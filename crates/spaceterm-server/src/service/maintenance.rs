@@ -248,6 +248,21 @@ impl Maintenance {
         Self { service }
     }
 
+    /// Whether this service retains an original that still needs resolving. Scoped evidence
+    /// refuses to run against work it did not submit.
+    pub fn unresolved(&self) -> Result<bool, MaintenanceRefusal> {
+        let data = match Directory::open(&self.service.paths.data, false) {
+            Ok(data) => data,
+            Err(ServerError::NotSetUp) => return Ok(false),
+            Err(error) => return Err(error.into()),
+        };
+        let _fence = data.lock("maintenance.lock", false)?;
+        Ok(Journal::read(&data)?
+            .originals
+            .iter()
+            .any(|original| !original.resolved()))
+    }
+
     /// Read one bounded request and write exactly one reply.
     pub fn exchange(
         &self,
@@ -302,7 +317,7 @@ impl Maintenance {
                 operation,
                 confirmation,
             } => self.apply(operation, Applied::Return { confirmation }),
-            _ => Err(ServerError::Unsupported),
+            Request::Resolve { operation } => self.resolve(operation),
         }
     }
 
@@ -452,7 +467,7 @@ impl Maintenance {
                     status: None,
                 };
                 journal.retain(&data, original.clone())?;
-                let (resolution, activation, status) = self.dispatch(dispatch);
+                let (resolution, activation, status) = self.dispatch(*dispatch);
                 Original {
                     resolution,
                     activation,
@@ -465,6 +480,64 @@ impl Maintenance {
         Ok(Reply::Outcome(original.outcome()))
     }
 
+    /// Report one already-submitted original's outcome.
+    ///
+    /// An update or return resolves through the service's own recovery of that exact target, so
+    /// it never chooses a newer artifact, repeats an uncertain Stop or Start dispatch or silently
+    /// rolls back. Every other original keeps the outcome this service validated.
+    fn resolve(&self, operation: [u8; 32]) -> Result<Reply, ServerError> {
+        let data = Directory::open(&self.service.paths.data, false)?;
+        let _fence = data.lock("maintenance.lock", false)?;
+        data.verify_path(&self.service.paths.data)?;
+        let mut journal = Journal::read(&data)?;
+        let Some(original) = journal.find(operation) else {
+            return Ok(Reply::Unknown);
+        };
+        let mut original = original.clone();
+        if matches!(
+            original.kind,
+            OperationKind::Update { .. } | OperationKind::Return { .. }
+        ) && !original.resolved()
+            && self.admitted(&original)?.is_some()
+        {
+            let recovered = match self.service.recover_activation() {
+                Ok(status) => status,
+                // A recovery that cannot finish leaves the original exactly as it was.
+                Err(_) => self.service.activation_status().unwrap_or_default(),
+            };
+            if let Some(status) = recovered
+                .filter(|status| original.activation.is_none_or(|id| id == status.operation))
+            {
+                original.resolution = resolution_of(status.phase);
+                original.activation = Some(status.operation);
+                original.status = self.policy();
+                journal.retain(&data, original.clone())?;
+            }
+        }
+        Ok(Reply::Outcome(original.outcome()))
+    }
+
+    /// The service's retained activation when it is this original's exact target. A later
+    /// original owns its own activation, so resolution never adopts one.
+    fn admitted(&self, original: &Original) -> Result<Option<ActivationStatus>, ServerError> {
+        let Some(status) = self.service.activation_status()? else {
+            return Ok(None);
+        };
+        if original.activation.is_some_and(|id| id != status.operation) {
+            return Ok(None);
+        }
+        let exact = match &original.kind {
+            OperationKind::Update { candidate } => {
+                *candidate == RemoteBuild::describe(&status.candidate)?
+            }
+            OperationKind::Return { previous } => {
+                *previous == RemoteBuild::describe(&status.previous)?
+            }
+            OperationKind::Start | OperationKind::Service { .. } => false,
+        };
+        Ok(exact.then_some(status))
+    }
+
     /// Validate one original against a fresh observation. No branch here dispatches anything.
     fn admit(&self, applied: Applied) -> Result<Admission, ServerError> {
         let controller = Controller::new(self.service.clone());
@@ -475,7 +548,7 @@ impl Maintenance {
                 kind: OperationKind::Start,
                 bound: self.observe()?.status,
                 confirmation: None,
-                dispatch: Dispatch::Start,
+                dispatch: Box::new(Dispatch::Start),
             }),
             Applied::Service {
                 action,
@@ -497,7 +570,7 @@ impl Maintenance {
                         kind,
                         bound: observation.status,
                         confirmation: Some(expected),
-                        dispatch: Dispatch::Service(prepared),
+                        dispatch: Box::new(Dispatch::Service(prepared)),
                     }),
                     Err(error) => Ok(Admission::Refused {
                         kind,
@@ -537,7 +610,7 @@ impl Maintenance {
                         kind,
                         bound: observation.status,
                         confirmation: Some(expected),
-                        dispatch: Dispatch::Update(approval),
+                        dispatch: Box::new(Dispatch::Update(approval)),
                     }),
                     Err(error) => Ok(Admission::Refused {
                         kind,
@@ -570,7 +643,7 @@ impl Maintenance {
                     kind,
                     bound: observation.status,
                     confirmation: Some(expected),
-                    dispatch: Dispatch::Return(approval),
+                    dispatch: Box::new(Dispatch::Return(approval)),
                 })
             }
         }
@@ -665,12 +738,25 @@ impl Maintenance {
         })
     }
 
+    /// The submitted original that admitted one retained activation, while it is retained.
+    fn submitted(&self, status: &ActivationStatus) -> Result<Option<[u8; 32]>, ServerError> {
+        let data = Directory::open(&self.service.paths.data, false)?;
+        let _fence = data.lock("maintenance.lock", false)?;
+        Ok(Journal::read(&data)?
+            .originals
+            .iter()
+            .find(|original| original.activation == Some(status.operation))
+            .map(|original| original.operation))
+    }
+
     fn remote_activation(
         &self,
         status: &ActivationStatus,
     ) -> Result<RemoteActivation, ServerError> {
         Ok(RemoteActivation {
-            operation: status.operation,
+            // A client resolves its own original, so name the submitted original while this
+            // service retains it and the service's own record identity otherwise.
+            operation: self.submitted(status)?.unwrap_or(status.operation),
             previous: RemoteBuild::describe(&status.previous)?,
             candidate: RemoteBuild::describe(&status.candidate)?,
             stopped: status.stopped,
@@ -733,7 +819,7 @@ enum Admission {
         kind: OperationKind,
         bound: ServiceStatus,
         confirmation: Option<String>,
-        dispatch: Dispatch,
+        dispatch: Box<Dispatch>,
     },
     /// Refused before any effect, with the original known well enough to retain its refusal.
     Refused {
@@ -1161,7 +1247,6 @@ mod tests {
     /// An installed service whose approved runtime is `previous` and whose staged different
     /// artifact is `candidate`.
     fn with_service(running: bool, stopped: bool, exercise: impl FnOnce(&Harness)) {
-        use ring::signature::KeyPair;
         let fixture = crate::service::tests::Fixture::new();
         with_artifact(
             &fixture.root.join("source"),
@@ -1665,6 +1750,107 @@ mod tests {
             );
             assert_eq!(harness.manager.stops.load(Ordering::SeqCst), 1);
             assert_eq!(harness.manager.starts.load(Ordering::SeqCst), 1);
+        });
+    }
+
+    #[test]
+    fn resolving_an_admitted_update_repeats_no_dispatch_and_selects_no_other_artifact() {
+        with_service(false, true, |harness| {
+            let candidate = Harness::digest(&harness.candidate);
+            let Reply::Prepared(prepared) = harness.exchange(&Request::PrepareUpdate {
+                candidate: candidate.clone(),
+            }) else {
+                panic!("the staged candidate was not described");
+            };
+            // The service manager cannot finish the registration change this time.
+            harness.manager.fail_replace.store(true, Ordering::SeqCst);
+            let Reply::Outcome(outcome) = harness.exchange(&Request::ApplyUpdate {
+                operation: [12; 32],
+                candidate: candidate.clone(),
+                confirmation: prepared.confirmation,
+            }) else {
+                panic!("the update was not performed");
+            };
+            assert_eq!(outcome.resolution, OperationResolution::Unconfirmed);
+            assert_eq!(
+                harness.state().installation,
+                Harness::digest(&harness.previous)
+            );
+            assert_eq!(
+                harness.exchange(&Request::Resolve {
+                    operation: [13; 32]
+                }),
+                Reply::Unknown
+            );
+            // The same exact target resolves without another confirmation or dispatch.
+            harness.manager.fail_replace.store(false, Ordering::SeqCst);
+            let Reply::Outcome(resolved) = harness.exchange(&Request::Resolve {
+                operation: [12; 32],
+            }) else {
+                panic!("the original was not resolved");
+            };
+            assert_eq!(resolved.operation, [12; 32]);
+            assert_eq!(
+                resolved.kind,
+                OperationKind::Update {
+                    candidate: RemoteBuild::describe(&harness.candidate).unwrap()
+                }
+            );
+            assert_eq!(resolved.resolution, OperationResolution::Completed);
+            assert!(resolved.status.is_some_and(|status| status.stopped));
+            assert_eq!(
+                harness.state().installation,
+                Harness::digest(&harness.candidate)
+            );
+            // The previous runtime stays retained, and no other artifact was selected.
+            assert!(harness.previous.directory.is_dir());
+            assert_eq!(harness.manager.stops.load(Ordering::SeqCst), 0);
+            assert_eq!(harness.manager.starts.load(Ordering::SeqCst), 0);
+            assert_eq!(
+                harness.exchange(&Request::Resolve {
+                    operation: [12; 32]
+                }),
+                Reply::Outcome(resolved)
+            );
+            assert_eq!(harness.manager.stops.load(Ordering::SeqCst), 0);
+            assert_eq!(harness.manager.starts.load(Ordering::SeqCst), 0);
+            // Observation names the submitted original, which is what a client resolves.
+            let Reply::Facts(facts) = harness.exchange(&Request::Observe) else {
+                panic!("observation unavailable");
+            };
+            let activation = facts.activation.expect("retained activation unavailable");
+            assert_eq!(activation.operation, [12; 32]);
+            assert_eq!(
+                activation.phase,
+                RemoteActivationPhase::Completed { running: false }
+            );
+            assert!(!activation.returned && activation.stopped);
+            assert!(!harness.maintenance.unresolved().unwrap());
+        });
+    }
+
+    #[test]
+    fn resolving_a_service_original_reports_it_without_repeating_its_dispatch() {
+        with_service(true, false, |harness| {
+            let Reply::Prepared(prepared) = harness.exchange(&Request::Prepare {
+                action: Action::Stop,
+            }) else {
+                panic!("preparation unavailable");
+            };
+            let Reply::Outcome(outcome) = harness.exchange(&Request::Apply {
+                operation: [14; 32],
+                action: Action::Stop,
+                confirmation: prepared.confirmation,
+            }) else {
+                panic!("the original was not performed");
+            };
+            assert_eq!(
+                harness.exchange(&Request::Resolve {
+                    operation: [14; 32]
+                }),
+                Reply::Outcome(outcome)
+            );
+            assert_eq!(harness.manager.stops.load(Ordering::SeqCst), 1);
         });
     }
 }
