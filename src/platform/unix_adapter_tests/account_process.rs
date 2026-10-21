@@ -54,15 +54,19 @@ fn account_bridge_cancellation_kills_owned_processes_and_unblocks_pipes() {
     // Prove that the descendant exists in the owned group before cancelling. Immediate
     // cancellation commonly kills the shell before its background process has been forked.
     let processes = ready_receiver.recv_timeout(Duration::from_secs(2)).unwrap();
-    let [leader, descendant] = processes.as_slice() else {
-        panic!("fixture must publish its leader and descendant");
+    let [command, descendant] = processes.as_slice() else {
+        panic!("fixture must publish its command and descendant");
     };
-    // SAFETY: getpgid only observes the live descendant created by this fixture.
-    assert_eq!(unsafe { libc::getpgid(*descendant) }, *leader);
+    // SAFETY: getpgid only observes the live command and descendant created by this fixture.
+    let command_group = unsafe { libc::getpgid(*command) };
+    let descendant_group = unsafe { libc::getpgid(*descendant) };
+    let caller_group = unsafe { libc::getpgrp() };
     cancellation.cancel();
     let result = receiver.recv_timeout(Duration::from_secs(2));
     cleanup();
     drop(write);
     assert!(result.unwrap().is_ok());
     reader.join().unwrap();
+    assert!(command_group > 0 && command_group != caller_group);
+    assert_eq!(descendant_group, command_group);
 }

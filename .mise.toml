@@ -259,6 +259,10 @@ run = "cargo test --package spaceterm --all-targets --features native-tests --lo
 description = "Run native Linux and shared Unix Adapter tests"
 run = "cargo test --package spaceterm --all-targets --features native-tests --locked -- linux unix"
 
+[tasks."test:native:ssh"]
+description = "Run native Unix SSH process Adapter tests"
+run = "cargo test --package spaceterm --lib --features native-tests --locked -- platform::unix_ssh_process:: ssh::process::unix_adapter_tests --nocapture"
+
 [tasks."test:tools"]
 description = "Test the shared task code in mise-tasks/lib"
 usage = 'arg "[filter]" help="Run one unittest module or test by its full name"'
