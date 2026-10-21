@@ -687,6 +687,7 @@ impl RemoteServerOperations for SshServerOperations {
         let owner = Arc::downgrade(&self.inner);
         let inner = Arc::downgrade(&self.inner);
         let store = Arc::clone(&self.inner.store);
+        let released = destination.clone();
         if std::thread::Builder::new()
             .name("spaceterm-ssh-operation".into())
             .spawn(move || match store.retire(operation) {
@@ -707,7 +708,10 @@ impl RemoteServerOperations for SshServerOperations {
             })
             .is_err()
         {
+            // The entry was taken for this retirement, so it must be given back or every later
+            // step on that server finds it busy and returns without a word.
             note_storage(&owner, Some(SshIntentStoreError::Unavailable));
+            release_claim(&owner, &released, generation);
         }
     }
 
@@ -728,6 +732,7 @@ impl RemoteServerOperations for SshServerOperations {
         let owner = Arc::downgrade(&self.inner);
         let inner = Arc::downgrade(&self.inner);
         let store = Arc::clone(&self.inner.store);
+        let released = destination.clone();
         if std::thread::Builder::new()
             .name("spaceterm-ssh-operation".into())
             .spawn(move || match store.retire(operation) {
@@ -743,7 +748,10 @@ impl RemoteServerOperations for SshServerOperations {
             })
             .is_err()
         {
+            // The entry was taken for this retirement, so it must be given back or every later
+            // step on that server finds it busy and returns without a word.
             note_storage(&owner, Some(SshIntentStoreError::Unavailable));
+            release_claim(&owner, &released, generation);
         }
     }
 
