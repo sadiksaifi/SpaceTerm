@@ -542,6 +542,39 @@ fn the_machine_menu_carries_the_operations_without_inline_affordances() {
     );
 }
 
+/// One destination can hold more than one unsettled original. The heading acts on the machine,
+/// so it offers what any of them offers; reading only the first hides the server's other
+/// operation from the sidebar entirely.
+#[test]
+fn the_machine_menu_covers_every_operation_the_owner_holds() {
+    let underway = RemoteOperationState::Working {
+        phase: MaintenancePhase::Dispatching,
+        kind: Some(SubmittedKind::Service(Action::Stop)),
+        cancellable: true,
+    };
+    let read = RemoteOperationState::Read(Box::new(facts(status(true, true, false))));
+
+    assert!(
+        menu_actions(&underway, None).is_empty(),
+        "the first entry alone offers nothing while its operation is underway"
+    );
+    assert_eq!(
+        menu_actions_for(std::slice::from_ref(&underway), None),
+        Vec::new(),
+        "one underway original still offers nothing"
+    );
+    assert_eq!(
+        menu_actions_for(&[underway, read], None),
+        vec![
+            RemoteAction::Stop,
+            RemoteAction::Restart,
+            RemoteAction::Update,
+            RemoteAction::Uninstall
+        ],
+        "the server's other operation is still reachable from the heading"
+    );
+}
+
 /// Every caption reads as one sentence. A literal split across source lines without a
 /// continuation leaves the source indentation in the middle of the sentence.
 fn reads_as_one_sentence(explanation: &str) {
@@ -1057,7 +1090,10 @@ fn two_originals_on_different_journeys_each_read_in_their_own_row() {
     ];
 
     let service = present_machine("penguin", &states, MaintenanceRow::Service, None);
-    assert_eq!(service.actions, vec![RemoteAction::CheckAgain, RemoteAction::Discard]);
+    assert_eq!(
+        service.actions,
+        vec![RemoteAction::CheckAgain, RemoteAction::Discard]
+    );
     assert!(
         service
             .explanation
@@ -1071,7 +1107,10 @@ fn two_originals_on_different_journeys_each_read_in_their_own_row() {
         service.explanation
     );
     let update = present_machine("penguin", &states, MaintenanceRow::Update, None);
-    assert_eq!(update.actions, vec![RemoteAction::Finish, RemoteAction::Discard]);
+    assert_eq!(
+        update.actions,
+        vec![RemoteAction::Finish, RemoteAction::Discard]
+    );
     assert!(
         update
             .explanation
@@ -1182,7 +1221,12 @@ fn an_original_takes_the_row_from_a_read_that_asked_for_nothing() {
     }
     assert_eq!(
         present_machine("penguin", &[], MaintenanceRow::Service, None),
-        present("penguin", &RemoteOperationState::Unread, MaintenanceRow::Service, None),
+        present(
+            "penguin",
+            &RemoteOperationState::Unread,
+            MaintenanceRow::Service,
+            None
+        ),
         "a machine the owner holds nothing for reads as unread"
     );
 }

@@ -14,7 +14,7 @@ use super::{ServerBindings, ServerOrigin, WorkspaceManager};
 use crate::domain::{SshDestination, WorkspaceEntry, WorkspaceId, WorkspaceLocation};
 use crate::ssh::server_connection::RemoteConnectionStatus;
 use crate::ssh::server_operations::RemoteOperationState;
-use crate::ui::remote_maintenance::{menu_actions, observed_menu_actions, working_state};
+use crate::ui::remote_maintenance::{menu_actions_for, observed_menu_actions, working_state};
 use crate::ui::workspace_sidebar::{MachineMenuCommand, MachineSection};
 
 /// The machine whose group a Workspace joins.
@@ -203,10 +203,16 @@ impl WorkspaceManager {
                     };
                     // A saved connection's server is the one these steps act on, whether it is
                     // presented now or not.
-                    let maintenance = operations
-                        .as_ref()
-                        .filter(|_| saved)
-                        .map(|operations| operations.state(&destination));
+                    // One destination can hold more than one unsettled original, so the
+                    // heading reads every state the owner holds for it rather than the first.
+                    let maintenance = operations.as_ref().filter(|_| saved).map(|operations| {
+                        operations
+                            .entries()
+                            .into_iter()
+                            .filter(|entry| !entry.removed && entry.destination == destination)
+                            .map(|entry| entry.state)
+                            .collect::<Vec<_>>()
+                    });
                     MachineSection {
                         label: destination.as_str().to_owned().into(),
                         // A Remote Workspace reports its own connection on its row. The heading
@@ -214,7 +220,11 @@ impl WorkspaceManager {
                         // outranks it: it is what is happening to the machine now.
                         status: maintenance
                             .as_ref()
-                            .and_then(|state| working_state(destination.as_str(), state))
+                            .and_then(|states| {
+                                states
+                                    .iter()
+                                    .find_map(|state| working_state(destination.as_str(), state))
+                            })
                             .or_else(|| {
                                 presentation
                                     .as_ref()
@@ -227,8 +237,12 @@ impl WorkspaceManager {
                         disconnects: controlled,
                         awaiting_connection: !presented && intended,
                         maintenance: match &maintenance {
-                            Some(state) if !matches!(state, RemoteOperationState::Unread) => {
-                                menu_actions(state, None)
+                            Some(states)
+                                if states.iter().any(|state| {
+                                    !matches!(state, RemoteOperationState::Unread)
+                                }) =>
+                            {
+                                menu_actions_for(states, None)
                             }
                             // Before any maintenance read, the heading offers what the connection
                             // already observed about that account's server.

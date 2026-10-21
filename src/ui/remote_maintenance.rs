@@ -380,6 +380,26 @@ pub(crate) fn menu_actions(
 
 /// The steps a menu carries, in menu order. The everyday acknowledgement and the cancellation
 /// belong to the row that reports the operation, not to a menu.
+/// The steps a machine heading offers for every operation the owner holds for that server.
+///
+/// One destination can hold more than one unsettled original, and the heading acts on the
+/// machine rather than on one row, so a step any of them offers belongs in the menu. Offering
+/// only the first entry's steps hides the server's other operation from the sidebar entirely.
+pub(crate) fn menu_actions_for(
+    states: &[RemoteOperationState],
+    asked: Option<RemoteMaintenanceRequest>,
+) -> Vec<RemoteAction> {
+    let mut offered: Vec<RemoteAction> = Vec::new();
+    for state in states {
+        for action in menu_actions(state, asked) {
+            if !offered.contains(&action) {
+                offered.push(action);
+            }
+        }
+    }
+    menu_order(offered.into_iter())
+}
+
 fn menu_order(actions: impl Iterator<Item = RemoteAction>) -> Vec<RemoteAction> {
     let mut actions: Vec<_> = actions
         .filter(|action| {

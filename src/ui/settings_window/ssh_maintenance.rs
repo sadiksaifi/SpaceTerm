@@ -189,12 +189,7 @@ impl SettingsWindow {
             .as_ref()
             .filter(|(asked, _)| *asked == destination)
             .map(|(_, request)| *request);
-        Some(present_machine(
-            destination.as_str(),
-            &states,
-            row,
-            asked,
-        ))
+        Some(present_machine(destination.as_str(), &states, row, asked))
     }
 
     /// The caption under one maintenance row, or `None` for another row.
@@ -603,8 +598,7 @@ impl SettingsWindow {
         listed
             .into_iter()
             .filter_map(|destination| {
-                let states =
-                    self.maintenance_states(&destination, RemoteOperationScope::Removed);
+                let states = self.maintenance_states(&destination, RemoteOperationScope::Removed);
                 let presentation = removed_presentation(destination.as_str(), &states)?;
                 Some((destination, presentation))
             })

@@ -249,8 +249,7 @@ impl RemoteServerOperations for ScriptedOperations {
             .expect("states")
             .iter()
             .map(|held| RemoteOperationEntry {
-                destination: SshDestination::new(held.destination.clone())
-                    .expect("destination"),
+                destination: SshDestination::new(held.destination.clone()).expect("destination"),
                 removed: held.removed,
                 state: held.state.clone(),
             })
@@ -1544,7 +1543,10 @@ fn a_second_original_on_one_machine_is_named_and_settled_in_turn(cx: &mut TestAp
         "the row settles the one original it reports"
     );
     assert!(
-        says("can\u{2019}t ask it about the restart it already sent", servers.cx),
+        says(
+            "can\u{2019}t ask it about the restart it already sent",
+            servers.cx
+        ),
         "the original that was waiting takes the settled one's place in the row"
     );
     assert!(
@@ -1574,7 +1576,10 @@ fn a_removed_connection_with_two_originals_is_listed_once(cx: &mut TestAppContex
     servers.operations.remove("penguin");
     servers.cx.run_until_parked();
 
-    assert!(rendered("settings-removed-server-operations-penguin", servers.cx));
+    assert!(rendered(
+        "settings-removed-server-operations-penguin",
+        servers.cx
+    ));
     assert!(says(
         "can\u{2019}t ask it about the stop it already sent",
         servers.cx
@@ -1604,7 +1609,10 @@ fn a_removed_connection_with_two_originals_is_listed_once(cx: &mut TestAppContex
         vec![Call::Discard(RemoteOperationScope::Removed)]
     );
     assert!(
-        says("didn\u{2019}t hear whether penguin removed its service", servers.cx),
+        says(
+            "didn\u{2019}t hear whether penguin removed its service",
+            servers.cx
+        ),
         "the original that was waiting takes the settled one's place"
     );
     assert!(
