@@ -182,7 +182,8 @@ impl RemoteAction {
         SharedString::from(text)
     }
 
-    /// The row that carries this step, for a surface that offers the steps outside the rows.
+    /// The preferred row for a step offered outside Settings. Shared steps use whichever row
+    /// currently offers them.
     pub(crate) const fn row(self) -> MaintenanceRow {
         match self {
             Self::Update | Self::Return | Self::Finish => MaintenanceRow::Update,
@@ -363,41 +364,25 @@ fn listed(kinds: &[&SubmittedKind]) -> String {
     }
 }
 
-/// The steps a machine heading's menu offers, in menu order. The menu carries the operations
-/// themselves, never the everyday acknowledgement or the cancellation an inline row offers.
-pub(crate) fn menu_actions(
-    state: &RemoteOperationState,
-    asked: Option<RemoteMaintenanceRequest>,
-) -> Vec<RemoteAction> {
-    // Only the steps are read here, so the machine the menu names is not needed.
-    let offered = |row| present("", state, row, asked).actions;
-    menu_order(
-        offered(MaintenanceRow::Service)
-            .into_iter()
-            .chain(offered(MaintenanceRow::Update)),
-    )
-}
-
-/// The steps a menu carries, in menu order. The everyday acknowledgement and the cancellation
-/// belong to the row that reports the operation, not to a menu.
-/// The steps a machine heading offers for every operation the owner holds for that server.
-///
-/// One destination can hold more than one unsettled original, and the heading acts on the
-/// machine rather than on one row, so a step any of them offers belongs in the menu. Offering
-/// only the first entry's steps hides the server's other operation from the sidebar entirely.
+/// The steps a machine heading offers for the originals Settings currently reports. Each row
+/// selects one original before its actions are read, so a waiting original cannot offer a step
+/// Settings would reject for the reported one.
 pub(crate) fn menu_actions_for(
     states: &[RemoteOperationState],
     asked: Option<RemoteMaintenanceRequest>,
 ) -> Vec<RemoteAction> {
-    let mut offered: Vec<RemoteAction> = Vec::new();
-    for state in states {
-        for action in menu_actions(state, asked) {
-            if !offered.contains(&action) {
-                offered.push(action);
-            }
+    let offered = |row| present_machine("", states, row, asked).actions;
+    let mut actions = Vec::new();
+    for action in menu_order(
+        offered(MaintenanceRow::Service)
+            .into_iter()
+            .chain(offered(MaintenanceRow::Update)),
+    ) {
+        if !actions.contains(&action) {
+            actions.push(action);
         }
     }
-    menu_order(offered.into_iter())
+    actions
 }
 
 fn menu_order(actions: impl Iterator<Item = RemoteAction>) -> Vec<RemoteAction> {

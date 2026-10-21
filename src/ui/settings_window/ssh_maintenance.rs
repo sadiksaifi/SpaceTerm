@@ -223,7 +223,17 @@ impl SettingsWindow {
         action: RemoteAction,
         cx: &mut Context<Self>,
     ) {
-        self.request_maintenance(destination, action.row(), action, cx);
+        // Discard can belong to either journey. Prefer its usual row when both offer it.
+        let preferred = action.row();
+        let row = [preferred, MaintenanceRow::Service, MaintenanceRow::Update]
+            .into_iter()
+            .find(|row| {
+                self.maintenance_presentation(*row)
+                    .is_some_and(|presentation| presentation.actions.contains(&action))
+            });
+        if let Some(row) = row {
+            self.request_maintenance(destination, row, action, cx);
+        }
     }
 
     /// Takes one step from a maintenance row. A step the row no longer offers does nothing, so a
@@ -622,7 +632,7 @@ impl SettingsWindow {
             })
             .size(ButtonSize::Regular)
             .tab_stop(true)
-            .debug_selector(action.selector())
+            .debug_selector(format!("{control_selector}-{}", action.name()))
             .accessibility_description(action.consequence(machine.as_ref()))
             .on_activate(move |_, _, cx| {
                 let destination = destination.clone();

@@ -516,7 +516,7 @@ fn the_machine_menu_carries_the_operations_without_inline_affordances() {
     let running = RemoteOperationState::Read(Box::new(facts(status(true, true, false))));
 
     assert_eq!(
-        menu_actions(&running, None),
+        menu_actions_for(std::slice::from_ref(&running), None),
         vec![
             RemoteAction::Stop,
             RemoteAction::Restart,
@@ -530,23 +530,21 @@ fn the_machine_menu_carries_the_operations_without_inline_affordances() {
         kind: SubmittedKind::Service(Action::Stop),
         outcome: completed(None),
     };
-    assert!(menu_actions(&resolved, None).is_empty());
+    assert!(menu_actions_for(std::slice::from_ref(&resolved), None).is_empty());
     let working = RemoteOperationState::Working {
         phase: MaintenancePhase::Dispatching,
         kind: Some(SubmittedKind::Service(Action::Stop)),
         cancellable: true,
     };
     assert!(
-        menu_actions(&working, None).is_empty(),
+        menu_actions_for(std::slice::from_ref(&working), None).is_empty(),
         "nothing is offered while an operation is underway"
     );
 }
 
-/// One destination can hold more than one unsettled original. The heading acts on the machine,
-/// so it offers what any of them offers; reading only the first hides the server's other
-/// operation from the sidebar entirely.
+/// A waiting read cannot offer a new operation while Settings reports an original in progress.
 #[test]
-fn the_machine_menu_covers_every_operation_the_owner_holds() {
+fn the_machine_menu_waits_for_the_original_settings_reports() {
     let underway = RemoteOperationState::Working {
         phase: MaintenancePhase::Dispatching,
         kind: Some(SubmittedKind::Service(Action::Stop)),
@@ -555,7 +553,7 @@ fn the_machine_menu_covers_every_operation_the_owner_holds() {
     let read = RemoteOperationState::Read(Box::new(facts(status(true, true, false))));
 
     assert!(
-        menu_actions(&underway, None).is_empty(),
+        menu_actions_for(std::slice::from_ref(&underway), None).is_empty(),
         "the first entry alone offers nothing while its operation is underway"
     );
     assert_eq!(
@@ -565,13 +563,8 @@ fn the_machine_menu_covers_every_operation_the_owner_holds() {
     );
     assert_eq!(
         menu_actions_for(&[underway, read], None),
-        vec![
-            RemoteAction::Stop,
-            RemoteAction::Restart,
-            RemoteAction::Update,
-            RemoteAction::Uninstall
-        ],
-        "the server's other operation is still reachable from the heading"
+        Vec::new(),
+        "the menu must not offer steps from the read hidden behind the original"
     );
 }
 
@@ -1089,6 +1082,15 @@ fn two_originals_on_different_journeys_each_read_in_their_own_row() {
         },
     ];
 
+    assert_eq!(
+        menu_actions_for(&states, None),
+        vec![
+            RemoteAction::CheckAgain,
+            RemoteAction::Discard,
+            RemoteAction::Finish,
+        ],
+        "both journeys stay reachable, with one shared Discard"
+    );
     let service = present_machine("penguin", &states, MaintenanceRow::Service, None);
     assert_eq!(
         service.actions,

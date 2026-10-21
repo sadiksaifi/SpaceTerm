@@ -12635,9 +12635,9 @@ fn a_machine_headings_menu_should_disconnect_only_its_server(cx: &mut TestAppCon
 /// An operations owner whose state the test sets and whose calls it counts. Nothing here reaches
 /// a computer.
 struct ScriptedMaintenance {
-    /// The destination this owner holds its one entry for.
+    /// The destination this owner holds its entries for.
     destination: crate::domain::SshDestination,
-    state: Mutex<crate::ssh::server_operations::RemoteOperationState>,
+    states: Mutex<Vec<crate::ssh::server_operations::RemoteOperationState>>,
     calls: Mutex<Vec<String>>,
     changes: (async_channel::Sender<()>, async_channel::Receiver<()>),
 }
@@ -12650,7 +12650,7 @@ impl ScriptedMaintenance {
         std::sync::Arc::new(Self {
             destination: crate::domain::SshDestination::new(destination.to_owned())
                 .expect("destination"),
-            state: Mutex::new(state),
+            states: Mutex::new(vec![state]),
             calls: Mutex::new(Vec::new()),
             changes: async_channel::unbounded(),
         })
@@ -12670,16 +12670,22 @@ impl crate::ssh::server_operations::RemoteServerOperations for ScriptedMaintenan
         self.changes.1.clone()
     }
 
-    /// Every entry this owner holds, which is the one its state reports. A real owner derives
-    /// one destination's state from these entries, so a double that answered with a state it
-    /// listed no entry for would let a surface read one and not the other.
+    /// The entries Settings and the sidebar read, in the same order.
     fn entries(&self) -> Vec<crate::ssh::server_operations::RemoteOperationEntry> {
-        vec![crate::ssh::server_operations::RemoteOperationEntry {
-            destination: self.destination.clone(),
-            removed: false,
-            operation: Some([1; 32]),
-            state: self.state.lock().unwrap().clone(),
-        }]
+        self.states
+            .lock()
+            .unwrap()
+            .iter()
+            .enumerate()
+            .map(
+                |(index, state)| crate::ssh::server_operations::RemoteOperationEntry {
+                    destination: self.destination.clone(),
+                    removed: false,
+                    operation: Some([index as u8 + 1; 32]),
+                    state: state.clone(),
+                },
+            )
+            .collect()
     }
 
     #[cfg(test)]
@@ -12687,7 +12693,12 @@ impl crate::ssh::server_operations::RemoteServerOperations for ScriptedMaintenan
         &self,
         _: &crate::domain::SshDestination,
     ) -> crate::ssh::server_operations::RemoteOperationState {
-        self.state.lock().unwrap().clone()
+        self.states
+            .lock()
+            .unwrap()
+            .first()
+            .cloned()
+            .unwrap_or(crate::ssh::server_operations::RemoteOperationState::Unread)
     }
 
     fn refresh(&self, _: &crate::domain::SshDestination) {
@@ -12718,12 +12729,16 @@ impl crate::ssh::server_operations::RemoteServerOperations for ScriptedMaintenan
         self.record("resume");
     }
 
-    fn acknowledge(&self, _: crate::ssh::server_operations::RemoteOperationHandle) {
+    fn acknowledge(&self, handle: crate::ssh::server_operations::RemoteOperationHandle) {
         self.record("acknowledge");
+        self.states.lock().unwrap().retain(|state| {
+            !matches!(state, crate::ssh::server_operations::RemoteOperationState::Resolved { handle: named, .. } if *named == handle)
+        });
+        let _ = self.changes.0.try_send(());
     }
 
-    fn discard(&self, _: [u8; 32]) {
-        self.record("discard");
+    fn discard(&self, operation: [u8; 32]) {
+        self.record(&format!("discard {}", operation[0]));
     }
 
     fn dismiss(&self, _: [u8; 32]) {
@@ -12806,8 +12821,9 @@ fn a_machine_heading_should_offer_the_steps_its_server_state_allows(cx: &mut Tes
     .map(|selector| cx.debug_bounds(selector).is_some());
     cx.simulate_keystrokes("escape");
     cx.run_until_parked();
-    *operations.state.lock().unwrap() =
-        RemoteOperationState::Read(Box::new(remote_facts(false, true)));
+    *operations.states.lock().unwrap() = vec![RemoteOperationState::Read(Box::new(remote_facts(
+        false, true,
+    )))];
     redraw(cx);
     right_click("machine-heading-penguin", cx);
     let stopped = [
@@ -12865,19 +12881,7 @@ fn a_machine_heading_should_report_an_operation_underway(cx: &mut TestAppContext
     cx.run_until_parked();
 }
 
-/// Choosing a step from the heading opens the Servers Settings Section on that machine and takes
-/// the step there, where it describes its change before anything is sent.
-#[gpui::test]
-fn a_machine_headings_step_should_describe_its_change_in_settings(cx: &mut TestAppContext) {
-    use crate::ssh::server_operations::RemoteOperationState;
-
-    let (harness, cx) = MachineGroupsHarness::new(cx);
-    let (operations, _connections) = remote_maintenance(
-        RemoteOperationState::Read(Box::new(remote_facts(true, false))),
-        "penguin",
-        cx,
-    );
-    harness.present_ssh("penguin", &[], cx);
+fn configure_maintenance_settings(cx: &mut VisualTestContext) {
     let settings = crate::settings::Settings::load(
         crate::settings::storage::testing::MemoryStorage::with_document(
             &crate::settings::SettingsDocument::default(),
@@ -12897,6 +12901,22 @@ fn a_machine_headings_step_should_describe_its_change_in_settings(cx: &mut TestA
             cx,
         );
     });
+}
+
+/// Choosing a step from the heading opens the Servers Settings Section on that machine and takes
+/// the step there, where it describes its change before anything is sent.
+#[gpui::test]
+fn a_machine_headings_step_should_describe_its_change_in_settings(cx: &mut TestAppContext) {
+    use crate::ssh::server_operations::RemoteOperationState;
+
+    let (harness, cx) = MachineGroupsHarness::new(cx);
+    let (operations, _connections) = remote_maintenance(
+        RemoteOperationState::Read(Box::new(remote_facts(true, false))),
+        "penguin",
+        cx,
+    );
+    harness.present_ssh("penguin", &[], cx);
+    configure_maintenance_settings(cx);
     redraw(cx);
 
     right_click("machine-heading-penguin", cx);
@@ -12925,6 +12945,134 @@ fn a_machine_headings_step_should_describe_its_change_in_settings(cx: &mut TestA
         .filter_map(|option| option["aria"]["label"].as_str().map(str::to_owned))
         .collect();
     assert_eq!(selected, ["Servers", "penguin"]);
+}
+
+/// A later original gets its turn after the row's reported result is acknowledged. The heading
+/// must offer the same steps as Settings throughout that transition.
+#[gpui::test]
+fn a_machine_heading_should_offer_only_the_original_settings_reports(cx: &mut TestAppContext) {
+    use crate::local_server::service::control::Action;
+    use crate::ssh::server_maintenance::SubmittedKind;
+    use crate::ssh::server_operations::{
+        RemoteOperationHandle, RemoteOperationState, RetainedOutcome,
+    };
+
+    let (harness, cx) = MachineGroupsHarness::new(cx);
+    let (operations, _connections) = remote_maintenance(
+        RemoteOperationState::Resolved {
+            handle: RemoteOperationHandle(8),
+            kind: SubmittedKind::Service(Action::Stop),
+            outcome: RetainedOutcome::Completed {
+                status: None,
+                build: None,
+            },
+        },
+        "penguin",
+        cx,
+    );
+    operations
+        .states
+        .lock()
+        .unwrap()
+        .push(RemoteOperationState::Unconfirmed {
+            kind: SubmittedKind::Service(Action::Restart),
+        });
+    harness.present_ssh("penguin", &[], cx);
+    configure_maintenance_settings(cx);
+    redraw(cx);
+    right_click("machine-heading-penguin", cx);
+    assert!(
+        cx.debug_bounds("machine-menu-check-again").is_none(),
+        "Settings reports the completed stop before the unconfirmed restart"
+    );
+    assert!(cx.debug_bounds("machine-menu-discard").is_none());
+    click("machine-menu-server-settings", cx);
+    let settings_window = cx
+        .windows()
+        .into_iter()
+        .find(|window| {
+            window
+                .downcast::<crate::ui::settings_window::SettingsWindow>()
+                .is_some()
+        })
+        .expect("Settings should open");
+    let mut settings_cx = VisualTestContext::from_window(settings_window, cx);
+    settings_cx.run_until_parked();
+    click(
+        "settings-ssh-server-service-control-acknowledge",
+        &mut settings_cx,
+    );
+    assert_eq!(operations.calls(), ["acknowledge"]);
+
+    redraw(cx);
+    right_click("machine-heading-penguin", cx);
+    click("machine-menu-check-again", cx);
+    assert_eq!(
+        operations.calls(),
+        ["acknowledge", "resume"],
+        "the heading now resolves the restart Settings reports"
+    );
+}
+
+#[gpui::test]
+fn a_machine_headings_discard_should_reach_an_update_without_a_service_original(
+    cx: &mut TestAppContext,
+) {
+    use crate::ssh::server_maintenance::SubmittedKind;
+    use crate::ssh::server_operations::RemoteOperationState;
+
+    let (harness, cx) = MachineGroupsHarness::new(cx);
+    let (operations, _connections) = remote_maintenance(
+        RemoteOperationState::Unconfirmed {
+            kind: SubmittedKind::Update {
+                candidate: "b".repeat(64),
+            },
+        },
+        "penguin",
+        cx,
+    );
+    harness.present_ssh("penguin", &[], cx);
+    configure_maintenance_settings(cx);
+    redraw(cx);
+    right_click("machine-heading-penguin", cx);
+    click("machine-menu-discard", cx);
+
+    let settings_window = cx
+        .windows()
+        .into_iter()
+        .find(|window| {
+            window
+                .downcast::<crate::ui::settings_window::SettingsWindow>()
+                .is_some()
+        })
+        .expect("Settings should open");
+    let mut settings_cx = VisualTestContext::from_window(settings_window, cx);
+    settings_cx.run_until_parked();
+    assert!(
+        settings_cx
+            .debug_bounds("modal-action-settings-ssh-server-discard-confirm")
+            .is_some(),
+        "the sidebar's Discard must reach the update row that offers it"
+    );
+    assert!(
+        spaceterm_ui::a11y_testing::A11yTree::read(&mut settings_cx)
+            .with_role("Label")
+            .iter()
+            .any(|node| {
+                node["aria"]["value"].as_str().is_some_and(|value| {
+                    value.contains("Discard the update SpaceTerm sent to penguin?")
+                })
+            })
+    );
+    assert!(
+        operations.calls().is_empty(),
+        "opening the confirmation retires nothing"
+    );
+    click(
+        "modal-action-settings-ssh-server-discard-confirm",
+        &mut settings_cx,
+    );
+    assert_eq!(operations.calls(), ["discard 1"]);
 }
 
 /// A shared server Workspace presented in this window, with the server Pane its scripted
