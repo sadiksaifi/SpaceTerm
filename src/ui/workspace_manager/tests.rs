@@ -12412,7 +12412,7 @@ fn an_empty_ssh_server_should_keep_its_heading_and_say_it_has_no_workspaces(
     );
     assert!(
         spaceterm_ui::a11y_testing::A11yTree::read(cx)
-            .find("No Workspaces")
+            .find_text("No Workspaces")
             .is_some()
     );
 }
@@ -15617,4 +15617,129 @@ fn a_saved_connection_waiting_after_relaunch_should_head_the_window_with_connect
     right_click("machine-heading-penguin", cx);
     click("machine-menu-connect", cx);
     wait_until(|| backend.requested.load(Ordering::SeqCst) == 1, cx);
+}
+
+/// An SSH computer that waits for the person on quiet attempts and holds a requested Connect
+/// until the test opens `gate`, so the connection stays in progress meanwhile.
+struct HoldsRequestedConnect {
+    gate: Arc<AtomicBool>,
+}
+
+impl crate::ssh::server_connection::SshConnectBackend for HoldsRequestedConnect {
+    fn connect(
+        &self,
+        _: &crate::domain::SshDestination,
+        mode: crate::ssh::server_connection::ConnectMode,
+        _: Option<&crate::ssh::server_connection::SshServerContinuity>,
+        _: &crate::ssh::cancellation::SshCancellationToken,
+        _: &crate::ssh::server_connection::ConnectProgress<'_>,
+    ) -> Result<
+        crate::ssh::server_connection::ConnectedSshServer,
+        crate::ssh::server_connection::SshConnectFailure,
+    > {
+        use crate::ssh::server_connection::{ConnectMode, InteractionReason, SshConnectFailure};
+        while mode == ConnectMode::Requested && !self.gate.load(Ordering::SeqCst) {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        Err(SshConnectFailure::NeedsPerson(
+            InteractionReason::CredentialProvider,
+        ))
+    }
+    fn observe(
+        &self,
+        _: &crate::domain::SshDestination,
+        _: Option<&crate::ssh::server_connection::SshServerContinuity>,
+        _: &crate::ssh::cancellation::SshCancellationToken,
+        _: &crate::ssh::server_connection::ConnectProgress<'_>,
+    ) -> Result<
+        crate::ssh::server_connection::SshServerObservation,
+        crate::ssh::server_connection::SshConnectFailure,
+    > {
+        Err(
+            crate::ssh::server_connection::SshConnectFailure::NeedsPerson(
+                crate::ssh::server_connection::InteractionReason::CredentialProvider,
+            ),
+        )
+    }
+}
+
+/// While a Saved Connection connects from its heading, SpaceTerm hasn't read its Workspaces yet,
+/// so the line under the heading says they appear once it connects rather than that it has none.
+#[gpui::test]
+fn a_saved_connection_connecting_from_its_heading_should_not_claim_it_has_no_workspaces(
+    cx: &mut TestAppContext,
+) {
+    use crate::ssh::server_connection::{
+        RemoteConnectionStatus, RetainedSshConnection, SshServerConnections,
+    };
+    use spaceterm_ui::a11y_testing::A11yTree;
+
+    // The registry's connect worker runs on its own thread and wakes the window from there.
+    cx.executor().allow_parking();
+    let (harness, cx) = MachineGroupsHarness::new(cx);
+    let penguin = crate::domain::SshDestination::new("penguin".to_owned()).unwrap();
+    let remembered = Arc::new(RememberedConnections::default());
+    remembered.0.lock().unwrap().push(RetainedSshConnection {
+        destination: penguin.clone(),
+        continuity: None,
+        active: true,
+    });
+    let gate = Arc::new(AtomicBool::new(false));
+    let connections = SshServerConnections::new(
+        Arc::new(HoldsRequestedConnect { gate: gate.clone() }),
+        remembered,
+    );
+    let installed = connections.clone();
+    cx.update(|window, cx| {
+        crate::ui::ssh_servers::install(installed, None, cx);
+        harness
+            .manager
+            .update(cx, |manager, cx| manager.follow_ssh_servers(window, cx));
+    });
+    connections.resume_retained();
+    wait_until(
+        || {
+            matches!(
+                connections.status(&penguin),
+                RemoteConnectionStatus::NeedsPerson { .. }
+            )
+        },
+        cx,
+    );
+    assert!(
+        A11yTree::read(cx)
+            .find_text("Connect to show its Workspaces.")
+            .is_some()
+    );
+
+    right_click("machine-heading-penguin", cx);
+    click("machine-menu-connect", cx);
+    wait_until(
+        || {
+            matches!(
+                connections.status(&penguin),
+                RemoteConnectionStatus::Working { .. }
+            )
+        },
+        cx,
+    );
+    let tree = A11yTree::read(cx);
+    let note = tree.find_text("Workspaces appear once connected.");
+    let claims_none = tree.find_text("No Workspaces").is_some();
+    let has_note = note.is_some();
+    gate.store(true, Ordering::SeqCst);
+    // The connect worker ends before the test does.
+    wait_until(
+        || {
+            matches!(
+                connections.status(&penguin),
+                RemoteConnectionStatus::NeedsPerson { .. }
+            )
+        },
+        cx,
+    );
+    assert!(
+        has_note && !claims_none,
+        "a connecting server's Workspaces haven't been read, so it doesn't claim to have none"
+    );
 }
