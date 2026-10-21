@@ -54,6 +54,58 @@ def fixture_line_offsets(start, end, caret, document_scalars, events):
     return sorted(current | valid), sorted(historical - valid)
 
 
+def fixture_lines(text, marker, events, granularity):
+    """Observe all native line boundaries against one unchanged fixture document."""
+    observed = fixture_document(text, marker)
+    if observed is None:
+        return None, {"document_coherent": False}
+    document, start, end, caret = observed
+    offsets, expired = fixture_line_offsets(start, end, caret, len(document), events)
+    proof = {
+        "document_scalars": len(document),
+        "caret_offset": caret,
+        "requested_offsets": offsets,
+        "expired_event_offsets": expired,
+        "marker_event_offsets": list(events),
+        "queries": [],
+    }
+    for offset in offsets:
+        line, line_start, line_end = text.getStringAtOffset(offset, granularity)
+        current_document = text.getText(0, -1)
+        evidence = {
+            "requested_offset": offset,
+            "document_scalars": len(current_document),
+            "start": line_start,
+            "end": line_end,
+            "scalars": len(line),
+            "contains_fixture_marker": marker in line,
+            "ends_newline": line.endswith("\n"),
+            "matches_document_slice": line == current_document[line_start:line_end],
+            "returned_range_bounded": 0 <= line_start <= line_end <= len(current_document),
+            "offset_inside_range": (
+                line_start <= offset < line_end
+                or (
+                    offset == len(current_document)
+                    and line_end == offset
+                    and (not current_document.endswith("\n") or line_start == offset)
+                )
+            ),
+            "document_unchanged": current_document == document,
+        }
+        proof["queries"].append(evidence)
+        if not all(
+            evidence[key]
+            for key in (
+                "matches_document_slice",
+                "returned_range_bounded",
+                "offset_inside_range",
+                "document_unchanged",
+            )
+        ):
+            return None, proof
+    return observed, proof
+
+
 class ReadinessStep(Enum):
     DISPLAY_ENVIRONMENT = "display_environment"
     SPEECH_DISPATCHER = "speech_dispatcher"

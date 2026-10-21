@@ -46,8 +46,7 @@ from spaceterm_tasks.accessibility_linux import (
     SmokeFailure,
     cleanup_private_processes,
     create_private_runtime,
-    fixture_document,
-    fixture_line_offsets,
+    fixture_lines,
     orca_registered,
     require,
     require_account_server,
@@ -733,80 +732,28 @@ def validate_tree(probe, input_driver, output, fixture_speech, readiness):
     probe.wait(lambda: probe.insert_marker, "shell_text_event_missing")
     # Orca derives inserted output from the CURRENT caret line. Let it finish
     # genuine output presentation before selection changes that caret.
-    document, start, end, fixture_caret = probe.wait(
-        lambda: fixture_document(text, MARKER), "fixture_document_not_coherent"
-    )
-    line_queries = []
-    offsets, expired = fixture_line_offsets(
-        start, end, fixture_caret, len(document), probe.marker_event_offsets
-    )
-    (output / "fixture-line-query-plan.json").write_text(
-        json.dumps(
-            {
-                "document_scalars": len(document),
-                "requested_offsets": offsets,
-                "expired_event_offsets": expired,
-                "marker_event_offsets": probe.marker_event_offsets,
-            },
-            indent=2,
+    line_proof = {}
+
+    def current_lines():
+        nonlocal line_proof
+        observed, line_proof = fixture_lines(
+            text, MARKER, probe.marker_event_offsets, atspi.TEXT_GRANULARITY_LINE
         )
+        return observed
+
+    try:
+        document, start, end, fixture_caret = probe.wait(
+            current_lines, "terminal_line_boundary_invalid"
+        )
+    except SmokeFailure:
+        (output / "fixture-line-failure.json").write_text(json.dumps(line_proof, indent=2) + "\n")
+        raise
+    (output / "fixture-line-query-plan.json").write_text(
+        json.dumps({key: value for key, value in line_proof.items() if key != "queries"}, indent=2)
         + "\n"
     )
-    for offset in offsets:
-        last_evidence = None
-
-        def current_line():
-            nonlocal last_evidence
-            line, line_start, line_end = text.getStringAtOffset(offset, atspi.TEXT_GRANULARITY_LINE)
-            current_document = text.getText(0, -1)
-            evidence = {
-                "requested_offset": offset,
-                "document_scalars": len(current_document),
-                "start": line_start,
-                "end": line_end,
-                "scalars": len(line),
-                "contains_fixture_marker": MARKER in line,
-                "ends_newline": line.endswith("\n"),
-                "matches_document_slice": line == current_document[line_start:line_end],
-                "returned_range_bounded": 0 <= line_start <= line_end <= len(current_document),
-                "offset_inside_range": (
-                    line_start <= offset < line_end
-                    or (
-                        offset == len(current_document)
-                        and line_end == offset
-                        and (not current_document.endswith("\n") or line_start == offset)
-                    )
-                ),
-            }
-            last_evidence = evidence
-            if (
-                evidence["matches_document_slice"]
-                and evidence["offset_inside_range"]
-                and evidence["returned_range_bounded"]
-            ):
-                return evidence, current_document
-            return None
-
-        try:
-            evidence, document = probe.wait(current_line, "terminal_line_boundary_invalid")
-        except SmokeFailure:
-            (output / "fixture-line-failure.json").write_text(
-                json.dumps(last_evidence, indent=2) + "\n"
-            )
-            raise
-        line_queries.append(evidence)
-        (output / "fixture-line-verification.json").write_text(
-            json.dumps(
-                {
-                    "queries": line_queries,
-                    "marker_event_offsets": probe.marker_event_offsets,
-                    "document_scalars": len(document),
-                    "caret_offset": text.caretOffset,
-                },
-                indent=2,
-            )
-            + "\n"
-        )
+    (output / "fixture-line-verification.json").write_text(json.dumps(line_proof, indent=2) + "\n")
+    line_queries = line_proof["queries"]
     readiness.wait(ReadinessStep.FIXTURE_SPEECH, fixture_speech)
     shell = probe.end()
     coordinates = atspi.DESKTOP_COORDS if input_driver.backend == "x11" else atspi.WINDOW_COORDS

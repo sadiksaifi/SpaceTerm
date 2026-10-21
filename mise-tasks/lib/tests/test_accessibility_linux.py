@@ -18,6 +18,7 @@ from spaceterm_tasks.accessibility_linux import (
     SmokeFailure,
     fixture_document,
     fixture_line_offsets,
+    fixture_lines,
     orca_registered,
     require_account_server,
     require_prerequisites,
@@ -116,6 +117,33 @@ class AccessibilityLineQueryTests(unittest.TestCase):
         )
         self.assertIsNone(fixture_document(text, "M"))
         self.assertEqual(fixture_document(text, "M"), ("M\nprompt", 0, 1, 8))
+
+    def test_document_trimming_replans_lines_before_querying_expired_events(self):
+        text = SimpleNamespace(
+            caretOffset=2,
+            getText=Mock(side_effect=["M\nlong", "M\nlong", "M\n", "M\n", "M\n", "M\n", "M\n"]),
+            getStringAtOffset=Mock(side_effect=[("M\n", 0, 2), ("M\n", 0, 2), ("", 2, 2)]),
+        )
+        events = [{"start": 0, "payload_scalars": 6}]
+        observed, proof = fixture_lines(text, "M", events, "line")
+        self.assertIsNone(observed)
+        self.assertFalse(proof["queries"][0]["document_unchanged"])
+        self.assertEqual(text.getStringAtOffset.call_count, 1)
+        observed, proof = fixture_lines(text, "M", events, "line")
+        self.assertEqual(observed, ("M\n", 0, 1, 2))
+        self.assertEqual(proof["requested_offsets"], [0, 2])
+        self.assertEqual(proof["expired_event_offsets"], [5])
+
+    def test_stable_incorrect_native_line_boundary_is_rejected(self):
+        text = SimpleNamespace(
+            caretOffset=1,
+            getText=Mock(return_value="M\n"),
+            getStringAtOffset=Mock(return_value=("M", 0, 2)),
+        )
+        observed, proof = fixture_lines(text, "M", [], "line")
+        self.assertIsNone(observed)
+        self.assertTrue(proof["queries"][0]["document_unchanged"])
+        self.assertFalse(proof["queries"][0]["matches_document_slice"])
 
     def test_current_queries_exclude_only_expired_insertion_positions(self):
         self.assertEqual(
