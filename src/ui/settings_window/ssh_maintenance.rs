@@ -852,15 +852,6 @@ pub(super) const fn maintenance_row(row: SettingsRowId) -> Option<MaintenanceRow
     }
 }
 
-/// The validated result an acknowledgement retires: the one the row reports, which is the first
-/// of the listing's states holding one.
-fn acknowledged(states: &[RemoteOperationState]) -> Option<RemoteOperationHandle> {
-    states.iter().find_map(|state| match state {
-        RemoteOperationState::Resolved { handle, .. } => Some(*handle),
-        _ => None,
-    })
-}
-
 #[cfg(test)]
 #[path = "ssh_maintenance_tests.rs"]
 mod tests;
