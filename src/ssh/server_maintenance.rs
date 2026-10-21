@@ -329,6 +329,17 @@ fn outcome(
     }
 }
 
+/// Whether the artifact this client holds may replace the account's approved build. An update
+/// never moves a server back to an older release, so a downgrade transfers nothing.
+fn replaceable(candidate: &str, approved: &str) -> Result<(), SshMaintenanceFailure> {
+    if is_released_downgrade(candidate, approved) {
+        return Err(SshMaintenanceFailure::Refused(
+            MaintenanceRefusal::CandidateUnavailable,
+        ));
+    }
+    Ok(())
+}
+
 /// Every route, discovery and artifact failure as one maintenance classification.
 fn failure(error: SshConnectFailure) -> SshMaintenanceFailure {
     match error {
@@ -482,13 +493,7 @@ impl<A: SshProcessAdapter> SshMaintenanceBackend for NativeSshConnectBackend<A> 
     ) -> Result<Option<PreparedChange>, SshMaintenanceFailure> {
         let (route, discovery) = self.bound(target, authority, cancellation, progress)?;
         let artifact = route.candidate(&discovery.target).map_err(failure)?;
-        if is_released_downgrade(artifact.version(), &discovery.version) {
-            // The account's approved build is a later release, so this client holds no artifact
-            // that may replace it. Nothing is transferred.
-            return Err(SshMaintenanceFailure::Refused(
-                MaintenanceRefusal::CandidateUnavailable,
-            ));
-        }
+        replaceable(artifact.version(), &discovery.version)?;
         progress(MaintenancePhase::Transferring);
         let Some(candidate) = self.staged(&route, &artifact, cancellation)? else {
             return Ok(None);
@@ -978,6 +983,72 @@ mod tests {
                 requests[0].contains(&format!("{expected}'")),
                 "{}",
                 requests[0]
+            );
+        }
+    }
+
+    /// Staging transfers only an artifact this client verified for the account's own platform.
+    #[gpui::test]
+    fn staging_refuses_an_unverified_or_foreign_artifact(cx: &mut gpui::TestAppContext) {
+        let unavailable = (
+            SshServerArtifacts::new(None),
+            discovery(SERVER),
+            SshMaintenanceFailure::Refused(MaintenanceRefusal::CandidateUnavailable),
+        );
+        let unverified = (
+            // This client holds a directory for the account's target whose artifact cannot be
+            // read and verified.
+            SshServerArtifacts::new(Some("/fixture/artifacts".into())),
+            discovery(SERVER),
+            SshMaintenanceFailure::Refused(MaintenanceRefusal::CandidateChanged),
+        );
+        let foreign = (
+            SshServerArtifacts::new(Some("/fixture/artifacts".into())),
+            AccountDiscovery {
+                target: "powerpc64-unknown-linux-gnu".into(),
+                ..discovery(SERVER)
+            },
+            SshMaintenanceFailure::Incompatible(IncompatibilityKind::Platform),
+        );
+        for (artifacts, discovered, expected) in [unavailable, unverified, foreign] {
+            let account = account(discovered, Reply::Prepared(change()));
+            let (backend, _) = backend(cx.background_executor.clone(), account.clone(), artifacts);
+
+            let prepared = backend.prepare_update(
+                &target(bound()),
+                MaintenanceAuthority::Requested,
+                &SshCancellationToken::default(),
+                &silent,
+            );
+
+            assert!(
+                matches!(prepared, Err(failure) if failure == expected),
+                "{expected:?} was not refused"
+            );
+            assert_eq!(account.ran("ssh-stage"), 0, "nothing was transferred");
+            assert_eq!(account.ran("ssh-maintain"), 0, "no update was described");
+        }
+    }
+
+    /// An update never moves a server back to an older release, so a downgrade is refused before
+    /// anything is transferred.
+    #[test]
+    fn a_released_downgrade_is_refused_before_transfer() {
+        assert!(matches!(
+            replaceable("0.6.7", "0.6.8"),
+            Err(SshMaintenanceFailure::Refused(
+                MaintenanceRefusal::CandidateUnavailable
+            ))
+        ));
+        for (candidate, approved) in [
+            ("0.6.9", "0.6.8"),
+            ("0.6.8", "0.6.8"),
+            ("0.7.0-dev", "0.6.8"),
+            ("0.6.8", "0.7.0-dev"),
+        ] {
+            assert!(
+                replaceable(candidate, approved).is_ok(),
+                "{candidate} was refused against {approved}"
             );
         }
     }
