@@ -17,7 +17,7 @@ pub(crate) struct UnixSshProcessAdapter;
 pub(crate) struct UnixSshProcess {
     child: Child,
     process_group: libc::pid_t,
-    collected_exit: Option<ProcessExit>,
+    observed_exit: Option<ProcessExit>,
 }
 
 impl SshProcessAdapter for UnixSshProcessAdapter {
@@ -83,7 +83,7 @@ impl SshProcessAdapter for UnixSshProcessAdapter {
             UnixSshProcess {
                 child,
                 process_group,
-                collected_exit: None,
+                observed_exit: None,
             },
             SshProcessPipes::new_pollable(
                 stdin.map(|pipe| Box::new(pipe) as Box<dyn std::io::Write + Send>),
@@ -98,20 +98,7 @@ impl SshProcessAdapter for UnixSshProcessAdapter {
         &self,
         process: &mut Self::Process,
     ) -> Result<Option<ProcessExit>, SshProcessMechanismError> {
-        if let Some(exit) = process.collected_exit {
-            return Ok(Some(exit));
-        }
-        process
-            .child
-            .try_wait()
-            .map_err(|_| SshProcessMechanismError::StatusFailed)
-            .map(|status| {
-                status.map(|status| {
-                    let exit = ProcessExit::new(status.success(), status.code());
-                    process.collected_exit = Some(exit);
-                    exit
-                })
-            })
+        process.observe_status(true)
     }
 
     fn signal(
@@ -121,9 +108,23 @@ impl SshProcessAdapter for UnixSshProcessAdapter {
     ) -> Result<(), SshProcessMechanismError> {
         let signal = match signal {
             ProcessSignal::Terminate => libc::SIGTERM,
-            ProcessSignal::Kill => libc::SIGKILL,
+            ProcessSignal::Kill => {
+                // A group signal can miss a child still being forked by its leader. End the
+                // leader first, then observe exit without releasing its PID before the group
+                // signal. No new leader-owned fork can join the group after that observation.
+                if process.observed_exit.is_none() {
+                    process
+                        .child
+                        .kill()
+                        .map_err(|_| SshProcessMechanismError::SignalFailed)?;
+                    process
+                        .observe_status(false)
+                        .map_err(|_| SshProcessMechanismError::SignalFailed)?;
+                }
+                libc::SIGKILL
+            }
         };
-        signal_group(process.process_group, signal)
+        signal_group(process, signal)
     }
 
     fn observe_exit(&self, process: &mut Self::Process) -> Option<SshProcessExitObservation> {
@@ -131,13 +132,52 @@ impl SshProcessAdapter for UnixSshProcessAdapter {
     }
 
     fn reap(&self, mut process: Self::Process) -> Result<(), SshProcessMechanismError> {
-        if process.collected_exit.is_none() {
-            process
-                .child
-                .wait()
-                .map_err(|_| SshProcessMechanismError::ReapFailed)?;
-        }
+        process
+            .child
+            .wait()
+            .map_err(|_| SshProcessMechanismError::ReapFailed)?;
         Ok(())
+    }
+}
+
+impl UnixSshProcess {
+    fn observe_status(
+        &mut self,
+        nonblocking: bool,
+    ) -> Result<Option<ProcessExit>, SshProcessMechanismError> {
+        if let Some(exit) = self.observed_exit {
+            return Ok(Some(exit));
+        }
+        loop {
+            let mut information = MaybeUninit::<libc::siginfo_t>::zeroed();
+            // SAFETY: this exclusively owned child is unreaped. WNOWAIT retains its PID and
+            // process group identity until reap, including after a successful status query.
+            let result = unsafe {
+                libc::waitid(
+                    libc::P_PID,
+                    self.child.id() as libc::id_t,
+                    information.as_mut_ptr(),
+                    libc::WEXITED | libc::WNOWAIT | if nonblocking { libc::WNOHANG } else { 0 },
+                )
+            };
+            if result == -1 {
+                if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(SshProcessMechanismError::StatusFailed);
+            }
+            // SAFETY: the structure was zeroed and waitid succeeded. WNOHANG leaves si_pid zero
+            // when no exit is available; otherwise si_code and si_status describe that exit.
+            let information = unsafe { information.assume_init() };
+            if unsafe { information.si_pid() } == 0 {
+                return Ok(None);
+            }
+            let code = (information.si_code == libc::CLD_EXITED)
+                .then(|| unsafe { information.si_status() });
+            let exit = ProcessExit::new(code == Some(0), code);
+            self.observed_exit = Some(exit);
+            return Ok(Some(exit));
+        }
     }
 }
 
@@ -164,20 +204,47 @@ fn stdio(mode: SshProcessStdio) -> Stdio {
 }
 
 fn signal_group(
-    process_group: libc::pid_t,
+    process: &UnixSshProcess,
     signal: libc::c_int,
 ) -> Result<(), SshProcessMechanismError> {
-    // SAFETY: the positive process group belongs to a child launched above with a private group.
-    let result = unsafe { libc::kill(-process_group, signal) };
+    // SAFETY: the unreaped child reserves the private process group until final cleanup.
+    let result = unsafe { libc::kill(-process.process_group, signal) };
     if result == 0 {
         return Ok(());
     }
     let error = io::Error::last_os_error();
+    #[cfg(target_os = "macos")]
+    if error.raw_os_error() == Some(libc::EPERM)
+        && process.observed_exit.is_some()
+        && retained_leader_is_only_group_member(process.process_group)
+    {
+        // macOS reports EPERM when a group's only member is its zombie leader. Prove that
+        // exact state rather than suppressing a permission failure for a live descendant.
+        return Ok(());
+    }
     if error.raw_os_error() == Some(libc::ESRCH) {
         Ok(())
     } else {
         Err(SshProcessMechanismError::SignalFailed)
     }
+}
+
+#[cfg(target_os = "macos")]
+fn retained_leader_is_only_group_member(leader: libc::pid_t) -> bool {
+    // PROC_PGRP_ONLY from sys/proc_info.h. Two slots distinguish the known leader from a
+    // group with any additional member, without enumerating or polling the process tree.
+    const PROC_PGRP_ONLY: u32 = 2;
+    let mut members = [0 as libc::pid_t; 2];
+    // SAFETY: proc_listpids writes at most the size of this live fixed-size buffer.
+    let bytes = unsafe {
+        libc::proc_listpids(
+            PROC_PGRP_ONLY,
+            leader as u32,
+            members.as_mut_ptr().cast(),
+            std::mem::size_of_val(&members) as libc::c_int,
+        )
+    };
+    bytes == std::mem::size_of::<libc::pid_t>() as libc::c_int && members[0] == leader
 }
 
 #[cfg(all(test, feature = "native-tests"))]
@@ -314,7 +381,7 @@ mod tests {
     }
 
     #[test]
-    fn collected_process_exit_should_remain_observable() {
+    fn observed_process_exit_should_retain_its_identity_and_remain_observable() {
         let adapter = UnixSshProcessAdapter;
         let mut spawned = adapter.spawn(shell_request("exit 7")).unwrap();
         let deadline = std::time::Instant::now() + Duration::from_secs(2);
@@ -335,7 +402,25 @@ mod tests {
         let observed = receiver.recv_timeout(Duration::from_secs(2));
         interrupt.interrupt();
         waiter.join().unwrap();
+        let process = spawned.process_mut().process_group;
+        let mut retained = MaybeUninit::<libc::siginfo_t>::zeroed();
+        // SAFETY: this checks that status observation has left our child waitable. WNOWAIT
+        // preserves that child for the adapter's final cleanup below.
+        let waitable = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                process as libc::id_t,
+                retained.as_mut_ptr(),
+                libc::WEXITED | libc::WNOWAIT | libc::WNOHANG,
+            )
+        };
         adapter.reap(spawned.into_process()).unwrap();
+        assert_eq!(
+            waitable, 0,
+            "status observation must not reap the owned child"
+        );
+        // SAFETY: waitid succeeded and initialized the zeroed information structure.
+        assert_eq!(unsafe { retained.assume_init().si_pid() }, process);
         assert_eq!(exit.code(), Some(7));
         assert_eq!(
             observed.unwrap(),

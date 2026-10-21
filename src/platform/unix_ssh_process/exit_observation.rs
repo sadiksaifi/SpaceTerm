@@ -14,14 +14,14 @@ pub(super) fn observe(
     adapter: &UnixSshProcessAdapter,
     process: &mut UnixSshProcess,
 ) -> Option<SshProcessExitObservation> {
-    if process.collected_exit.is_some() {
+    if process.observed_exit.is_some() {
         return Some(immediate_exit());
     }
     let registration = native_observation(process.child.id());
     // A kqueue NOTE_EXIT registration only observes later edges. Checking status after registration
-    // also covers a child that exited before attachment. The exclusive process borrow retains its
-    // identity until this check completes, so a registration that found the child already exiting
-    // is an exit even while its status is not yet collectible.
+    // also covers a child that exited before attachment. The unreaped child retains its identity,
+    // so a registration that found it already exiting is an exit even while its status is not yet
+    // observable.
     match (adapter.try_status(process), registration) {
         (Ok(Some(_)), _) | (Ok(None), Err(RegistrationFailure::Exited)) => Some(immediate_exit()),
         (Ok(None), Ok(observation)) => Some(observation),
