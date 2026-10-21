@@ -732,7 +732,7 @@ impl AuthorizationPrompt {
 
 /// Where the service stands, read from its status.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum ServicePhase {
+pub(crate) enum ServicePhase {
     NotInstalled,
     Running,
     /// The person stopped it. It stays stopped until an explicit Start.
@@ -743,7 +743,7 @@ pub(super) enum ServicePhase {
 
 impl ServicePhase {
     /// A running process wins over a recorded Stop, since the process is what ends Sessions.
-    pub(super) fn of(status: ServiceStatus) -> Self {
+    pub(crate) fn of(status: ServiceStatus) -> Self {
         if !status.installed {
             Self::NotInstalled
         } else if status.running {
@@ -756,7 +756,7 @@ impl ServicePhase {
     }
 
     /// The steps offered from this phase, in the order the row shows them.
-    pub(super) fn actions(self) -> &'static [ServiceAction] {
+    pub(crate) fn actions(self) -> &'static [ServiceAction] {
         use ServiceAction as Action;
         match self {
             Self::NotInstalled => &[Action::Install],
