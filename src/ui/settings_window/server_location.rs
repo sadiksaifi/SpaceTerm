@@ -121,6 +121,8 @@ impl SettingsWindow {
     /// Selection, section and connection changes call this; rendering never does, so painting
     /// asks no server anything.
     pub(super) fn sync_server_location(&mut self, cx: &mut Context<Self>) {
+        // End All Sessions follows the same server through the same changes.
+        self.sync_end_all_sessions(cx);
         let target = if self.active_section == SettingsSectionId::Servers {
             self.selected_server()
         } else {

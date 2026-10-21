@@ -23,7 +23,9 @@ fn select(connection: &mut PaneConnection, create: bool) -> Result<Reply, Server
 /// The Takeover offer in `reply` and the Controlling Client it names.
 fn offer(reply: Reply) -> Result<(PaneTarget, Controller), Box<dyn Error>> {
     match reply {
-        Reply::Takeover { target, controller } => Ok((target, controller)),
+        Reply::Takeover {
+            target, controller, ..
+        } => Ok((target, controller)),
         _ => Err("expected Takeover Screen".into()),
     }
 }

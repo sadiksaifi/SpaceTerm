@@ -721,6 +721,84 @@ fn a_takeover_screen_should_name_the_controlling_client_as_control_moves(cx: &mu
     assert!(tree.find(crate::ui::server_pane::TAKEOVER_TITLE).is_some());
 }
 
+/// End All Sessions keeps every control grant, so another client's Takeover Screen still names
+/// the Controlling Client. It no longer says the shell keeps running, and nothing starts one.
+#[gpui::test]
+fn a_takeover_screen_should_keep_its_controller_and_stop_claiming_a_shell_after_end_all_sessions(
+    cx: &mut TestAppContext,
+) {
+    use spaceterm_server::pane::control::Controller;
+    use spaceterm_ui::a11y_testing::A11yTree;
+
+    let (harness, cx) = shared_tab_manager(cx);
+    let pane = harness.panes.pane(ROOT_PANE);
+    pane.offer_take_over(Controller::Client {
+        name: "Build Server".into(),
+        this_client: false,
+    });
+    settle(&harness, cx);
+    pane.set_session_dormant(true);
+    settle(&harness, cx);
+
+    let tree = A11yTree::read(cx);
+    assert_eq!(
+        tree.node(&format!(
+            "Controlled by Build Server. {}",
+            crate::ui::server_pane::TAKEOVER_ENDED_DETAIL
+        ))["aria"]["role"],
+        "Status",
+        "the screen still names who controls the Pane, and says its shell ended"
+    );
+    assert!(
+        tree.find(&format!(
+            "Controlled by Build Server. {}",
+            crate::ui::server_pane::TAKEOVER_DETAIL
+        ))
+        .is_none(),
+        "an ended Session no longer keeps running"
+    );
+    assert!(cx.debug_bounds("shared-pane-take-over-1").is_some());
+    assert_eq!(pane.restored_starts(), 0, "presenting it starts nothing");
+    assert_eq!(pane.take_overs(), 0, "presenting it takes nothing over");
+
+    // Interrupted, the screen names nobody and still makes no claim about a running shell.
+    pane.set(DevelopmentPaneStatus::TakeoverReconnecting);
+    settle(&harness, cx);
+    assert_eq!(
+        A11yTree::read(cx).node("Reconnecting…")["aria"]["description"],
+        "Reconnecting… Take Over is available once SpaceTerm reconnects."
+    );
+}
+
+/// Taking over a Pane whose Session End All Sessions ended moves its control only. The Pane then
+/// waits for Start Session, and nothing starts a shell on the way.
+#[gpui::test]
+fn taking_over_an_ended_pane_should_offer_start_session_without_starting_one(
+    cx: &mut TestAppContext,
+) {
+    use spaceterm_server::pane::control::Controller;
+
+    let (harness, cx) = shared_tab_manager(cx);
+    let pane = harness.panes.pane(ROOT_PANE);
+    pane.offer_take_over(Controller::Client {
+        name: "Build Server".into(),
+        this_client: false,
+    });
+    pane.set_session_dormant(true);
+    settle(&harness, cx);
+
+    click("shared-pane-take-over-1", cx);
+    assert_eq!(pane.take_overs(), 1);
+    pane.reconnect_to(DevelopmentPaneStatus::SessionEnded);
+    settle(&harness, cx);
+
+    assert!(cx.debug_bounds("shared-pane-takeover-1").is_none());
+    assert!(cx.debug_bounds("shared-pane-session-ended-1").is_some());
+    assert_eq!(pane.restored_starts(), 0, "Take Over starts no shell");
+    click("shared-pane-start-session-1", cx);
+    assert_eq!(pane.restored_starts(), 1);
+}
+
 /// An SSH server's Pane may wait for a route that needs the person to sign in again. Its Retry is
 /// the person's request, so it asks the registry to connect as the person would from Settings,
 /// once, and nothing asks again on its own.
@@ -870,6 +948,50 @@ fn a_restored_pane_should_offer_start_new_shell_without_starting_one(cx: &mut Te
         harness.panes.pane(ROOT_PANE).restored_starts(),
         1,
         "Start New Shell should ask the server once"
+    );
+}
+
+#[gpui::test]
+fn an_ended_pane_should_offer_start_session_without_starting_one(cx: &mut TestAppContext) {
+    let (harness, cx) = shared_tab_manager(cx);
+    harness
+        .panes
+        .pane(ROOT_PANE)
+        .set(DevelopmentPaneStatus::SessionEnded);
+    settle(&harness, cx);
+
+    assert!(
+        cx.debug_bounds("shared-pane-session-ended-1").is_some(),
+        "a Pane whose Session End All Sessions ended should say so"
+    );
+    assert!(
+        cx.debug_bounds("shared-pane-restored-1").is_none(),
+        "an ended Session is not a server restart"
+    );
+    // Repaints, reconnection, and focus restoration never start an ended Session.
+    harness
+        .panes
+        .pane(ROOT_PANE)
+        .reconnect_to(DevelopmentPaneStatus::SessionEnded);
+    settle(&harness, cx);
+    assert_eq!(
+        harness.panes.pane(ROOT_PANE).restored_starts(),
+        0,
+        "presenting the ended Session must not start a shell"
+    );
+
+    click("shared-pane-start-session-1", cx);
+
+    assert_eq!(
+        harness.panes.pane(ROOT_PANE).restored_starts(),
+        1,
+        "Start Session should ask the server once"
+    );
+    click("shared-pane-start-session-1", cx);
+    assert_eq!(
+        harness.panes.pane(ROOT_PANE).restored_starts(),
+        1,
+        "a start awaiting its answer should not be asked for again"
     );
 }
 

@@ -2904,6 +2904,7 @@ impl TabView {
                 offered,
                 ended,
                 controller,
+                dormant,
             } => {
                 let status = if taking_over {
                     Some(server_pane::progress_status(
@@ -2927,7 +2928,7 @@ impl TabView {
                         server_pane::SESSION_ENDED_DETAIL,
                     )
                 } else if offered || taking_over {
-                    server_pane::takeover_copy(controller.as_ref())
+                    server_pane::takeover_copy(controller.as_ref(), dormant)
                 } else {
                     // SpaceTerm stopped reconnecting, so the screen claims nothing about the shell
                     // or who controls it.
@@ -2970,44 +2971,41 @@ impl TabView {
                 starting,
                 unconfirmed,
                 offered,
+                ended,
             } => {
+                let copy = server_pane::DormantCopy::of(ended);
                 let status = if starting {
                     Some(server_pane::progress_status(
-                        selector("start-shell-status"),
-                        selector("start-shell-progress"),
-                        server_pane::STARTING_SHELL.into(),
+                        selector(&format!("{}-status", copy.action)),
+                        selector(&format!("{}-progress", copy.action)),
+                        copy.progress.into(),
                         cx,
                     ))
                 } else if unconfirmed {
                     Some(server_pane::note_status(
-                        selector("start-shell-status"),
-                        server_pane::START_SHELL_UNCONFIRMED.into(),
+                        selector(&format!("{}-status", copy.action)),
+                        copy.unconfirmed.into(),
                         cx,
                     ))
                 } else {
                     None
                 };
                 let owner = view.clone();
-                let action = Button::new(selector("start-shell"), "Start New Shell")
+                let action = Button::new(selector(copy.action), copy.label)
                     .variant(ButtonVariant::Primary)
                     .size(ButtonSize::Regular)
                     .disabled(!offered)
                     .tab_stop(true)
-                    .accessibility_description(
-                        "Starts a new shell on the server in this Pane's last directory.",
-                    )
-                    .debug_selector(selector("start-shell"))
+                    .accessibility_description(copy.description)
+                    .debug_selector(selector(copy.action))
                     .on_activate(move |_, window, cx| {
                         let _ = owner.update(cx, |view, cx| {
                             view.start_shared_shell(pane_id, window, cx);
                         });
                     });
                 server_pane::render_screen(
-                    selector("restored"),
-                    server_pane::ScreenCopy::new(
-                        server_pane::RESTORED_TITLE.into(),
-                        server_pane::RESTORED_DETAIL.into(),
-                    ),
+                    selector(copy.screen),
+                    server_pane::ScreenCopy::new(copy.title.into(), copy.detail.into()),
                     true,
                     Some(action),
                     status,

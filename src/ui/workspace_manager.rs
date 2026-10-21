@@ -4861,6 +4861,9 @@ impl WorkspaceManager {
             Mutation::RenameWorkspace { .. } | Mutation::PinWorkspace { .. } => {}
             // The published removal already moved the keyboard to what remains.
             Mutation::Close { .. } | Mutation::Worktree(_) => {}
+            // Ended Panes stay where they are. Each one presents Session Ended until someone
+            // starts it, so nothing here moves the keyboard or starts a shell.
+            Mutation::EndAllSessions { .. } => {}
         }
     }
 

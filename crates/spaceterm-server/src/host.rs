@@ -318,6 +318,7 @@ pub(crate) fn serve_runtime(
                                         accessibility: false,
                                         directory_recovery: true,
                                         worktree_writes: false,
+                                        end_all_sessions: false,
                                         workspace_policy: false,
                                         presentation_changes: false,
                                     }
@@ -742,6 +743,7 @@ mod startup_tests {
                         accessibility: false,
                         directory_recovery: true,
                         worktree_writes: false,
+                        end_all_sessions: false,
                         workspace_policy: true,
                         presentation_changes: false,
                     },
@@ -750,6 +752,7 @@ mod startup_tests {
                         next_sequence: 1,
                     },
                     Request::SelectPane { pane, .. } => Reply::Restored {
+                        session_ended: false,
                         recovery: None,
                         directory_unavailable: false,
                         server: [1; 32],

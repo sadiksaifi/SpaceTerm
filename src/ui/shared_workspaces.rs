@@ -1690,6 +1690,8 @@ mod development {
                 | Mutation::SplitPane { .. } => None,
                 // A stale close is answered with its own outcome rather than a field conflict.
                 Mutation::Close { .. } | Mutation::Worktree(_) => None,
+                // Ending Sessions edits no field, and its refusals reach Settings directly.
+                Mutation::EndAllSessions { .. } => None,
             }
         }
 
@@ -2079,6 +2081,7 @@ mod development {
         pub(crate) struct ScriptedPane {
             status: Mutex<crate::terminal::server_session::DevelopmentPaneStatus>,
             controller: Mutex<Option<spaceterm_server::pane::control::Controller>>,
+            session_dormant: std::sync::atomic::AtomicBool,
             generation: std::sync::atomic::AtomicU64,
             selections: std::sync::atomic::AtomicUsize,
             take_overs: std::sync::atomic::AtomicUsize,
@@ -2093,6 +2096,7 @@ mod development {
                         crate::terminal::server_session::DevelopmentPaneStatus::Connecting,
                     ),
                     controller: Mutex::default(),
+                    session_dormant: std::sync::atomic::AtomicBool::new(false),
                     generation: std::sync::atomic::AtomicU64::new(0),
                     selections: std::sync::atomic::AtomicUsize::new(0),
                     take_overs: std::sync::atomic::AtomicUsize::new(0),
@@ -2124,6 +2128,22 @@ mod development {
                 self.set(crate::terminal::server_session::DevelopmentPaneStatus::Connected);
             }
 
+            /// The server says whether End All Sessions left the Pane without a shell.
+            pub(crate) fn set_session_dormant(&self, dormant: bool) {
+                self.session_dormant
+                    .store(dormant, std::sync::atomic::Ordering::SeqCst);
+            }
+
+            /// A new connection reaches the server, which answers with `status`.
+            pub(crate) fn reconnect_to(
+                &self,
+                status: crate::terminal::server_session::DevelopmentPaneStatus,
+            ) {
+                self.generation
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                self.set(status);
+            }
+
             /// How many times a person's explicit action asked the server for this Pane.
             pub(crate) fn selections(&self) -> usize {
                 self.selections.load(std::sync::atomic::Ordering::SeqCst)
@@ -2150,6 +2170,11 @@ mod development {
 
             fn controller(&self) -> Option<spaceterm_server::pane::control::Controller> {
                 self.controller.lock().expect("controller").clone()
+            }
+
+            fn session_dormant(&self) -> bool {
+                self.session_dormant
+                    .load(std::sync::atomic::Ordering::SeqCst)
             }
 
             fn connection_generation(&self) -> u64 {
@@ -2262,6 +2287,7 @@ mod development {
             pub(crate) fn new(inventory: Option<Inventory>) -> Self {
                 Self {
                     snapshot: Mutex::new(SharedWorkspaceSnapshot {
+                        end_all_sessions: true,
                         worktree_writes: false,
                         inventory,
                         connected: true,
@@ -2278,6 +2304,11 @@ mod development {
 
             pub(crate) fn set_inventory(&self, inventory: Inventory) {
                 self.snapshot.lock().expect("snapshot").inventory = Some(inventory);
+            }
+
+            /// Whether the scripted server negotiated End All Sessions.
+            pub(crate) fn set_end_all_sessions(&self, offered: bool) {
+                self.snapshot.lock().expect("snapshot").end_all_sessions = offered;
             }
 
             pub(crate) fn set_connected(&self, connected: bool) {

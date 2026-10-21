@@ -1232,6 +1232,7 @@ mod tests {
                         accessibility: false,
                         directory_recovery: false,
                         worktree_writes: false,
+                        end_all_sessions: false,
                         workspace_policy: true,
                         presentation_changes: false,
                     },

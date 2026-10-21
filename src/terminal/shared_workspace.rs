@@ -14,6 +14,7 @@ use std::time::Duration;
 
 #[derive(Clone)]
 pub(crate) struct SharedWorkspaceSnapshot {
+    pub end_all_sessions: bool,
     pub worktree_writes: bool,
     pub inventory: Option<Inventory>,
     pub connected: bool,
@@ -92,6 +93,7 @@ impl SharedWorkspaceClient {
         legacy_location: Option<String>,
     ) -> Self {
         let snapshot = Arc::new(PublishedSnapshot::new(SharedWorkspaceSnapshot {
+            end_all_sessions: false,
             worktree_writes: false,
             inventory: None,
             connected: false,
@@ -268,6 +270,7 @@ fn run(
             let (initial, mut sequence) = inventory(&mut connection, &controls)?;
             state.publish(|s| {
                 s.worktree_writes = connection.worktree_writes();
+                s.end_all_sessions = connection.supports_end_all_sessions();
                 s.inventory = Some(initial);
                 s.pending = journal.pending().is_some();
                 s.pending_operation = journal.pending().map(|p| p.mutation.clone());
@@ -364,6 +367,7 @@ mod tests {
     fn each_subscriber_wakes_after_a_coalesced_publication_without_holding_state() {
         let (commands, _receiver) = mpsc::sync_channel(1);
         let state = Arc::new(PublishedSnapshot::new(SharedWorkspaceSnapshot {
+            end_all_sessions: true,
             worktree_writes: true,
             inventory: None,
             connected: true,
@@ -403,6 +407,7 @@ mod tests {
     fn disconnect_rejects_an_enqueued_edit_without_carrying_it_across_reconnect() {
         let (commands, receiver) = mpsc::sync_channel(1);
         let state = Arc::new(PublishedSnapshot::new(SharedWorkspaceSnapshot {
+            end_all_sessions: true,
             worktree_writes: true,
             inventory: None,
             connected: true,

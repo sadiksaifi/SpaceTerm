@@ -6,6 +6,7 @@ mod background_image;
 mod catalog;
 mod clipboard;
 mod editor;
+mod end_sessions;
 mod git;
 mod import;
 mod keybindings;
@@ -375,6 +376,7 @@ pub(crate) struct SettingsWindow {
     /// The Worktree Path Template field, kept so an edit survives re-rendering.
     worktree_location: git::WorktreeLocationField,
     server_location: server_location::ServerLocation,
+    end_all_sessions: end_sessions::EndAllSessions,
     /// The local server this window presents. `None` omits the Servers section.
     local_server: Option<servers::LocalServerRow>,
     /// The service that runs the local server. `None` omits its row.
@@ -704,6 +706,7 @@ impl SettingsWindow {
             settings_file,
             worktree_location,
             server_location,
+            end_all_sessions: end_sessions::EndAllSessions::new(),
             server_service: local_server
                 .as_ref()
                 .and_then(|offered| offered.service.clone())
@@ -1343,6 +1346,9 @@ impl SettingsWindow {
                     .presentation()
                     .explanation,
             );
+        } else if row == SettingsRowId::EndAllSessions {
+            let (caption, tone) = self.end_all_sessions_caption();
+            rendered = rendered.caption(caption, tone);
         } else if row == SettingsRowId::ServerWorktreeLocation {
             let (caption, tone) = self.server_location_caption(cx);
             rendered = rendered.caption_with_example(caption, tone);
@@ -1414,6 +1420,7 @@ impl SettingsWindow {
                 self.render_git_tool(row, appearance, cx)
             }
             SettingsRowId::ServerWorktreeLocation => self.render_server_location(appearance, cx),
+            SettingsRowId::EndAllSessions => self.render_end_all_sessions(appearance, cx),
             SettingsRowId::WorktreeLocation => self.render_worktree_location(appearance, cx),
             SettingsRowId::LocalServer => self.render_local_server(appearance, cx),
             SettingsRowId::ServerService => self.render_server_service(appearance, cx),

@@ -186,6 +186,10 @@ pub enum Axis {
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Mutation {
+    /// End the Sessions on this running server without removing their Panes.
+    EndAllSessions {
+        confirmation: CloseInventory,
+    },
     Worktree(crate::worktree::Operation),
     Close {
         target: CloseTarget,
@@ -220,6 +224,7 @@ pub enum Mutation {
 impl Mutation {
     pub fn is_bounded(&self) -> bool {
         match self {
+            Self::EndAllSessions { confirmation } => confirmation.sessions.len() <= MAX_PANES,
             Self::Worktree(operation) => operation.is_bounded(),
             Self::Close { confirmation, .. } => {
                 !confirmation.panes.is_empty() && confirmation.panes.len() <= MAX_PANES
@@ -275,6 +280,8 @@ pub struct State {
     devices: Vec<DeviceOutcomes>,
     #[serde(default)]
     creator_boot: Option<Id>,
+    /// Durable cleanup intent names original Sessions, never future replacements.
+    session_ends: Option<CloseInventory>,
 }
 impl State {
     pub fn empty() -> Self {
@@ -290,10 +297,12 @@ impl State {
             },
             devices: Vec::new(),
             creator_boot: None,
+            session_ends: None,
         }
     }
     pub fn begin_boot(&mut self, boot: Id) {
         if self.creator_boot != Some(boot) {
+            self.session_ends = None;
             for w in &mut self.inventory.workspaces {
                 for t in &mut w.tabs {
                     for p in &mut t.panes {
@@ -359,6 +368,7 @@ impl State {
             },
             devices: Vec::new(),
             creator_boot: None,
+            session_ends: None,
         })
     }
     pub fn envelope(
@@ -400,6 +410,9 @@ impl State {
             .pending
             .iter()
             .find(|o| o.sequence == sequence)
+    }
+    pub fn session_ends(&self) -> Option<&CloseInventory> {
+        self.session_ends.as_ref()
     }
     pub fn next_sequence(&self, device: Id) -> u64 {
         self.devices
@@ -561,6 +574,16 @@ impl State {
             !name.trim().is_empty() && name.len() <= 256 && !name.chars().any(char::is_control)
         };
         let target = match mutation {
+            Mutation::EndAllSessions { confirmation } => {
+                let Some(live) = &self.inventory.close else {
+                    return Ok(Outcome::StaleConfirmation);
+                };
+                if live != confirmation {
+                    return Ok(Outcome::StaleConfirmation);
+                }
+                self.session_ends = Some(confirmation.clone());
+                confirmation.boot
+            }
             Mutation::Worktree(_) => return Ok(Outcome::Pending),
             Mutation::Close {
                 target,
@@ -945,6 +968,19 @@ impl State {
     }
     pub(crate) fn validate(&self) -> Result<(), ServerError> {
         let invalid = || ServerError::UnsafeStorage;
+        if let Some(ends) = &self.session_ends {
+            let ids: std::collections::BTreeSet<_> = ends.sessions.iter().map(|p| p.id).collect();
+            if Some(ends.boot) != self.creator_boot
+                || ends.sessions.len() > MAX_PANES
+                || ids.len() != ends.sessions.len()
+                || ends
+                    .sessions
+                    .iter()
+                    .any(|p| p.id == [0; 32] || p.session == Some([0; 32]))
+            {
+                return Err(invalid());
+            }
+        }
         if self.names.len() != self.inventory.workspaces.len()
             || self
                 .inventory
@@ -1153,6 +1189,84 @@ impl ClientJournal {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn end_all_sessions_retains_exact_originals_across_acknowledgement_recovery_and_boots() {
+        let mut state = State::empty();
+        state.begin_boot([9; 32]);
+        state
+            .apply(
+                [1; 32],
+                1,
+                Mutation::CreateWorkspace {
+                    name: "Build".into(),
+                    directory: None,
+                },
+                "/home/test".as_ref(),
+                |_| true,
+            )
+            .unwrap();
+        let pane = state.inventory.workspaces[0].tabs[0].root_pane;
+        let original = CloseInventory {
+            boot: [9; 32],
+            sessions: vec![ConfirmedPane {
+                id: pane,
+                session: Some([7; 32]),
+            }],
+        };
+        state.inventory.close = Some(original.clone());
+        assert_eq!(
+            state
+                .apply(
+                    [2; 32],
+                    1,
+                    Mutation::EndAllSessions {
+                        confirmation: CloseInventory {
+                            boot: [8; 32],
+                            ..original.clone()
+                        }
+                    },
+                    "/home/test".as_ref(),
+                    |_| true
+                )
+                .unwrap(),
+            Outcome::StaleConfirmation
+        );
+        assert!(state.session_ends().is_none());
+        let mutation = Mutation::EndAllSessions {
+            confirmation: original.clone(),
+        };
+        state
+            .apply([2; 32], 2, mutation.clone(), "/home/test".as_ref(), |_| {
+                true
+            })
+            .unwrap();
+        let outcome = state.outcome([2; 32], 2).unwrap().clone();
+        state.acknowledge([2; 32], 1).unwrap();
+        state.acknowledge([2; 32], 2).unwrap();
+        let envelope = state.envelope("/home/test".as_ref()).unwrap();
+        let record = serde_json::from_slice(&serde_json::to_vec(&envelope).unwrap()).unwrap();
+        let mut recovered = State::from_legacy(&record);
+        recovered.validate().unwrap();
+        recovered.begin_boot([9; 32]);
+        assert_eq!(
+            recovered.session_ends(),
+            Some(&original),
+            "acknowledgement cannot erase cleanup intent"
+        );
+        assert_eq!(outcome.outcome, Outcome::Accepted { target: [9; 32] });
+        recovered.begin_boot([10; 32]);
+        assert!(
+            recovered.session_ends().is_none(),
+            "old cleanup has no authority in another boot"
+        );
+        assert_eq!(
+            recovered
+                .apply([2; 32], 3, mutation, "/home/test".as_ref(), |_| true)
+                .unwrap(),
+            Outcome::StaleConfirmation
+        );
+    }
 
     #[test]
     fn confirmed_worktree_close_is_exact_and_keeps_outside_tabs_and_workspaces() {

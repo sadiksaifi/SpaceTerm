@@ -1,0 +1,524 @@
+//! End All Sessions for the server selected in the Servers list.
+//!
+//! The action ends every live Terminal Session on that server for every client. The server keeps
+//! running, and its Workspaces, Tabs, Panes, and control grants remain. The row reads the
+//! server's writer, the one the Workspace Window shares, so the request uses the same operation
+//! sequence and recovery as every other shared edit. Nothing here ever asks twice: a lost answer
+//! is resolved by that writer's recovery, never by another request.
+use super::server_list::ServerChoice;
+use super::*;
+use crate::ui::server_worktrees::Client;
+use crate::ui::shared_workspaces::SharedRefusalReason;
+use crate::ui::sidebar_window::form::CaptionTone;
+use gpui::Task;
+use spaceterm_server::hierarchy::{CloseInventory, Id, Mutation, Outcome, RetainedOutcome};
+use spaceterm_ui::{
+    Alert, AlertIntent, AlertOutcome, Button, ButtonSize, ButtonVariant, ModalAction,
+    ModalActionEmphasis, ModalActionIntent, ModalActionRole, ModalId, ProgressRing, ProgressSize,
+    ProgressState,
+};
+
+pub(super) const END_SELECTOR: &str = "settings-server-end-all-sessions";
+pub(super) const END_PROGRESS_SELECTOR: &str = "settings-server-end-all-sessions-progress";
+pub(super) const END_CONFIRM_SELECTOR: &str = "settings-server-end-all-sessions-confirm";
+pub(super) const END_CANCEL_SELECTOR: &str = "settings-server-end-all-sessions-cancel";
+const LABEL: &str = "End All Sessions\u{2026}";
+const CONFIRM: &str = "End All Sessions";
+
+/// What the selected server's writer allows now.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) enum Availability {
+    /// No writer has answered for this server yet.
+    Unknown,
+    /// The server is not connected, so nothing can be asked of it.
+    Offline,
+    /// The server is connected but doesn't offer End All Sessions.
+    Unsupported,
+    /// Another shared edit awaits its answer, and one edit is asked at a time.
+    Pending,
+    /// The server's current run and its Panes' Sessions, as the server last published them.
+    Ready(CloseInventory),
+}
+
+impl Availability {
+    fn of(snapshot: &crate::terminal::shared_workspace::SharedWorkspaceSnapshot) -> Self {
+        if !snapshot.connected {
+            return Self::Offline;
+        }
+        if !snapshot.end_all_sessions {
+            return Self::Unsupported;
+        }
+        if snapshot.pending {
+            return Self::Pending;
+        }
+        match snapshot
+            .inventory
+            .as_ref()
+            .and_then(|inventory| inventory.close.as_ref())
+        {
+            Some(close) => Self::Ready(close.clone()),
+            None => Self::Unknown,
+        }
+    }
+}
+
+/// Each running Session, by its Pane.
+fn live_sessions(close: &CloseInventory) -> std::collections::BTreeSet<(Id, Id)> {
+    close
+        .sessions
+        .iter()
+        .filter_map(|pane| Some((pane.id, pane.session?)))
+        .collect()
+}
+
+/// Why a confirmation no longer describes the server, if it doesn't. A confirmation names the
+/// exact Sessions it showed, so a restart, an ended Session, and a newly started one each make it
+/// stale.
+pub(super) fn recheck(confirmed: &CloseInventory, current: &CloseInventory) -> Option<Ended> {
+    if current.boot != confirmed.boot {
+        Some(Ended::Restarted)
+    } else if live_sessions(current) != live_sessions(confirmed) {
+        Some(Ended::Changed)
+    } else {
+        None
+    }
+}
+
+/// The request for the Sessions the person confirmed, which recovery resends unchanged.
+fn request(confirmed: &CloseInventory) -> Mutation {
+    Mutation::EndAllSessions {
+        confirmation: confirmed.clone(),
+    }
+}
+
+/// The answer to the last request, kept until the person selects another server.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum Ended {
+    Accepted,
+    /// The server restarted after the person confirmed, so the confirmation named other Sessions.
+    Restarted,
+    /// The server's Sessions changed after the person confirmed. The server answers a stale
+    /// confirmation this way too, restart or not.
+    Changed,
+    Refused(SharedRefusalReason),
+    /// The server answered with a refusal that has no specific explanation.
+    Failed,
+    /// The answer never arrived. The writer's recovery resolves the original request.
+    Unconfirmed,
+}
+
+pub(super) struct EndAllSessions {
+    /// The server the row presents.
+    target: Option<ServerChoice>,
+    /// Counts the times the row started over, so an answer for an earlier server lands nowhere.
+    generation: u64,
+    availability: Availability,
+    working: bool,
+    ended: Option<Ended>,
+    client: Option<Client>,
+    poll: Option<Task<()>>,
+}
+
+impl EndAllSessions {
+    pub(super) fn new() -> Self {
+        Self {
+            target: None,
+            generation: 0,
+            availability: Availability::Unknown,
+            working: false,
+            ended: None,
+            client: None,
+            poll: None,
+        }
+    }
+
+    fn start_over(&mut self, target: Option<ServerChoice>) {
+        self.target = target;
+        self.generation = self.generation.wrapping_add(1);
+        self.availability = Availability::Unknown;
+        self.working = false;
+        self.ended = None;
+        self.client = None;
+        self.poll = None;
+    }
+}
+
+/// The row's caption, derived from its state alone so every state reads one way.
+pub(super) fn caption(
+    server: &str,
+    availability: &Availability,
+    working: bool,
+    ended: Option<Ended>,
+) -> (SharedString, CaptionTone) {
+    let guidance = |text: String| (SharedString::from(text), CaptionTone::Guidance);
+    if working {
+        return guidance(format!("Ending every Terminal Session on {server}\u{2026}"));
+    }
+    match ended {
+        Some(Ended::Accepted) => {
+            return guidance(format!(
+                "Every Terminal Session on {server} ended. Its Panes show Session Ended until \
+                 someone selects one or chooses Start Session."
+            ));
+        }
+        Some(Ended::Restarted) => {
+            return (
+                format!(
+                    "{server} restarted after you confirmed, so nothing ended. Review its \
+                     Terminal Sessions and try again."
+                )
+                .into(),
+                CaptionTone::Warning,
+            );
+        }
+        Some(Ended::Changed) => {
+            return (
+                format!(
+                    "The Terminal Sessions on {server} changed after you confirmed, so nothing \
+                     ended. Review them and try again."
+                )
+                .into(),
+                CaptionTone::Warning,
+            );
+        }
+        Some(Ended::Refused(reason)) => {
+            return (
+                format!(
+                    "SpaceTerm didn\u{2019}t end the Terminal Sessions on {server}. {}",
+                    reason.explanation()
+                )
+                .into(),
+                CaptionTone::Error,
+            );
+        }
+        Some(Ended::Failed) => {
+            return (
+                format!("{server} couldn\u{2019}t end its Terminal Sessions. Nothing changed.")
+                    .into(),
+                CaptionTone::Error,
+            );
+        }
+        Some(Ended::Unconfirmed) => {
+            return (
+                format!(
+                    "SpaceTerm didn\u{2019}t hear whether {server} ended its Terminal Sessions. \
+                     It asks the server for the answer when it reconnects, and doesn\u{2019}t \
+                     ask it to end them again."
+                )
+                .into(),
+                CaptionTone::Warning,
+            );
+        }
+        None => {}
+    }
+    match availability {
+        Availability::Unknown | Availability::Offline => {
+            guidance(format!("Connect to {server} to end its Terminal Sessions."))
+        }
+        Availability::Unsupported => guidance(format!(
+            "{server} doesn\u{2019}t support ending all its Terminal Sessions. Update the server \
+             to use End All Sessions."
+        )),
+        Availability::Pending => guidance(format!(
+            "End All Sessions is available once {server} answers an earlier change."
+        )),
+        Availability::Ready(close) => match live_sessions(close).len() {
+            0 => guidance(format!("No Terminal Sessions are running on {server}.")),
+            live => guidance(format!(
+                "Ends {} on {server} for every client and clears their output. The server keeps \
+                 running, and its Workspaces, Tabs, and Panes remain.",
+                sessions(live)
+            )),
+        },
+    }
+}
+
+fn sessions(count: usize) -> String {
+    match count {
+        1 => "the 1 running Terminal Session".to_owned(),
+        count => format!("all {count} running Terminal Sessions"),
+    }
+}
+
+/// The confirmation's title, message, and detail. Each names the selected server.
+pub(super) fn confirmation(server: &str, live: usize) -> (String, String, String) {
+    (
+        format!("End All Sessions on {server}?"),
+        format!(
+            "This ends {} on {server} for every client. Their terminal output and Scrollback are \
+             cleared, and programs running in them stop.",
+            sessions(live)
+        ),
+        "The server keeps running, and its Workspaces, Tabs, and Panes remain. Repository files \
+         and Worktree directories stay on disk. A Pane starts a new shell only when someone \
+         selects it, opens its Tab, or chooses Start Session."
+            .to_owned(),
+    )
+}
+
+impl SettingsWindow {
+    /// Follows the selected server's writer while the Servers section shows it. Selection,
+    /// section, and connection changes call this; rendering never does.
+    pub(super) fn sync_end_all_sessions(&mut self, cx: &mut Context<Self>) {
+        let target = if self.active_section == SettingsSectionId::Servers {
+            self.selected_server()
+        } else {
+            None
+        };
+        let state = &mut self.end_all_sessions;
+        if state.target != target {
+            state.start_over(target.clone());
+        }
+        let Some(target) = target else {
+            return;
+        };
+        if state.poll.is_some() {
+            return;
+        }
+        let generation = state.generation;
+        state.poll = Some(cx.spawn(async move |settings, cx| {
+            loop {
+                // The Workspace Window may register a newly presented server's writer after this
+                // window hears of it, so each reading looks the writer up again.
+                let client = cx.update(|cx| match &target {
+                    ServerChoice::Local => Client::get(cx),
+                    ServerChoice::Ssh(destination) => Client::presented_ssh(destination, cx),
+                });
+                let availability = client.as_ref().map_or(Availability::Unknown, |client| {
+                    Availability::of(&client.source.snapshot())
+                });
+                if settings
+                    .update(cx, |settings, cx| {
+                        let state = &mut settings.end_all_sessions;
+                        if state.generation != generation {
+                            return;
+                        }
+                        if state.availability != availability {
+                            state.availability = availability;
+                            cx.notify();
+                        }
+                        state.client = client;
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(500))
+                    .await;
+            }
+        }));
+    }
+
+    pub(super) fn end_all_sessions_caption(&self) -> (SharedString, CaptionTone) {
+        let state = &self.end_all_sessions;
+        caption(
+            &self.selected_server_name(),
+            &state.availability,
+            state.working,
+            state.ended,
+        )
+    }
+
+    /// Whether the person can ask for End All Sessions now.
+    fn end_all_sessions_offered(&self) -> bool {
+        let state = &self.end_all_sessions;
+        !state.working
+            && state.client.is_some()
+            && matches!(&state.availability, Availability::Ready(close) if !live_sessions(close).is_empty())
+    }
+
+    /// Asks the person to confirm ending the selected server's Sessions. The alert names the
+    /// server, and its confirmation applies only to that server in the same run.
+    fn confirm_end_all_sessions(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.end_all_sessions_offered() {
+            return;
+        }
+        let state = &self.end_all_sessions;
+        // The confirmation names these exact Sessions, and only they are asked to end.
+        let Availability::Ready(confirmed) = state.availability.clone() else {
+            return;
+        };
+        let generation = state.generation;
+        let server = self.selected_server_name();
+        let (title, message, detail) = confirmation(&server, live_sessions(&confirmed).len());
+        let owner = cx.weak_entity();
+        let result = Alert::new(
+            ModalId::new("settings-server-end-all-sessions"),
+            title.clone(),
+            title,
+            message,
+            vec![
+                ModalAction::new(
+                    true,
+                    CONFIRM,
+                    ModalActionRole::Affirmative,
+                    END_CONFIRM_SELECTOR,
+                )
+                .with_intent(ModalActionIntent::Destructive)
+                .with_emphasis(ModalActionEmphasis::Prominent),
+                ModalAction::new(
+                    false,
+                    "Cancel",
+                    ModalActionRole::Cancel,
+                    END_CANCEL_SELECTOR,
+                ),
+            ],
+        )
+        .intent(AlertIntent::Critical)
+        .detail(detail)
+        .present(window, cx, move |outcome, cx| {
+            if !matches!(
+                outcome,
+                AlertOutcome::Activated {
+                    action_id: true,
+                    ..
+                }
+            ) {
+                return;
+            }
+            let _ = owner.update(cx, |settings, cx| {
+                settings.end_all_sessions(generation, &confirmed, cx);
+            });
+        });
+        if result.is_err() {
+            eprintln!("failed to present the End All Sessions confirmation");
+        }
+    }
+
+    /// Asks the server once to end the Sessions the person confirmed. A confirmation for another
+    /// server, for the server's earlier run, or for Sessions that changed since, submits nothing.
+    fn end_all_sessions(
+        &mut self,
+        generation: u64,
+        confirmed: &CloseInventory,
+        cx: &mut Context<Self>,
+    ) {
+        let state = &mut self.end_all_sessions;
+        if state.generation != generation || state.working {
+            return;
+        }
+        let Some(client) = state.client.clone() else {
+            return;
+        };
+        // Read the server afresh: the confirmation named the Sessions it showed.
+        match Availability::of(&client.source.snapshot()) {
+            Availability::Ready(current) => {
+                if let Some(stale) = recheck(confirmed, &current) {
+                    state.ended = Some(stale);
+                    cx.notify();
+                    return;
+                }
+            }
+            Availability::Offline | Availability::Unknown => {
+                state.ended = Some(Ended::Refused(SharedRefusalReason::Offline));
+                cx.notify();
+                return;
+            }
+            Availability::Pending => {
+                state.ended = Some(Ended::Refused(SharedRefusalReason::Pending));
+                cx.notify();
+                return;
+            }
+            Availability::Unsupported => {
+                state.ended = Some(Ended::Failed);
+                cx.notify();
+                return;
+            }
+        }
+        let completion = match client.source.submit_waiting(request(confirmed)) {
+            Ok(completion) => completion,
+            Err(reason) => {
+                state.ended = Some(Ended::Refused(reason));
+                cx.notify();
+                return;
+            }
+        };
+        state.working = true;
+        state.ended = None;
+        let source = client.source.clone();
+        cx.spawn(async move |settings, cx| {
+            let result = loop {
+                // Reading the snapshot delivers this request's answer once the server gives it.
+                source.snapshot();
+                match completion.try_recv() {
+                    Ok(result) => break Some(result),
+                    Err(async_channel::TryRecvError::Closed) => break None,
+                    Err(async_channel::TryRecvError::Empty) => (),
+                }
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(50))
+                    .await;
+            };
+            let _ = settings.update(cx, |settings, cx| {
+                let state = &mut settings.end_all_sessions;
+                if state.generation != generation {
+                    return;
+                }
+                state.working = false;
+                state.ended = Some(match result {
+                    Some(Ok(RetainedOutcome {
+                        outcome: Outcome::Accepted { .. },
+                        ..
+                    })) => Ended::Accepted,
+                    Some(Ok(RetainedOutcome {
+                        outcome: Outcome::StaleConfirmation,
+                        ..
+                    })) => Ended::Changed,
+                    Some(Ok(_)) => Ended::Failed,
+                    Some(Err(reason)) => Ended::Refused(reason),
+                    None => Ended::Unconfirmed,
+                });
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// The End All Sessions button, with progress beside it while the server answers. The button
+    /// stays focusable while working, so the keyboard keeps its place, and ignores activation.
+    pub(super) fn render_end_all_sessions(
+        &mut self,
+        appearance: &ChromeAppearance,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let state = &self.end_all_sessions;
+        let working = state.working;
+        let offered = self.end_all_sessions_offered();
+        let server = self.selected_server_name();
+        let owner = cx.weak_entity();
+        let button = Button::new(END_SELECTOR, LABEL)
+            .variant(ButtonVariant::Outline)
+            .size(ButtonSize::Regular)
+            .disabled(!offered && !working)
+            .tab_stop(true)
+            .debug_selector(END_SELECTOR)
+            .accessibility_description(SharedString::from(format!(
+                "Ends every Terminal Session on {server} for every client. SpaceTerm asks first."
+            )))
+            .on_activate(move |_, window, cx| {
+                let _ = owner.update(cx, |settings, cx| {
+                    settings.confirm_end_all_sessions(window, cx);
+                });
+            });
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(appearance.spacing(8.0))
+            .when(working, |row| {
+                row.child(
+                    ProgressRing::new(
+                        END_PROGRESS_SELECTOR,
+                        "Ending Sessions",
+                        ProgressState::Indeterminate,
+                    )
+                    .size(ProgressSize::Compact)
+                    .debug_selector(END_PROGRESS_SELECTOR),
+                )
+            })
+            .child(button)
+            .into_any_element()
+    }
+}
