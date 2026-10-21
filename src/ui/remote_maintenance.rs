@@ -1270,6 +1270,13 @@ pub(crate) struct MaintenanceConfirmation {
 impl MaintenanceConfirmation {
     /// The confirmation for `request` as `change` describes it, naming `machine`. `None` for a
     /// request that ends no work and so asks nothing.
+    ///
+    /// The copy is the shared destructive copy every control surface shows, so a remote
+    /// confirmation reads like the local one with the selected machine in place of this
+    /// computer. It reaches that copy through the constructors that take a compiled application
+    /// identity: `Wording::for_server` and `UpdateWording::for_server` name a supplied server
+    /// instead and belong here once they are in this branch. The only difference is a machine
+    /// whose name is itself an application identity, which the identity constructor renames.
     pub(crate) fn of(
         machine: &str,
         request: RemoteMaintenanceRequest,
@@ -1356,8 +1363,10 @@ struct ResumedRetained;
 
 impl gpui::Global for ResumedRetained {}
 
-/// One remote build as the shared update wording names builds. The wording names a build by its
-/// version, commit and package digest, which is exactly what a remote build carries.
+/// One remote build in the shape the identity constructor reads builds from. The wording names a
+/// build by its version, commit and package digest, and reads the digest from the installation
+/// directory's name, so a remote build supplies its digest there. `UpdateWording::for_server`
+/// takes [`BuildName`] directly and replaces this.
 fn installation(build: &RemoteBuild) -> RetainedInstallation {
     RetainedInstallation {
         directory: std::path::PathBuf::from(&build.digest),
