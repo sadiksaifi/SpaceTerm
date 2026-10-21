@@ -946,13 +946,30 @@ fn bind(kind: SubmittedKind, confirmation: Option<String>) -> Option<OperationSu
     })
 }
 
-/// Admits one dispatch and records its original. An entry that already runs an exchange admits
-/// none, so nothing replaces the original an exchange underway is settling.
+/// Admits one dispatch and records its original. An entry that already runs an exchange, or
+/// still holds an original it has not settled, admits none, so nothing replaces an original
+/// this client is still following.
 fn start_submission(
     state: &mut State,
     index: usize,
     submission: OperationSubmission,
 ) -> Option<(Admitted, OperationSubmission)> {
+    // An exchange underway says for itself what it reached, so nothing here speaks over it.
+    if state.entries[index].running {
+        return None;
+    }
+    // One entry keeps one original, and an unresolved original's record is the only thing that
+    // could still say what it did. So a second submission is refused rather than retained over
+    // it: nothing is dispatched, and nothing reached the other computer.
+    if let Some(submitted) = &state.entries[index].submitted {
+        let kind = submitted.kind.clone();
+        state.entries[index].state = RemoteOperationState::Failed {
+            failure: SshMaintenanceFailure::NotRetained,
+            kind: Some(kind),
+        };
+        notify(state);
+        return None;
+    }
     let admitted = admit(
         state,
         index,
@@ -2579,6 +2596,56 @@ mod tests {
         assert!(
             owner.entries().iter().any(|entry| entry.removed),
             "the removed connection still has something to say"
+        );
+    }
+
+    /// A second submission must not displace the original an entry still holds: that original's
+    /// record is the only thing that can still say what it did.
+    #[test]
+    fn a_submission_is_refused_while_an_unresolved_original_is_held() {
+        let script = Arc::new(Script::default());
+        let records = Arc::new(Records::default());
+        let (owner, _, _) = submit(&script, &records, Err(SshMaintenanceFailure::Unconfirmed));
+        eventually(|| {
+            matches!(
+                owner.state(&destination()),
+                RemoteOperationState::Unconfirmed { .. }
+            )
+        });
+        let unresolved = records.only();
+
+        owner.start(&destination());
+        std::thread::sleep(Duration::from_millis(30));
+
+        assert_eq!(
+            script.applied.lock().unwrap().len(),
+            1,
+            "an entry holding an unresolved original dispatches nothing more"
+        );
+        assert_eq!(
+            records.only(),
+            unresolved,
+            "the unresolved original keeps the record that can still say what it did"
+        );
+        assert!(
+            matches!(
+                owner.state(&destination()),
+                RemoteOperationState::Failed {
+                    failure: SshMaintenanceFailure::NotRetained,
+                    kind: Some(SubmittedKind::Service(Action::Stop)),
+                }
+            ),
+            "the refused step is told, naming the original still held: {:?}",
+            owner.state(&destination())
+        );
+
+        // The original the entry kept is still the one its resolution settles.
+        script.resolves(Ok(outcome(OperationResolution::Completed)));
+        owner.resume(&destination());
+        resolved(owner.as_ref());
+        assert_eq!(
+            *script.resolved.lock().unwrap(),
+            vec![(unresolved.operation, MaintenanceAuthority::Requested)]
         );
     }
 
