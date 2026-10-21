@@ -262,6 +262,7 @@ impl RemoteServerOperations for ScriptedOperations {
 
     /// The owner answers with one entry's state, preferring a connection still saved. It is the
     /// one reader that cannot see a second entry for the same destination.
+    #[cfg(test)]
     fn state(&self, destination: &SshDestination) -> RemoteOperationState {
         let states = self.states.lock().expect("states");
         states

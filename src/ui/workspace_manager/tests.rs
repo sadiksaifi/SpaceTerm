@@ -12681,6 +12681,7 @@ impl crate::ssh::server_operations::RemoteServerOperations for ScriptedMaintenan
         }]
     }
 
+    #[cfg(test)]
     fn state(
         &self,
         _: &crate::domain::SshDestination,

@@ -133,6 +133,11 @@ pub(crate) trait RemoteServerOperations: Send + Sync {
     fn entries(&self) -> Vec<RemoteOperationEntry>;
 
     /// One server's state, or [`RemoteOperationState::Unread`] when it has none.
+    ///
+    /// A surface reads [`Self::entries`] instead: one destination can hold more than one
+    /// unsettled original, and this reports only the first. It remains for tests that set up and
+    /// assert against a single original.
+    #[cfg(test)]
     fn state(&self, destination: &SshDestination) -> RemoteOperationState;
 
     /// Reads the service facts on the bound route, with the authority the person just granted by
@@ -540,6 +545,7 @@ impl RemoteServerOperations for SshServerOperations {
         entries
     }
 
+    #[cfg(test)]
     fn state(&self, destination: &SshDestination) -> RemoteOperationState {
         self.inner
             .state
