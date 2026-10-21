@@ -82,6 +82,9 @@ pub(crate) enum RemoteAction {
     /// Discards an original this client can no longer resolve, because the destination no longer
     /// reaches the computer, account or server it bound. Nothing is sent.
     Discard,
+    /// Clears an entry whose original the service has no record of. There is nothing left to
+    /// resolve and nothing left to retire, so it gives up nothing and asks nothing.
+    Dismiss,
 }
 
 impl RemoteAction {
@@ -98,7 +101,7 @@ impl RemoteAction {
             Self::Finish => UpdateAction::Finish.label(),
             Self::CheckAgain => "Check Again",
             Self::Cancel => crate::ui::ssh_servers::SshServerAction::Cancel.label(),
-            Self::Acknowledge => "OK",
+            Self::Acknowledge | Self::Dismiss => "OK",
             Self::Discard => "Discard\u{2026}",
         }
     }
@@ -117,6 +120,7 @@ impl RemoteAction {
             Self::Cancel => "settings-ssh-server-maintenance-cancel",
             Self::Acknowledge => "settings-ssh-server-maintenance-acknowledge",
             Self::Discard => "settings-ssh-server-maintenance-discard",
+            Self::Dismiss => "settings-ssh-server-maintenance-dismiss",
         }
     }
 
@@ -128,6 +132,7 @@ impl RemoteAction {
             | Self::Stop
             | Self::CheckAgain
             | Self::Acknowledge
+            | Self::Dismiss
             | Self::Update
             | Self::Return
             | Self::Finish => "primary",
@@ -172,6 +177,7 @@ impl RemoteAction {
             Self::Discard => format!(
                 "Stops following the operation SpaceTerm sent to {machine}. SpaceTerm asks first."
             ),
+            Self::Dismiss => format!("Clears this entry for {machine}. Nothing is sent to it."),
         };
         SharedString::from(text)
     }
@@ -199,6 +205,7 @@ impl RemoteAction {
             Self::Cancel => "cancel",
             Self::Acknowledge => "acknowledge",
             Self::Discard => "discard",
+            Self::Dismiss => "dismiss",
         }
     }
 
@@ -303,6 +310,7 @@ pub(crate) fn removed_actions(
                     | RemoteAction::CheckAgain
                     | RemoteAction::Acknowledge
                     | RemoteAction::Discard
+                    | RemoteAction::Dismiss
             )
         })
         .collect()
@@ -1450,6 +1458,29 @@ pub(crate) const fn discarded_operation(state: &RemoteOperationState) -> Option<
     }
 }
 
+/// Where an original the service has no record of ends, for an entry that can no longer reach
+/// the machine to ask about it.
+///
+/// A service with no record of an original either never received it, or admitted it and dropped
+/// it without validating a result. This client cannot tell those apart, so the caption names both
+/// and claims neither, and it claims nothing about what the operation did on that computer.
+fn forgotten_final_word(machine: &str) -> MaintenancePresentation {
+    let (explanation, tone) = warning(format!(
+        "{machine} has no record of the operation SpaceTerm sent. The operation may never have \
+         arrived, or that server may have dropped it after admitting it. SpaceTerm can\u{2019}t \
+         tell whether it took effect. SpaceTerm has stopped following it. Choose OK to clear this \
+         entry."
+    ));
+    MaintenancePresentation {
+        state: Some("No Record"),
+        state_selector: selector(MaintenanceRow::Service, "forgotten"),
+        explanation,
+        tone,
+        actions: vec![RemoteAction::Dismiss],
+        working: false,
+    }
+}
+
 /// What a server whose saved connection was removed still has to tell the person, and the one
 /// step it offers. `None` once nothing is left to tell, so a removed connection disappears as
 /// soon as its operation is settled.
@@ -1457,6 +1488,18 @@ pub(crate) fn removed_presentation(
     machine: &str,
     state: &RemoteOperationState,
 ) -> Option<MaintenancePresentation> {
+    // An original the service has no record of can never be resolved, and this client retains
+    // nothing for it, so the entry ends there instead of offering a step that would reach the
+    // connection the person removed.
+    if matches!(
+        state,
+        RemoteOperationState::Failed {
+            failure: SshMaintenanceFailure::Forgotten,
+            ..
+        }
+    ) {
+        return Some(forgotten_final_word(machine));
+    }
     [MaintenanceRow::Service, MaintenanceRow::Update]
         .into_iter()
         .find_map(|row| {

@@ -534,11 +534,12 @@ impl SettingsWindow {
 }
 
 /// Why a removed connection still appears, and what the person can do about it. The section lists
-/// an operation that is still working or still unconfirmed as well as a validated result, so the
-/// caption promises no result an entry may not have.
+/// an operation that is still working or still unconfirmed, a validated result, and an original
+/// the server has no record of, so the caption promises no result an entry may not have and
+/// claims to follow no operation this client has given up.
 pub(super) const REMOVED_GUIDANCE: &str = "You removed these saved connections. SpaceTerm still \
-     follows the work you asked for on them, whether or not it has a result yet. Nothing here \
-     reconnects, and answering doesn\u{2019}t bring a connection back.";
+     has something to tell you about the work you asked for on them, whether or not it has a \
+     result yet. Nothing here reconnects, and answering doesn\u{2019}t bring a connection back.";
 
 impl SettingsWindow {
     /// The servers whose saved connection was removed and that still have something to say,
@@ -600,6 +601,9 @@ impl SettingsWindow {
                     self.confirm_discard(destination, kind, RemoteOperationScope::Removed, cx);
                 }
             }
+            // Nothing is retained for an original the service has no record of and nothing is
+            // sent, so clearing the entry gives up nothing and asks nothing.
+            RemoteAction::Dismiss => operations.dismiss(&destination, RemoteOperationScope::Removed),
             _ => return,
         }
         cx.notify();

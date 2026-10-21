@@ -860,6 +860,58 @@ fn an_observation_decides_what_is_offered_before_any_read() {
     );
 }
 
+/// A removed connection's server that has no record of its original leaves nothing to resolve, so
+/// the entry reaches a final word instead of disappearing without one. It names both ways that
+/// can happen without choosing one, claims nothing about what the operation did, and offers the
+/// one step that clears it. The selected server's own row keeps the read it can still make.
+#[test]
+fn a_removed_connection_whose_original_is_unknown_reaches_a_final_word() {
+    let forgotten = RemoteOperationState::Failed {
+        failure: SshMaintenanceFailure::Forgotten,
+        kind: None,
+    };
+
+    let presentation = removed_presentation("penguin", &forgotten)
+        .expect("a removed connection's unknown original still has a final word");
+    assert_eq!(
+        presentation
+            .actions
+            .iter()
+            .map(|action| action.label())
+            .collect::<Vec<_>>(),
+        vec!["OK"],
+        "the entry offers the one step that clears it, got {:?}",
+        presentation.actions
+    );
+    let said = presentation.explanation.to_string();
+    assert!(
+        said.contains("penguin has no record of the operation SpaceTerm sent."),
+        "the final word names the machine with no record, got {said:?}"
+    );
+    assert!(
+        said.contains("may never have arrived, or that server may have dropped it"),
+        "the final word names both ways this happens without choosing one, got {said:?}"
+    );
+    assert!(
+        said.contains("can\u{2019}t tell whether it took effect"),
+        "the final word claims nothing about what the operation did, got {said:?}"
+    );
+    assert!(
+        said.contains("has stopped following it"),
+        "the final word says this client is no longer following it, got {said:?}"
+    );
+    reads_as_one_sentence(&presentation.explanation);
+    assert!(
+        !presentation.working,
+        "nothing is underway for an original the service has no record of"
+    );
+    assert_eq!(
+        service("penguin", &forgotten).actions,
+        vec![RemoteAction::Check],
+        "the selected server's own row keeps the read it can still make"
+    );
+}
+
 /// This client's private record of these operations is not the record of saved connections, so
 /// its failure says only what it changes: the step the person just took leaves the operation
 /// listed, and a result on screen now is gone after SpaceTerm quits. The two storage conditions

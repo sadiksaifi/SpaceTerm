@@ -27,7 +27,7 @@ use crate::ssh::server_connection::{
     SshConnectFailure, SshConnectionIntentStore, SshIntentStoreError, SshServerConnections,
     SshServerContinuity, SshServerFacts, SshServerObservation,
 };
-use crate::ssh::server_maintenance::{MaintenancePhase, SubmittedKind};
+use crate::ssh::server_maintenance::{MaintenancePhase, SshMaintenanceFailure, SubmittedKind};
 use crate::ssh::server_operations::{
     RemoteMaintenanceRequest, RemoteOperationEntry, RemoteOperationHandle, RemoteOperationScope,
     RemoteOperationState, RemoteServerOperations, RetainedOutcome,
@@ -54,6 +54,7 @@ enum Call {
     Resume,
     Acknowledge(RemoteOperationHandle),
     Discard(RemoteOperationScope),
+    Dismiss(RemoteOperationScope),
     ResumeRetained,
 }
 
@@ -352,6 +353,17 @@ impl RemoteServerOperations for ScriptedOperations {
             return;
         }
         self.set(destination.as_str(), RemoteOperationState::Unread);
+    }
+
+    fn dismiss(&self, destination: &SshDestination, scope: RemoteOperationScope) {
+        self.record(Call::Dismiss(scope));
+        // Nothing was retained for an original the service has no record of, so the entry goes
+        // whether or not this client can write.
+        self.states
+            .lock()
+            .expect("states")
+            .remove(destination.as_str());
+        self.publish();
     }
 
     fn persistence_error(&self) -> Option<SshIntentStoreError> {
@@ -1313,4 +1325,65 @@ fn a_discard_this_client_cannot_save_says_the_original_stays(cx: &mut TestAppCon
         "the original SpaceTerm couldn\u{2019}t stop following stays"
     );
     assert!(announces("Choosing OK or Discard leaves the operation listed.", servers.cx));
+}
+
+/// A removed connection's server that has no record of its original leaves nothing to resolve, so
+/// the entry says where it ends and one step clears it. Nothing is sent, so it asks nothing.
+#[gpui::test]
+fn a_removed_connections_unknown_original_ends_with_a_word(cx: &mut TestAppContext) {
+    let servers = open_maintenance(cx);
+    let destination = SshDestination::new("penguin".to_owned()).expect("destination");
+    servers.operations.set(
+        "penguin",
+        RemoteOperationState::Unconfirmed {
+            kind: SubmittedKind::Service(Action::Stop),
+        },
+    );
+    servers.cx.run_until_parked();
+    servers.connections.remove(&destination);
+    servers.operations.remove("penguin");
+    servers.operations.set(
+        "penguin",
+        RemoteOperationState::Failed {
+            failure: SshMaintenanceFailure::Forgotten,
+            kind: None,
+        },
+    );
+    servers.cx.run_until_parked();
+
+    assert!(
+        rendered("settings-removed-server-operations-penguin", servers.cx),
+        "the entry says where it ends instead of disappearing without a word"
+    );
+    assert!(says(
+        "penguin has no record of the operation SpaceTerm sent.",
+        servers.cx
+    ));
+    assert!(says(
+        "may never have arrived, or that server may have dropped it",
+        servers.cx
+    ));
+    assert!(says("has stopped following it", servers.cx));
+    for absent in [
+        "settings-ssh-server-service-again-penguin",
+        "settings-ssh-server-maintenance-discard-penguin",
+        "settings-ssh-server-service-check-penguin",
+    ] {
+        assert!(
+            !rendered(absent, servers.cx),
+            "{absent} offers a step that cannot settle an original the service has no record of"
+        );
+    }
+
+    click("settings-ssh-server-maintenance-dismiss-penguin", servers.cx);
+
+    assert_eq!(
+        servers.operations.calls(),
+        vec![Call::Dismiss(RemoteOperationScope::Removed)],
+        "clearing the entry sends nothing and asks nothing"
+    );
+    assert!(
+        !rendered("settings-row-removed-server-operations", servers.cx),
+        "the cleared entry leaves nothing to say about a removed connection"
+    );
 }
