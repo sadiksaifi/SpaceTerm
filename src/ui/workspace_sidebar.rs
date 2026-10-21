@@ -13,7 +13,7 @@ use super::workspace_status::{WorkspaceStatusPaint, resolve as resolve_workspace
 use super::{WORKSPACE_SIDEBAR_DEFAULT_WIDTH, WORKSPACE_SIDEBAR_MINIMUM_WIDTH};
 use crate::appearance::ChromeColors;
 use crate::appearance::Color;
-use crate::domain::{RemoteConnectionPhase, WorkspaceId, WorktreeId};
+use crate::domain::{RemoteConnectionPhase, SshDestination, WorkspaceId, WorktreeId};
 use gpui::prelude::*;
 use gpui::{
     AnyElement, App, Context, DispatchPhase, Entity, EntityId, EventEmitter, FocusHandle,
@@ -69,6 +69,12 @@ pub(super) enum SidebarEvent {
         workspace_id: WorkspaceId,
         position: usize,
     },
+    /// A machine heading's command, naming the other machine's SSH Destination, or `None` for
+    /// this computer.
+    Machine {
+        destination: Option<SshDestination>,
+        command: MachineMenuCommand,
+    },
     Create(WorkspaceCreation),
     FocusChanged,
     LayoutChanged,
@@ -100,6 +106,38 @@ pub(super) enum WorkspaceMenuCommand {
     /// Sessions running on its server. It has no default Shortcut.
     Detach,
     Close,
+}
+
+/// What a machine heading's menu asks of the application.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum MachineMenuCommand {
+    /// Connects to the machine's SpaceTerm Server, asking the person in this window if needed.
+    Connect,
+    /// Stops presenting the SSH server's Workspaces. They keep running on that machine.
+    Disconnect,
+    /// Opens the Servers Settings Section.
+    ServerSettings,
+}
+
+/// The heading that names one machine above its Workspaces, as a source list names its
+/// sections.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct MachineSection {
+    /// This computer's name, or the other machine's SSH Destination.
+    pub(super) label: SharedString,
+    /// The other machine's SSH Destination, which the heading's commands name.
+    pub(super) destination: Option<SshDestination>,
+    /// The SSH server connection's state while it isn't connected.
+    pub(super) status: Option<&'static str>,
+    pub(super) connects: bool,
+    pub(super) disconnects: bool,
+    /// Whether Settings lists this machine's server, so Server Settings can open on it.
+    pub(super) has_settings: bool,
+    /// Whether the machine's server is a Saved Connection that isn't presented yet, so its
+    /// Workspaces appear only once it connects.
+    pub(super) awaiting_connection: bool,
+    /// How many Workspace rows follow the heading.
+    pub(super) workspaces: usize,
 }
 
 /// What a Worktree row's menu asks of the application.
@@ -289,6 +327,14 @@ impl SidebarRowKey {
     }
 }
 
+/// One child of the Workspace list: a machine heading, or a Workspace with its disclosed
+/// Worktrees. The list's drag strip moves Workspaces among these.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+enum SidebarItem {
+    Machine(u64),
+    Workspace(WorkspaceId),
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct SidebarLayout {
     pub(super) visible: bool,
@@ -304,6 +350,13 @@ struct DraggedWorkspace {
 /// Owns sidebar layout, scrolling, menus, inline rename, reordering, and focus transitions.
 pub(super) struct WorkspaceSidebar {
     rows: Vec<WorkspaceRowViewModel>,
+    /// The machine headings and how many rows each one heads, in row order. Empty while one
+    /// machine's Workspaces need no heading.
+    sections: Vec<MachineSection>,
+    /// Each heading's strip identity, parallel to `sections`, kept for the life of its label so a
+    /// heading that returns keeps its place in the strip's motion.
+    section_ids: Vec<u64>,
+    section_identities: std::collections::HashMap<SharedString, u64>,
     remote_unavailable: Option<String>,
     layout: SidebarLayout,
     scroll_handle: ScrollHandle,
@@ -326,7 +379,7 @@ pub(super) struct WorkspaceSidebar {
     rename: Option<WorkspaceRenameState>,
     resize_origin: Option<SidebarLayout>,
     suppress_pointer_until_release: bool,
-    workspace_reorder: ReorderableStrip<WorkspaceId>,
+    workspace_reorder: ReorderableStrip<SidebarItem>,
     /// How the sidebar moves as it shows and hides.
     motion: SidebarMotion,
     /// How the current frame presents the sidebar.
@@ -378,6 +431,9 @@ impl WorkspaceSidebar {
         .detach();
         Self {
             rows: Vec::new(),
+            sections: Vec::new(),
+            section_ids: Vec::new(),
+            section_identities: std::collections::HashMap::new(),
             remote_unavailable: None,
             layout: SidebarLayout {
                 visible,
@@ -746,13 +802,26 @@ fn workspace_row_status_paint(
 }
 
 impl WorkspaceSidebar {
+    /// Presents `rows` in order, under `sections` when more than one machine needs naming. The
+    /// sections' row counts add up to the rows; rows past them follow without a heading.
     pub(super) fn set_rows(
         &mut self,
         rows: Vec<WorkspaceRowViewModel>,
+        sections: Vec<MachineSection>,
         remote_unavailable: Option<String>,
         cx: &mut Context<Self>,
     ) {
         self.rows = rows;
+        let identities = &mut self.section_identities;
+        self.section_ids = sections
+            .iter()
+            .map(|section| {
+                // The map only grows, so its size names each new heading uniquely.
+                let next = identities.len() as u64;
+                *identities.entry(section.label.clone()).or_insert(next)
+            })
+            .collect();
+        self.sections = sections;
         self.remote_unavailable = remote_unavailable;
         if self
             .cursor
@@ -787,32 +856,37 @@ impl WorkspaceSidebar {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> DragPreview {
-        let size = self.row_position(workspace_id).and_then(|position| {
+        let item = SidebarItem::Workspace(workspace_id);
+        let size = self.item_position(item).and_then(|position| {
             self.workspace_reorder
-                .item_size(&self.scroll_handle, workspace_id, position)
+                .item_size(&self.scroll_handle, item, position)
         });
         let session = DragSession::begin(cx, |sidebar: &mut Self, _, cx| {
-            let ids = sidebar.row_ids();
+            let items = sidebar.items();
             sidebar
                 .workspace_reorder
-                .cancel(&sidebar.scroll_handle, &ids, cx);
+                .cancel(&sidebar.scroll_handle, &items, cx);
             cx.notify();
         });
-        let ids = self.row_ids();
+        let items = self.items();
         // The lifted copy shows the Workspace row alone, without its group's Worktree rows.
         let length = self
             .row_spans
             .get(&SidebarRowKey::Workspace(workspace_id))
             .map(|(top, bottom)| *bottom - *top);
         self.workspace_reorder.begin(
-            workspace_id,
+            item,
             length,
             session,
             &self.scroll_handle,
-            &ids,
+            &items,
             window,
             cx,
         );
+        // A Workspace moves only among its own machine's Workspaces.
+        if let Some(peers) = self.machine_peers(workspace_id) {
+            self.workspace_reorder.confine_landing(peers);
+        }
         self.drag_workspace_to(workspace_id, window.mouse_position(), cx);
         cx.notify();
         let sidebar = cx.entity().downgrade();
@@ -879,13 +953,13 @@ impl WorkspaceSidebar {
         pointer: gpui::Point<Pixels>,
         cx: &mut Context<Self>,
     ) {
-        if self.workspace_reorder.dragged() != Some(workspace_id) {
+        if self.workspace_reorder.dragged() != Some(SidebarItem::Workspace(workspace_id)) {
             return;
         }
-        let ids = self.row_ids();
+        let items = self.items();
         if self
             .workspace_reorder
-            .track(&self.scroll_handle, &ids, pointer, cx)
+            .track(&self.scroll_handle, &items, pointer, cx)
         {
             cx.notify();
         }
@@ -894,17 +968,30 @@ impl WorkspaceSidebar {
     /// Lands the dragged row in the slot marked at the release point and asks the application to
     /// move its Workspace. The next rows the application supplies confirm or replace this order.
     fn finish_workspace_drag(&mut self, pointer: gpui::Point<Pixels>, cx: &mut Context<Self>) {
-        let Some(workspace_id) = self.workspace_reorder.dragged() else {
+        let Some(SidebarItem::Workspace(workspace_id)) = self.workspace_reorder.dragged() else {
             return;
         };
         self.drag_workspace_to(workspace_id, pointer, cx);
-        let ids = self.row_ids();
+        let items = self.items();
         let landing = self
             .workspace_reorder
-            .finish(&self.scroll_handle, &ids, cx)
-            .and_then(|(workspace_id, position)| {
+            .finish(&self.scroll_handle, &items, cx)
+            .and_then(|(item, position)| {
+                let SidebarItem::Workspace(workspace_id) = item else {
+                    return None;
+                };
+                // The row lands after every Workspace that precedes its new place in the list.
+                let mut order = items.clone();
+                let current = order.iter().position(|candidate| *candidate == item)?;
+                order.remove(current);
+                order.insert(position.min(order.len()), item);
+                let row = order
+                    .iter()
+                    .take_while(|candidate| **candidate != item)
+                    .filter(|candidate| matches!(candidate, SidebarItem::Workspace(_)))
+                    .count();
                 self.row_position(workspace_id)
-                    .map(|current| (workspace_id, current, position))
+                    .map(|current| (workspace_id, current, row))
             });
         if let Some((workspace_id, current, position)) = landing {
             self.move_row(workspace_id, current, position, cx);
@@ -928,8 +1015,66 @@ impl WorkspaceSidebar {
         cx.notify();
     }
 
-    fn row_ids(&self) -> Vec<WorkspaceId> {
-        self.rows.iter().map(|row| row.workspace_id).collect()
+    /// The Workspace list's children in order: each machine's heading before its rows.
+    fn items(&self) -> Vec<SidebarItem> {
+        let mut rows = self
+            .rows
+            .iter()
+            .map(|row| SidebarItem::Workspace(row.workspace_id));
+        let mut items = Vec::with_capacity(self.rows.len() + self.sections.len());
+        for (section, id) in self.sections.iter().zip(&self.section_ids) {
+            items.push(SidebarItem::Machine(*id));
+            items.extend(rows.by_ref().take(section.workspaces));
+        }
+        items.extend(rows);
+        items
+    }
+
+    fn item_position(&self, item: SidebarItem) -> Option<usize> {
+        self.items().iter().position(|candidate| *candidate == item)
+    }
+
+    fn section(&self, item: SidebarItem) -> Option<&MachineSection> {
+        let SidebarItem::Machine(id) = item else {
+            return None;
+        };
+        self.section_ids
+            .iter()
+            .position(|candidate| *candidate == id)
+            .map(|position| &self.sections[position])
+    }
+
+    /// The heading over `workspace_id`'s row and the rows it heads, while the list names
+    /// machines.
+    fn heading_of(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> Option<(&MachineSection, std::ops::Range<usize>)> {
+        let position = self.row_position(workspace_id)?;
+        let mut start = 0;
+        self.sections.iter().find_map(|section| {
+            let rows = start..start + section.workspaces;
+            start = rows.end;
+            rows.contains(&position).then_some((section, rows))
+        })
+    }
+
+    /// The name of the machine heading `workspace_id`'s row, while the list names machines.
+    fn machine_label(&self, workspace_id: WorkspaceId) -> Option<SharedString> {
+        self.heading_of(workspace_id)
+            .map(|(section, _)| section.label.clone())
+    }
+
+    /// The Workspaces under the same heading as `workspace_id`, which a drag of it lands among,
+    /// or `None` while the list has no headings.
+    fn machine_peers(&self, workspace_id: WorkspaceId) -> Option<Vec<SidebarItem>> {
+        let (_, rows) = self.heading_of(workspace_id)?;
+        Some(
+            self.rows[rows]
+                .iter()
+                .map(|row| SidebarItem::Workspace(row.workspace_id))
+                .collect(),
+        )
     }
 
     fn row_position(&self, workspace_id: WorkspaceId) -> Option<usize> {
@@ -941,18 +1086,20 @@ impl WorkspaceSidebar {
 
 impl Render for WorkspaceSidebar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let ids = self.row_ids();
+        let items = self.items();
         self.workspace_reorder
-            .refresh(&self.scroll_handle, &ids, window, cx);
+            .refresh(&self.scroll_handle, &items, window, cx);
         if let Some(active) = self.rows.iter().find(|row| row.active) {
             self.workspace_reorder.reveal_while_entering(
-                active.workspace_id,
+                SidebarItem::Workspace(active.workspace_id),
                 &self.scroll_handle,
-                &ids,
+                &items,
             );
         }
         let selected = match self.selected_key() {
-            Some(SidebarRowKey::Workspace(workspace_id)) => Some(workspace_id),
+            Some(SidebarRowKey::Workspace(workspace_id)) => {
+                Some(SidebarItem::Workspace(workspace_id))
+            }
             _ => None,
         };
         self.workspace_reorder
@@ -1295,7 +1442,7 @@ impl WorkspaceSidebar {
     /// Scrolls the least distance that shows a row whole, or the top of a row taller than the
     /// list. Before the row is painted, the list shows its Workspace group instead.
     fn reveal_key(&self, key: SidebarRowKey) {
-        let Some(index) = self.row_position(key.workspace_id()) else {
+        let Some(index) = self.item_position(SidebarItem::Workspace(key.workspace_id())) else {
             return;
         };
         let (Some(group), Some(&(top, bottom))) = (
@@ -1339,8 +1486,10 @@ impl WorkspaceSidebar {
         }
     }
 
-    pub(super) fn reveal_row(&self, index: usize, cx: &mut Context<Self>) {
-        self.scroll_handle.scroll_to_item(index);
+    pub(super) fn reveal_workspace(&self, workspace_id: WorkspaceId, cx: &mut Context<Self>) {
+        if let Some(index) = self.item_position(SidebarItem::Workspace(workspace_id)) {
+            self.scroll_handle.scroll_to_item(index);
+        }
         cx.notify();
     }
     pub(super) fn toggle(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1368,8 +1517,8 @@ impl WorkspaceSidebar {
                 self.end_resize();
             }
             self.set_layout(true, self.layout.width, window, cx);
-            if let Some(index) = self.rows.iter().position(|row| row.active) {
-                self.reveal_row(index, cx);
+            if let Some(active) = self.rows.iter().find(|row| row.active) {
+                self.reveal_workspace(active.workspace_id, cx);
             }
             self.cursor = None;
             cx.defer_in(window, |sidebar, window, cx| {

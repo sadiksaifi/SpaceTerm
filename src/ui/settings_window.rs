@@ -11,6 +11,7 @@ mod import;
 mod keybindings;
 mod microphone;
 mod permission_access;
+mod server_list;
 mod server_location;
 mod server_update;
 mod servers;
@@ -243,6 +244,29 @@ pub(crate) fn open_or_activate(section: Option<SettingsSectionId>, cx: &mut App)
     }
 }
 
+/// Opens Settings on Servers with one server selected: an SSH server by its destination, or the
+/// account-local server for `None`. Selecting reads nothing from that server.
+pub(crate) fn open_server_settings(
+    destination: Option<crate::domain::SshDestination>,
+    cx: &mut App,
+) {
+    open_or_activate(Some(SettingsSectionId::Servers), cx);
+    // An existing window selects the section in a deferred update, so the selection follows it.
+    cx.defer(move |cx| {
+        if let Some(settings) = open_settings_window(cx) {
+            let _ = settings.update(cx, |settings, _, cx| {
+                settings.select_server(
+                    destination.map_or(
+                        server_list::ServerChoice::Local,
+                        server_list::ServerChoice::Ssh,
+                    ),
+                    cx,
+                );
+            });
+        }
+    });
+}
+
 /// Opens Settings on Servers and starts the one Update Server journey there, for a surface that
 /// offers it elsewhere, such as the incompatible-server screen or the status item. The journey
 /// reads the server first and asks before it changes anything.
@@ -251,7 +275,11 @@ pub(crate) fn open_server_update(cx: &mut App) {
     // An existing window selects the section in a deferred update, so the request follows it.
     cx.defer(|cx| {
         if let Some(settings) = open_settings_window(cx) {
-            let _ = settings.update(cx, |settings, _, cx| settings.request_server_update(cx));
+            let _ = settings.update(cx, |settings, _, cx| {
+                // The journey updates the local server, so its detail is the one presented.
+                settings.select_server(server_list::ServerChoice::Local, cx);
+                settings.request_server_update(cx);
+            });
         }
     });
 }
@@ -355,6 +383,16 @@ pub(crate) struct SettingsWindow {
     server_update: Option<server_update::ServerUpdateRow>,
     /// The desktop's SSH server connections. `None` omits their row.
     ssh_servers: Option<ssh_servers::SshServerRows>,
+    /// The server the person selected in the Servers list. A server no longer listed gives way
+    /// to the local server or the first saved one.
+    selected_server: Option<server_list::ServerChoice>,
+    /// The server the current search shows, which stands in for the person's choice only while
+    /// the query lasts.
+    search_selected_server: Option<server_list::ServerChoice>,
+    /// The server list's one keyboard stop. The arrow keys move its selection.
+    server_list_focus: FocusHandle,
+    /// How the server list names the server for this account on this computer.
+    this_computer: &'static str,
 }
 
 impl SidebarOwner for SettingsWindow {
@@ -605,6 +643,7 @@ impl SettingsWindow {
         let ssh_servers = crate::ui::ssh_servers::installed(cx)
             .map(|connections| ssh_servers::SshServerRows::new(connections, ssh_hosts, window, cx));
         let presentation = crate::desktop_profile::DesktopPresentation::get(cx);
+        let this_computer = presentation.wording().this_computer;
         let available_sections = SettingsSectionId::ALL
             .into_iter()
             .filter(|section| {
@@ -629,7 +668,7 @@ impl SettingsWindow {
                         && local_server
                             .as_ref()
                             .is_none_or(|offered| offered.update.is_none()))
-                    || (*row == SettingsRowId::SshServers && ssh_servers.is_none())
+                    || (*row == SettingsRowId::SshConnect && ssh_servers.is_none())
             })
             .collect();
         Self {
@@ -678,6 +717,10 @@ impl SettingsWindow {
             local_server: local_server
                 .map(|offered| servers::LocalServerRow::new(offered.connection)),
             ssh_servers,
+            selected_server: None,
+            search_selected_server: None,
+            server_list_focus: cx.focus_handle().tab_stop(true),
+            this_computer,
         }
     }
 
@@ -692,6 +735,7 @@ impl SettingsWindow {
             self.check_server_update(cx);
             self.read_ssh_hosts(cx);
         }
+        self.sync_server_location(cx);
     }
 
     fn close(&mut self, _: &CloseSettingsWindow, window: &mut Window, cx: &mut Context<Self>) {
@@ -789,21 +833,25 @@ impl SettingsWindow {
         cx.notify();
     }
 
-    fn matching_rows(&self) -> Vec<SettingsRowId> {
+    /// The rows this desktop can present that answer the query, best first, without regard to
+    /// the server selected in the Servers list.
+    fn reachable_rows(&self) -> Vec<SettingsRowId> {
         catalog::matching_rows(&self.query, self.permission_access.naming())
             .into_iter()
             .filter(|row| {
                 self.available_sections.contains(&row.descriptor().section)
                     && !self.omitted_rows.contains(row)
-                    && (*row != SettingsRowId::ServerWorktreeLocation
-                        || self.offers_server_location()
-                            && self
-                                .local_server
-                                .as_ref()
-                                .and_then(|r| r.worktree_server())
-                                .is_some())
             })
             .collect()
+    }
+
+    /// The rows answering the query for the selected server, best first.
+    fn search_matches(&self) -> Vec<SettingsRowId> {
+        self.server_search_matches(self.reachable_rows())
+    }
+
+    fn matching_rows(&self) -> Vec<SettingsRowId> {
+        self.with_server_list_first(self.search_matches())
     }
 
     fn rows_for(&self, section: SettingsSectionId) -> Vec<SettingsRowId> {
@@ -814,7 +862,9 @@ impl SettingsWindow {
     }
 
     fn synchronize_search_results(&mut self) {
-        let matching = self.matching_rows();
+        let reachable = self.reachable_rows();
+        self.select_server_for_query(&reachable);
+        let matching = self.search_matches();
         self.revealed = if self.query.trim().is_empty() {
             None
         } else {
@@ -1192,9 +1242,12 @@ impl SettingsWindow {
                 // The gallery's title names the appearance it is showing, which changes with the
                 // mode and, under Auto, with the slot chosen above it. Its selector stays fixed.
                 let heading = if title == SettingsRowId::InstalledThemes.descriptor().group {
-                    self.installed_themes_title(cx)
+                    SharedString::new_static(self.installed_themes_title(cx))
+                } else if section == SettingsSectionId::Servers {
+                    // Each Servers group names the machine its rows act on.
+                    self.server_group_heading(title)
                 } else {
-                    title
+                    SharedString::new_static(title)
                 };
                 let row_bounds = Rc::clone(&self.row_bounds);
                 FormGroup::new(group_selector(section, title), heading, members)
@@ -1300,6 +1353,8 @@ impl SettingsWindow {
             if let Some(presentation) = self.local_server_presentation() {
                 rendered = rendered.caption(presentation.explanation, presentation.tone);
             }
+        } else if let Some((caption, tone)) = self.server_row_caption(row) {
+            rendered = rendered.caption(caption, tone);
         } else if row == SettingsRowId::ServerService {
             if let Some(presentation) = self.server_service_presentation() {
                 rendered = rendered.caption(presentation.explanation, presentation.tone);
@@ -1363,7 +1418,21 @@ impl SettingsWindow {
             SettingsRowId::LocalServer => self.render_local_server(appearance, cx),
             SettingsRowId::ServerService => self.render_server_service(appearance, cx),
             SettingsRowId::ServerUpdate => self.render_server_update(appearance, cx),
-            SettingsRowId::SshServers => self.render_ssh_servers(appearance, cx),
+            SettingsRowId::ServerList => self.render_server_list(appearance, window, cx),
+            SettingsRowId::SshConnect => self.render_ssh_connect(appearance, cx),
+            SettingsRowId::SshServerStatus => self.render_ssh_server_status(appearance, cx),
+            SettingsRowId::SshServerVersion
+            | SettingsRowId::SshServerPlatform
+            | SettingsRowId::SshServerCompatibility
+            | SettingsRowId::SshServerStartup => self.render_ssh_server_fact(row, appearance),
+            SettingsRowId::ServerConnection => {
+                let (method, _) = self.server_connection_presentation();
+                self.render_server_value(row, method, appearance)
+            }
+            SettingsRowId::DirectNetworkPairing => {
+                self.render_server_value(row, "None", appearance)
+            }
+            SettingsRowId::RemoveServer => self.render_remove_server(cx),
             SettingsRowId::UpdateStatus => self.render_update_status(cx),
             SettingsRowId::AutomaticUpdateDownloads => self.render_automatic_update_downloads(cx),
             SettingsRowId::UpdateCheckInterval => self.render_update_check_interval(cx),
@@ -2000,6 +2069,13 @@ impl SettingsWindow {
             [first, second, third] => detail.push_str(&format!(" {first}, {second}, and {third} access are system permissions and are not affected.")),
             _ => unreachable!("Settings presents at most three system permission rows"),
         }
+        // Saved connections and Server Settings live outside the Settings Document.
+        if self
+            .available_sections
+            .contains(&SettingsSectionId::Servers)
+        {
+            detail.push_str(" Server connections and Server Settings are not affected.");
+        }
         detail
     }
 
@@ -2195,7 +2271,8 @@ fn row_layout(row: SettingsRowId) -> FormRowLayout {
     match row {
         SettingsRowId::TerminalTheme
         | SettingsRowId::InstalledThemes
-        | SettingsRowId::SshServers
+        | SettingsRowId::ServerList
+        | SettingsRowId::SshConnect
         | SettingsRowId::SettingsFile => FormRowLayout::Full,
         SettingsRowId::WorktreeLocation | SettingsRowId::ServerWorktreeLocation => {
             FormRowLayout::Above

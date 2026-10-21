@@ -7,6 +7,7 @@
 
 use gpui::prelude::*;
 use gpui::{AnyElement, App, SharedString, Stateful, div};
+use spaceterm_server::pane::control::Controller;
 use spaceterm_ui::{
     Button, ButtonSize, ButtonVariant, FloatingRole, Icon, ProgressRing, ProgressSize,
     ProgressState,
@@ -22,13 +23,38 @@ use super::chrome_icons::IconRole;
 use super::chrome_typography::{ChromeTextStyleExt as _, TextRole};
 use super::terminal_pane::StatusIntent;
 
-/// What the window knows when the server offers Take Over: this window does not control the
-/// Pane. Another client may, or nobody does after this client released it.
+/// What the window knows while it cannot ask the server who controls the Pane: only that this
+/// window does not.
 pub(crate) const TAKEOVER_TITLE: &str = "Not Controlled by This Window";
 pub(crate) const TAKEOVER_DETAIL: &str =
     "Take Over to type and resize here. The shell keeps running.";
+pub(crate) const UNCONTROLLED_TITLE: &str = "Not Controlled";
+pub(crate) const UNCONTROLLED_DETAIL: &str = "No SpaceTerm controls this Pane. Take Over to type \
+                                              and resize here. The shell keeps running.";
+pub(crate) const EARLIER_ATTACHMENT_DETAIL: &str = "This SpaceTerm controlled it before the \
+                                                    Workspace was attached again. Take Over to \
+                                                    type and resize here.";
 pub(crate) const TAKEOVER_FAILED_DETAIL: &str =
     "Take Over is available once SpaceTerm connects again.";
+/// The Takeover Screen's title and detail while it offers Take Over, naming the Controlling Client
+/// the server reported. `None` means the server has not said, so the screen claims only what this
+/// window knows.
+pub(crate) fn takeover_copy(controller: Option<&Controller>) -> (SharedString, &'static str) {
+    match controller {
+        Some(Controller::Client {
+            name,
+            this_client: false,
+        }) => (
+            format!("Controlled by {}", name.as_str()).into(),
+            TAKEOVER_DETAIL,
+        ),
+        Some(Controller::Client {
+            this_client: true, ..
+        }) => (TAKEOVER_TITLE.into(), EARLIER_ATTACHMENT_DETAIL),
+        Some(Controller::Nobody) => (UNCONTROLLED_TITLE.into(), UNCONTROLLED_DETAIL),
+        None => (TAKEOVER_TITLE.into(), TAKEOVER_DETAIL),
+    }
+}
 pub(crate) const SESSION_ENDED_TITLE: &str = "Session Ended";
 pub(crate) const SESSION_ENDED_DETAIL: &str =
     "This Terminal Session is no longer available on the server.";
@@ -558,7 +584,7 @@ pub(crate) use connection::{
 mod connection {
     use std::sync::Arc;
 
-    use super::{Dormant, ScreenAnnouncements};
+    use super::{Controller, Dormant, ScreenAnnouncements};
     use crate::local_server::ServerError;
     use crate::terminal::server_session::{DevelopmentPaneState, DevelopmentPaneStatus};
 
@@ -568,6 +594,9 @@ mod connection {
     /// reconnection never select, take over, or start a shell.
     pub(crate) trait ServerPaneConnection: Send + Sync {
         fn status(&self) -> DevelopmentPaneStatus;
+
+        /// Who controlled the Pane when the server last offered Take Over, if it ever did.
+        fn controller(&self) -> Option<Controller>;
 
         /// Identifies the connection that last supplied an authoritative screen. It changes when a
         /// new connection reaches the Terminal Session and when another client takes control, and
@@ -605,6 +634,10 @@ mod connection {
     impl ServerPaneConnection for DevelopmentPaneState {
         fn status(&self) -> DevelopmentPaneStatus {
             Self::status(self)
+        }
+
+        fn controller(&self) -> Option<Controller> {
+            Self::controller(self)
         }
 
         fn connection_generation(&self) -> u64 {
@@ -645,15 +678,17 @@ mod connection {
     }
 
     /// What a server-backed Pane presents in place of its terminal, if anything.
-    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    #[derive(Clone, Debug, PartialEq, Eq)]
     pub(crate) enum ServerPaneScreen {
         /// Another client is the Controlling Client. `offered` is whether Take Over can be asked
         /// for now; `ended` means the Terminal Session ended while the other client held it.
+        /// `controller` is who the server last said controls the Pane, while that still holds.
         Takeover {
             taking_over: bool,
             unconfirmed: bool,
             offered: bool,
             ended: bool,
+            controller: Option<Controller>,
         },
         /// The server restarted, so the Pane kept its place and lost its shell.
         Restored {
@@ -688,6 +723,7 @@ mod connection {
         announcements: ScreenAnnouncements,
         connection: Arc<dyn ServerPaneConnection>,
         status: DevelopmentPaneStatus,
+        controller: Option<Controller>,
         generation: u64,
         takeover_shown: bool,
         take_over_unconfirmed: bool,
@@ -702,6 +738,7 @@ mod connection {
             let mut view = Self {
                 announcements: ScreenAnnouncements::default(),
                 status: connection.status(),
+                controller: connection.controller(),
                 generation: connection.connection_generation(),
                 connection: Arc::clone(&connection),
                 takeover_shown: false,
@@ -729,10 +766,16 @@ mod connection {
             let generation = self.connection.connection_generation();
             let generation_changed = generation != self.generation;
             let progress = self.connection.directory_progress();
-            if status == self.status && !generation_changed && progress == self.directory_progress {
+            let controller = self.connection.controller();
+            if status == self.status
+                && !generation_changed
+                && progress == self.directory_progress
+                && controller == self.controller
+            {
                 return ServerPaneSync::default();
             }
             self.directory_progress = progress;
+            self.controller = controller;
             // Take Over that returns to the Takeover Screen on the same connection generation is
             // unconfirmed: the server may have refused it, or committed it and lost the reply.
             // A new generation means this client held control and another client took it since.
@@ -853,11 +896,15 @@ mod connection {
                     },
                 });
             }
+            let taking_over = self.status == DevelopmentPaneStatus::TakingOver;
+            let offered = self.status == DevelopmentPaneStatus::Takeover;
             self.takeover_shown.then(|| ServerPaneScreen::Takeover {
-                taking_over: self.status == DevelopmentPaneStatus::TakingOver,
+                taking_over,
                 unconfirmed: self.take_over_unconfirmed && !self.session_ended(),
-                offered: self.status == DevelopmentPaneStatus::Takeover,
+                offered,
                 ended: self.session_ended(),
+                // An interrupted connection cannot say who controls the Pane now.
+                controller: self.controller.clone().filter(|_| offered || taking_over),
             })
         }
 

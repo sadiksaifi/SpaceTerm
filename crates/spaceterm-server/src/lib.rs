@@ -4,6 +4,8 @@ pub mod attachments;
 #[cfg(feature = "client")]
 mod client;
 pub mod client_view;
+#[cfg(feature = "client")]
+mod computer_name;
 pub mod hierarchy;
 mod host;
 pub mod organization;

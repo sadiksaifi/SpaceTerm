@@ -27,9 +27,9 @@ pub(crate) use development::{
     POLL_INTERVAL, SharedAcceptance, SharedAttachmentFailure, SharedCloseApproval,
     SharedCloseReview, SharedCloseState, SharedCloseUnavailable, SharedEditSource,
     SharedPaneSessions, SharedPanes, SharedRefusal, SharedRefusalReason, SharedRemoval,
-    SharedRowStatus, SharedSubmission, SharedTabs, SharedWorkspaceConflict, SharedWorkspaceFacts,
-    SharedWorkspaceHost, SharedWorkspacePlan, SharedWorkspaces, presenting_window,
-    shared_close_changed_title,
+    SharedRowStatus, SharedSubmission, SharedTabs, SharedWorkspaceConflict, SharedWorkspaceEdits,
+    SharedWorkspaceFacts, SharedWorkspaceHost, SharedWorkspacePlan, SharedWorkspaces,
+    presenting_window, shared_close_changed_title,
 };
 
 #[path = "shared_workspaces/repositories.rs"]
@@ -116,11 +116,20 @@ mod development {
         fn subscribe(&self) -> Option<async_channel::Receiver<()>> {
             None
         }
+
+        /// Whether the server accepts Worktree writes, without copying the hierarchy.
+        fn worktree_writes(&self) -> bool {
+            self.snapshot().worktree_writes
+        }
     }
 
     impl SharedWorkspaceEdits for SharedWorkspaceClient {
         fn snapshot(&self) -> SharedWorkspaceSnapshot {
             Self::snapshot(self)
+        }
+
+        fn worktree_writes(&self) -> bool {
+            Self::supports_worktree_writes(self)
         }
 
         fn availability(&self) -> (bool, bool) {
@@ -2069,6 +2078,7 @@ mod development {
         /// A scripted Pane whose status a test sets and whose explicit requests it counts.
         pub(crate) struct ScriptedPane {
             status: Mutex<crate::terminal::server_session::DevelopmentPaneStatus>,
+            controller: Mutex<Option<spaceterm_server::pane::control::Controller>>,
             generation: std::sync::atomic::AtomicU64,
             selections: std::sync::atomic::AtomicUsize,
             take_overs: std::sync::atomic::AtomicUsize,
@@ -2082,6 +2092,7 @@ mod development {
                     status: Mutex::new(
                         crate::terminal::server_session::DevelopmentPaneStatus::Connecting,
                     ),
+                    controller: Mutex::default(),
                     generation: std::sync::atomic::AtomicU64::new(0),
                     selections: std::sync::atomic::AtomicUsize::new(0),
                     take_overs: std::sync::atomic::AtomicUsize::new(0),
@@ -2095,6 +2106,15 @@ mod development {
                 status: crate::terminal::server_session::DevelopmentPaneStatus,
             ) {
                 *self.status.lock().expect("status") = status;
+            }
+
+            /// The server offers Take Over and says who controls the Pane.
+            pub(crate) fn offer_take_over(
+                &self,
+                controller: spaceterm_server::pane::control::Controller,
+            ) {
+                *self.controller.lock().expect("controller") = Some(controller);
+                self.set(crate::terminal::server_session::DevelopmentPaneStatus::Takeover);
             }
 
             /// A new connection reaches the Terminal Session and supplies its screen.
@@ -2126,6 +2146,10 @@ mod development {
         impl crate::ui::server_pane::ServerPaneConnection for ScriptedPane {
             fn status(&self) -> crate::terminal::server_session::DevelopmentPaneStatus {
                 *self.status.lock().expect("status")
+            }
+
+            fn controller(&self) -> Option<spaceterm_server::pane::control::Controller> {
+                self.controller.lock().expect("controller").clone()
             }
 
             fn connection_generation(&self) -> u64 {
@@ -2258,6 +2282,10 @@ mod development {
 
             pub(crate) fn set_connected(&self, connected: bool) {
                 self.snapshot.lock().expect("snapshot").connected = connected;
+            }
+
+            pub(crate) fn set_worktree_writes(&self, worktree_writes: bool) {
+                self.snapshot.lock().expect("snapshot").worktree_writes = worktree_writes;
             }
 
             pub(crate) fn set_error(&self, error: spaceterm_server::ServerError) {

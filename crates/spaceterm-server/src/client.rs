@@ -20,6 +20,9 @@ pub struct LocalServer {
     paths: Paths,
     identity: String,
     account: String,
+    /// A named Development client's name, which its Client Name carries after the computer's.
+    development: Option<String>,
+    computer: std::sync::Arc<dyn crate::computer_name::ComputerName>,
     remote: Option<std::sync::Arc<RemoteRoute>>,
     shared_pane: std::sync::Arc<crate::pane::SharedPaneConnection>,
     attachments:
@@ -76,6 +79,15 @@ impl LocalServer {
         )?;
         Ok(client)
     }
+    /// What other clients call this one while it controls a Pane.
+    fn client_name(&self) -> crate::pane::control::ClientName {
+        match (self.computer.computer_name(), &self.development) {
+            (Some(computer), Some(development)) => format!("{computer} ({development})").into(),
+            (Some(computer), None) => computer.into(),
+            (None, Some(development)) => development.as_str().into(),
+            (None, None) => "".into(),
+        }
+    }
     fn server_id(&self) -> Result<[u8; 32], ServerError> {
         if let Some(remote) = &self.remote {
             self.client_directory()?;
@@ -84,6 +96,12 @@ impl LocalServer {
         Ok(Directory::open(&self.paths.data, false)?.read()?.server)
     }
     /// One durable attachment writer shared by the inventory and all Pane subscriptions.
+    /// Whether `other` is a clone of this handle rather than a separately created one, such as
+    /// the handle a later connection to the same account creates.
+    pub fn same_handle(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.shared_pane, &other.shared_pane)
+    }
+
     pub fn attachments(&self) -> Result<crate::attachments::Attachments, ServerError> {
         if let Some(attachments) = self.attachments.get() {
             return attachments.clone();
@@ -119,14 +137,19 @@ impl LocalServer {
         Self::with_paths(Paths::for_identity(directory_name)?)
     }
     pub(crate) fn with_paths(paths: Paths) -> Result<Self, ServerError> {
-        let account = match std::env::var_os("SPACETERM_DEVELOPMENT_CLIENT") {
-            Some(name) => development_account(name.to_str().ok_or(ServerError::Unsupported)?)?,
+        let development = std::env::var_os("SPACETERM_DEVELOPMENT_CLIENT")
+            .map(|name| name.into_string().map_err(|_| ServerError::Unsupported))
+            .transpose()?;
+        let account = match &development {
+            Some(name) => development_account(name)?,
             None => "desktop".to_owned(),
         };
         Ok(Self {
             identity: paths.identity.clone(),
             paths,
             account,
+            development,
+            computer: std::sync::Arc::new(crate::computer_name::SystemComputerName),
             remote: None,
             shared_pane: std::sync::Arc::default(),
             attachments: std::sync::Arc::default(),
@@ -178,13 +201,14 @@ impl LocalServer {
         }
         let mut server = Self::for_identity("spaceterm-development")?;
         server.account = development_account(name)?;
+        server.development = Some(name.to_owned());
         Ok(server)
     }
     fn authenticate(&self) -> Result<AuthenticatedStatus, ServerError> {
         let mut stream = host::connect(&self.paths)?;
         let mut status = protocol::admit_client(
             &mut stream,
-            &self.client_id()?,
+            (&self.client_id()?, &self.client_name()),
             &self.server_id()?,
             &self.identity,
             &[protocol::MAJOR],
@@ -209,7 +233,7 @@ impl LocalServer {
             }
             protocol::admit_transport(
                 &mut bridge,
-                &client,
+                (&client, &self.client_name()),
                 &remote.expected.server,
                 &self.identity,
                 &[protocol::MAJOR],
@@ -220,7 +244,7 @@ impl LocalServer {
         let mut stream = host::connect(&self.paths)?;
         protocol::admit_client(
             &mut stream,
-            &self.client_id()?,
+            (&self.client_id()?, &self.client_name()),
             &self.server_id()?,
             &self.identity,
             &[protocol::MAJOR],
@@ -273,6 +297,12 @@ mod tests {
     use crate::account_bridge::{AccountBridge, AccountBridgeIdentity, AccountConnector};
     use std::sync::Arc;
 
+    struct Studio;
+    impl crate::computer_name::ComputerName for Studio {
+        fn computer_name(&self) -> Option<String> {
+            Some("Studio\u{202E}".into())
+        }
+    }
     struct NoConnect;
     impl AccountConnector for NoConnect {
         fn connect(&self) -> Result<AccountBridge, ServerError> {
@@ -286,6 +316,7 @@ mod tests {
         connector: Arc<dyn AccountConnector>,
     ) -> LocalServer {
         let mut local = LocalServer::for_development_client(name, 1).unwrap();
+        local.computer = Arc::new(Studio);
         local.paths = Paths {
             identity: "spaceterm-development".into(),
             data: root.join("data"),
@@ -418,9 +449,11 @@ mod tests {
                 atomic::{AtomicUsize, Ordering},
             },
         };
+        /// A Client Identity and the Client Name it was admitted with.
+        type Admitted = ([u8; 32], String);
         struct Connector {
             opens: AtomicUsize,
-            clients: Arc<Mutex<Vec<[u8; 32]>>>,
+            clients: Arc<Mutex<Vec<Admitted>>>,
             cleaned: Arc<AtomicUsize>,
         }
         impl AccountConnector for Connector {
@@ -433,10 +466,10 @@ mod tests {
                         .unwrap()
                         .write(&remote_identity())
                         .unwrap();
-                    let (_, client) =
+                    let (_, client, name) =
                         protocol::admit_server(&mut server, &[7; 32], "spaceterm-development")
                             .unwrap();
-                    clients.lock().unwrap().push(client);
+                    clients.lock().unwrap().push((client, name.as_str().into()));
                     let mut wire = protocol::Wire::terminal(&mut server).unwrap();
                     assert!(matches!(
                         wire.read::<Request>().unwrap(),
@@ -497,6 +530,10 @@ mod tests {
         let clients = connector.clients.lock().unwrap();
         assert_eq!(clients.len(), 2);
         assert_eq!(clients[0], clients[1]);
+        assert_eq!(
+            clients[0].1, "Studio (first)",
+            "a Development client is named by its computer and its name"
+        );
         drop(clients);
         drop(first);
         drop(subscriber);
@@ -520,6 +557,8 @@ mod tests {
             },
             identity: "spaceterm-development".into(),
             account: "desktop".into(),
+            development: None,
+            computer: std::sync::Arc::new(crate::computer_name::SystemComputerName),
             remote: None,
             shared_pane: std::sync::Arc::default(),
             attachments: std::sync::Arc::default(),
@@ -555,6 +594,8 @@ mod tests {
             },
             identity: "spaceterm-development".into(),
             account: "desktop".into(),
+            development: None,
+            computer: std::sync::Arc::new(crate::computer_name::SystemComputerName),
             remote: None,
             shared_pane: std::sync::Arc::default(),
             attachments: std::sync::Arc::default(),
@@ -588,6 +629,8 @@ mod tests {
             },
             identity: "spaceterm-development".into(),
             account: name.into(),
+            development: None,
+            computer: std::sync::Arc::new(crate::computer_name::SystemComputerName),
             remote: None,
             shared_pane: std::sync::Arc::default(),
             attachments: std::sync::Arc::default(),

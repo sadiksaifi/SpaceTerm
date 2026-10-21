@@ -281,8 +281,11 @@ pub(crate) fn serve_runtime(
         let cancellation = stream.try_clone().map_err(|_| ServerError::Protocol)?;
         let handle = std::thread::spawn(move || {
             let _ = (|| -> Result<(), ServerError> {
-                let (_, device) =
+                let (_, device, name) =
                     protocol::admit_server(&mut stream, &record.server, &service_paths.identity)?;
+                if let Some(panes) = panes.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+                    panes.admitted(device, name);
+                }
                 let connection = protocol::random()?;
                 let result = (|| {
                     loop {
@@ -634,7 +637,7 @@ mod startup_tests {
         };
         protocol::admit_client(
             &mut stream,
-            &fixture.device,
+            (&fixture.device, &"Test".into()),
             &fixture.pin,
             "spaceterm-development",
             &[1],
@@ -816,7 +819,7 @@ mod startup_tests {
             };
             protocol::admit_client(
                 &mut slow,
-                &fixture.device,
+                (&fixture.device, &"Test".into()),
                 &fixture.pin,
                 "spaceterm-development",
                 &[major],
@@ -853,7 +856,7 @@ mod startup_tests {
             let mut stream = UnixStream::connect(fixture.paths.socket()).unwrap();
             protocol::admit_client(
                 &mut stream,
-                &fixture.device,
+                (&fixture.device, &"Test".into()),
                 &fixture.pin,
                 "spaceterm-development",
                 &[major],
@@ -903,7 +906,7 @@ mod startup_tests {
                 };
                 protocol::admit_client(
                     &mut stream,
-                    device,
+                    (device, &"Test".into()),
                     &fixture.pin,
                     "spaceterm-development",
                     &[major],
@@ -974,7 +977,7 @@ mod startup_tests {
         };
         protocol::admit_client(
             &mut pending,
-            &fixture.device,
+            (&fixture.device, &"Test".into()),
             &fixture.pin,
             "spaceterm-development",
             &[1],
@@ -1000,7 +1003,7 @@ mod startup_tests {
         let mut shutdown = UnixStream::connect(fixture.paths.socket()).unwrap();
         protocol::admit_client(
             &mut shutdown,
-            &fixture.device,
+            (&fixture.device, &"Test".into()),
             &fixture.pin,
             "spaceterm-development",
             &[1],
@@ -1082,7 +1085,7 @@ mod startup_tests {
         assert_eq!(
             protocol::admit_client(
                 &mut stream,
-                &fixture.device,
+                (&fixture.device, &"Test".into()),
                 &fixture.pin,
                 "spaceterm-development",
                 &[1]

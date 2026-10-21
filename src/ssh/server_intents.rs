@@ -36,6 +36,7 @@ struct Document {
 struct Record {
     destination: String,
     continuity: Option<SshServerContinuity>,
+    active: bool,
 }
 
 impl PrivateSshConnectionIntents {
@@ -84,6 +85,7 @@ impl PrivateSshConnectionIntents {
                 let connection = RetainedSshConnection {
                     destination,
                     continuity: record.continuity,
+                    active: record.active,
                 };
                 Self::validate(&connection)?;
                 Ok(connection)
@@ -130,6 +132,7 @@ impl PrivateSshConnectionIntents {
                     .map(|record| Record {
                         destination: record.destination.as_str().to_owned(),
                         continuity: record.continuity,
+                        active: record.active,
                     })
                     .collect(),
             };
@@ -221,6 +224,7 @@ mod tests {
                 build: "spaceterm-development".into(),
                 server: [server; 32],
             }),
+            active: true,
         }
     }
 
@@ -240,6 +244,19 @@ mod tests {
         assert_eq!(records[0].continuity.as_ref().unwrap().server, [3; 32]);
         reopened.remove(&records[0].destination).unwrap();
         assert!(reopened.load().unwrap().is_empty());
+    }
+
+    #[test]
+    fn an_inactive_saved_connection_survives_relaunch_inactive() {
+        let (paths, _) = fixture();
+        let mut inactive = connection("penguin", 3);
+        inactive.active = false;
+        PrivateSshConnectionIntents::new(paths.clone())
+            .retain(inactive)
+            .unwrap();
+        let records = PrivateSshConnectionIntents::new(paths).load().unwrap();
+        assert_eq!(records.len(), 1);
+        assert!(!records[0].active);
     }
 
     #[test]

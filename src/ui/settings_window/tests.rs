@@ -2696,8 +2696,17 @@ fn rendered_control_selector(row: SettingsRowId) -> Option<String> {
             SettingsRowId::LocalServer => "settings-local-server-control",
             SettingsRowId::ServerService => "settings-server-service-control",
             SettingsRowId::ServerUpdate => "settings-server-update-control",
-            // The fixture installs no SSH server registry, so this row is omitted.
-            SettingsRowId::SshServers => return None,
+            SettingsRowId::ServerList => "settings-server-list",
+            SettingsRowId::ServerConnection => "settings-row-server-connection-value",
+            SettingsRowId::DirectNetworkPairing => "settings-row-direct-network-pairing-value",
+            // The fixture installs no SSH server registry, so the SSH rows are absent.
+            SettingsRowId::SshConnect
+            | SettingsRowId::SshServerStatus
+            | SettingsRowId::SshServerVersion
+            | SettingsRowId::SshServerPlatform
+            | SettingsRowId::SshServerCompatibility
+            | SettingsRowId::SshServerStartup
+            | SettingsRowId::RemoveServer => return None,
             // The fixture installs no update service, so this row presents no action control.
             SettingsRowId::UpdateStatus => return None,
             SettingsRowId::AutomaticUpdateDownloads => "settings-automatic-update-downloads",
@@ -4405,7 +4414,7 @@ fn a_desktop_with_every_feature_presents_unavailable_host_features(cx: &mut Test
 
     window.read_with(cx, |settings, _| {
         let accessibility = settings.permission_access.row(crate::platform::permission_access::SystemPermission::Accessibility).copy().name;
-        assert_eq!(settings.reset_all_detail(), format!("This cannot be undone. Themes can be installed again from their Zed extension or file. Microphone, Screen Recording, and {accessibility} access are system permissions and are not affected."));
+        assert_eq!(settings.reset_all_detail(), format!("This cannot be undone. Themes can be installed again from their Zed extension or file. Microphone, Screen Recording, and {accessibility} access are system permissions and are not affected. Server connections and Server Settings are not affected."));
     });
 
     assert!(

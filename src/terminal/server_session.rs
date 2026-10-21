@@ -37,6 +37,8 @@ pub(crate) enum DevelopmentPaneStatus {
 }
 pub(crate) struct DevelopmentPaneState {
     status: Mutex<DevelopmentPaneStatus>,
+    /// Who controlled the Pane when the server last offered Take Over.
+    controller: Mutex<Option<pane::control::Controller>>,
     retry: AtomicBool,
     selected: AtomicBool,
     take_over: AtomicBool,
@@ -63,6 +65,7 @@ impl DevelopmentPaneState {
     fn new() -> Self {
         Self {
             status: Mutex::new(DevelopmentPaneStatus::Connecting),
+            controller: Mutex::default(),
             retry: AtomicBool::new(false),
             selected: AtomicBool::new(false),
             take_over: AtomicBool::new(false),
@@ -93,6 +96,13 @@ impl DevelopmentPaneState {
 
     pub(crate) fn status(&self) -> DevelopmentPaneStatus {
         *self.status.lock().unwrap_or_else(|e| e.into_inner())
+    }
+    /// Who controlled the Pane when the server last offered Take Over, if it ever did.
+    pub(crate) fn controller(&self) -> Option<pane::control::Controller> {
+        self.controller
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
     /// What the current connection answered about interactive terminal input.
     ///
@@ -197,6 +207,16 @@ impl DevelopmentPaneState {
             self.take_over.store(true, Ordering::Release);
             self.retry.store(true, Ordering::Release);
             self.wake.notify();
+        }
+    }
+    /// The server offered Take Over and named who controls the Pane. Every offer replaces the
+    /// last one, so the Takeover Screen follows control as it moves. A Take Over in progress
+    /// stays in progress until the server answers it.
+    fn offered_take_over(&self, controller: pane::control::Controller) {
+        let mut status = self.status.lock().unwrap_or_else(|e| e.into_inner());
+        *self.controller.lock().unwrap_or_else(|e| e.into_inner()) = Some(controller);
+        if *status != DevelopmentPaneStatus::TakingOver {
+            *status = DevelopmentPaneStatus::Takeover;
         }
     }
     fn invalidate(&self) -> u64 {
@@ -1379,7 +1399,11 @@ fn present(
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .take();
-            while let Reply::Takeover { target } = reply {
+            while let Reply::Takeover {
+                target,
+                ref controller,
+            } = reply
+            {
                 expected_target = Some(target);
                 state.paste_unconfirmed.store(false, Ordering::Release);
                 if !takeover {
@@ -1390,12 +1414,7 @@ fn present(
                     // Erase cached terminal presentation before the window replaces its surface.
                     clear_presentation(&events, &mut generation, &appearance);
                 }
-                {
-                    let mut status = state.status.lock().unwrap_or_else(|e| e.into_inner());
-                    if *status != DevelopmentPaneStatus::TakingOver {
-                        *status = DevelopmentPaneStatus::Takeover;
-                    }
-                }
+                state.offered_take_over(controller.clone());
                 if !alive.load(Ordering::Acquire)
                     || attachment.as_ref().is_some_and(|permit| !permit.active())
                 {
@@ -3917,6 +3936,30 @@ mod tests {
             assert!(!state.connection_failed(error, false), "{error:?}");
             assert_eq!(state.status(), DevelopmentPaneStatus::Failed(error));
         }
+    }
+
+    #[test]
+    fn each_take_over_offer_names_the_current_controlling_client() {
+        use pane::control::Controller;
+        let client = |name: &str| Controller::Client {
+            name: name.into(),
+            this_client: false,
+        };
+        let state = DevelopmentPaneState::new();
+        assert_eq!(state.controller(), None);
+        state.offered_take_over(client("Studio"));
+        assert_eq!(state.status(), DevelopmentPaneStatus::Takeover);
+        assert_eq!(state.controller(), Some(client("Studio")));
+        state.offered_take_over(Controller::Nobody);
+        assert_eq!(state.controller(), Some(Controller::Nobody));
+        state.take_over();
+        state.offered_take_over(client("Laptop"));
+        assert_eq!(
+            state.status(),
+            DevelopmentPaneStatus::TakingOver,
+            "an offer that crosses Take Over leaves it waiting for its answer"
+        );
+        assert_eq!(state.controller(), Some(client("Laptop")));
     }
 
     #[test]

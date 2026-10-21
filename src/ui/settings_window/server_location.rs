@@ -1,4 +1,9 @@
-//! This server-owned preference is deliberately outside Settings import, export and reset.
+//! New Worktree Location for the server selected in the Servers list.
+//!
+//! This server-owned preference is deliberately outside Settings import, export and reset. The
+//! field reads and writes only the selected server, and only while SpaceTerm presents it. Choosing
+//! another server starts over, so a draft or an answer for one server never reaches another.
+use super::server_list::ServerChoice;
 use super::*;
 use crate::ui::appearance::gpui_color;
 use crate::ui::chrome_typography::{ChromeTextStyleExt as _, TextRole};
@@ -16,6 +21,13 @@ pub(super) struct ServerLocation {
     offered: bool,
     saving: bool,
     notice: Option<String>,
+    /// The server whose value the field shows.
+    target: Option<ServerChoice>,
+    /// Counts the times the field started over, so a read or write answered for an earlier server
+    /// or connection lands nowhere.
+    generation: u64,
+    /// The writer that answered the latest read, which a change writes through.
+    client: Option<Client>,
     poll: Option<Task<()>>,
     window: gpui::AnyWindowHandle,
 }
@@ -29,9 +41,29 @@ impl ServerLocation {
             offered: true,
             saving: false,
             notice: None,
+            target: None,
+            generation: 0,
+            client: None,
             poll: None,
             window: window.window_handle(),
         }
+    }
+    /// Forgets everything read from or typed for the previous server and stops reading it.
+    fn start_over(&mut self, target: Option<ServerChoice>, cx: &mut Context<SettingsWindow>) {
+        self.target = target;
+        self.generation = self.generation.wrapping_add(1);
+        self.saved = None;
+        self.latest = None;
+        self.connected = false;
+        self.offered = true;
+        self.saving = false;
+        self.notice = None;
+        self.client = None;
+        self.poll = None;
+        self.field.problem = None;
+        self.field
+            .input
+            .update(cx, |input, cx| input.set_value(String::new(), cx));
     }
     fn receive(&mut self, saved: Settings, cx: &mut Context<SettingsWindow>) {
         if self
@@ -70,33 +102,71 @@ impl ServerLocation {
     }
 }
 impl SettingsWindow {
-    fn follow_server_location(&mut self, cx: &mut Context<Self>) {
-        if self
-            .local_server
+    /// Whether SpaceTerm presents `target` now, so its Server Settings can be read.
+    fn server_location_reachable(&self, target: &ServerChoice) -> bool {
+        match target {
+            ServerChoice::Local => self
+                .local_server
+                .as_ref()
+                .and_then(|row| row.worktree_server())
+                .is_some(),
+            ServerChoice::Ssh(destination) => self
+                .ssh_servers
+                .as_ref()
+                .is_some_and(|rows| rows.connections.server(destination).is_some()),
+        }
+    }
+
+    /// Follows the selected server's New Worktree Location while the Servers section shows it.
+    /// Selection, section and connection changes call this; rendering never does, so painting
+    /// asks no server anything.
+    pub(super) fn sync_server_location(&mut self, cx: &mut Context<Self>) {
+        let target = if self.active_section == SettingsSectionId::Servers {
+            self.selected_server()
+        } else {
+            None
+        };
+        let reachable = target
             .as_ref()
-            .and_then(|r| r.worktree_server())
-            .is_none()
+            .is_some_and(|target| self.server_location_reachable(target));
+        let state = &mut self.server_location;
+        if state.target != target || (!reachable && (state.poll.is_some() || state.saved.is_some()))
         {
-            return;
+            state.start_over(target.clone(), cx);
         }
-        if self.server_location.poll.is_some() {
-            return;
-        }
-        let Some(client) = Client::get(cx) else {
+        let Some(target) = target.filter(|_| reachable) else {
             return;
         };
-        self.server_location.poll = Some(cx.spawn(async move |settings, cx| {
+        if state.poll.is_some() {
+            return;
+        }
+        let generation = state.generation;
+        state.poll = Some(cx.spawn(async move |settings, cx| {
             loop {
-                let request = cx.update(|cx| client.read(Read::Settings, cx));
-                let read = request.await;
+                // The Workspace Window may register a newly presented server's writer after
+                // this window hears of it, so each reading looks the writer up again.
+                let client = cx.update(|cx| match &target {
+                    ServerChoice::Local => Client::get(cx),
+                    ServerChoice::Ssh(destination) => Client::presented_ssh(destination, cx),
+                });
+                let read = match &client {
+                    Some(client) => Some(cx.update(|cx| client.read(Read::Settings, cx)).await),
+                    None => None,
+                };
                 if settings
                     .update(cx, |settings, cx| {
                         let state = &mut settings.server_location;
-                        state.connected = read.is_ok();
-                        if client.availability().0 {
+                        if state.generation != generation {
+                            return;
+                        }
+                        state.connected = matches!(read, Some(Ok(_)));
+                        if let Some(client) = &client
+                            && client.availability().0
+                        {
                             state.offered = client.supports_worktree_writes();
                         }
-                        if let Ok(ReadReply::Settings(saved)) = read {
+                        state.client = client;
+                        if let Some(Ok(ReadReply::Settings(saved))) = read {
                             state.receive(saved, cx);
                         }
                         cx.notify();
@@ -169,9 +239,11 @@ impl SettingsWindow {
             return;
         }
         let version = saved.version;
-        let Some(client) = Client::get(cx) else {
+        // The change goes to the server whose value the person edited, through its own writer.
+        let Some(client) = state.client.clone() else {
             return;
         };
+        let generation = state.generation;
         let draft = template.clone();
         let write = client.write(Operation::SetLocation { version, template }, cx);
         let handle = self.server_location.window;
@@ -185,6 +257,11 @@ impl SettingsWindow {
             };
             let _ = handle.update(cx, |_, window, cx| {
                 let _ = settings.update(cx, |settings, cx| {
+                    // The person chose another server meanwhile. The change finished on the server
+                    // it was written to, and the field now shows a different one.
+                    if settings.server_location.generation != generation {
+                        return;
+                    }
                     settings.server_location.saving = false;
                     if result.is_ok() {
                         let saved = Settings {
@@ -227,6 +304,7 @@ impl SettingsWindow {
             saved.template,
         );
         let owner = cx.weak_entity();
+        let generation = self.server_location.generation;
         let _ = spaceterm_ui::Alert::new(
             spaceterm_ui::ModalId::new("server-worktree-location-conflict"),
             title,
@@ -250,6 +328,9 @@ impl SettingsWindow {
         .intent(spaceterm_ui::AlertIntent::Warning)
         .present(window, cx, move |outcome, cx| {
             let _ = owner.update(cx, |settings, cx| {
+                if settings.server_location.generation != generation {
+                    return;
+                }
                 if matches!(
                     outcome,
                     spaceterm_ui::AlertOutcome::Activated {
@@ -275,9 +356,16 @@ impl SettingsWindow {
         if state.saving {
             return ("Saving…".into(), CaptionTone::Guidance);
         }
+        // The card heading names the machine. A local server reads as the account's own.
+        let server = match self.selected_server() {
+            Some(ServerChoice::Ssh(destination)) => {
+                format!("the server on {}", destination.as_str())
+            }
+            _ => "your account\u{2019}s server".to_owned(),
+        };
         if !state.connected {
             return (
-                "Connect to the local server to change it.".into(),
+                format!("Connect to {server} to change it.").into(),
                 CaptionTone::Guidance,
             );
         }
@@ -288,7 +376,7 @@ impl SettingsWindow {
             );
         }
         (
-            "Where this server creates new Worktrees for its Workspaces. Use {repository} and {branch}. For example: ~/.worktrees/my-app/feature-login".into(),
+            format!("Where {server} creates new Worktrees for its Workspaces. Use {{repository}} and {{branch}}. For example: ~/.worktrees/my-app/feature-login").into(),
             CaptionTone::Guidance,
         )
     }
@@ -297,7 +385,6 @@ impl SettingsWindow {
         appearance: &ChromeAppearance,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        self.follow_server_location(cx);
         let state = &self.server_location;
         let input = state.field.input.clone();
         input.update(cx, |input, cx| {

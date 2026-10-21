@@ -949,14 +949,9 @@ impl WorkspaceManager {
     }
 
     fn scroll_active_workspace_into_view(&self, cx: &mut App) {
-        let id = self.workspaces.active_workspace_id();
-        if let Some(index) = self
-            .workspaces
-            .iter()
-            .position(|workspace| Some(workspace.id()) == id)
-        {
+        if let Some(workspace_id) = self.workspaces.active_workspace_id() {
             self.sidebar
-                .update(cx, |sidebar, cx| sidebar.reveal_row(index, cx));
+                .update(cx, |sidebar, cx| sidebar.reveal_workspace(workspace_id, cx));
         }
     }
 
@@ -1620,6 +1615,7 @@ impl WorkspaceManager {
         {
             Self::report_workspace_error("rename", error);
         }
+        self.arrange_by_machine();
         let (control_connection, _, _, _, _, _, lifecycle) = completion.into_parts();
         let replaced = self.remote_workspace_runtimes.insert(
             workspace_id,
@@ -2813,6 +2809,8 @@ impl WorkspaceManager {
                 workspace_id,
                 position,
             } => {
+                // Each machine's Workspaces stay together, so a move stops at their ends.
+                let position = self.position_within_machine(workspace_id, position);
                 if let Err(error) = self.workspaces.move_workspace(workspace_id, position) {
                     Self::report_workspace_error("move", error);
                 }
@@ -2866,6 +2864,10 @@ impl WorkspaceManager {
                     self.request_worktree_removal(workspace_id, worktree_id, window, cx);
                 }
             },
+            SidebarEvent::Machine {
+                destination,
+                command,
+            } => self.perform_machine_command(destination, command, window, cx),
             SidebarEvent::LayoutChanged => self.synchronize_tab_manager_layouts(window, cx),
             SidebarEvent::FocusPane => self.focus(window, cx),
             SidebarEvent::FocusChanged => {}
@@ -4097,6 +4099,8 @@ impl WorkspaceManager {
         if let Some(shared) = self.shared.get_mut(key) {
             shared.register(workspace_id, facts.clone());
         }
+        // Registration names the Workspace's server, and so its machine's group.
+        self.arrange_by_machine();
         self.synchronize_tab_manager_layout(workspace_id, window, cx);
         if let Some(manager) = self
             .workspaces
@@ -5306,10 +5310,11 @@ impl WorkspaceManager {
             ),
         };
         let rows = self.sidebar_rows(cx);
+        let sections = self.machine_sections(cx);
         let remote_unavailable = self.remote_workspace_unavailable_reason.clone();
 
         self.sidebar.update(cx, |sidebar, cx| {
-            sidebar.set_rows(rows, remote_unavailable, cx)
+            sidebar.set_rows(rows, sections, remote_unavailable, cx)
         });
         // The New Worktree Command is available only where it can act, so its menu item disables
         // elsewhere.
@@ -5679,6 +5684,7 @@ mod launch;
 #[cfg(test)]
 pub(crate) use launch::testing as launch_testing;
 pub(crate) use launch::{LocalServerAdapters, resume_waiting_launches, start_local_server};
+mod machine_groups;
 #[path = "workspace_manager/repository.rs"]
 mod repository;
 mod server_bindings;

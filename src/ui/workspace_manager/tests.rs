@@ -235,7 +235,7 @@ fn sidebar_should_follow_remote_root_across_tabs_pins_and_custom_names(cx: &mut 
 }
 
 #[gpui::test]
-fn sidebar_rows_should_keep_the_directory_and_pin_below_name_and_hide_machine_when_narrow(
+fn sidebar_rows_should_keep_the_directory_and_pin_below_name_and_leave_the_machine_to_its_heading(
     cx: &mut TestAppContext,
 ) {
     let (manager, _, cx) = workspace_manager(cx);
@@ -270,10 +270,14 @@ fn sidebar_rows_should_keep_the_directory_and_pin_below_name_and_hide_machine_wh
     });
     cx.run_until_parked();
     let name = cx.debug_bounds("workspace-row-name-2").unwrap();
-    let machine = cx.debug_bounds("workspace-machine-2").unwrap();
     let path = cx.debug_bounds("workspace-row-path-2").unwrap();
     let pin = cx.debug_bounds("workspace-row-pin-2").unwrap();
-    assert!(machine.left() - name.right() >= px(8.0));
+    // The machine's heading names it, so its row doesn't repeat it.
+    assert!(
+        cx.debug_bounds("machine-heading-deploy@staging-production")
+            .is_some()
+    );
+    assert!(cx.debug_bounds("workspace-machine-2").is_none());
     assert!(path.top() >= name.bottom());
     assert!(pin.right() <= path.left());
     cx.update(|window, cx| {
@@ -1305,6 +1309,7 @@ impl WorkspaceManager {
                 .activate_workspace(previous)
                 .expect("the previous Workspace remains");
         }
+        self.arrange_by_machine();
         self.activate_workspace(workspace_id, window, cx);
         workspace_id
     }
@@ -11862,6 +11867,771 @@ fn each_servers_workspaces_should_take_edits_and_withdrawal_only_from_their_own_
     );
 }
 
+/// One inventory at `revision` publishing each named Workspace, identified by its number below 50.
+fn machine_inventory(
+    revision: u64,
+    workspaces: &[(&str, u8)],
+) -> spaceterm_server::hierarchy::Inventory {
+    use spaceterm_server::hierarchy::{Axis, Inventory, Pane, Tab, Workspace};
+
+    Inventory {
+        repositories: None,
+        revision,
+        close: None,
+        workspaces: workspaces
+            .iter()
+            .map(|(name, number)| Workspace {
+                id: [*number; 32],
+                name: (*name).to_owned(),
+                name_version: 0,
+                pin_version: 0,
+                pinned_directory: None,
+                root_tab: [number + 50; 32],
+                tabs: vec![Tab {
+                    worktree: None,
+                    worktree_membership_fixed: false,
+                    worktree_repository: None,
+                    id: [number + 50; 32],
+                    root_pane: [number + 100; 32],
+                    panes: vec![Pane {
+                        id: [number + 100; 32],
+                        source: None,
+                        axis: Axis::Right,
+                        starting_directory: PathBuf::from("/srv/work"),
+                        confirmed_directory: None,
+                        creator: None,
+                    }],
+                }],
+            })
+            .collect(),
+    }
+}
+
+/// A window presenting the account-local server beside SSH servers, each with scripted edits.
+struct MachineGroupsHarness {
+    manager: Entity<WorkspaceManager>,
+    local: Rc<crate::ui::shared_workspaces::testing::ScriptedEdits>,
+    /// The revision the next publication carries, so every server reads it as new.
+    revision: std::cell::Cell<u64>,
+}
+
+impl MachineGroupsHarness {
+    fn new(cx: &mut TestAppContext) -> (Self, &mut VisualTestContext) {
+        use crate::ui::shared_workspaces::testing::{ScriptedEdits, ScriptedPanes};
+        use crate::ui::shared_workspaces::{SharedEditSource, SharedPaneSessions};
+
+        let (manager, _records, cx) = workspace_manager(cx);
+        let local = Rc::new(ScriptedEdits::new(Some(machine_inventory(1, &[]))));
+        cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| {
+                manager.present_shared_workspaces(
+                    SharedEditSource::new(Rc::clone(&local) as Rc<_>),
+                    SharedPaneSessions::with_opener(
+                        ScriptedPanes::new(Self::session_factory()) as Rc<_>,
+                        &PaneConstruction::testing(),
+                    ),
+                    window,
+                    cx,
+                );
+                manager.sync_shared_workspaces(ServerKey::LOCAL, window, cx);
+            });
+        });
+        cx.run_until_parked();
+        (
+            Self {
+                manager,
+                local,
+                revision: std::cell::Cell::new(2),
+            },
+            cx,
+        )
+    }
+
+    fn session_factory() -> WorkspaceTerminalSessionFactory {
+        WorkspaceTerminalSessionFactory::new_local(
+            Rc::new(TestTerminalSessionFactory::new(
+                TestTerminalSessionRecords::default(),
+            )),
+            crate::terminal::testing::test_local_directory(std::env::temp_dir()),
+        )
+    }
+
+    /// Presents the SSH server at `destination`, publishing `workspaces`, and attaches each one.
+    fn present_ssh(
+        &self,
+        destination: &str,
+        workspaces: &[(&str, u8)],
+        cx: &mut VisualTestContext,
+    ) -> (
+        ServerKey,
+        Rc<crate::ui::shared_workspaces::testing::ScriptedEdits>,
+    ) {
+        use crate::ui::shared_workspaces::testing::{ScriptedEdits, ScriptedPanes};
+        use crate::ui::shared_workspaces::{SharedEditSource, SharedPaneSessions};
+
+        let edits = Rc::new(ScriptedEdits::new(Some(machine_inventory(
+            self.next_revision(),
+            workspaces,
+        ))));
+        let destination = crate::domain::SshDestination::new(destination.to_owned()).unwrap();
+        let key = cx.update(|window, cx| {
+            self.manager.update(cx, |manager, cx| {
+                let key = manager.present_server_workspaces(
+                    ServerOrigin::Ssh(destination),
+                    SharedEditSource::new(Rc::clone(&edits) as Rc<_>),
+                    SharedPaneSessions::with_opener(
+                        ScriptedPanes::new(Self::session_factory()) as Rc<_>,
+                        &PaneConstruction::testing(),
+                    ),
+                    window,
+                    cx,
+                );
+                manager.sync_shared_workspaces(key, window, cx);
+                key
+            })
+        });
+        self.attach(key, workspaces, cx);
+        (key, edits)
+    }
+
+    /// Publishes `workspaces` from the server at `key` and attaches each one.
+    fn publish(
+        &self,
+        key: ServerKey,
+        edits: &crate::ui::shared_workspaces::testing::ScriptedEdits,
+        workspaces: &[(&str, u8)],
+        cx: &mut VisualTestContext,
+    ) {
+        edits.set_inventory(machine_inventory(self.next_revision(), workspaces));
+        cx.update(|window, cx| {
+            self.manager.update(cx, |manager, cx| {
+                manager.sync_shared_workspaces(key, window, cx);
+            });
+        });
+        self.attach(key, workspaces, cx);
+    }
+
+    /// Attaches each of `workspaces` this client does not present yet, as choosing it in the
+    /// Workspace Switcher does.
+    fn attach(&self, key: ServerKey, workspaces: &[(&str, u8)], cx: &mut VisualTestContext) {
+        cx.update(|window, cx| {
+            self.manager.update(cx, |manager, cx| {
+                for (_, number) in workspaces {
+                    let server = [*number; 32];
+                    if manager
+                        .shared
+                        .get(key)
+                        .is_some_and(|shared| shared.local(server).is_none())
+                    {
+                        manager.attach_detached_workspace(key, server, window, cx);
+                    }
+                }
+            });
+        });
+        cx.run_until_parked();
+    }
+
+    fn next_revision(&self) -> u64 {
+        let revision = self.revision.get();
+        self.revision.set(revision + 1);
+        revision
+    }
+
+    /// Every presented Workspace's name, in Workspace order.
+    fn names(&self, cx: &mut VisualTestContext) -> Vec<String> {
+        self.manager.read_with(cx, |manager, _| {
+            manager
+                .workspaces
+                .iter()
+                .map(|workspace| workspace.name().to_owned())
+                .collect()
+        })
+    }
+
+    fn named(&self, name: &str, cx: &mut VisualTestContext) -> WorkspaceId {
+        let name = name.to_owned();
+        self.manager.read_with(cx, move |manager, _| {
+            manager
+                .workspaces
+                .iter()
+                .find(|workspace| workspace.name() == name)
+                .map(|workspace| workspace.id())
+                .expect("the Workspace should be presented")
+        })
+    }
+
+    fn active_name(&self, cx: &mut VisualTestContext) -> String {
+        self.manager.read_with(cx, |manager, _| {
+            manager.workspaces.active().name().to_owned()
+        })
+    }
+}
+
+/// Each machine's Workspaces stay together in Workspace order, the local ones first and then each
+/// other machine's by name, so a Workspace published later joins the end of its own machine's.
+#[gpui::test]
+fn workspaces_from_several_servers_should_stay_grouped_by_machine(cx: &mut TestAppContext) {
+    let (harness, cx) = MachineGroupsHarness::new(cx);
+    harness.publish(ServerKey::LOCAL, &harness.local, &[("Here", 1)], cx);
+    let (zeta, zeta_edits) = harness.present_ssh("zeta", &[("Far", 1)], cx);
+    harness.publish(
+        ServerKey::LOCAL,
+        &harness.local,
+        &[("Here", 1), ("Also Here", 2)],
+        cx,
+    );
+    harness.present_ssh("Alpha", &[("Near", 1)], cx);
+    harness.publish(zeta, &zeta_edits, &[("Far", 1), ("Farther", 2)], cx);
+
+    assert_eq!(
+        harness.names(cx),
+        ["Default", "Here", "Also Here", "Near", "Far", "Farther",],
+        "local Workspaces come first, then each machine's by name regardless of case, and a new \
+         Workspace lands at the end of its machine's"
+    );
+}
+
+/// Moving a Workspace past its machine's Workspaces leaves it at the nearer end of them.
+#[gpui::test]
+fn moving_a_workspace_should_stay_among_its_machines_workspaces(cx: &mut TestAppContext) {
+    let (harness, cx) = MachineGroupsHarness::new(cx);
+    harness.publish(ServerKey::LOCAL, &harness.local, &[("Here", 1)], cx);
+    harness.present_ssh("penguin", &[("Far", 1), ("Farther", 2)], cx);
+    let farther = harness.named("Farther", cx);
+    let default = harness.named("Default", cx);
+
+    let move_to = |workspace_id: WorkspaceId, position: usize, cx: &mut VisualTestContext| {
+        cx.update(|window, cx| {
+            harness.manager.update(cx, |manager, cx| {
+                manager.handle_sidebar_event(
+                    SidebarEvent::Move {
+                        workspace_id,
+                        position,
+                    },
+                    window,
+                    cx,
+                );
+            });
+        });
+    };
+    move_to(farther, 0, cx);
+    let toward_start = harness.names(cx);
+    move_to(default, 3, cx);
+
+    assert_eq!(
+        (toward_start, harness.names(cx)),
+        (
+            vec![
+                "Default".to_owned(),
+                "Here".to_owned(),
+                "Farther".to_owned(),
+                "Far".to_owned(),
+            ],
+            vec![
+                "Here".to_owned(),
+                "Default".to_owned(),
+                "Farther".to_owned(),
+                "Far".to_owned(),
+            ]
+        ),
+        "a move past a machine's Workspaces stops at their nearer end"
+    );
+}
+
+/// Position shortcuts follow the grouped order the sidebar shows, not the order Workspaces arrived.
+#[gpui::test]
+fn workspace_shortcuts_should_follow_the_grouped_order(cx: &mut TestAppContext) {
+    let (harness, cx) = MachineGroupsHarness::new(cx);
+    harness.publish(ServerKey::LOCAL, &harness.local, &[("Here", 1)], cx);
+    harness.present_ssh("penguin", &[("Far", 1)], cx);
+    harness.publish(
+        ServerKey::LOCAL,
+        &harness.local,
+        &[("Here", 1), ("Also Here", 2)],
+        cx,
+    );
+
+    cx.simulate_keystrokes("ctrl-3");
+    cx.run_until_parked();
+    let third = harness.active_name(cx);
+    cx.simulate_keystrokes("ctrl-4");
+    cx.run_until_parked();
+
+    assert_eq!(
+        (third, harness.active_name(cx)),
+        ("Also Here".to_owned(), "Far".to_owned())
+    );
+}
+
+/// Disconnecting from one server removes only its machine's Workspaces. The Active Workspace and
+/// the order of the others stay as the person left them.
+#[gpui::test]
+fn withdrawing_one_server_should_keep_the_other_machines_workspaces_and_active_workspace(
+    cx: &mut TestAppContext,
+) {
+    let (harness, cx) = MachineGroupsHarness::new(cx);
+    harness.publish(
+        ServerKey::LOCAL,
+        &harness.local,
+        &[("Here", 1), ("Also Here", 2)],
+        cx,
+    );
+    let (penguin, _) = harness.present_ssh("penguin", &[("Far", 1)], cx);
+    let here = harness.named("Here", cx);
+    cx.update(|window, cx| {
+        harness.manager.update(cx, |manager, cx| {
+            manager.handle_sidebar_event(
+                SidebarEvent::Move {
+                    workspace_id: here,
+                    position: 2,
+                },
+                window,
+                cx,
+            );
+            manager.activate_workspace(here, window, cx);
+        });
+    });
+
+    cx.update(|window, cx| {
+        harness.manager.update(cx, |manager, cx| {
+            manager.withdraw_server_workspaces(penguin, window, cx);
+        });
+    });
+    cx.run_until_parked();
+
+    assert_eq!(
+        (harness.names(cx), harness.active_name(cx)),
+        (
+            vec![
+                "Default".to_owned(),
+                "Also Here".to_owned(),
+                "Here".to_owned(),
+            ],
+            "Here".to_owned()
+        )
+    );
+}
+
+/// An SSH registry whose every connection waits for the person to sign in, recording each
+/// request it receives.
+fn waiting_ssh_registry(
+    cx: &mut VisualTestContext,
+) -> (
+    crate::ssh::server_connection::SshServerConnections,
+    std::sync::mpsc::Receiver<String>,
+) {
+    use crate::ssh::cancellation::SshCancellationToken;
+    use crate::ssh::server_connection::{
+        ConnectMode, ConnectProgress, ConnectedSshServer, InteractionReason, RetainedSshConnection,
+        SshConnectBackend, SshConnectFailure, SshConnectionIntentStore, SshIntentStoreError,
+        SshServerConnections, SshServerContinuity, SshServerObservation,
+    };
+    use std::sync::{Arc, mpsc};
+
+    struct WaitingBackend(Mutex<mpsc::Sender<String>>);
+    impl SshConnectBackend for WaitingBackend {
+        fn connect(
+            &self,
+            destination: &crate::domain::SshDestination,
+            _: ConnectMode,
+            _: Option<&SshServerContinuity>,
+            _: &SshCancellationToken,
+            _: &ConnectProgress<'_>,
+        ) -> Result<ConnectedSshServer, SshConnectFailure> {
+            let _ = self.0.lock().unwrap().send(destination.as_str().to_owned());
+            Err(SshConnectFailure::NeedsPerson(
+                InteractionReason::Authentication,
+            ))
+        }
+        fn observe(
+            &self,
+            _: &crate::domain::SshDestination,
+            _: Option<&SshServerContinuity>,
+            _: &SshCancellationToken,
+            _: &ConnectProgress<'_>,
+        ) -> Result<SshServerObservation, SshConnectFailure> {
+            Err(SshConnectFailure::NeedsPerson(
+                InteractionReason::Authentication,
+            ))
+        }
+    }
+    struct NoIntents;
+    impl SshConnectionIntentStore for NoIntents {
+        fn load(&self) -> Result<Vec<RetainedSshConnection>, SshIntentStoreError> {
+            Ok(Vec::new())
+        }
+        fn retain(&self, _: RetainedSshConnection) -> Result<(), SshIntentStoreError> {
+            Ok(())
+        }
+        fn remove(&self, _: &crate::domain::SshDestination) -> Result<(), SshIntentStoreError> {
+            Ok(())
+        }
+    }
+
+    let (sender, connects) = mpsc::channel();
+    let connections = SshServerConnections::new(
+        Arc::new(WaitingBackend(Mutex::new(sender))),
+        Arc::new(NoIntents),
+    );
+    let installed = connections.clone();
+    cx.update(|_, cx| crate::ui::ssh_servers::install(installed, None, cx));
+    (connections, connects)
+}
+
+/// Waits until the registry reports that `destination` waits for the person.
+fn wait_for_person(
+    connections: &crate::ssh::server_connection::SshServerConnections,
+    destination: &str,
+) {
+    use crate::ssh::server_connection::RemoteConnectionStatus;
+
+    let destination = crate::domain::SshDestination::new(destination.to_owned()).unwrap();
+    let deadline = Instant::now() + std::time::Duration::from_secs(5);
+    while !matches!(
+        connections.status(&destination),
+        RemoteConnectionStatus::NeedsPerson { .. }
+    ) {
+        assert!(
+            Instant::now() < deadline,
+            "the connection should come to wait for the person"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
+fn heading_names(cx: &mut VisualTestContext) -> Vec<String> {
+    spaceterm_ui::a11y_testing::A11yTree::read(cx)
+        .with_role("Heading")
+        .iter()
+        .filter_map(|node| node["aria"]["label"].as_str().map(str::to_owned))
+        .collect()
+}
+
+/// One machine's Workspaces need no heading. Once another machine's server is presented, each
+/// machine heads its own Workspaces, and each row names its machine to assistive technology.
+#[gpui::test]
+fn machine_headings_should_appear_only_once_a_second_machine_is_presented(cx: &mut TestAppContext) {
+    use spaceterm_ui::a11y_testing::A11yTree;
+
+    let (harness, cx) = MachineGroupsHarness::new(cx);
+    harness.publish(ServerKey::LOCAL, &harness.local, &[("Here", 1)], cx);
+    redraw(cx);
+    let alone = (
+        cx.debug_bounds("machine-heading-This Computer").is_some(),
+        heading_names(cx),
+    );
+
+    harness.present_ssh("penguin", &[("Far", 1)], cx);
+    redraw(cx);
+    let here = harness.named("Here", cx).get();
+    let far = harness.named("Far", cx).get();
+    let bounds = |selector: String, cx: &mut VisualTestContext| {
+        cx.debug_bounds(selector.leak())
+            .expect("the sidebar should present it")
+    };
+    let local = bounds("machine-heading-This Computer".to_owned(), cx);
+    let first = bounds("workspace-row-1-inactive".to_owned(), cx);
+    let here_row = bounds(format!("workspace-group-{here}"), cx);
+    let remote = bounds("machine-heading-penguin".to_owned(), cx);
+    let far_row = bounds(format!("workspace-group-{far}"), cx);
+
+    assert_eq!(alone, (false, Vec::<String>::new()));
+    assert!(
+        local.bottom() <= first.top()
+            && here_row.bottom() <= remote.top()
+            && remote.bottom() <= far_row.top(),
+        "each machine's heading stands above its own Workspaces"
+    );
+    assert_eq!(heading_names(cx), ["This Computer", "penguin"]);
+    let far_item = A11yTree::read(cx)
+        .with_role("TreeItem")
+        .into_iter()
+        .find(|node| node["aria"]["label"] == "Far")
+        .map(|node| {
+            node["aria"]["description"]
+                .as_str()
+                .unwrap_or("")
+                .to_owned()
+        });
+    assert!(
+        far_item.is_some_and(|description| description.starts_with("penguin")),
+        "a row reached on its own names its machine"
+    );
+}
+
+/// A presented SSH server that isn't connected says so in its heading. Reading the state asks
+/// that server for nothing.
+#[gpui::test]
+fn an_ssh_machine_heading_should_show_a_connection_that_is_not_connected(cx: &mut TestAppContext) {
+    let (harness, cx) = MachineGroupsHarness::new(cx);
+    harness.publish(ServerKey::LOCAL, &harness.local, &[("Here", 1)], cx);
+    let (connections, connects) = waiting_ssh_registry(cx);
+    harness.present_ssh("penguin", &[("Far", 1)], cx);
+
+    connections.connect(crate::domain::SshDestination::new("penguin".to_owned()).unwrap());
+    wait_for_person(&connections, "penguin");
+    assert_eq!(connects.try_recv().ok().as_deref(), Some("penguin"));
+    redraw(cx);
+
+    assert!(
+        cx.debug_bounds("machine-heading-status-penguin").is_some(),
+        "the heading should show the connection's state"
+    );
+    assert_eq!(
+        heading_names(cx),
+        ["This Computer", "penguin, Waiting for You"]
+    );
+    assert!(
+        connects.try_recv().is_err(),
+        "presenting the state asks the server for nothing"
+    );
+}
+
+/// A presented SSH server with no attached Workspaces keeps its heading, with a quiet line in
+/// place of its Workspaces.
+#[gpui::test]
+fn an_empty_ssh_server_should_keep_its_heading_and_say_it_has_no_workspaces(
+    cx: &mut TestAppContext,
+) {
+    let (harness, cx) = MachineGroupsHarness::new(cx);
+    harness.publish(ServerKey::LOCAL, &harness.local, &[("Here", 1)], cx);
+    harness.present_ssh("penguin", &[], cx);
+    redraw(cx);
+
+    let heading = cx.debug_bounds("machine-heading-penguin");
+    let empty = cx.debug_bounds("machine-empty-penguin");
+    assert!(
+        heading
+            .zip(empty)
+            .is_some_and(|(heading, empty)| heading.bottom() <= empty.top()),
+        "the empty server's heading should stand above its No Workspaces line"
+    );
+    assert!(
+        cx.debug_bounds("machine-empty-This Computer").is_none(),
+        "a machine with Workspaces lists them instead"
+    );
+    assert!(
+        spaceterm_ui::a11y_testing::A11yTree::read(cx)
+            .find_text("No Workspaces")
+            .is_some()
+    );
+}
+
+/// Dragging a Workspace row past its machine's heading lands it at the nearer end of that
+/// machine's Workspaces.
+#[gpui::test]
+fn dragging_a_workspace_past_its_machine_heading_should_stay_with_its_machine(
+    cx: &mut TestAppContext,
+) {
+    let (harness, cx) = MachineGroupsHarness::new(cx);
+    harness.present_ssh("penguin", &[("Far", 1), ("Farther", 2)], cx);
+    harness.manager.update(cx, |manager, cx| {
+        manager
+            .workspaces
+            .activate_workspace(WorkspaceId::new(1))
+            .unwrap();
+        cx.notify();
+    });
+    redraw(cx);
+    let farther = harness.named("Farther", cx).get();
+    let far = harness.named("Far", cx).get();
+    let row = cx
+        .debug_bounds(format!("workspace-row-{farther}-inactive").leak())
+        .expect("the row to drag");
+    let group_start = cx
+        .debug_bounds(format!("workspace-row-{far}-inactive").leak())
+        .expect("the machine's first row")
+        .origin;
+    let top = cx
+        .debug_bounds("workspace-row-1-active")
+        .expect("the local row")
+        .center();
+
+    cx.simulate_mouse_move(row.center(), None, Modifiers::none());
+    cx.simulate_mouse_down(row.center(), MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_move(
+        row.center() - point(px(0.0), px(8.0)),
+        MouseButton::Left,
+        Modifiers::none(),
+    );
+    cx.run_until_parked();
+    cx.simulate_mouse_move(top, MouseButton::Left, Modifiers::none());
+    finish_slides(cx);
+    let landing = cx
+        .debug_bounds(format!("workspace-row-{farther}-inactive").leak())
+        .map(|face| face.origin);
+    cx.simulate_mouse_up(top, MouseButton::Left, Modifiers::none());
+    cx.run_until_parked();
+
+    assert_eq!(
+        landing,
+        Some(group_start),
+        "the dragged row's place opens at the start of its machine's Workspaces"
+    );
+    assert_eq!(harness.names(cx), ["Default", "Farther", "Far"]);
+}
+
+/// A machine heading's menu reaches that machine's server: Connect asks the registry as Settings
+/// does, and every heading offers the Servers Settings Section.
+#[gpui::test]
+fn a_machine_headings_menu_should_connect_its_server(cx: &mut TestAppContext) {
+    let (harness, cx) = MachineGroupsHarness::new(cx);
+    let (connections, connects) = waiting_ssh_registry(cx);
+    harness.present_ssh("penguin", &[("Far", 1)], cx);
+    connections.connect(crate::domain::SshDestination::new("penguin".to_owned()).unwrap());
+    wait_for_person(&connections, "penguin");
+    let _ = connects.try_recv();
+    redraw(cx);
+
+    right_click("machine-heading-This Computer", cx);
+    let local = (
+        cx.debug_bounds("machine-menu-server-settings").is_some(),
+        cx.debug_bounds("machine-menu-connect").is_some(),
+    );
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    right_click("machine-heading-penguin", cx);
+    let remote = (
+        cx.debug_bounds("machine-menu-server-settings").is_some(),
+        cx.debug_bounds("machine-menu-disconnect").is_some(),
+    );
+    click("machine-menu-connect", cx);
+
+    assert_eq!(local, (true, false));
+    assert_eq!(remote, (true, true));
+    assert_eq!(
+        connects
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .ok()
+            .as_deref(),
+        Some("penguin"),
+        "Connect asks the registry to connect to the heading's machine"
+    );
+}
+
+struct SettingsMovement;
+
+impl crate::platform::window_movement::WindowMovementFactory for SettingsMovement {
+    fn create(
+        &self,
+    ) -> Rc<dyn crate::platform::window_movement::OperatingSystemWindowDragPlatform> {
+        Rc::new(RecordingOperatingSystemWindowDragPlatform::default())
+    }
+}
+
+/// A machine heading's Server Settings opens Settings with that machine's server selected.
+#[gpui::test]
+fn a_machine_headings_server_settings_should_select_its_server(cx: &mut TestAppContext) {
+    use spaceterm_ui::a11y_testing::A11yTree;
+
+    let (harness, cx) = MachineGroupsHarness::new(cx);
+    let (connections, _connects) = waiting_ssh_registry(cx);
+    for name in ["alpha", "penguin"] {
+        harness.present_ssh(name, &[], cx);
+        connections.connect(crate::domain::SshDestination::new(name.to_owned()).unwrap());
+        wait_for_person(&connections, name);
+    }
+    let settings = crate::settings::Settings::load(
+        crate::settings::storage::testing::MemoryStorage::with_document(
+            &crate::settings::SettingsDocument::default(),
+        ),
+    );
+    cx.update(|_, cx| {
+        crate::ui::appearance_runtime::install(
+            settings,
+            Rc::new(crate::platform::appearance::testing::RecordingAppearancePlatform::default()),
+            cx,
+        )
+        .expect("appearance runtime should install");
+        crate::ui::settings_window::configure_window_chrome(
+            Rc::new(SettingsMovement),
+            Default::default(),
+            None,
+            cx,
+        );
+    });
+    redraw(cx);
+
+    right_click("machine-heading-penguin", cx);
+    click("machine-menu-server-settings", cx);
+
+    let settings_window = cx
+        .windows()
+        .into_iter()
+        .find(|window| {
+            window
+                .downcast::<crate::ui::settings_window::SettingsWindow>()
+                .is_some()
+        })
+        .expect("Settings should open");
+    let mut settings_cx = VisualTestContext::from_window(settings_window, cx);
+    settings_cx.run_until_parked();
+    let selected: Vec<_> = A11yTree::read(&mut settings_cx)
+        .with_role("ListBoxOption")
+        .into_iter()
+        .filter(|option| option["aria"]["selected"] == true)
+        .filter_map(|option| option["aria"]["label"].as_str().map(str::to_owned))
+        .collect();
+    assert_eq!(
+        selected,
+        ["Servers", "penguin"],
+        "Settings presents the Servers section with the heading's server selected"
+    );
+}
+
+/// A machine with only native Remote Workspaces has no presented SSH server, so its heading offers
+/// no Connect that would set one up there and no Disconnect, whatever the registry reports for its
+/// destination.
+#[gpui::test]
+fn a_machine_with_only_remote_workspaces_should_offer_no_connection_controls(
+    cx: &mut TestAppContext,
+) {
+    let (harness, cx) = MachineGroupsHarness::new(cx);
+    // The registry reads "work" as an inactive host, whose status alone would offer Connect.
+    let (_connections, _connects) = waiting_ssh_registry(cx);
+    create_disconnected_remote_workspace(&harness.manager, cx);
+    redraw(cx);
+
+    assert!(
+        cx.debug_bounds("machine-heading-work").is_some(),
+        "the machine still heads its Workspaces"
+    );
+    assert!(
+        cx.debug_bounds("machine-heading-work-menu").is_none(),
+        "no SSH server is saved or presented there, so its heading offers nothing"
+    );
+}
+
+/// A machine heading's Disconnect ends that machine's connection and leaves the others connected.
+#[gpui::test]
+fn a_machine_headings_menu_should_disconnect_only_its_server(cx: &mut TestAppContext) {
+    use crate::ssh::server_connection::RemoteConnectionStatus;
+
+    let (harness, cx) = MachineGroupsHarness::new(cx);
+    let (connections, _connects) = waiting_ssh_registry(cx);
+    for name in ["penguin", "zeta"] {
+        harness.present_ssh(name, &[], cx);
+        connections.connect(crate::domain::SshDestination::new(name.to_owned()).unwrap());
+        wait_for_person(&connections, name);
+    }
+    redraw(cx);
+
+    right_click("machine-heading-penguin", cx);
+    click("machine-menu-disconnect", cx);
+
+    let status = |name: &str| {
+        connections.status(&crate::domain::SshDestination::new(name.to_owned()).unwrap())
+    };
+    assert!(matches!(
+        status("penguin"),
+        RemoteConnectionStatus::Inactive
+    ));
+    assert!(matches!(
+        status("zeta"),
+        RemoteConnectionStatus::NeedsPerson { .. }
+    ));
+}
+
 /// A shared server Workspace presented in this window, with the server Pane its scripted
 /// connection drives. Its Panes reach the same presentation the local Development server's do.
 struct SharedPaneHarness {
@@ -14583,3 +15353,393 @@ mod shared_repositories {
 
 #[path = "launch_tests.rs"]
 mod launch_tests;
+
+/// Saved connections remembered in memory, as the private record keeps them.
+#[derive(Default)]
+struct RememberedConnections(Mutex<Vec<crate::ssh::server_connection::RetainedSshConnection>>);
+
+impl RememberedConnections {
+    fn active(&self, destination: &str) -> Option<bool> {
+        self.0
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|record| record.destination.as_str() == destination)
+            .map(|record| record.active)
+    }
+}
+
+impl crate::ssh::server_connection::SshConnectionIntentStore for RememberedConnections {
+    fn load(
+        &self,
+    ) -> Result<
+        Vec<crate::ssh::server_connection::RetainedSshConnection>,
+        crate::ssh::server_connection::SshIntentStoreError,
+    > {
+        Ok(self.0.lock().unwrap().clone())
+    }
+    fn retain(
+        &self,
+        record: crate::ssh::server_connection::RetainedSshConnection,
+    ) -> Result<(), crate::ssh::server_connection::SshIntentStoreError> {
+        let mut records = self.0.lock().unwrap();
+        records.retain(|other| other.destination != record.destination);
+        records.push(record);
+        Ok(())
+    }
+    fn remove(
+        &self,
+        destination: &crate::domain::SshDestination,
+    ) -> Result<(), crate::ssh::server_connection::SshIntentStoreError> {
+        self.0
+            .lock()
+            .unwrap()
+            .retain(|record| record.destination != *destination);
+        Ok(())
+    }
+}
+
+/// An SSH computer that connects once over a route the test can end, then answers every later
+/// attempt with `later`. Requested attempts are counted.
+struct ConnectsOnceThen {
+    route: Arc<AtomicBool>,
+    attempts: AtomicUsize,
+    requested: AtomicUsize,
+    first_succeeds: bool,
+    later: fn() -> crate::ssh::server_connection::SshConnectFailure,
+}
+
+struct ScriptedRoute(Arc<AtomicBool>);
+impl crate::ssh::server_connection::SshServerLease for ScriptedRoute {
+    fn is_alive(&self) -> bool {
+        self.0.load(Ordering::SeqCst)
+    }
+}
+
+impl crate::ssh::server_connection::SshConnectBackend for ConnectsOnceThen {
+    fn connect(
+        &self,
+        _: &crate::domain::SshDestination,
+        mode: crate::ssh::server_connection::ConnectMode,
+        _: Option<&crate::ssh::server_connection::SshServerContinuity>,
+        _: &crate::ssh::cancellation::SshCancellationToken,
+        _: &crate::ssh::server_connection::ConnectProgress<'_>,
+    ) -> Result<
+        crate::ssh::server_connection::ConnectedSshServer,
+        crate::ssh::server_connection::SshConnectFailure,
+    > {
+        if mode == crate::ssh::server_connection::ConnectMode::Requested {
+            self.requested.fetch_add(1, Ordering::SeqCst);
+        }
+        if !self.first_succeeds || self.attempts.fetch_add(1, Ordering::SeqCst) > 0 {
+            return Err((self.later)());
+        }
+        Ok(crate::ssh::server_connection::ConnectedSshServer {
+            server: spaceterm_server::LocalServer::for_identity("spaceterm-development").unwrap(),
+            continuity: crate::ssh::server_connection::SshServerContinuity {
+                route: [1; 32],
+                account: 501,
+                build: "spaceterm-development".into(),
+                server: [2; 32],
+            },
+            lease: Arc::new(ScriptedRoute(self.route.clone())),
+            protocol_major: 1,
+            facts: crate::ssh::server_connection::SshServerFacts {
+                platform: ("linux".into(), "x86_64".into()),
+                version: Some("1.0.0".into()),
+                starts_automatically: true,
+            },
+        })
+    }
+    fn observe(
+        &self,
+        _: &crate::domain::SshDestination,
+        _: Option<&crate::ssh::server_connection::SshServerContinuity>,
+        _: &crate::ssh::cancellation::SshCancellationToken,
+        _: &crate::ssh::server_connection::ConnectProgress<'_>,
+    ) -> Result<
+        crate::ssh::server_connection::SshServerObservation,
+        crate::ssh::server_connection::SshConnectFailure,
+    > {
+        Err((self.later)())
+    }
+}
+
+fn wait_until(mut done: impl FnMut() -> bool, cx: &mut VisualTestContext) {
+    let deadline = Instant::now() + std::time::Duration::from_secs(5);
+    while !done() {
+        assert!(Instant::now() < deadline, "the registry settles");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        cx.run_until_parked();
+    }
+    redraw(cx);
+}
+
+/// Connects to "penguin", presents it, ends its route so the next attempt answers `later`, and
+/// checks that the heading shows `state` and offers Disconnect, which withdraws the server and
+/// saves it inactive.
+fn a_failing_presented_server_should_offer_disconnect(
+    later: fn() -> crate::ssh::server_connection::SshConnectFailure,
+    state: &str,
+    cx: &mut TestAppContext,
+) {
+    use crate::ssh::server_connection::SshServerConnections;
+
+    let (harness, cx) = MachineGroupsHarness::new(cx);
+    let route = Arc::new(AtomicBool::new(true));
+    let remembered = Arc::new(RememberedConnections::default());
+    let connections = SshServerConnections::new(
+        Arc::new(ConnectsOnceThen {
+            route: route.clone(),
+            attempts: AtomicUsize::new(0),
+            requested: AtomicUsize::new(0),
+            first_succeeds: true,
+            later,
+        }),
+        remembered.clone(),
+    );
+    let installed = connections.clone();
+    cx.update(|_, cx| crate::ui::ssh_servers::install(installed, None, cx));
+    let penguin = crate::domain::SshDestination::new("penguin".to_owned()).unwrap();
+    connections.connect(penguin.clone());
+    wait_until(|| connections.server(&penguin).is_some(), cx);
+    // The window presents the connected server as its registry binding would.
+    harness.present_ssh("penguin", &[("Far", 1)], cx);
+
+    route.store(false, Ordering::SeqCst);
+    let expected = format!("penguin, {state}");
+    let deadline = Instant::now() + std::time::Duration::from_secs(5);
+    while !heading_names(cx).contains(&expected) {
+        assert!(
+            Instant::now() < deadline,
+            "the heading should show {expected:?}, got {:?}",
+            heading_names(cx)
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        redraw(cx);
+    }
+
+    right_click("machine-heading-penguin", cx);
+    click("machine-menu-disconnect", cx);
+    wait_until(|| remembered.active("penguin") == Some(false), cx);
+    assert!(connections.server(&penguin).is_none());
+}
+
+/// A presented server whose reconnect fails keeps its frozen Workspaces under its heading, which
+/// still reconnects it quietly and offers Disconnect to end that.
+#[gpui::test]
+fn a_presented_server_that_fails_after_connecting_should_offer_disconnect(cx: &mut TestAppContext) {
+    use crate::ssh::server_connection::{SshConnectFailure, UnavailableKind};
+    a_failing_presented_server_should_offer_disconnect(
+        || SshConnectFailure::Unavailable(UnavailableKind::ServiceUnavailable),
+        "Unavailable",
+        cx,
+    );
+}
+
+/// A presented server stopped on its computer no longer reconnects, yet its heading still offers
+/// Disconnect, so Remove isn't the only way to withdraw it.
+#[gpui::test]
+fn a_presented_server_stopped_after_connecting_should_offer_disconnect(cx: &mut TestAppContext) {
+    a_failing_presented_server_should_offer_disconnect(
+        || crate::ssh::server_connection::SshConnectFailure::Stopped,
+        "Stopped",
+        cx,
+    );
+}
+
+/// After relaunch, a Saved Connection SpaceTerm keeps trying heads the Workspace Window while it
+/// waits for the person, even before any of its Workspaces arrive, and its Connect asks once.
+#[gpui::test]
+fn a_saved_connection_waiting_after_relaunch_should_head_the_window_with_connect(
+    cx: &mut TestAppContext,
+) {
+    use crate::ssh::server_connection::{
+        InteractionReason, RetainedSshConnection, SshConnectFailure, SshServerConnections,
+    };
+
+    let (harness, cx) = MachineGroupsHarness::new(cx);
+    let remembered = Arc::new(RememberedConnections::default());
+    remembered.0.lock().unwrap().extend([
+        RetainedSshConnection {
+            destination: crate::domain::SshDestination::new("penguin".to_owned()).unwrap(),
+            continuity: None,
+            active: true,
+        },
+        RetainedSshConnection {
+            destination: crate::domain::SshDestination::new("idle".to_owned()).unwrap(),
+            continuity: None,
+            active: false,
+        },
+    ]);
+    let backend = Arc::new(ConnectsOnceThen {
+        route: Arc::new(AtomicBool::new(true)),
+        attempts: AtomicUsize::new(0),
+        requested: AtomicUsize::new(0),
+        first_succeeds: false,
+        later: || SshConnectFailure::NeedsPerson(InteractionReason::CredentialProvider),
+    });
+    let connections = SshServerConnections::new(backend.clone(), remembered.clone());
+    let installed = connections.clone();
+    cx.update(|window, cx| {
+        crate::ui::ssh_servers::install(installed, None, cx);
+        harness
+            .manager
+            .update(cx, |manager, cx| manager.follow_ssh_servers(window, cx));
+    });
+    connections.resume_retained();
+    let penguin = crate::domain::SshDestination::new("penguin".to_owned()).unwrap();
+    wait_until(
+        || {
+            matches!(
+                connections.status(&penguin),
+                crate::ssh::server_connection::RemoteConnectionStatus::NeedsPerson { .. }
+            )
+        },
+        cx,
+    );
+
+    assert_eq!(
+        heading_names(cx),
+        vec![
+            "This Computer".to_owned(),
+            "penguin, Waiting for You".to_owned()
+        ],
+        "the waiting connection has its heading; the inactive one has none"
+    );
+    assert!(cx.debug_bounds("machine-empty-penguin").is_some());
+    assert_eq!(
+        backend.requested.load(Ordering::SeqCst),
+        0,
+        "relaunch asks nothing"
+    );
+
+    right_click("machine-heading-penguin", cx);
+    click("machine-menu-connect", cx);
+    wait_until(|| backend.requested.load(Ordering::SeqCst) == 1, cx);
+}
+
+/// An SSH computer that waits for the person on quiet attempts and holds a requested Connect
+/// until the test opens `gate`, so the connection stays in progress meanwhile.
+struct HoldsRequestedConnect {
+    gate: Arc<AtomicBool>,
+}
+
+impl crate::ssh::server_connection::SshConnectBackend for HoldsRequestedConnect {
+    fn connect(
+        &self,
+        _: &crate::domain::SshDestination,
+        mode: crate::ssh::server_connection::ConnectMode,
+        _: Option<&crate::ssh::server_connection::SshServerContinuity>,
+        _: &crate::ssh::cancellation::SshCancellationToken,
+        _: &crate::ssh::server_connection::ConnectProgress<'_>,
+    ) -> Result<
+        crate::ssh::server_connection::ConnectedSshServer,
+        crate::ssh::server_connection::SshConnectFailure,
+    > {
+        use crate::ssh::server_connection::{ConnectMode, InteractionReason, SshConnectFailure};
+        while mode == ConnectMode::Requested && !self.gate.load(Ordering::SeqCst) {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        Err(SshConnectFailure::NeedsPerson(
+            InteractionReason::CredentialProvider,
+        ))
+    }
+    fn observe(
+        &self,
+        _: &crate::domain::SshDestination,
+        _: Option<&crate::ssh::server_connection::SshServerContinuity>,
+        _: &crate::ssh::cancellation::SshCancellationToken,
+        _: &crate::ssh::server_connection::ConnectProgress<'_>,
+    ) -> Result<
+        crate::ssh::server_connection::SshServerObservation,
+        crate::ssh::server_connection::SshConnectFailure,
+    > {
+        Err(
+            crate::ssh::server_connection::SshConnectFailure::NeedsPerson(
+                crate::ssh::server_connection::InteractionReason::CredentialProvider,
+            ),
+        )
+    }
+}
+
+/// While a Saved Connection connects from its heading, SpaceTerm hasn't read its Workspaces yet,
+/// so the line under the heading says they appear once it connects rather than that it has none.
+#[gpui::test]
+fn a_saved_connection_connecting_from_its_heading_should_not_claim_it_has_no_workspaces(
+    cx: &mut TestAppContext,
+) {
+    use crate::ssh::server_connection::{
+        RemoteConnectionStatus, RetainedSshConnection, SshServerConnections,
+    };
+    use spaceterm_ui::a11y_testing::A11yTree;
+
+    // The registry's connect worker runs on its own thread and wakes the window from there.
+    cx.executor().allow_parking();
+    let (harness, cx) = MachineGroupsHarness::new(cx);
+    let penguin = crate::domain::SshDestination::new("penguin".to_owned()).unwrap();
+    let remembered = Arc::new(RememberedConnections::default());
+    remembered.0.lock().unwrap().push(RetainedSshConnection {
+        destination: penguin.clone(),
+        continuity: None,
+        active: true,
+    });
+    let gate = Arc::new(AtomicBool::new(false));
+    let connections = SshServerConnections::new(
+        Arc::new(HoldsRequestedConnect { gate: gate.clone() }),
+        remembered,
+    );
+    let installed = connections.clone();
+    cx.update(|window, cx| {
+        crate::ui::ssh_servers::install(installed, None, cx);
+        harness
+            .manager
+            .update(cx, |manager, cx| manager.follow_ssh_servers(window, cx));
+    });
+    connections.resume_retained();
+    wait_until(
+        || {
+            matches!(
+                connections.status(&penguin),
+                RemoteConnectionStatus::NeedsPerson { .. }
+            )
+        },
+        cx,
+    );
+    assert!(
+        A11yTree::read(cx)
+            .find_text("Connect to show its Workspaces.")
+            .is_some()
+    );
+
+    right_click("machine-heading-penguin", cx);
+    click("machine-menu-connect", cx);
+    wait_until(
+        || {
+            matches!(
+                connections.status(&penguin),
+                RemoteConnectionStatus::Working { .. }
+            )
+        },
+        cx,
+    );
+    let tree = A11yTree::read(cx);
+    let note = tree.find_text("Workspaces appear once connected.");
+    let claims_none = tree.find_text("No Workspaces").is_some();
+    let has_note = note.is_some();
+    gate.store(true, Ordering::SeqCst);
+    // The connect worker ends before the test does.
+    wait_until(
+        || {
+            matches!(
+                connections.status(&penguin),
+                RemoteConnectionStatus::NeedsPerson { .. }
+            )
+        },
+        cx,
+    );
+    assert!(
+        has_note && !claims_none,
+        "a connecting server's Workspaces haven't been read, so it doesn't claim to have none"
+    );
+}

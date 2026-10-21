@@ -77,7 +77,7 @@ fn directory_repair_preserves_organization_and_cannot_replace_a_running_shell() 
     expected.confirmed_directory = Some(host.directory.clone());
     assert!(host.organization.as_ref() == Some(&expected));
     assert!(
-        matches!(host.request([2; 32], [2; 32], request), Reply::Takeover { target } if target == lease.into())
+        matches!(host.request([2; 32], [2; 32], request), Reply::Takeover { target, .. } if target == lease.into())
     );
     host.shutdown().unwrap();
 }
@@ -132,7 +132,7 @@ fn retry_revalidates_the_original_and_passive_reconnect_never_starts_it() {
         panic!("Retry should validate the original again")
     };
     assert!(
-        matches!(host.request([2; 32], [4; 32], retry), Reply::Takeover { target } if target == lease.into())
+        matches!(host.request([2; 32], [4; 32], retry), Reply::Takeover { target, .. } if target == lease.into())
     );
     host.shutdown().unwrap();
     std::fs::remove_dir(&root).unwrap();
