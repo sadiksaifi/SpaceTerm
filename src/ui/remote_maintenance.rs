@@ -1009,16 +1009,35 @@ fn failed(
             vec![RemoteAction::Check],
             false,
         ),
-        SshMaintenanceFailure::NotRetained => (
-            Some("Not Started"),
-            selector(row, "not-retained"),
-            failure(format!(
-                "SpaceTerm couldn\u{2019}t save what it needs to follow this operation, so it \
-                 didn\u{2019}t ask {machine} to do it. Nothing changed on {machine}."
-            )),
-            vec![RemoteAction::Check],
-            false,
-        ),
+        // This client keeps one record per server, and an unresolved original's record is the
+        // only thing that could still say what it did. So a step chosen while one is held is
+        // refused rather than retained over it: nothing was sent, and the original it refused
+        // for is still outstanding.
+        SshMaintenanceFailure::NotRetained => match kind {
+            Some(submitted) => (
+                Some("Not Started"),
+                selector(row, "not-retained-unresolved"),
+                failure(format!(
+                    "SpaceTerm is still following the {} it already sent to {machine}, so it \
+                     didn\u{2019}t ask for the step you just chose. Nothing was sent to {machine} \
+                     for that step. {}",
+                    sent(submitted),
+                    unsettled(machine, submitted)
+                )),
+                vec![resolve_action(submitted)],
+                false,
+            ),
+            None => (
+                Some("Not Started"),
+                selector(row, "not-retained"),
+                failure(format!(
+                    "SpaceTerm couldn\u{2019}t save what it needs to follow this operation, so it \
+                     didn\u{2019}t ask {machine} to do it. Nothing changed on {machine}."
+                )),
+                vec![RemoteAction::Check],
+                false,
+            ),
+        },
     }
 }
 

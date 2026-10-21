@@ -612,6 +612,16 @@ fn every_state_reads_distinctly() {
             failure: SshMaintenanceFailure::Refused(MaintenanceRefusal::Unsupported),
             kind: Some(SubmittedKind::Service(Action::Stop)),
         },
+        RemoteOperationState::Failed {
+            failure: SshMaintenanceFailure::NotRetained,
+            kind: None,
+        },
+        // A step refused because this client still holds an unresolved original is a different
+        // state: it reports that original and offers the step that settles it.
+        RemoteOperationState::Failed {
+            failure: SshMaintenanceFailure::NotRetained,
+            kind: Some(SubmittedKind::Service(Action::Stop)),
+        },
     ];
 
     let presented: Vec<_> = states
@@ -955,4 +965,77 @@ fn an_unsaved_operation_record_says_what_it_leaves_the_person_with() {
             );
         }
     }
+}
+
+/// The owner refuses a second submission while it still holds an original it has not settled,
+/// rather than overwriting the one record that could still say what that original did. The
+/// refused step reached no computer, and the earlier original is still outstanding, so the row
+/// says both and keeps the step that settles the original. Only a refusal holding nothing
+/// submitted promises the machine is unchanged.
+#[test]
+fn a_refused_submission_reports_the_original_that_refused_it() {
+    let state = |kind| RemoteOperationState::Failed {
+        failure: SshMaintenanceFailure::NotRetained,
+        kind,
+    };
+    let holding = state(Some(SubmittedKind::Service(Action::Stop)));
+
+    let held = service("penguin", &holding);
+    assert_eq!(
+        held.actions,
+        vec![RemoteAction::CheckAgain],
+        "a refused submission must keep the step that settles the original it refused for"
+    );
+    assert!(
+        held.explanation
+            .contains("didn\u{2019}t ask for the step you just chose"),
+        "the row must say the refused step reached nothing, got {:?}",
+        held.explanation
+    );
+    assert!(
+        held.explanation
+            .contains("still following the stop it already sent to penguin"),
+        "the row must say which earlier original it is still following, got {:?}",
+        held.explanation
+    );
+    assert!(
+        held.explanation
+            .contains("can\u{2019}t tell whether penguin stopped its server"),
+        "the row must say the earlier original is unsettled, got {:?}",
+        held.explanation
+    );
+    assert!(
+        held.explanation
+            .contains("isn\u{2019}t asked to do it again"),
+        "the row must promise the earlier original is not repeated, got {:?}",
+        held.explanation
+    );
+    assert!(
+        !held.explanation.contains("Nothing changed on penguin"),
+        "the row must not promise the machine is unchanged while an original it sent is still \
+         outstanding, got {:?}",
+        held.explanation
+    );
+    reads_as_one_sentence(&held.explanation);
+    assert_eq!(
+        update("penguin", &state(Some(SubmittedKind::Return))).actions,
+        vec![RemoteAction::Finish],
+        "the update journey keeps its own resolving step"
+    );
+    // The step settles the original without reaching the connection, so a removed connection
+    // holding this state stays listed with it.
+    assert_eq!(
+        removed_actions(&holding, MaintenanceRow::Service),
+        vec![RemoteAction::CheckAgain],
+        "a removed connection's record must stay reachable"
+    );
+
+    // Nothing was submitted, so the refusal is the whole story and a read is the only step.
+    let bare = service("penguin", &state(None));
+    assert_eq!(bare.actions, vec![RemoteAction::Check]);
+    assert!(bare.explanation.contains("Nothing changed on penguin"));
+    assert_ne!(
+        bare.state_selector, held.state_selector,
+        "a refusal holding an original reads differently from one holding none"
+    );
 }
