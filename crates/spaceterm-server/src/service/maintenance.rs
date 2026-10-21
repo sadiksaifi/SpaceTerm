@@ -912,12 +912,23 @@ impl Original {
             status: self.status,
         }
     }
-    /// Only an unresolved original still needs resolving, so only it may never be evicted.
+    /// Whether resolving this original again can still change what it reports.
     fn resolved(&self) -> bool {
         !matches!(
             self.resolution,
             OperationResolution::Admitted | OperationResolution::Unconfirmed
         )
+    }
+
+    /// Whether this original may be evicted to retain a newer one.
+    ///
+    /// An admitted original is still underway, so resolving it can still settle it and it is
+    /// never evicted. An unconfirmed one is already as settled as this service can make it:
+    /// resolving it returns the same answer forever. Keeping it would let a handful of lost
+    /// results fill the journal and refuse every later operation for this account, so it gives
+    /// way once there is no resolved original left to drop.
+    fn evictable(&self) -> bool {
+        self.resolved() || self.resolution == OperationResolution::Unconfirmed
     }
 }
 
@@ -973,8 +984,15 @@ impl Journal {
             Some(index) => self.originals[index] = original,
             None => {
                 while self.originals.len() >= RETAINED {
-                    let Some(index) = self.originals.iter().position(Original::resolved) else {
-                        // Every retained original still needs resolving, so none may be evicted.
+                    // A resolved original goes first, so an unconfirmed one keeps its place for
+                    // as long as this journal can afford it.
+                    let Some(index) = self
+                        .originals
+                        .iter()
+                        .position(Original::resolved)
+                        .or_else(|| self.originals.iter().position(Original::evictable))
+                    else {
+                        // Every retained original is still underway, so none may be evicted.
                         return Err(ServerError::StorageUnavailable);
                     };
                     self.originals.remove(index);
@@ -1591,8 +1609,12 @@ mod tests {
         });
     }
 
+    /// An unconfirmed original is as settled as this service can make it: resolving it returns
+    /// the same answer forever. Keeping every one of them would let a handful of lost results
+    /// fill the journal and refuse every later operation for this account, so the oldest gives
+    /// way and the newer original is still performed.
     #[test]
-    fn an_unresolved_original_is_never_evicted_for_a_newer_one() {
+    fn an_unconfirmed_original_gives_way_rather_than_refusing_every_later_one() {
         with_service(false, true, |harness| {
             for index in 0..RETAINED {
                 let operation = [index as u8 + 1; 32];
@@ -1603,21 +1625,31 @@ mod tests {
                 assert_eq!(outcome.resolution, OperationResolution::Unconfirmed);
             }
             assert_eq!(harness.manager.starts.load(Ordering::SeqCst), RETAINED);
-            assert_eq!(
-                harness.exchange(&Request::Start {
-                    operation: [200; 32]
-                }),
-                Reply::Refused {
-                    refusal: MaintenanceRefusal::StorageUnavailable
-                }
+
+            let newer = [200; 32];
+            assert!(
+                matches!(
+                    harness.exchange(&Request::Start { operation: newer }),
+                    Reply::Outcome(outcome) if outcome.operation == newer
+                ),
+                "a journal of unconfirmed originals must not refuse every later operation"
             );
-            assert_eq!(harness.manager.starts.load(Ordering::SeqCst), RETAINED);
-            for index in 0..RETAINED {
+
+            assert_eq!(harness.manager.starts.load(Ordering::SeqCst), RETAINED + 1);
+            assert_eq!(
+                harness.exchange(&Request::Resolve { operation: [1; 32] }),
+                Reply::Unknown,
+                "the oldest unconfirmed original gave way"
+            );
+            for index in 1..RETAINED {
                 let operation = [index as u8 + 1; 32];
-                assert!(matches!(
-                    harness.exchange(&Request::Start { operation }),
-                    Reply::Outcome(outcome) if outcome.operation == operation
-                ));
+                assert!(
+                    matches!(
+                        harness.exchange(&Request::Resolve { operation }),
+                        Reply::Outcome(outcome) if outcome.operation == operation
+                    ),
+                    "every original the journal still holds answers about itself"
+                );
             }
         });
     }
