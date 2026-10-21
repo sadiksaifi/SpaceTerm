@@ -933,6 +933,16 @@ fn failed(
             vec![RemoteAction::Check],
             false,
         ),
+        SshMaintenanceFailure::NotRetained => (
+            Some("Not Started"),
+            selector(row, "not-retained"),
+            failure(format!(
+                "SpaceTerm couldn\u{2019}t save what it needs to follow this operation, so it \
+                 didn\u{2019}t ask {machine} to do it. Nothing changed on {machine}."
+            )),
+            vec![RemoteAction::Check],
+            false,
+        ),
     }
 }
 

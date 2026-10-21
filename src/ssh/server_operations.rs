@@ -70,7 +70,6 @@ pub(crate) enum RemoteOperationState {
         handle: RemoteOperationHandle,
         request: RemoteMaintenanceRequest,
         change: Box<PreparedChange>,
-        facts: Box<MaintenanceFacts>,
     },
     /// A submitted original whose outcome the service validated, awaiting acknowledgement. The
     /// outcome is the retained form, so a result read before relaunch presents what it presented
@@ -82,10 +81,7 @@ pub(crate) enum RemoteOperationState {
     },
     /// A submitted original whose result could not be validated. It stays unconfirmed until
     /// resolving the same original settles it; nothing here repeats it.
-    Unconfirmed {
-        handle: RemoteOperationHandle,
-        kind: SubmittedKind,
-    },
+    Unconfirmed { kind: SubmittedKind },
     /// Continuation needs the person. Background work never asks on its own.
     NeedsPerson {
         reason: InteractionReason,
@@ -338,16 +334,6 @@ impl SshServerOperations {
         let observer: Arc<dyn SshConnectionRemovals> = owner.clone();
         owner.inner.connections.watch_removals(&observer);
         owner
-    }
-
-    /// The last failure reading or writing the retained records. No remote exchange explains it,
-    /// so the Servers surface reports it on its own.
-    pub(crate) fn persistence_error(&self) -> Option<SshIntentStoreError> {
-        self.inner
-            .state
-            .lock()
-            .ok()
-            .and_then(|state| state.persistence_error)
     }
 
     /// Finds the entry that admits new work for `destination`, creating it when the registry
@@ -1100,7 +1086,6 @@ fn describe(
                     handle,
                     request,
                     change: Box::new(change),
-                    facts: Box::new(facts),
                 };
             });
         }
@@ -1130,11 +1115,12 @@ fn submit(
         Ok(client) => client,
         Err(error) => {
             note_storage(inner, Some(error));
+            // Nothing reached the other computer, and the fault is this client's storage.
             return unsubmitted(
                 inner,
                 destination,
                 generation,
-                SshMaintenanceFailure::Unavailable(UnavailableKind::ServiceUnavailable),
+                SshMaintenanceFailure::NotRetained,
             );
         }
     };
@@ -1152,11 +1138,12 @@ fn submit(
         Ok(false) => return,
         Err(error) => {
             note_storage(inner, Some(error));
+            // Nothing reached the other computer, and the fault is this client's storage.
             return unsubmitted(
                 inner,
                 destination,
                 generation,
-                SshMaintenanceFailure::Unavailable(UnavailableKind::ServiceUnavailable),
+                SshMaintenanceFailure::NotRetained,
             );
         }
     }
@@ -1326,7 +1313,6 @@ fn settle(
     failure: SshMaintenanceFailure,
 ) {
     update(inner, destination, generation, |state, index| {
-        let handle = next_handle(state);
         let entry = &mut state.entries[index];
         entry.running = false;
         let kind = entry
@@ -1342,7 +1328,7 @@ fn settle(
         };
         entry.state = match (failure, kind) {
             (SshMaintenanceFailure::Cancelled | SshMaintenanceFailure::Unconfirmed, Some(kind)) => {
-                RemoteOperationState::Unconfirmed { handle, kind }
+                RemoteOperationState::Unconfirmed { kind }
             }
             (SshMaintenanceFailure::NeedsPerson(reason), kind) => {
                 RemoteOperationState::NeedsPerson { reason, kind }
@@ -1646,6 +1632,8 @@ mod tests {
         write_fails: Mutex<Option<SshIntentStoreError>>,
         loads: AtomicUsize,
         writes: AtomicUsize,
+        /// How many writes the store refused, so a test can wait for a refused attempt.
+        refused: AtomicUsize,
     }
     impl RemoteOperationStore for Records {
         fn load(&self) -> Result<Vec<RetainedRemoteOperation>, SshIntentStoreError> {
@@ -1669,6 +1657,7 @@ mod tests {
         fn retire(&self, operation: [u8; 32]) -> Result<(), SshIntentStoreError> {
             if let Some(error) = (*self.fails.lock().unwrap()).or(*self.write_fails.lock().unwrap())
             {
+                self.refused.fetch_add(1, Ordering::SeqCst);
                 return Err(error);
             }
             self.operations
@@ -2188,7 +2177,7 @@ mod tests {
         // A retirement that cannot be saved leaves the result waiting.
         *records.fails.lock().unwrap() = Some(SshIntentStoreError::Unavailable);
         owner.acknowledge(handle);
-        eventually(|| owner.persistence_error() == Some(SshIntentStoreError::Unavailable));
+        eventually(|| records.refused.load(Ordering::SeqCst) == 1);
         assert!(matches!(
             owner.state(&destination()),
             RemoteOperationState::Resolved { .. }
@@ -2359,9 +2348,7 @@ mod tests {
             matches!(
                 owner.state(&destination()),
                 RemoteOperationState::Failed {
-                    failure: SshMaintenanceFailure::Unavailable(
-                        UnavailableKind::ServiceUnavailable
-                    ),
+                    failure: SshMaintenanceFailure::NotRetained,
                     kind: None,
                 }
             )
@@ -2369,10 +2356,6 @@ mod tests {
         assert!(
             script.applied.lock().unwrap().is_empty(),
             "an operation this client could not resolve is never dispatched"
-        );
-        assert_eq!(
-            owner.persistence_error(),
-            Some(SshIntentStoreError::Unavailable)
         );
 
         // Storage works again, so the same request can be confirmed and dispatched.

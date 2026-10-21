@@ -217,7 +217,6 @@ impl RemoteServerOperations for ScriptedOperations {
                 handle: self.next_handle(),
                 request,
                 change: Box::new(change(running, !running)),
-                facts: Box::new(facts(status(true, running, !running))),
             },
         );
     }
@@ -685,7 +684,6 @@ fn an_unconfirmed_operation_is_resolved_and_never_repeated(cx: &mut TestAppConte
     servers.operations.set(
         "penguin",
         RemoteOperationState::Unconfirmed {
-            handle: RemoteOperationHandle(5),
             kind: SubmittedKind::Service(Action::Stop),
         },
     );
@@ -786,7 +784,6 @@ fn removing_the_connection_removes_its_maintenance_rows(cx: &mut TestAppContext)
     servers.operations.set(
         "penguin",
         RemoteOperationState::Unconfirmed {
-            handle: RemoteOperationHandle(6),
             kind: SubmittedKind::Service(Action::Stop),
         },
     );
@@ -816,7 +813,6 @@ fn a_removed_connection_keeps_what_spaceterm_still_has_to_say(cx: &mut TestAppCo
     servers.operations.set(
         "penguin",
         RemoteOperationState::Unconfirmed {
-            handle: RemoteOperationHandle(7),
             kind: SubmittedKind::Service(Action::Stop),
         },
     );
@@ -997,7 +993,7 @@ fn an_observed_server_offers_its_steps_before_any_maintenance_read(cx: &mut Test
 fn the_detail_presents_the_controls_above_the_facts(cx: &mut TestAppContext) {
     let servers = open_maintenance(cx);
 
-    let mut top = |cx: &mut VisualTestContext, selector: &str| {
+    let top = |cx: &mut VisualTestContext, selector: &str| {
         let selector: &'static str = Box::leak(selector.to_owned().into_boxed_str());
         cx.debug_bounds(selector)
             .unwrap_or_else(|| panic!("{selector} was not rendered"))

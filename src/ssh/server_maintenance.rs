@@ -133,6 +133,9 @@ pub(crate) enum SshMaintenanceFailure {
     Unconfirmed,
     /// This service holds no record of the submitted original.
     Forgotten,
+    /// This client could not retain the record that keeps the operation resolvable, so it never
+    /// submitted it. Nothing reached the other computer.
+    NotRetained,
 }
 
 /// The remote maintenance exchanges, run on a worker and never on a render thread.

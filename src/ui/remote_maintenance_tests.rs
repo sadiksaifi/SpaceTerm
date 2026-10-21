@@ -202,7 +202,6 @@ fn only_the_row_that_owns_an_operation_reports_its_progress() {
 #[test]
 fn an_unconfirmed_operation_only_asks_the_machine_again() {
     let lost = RemoteOperationState::Unconfirmed {
-        handle: RemoteOperationHandle(1),
         kind: SubmittedKind::Service(Action::Stop),
     };
 
@@ -223,7 +222,6 @@ fn an_unconfirmed_operation_only_asks_the_machine_again() {
     );
 
     let lost_update = RemoteOperationState::Unconfirmed {
-        handle: RemoteOperationHandle(2),
         kind: SubmittedKind::Update {
             candidate: "b".repeat(64),
         },
@@ -341,11 +339,9 @@ fn an_unfinished_update_is_finished_without_asking_again() {
 fn a_removed_connection_offers_only_resolving_and_acknowledging() {
     let states = [
         RemoteOperationState::Unconfirmed {
-            handle: RemoteOperationHandle(5),
             kind: SubmittedKind::Service(Action::Stop),
         },
         RemoteOperationState::Unconfirmed {
-            handle: RemoteOperationHandle(6),
             kind: SubmittedKind::Return,
         },
         RemoteOperationState::Resolved {
@@ -440,10 +436,8 @@ fn every_state_reads_distinctly() {
             handle: RemoteOperationHandle(9),
             request: RemoteMaintenanceRequest::Service(Action::Stop),
             change: Box::new(change(true, false)),
-            facts: Box::new(facts(status(true, true, false))),
         },
         RemoteOperationState::Unconfirmed {
-            handle: RemoteOperationHandle(10),
             kind: SubmittedKind::Service(Action::Stop),
         },
         RemoteOperationState::NeedsPerson {
