@@ -23,6 +23,7 @@ use super::SettingsWindow;
 use super::catalog::SettingsRowId;
 use super::server_list::ServerChoice;
 use crate::domain::SshDestination;
+use crate::local_server::service::maintenance::PreparedChange;
 use crate::ssh::server_operations::{
     RemoteMaintenanceRequest, RemoteOperationHandle, RemoteOperationState, RemoteServerOperations,
 };
@@ -273,7 +274,7 @@ impl SettingsWindow {
         destination: SshDestination,
         handle: RemoteOperationHandle,
         request: RemoteMaintenanceRequest,
-        change: &crate::local_server::service::maintenance::PreparedChange,
+        change: &PreparedChange,
         cx: &mut Context<Self>,
     ) {
         let Some(rows) = self.ssh_maintenance.as_ref() else {

@@ -248,6 +248,7 @@ pub(crate) fn menu_actions(
     state: &RemoteOperationState,
     asked: Option<RemoteMaintenanceRequest>,
 ) -> Vec<RemoteAction> {
+    // Only the steps are read here, so the machine the menu names is not needed.
     let offered = |row| present("", state, row, asked).actions;
     menu_order(
         offered(MaintenanceRow::Service)
@@ -278,6 +279,7 @@ pub(crate) fn removed_actions(
     state: &RemoteOperationState,
     row: MaintenanceRow,
 ) -> Vec<RemoteAction> {
+    // Only the steps are read here, so the machine the entry names is not needed.
     present("", state, row, None)
         .actions
         .into_iter()
@@ -345,17 +347,22 @@ fn bystander(
     state: &RemoteOperationState,
     row: MaintenanceRow,
 ) -> MaintenancePresentation {
-    let (explanation, tone) = match (row, state) {
-        (_, RemoteOperationState::Working { .. } | RemoteOperationState::Described { .. }) => {
+    // The row that reports the operation names its own step, so this one names only where to
+    // find it.
+    let reported = match row {
+        MaintenanceRow::Service => "Server update",
+        MaintenanceRow::Update => "Background service",
+    };
+    let (explanation, tone) = match state {
+        RemoteOperationState::Working { .. } | RemoteOperationState::Described { .. } => {
             guidance(format!("An operation on {machine} is underway."))
         }
-        (MaintenanceRow::Service, _) => guidance(format!(
-            "An update you confirmed on {machine} hasn\u{2019}t finished. Choose Finish Update \
-             under Server update."
+        RemoteOperationState::Resolved { .. } => guidance(format!(
+            "SpaceTerm has the result of an operation on {machine} under {reported}."
         )),
-        (MaintenanceRow::Update, _) => guidance(format!(
-            "An operation you confirmed on {machine} hasn\u{2019}t finished. Choose Check Again \
-             under Background service."
+        _ => guidance(format!(
+            "An operation you asked for on {machine} hasn\u{2019}t finished. {reported} says \
+             what SpaceTerm knows about it."
         )),
     };
     MaintenancePresentation {
@@ -685,7 +692,10 @@ fn submitted(
     row: MaintenanceRow,
 ) -> MaintenancePresentation {
     let (badge, state_selector, (explanation, tone), actions, working) = match state {
-        RemoteOperationState::Unread | RemoteOperationState::Read(_) => unreachable!(),
+        // Only the states a submitted operation reaches arrive here; a read belongs to the rows.
+        RemoteOperationState::Unread | RemoteOperationState::Read(_) => {
+            return unread(machine, row);
+        }
         RemoteOperationState::Working {
             phase,
             kind,
