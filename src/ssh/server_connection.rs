@@ -1401,15 +1401,50 @@ mod tests {
         assert!(intents.active(&destination()).is_none());
         assert_eq!(backend.calls.load(Ordering::SeqCst), 1);
     }
+    /// Holds each connect attempt until the test releases that attempt by its order.
+    struct Gated {
+        attempts: AtomicUsize,
+        released: [std::sync::atomic::AtomicBool; 2],
+    }
+    impl SshConnectBackend for Gated {
+        fn connect(
+            &self,
+            _: &SshDestination,
+            _: ConnectMode,
+            _: Option<&SshServerContinuity>,
+            _: &SshCancellationToken,
+            _: &ConnectProgress<'_>,
+        ) -> Result<ConnectedSshServer, SshConnectFailure> {
+            let attempt = self.attempts.fetch_add(1, Ordering::SeqCst);
+            while !self.released[attempt].load(Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            Ok(connected())
+        }
+        fn observe(
+            &self,
+            _: &SshDestination,
+            _: Option<&SshServerContinuity>,
+            _: &SshCancellationToken,
+            _: &ConnectProgress<'_>,
+        ) -> Result<SshServerObservation, SshConnectFailure> {
+            Err(SshConnectFailure::Stopped)
+        }
+    }
     #[test]
     fn a_removed_connections_late_result_never_reaches_its_re_added_successor() {
-        let (registry, _, _, entered, release) = setup(false);
+        let backend = Arc::new(Gated {
+            attempts: AtomicUsize::new(0),
+            released: Default::default(),
+        });
+        let registry = SshServerConnections::new(backend.clone(), Arc::new(Intents::default()));
         registry.connect(destination());
-        entered.recv_blocking().unwrap();
+        eventually(|| backend.attempts.load(Ordering::SeqCst) == 1);
         registry.remove(&destination());
         registry.connect(destination());
-        entered.recv_blocking().unwrap();
-        release.send_blocking(()).unwrap();
+        eventually(|| backend.attempts.load(Ordering::SeqCst) == 2);
+        // Only the removed attempt succeeds now.
+        backend.released[0].store(true, Ordering::SeqCst);
         std::thread::sleep(Duration::from_millis(100));
         assert!(
             matches!(
@@ -1419,7 +1454,7 @@ mod tests {
             "the removed attempt's success must not present the re-added connection"
         );
         assert!(registry.server(&destination()).is_none());
-        release.send_blocking(()).unwrap();
+        backend.released[1].store(true, Ordering::SeqCst);
         eventually(|| {
             matches!(
                 registry.status(&destination()),
