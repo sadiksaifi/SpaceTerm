@@ -307,9 +307,23 @@ struct State {
     next_generation: u64,
     /// This client's retained identifier, read once and kept for the process.
     client: Option<[u8; 32]>,
-    loaded: bool,
-    loading: bool,
+    recovery: Recovery,
     persistence_error: Option<SshIntentStoreError>,
+}
+
+/// How far this client has got with reading the originals it retained.
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum Recovery {
+    /// They have not been read. A read that could not reach storage leaves them here, because
+    /// reaching no storage says nothing about them.
+    Unread,
+    /// One read is underway. Only it may take the retained originals into entries.
+    Reading,
+    /// They were read and every original in them taken into an entry.
+    Read,
+    /// They cannot be read as records. That is a durable fact about the file, so reading it
+    /// again would find the same thing.
+    Malformed,
 }
 
 struct Inner {
@@ -351,8 +365,7 @@ impl SshServerOperations {
                     next_handle: 0,
                     next_generation: 0,
                     client: None,
-                    loaded: false,
-                    loading: false,
+                    recovery: Recovery::Unread,
                     persistence_error: None,
                 }),
                 backend,
@@ -773,14 +786,8 @@ impl RemoteServerOperations for SshServerOperations {
     }
 
     fn resume_retained(&self) {
-        {
-            let Ok(mut state) = self.inner.state.lock() else {
-                return;
-            };
-            if state.loaded || state.loading {
-                return;
-            }
-            state.loading = true;
+        if !claim_recovery(&self.inner) {
+            return;
         }
         let owner = Self {
             inner: Arc::clone(&self.inner),
@@ -790,35 +797,23 @@ impl RemoteServerOperations for SshServerOperations {
             .spawn(move || owner.load())
             .is_err()
         {
-            if let Ok(mut state) = self.inner.state.lock() {
-                state.loading = false;
-            }
-            note_storage(
-                &Arc::downgrade(&self.inner),
-                Some(SshIntentStoreError::Unavailable),
-            );
+            release_recovery(&self.inner, SshIntentStoreError::Unavailable);
         }
     }
 }
 
 impl SshServerOperations {
     /// Reads the retained records once a Workspace Window exists and continues each unresolved
-    /// original quietly. A read that fails is tried again by a later call.
+    /// original quietly. Only the claimed read runs this.
     fn load(&self) {
         let records = match self.inner.store.load() {
             Ok(records) => records,
-            Err(error) => {
-                if let Ok(mut state) = self.inner.state.lock() {
-                    state.loading = false;
-                }
-                note_storage(&Arc::downgrade(&self.inner), Some(error));
-                return;
-            }
+            Err(error) => return release_recovery(&self.inner, error),
         };
         if let Ok(mut state) = self.inner.state.lock() {
-            state.loaded = true;
-            state.loading = false;
+            state.recovery = Recovery::Read;
         }
+        note_storage(&Arc::downgrade(&self.inner), None);
         for record in records {
             let admitted = {
                 let Ok(mut state) = self.inner.state.lock() else {
@@ -833,9 +828,56 @@ impl SshServerOperations {
     }
 }
 
+/// Claims the one read of the retained records. It refuses while a read runs, once they have
+/// been read, and for records that cannot be read at all.
+fn claim_recovery(owner: &Arc<Inner>) -> bool {
+    let Ok(mut state) = owner.state.lock() else {
+        return false;
+    };
+    if state.recovery != Recovery::Unread {
+        return false;
+    }
+    state.recovery = Recovery::Reading;
+    true
+}
+
+/// Gives back a claimed read that took no record, and reports why. Reaching no storage leaves
+/// the records unread, so a later read tries them again; records that cannot be read are a
+/// durable fact about the file, so nothing reads them again.
+fn release_recovery(owner: &Arc<Inner>, error: SshIntentStoreError) {
+    if let Ok(mut state) = owner.state.lock() {
+        state.recovery = match error {
+            SshIntentStoreError::Unavailable => Recovery::Unread,
+            SshIntentStoreError::Malformed => Recovery::Malformed,
+        };
+    }
+    note_storage(&Arc::downgrade(owner), Some(error));
+}
+
+/// Reads the retained records after a storage interaction landed, when an earlier read reached
+/// no storage. Storage answering is the one fact that read was missing.
+fn recover(owner: &Arc<Inner>) {
+    if claim_recovery(owner) {
+        SshServerOperations {
+            inner: Arc::clone(owner),
+        }
+        .load();
+    }
+}
+
 /// Takes one retained record into an entry and admits its quiet continuation. A record with a
 /// validated outcome needs no exchange: it waits for acknowledgement.
 fn adopt(state: &mut State, record: RetainedRemoteOperation) -> Option<(Admitted, [u8; 32])> {
+    // An original an entry already holds is not taken again: two entries holding one original
+    // would let retiring either leave the other to write its retired record back.
+    if state.entries.iter().any(|entry| {
+        entry
+            .submitted
+            .as_ref()
+            .is_some_and(|submitted| submitted.operation == record.operation)
+    }) {
+        return None;
+    }
     // One live entry presents a destination, so a record for a connection still saved joins it.
     let existing = state.entries.iter().position(|entry| {
         entry.destination == record.target.destination
@@ -1028,6 +1070,9 @@ fn note_storage(inner: &Weak<Inner>, error: Option<SshIntentStoreError>) {
     {
         state.persistence_error = error;
         notify(&mut state);
+    }
+    if error.is_none() {
+        recover(&owner);
     }
 }
 
@@ -2373,6 +2418,68 @@ mod tests {
         eventually_says("a write that lands withdraws the notice", || {
             owner.persistence_error().is_none()
         });
+    }
+
+    /// A read that could not reach storage says nothing about the retained records, so the
+    /// originals this client submitted are still resumed once storage answers, without
+    /// relaunching SpaceTerm.
+    #[test]
+    fn a_record_read_that_could_not_reach_storage_is_tried_again() {
+        let script = Arc::new(Script::default());
+        let records = Arc::new(Records::default());
+        records.operations.lock().unwrap().push(record(None));
+        *records.fails.lock().unwrap() = Some(SshIntentStoreError::Unavailable);
+        let (connections, _) = connected();
+        let owner = SshServerOperations::new(script.clone(), records.clone(), connections);
+        owner.resume_retained();
+        eventually_says("the failed read is reported", || {
+            owner.persistence_error() == Some(SshIntentStoreError::Unavailable)
+        });
+        assert!(
+            script.resolved.lock().unwrap().is_empty(),
+            "a read that reached no records resumes nothing"
+        );
+
+        // Storage answers again, and the person starts the server, which writes its own record.
+        *records.fails.lock().unwrap() = None;
+        script
+            .applies(Ok(outcome(OperationResolution::Completed)))
+            .resolves(Ok(outcome(OperationResolution::Completed)));
+        owner.start(&destination());
+        eventually_says(
+            "the original retained before the failed read is resumed without relaunching",
+            || {
+                script
+                    .resolved
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|(operation, _)| *operation == [7; 32])
+            },
+        );
+    }
+
+    /// Records that cannot be read are a durable fact about the file: reading them again finds
+    /// the same thing, so this client stops reading them.
+    #[test]
+    fn records_that_cannot_be_read_are_not_read_again() {
+        let script = Arc::new(Script::default());
+        let records = Arc::new(Records::default());
+        *records.fails.lock().unwrap() = Some(SshIntentStoreError::Malformed);
+        let (connections, _) = registry();
+        let owner = SshServerOperations::new(script.clone(), records.clone(), connections);
+        owner.resume_retained();
+        eventually_says("the damaged records are reported", || {
+            owner.persistence_error() == Some(SshIntentStoreError::Malformed)
+        });
+
+        owner.resume_retained();
+        std::thread::sleep(Duration::from_millis(30));
+        assert_eq!(
+            records.loads.load(Ordering::SeqCst),
+            1,
+            "damaged records are read once, not again on every later attempt"
+        );
     }
 
     /// A retirement takes the entry it is about, so an exchange admitted at the same moment
