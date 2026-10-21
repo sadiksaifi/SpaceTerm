@@ -772,4 +772,99 @@ mod tests {
             "reusing an authenticated route asks for no authority"
         );
     }
+
+    /// A dispatched operation whose reply is lost stays unconfirmed. Only resolving the same
+    /// original can settle it, so nothing here dispatches a second time.
+    #[gpui::test]
+    fn a_lost_reply_after_dispatch_is_unconfirmed_and_never_repeated(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let discovered = serde_json::to_vec(&discovery(SERVER)).unwrap();
+        let account = answering(move |command| {
+            if command.contains("ssh-discover") {
+                (discovered.clone(), 0)
+            } else {
+                // The service admitted the operation and answered nothing readable.
+                (Vec::new(), 1)
+            }
+        });
+        let (backend, _) = backend(cx.background_executor.clone(), account.clone(), artifacts());
+        let confirmation = "2".repeat(64);
+        let submission = OperationSubmission {
+            operation: OPERATION,
+            kind: SubmittedKind::Service(Action::Stop),
+            confirmation: Some(confirmation.clone()),
+        };
+
+        let outcome = backend.apply(
+            &target(bound()),
+            &submission,
+            &SshCancellationToken::default(),
+            &silent,
+        );
+
+        assert!(matches!(outcome, Err(SshMaintenanceFailure::Unconfirmed)));
+        assert_eq!(
+            account.ran("ssh-maintain"),
+            1,
+            "an admitted operation is never dispatched again"
+        );
+        let dispatched = account
+            .commands()
+            .into_iter()
+            .find(|command| command.contains("ssh-maintain"))
+            .unwrap();
+        assert!(
+            dispatched.contains(&format!(
+                "apply {} stop {confirmation}",
+                "04".repeat(32)
+            )),
+            "{dispatched}"
+        );
+    }
+
+    /// A destructive submission without the confirmation the service issued for one exact
+    /// observation is not a submission this contract admits, so nothing is dispatched.
+    #[gpui::test]
+    fn an_unconfirmed_destructive_submission_dispatches_nothing(cx: &mut gpui::TestAppContext) {
+        let account = account(discovery(SERVER), Reply::Outcome(completed()));
+        let (backend, _) = backend(cx.background_executor.clone(), account.clone(), artifacts());
+        for submission in [
+            OperationSubmission {
+                operation: OPERATION,
+                kind: SubmittedKind::Service(Action::Uninstall),
+                confirmation: None,
+            },
+            OperationSubmission {
+                operation: OPERATION,
+                kind: SubmittedKind::Update {
+                    candidate: "3".repeat(64),
+                },
+                confirmation: None,
+            },
+            OperationSubmission {
+                operation: OPERATION,
+                kind: SubmittedKind::Return,
+                confirmation: None,
+            },
+            // Start ends no work and carries no confirmation, so one it did not ask for is wrong.
+            OperationSubmission {
+                operation: OPERATION,
+                kind: SubmittedKind::Start,
+                confirmation: Some("2".repeat(64)),
+            },
+        ] {
+            let outcome = backend.apply(
+                &target(bound()),
+                &submission,
+                &SshCancellationToken::default(),
+                &silent,
+            );
+            assert!(matches!(
+                outcome,
+                Err(SshMaintenanceFailure::Refused(MaintenanceRefusal::Protocol))
+            ));
+        }
+        assert!(account.commands().is_empty(), "nothing reached the account");
+    }
 }
