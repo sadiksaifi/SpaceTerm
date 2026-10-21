@@ -1114,6 +1114,12 @@ fn observation(
                     server: discovery.server.unwrap_or([0; 32]),
                 })?;
             }
+            let observed = SshServerContinuity {
+                route,
+                account: discovery.account,
+                build: discovery.build.clone(),
+                server: discovery.server.unwrap_or([0; 32]),
+            };
             if discovery.stopped {
                 return Err(SshConnectFailure::Stopped);
             }
@@ -1124,6 +1130,7 @@ fn observation(
                     ServerAvailability::NotRunning
                 },
                 facts: facts(&discovery)?,
+                continuity: (observed.server != [0; 32]).then_some(observed),
             })
         }
         Discovery::Missing { target, .. } => {
@@ -1137,6 +1144,7 @@ fn observation(
                     version: None,
                     starts_automatically: false,
                 },
+                continuity: None,
             })
         }
     }

@@ -92,6 +92,10 @@ pub(crate) struct SshServerFacts {
 pub(crate) struct SshServerObservation {
     pub availability: ServerAvailability,
     pub facts: SshServerFacts,
+    /// The route, account, application identity and server this observation signed in to and
+    /// validated. `None` when the account has no server to identify. An operation submitted
+    /// afterwards binds it, so a check is enough to maintain a server without connecting to it.
+    pub continuity: Option<SshServerContinuity>,
 }
 
 #[derive(Clone)]
@@ -598,6 +602,11 @@ impl SshServerConnections {
                                 RemoteConnectionStatus::Inactive
                             } else {
                                 entry.last_facts = Some(observation.facts.clone());
+                                // The check signed in and validated the account's server, so an
+                                // operation submitted afterwards can bind what it saw.
+                                if let Some(continuity) = observation.continuity {
+                                    entry.continuity = Some(continuity);
+                                }
                                 RemoteConnectionStatus::Checked {
                                     availability: observation.availability,
                                     facts: observation.facts,
@@ -649,7 +658,11 @@ impl SshServerConnections {
         if cancelling {
             self.inner.backend.disconnect(destination);
         } else {
-            entry.continuity = None;
+            // The identity the account last admitted is a fact about the saved connection, like
+            // the facts the row keeps. Disconnect ends the live capability, not the record of
+            // which computer, account and server this destination reached. Keeping it lets a
+            // later connection refuse a destination that now reaches another one, and lets the
+            // operations this client submitted bind the server they were sent to.
             self.inner.backend.forget(destination);
         }
         if saves {
@@ -1275,6 +1288,7 @@ mod tests {
                 Ok(SshServerObservation {
                     availability: ServerAvailability::NotRunning,
                     facts: facts(),
+                    continuity: Some(pin()),
                 })
             }
         }
@@ -1363,6 +1377,70 @@ mod tests {
         assert_eq!(registry.connections().len(), 1, "it stays saved");
         assert_eq!(backend.disconnects.load(Ordering::SeqCst), 1);
     }
+    /// Check Status signs in and validates the account's server, so a server the person only
+    /// checked can be maintained without connecting to it and presenting its Workspaces.
+    #[test]
+    fn a_check_records_the_identity_it_validated() {
+        let (registry, _, intents, _, _) = setup(false);
+        let mut unknown = saved(false);
+        unknown.continuity = None;
+        intents.records.lock().unwrap().push(unknown);
+        registry.resume_retained();
+        eventually(|| registry.connections().len() == 1);
+        assert_eq!(
+            registry.continuity(&destination()),
+            None,
+            "a saved connection nothing has reached names no server"
+        );
+
+        registry.check(&destination());
+
+        eventually(|| {
+            matches!(
+                registry.status(&destination()),
+                RemoteConnectionStatus::Checked { .. }
+            )
+        });
+        assert_eq!(
+            registry.continuity(&destination()),
+            Some(pin()),
+            "a check leaves the identity an operation binds"
+        );
+    }
+
+    /// Disconnect ends the live connection, not the record of which computer, account and
+    /// server the destination reached. A server the person disconnected from can still be
+    /// maintained, and a later connection still verifies the identity it admitted before.
+    #[test]
+    fn the_admitted_identity_outlives_disconnect() {
+        let (registry, _, intents, entered, release) = setup(false);
+        registry.connect(destination());
+        entered.recv_blocking().unwrap();
+        release.send_blocking(()).unwrap();
+        eventually(|| registry.continuity(&destination()).is_some());
+        let admitted = registry.continuity(&destination()).unwrap();
+
+        registry.disconnect(&destination());
+
+        eventually(|| intents.active(&destination()) == Some(false));
+        assert_eq!(
+            registry.continuity(&destination()),
+            Some(admitted.clone()),
+            "the identity the account admitted survives Disconnect"
+        );
+        assert_eq!(
+            intents
+                .records
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|record| record.destination == destination())
+                .and_then(|record| record.continuity.clone()),
+            Some(admitted),
+            "a saved connection reopens knowing the server it reached"
+        );
+    }
+
     #[test]
     fn the_latest_observed_facts_outlive_disconnect_until_removal() {
         let (registry, _, intents, entered, release) = setup(false);

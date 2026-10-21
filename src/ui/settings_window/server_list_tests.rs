@@ -105,6 +105,7 @@ impl SshConnectBackend for Computers {
     ) -> Result<SshServerObservation, SshConnectFailure> {
         self.observations.fetch_add(1, Ordering::SeqCst);
         Ok(SshServerObservation {
+            continuity: None,
             availability: ServerAvailability::Running,
             facts: facts(),
         })

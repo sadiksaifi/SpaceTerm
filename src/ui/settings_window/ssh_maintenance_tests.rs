@@ -358,6 +358,7 @@ impl SshConnectBackend for Observed {
         _: &ConnectProgress<'_>,
     ) -> Result<SshServerObservation, SshConnectFailure> {
         Ok(SshServerObservation {
+            continuity: None,
             availability: ServerAvailability::Running,
             facts: SshServerFacts {
                 platform: ("Example OS".to_owned(), "x86_64".to_owned()),
