@@ -12635,14 +12635,21 @@ fn a_machine_headings_menu_should_disconnect_only_its_server(cx: &mut TestAppCon
 /// An operations owner whose state the test sets and whose calls it counts. Nothing here reaches
 /// a computer.
 struct ScriptedMaintenance {
+    /// The destination this owner holds its one entry for.
+    destination: crate::domain::SshDestination,
     state: Mutex<crate::ssh::server_operations::RemoteOperationState>,
     calls: Mutex<Vec<String>>,
     changes: (async_channel::Sender<()>, async_channel::Receiver<()>),
 }
 
 impl ScriptedMaintenance {
-    fn new(state: crate::ssh::server_operations::RemoteOperationState) -> std::sync::Arc<Self> {
+    fn new(
+        destination: &str,
+        state: crate::ssh::server_operations::RemoteOperationState,
+    ) -> std::sync::Arc<Self> {
         std::sync::Arc::new(Self {
+            destination: crate::domain::SshDestination::new(destination.to_owned())
+                .expect("destination"),
             state: Mutex::new(state),
             calls: Mutex::new(Vec::new()),
             changes: async_channel::unbounded(),
@@ -12663,8 +12670,15 @@ impl crate::ssh::server_operations::RemoteServerOperations for ScriptedMaintenan
         self.changes.1.clone()
     }
 
+    /// Every entry this owner holds, which is the one its state reports. A real owner derives
+    /// one destination's state from these entries, so a double that answered with a state it
+    /// listed no entry for would let a surface read one and not the other.
     fn entries(&self) -> Vec<crate::ssh::server_operations::RemoteOperationEntry> {
-        Vec::new()
+        vec![crate::ssh::server_operations::RemoteOperationEntry {
+            destination: self.destination.clone(),
+            removed: false,
+            state: self.state.lock().unwrap().clone(),
+        }]
     }
 
     fn state(
@@ -12762,7 +12776,7 @@ fn remote_maintenance(
     std::sync::Arc<ScriptedMaintenance>,
     crate::ssh::server_connection::SshServerConnections,
 ) {
-    let operations = ScriptedMaintenance::new(state);
+    let operations = ScriptedMaintenance::new(destination, state);
     let owner = std::sync::Arc::clone(&operations)
         as std::sync::Arc<dyn crate::ssh::server_operations::RemoteServerOperations>;
     cx.update(|_, cx| crate::ssh::server_operations::install(owner, cx));

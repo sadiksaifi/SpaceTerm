@@ -1,7 +1,6 @@
 //! The selected SSH server's maintenance rows, driven through a scripted operations owner whose
 //! every call the test counts.
 
-use std::collections::BTreeMap;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -95,10 +94,20 @@ fn facts(status: ServiceStatus) -> MaintenanceFacts {
     }
 }
 
+/// One entry the scripted owner holds: the destination it binds, whether its saved connection
+/// was removed, and the state it reports.
+struct Held {
+    destination: String,
+    removed: bool,
+    state: RemoteOperationState,
+}
+
 /// An owner whose states the test sets and whose calls it counts. Describing a change answers
 /// with the exact change it describes, and only confirming it resolves an operation.
 struct ScriptedOperations {
-    states: Mutex<BTreeMap<String, (bool, RemoteOperationState)>>,
+    /// Every entry the owner holds, in the order it reports them. One destination can hold more
+    /// than one, so the order within a destination is the order the surface must read.
+    states: Mutex<Vec<Held>>,
     calls: Mutex<Vec<Call>>,
     /// What a confirmed change resolves to.
     /// What resolving an unresolved original answers.
@@ -113,7 +122,7 @@ struct ScriptedOperations {
 impl ScriptedOperations {
     fn new() -> Arc<Self> {
         Arc::new(Self {
-            states: Mutex::new(BTreeMap::new()),
+            states: Mutex::new(Vec::new()),
             calls: Mutex::new(Vec::new()),
             resumed: Mutex::new(None),
             changes: async_channel::unbounded(),
@@ -126,16 +135,47 @@ impl ScriptedOperations {
     /// outlives every later state of the operation it holds.
     fn set(&self, destination: &str, state: RemoteOperationState) {
         let mut states = self.states.lock().expect("states");
-        let removed = states.get(destination).is_some_and(|(removed, _)| *removed);
-        states.insert(destination.to_owned(), (removed, state));
+        match states
+            .iter_mut()
+            .find(|held| held.destination == destination)
+        {
+            Some(held) => held.state = state,
+            None => states.push(Held {
+                destination: destination.to_owned(),
+                removed: false,
+                state,
+            }),
+        }
+        drop(states);
+        self.publish();
+    }
+
+    /// Holds more than one entry for one server, in the order the owner reports them. A read of
+    /// the retained records that failed and later landed leaves the owner following the original
+    /// it recovered beside the one the person submitted while it could not read, so the first
+    /// here is the one the person's last step produced.
+    fn hold(&self, destination: &str, held: impl IntoIterator<Item = RemoteOperationState>) {
+        let mut states = self.states.lock().expect("states");
+        states.retain(|held| held.destination != destination);
+        states.extend(held.into_iter().map(|state| Held {
+            destination: destination.to_owned(),
+            removed: false,
+            state,
+        }));
         drop(states);
         self.publish();
     }
 
     /// Keeps the state of a server whose saved connection the person removed.
     fn remove(&self, destination: &str) {
-        if let Some(entry) = self.states.lock().expect("states").get_mut(destination) {
-            entry.0 = true;
+        for held in self
+            .states
+            .lock()
+            .expect("states")
+            .iter_mut()
+            .filter(|held| held.destination == destination)
+        {
+            held.removed = true;
         }
         self.publish();
     }
@@ -174,10 +214,15 @@ impl ScriptedOperations {
     }
 
     fn described(&self, destination: &str) -> Option<RemoteMaintenanceRequest> {
-        match self.state(&SshDestination::new(destination.to_owned()).expect("destination")) {
-            RemoteOperationState::Described { request, .. } => Some(request),
-            _ => None,
-        }
+        self.states
+            .lock()
+            .expect("states")
+            .iter()
+            .filter(|held| held.destination == destination)
+            .find_map(|held| match held.state {
+                RemoteOperationState::Described { request, .. } => Some(request),
+                _ => None,
+            })
     }
 }
 
@@ -198,24 +243,37 @@ impl RemoteServerOperations for ScriptedOperations {
     }
 
     fn entries(&self) -> Vec<RemoteOperationEntry> {
-        self.states
+        let mut entries: Vec<_> = self
+            .states
             .lock()
             .expect("states")
             .iter()
-            .map(|(destination, (removed, state))| RemoteOperationEntry {
-                destination: SshDestination::new(destination.clone()).expect("destination"),
-                removed: *removed,
-                state: state.clone(),
+            .map(|held| RemoteOperationEntry {
+                destination: SshDestination::new(held.destination.clone())
+                    .expect("destination"),
+                removed: held.removed,
+                state: held.state.clone(),
             })
-            .collect()
+            .collect();
+        // The owner orders by destination and keeps the order it holds one destination's entries
+        // in, so the surface reads them as the owner reports them.
+        entries.sort_by(|left, right| left.destination.cmp(&right.destination));
+        entries
     }
 
+    /// The owner answers with one entry's state, preferring a connection still saved. It is the
+    /// one reader that cannot see a second entry for the same destination.
     fn state(&self, destination: &SshDestination) -> RemoteOperationState {
-        self.states
-            .lock()
-            .expect("states")
-            .get(destination.as_str())
-            .map_or(RemoteOperationState::Unread, |(_, state)| state.clone())
+        let states = self.states.lock().expect("states");
+        states
+            .iter()
+            .find(|held| held.destination == destination.as_str() && !held.removed)
+            .or_else(|| {
+                states
+                    .iter()
+                    .find(|held| held.destination == destination.as_str())
+            })
+            .map_or(RemoteOperationState::Unread, |held| held.state.clone())
     }
 
     fn refresh(&self, destination: &SshDestination) {
@@ -246,9 +304,9 @@ impl RemoteServerOperations for ScriptedOperations {
             .lock()
             .expect("states")
             .iter()
-            .filter_map(|(destination, (_, state))| match state {
+            .filter_map(|held| match held.state {
                 RemoteOperationState::Described { request, .. } => {
-                    Some((destination.clone(), *request))
+                    Some((held.destination.clone(), request))
                 }
                 _ => None,
             })
@@ -319,12 +377,12 @@ impl RemoteServerOperations for ScriptedOperations {
             .lock()
             .expect("states")
             .iter()
-            .filter_map(|(destination, (_, state))| match state {
+            .filter_map(|held| match &held.state {
                 RemoteOperationState::Resolved {
-                    handle: held,
+                    handle: named,
                     outcome,
                     ..
-                } if *held == handle => Some((destination.clone(), outcome.clone())),
+                } if *named == handle => Some((held.destination.clone(), outcome.clone())),
                 _ => None,
             })
             .collect();
@@ -345,6 +403,8 @@ impl RemoteServerOperations for ScriptedOperations {
         }
     }
 
+    /// Retires the first entry in the named listing that holds an original a Discard settles, as
+    /// the owner does, so a second entry for the same destination keeps its own original.
     fn discard(&self, destination: &SshDestination, scope: RemoteOperationScope) {
         self.record(Call::Discard(scope));
         if !self.retires() {
@@ -352,17 +412,47 @@ impl RemoteServerOperations for ScriptedOperations {
             self.publish();
             return;
         }
-        self.set(destination.as_str(), RemoteOperationState::Unread);
+        let mut states = self.states.lock().expect("states");
+        if let Some(held) = states.iter_mut().find(|held| {
+            held.destination == destination.as_str()
+                && held.removed == (scope == RemoteOperationScope::Removed)
+                && matches!(
+                    held.state,
+                    RemoteOperationState::Paused { .. } | RemoteOperationState::Unconfirmed { .. }
+                )
+        }) {
+            held.state = RemoteOperationState::Unread;
+        }
+        drop(states);
+        self.publish();
     }
 
     fn dismiss(&self, destination: &SshDestination, scope: RemoteOperationScope) {
         self.record(Call::Dismiss(scope));
         // Nothing was retained for an original the service has no record of, so the entry goes
         // whether or not this client can write.
-        self.states
-            .lock()
-            .expect("states")
-            .remove(destination.as_str());
+        let removed = scope == RemoteOperationScope::Removed;
+        let mut states = self.states.lock().expect("states");
+        if let Some(index) = states.iter().position(|held| {
+            held.destination == destination.as_str()
+                && held.removed == removed
+                && matches!(
+                    held.state,
+                    RemoteOperationState::Failed {
+                        failure: SshMaintenanceFailure::Forgotten,
+                        ..
+                    }
+                )
+        }) {
+            // A removed connection's entry exists only to carry this last word, so clearing it
+            // ends the listing. A saved connection keeps its row with nothing read.
+            if removed {
+                states.remove(index);
+            } else {
+                states[index].state = RemoteOperationState::Unread;
+            }
+        }
+        drop(states);
         self.publish();
     }
 
@@ -1394,5 +1484,131 @@ fn a_removed_connections_unknown_original_ends_with_a_word(cx: &mut TestAppConte
     assert!(
         !rendered("settings-row-removed-server-operations", servers.cx),
         "the cleared entry leaves nothing to say about a removed connection"
+    );
+}
+
+/// A read of this client's retained records that fails and later lands leaves the owner holding
+/// two originals on one machine, neither a duplicate of the other. A row reports one state, so
+/// the row reports one of the originals and names the one it has still to report. The step it
+/// offers settles the original it reports, and the one that was waiting takes its place, so
+/// nothing a person asked for on that machine is unreachable.
+#[gpui::test]
+fn a_second_original_on_one_machine_is_named_and_settled_in_turn(cx: &mut TestAppContext) {
+    let servers = open_maintenance(cx);
+    // The owner holds the original the person just submitted first, and the one its retry
+    // recovered second. Both belong to the connection still saved.
+    servers.operations.hold(
+        "penguin",
+        [
+            RemoteOperationState::Unconfirmed {
+                kind: SubmittedKind::Service(Action::Stop),
+            },
+            paused(SubmittedKind::Service(Action::Restart)),
+        ],
+    );
+    servers.cx.run_until_parked();
+
+    assert!(
+        announces("penguin: Unconfirmed", servers.cx),
+        "the row reports the original the person's last step produced"
+    );
+    assert!(says(
+        "didn\u{2019}t hear whether penguin stopped its server",
+        servers.cx
+    ));
+    assert!(
+        says(
+            "You asked for one more operation on penguin: the restart.",
+            servers.cx
+        ),
+        "the row must name the original it has still to report"
+    );
+    assert!(
+        says("reports that one here once this one is settled", servers.cx),
+        "the row must say the named original gets its turn"
+    );
+
+    // Discard settles the original the row reports, and asks about that one alone.
+    click("settings-ssh-server-maintenance-discard", servers.cx);
+
+    assert!(says(
+        "Discard the stop SpaceTerm sent to penguin?",
+        servers.cx
+    ));
+
+    click_modal("settings-ssh-server-discard-confirm", servers.cx);
+
+    assert_eq!(
+        servers.operations.calls(),
+        vec![Call::Discard(RemoteOperationScope::Saved)],
+        "the row settles the one original it reports"
+    );
+    assert!(
+        says("can\u{2019}t ask it about the restart it already sent", servers.cx),
+        "the original that was waiting takes the settled one's place in the row"
+    );
+    assert!(
+        !says("one more operation on penguin", servers.cx),
+        "nothing is left waiting once the machine holds one original"
+    );
+}
+
+/// A removed connection holding two originals is listed once. Two entries under one machine name
+/// would give the person two sets of steps with nothing to tell them apart, so the entry reports
+/// one original, names the other, and its step settles the one it reports.
+#[gpui::test]
+fn a_removed_connection_with_two_originals_is_listed_once(cx: &mut TestAppContext) {
+    let servers = open_maintenance(cx);
+    let destination = SshDestination::new("penguin".to_owned()).expect("destination");
+    servers.operations.hold(
+        "penguin",
+        [
+            paused(SubmittedKind::Service(Action::Stop)),
+            RemoteOperationState::Unconfirmed {
+                kind: SubmittedKind::Service(Action::Uninstall),
+            },
+        ],
+    );
+    servers.cx.run_until_parked();
+    servers.connections.remove(&destination);
+    servers.operations.remove("penguin");
+    servers.cx.run_until_parked();
+
+    assert!(rendered("settings-removed-server-operations-penguin", servers.cx));
+    assert!(says(
+        "can\u{2019}t ask it about the stop it already sent",
+        servers.cx
+    ));
+    assert!(
+        says(
+            "You asked for one more operation on penguin: the removal.",
+            servers.cx
+        ),
+        "the entry must name the original it has still to report"
+    );
+
+    click(
+        "settings-ssh-server-maintenance-discard-penguin",
+        servers.cx,
+    );
+
+    assert!(
+        says("Discard the stop SpaceTerm sent to penguin?", servers.cx),
+        "the step settles the original the entry reports"
+    );
+
+    click_modal("settings-ssh-server-discard-confirm", servers.cx);
+
+    assert_eq!(
+        servers.operations.calls(),
+        vec![Call::Discard(RemoteOperationScope::Removed)]
+    );
+    assert!(
+        says("didn\u{2019}t hear whether penguin removed its service", servers.cx),
+        "the original that was waiting takes the settled one's place"
+    );
+    assert!(
+        !says("one more operation on penguin", servers.cx),
+        "nothing is left waiting once the entry holds one original"
     );
 }

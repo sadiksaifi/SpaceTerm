@@ -262,6 +262,107 @@ pub(crate) fn present(
     }
 }
 
+/// One row's presentation for a machine the owner holds more than one state for.
+///
+/// `states` are that machine's states in the order the owner reports them. One machine can hold
+/// two originals, neither a duplicate of the other: a read of this client's retained records
+/// that failed and later landed leaves it following the original it recovered beside the one the
+/// person submitted while it could not read.
+///
+/// A row reports one state: one badge, one caption, one set of steps. Two badges and two sets of
+/// steps in one row would leave the person unable to tell which step settles which operation,
+/// and a step here retires the only record that could still say what a remote server did. So the
+/// row reports one original and names the ones it has still to report, every step it offers acts
+/// on the one it reports, and settling that one brings the next to the row.
+pub(crate) fn present_machine(
+    machine: &str,
+    states: &[RemoteOperationState],
+    row: MaintenanceRow,
+    asked: Option<RemoteMaintenanceRequest>,
+) -> MaintenancePresentation {
+    // Each original is reported by the row whose journey the person asked for, as a single
+    // original is, so two originals on different journeys each read in their own row.
+    let owned: Vec<&RemoteOperationState> = states
+        .iter()
+        .filter(|state| owning_row(state, asked) == row)
+        .collect();
+    // The original the person is waiting on is what the row reports. A read is the fact a row
+    // reports when nothing is submitted, so it gives way to an original that is.
+    let reported = owned
+        .iter()
+        .position(|state| held(state).is_some())
+        .or_else(|| (!owned.is_empty()).then_some(0));
+    let Some(reported) = reported else {
+        let state = states.first().unwrap_or(&RemoteOperationState::Unread);
+        return present(machine, state, row, asked);
+    };
+    let waiting: Vec<&SubmittedKind> = owned
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| *index != reported)
+        .filter_map(|(_, state)| held(state))
+        .collect();
+    let presentation = present(machine, owned[reported], row, asked);
+    if waiting.is_empty() {
+        return presentation;
+    }
+    MaintenancePresentation {
+        explanation: SharedString::from(format!(
+            "{} {}",
+            presentation.explanation,
+            awaiting(machine, &waiting)
+        )),
+        ..presentation
+    }
+}
+
+/// The original one state holds: the operation this client sent and has not retired. A read or a
+/// description holds none, because nothing was sent for it.
+fn held(state: &RemoteOperationState) -> Option<&SubmittedKind> {
+    match state {
+        RemoteOperationState::Working { kind, .. }
+        | RemoteOperationState::NeedsPerson { kind, .. }
+        | RemoteOperationState::Paused { kind, .. }
+        | RemoteOperationState::Failed { kind, .. } => kind.as_ref(),
+        RemoteOperationState::Resolved { kind, .. }
+        | RemoteOperationState::Unconfirmed { kind } => Some(kind),
+        RemoteOperationState::Unread
+        | RemoteOperationState::Read(_)
+        | RemoteOperationState::Described { .. } => None,
+    }
+}
+
+/// Names the originals a row has still to report and promises each one its turn. It claims
+/// nothing about what any of them did, which this client cannot know until the machine answers.
+fn awaiting(machine: &str, kinds: &[&SubmittedKind]) -> String {
+    let named = listed(kinds);
+    if kinds.len() == 1 {
+        format!(
+            "You asked for one more operation on {machine}: {named}. SpaceTerm reports that one \
+             here once this one is settled."
+        )
+    } else {
+        format!(
+            "You asked for {} more operations on {machine}: {named}. SpaceTerm reports them here \
+             one at a time, as each one is settled.",
+            kinds.len()
+        )
+    }
+}
+
+/// Names the operations a row has still to report, as a sentence lists them.
+fn listed(kinds: &[&SubmittedKind]) -> String {
+    let named: Vec<_> = kinds
+        .iter()
+        .map(|kind| format!("the {}", sent(kind)))
+        .collect();
+    match named.split_last() {
+        Some((last, [])) => last.clone(),
+        Some((last, earlier)) => format!("{} and {last}", earlier.join(", ")),
+        None => String::new(),
+    }
+}
+
 /// The steps a machine heading's menu offers, in menu order. The menu carries the operations
 /// themselves, never the everyday acknowledgement or the cancellation an inline row offers.
 pub(crate) fn menu_actions(
@@ -1505,8 +1606,36 @@ fn forgotten_final_word(machine: &str) -> MaintenancePresentation {
 /// soon as its operation is settled.
 pub(crate) fn removed_presentation(
     machine: &str,
-    state: &RemoteOperationState,
+    states: &[RemoteOperationState],
 ) -> Option<MaintenancePresentation> {
+    // A removed connection can hold two originals for the same reason a saved one can, so its
+    // entry reports one of them and names the ones it has still to report.
+    let (reported, presentation) = states
+        .iter()
+        .enumerate()
+        .find_map(|(index, state)| Some((index, removed_word(machine, state)?)))?;
+    let waiting: Vec<&SubmittedKind> = states
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| *index != reported)
+        .filter_map(|(_, state)| held(state))
+        .collect();
+    if waiting.is_empty() {
+        return Some(presentation);
+    }
+    Some(MaintenancePresentation {
+        explanation: SharedString::from(format!(
+            "{} {}",
+            presentation.explanation,
+            awaiting(machine, &waiting)
+        )),
+        ..presentation
+    })
+}
+
+/// What one state of a removed connection's server still has to tell the person, and the one step
+/// it offers.
+fn removed_word(machine: &str, state: &RemoteOperationState) -> Option<MaintenancePresentation> {
     // An original the service has no record of can never be resolved, and this client retains
     // nothing for it, so the entry ends there instead of offering a step that would reach the
     // connection the person removed.

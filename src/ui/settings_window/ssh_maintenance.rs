@@ -33,7 +33,7 @@ use crate::ui::appearance::{ChromeAppearance, gpui_color};
 use crate::ui::chrome_typography::{ChromeTextStyleExt as _, TextRole};
 use crate::ui::remote_maintenance::{
     MaintenanceConfirmation, MaintenancePresentation, MaintenanceRow, RemoteAction,
-    discarded_operation, observed, present, removed_presentation,
+    discarded_operation, observed, present_machine, removed_presentation,
 };
 use crate::ui::sidebar_window::form::{CaptionTone, badge};
 
@@ -131,22 +131,50 @@ impl SshMaintenanceRows {
 }
 
 impl SettingsWindow {
-    /// The selected SSH server and its maintenance state, from the owner's snapshot.
-    fn selected_maintenance(&self) -> Option<(SshDestination, RemoteOperationState)> {
+    /// The states the owner holds for `destination` in one listing, in the order it reports
+    /// them. One destination can hold more than one: a read of this client's retained records
+    /// that failed and later landed leaves it following the original it recovered beside the one
+    /// the person submitted while it could not read. Reading them all is what keeps either one
+    /// reachable.
+    fn maintenance_states(
+        &self,
+        destination: &SshDestination,
+        scope: RemoteOperationScope,
+    ) -> Vec<RemoteOperationState> {
+        let Some(rows) = self.ssh_maintenance.as_ref() else {
+            return Vec::new();
+        };
+        rows.operations
+            .entries()
+            .into_iter()
+            .filter(|entry| {
+                entry.destination == *destination
+                    && entry.removed == (scope == RemoteOperationScope::Removed)
+            })
+            .map(|entry| entry.state)
+            .collect()
+    }
+
+    /// The selected SSH server and every maintenance state the owner holds for it, from its
+    /// snapshot.
+    fn selected_maintenance(&self) -> Option<(SshDestination, Vec<RemoteOperationState>)> {
         let Some(ServerChoice::Ssh(destination)) = self.selected_server() else {
             return None;
         };
-        let rows = self.ssh_maintenance.as_ref()?;
-        let state = rows.operations.state(&destination);
-        Some((destination, state))
+        // A window with no maintenance rows presents none.
+        self.ssh_maintenance.as_ref()?;
+        let states = self.maintenance_states(&destination, RemoteOperationScope::Saved);
+        Some((destination, states))
     }
 
     fn maintenance_presentation(&self, row: MaintenanceRow) -> Option<MaintenancePresentation> {
-        let (destination, state) = self.selected_maintenance()?;
+        let (destination, states) = self.selected_maintenance()?;
         let rows = self.ssh_maintenance.as_ref()?;
         // Before any maintenance read, what the connection already observed decides what the row
         // offers, so a connected server can be stopped without a reading step first.
-        if matches!(state, RemoteOperationState::Unread)
+        if states
+            .iter()
+            .all(|state| matches!(state, RemoteOperationState::Unread))
             && let Some(connections) = self.ssh_servers.as_ref()
             && let Some(presentation) = observed(
                 destination.as_str(),
@@ -161,7 +189,12 @@ impl SettingsWindow {
             .as_ref()
             .filter(|(asked, _)| *asked == destination)
             .map(|(_, request)| *request);
-        Some(present(destination.as_str(), &state, row, asked))
+        Some(present_machine(
+            destination.as_str(),
+            &states,
+            row,
+            asked,
+        ))
     }
 
     /// The caption under one maintenance row, or `None` for another row.
@@ -206,19 +239,22 @@ impl SettingsWindow {
             return;
         }
         let operations = Arc::clone(&rows.operations);
-        let state = operations.state(&destination);
+        // The step acts on the original the row reports, which is the first of the machine's
+        // states holding one, so a second original on that machine is never settled by a step
+        // offered for the first.
+        let states = self.maintenance_states(&destination, RemoteOperationScope::Saved);
         match action {
             RemoteAction::Check => operations.refresh(&destination),
             RemoteAction::Start => operations.start(&destination),
             RemoteAction::Cancel => operations.cancel(&destination),
             RemoteAction::Finish | RemoteAction::CheckAgain => operations.resume(&destination),
             RemoteAction::Acknowledge => {
-                if let Some(handle) = acknowledged(&state) {
+                if let Some(handle) = acknowledged(&states) {
                     operations.acknowledge(handle);
                 }
             }
             RemoteAction::Discard => {
-                if let Some(kind) = discarded_operation(&state) {
+                if let Some(kind) = states.iter().find_map(discarded_operation) {
                     self.confirm_discard(destination, kind, RemoteOperationScope::Saved, cx);
                 }
             }
@@ -228,12 +264,13 @@ impl SettingsWindow {
                 };
                 // A change already described is the change the person reviews. Describing again
                 // would ask the machine a second time for the same answer.
-                if let RemoteOperationState::Described {
+                if let Some(RemoteOperationState::Described {
                     handle,
                     request: described,
                     change,
-                    ..
-                } = &state
+                }) = states
+                    .iter()
+                    .find(|state| matches!(state, RemoteOperationState::Described { .. }))
                 {
                     if *described == request {
                         self.confirm_maintenance(destination, *handle, request, change, cx);
@@ -261,24 +298,31 @@ impl SettingsWindow {
         let Some((destination, request)) = rows.asked.clone() else {
             return;
         };
-        match rows.operations.state(&destination) {
+        let states = self.maintenance_states(&destination, RemoteOperationScope::Saved);
+        let described = states.iter().find_map(|state| match state {
             RemoteOperationState::Described {
                 handle,
                 request: described,
                 change,
-                ..
-            } if described == request => {
-                if let Some(rows) = self.ssh_maintenance.as_mut() {
-                    rows.asked = None;
-                }
-                self.confirm_maintenance(destination, handle, request, &change, cx);
+            } if *described == request => Some((*handle, change.clone())),
+            _ => None,
+        });
+        if let Some((handle, change)) = described {
+            if let Some(rows) = self.ssh_maintenance.as_mut() {
+                rows.asked = None;
             }
-            RemoteOperationState::Working { .. } => {}
-            _ => {
-                if let Some(rows) = self.ssh_maintenance.as_mut() {
-                    rows.asked = None;
-                }
-            }
+            self.confirm_maintenance(destination, handle, request, &change, cx);
+            return;
+        }
+        // A description still underway is the one this window asked for, so it keeps waiting.
+        if states
+            .iter()
+            .any(|state| matches!(state, RemoteOperationState::Working { .. }))
+        {
+            return;
+        }
+        if let Some(rows) = self.ssh_maintenance.as_mut() {
+            rows.asked = None;
         }
     }
 
@@ -543,18 +587,26 @@ pub(super) const REMOVED_GUIDANCE: &str = "You removed these saved connections. 
 
 impl SettingsWindow {
     /// The servers whose saved connection was removed and that still have something to say,
-    /// ordered by destination as the owner reports them.
+    /// ordered by destination as the owner reports them. One destination is listed once, with
+    /// every state the owner holds for it, so two originals on one removed connection read as
+    /// one entry whose step settles one of them at a time.
     fn removed_operations(&self) -> Vec<(SshDestination, MaintenancePresentation)> {
         let Some(rows) = self.ssh_maintenance.as_ref() else {
             return Vec::new();
         };
-        rows.operations
-            .entries()
+        let mut listed: Vec<SshDestination> = Vec::new();
+        for entry in rows.operations.entries() {
+            if entry.removed && !listed.contains(&entry.destination) {
+                listed.push(entry.destination);
+            }
+        }
+        listed
             .into_iter()
-            .filter(|entry| entry.removed)
-            .filter_map(|entry| {
-                let presentation = removed_presentation(entry.destination.as_str(), &entry.state)?;
-                Some((entry.destination, presentation))
+            .filter_map(|destination| {
+                let states =
+                    self.maintenance_states(&destination, RemoteOperationScope::Removed);
+                let presentation = removed_presentation(destination.as_str(), &states)?;
+                Some((destination, presentation))
             })
             .collect()
     }
@@ -588,16 +640,19 @@ impl SettingsWindow {
             return;
         }
         let operations = Arc::clone(&rows.operations);
-        let state = operations.state(&destination);
+        // The step settles the original this entry reports, which the removed listing's own
+        // states name. The selected server's states are a different listing and a different
+        // original, so neither settles the other's.
+        let states = self.maintenance_states(&destination, RemoteOperationScope::Removed);
         match action {
             RemoteAction::Finish | RemoteAction::CheckAgain => operations.resume(&destination),
             RemoteAction::Acknowledge => {
-                if let Some(handle) = acknowledged(&state) {
+                if let Some(handle) = acknowledged(&states) {
                     operations.acknowledge(handle);
                 }
             }
             RemoteAction::Discard => {
-                if let Some(kind) = discarded_operation(&state) {
+                if let Some(kind) = states.iter().find_map(discarded_operation) {
                     self.confirm_discard(destination, kind, RemoteOperationScope::Removed, cx);
                 }
             }
@@ -715,12 +770,13 @@ pub(super) const fn maintenance_row(row: SettingsRowId) -> Option<MaintenanceRow
     }
 }
 
-/// The validated result an acknowledgement retires, if the state holds one.
-const fn acknowledged(state: &RemoteOperationState) -> Option<RemoteOperationHandle> {
-    match state {
+/// The validated result an acknowledgement retires: the one the row reports, which is the first
+/// of the listing's states holding one.
+fn acknowledged(states: &[RemoteOperationState]) -> Option<RemoteOperationHandle> {
+    states.iter().find_map(|state| match state {
         RemoteOperationState::Resolved { handle, .. } => Some(*handle),
         _ => None,
-    }
+    })
 }
 
 #[cfg(test)]

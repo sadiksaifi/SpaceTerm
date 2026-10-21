@@ -488,7 +488,7 @@ fn a_removed_connection_reports_the_work_it_is_doing() {
         cancellable: true,
     };
 
-    let presentation = removed_presentation("penguin", &working)
+    let presentation = removed_presentation("penguin", std::slice::from_ref(&working))
         .expect("a removed connection resolving its original still has something to say");
     assert!(presentation.working, "the entry reports the work underway");
     assert!(
@@ -500,7 +500,9 @@ fn a_removed_connection_reports_the_work_it_is_doing() {
     assert!(
         removed_presentation(
             "penguin",
-            &RemoteOperationState::Read(Box::new(facts(status(true, true, false))))
+            &[RemoteOperationState::Read(Box::new(facts(status(
+                true, true, false
+            ))))]
         )
         .is_none(),
         "a removed connection with nothing left to tell is not listed"
@@ -881,7 +883,7 @@ fn a_removed_connection_whose_original_is_unknown_reaches_a_final_word() {
         kind: None,
     };
 
-    let presentation = removed_presentation("penguin", &forgotten)
+    let presentation = removed_presentation("penguin", std::slice::from_ref(&forgotten))
         .expect("a removed connection's unknown original still has a final word");
     assert_eq!(
         presentation
@@ -1038,4 +1040,188 @@ fn a_refused_submission_reports_the_original_that_refused_it() {
         bare.state_selector, held.state_selector,
         "a refusal holding an original reads differently from one holding none"
     );
+}
+
+/// Two originals on one machine, neither a duplicate of the other, each reach the person. Each is
+/// reported by the row whose journey it belongs to, so a service original and an update original
+/// read in their own rows and neither row claims the other's.
+#[test]
+fn two_originals_on_different_journeys_each_read_in_their_own_row() {
+    let states = [
+        RemoteOperationState::Unconfirmed {
+            kind: SubmittedKind::Service(Action::Stop),
+        },
+        RemoteOperationState::Unconfirmed {
+            kind: SubmittedKind::Return,
+        },
+    ];
+
+    let service = present_machine("penguin", &states, MaintenanceRow::Service, None);
+    assert_eq!(service.actions, vec![RemoteAction::CheckAgain, RemoteAction::Discard]);
+    assert!(
+        service
+            .explanation
+            .contains("whether penguin stopped its server"),
+        "got {:?}",
+        service.explanation
+    );
+    assert!(
+        !service.explanation.contains("You asked for"),
+        "the update journey reports its own original, so the service row names none, got {:?}",
+        service.explanation
+    );
+    let update = present_machine("penguin", &states, MaintenanceRow::Update, None);
+    assert_eq!(update.actions, vec![RemoteAction::Finish, RemoteAction::Discard]);
+    assert!(
+        update
+            .explanation
+            .contains("returned its server to the previous version"),
+        "got {:?}",
+        update.explanation
+    );
+    reads_as_one_sentence(&service.explanation);
+    reads_as_one_sentence(&update.explanation);
+}
+
+/// A row reports one original, so a machine whose originals belong to one journey reads one of
+/// them and names the rest. The sentence counts them, names each, and promises each a turn.
+#[test]
+fn a_row_names_every_original_it_has_still_to_report() {
+    let one = [
+        RemoteOperationState::Unconfirmed {
+            kind: SubmittedKind::Service(Action::Stop),
+        },
+        RemoteOperationState::Unconfirmed {
+            kind: SubmittedKind::Service(Action::Restart),
+        },
+    ];
+
+    let service = present_machine("penguin", &one, MaintenanceRow::Service, None);
+    assert_eq!(
+        service.state,
+        Some("Unconfirmed"),
+        "the row reports the first original the owner holds"
+    );
+    assert!(
+        service
+            .explanation
+            .contains("You asked for one more operation on penguin: the restart."),
+        "got {:?}",
+        service.explanation
+    );
+    assert!(
+        service
+            .explanation
+            .contains("reports that one here once this one is settled"),
+        "got {:?}",
+        service.explanation
+    );
+    reads_as_one_sentence(&service.explanation);
+
+    let several = [
+        RemoteOperationState::Unconfirmed {
+            kind: SubmittedKind::Service(Action::Stop),
+        },
+        RemoteOperationState::Unconfirmed {
+            kind: SubmittedKind::Service(Action::Restart),
+        },
+        RemoteOperationState::Unconfirmed {
+            kind: SubmittedKind::Service(Action::Uninstall),
+        },
+    ];
+
+    let service = present_machine("penguin", &several, MaintenanceRow::Service, None);
+    assert!(
+        service
+            .explanation
+            .contains("You asked for 2 more operations on penguin: the restart and the removal."),
+        "got {:?}",
+        service.explanation
+    );
+    assert!(
+        service
+            .explanation
+            .contains("reports them here one at a time, as each one is settled"),
+        "got {:?}",
+        service.explanation
+    );
+    reads_as_one_sentence(&service.explanation);
+}
+
+/// A read is the fact a row reports when nothing is submitted, so an original the person is
+/// waiting on takes the row from it instead of being hidden behind it. One state alone reads as
+/// it always has.
+#[test]
+fn an_original_takes_the_row_from_a_read_that_asked_for_nothing() {
+    let read = RemoteOperationState::Read(Box::new(facts(status(true, true, false))));
+    let unconfirmed = RemoteOperationState::Unconfirmed {
+        kind: SubmittedKind::Service(Action::Stop),
+    };
+    let states = [read.clone(), unconfirmed.clone()];
+
+    let service = present_machine("penguin", &states, MaintenanceRow::Service, None);
+    assert_eq!(service.state, Some("Unconfirmed"));
+    assert_eq!(
+        service.actions,
+        vec![RemoteAction::CheckAgain, RemoteAction::Discard]
+    );
+    assert!(
+        !service.explanation.contains("You asked for"),
+        "a read asked for nothing, so the row names no operation waiting, got {:?}",
+        service.explanation
+    );
+
+    for state in [read, unconfirmed] {
+        for row in [MaintenanceRow::Service, MaintenanceRow::Update] {
+            assert_eq!(
+                present_machine("penguin", std::slice::from_ref(&state), row, None),
+                present("penguin", &state, row, None),
+                "one state alone must read as it always has"
+            );
+        }
+    }
+    assert_eq!(
+        present_machine("penguin", &[], MaintenanceRow::Service, None),
+        present("penguin", &RemoteOperationState::Unread, MaintenanceRow::Service, None),
+        "a machine the owner holds nothing for reads as unread"
+    );
+}
+
+/// A removed connection can hold two originals for the same reason a saved one can, so its entry
+/// reports one of them and names the other. The step it offers settles the one it reports.
+#[test]
+fn a_removed_connection_names_the_second_original_it_holds() {
+    let states = [
+        RemoteOperationState::Unconfirmed {
+            kind: SubmittedKind::Service(Action::Stop),
+        },
+        RemoteOperationState::Resolved {
+            handle: RemoteOperationHandle(7),
+            kind: SubmittedKind::Service(Action::Restart),
+            outcome: completed(Some(status(true, true, false))),
+        },
+    ];
+
+    let presentation = removed_presentation("penguin", &states)
+        .expect("a removed connection with two originals still has something to say");
+    assert_eq!(
+        presentation.actions,
+        vec![RemoteAction::CheckAgain, RemoteAction::Discard],
+        "the entry offers the steps that settle the original it reports"
+    );
+    assert!(
+        presentation
+            .explanation
+            .contains("whether penguin stopped its server"),
+        "got {:?}",
+        presentation.explanation
+    );
+    assert!(
+        presentation
+            .explanation
+            .contains("You asked for one more operation on penguin: the restart."),
+        "the entry must name the original it has still to report, got {:?}",
+        presentation.explanation
+    );
+    reads_as_one_sentence(&presentation.explanation);
 }
