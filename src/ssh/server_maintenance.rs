@@ -646,6 +646,16 @@ mod tests {
             status: None,
         }
     }
+    fn change() -> PreparedChange {
+        PreparedChange {
+            confirmation: "2".repeat(64),
+            running: true,
+            stopped: false,
+            startup: ServiceStartup::AtBoot,
+            previous: None,
+            candidate: None,
+        }
+    }
     fn encoded(reply: &Reply) -> Vec<u8> {
         serde_json::to_vec(reply).unwrap()
     }
@@ -866,5 +876,109 @@ mod tests {
             ));
         }
         assert!(account.commands().is_empty(), "nothing reached the account");
+    }
+
+    /// Resolving an original reads its outcome. It dispatches nothing, chooses no artifact and
+    /// renews no approval, so the only request it sends names the original it resolves.
+    #[gpui::test]
+    fn resolving_an_original_sends_no_destructive_request(cx: &mut gpui::TestAppContext) {
+        let account = account(discovery(SERVER), Reply::Outcome(completed()));
+        let (backend, _) = backend(cx.background_executor.clone(), account.clone(), artifacts());
+
+        let outcome = backend.resolve(
+            &target(bound()),
+            OPERATION,
+            MaintenanceAuthority::Requested,
+            &SshCancellationToken::default(),
+            &silent,
+        );
+
+        assert!(matches!(
+            outcome,
+            Ok(OperationOutcome {
+                resolution: OperationResolution::Completed,
+                ..
+            })
+        ));
+        let requests: Vec<_> = account
+            .commands()
+            .into_iter()
+            .filter(|command| command.contains("ssh-maintain"))
+            .collect();
+        assert_eq!(requests.len(), 1);
+        assert!(
+            requests[0].contains(&format!("resolve {}'", "04".repeat(32))),
+            "{}",
+            requests[0]
+        );
+        for destructive in ["apply", "start", "prepare", "stage", "install"] {
+            assert!(
+                !requests[0].contains(destructive),
+                "resolving asked for {destructive}"
+            );
+        }
+    }
+
+    /// A service that holds no record of the original says so, rather than letting a fresh query
+    /// invent a result.
+    #[gpui::test]
+    fn an_unknown_original_is_forgotten(cx: &mut gpui::TestAppContext) {
+        let account = account(discovery(SERVER), Reply::Unknown);
+        let (backend, _) = backend(cx.background_executor.clone(), account, artifacts());
+
+        assert!(matches!(
+            backend.resolve(
+                &target(bound()),
+                OPERATION,
+                MaintenanceAuthority::Requested,
+                &SshCancellationToken::default(),
+                &silent,
+            ),
+            Err(SshMaintenanceFailure::Forgotten)
+        ));
+    }
+
+    /// Describing a change returns the service's confirmation for the exact observation it
+    /// describes, and changes nothing.
+    #[gpui::test]
+    fn describing_a_change_performs_nothing(cx: &mut gpui::TestAppContext) {
+        for (described, expected) in [
+            (None, "prepare-return"),
+            (Some(Action::Stop), "prepare stop"),
+            (Some(Action::Restart), "prepare restart"),
+            (Some(Action::Uninstall), "prepare uninstall"),
+        ] {
+            let account = account(discovery(SERVER), Reply::Prepared(change()));
+            let (backend, _) =
+                backend(cx.background_executor.clone(), account.clone(), artifacts());
+            let cancellation = SshCancellationToken::default();
+            let prepared = match described {
+                Some(action) => backend.prepare(
+                    &target(bound()),
+                    action,
+                    MaintenanceAuthority::Requested,
+                    &cancellation,
+                    &silent,
+                ),
+                None => backend.prepare_return(
+                    &target(bound()),
+                    MaintenanceAuthority::Requested,
+                    &cancellation,
+                    &silent,
+                ),
+            };
+            assert_eq!(prepared.ok().map(|change| change.confirmation), Some("2".repeat(64)));
+            let requests: Vec<_> = account
+                .commands()
+                .into_iter()
+                .filter(|command| command.contains("ssh-maintain"))
+                .collect();
+            assert_eq!(requests.len(), 1);
+            assert!(
+                requests[0].contains(&format!("{expected}'")),
+                "{}",
+                requests[0]
+            );
+        }
     }
 }
