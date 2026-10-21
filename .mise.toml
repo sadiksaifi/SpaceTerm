@@ -610,3 +610,13 @@ run = "target/debug/examples/server_maintenance {{usage.previous_archive | quote
 [tasks."server:ssh:maintenance:native:test"]
 description = "Observe an explicitly selected SSH account server's maintenance state on the native host"
 run = "cargo test --package spaceterm --lib --all-features --locked -- ssh::server_process::unix_adapter_tests::native_account_server_maintenance_observe --ignored --exact --nocapture"
+
+[tasks."server:ssh:maintenance:native:originals"]
+description = "Stop, start and update an explicitly authorized disposable SSH account server"
+env = { SPACETERM_SSH_NATIVE_MAINTAIN = "1" }
+run = "cargo test --package spaceterm --lib --all-features --locked -- ssh::server_process::unix_adapter_tests::native_account_server_maintenance_originals --ignored --exact --nocapture"
+
+[tasks."server:ssh:maintenance:native:recovery"]
+description = "Finish a submitted SSH server original from a new client after the first one is lost"
+env = { SPACETERM_SSH_NATIVE_MAINTAIN = "1" }
+run = "cargo test --package spaceterm --lib --all-features --locked -- ssh::server_process::unix_adapter_tests::native_remote_original_finishes_after_the_client_is_lost --ignored --exact --nocapture"

@@ -68,7 +68,7 @@ Those records are what makes an interrupted operation resolvable. Connect and Re
 
 A validated result stays until the person acknowledges it. Removing the saved connection ends presentation and reconnect intent at once and keeps that record, which the Servers section still presents with only its resolution and acknowledgement. Removal never recreates the connection, and a connection saved again under the same destination inherits neither the record nor its late results.
 
-`mise run server:maintenance:smoke` exercises these operations against disposable Development service state, and `mise run server:ssh:maintenance:native:test` observes a selected SSH account server on a real host.
+`mise run server:maintenance:smoke` exercises these operations against disposable Development service state. Three native checks reach a real host, each selecting it through `SPACETERM_SSH_NATIVE_DESTINATION` with `SPACETERM_SSH_NATIVE_EXPECT=ready`: `server:ssh:maintenance:native:test` only observes, while `server:ssh:maintenance:native:originals` and `server:ssh:maintenance:native:recovery` stop, start and update that account's server and need their own `SPACETERM_SSH_NATIVE_MAINTAIN=1`. The update step needs `SPACETERM_SSH_SERVER_ARTIFACTS` to hold a verified candidate that differs from the account's approved build. The recovery check finishes an original that asked for Stop, so it leaves that server stopped; start it again explicitly afterwards.
 
 ## Replacing incompatible development state
 
