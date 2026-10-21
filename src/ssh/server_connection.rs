@@ -188,6 +188,11 @@ pub(crate) trait SshConnectionIntentStore: Send + Sync {
     fn retain(&self, connection: RetainedSshConnection) -> Result<(), SshIntentStoreError>;
     fn remove(&self, destination: &SshDestination) -> Result<(), SshIntentStoreError>;
 }
+/// Watches removal of a saved connection. The registry tells it after the removal has applied,
+/// so nothing an observer does can recreate the connection or its reconnect intent.
+pub(crate) trait SshConnectionRemovals: Send + Sync {
+    fn removed(&self, destination: &SshDestination);
+}
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ConnectMode {
     Requested,
@@ -306,6 +311,8 @@ struct Inner {
     backend: Arc<dyn SshConnectBackend>,
     intents: Arc<dyn SshConnectionIntentStore>,
     persistence: async_channel::Sender<PersistenceCommand>,
+    /// Held weakly, so watching removal keeps neither owner alive.
+    removals: Mutex<Option<Weak<dyn SshConnectionRemovals>>>,
 }
 impl Drop for Inner {
     fn drop(&mut self) {
@@ -341,6 +348,7 @@ impl SshServerConnections {
             backend,
             intents,
             persistence,
+            removals: Mutex::new(None),
         });
         let weak = Arc::downgrade(&inner);
         if std::thread::Builder::new()
@@ -352,6 +360,12 @@ impl SshServerConnections {
             state.persistence_error = Some(SshIntentStoreError::Unavailable);
         }
         Self { inner }
+    }
+    /// Makes `observer` the one watcher of saved-connection removal.
+    pub(crate) fn watch_removals(&self, observer: &Arc<dyn SshConnectionRemovals>) {
+        if let Ok(mut removals) = self.inner.removals.lock() {
+            *removals = Some(Arc::downgrade(observer));
+        }
     }
     pub(crate) fn status(&self, destination: &SshDestination) -> RemoteConnectionStatus {
         self.inner
@@ -507,6 +521,18 @@ impl SshServerConnections {
             .persistence
             .try_send(PersistenceCommand::Remove(destination.clone()));
         notify(&mut state);
+        drop(state);
+        // Told after the removal applied, and told again when the person retries one that could
+        // not be saved, so what a removed connection still owns stays understandable.
+        let observer = self
+            .inner
+            .removals
+            .lock()
+            .ok()
+            .and_then(|removals| removals.as_ref()?.upgrade());
+        if let Some(observer) = observer {
+            observer.removed(destination);
+        }
     }
     /// Observes a saved connection that has no work running, once, and reports what it found.
     /// It may ask the person to sign in, because they asked for it. It connects, starts and
@@ -1472,6 +1498,46 @@ mod tests {
                 RemoteConnectionStatus::Connected { .. }
             )
         });
+    }
+    /// Records each saved connection the registry reports as removed.
+    #[derive(Default)]
+    struct Removals(Mutex<Vec<SshDestination>>);
+    impl SshConnectionRemovals for Removals {
+        fn removed(&self, destination: &SshDestination) {
+            self.0.lock().unwrap().push(destination.clone());
+        }
+    }
+    #[test]
+    fn removal_reports_each_removal_it_applied_including_a_retried_one() {
+        let (registry, _, intents, _, _) = setup(false);
+        let removals = Arc::new(Removals::default());
+        let observer: Arc<dyn SshConnectionRemovals> = removals.clone();
+        registry.watch_removals(&observer);
+        registry.remove(&destination());
+        assert!(
+            removals.0.lock().unwrap().is_empty(),
+            "a connection that was never saved has nothing to remove"
+        );
+
+        intents.records.lock().unwrap().push(saved(false));
+        registry.resume_retained();
+        eventually(|| registry.connections().len() == 1);
+        *intents.fails.lock().unwrap() = Some(SshIntentStoreError::Unavailable);
+        registry.remove(&destination());
+        eventually(|| !registry.unsaved_removals().is_empty());
+        *intents.fails.lock().unwrap() = None;
+        registry.remove(&destination());
+        eventually(|| registry.unsaved_removals().is_empty());
+        assert_eq!(
+            *removals.0.lock().unwrap(),
+            vec![destination(), destination()],
+            "the retried removal is reported again"
+        );
+
+        // The watcher is held weakly, so removal outlives it.
+        drop(observer);
+        drop(removals);
+        registry.remove(&destination());
     }
     #[test]
     fn a_removal_that_could_not_be_saved_is_reported_until_a_later_removal_saves() {

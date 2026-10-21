@@ -25,8 +25,8 @@ use spaceterm_server::service::maintenance::{
 
 use super::cancellation::SshCancellationToken;
 use super::server_connection::{
-    ContinuityChange, InteractionReason, SshIntentStoreError, SshServerConnections,
-    UnavailableKind, wait,
+    ContinuityChange, InteractionReason, SshConnectionRemovals, SshIntentStoreError,
+    SshServerConnections, UnavailableKind, wait,
 };
 use super::server_maintenance::{
     MaintenanceAuthority, MaintenancePhase, MaintenanceTarget, OperationSubmission,
@@ -325,6 +325,8 @@ impl SshServerOperations {
                 connections,
             }),
         });
+        let observer: Arc<dyn SshConnectionRemovals> = owner.clone();
+        owner.inner.connections.watch_removals(&observer);
         owner
     }
 
@@ -1438,6 +1440,47 @@ fn release(
     }
 }
 
+impl SshConnectionRemovals for SshServerOperations {
+    /// Removal ends presentation and ordinary reconnect intent at once. An original this client
+    /// submitted keeps its own record, so the person can still finish and acknowledge it.
+    fn removed(&self, destination: &SshDestination) {
+        let sealed = {
+            let Ok(mut state) = self.inner.state.lock() else {
+                return;
+            };
+            let mut sealed = Vec::new();
+            state.entries.retain_mut(|entry| {
+                if entry.destination != *destination || entry.removed {
+                    return true;
+                }
+                if entry.submitted.is_none() {
+                    entry.cancellation.cancel();
+                    return false;
+                }
+                entry.removed = true;
+                sealed.push(entry.generation);
+                true
+            });
+            notify(&mut state);
+            sealed
+        };
+        for generation in sealed {
+            let inner = Arc::downgrade(&self.inner);
+            let store = Arc::clone(&self.inner.store);
+            let destination = destination.clone();
+            let _ = std::thread::Builder::new()
+                .name("spaceterm-ssh-operation".into())
+                .spawn(move || {
+                    let Ok(client) = client(&inner, &store) else {
+                        return;
+                    };
+                    let result = retain_record(&inner, &store, &destination, generation, client);
+                    note_storage(&inner, result.err());
+                });
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2099,6 +2142,84 @@ mod tests {
         owner.acknowledge(handle);
         std::thread::sleep(Duration::from_millis(30));
         assert_eq!(owner.entries().len(), 1);
+    }
+
+    #[test]
+    fn removal_keeps_the_original_resolvable_and_never_recreates_the_connection() {
+        let script = Arc::new(Script::default());
+        let records = Arc::new(Records::default());
+        let (owner, connections, intents) =
+            submit(&script, &records, Err(SshMaintenanceFailure::Unconfirmed));
+        eventually(|| {
+            matches!(
+                owner.state(&destination()),
+                RemoteOperationState::Unconfirmed { .. }
+            )
+        });
+
+        connections.remove(&destination());
+        assert!(connections.connections().is_empty(), "removal is immediate");
+        eventually(|| records.only().removed);
+        let entries = owner.entries();
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].removed);
+        assert!(matches!(
+            entries[0].state,
+            RemoteOperationState::Unconfirmed { .. }
+        ));
+
+        // The person can still finish and acknowledge the original.
+        script.resolves(Ok(outcome(OperationResolution::Completed)));
+        owner.resume(&destination());
+        let handle = resolved(owner.as_ref());
+        assert!(
+            intents.0.lock().unwrap().is_empty() && connections.connections().is_empty(),
+            "resolution writes no saved-connection intent"
+        );
+        owner.acknowledge(handle);
+        eventually(|| owner.entries().is_empty());
+        assert!(records.operations.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_destination_saved_again_does_not_inherit_the_removed_record_or_its_late_result() {
+        let script = Arc::new(Script::default());
+        let (entered, arrived) = async_channel::unbounded();
+        let (release, held) = async_channel::unbounded();
+        *script.gate.lock().unwrap() = Some(Gate {
+            entered,
+            release: held,
+        });
+        let records = Arc::new(Records::default());
+        let (owner, connections, _) =
+            submit(&script, &records, Err(SshMaintenanceFailure::Unconfirmed));
+        arrived.recv_blocking().unwrap();
+
+        connections.remove(&destination());
+        connections.connect(destination());
+        eventually(|| connections.continuity(&destination()).is_some());
+        script.observes(Ok(facts()));
+        owner.refresh(&destination());
+        eventually(|| matches!(owner.state(&destination()), RemoteOperationState::Read(_)));
+
+        // The removed connection's late result reaches only its own sealed entry.
+        release.send_blocking(()).unwrap();
+        eventually(|| {
+            owner.entries().iter().any(|entry| {
+                entry.removed && matches!(entry.state, RemoteOperationState::Unconfirmed { .. })
+            })
+        });
+        assert!(
+            matches!(owner.state(&destination()), RemoteOperationState::Read(_)),
+            "the connection saved again inherits no original and no late result"
+        );
+        let entries = owner.entries();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(
+            entries.iter().filter(|entry| entry.removed).count(),
+            1,
+            "only the removed connection keeps the original"
+        );
     }
 
     #[test]
