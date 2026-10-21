@@ -568,60 +568,6 @@ pub(crate) enum RemoteShellCommandError {
     StartingDirectoryTooLong,
     #[error("the remote Pane launch command is too long")]
     CommandTooLong,
-    #[error("the remote server command argument is neither a fixed name nor a 32-byte value")]
-    InvalidServerArgument,
-}
-
-/// One argument a remote server command carries.
-///
-/// Only values this client composes cross the boundary: a name fixed by this build, or a 32-byte
-/// identity or digest written as 64 lowercase hexadecimal characters. Remote text, account paths
-/// and person-supplied strings can never become an argument.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct ValidatedRemoteServerArgument {
-    value: String,
-}
-
-impl ValidatedRemoteServerArgument {
-    /// A command name this build fixes, such as the exchange one request asks for.
-    pub(crate) fn name(name: &str) -> Result<Self, RemoteShellCommandError> {
-        if name.is_empty()
-            || name.len() > 32
-            || !name
-                .bytes()
-                .all(|byte| byte.is_ascii_lowercase() || byte == b'-')
-        {
-            return Err(RemoteShellCommandError::InvalidServerArgument);
-        }
-        Ok(Self {
-            value: name.to_owned(),
-        })
-    }
-
-    /// A 32-byte value as its 64 lowercase hexadecimal characters.
-    pub(crate) fn hexadecimal(value: &str) -> Result<Self, RemoteShellCommandError> {
-        if value.len() != 64
-            || !value
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-        {
-            return Err(RemoteShellCommandError::InvalidServerArgument);
-        }
-        Ok(Self {
-            value: value.to_owned(),
-        })
-    }
-
-    /// A 32-byte value this client holds, which needs no validation.
-    pub(crate) fn bytes(value: [u8; 32]) -> Self {
-        Self {
-            value: value.iter().map(|byte| format!("{byte:02x}")).collect(),
-        }
-    }
-
-    pub(crate) fn as_str(&self) -> &str {
-        &self.value
-    }
 }
 
 pub(crate) struct ValidatedRemoteShellCommand {

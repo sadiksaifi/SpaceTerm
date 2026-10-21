@@ -670,7 +670,6 @@ impl crate::ssh::server_process::SshServerBootstrap for UnixSshProcessAdapter {
         identity: &str,
         action: &str,
         missing: bool,
-        arguments: &[crate::ssh::command::ValidatedRemoteServerArgument],
     ) -> String {
         let mut script = format!(
             r#"set -eu
@@ -714,15 +713,10 @@ case "$digest" in *[!0-9a-f]*) exit 74;; esac
 [ ! -L "$root/installations" ] && [ ! -L "$root/installations/$digest" ] && [ ! -L "$root/installations/$digest/bin" ] && [ ! -L "$root/installations/$digest/bin/spaceterm-server" ] || exit 74
 "#);
         script.push_str(&format!(
-            "exec \"$root/installations/$digest/bin/spaceterm-server\" {} {}",
+            "exec \"$root/installations/$digest/bin/spaceterm-server\" {} {}\n",
             quote(action),
             quote(identity)
         ));
-        for argument in arguments {
-            script.push(' ');
-            script.push_str(&quote(argument.as_str()));
-        }
-        script.push('\n');
         script
     }
     fn install(

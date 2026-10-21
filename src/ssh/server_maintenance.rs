@@ -26,7 +26,6 @@ use spaceterm_server::service::maintenance::{
 };
 
 use super::cancellation::SshCancellationToken;
-use super::command::ValidatedRemoteServerArgument;
 use super::process::{CapturedProcessOutput, SshProcessAdapter};
 use super::server_connection::{
     ConnectMode, ContinuityChange, IncompatibilityKind, InteractionReason, RefusalKind,
@@ -209,70 +208,6 @@ pub(crate) trait SshMaintenanceBackend: Send + Sync {
     fn release(&self, destination: &SshDestination);
 }
 
-/// Encodes one request as the arguments its exchange carries.
-///
-/// Only values this build composes cross the boundary: the names of the exchange and the action,
-/// the operation identity the client bound, a whole-package digest and the exact-observation
-/// confirmation the service issued. Nothing the other computer wrote becomes an argument.
-fn arguments(
-    request: &Request,
-) -> Result<Vec<ValidatedRemoteServerArgument>, SshMaintenanceFailure> {
-    let protocol = || SshMaintenanceFailure::Refused(MaintenanceRefusal::Protocol);
-    let name = |value| ValidatedRemoteServerArgument::name(value).map_err(|_| protocol());
-    let value =
-        |value: &str| ValidatedRemoteServerArgument::hexadecimal(value).map_err(|_| protocol());
-    let operation = ValidatedRemoteServerArgument::bytes;
-    let action = |action: &Action| {
-        name(match action {
-            Action::Stop => "stop",
-            Action::Restart => "restart",
-            Action::Uninstall => "uninstall",
-        })
-    };
-    Ok(match request {
-        Request::Observe => vec![name("observe")?],
-        Request::Prepare { action: asked } => vec![name("prepare")?, action(asked)?],
-        Request::PrepareUpdate { candidate } => {
-            vec![name("prepare-update")?, value(candidate)?]
-        }
-        Request::PrepareReturn => vec![name("prepare-return")?],
-        Request::Apply {
-            operation: original,
-            action: asked,
-            confirmation,
-        } => vec![
-            name("apply")?,
-            operation(*original),
-            action(asked)?,
-            value(confirmation)?,
-        ],
-        Request::ApplyUpdate {
-            operation: original,
-            candidate,
-            confirmation,
-        } => vec![
-            name("apply-update")?,
-            operation(*original),
-            value(candidate)?,
-            value(confirmation)?,
-        ],
-        Request::ApplyReturn {
-            operation: original,
-            confirmation,
-        } => vec![
-            name("apply-return")?,
-            operation(*original),
-            value(confirmation)?,
-        ],
-        Request::Start {
-            operation: original,
-        } => vec![name("start")?, operation(*original)],
-        Request::Resolve {
-            operation: original,
-        } => vec![name("resolve")?, operation(*original)],
-    })
-}
-
 /// Whether admitting this request may change the account. A lost reply to one of these stays
 /// unconfirmed, because only the service can say what its original did.
 const fn dispatches(request: &Request) -> bool {
@@ -420,18 +355,21 @@ impl<A: SshProcessAdapter> NativeSshConnectBackend<A> {
         request: &Request,
         cancellation: &SshCancellationToken,
     ) -> Result<Reply, SshMaintenanceFailure> {
-        let arguments = arguments(request)?;
+        // The committed contract is the only encoding of a request. Serializing it keeps one
+        // source of truth, and the request never becomes a shell argument.
+        let asked = serde_json::to_vec(request)
+            .map_err(|_| SshMaintenanceFailure::Refused(MaintenanceRefusal::Protocol))?;
         let dispatched = dispatches(request);
         let output = if dispatched {
             route
-                .server_effect(MAINTAIN, &arguments, DISPATCH, cancellation)
+                .server_effect(MAINTAIN, asked, DISPATCH, cancellation)
                 .map_err(|error| match error {
                     SshDispatchFailure::NotDispatched(error) => failure(error),
                     SshDispatchFailure::Unconfirmed => SshMaintenanceFailure::Unconfirmed,
                 })?
         } else {
             route
-                .server_read(MAINTAIN, &arguments, READ, cancellation)
+                .server_read(MAINTAIN, asked, READ, cancellation)
                 .map_err(failure)?
         };
         reply(&output, dispatched)
@@ -673,7 +611,7 @@ mod tests {
     fn account(discovery: AccountDiscovery, reply: Reply) -> Arc<FakeAccount> {
         let discovered = serde_json::to_vec(&discovery).unwrap();
         let reply = encoded(&reply);
-        answering(move |command| {
+        answering(move |command, _| {
             if command.contains("ssh-discover") {
                 (discovered.clone(), 0)
             } else {
@@ -682,9 +620,17 @@ mod tests {
         })
     }
     fn answering(
-        answer: impl Fn(&str) -> (Vec<u8>, i32) + Send + Sync + 'static,
+        answer: impl Fn(&str, &[u8]) -> (Vec<u8>, i32) + Send + Sync + 'static,
     ) -> Arc<FakeAccount> {
         FakeAccount::new(CONFIGURATION, answer)
+    }
+    /// Every maintenance request this account received, decoded from what the client sent.
+    fn asked(account: &FakeAccount) -> Vec<Request> {
+        account
+            .sent("ssh-maintain")
+            .iter()
+            .map(|sent| serde_json::from_slice(sent).expect("one serialized request"))
+            .collect()
     }
     fn artifacts() -> SshServerArtifacts {
         SshServerArtifacts::new(None)
@@ -801,7 +747,7 @@ mod tests {
         cx: &mut gpui::TestAppContext,
     ) {
         let discovered = serde_json::to_vec(&discovery(SERVER)).unwrap();
-        let account = answering(move |command| {
+        let account = answering(move |command, _| {
             if command.contains("ssh-discover") {
                 (discovered.clone(), 0)
             } else {
@@ -830,14 +776,19 @@ mod tests {
             1,
             "an admitted operation is never dispatched again"
         );
-        let dispatched = account
-            .commands()
-            .into_iter()
-            .find(|command| command.contains("ssh-maintain"))
-            .unwrap();
-        assert!(
-            dispatched.contains(&format!("apply {} stop {confirmation}", "04".repeat(32))),
-            "{dispatched}"
+        let asked: Vec<Request> = account
+            .sent("ssh-maintain")
+            .iter()
+            .map(|sent| serde_json::from_slice(sent).expect("one serialized request"))
+            .collect();
+        assert_eq!(
+            asked,
+            vec![Request::Apply {
+                operation: OPERATION,
+                action: Action::Stop,
+                confirmation,
+            }],
+            "the dispatch carried exactly the original it bound"
         );
     }
 
@@ -908,22 +859,15 @@ mod tests {
                 ..
             })
         ));
-        let requests: Vec<_> = account
-            .commands()
-            .into_iter()
-            .filter(|command| command.contains("ssh-maintain"))
-            .collect();
-        assert_eq!(requests.len(), 1);
-        assert!(
-            requests[0].contains(&format!("resolve {}'", "04".repeat(32))),
-            "{}",
-            requests[0]
+        assert_eq!(
+            asked(&account),
+            vec![Request::Resolve {
+                operation: OPERATION
+            }],
+            "resolving asked only about that original"
         );
-        for destructive in ["apply", "start", "prepare", "stage", "install"] {
-            assert!(
-                !requests[0].contains(destructive),
-                "resolving asked for {destructive}"
-            );
+        for effect in ["ssh-stage", "ssh-install", "ssh-prepare"] {
+            assert_eq!(account.ran(effect), 0, "resolving asked for {effect}");
         }
     }
 
@@ -951,10 +895,25 @@ mod tests {
     #[gpui::test]
     fn describing_a_change_performs_nothing(cx: &mut gpui::TestAppContext) {
         for (described, expected) in [
-            (None, "prepare-return"),
-            (Some(Action::Stop), "prepare stop"),
-            (Some(Action::Restart), "prepare restart"),
-            (Some(Action::Uninstall), "prepare uninstall"),
+            (None, Request::PrepareReturn),
+            (
+                Some(Action::Stop),
+                Request::Prepare {
+                    action: Action::Stop,
+                },
+            ),
+            (
+                Some(Action::Restart),
+                Request::Prepare {
+                    action: Action::Restart,
+                },
+            ),
+            (
+                Some(Action::Uninstall),
+                Request::Prepare {
+                    action: Action::Uninstall,
+                },
+            ),
         ] {
             let account = account(discovery(SERVER), Reply::Prepared(change()));
             let (backend, _) =
@@ -979,17 +938,7 @@ mod tests {
                 prepared.ok().map(|change| change.confirmation),
                 Some("2".repeat(64))
             );
-            let requests: Vec<_> = account
-                .commands()
-                .into_iter()
-                .filter(|command| command.contains("ssh-maintain"))
-                .collect();
-            assert_eq!(requests.len(), 1);
-            assert!(
-                requests[0].contains(&format!("{expected}'")),
-                "{}",
-                requests[0]
-            );
+            assert_eq!(asked(&account), vec![expected]);
         }
     }
 
@@ -1079,10 +1028,10 @@ mod tests {
         );
 
         assert_eq!(observed.ok().map(|facts| facts.server), Some(SERVER));
-        for effect in ["ssh-prepare", "ssh-stage", "ssh-install", "start", "apply"] {
+        for effect in ["ssh-prepare", "ssh-stage", "ssh-install"] {
             assert_eq!(account.ran(effect), 0, "observing asked for {effect}");
         }
-        assert_eq!(account.ran("observe"), 1);
+        assert_eq!(asked(&account), vec![Request::Observe]);
     }
 
     /// Releasing ends only a route maintenance alone holds, together with its processes. The next
@@ -1156,14 +1105,12 @@ mod tests {
                 ..
             })
         ));
-        let dispatched = account
-            .commands()
-            .into_iter()
-            .find(|command| command.contains("ssh-maintain"))
-            .unwrap();
-        assert!(
-            dispatched.contains(&format!("start {}'", "04".repeat(32))),
-            "{dispatched}"
+        assert_eq!(
+            asked(&account),
+            vec![Request::Start {
+                operation: OPERATION
+            }],
+            "Start carried its original and no confirmation"
         );
     }
 

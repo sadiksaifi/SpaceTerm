@@ -15,7 +15,7 @@ use spaceterm_server::{
 use super::askpass::AskPassAttemptFactory;
 use super::cancellation::SshCancellationToken;
 use super::command::{
-    OpenSshExecutable, SshCommandContext, ValidatedRemoteServerArgument,
+    OpenSshExecutable, SshCommandContext,
     ValidatedRemoteShellCommand,
 };
 use super::control_connection::{
@@ -533,16 +533,13 @@ impl<A: SshProcessAdapter> NativeRoute<A> {
     pub(super) fn server_read(
         &self,
         action: &str,
-        arguments: &[ValidatedRemoteServerArgument],
+        input: Vec<u8>,
         timeout: Duration,
         cancellation: &SshCancellationToken,
     ) -> Result<super::process::CapturedProcessOutput, SshConnectFailure> {
         self.run(
-            &self
-                .config
-                .bootstrap
-                .locator(identity(), action, false, arguments),
-            Vec::new(),
+            &self.config.bootstrap.locator(identity(), action, false),
+            input,
             timeout,
             cancellation,
         )
@@ -551,7 +548,7 @@ impl<A: SshProcessAdapter> NativeRoute<A> {
     pub(super) fn server_effect(
         &self,
         action: &str,
-        arguments: &[ValidatedRemoteServerArgument],
+        input: Vec<u8>,
         timeout: Duration,
         cancellation: &SshCancellationToken,
     ) -> Result<super::process::CapturedProcessOutput, SshDispatchFailure> {
@@ -559,7 +556,7 @@ impl<A: SshProcessAdapter> NativeRoute<A> {
         let script = self
             .config
             .bootstrap
-            .locator(identity(), action, false, arguments);
+            .locator(identity(), action, false);
         let (command, capability) = self
             .command(&script)
             .map_err(SshDispatchFailure::NotDispatched)?;
@@ -573,7 +570,7 @@ impl<A: SshProcessAdapter> NativeRoute<A> {
             &self.config.adapter,
             &command,
             &self.environment,
-            Vec::new(),
+            input,
             MAX_DISCOVERY,
             &cancellation,
             Instant::now() + timeout,
@@ -637,7 +634,7 @@ impl<A: SshProcessAdapter> NativeRoute<A> {
         cancellation: &SshCancellationToken,
     ) -> Result<AccountDiscovery, SshConnectFailure> {
         let output = self
-            .server_effect("ssh-prepare", &[], OBSERVATION, cancellation)
+            .server_effect("ssh-prepare", Vec::new(), OBSERVATION, cancellation)
             .map_err(|error| match error {
                 SshDispatchFailure::NotDispatched(error) => error,
                 SshDispatchFailure::Unconfirmed => {
@@ -654,7 +651,7 @@ impl<A: SshProcessAdapter> NativeRoute<A> {
             &self
                 .config
                 .bootstrap
-                .locator(identity(), "ssh-discover", true, &[]),
+                .locator(identity(), "ssh-discover", true),
             Vec::new(),
             OBSERVATION,
             cancellation,
@@ -795,7 +792,7 @@ impl<A: SshProcessAdapter> AccountConnector for NativeConnector<A> {
                 &route
                     .config
                     .bootstrap
-                    .locator(identity(), "ssh-connect", false, &[]),
+                    .locator(identity(), "ssh-connect", false),
             )
             .map_err(|_| ServerError::NotRunning)?;
         capability
@@ -1268,13 +1265,7 @@ fn map_server_error(error: ServerError) -> SshConnectFailure {
 /// Native shell construction only; policy owns admission and verified artifact bytes.
 pub(crate) trait SshServerBootstrap: Send + Sync {
     fn key_public(&self, path: &std::path::Path) -> Option<super::command::SshCommandSpec>;
-    fn locator(
-        &self,
-        identity: &str,
-        action: &str,
-        missing: bool,
-        arguments: &[ValidatedRemoteServerArgument],
-    ) -> String;
+    fn locator(&self, identity: &str, action: &str, missing: bool) -> String;
     fn install(
         &self,
         identity: &str,
@@ -1297,7 +1288,7 @@ pub(crate) trait SshServerBootstrap: Send + Sync {
 #[cfg(test)]
 pub(crate) mod testing {
     //! One deterministic account server behind the real route, discovery and exchange code.
-    use std::io::{Cursor, Write, sink};
+    use std::io::{Cursor, Read, Write, sink};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
@@ -1313,21 +1304,24 @@ pub(crate) mod testing {
         SshProcessSpawnRequest, SshProcessStdio,
     };
 
-    /// How the fake account answers one remote command: its reply and its exit code.
-    type AccountAnswer = dyn Fn(&str) -> (Vec<u8>, i32) + Send + Sync;
+    /// How the fake account answers one remote command: its reply and its exit code. It receives
+    /// the command and whatever the client wrote on standard input.
+    type AccountAnswer = dyn Fn(&str, &[u8]) -> (Vec<u8>, i32) + Send + Sync;
 
-    /// The account this fake answers for, and every remote command it was asked to run.
+    /// The account this fake answers for, and every remote command it was asked to run with the
+    /// bytes the client sent it.
     pub(crate) struct FakeAccount {
         /// The effective OpenSSH configuration, whose digest is the route an original binds.
         configuration: Vec<u8>,
         answer: Box<AccountAnswer>,
-        commands: Mutex<Vec<String>>,
+        commands: Mutex<Vec<(String, Vec<u8>)>>,
     }
     impl FakeAccount {
-        /// `answer` receives one remote command and returns its reply and exit code.
+        /// `answer` receives one remote command and what the client wrote to it, and returns its
+        /// reply and exit code.
         pub(crate) fn new(
             configuration: &str,
-            answer: impl Fn(&str) -> (Vec<u8>, i32) + Send + Sync + 'static,
+            answer: impl Fn(&str, &[u8]) -> (Vec<u8>, i32) + Send + Sync + 'static,
         ) -> Arc<Self> {
             Arc::new(Self {
                 configuration: configuration.as_bytes().to_vec(),
@@ -1337,7 +1331,22 @@ pub(crate) mod testing {
         }
         /// Every remote command this account ran, in order.
         pub(crate) fn commands(&self) -> Vec<String> {
-            self.commands.lock().unwrap().clone()
+            self.commands
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(command, _)| command.clone())
+                .collect()
+        }
+        /// What the client wrote to each command naming `action`, in order.
+        pub(crate) fn sent(&self, action: &str) -> Vec<Vec<u8>> {
+            self.commands
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(command, _)| command.contains(action))
+                .map(|(_, sent)| sent.clone())
+                .collect()
         }
         /// How many commands name `action`.
         pub(crate) fn ran(&self, action: &str) -> usize {
@@ -1348,13 +1357,61 @@ pub(crate) mod testing {
         }
     }
 
+    /// The bytes a fake process receives, handed to its reply once the client closes them.
+    struct FakeInput {
+        sent: Vec<u8>,
+        complete: Option<std::sync::mpsc::Sender<Vec<u8>>>,
+    }
+    impl Write for FakeInput {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.sent.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    impl Drop for FakeInput {
+        fn drop(&mut self) {
+            if let Some(complete) = self.complete.take() {
+                let _ = complete.send(std::mem::take(&mut self.sent));
+            }
+        }
+    }
+
+    /// A reply the account composes only after the client finished writing its request, so an
+    /// answer can depend on what was asked.
+    struct FakeReply {
+        account: Arc<FakeAccount>,
+        command: String,
+        sent: std::sync::mpsc::Receiver<Vec<u8>>,
+        exit: Arc<Mutex<Option<ProcessExit>>>,
+        reply: Option<Cursor<Vec<u8>>>,
+    }
+    impl Read for FakeReply {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            if self.reply.is_none() {
+                let sent = self.sent.recv().unwrap_or_default();
+                let (reply, code) = (self.account.answer)(&self.command, &sent);
+                self.account
+                    .commands
+                    .lock()
+                    .unwrap()
+                    .push((self.command.clone(), sent));
+                *self.exit.lock().unwrap() = Some(ProcessExit::new(code == 0, Some(code)));
+                self.reply = Some(Cursor::new(reply));
+            }
+            self.reply.as_mut().expect("composed").read(buffer)
+        }
+    }
+
     #[derive(Clone)]
     pub(crate) struct FakeAdapter {
         account: Arc<FakeAccount>,
         /// The control socket the master publishes, which readiness then registers.
         filesystem: Arc<RecordingFilesystem>,
     }
-    pub(crate) struct FakeProcess(Option<ProcessExit>);
+    pub(crate) struct FakeProcess(Arc<Mutex<Option<ProcessExit>>>);
     impl SshProcessAdapter for FakeAdapter {
         type Process = FakeProcess;
         fn spawn(
@@ -1366,33 +1423,45 @@ pub(crate) mod testing {
                 .iter()
                 .map(|argument| argument.to_string_lossy().into_owned())
                 .collect();
-            let (stdout, exit) = if arguments.iter().any(|argument| argument == "-G") {
-                (
-                    self.account.configuration.clone(),
-                    Some(ProcessExit::successful()),
-                )
+            let exit = Arc::new(Mutex::new(None));
+            let reader = |bytes: Vec<u8>| Box::new(Cursor::new(bytes)) as Box<dyn Read + Send>;
+            let (stdin, stdout) = if arguments.iter().any(|argument| argument == "-G") {
+                *exit.lock().unwrap() = Some(ProcessExit::successful());
+                (None, Some(reader(self.account.configuration.clone())))
             } else if arguments.iter().any(|argument| argument == "-N") {
                 // The master publishes its control socket and stays up until the backend ends it.
                 if let Some(socket) = arguments.windows(2).find(|pair| pair[0] == "-S") {
                     self.filesystem
                         .create_socket(std::path::Path::new(&socket[1]));
                 }
-                (Vec::new(), None)
+                (None, Some(reader(Vec::new())))
             } else if arguments.iter().any(|argument| argument == "-O") {
-                (Vec::new(), Some(ProcessExit::successful()))
+                *exit.lock().unwrap() = Some(ProcessExit::successful());
+                (None, Some(reader(Vec::new())))
             } else {
-                let command = arguments.last().cloned().unwrap_or_default();
-                self.account.commands.lock().unwrap().push(command.clone());
-                let (reply, code) = (self.account.answer)(&command);
-                (reply, Some(ProcessExit::new(code == 0, Some(code))))
+                // The account answers once the client has written its whole request, so the
+                // reply can depend on what was asked rather than on the command name alone.
+                let (complete, sent) = std::sync::mpsc::channel();
+                (
+                    Some(Box::new(FakeInput {
+                        sent: Vec::new(),
+                        complete: Some(complete),
+                    }) as Box<dyn Write + Send>),
+                    Some(Box::new(FakeReply {
+                        account: Arc::clone(&self.account),
+                        command: arguments.last().cloned().unwrap_or_default(),
+                        sent,
+                        exit: Arc::clone(&exit),
+                        reply: None,
+                    }) as Box<dyn Read + Send>),
+                )
             };
             let pipes = SshProcessPipes::new(
                 (request.stdin() == SshProcessStdio::Piped)
-                    .then(|| Box::new(sink()) as Box<dyn Write + Send>),
+                    .then(|| stdin.unwrap_or_else(|| Box::new(sink()) as Box<dyn Write + Send>)),
                 (request.stdout() == SshProcessStdio::Piped)
-                    .then(|| Box::new(Cursor::new(stdout)) as Box<dyn std::io::Read + Send>),
-                (request.stderr() == SshProcessStdio::Piped)
-                    .then(|| Box::new(Cursor::new(Vec::new())) as Box<dyn std::io::Read + Send>),
+                    .then(|| stdout.unwrap_or_else(|| reader(Vec::new()))),
+                (request.stderr() == SshProcessStdio::Piped).then(|| reader(Vec::new())),
             );
             Ok(SpawnedSshProcess::new(FakeProcess(exit), pipes))
         }
@@ -1400,7 +1469,7 @@ pub(crate) mod testing {
             &self,
             process: &mut Self::Process,
         ) -> Result<Option<ProcessExit>, SshProcessMechanismError> {
-            Ok(process.0)
+            Ok(*process.0.lock().unwrap())
         }
         fn signal(
             &self,
@@ -1443,19 +1512,8 @@ pub(crate) mod testing {
         fn key_public(&self, _: &std::path::Path) -> Option<super::super::command::SshCommandSpec> {
             None
         }
-        fn locator(
-            &self,
-            identity: &str,
-            action: &str,
-            _: bool,
-            arguments: &[ValidatedRemoteServerArgument],
-        ) -> String {
-            let mut script = format!("{action} {identity}");
-            for argument in arguments {
-                script.push(' ');
-                script.push_str(argument.as_str());
-            }
-            script
+        fn locator(&self, identity: &str, action: &str, _: bool) -> String {
+            format!("{action} {identity}")
         }
         fn install(&self, identity: &str, _: usize, _: &[u8], digest: &str, _: bool) -> String {
             format!("ssh-install {identity} {digest}")
@@ -1527,60 +1585,22 @@ pub(crate) mod testing {
 mod tests {
     use super::*;
 
-    /// A remote server command carries only values this build composes, each quoted as data.
+    /// A remote server command names only the action and the compiled application identity, each
+    /// quoted as data. What one maintenance request asks for travels on standard input instead,
+    /// so no request value is ever a shell argument.
     #[test]
-    fn a_remote_server_command_carries_only_fixed_names_and_client_values() {
-        let digest = "0123456789abcdef".repeat(4);
-        assert_eq!(
-            ValidatedRemoteServerArgument::bytes([0xab; 32]).as_str(),
-            "ab".repeat(32)
-        );
-        assert!(ValidatedRemoteServerArgument::hexadecimal(&digest).is_ok());
-        for refused in [
-            digest.to_uppercase(),
-            digest[..63].to_owned(),
-            format!("{digest}0"),
-            "g".repeat(64),
-            String::new(),
-        ] {
+    fn a_remote_server_command_names_only_its_action_and_application_identity() {
+        let adapter = crate::platform::unix_ssh_process::UnixSshProcessAdapter;
+        for action in ["ssh-maintain", "ssh-discover", "ssh-connect", "ssh-prepare"] {
+            let script = adapter.locator(identity(), action, action == "ssh-discover");
             assert!(
-                ValidatedRemoteServerArgument::hexadecimal(&refused).is_err(),
-                "accepted {refused}"
-            );
-        }
-        for refused in ["", "ssh maintain", "Resolve", "resolve;rm", &"a".repeat(33)] {
-            assert!(
-                ValidatedRemoteServerArgument::name(refused).is_err(),
-                "accepted {refused}"
-            );
-        }
-
-        let script = crate::platform::unix_ssh_process::UnixSshProcessAdapter.locator(
-            identity(),
-            "ssh-maintain",
-            false,
-            &[
-                ValidatedRemoteServerArgument::name("resolve").unwrap(),
-                ValidatedRemoteServerArgument::hexadecimal(&digest).unwrap(),
-            ],
-        );
-        assert!(
-            script.ends_with(&format!(
-                "exec \"$root/installations/$digest/bin/spaceterm-server\" 'ssh-maintain' '{}' \
-                 'resolve' '{digest}'\n",
-                identity()
-            )),
-            "{script}"
-        );
-        assert!(
-            crate::platform::unix_ssh_process::UnixSshProcessAdapter
-                .locator(identity(), "ssh-discover", true, &[])
-                .ends_with(&format!(
-                    "exec \"$root/installations/$digest/bin/spaceterm-server\" 'ssh-discover' \
-                     '{}'\n",
+                script.ends_with(&format!(
+                    "exec \"$root/installations/$digest/bin/spaceterm-server\" '{action}' '{}'\n",
                     identity()
-                ))
-        );
+                )),
+                "{script}"
+            );
+        }
     }
 
     /// Staging retains a verified artifact beside the approved one. It shares the installer's
