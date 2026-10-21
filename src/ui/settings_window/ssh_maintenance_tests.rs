@@ -1020,3 +1020,36 @@ fn an_observed_server_offers_its_steps_before_any_maintenance_read(cx: &mut Test
     );
     assert!(alert_open("settings-ssh-server-stop-confirm", servers.cx));
 }
+
+/// The selected server's detail reads from its state down to its details: what it is doing, the
+/// steps that change it, then the facts SpaceTerm observed.
+#[gpui::test]
+fn the_detail_presents_the_controls_above_the_facts(cx: &mut TestAppContext) {
+    let servers = open_maintenance(cx);
+
+    let mut top = |cx: &mut VisualTestContext, selector: &str| {
+        let selector: &'static str = Box::leak(selector.to_owned().into_boxed_str());
+        cx.debug_bounds(selector)
+            .unwrap_or_else(|| panic!("{selector} was not rendered"))
+            .top()
+    };
+    let order = [
+        "settings-row-ssh-server-status",
+        SERVICE_ROW,
+        UPDATE_ROW,
+        "settings-row-ssh-server-version",
+        "settings-row-ssh-server-platform",
+        "settings-row-ssh-server-compatibility",
+        "settings-row-ssh-server-startup",
+        "settings-row-end-all-sessions",
+        "settings-row-remove-server",
+    ];
+    let tops: Vec<_> = order
+        .iter()
+        .map(|selector| top(servers.cx, selector))
+        .collect();
+    assert!(
+        tops.windows(2).all(|pair| pair[0] < pair[1]),
+        "the detail should read in order, got {order:?} at {tops:?}"
+    );
+}

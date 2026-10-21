@@ -384,6 +384,28 @@ fn selecting_an_ssh_server_presents_its_detail_under_headings_naming_it(cx: &mut
     assert!(tree.find_text("None").is_some(), "no device is paired");
 }
 
+/// A build with no remote operations owner offers no remote maintenance, so the selected SSH
+/// server keeps the rows that only report it.
+#[gpui::test]
+fn without_an_operations_owner_an_ssh_server_offers_no_maintenance(cx: &mut TestAppContext) {
+    let servers = open_servers(true, &["penguin"], cx);
+
+    click("settings-server-list-1", servers.cx);
+
+    for absent in [
+        "settings-row-ssh-server-service",
+        "settings-row-ssh-server-update",
+        "settings-row-removed-server-operations",
+    ] {
+        assert!(
+            !rendered(absent, servers.cx),
+            "{absent} needs an operations owner this build has none of"
+        );
+    }
+    assert!(rendered("settings-row-ssh-server-status", servers.cx));
+    assert!(rendered("settings-row-ssh-server-version", servers.cx));
+}
+
 #[gpui::test]
 fn the_local_server_offers_no_removal_or_pairing_ceremony(cx: &mut TestAppContext) {
     let servers = open_servers(true, &["penguin"], cx);
