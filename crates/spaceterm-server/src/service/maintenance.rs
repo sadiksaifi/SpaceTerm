@@ -438,6 +438,8 @@ impl Maintenance {
         data.verify_path(&self.service.paths.data)?;
         let mut journal = Journal::read(&data)?;
         if let Some(original) = journal.find(operation) {
+            // The retained original owns what it asked for and its outcome, so a resubmission
+            // under the same identity dispatches nothing, whatever it names now.
             return Ok(Reply::Outcome(original.outcome()));
         }
         let original = match self.admit(applied)? {
@@ -476,6 +478,8 @@ impl Maintenance {
                 }
             }
         };
+        // The retained record is what later resolution reads, so a failed publication is
+        // reported rather than answered with a result this service could not retain.
         journal.retain(&data, original.clone())?;
         Ok(Reply::Outcome(original.outcome()))
     }
