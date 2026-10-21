@@ -12714,6 +12714,14 @@ impl crate::ssh::server_operations::RemoteServerOperations for ScriptedMaintenan
         self.record("discard");
     }
 
+    fn dismiss(
+        &self,
+        _: &crate::domain::SshDestination,
+        _: crate::ssh::server_operations::RemoteOperationScope,
+    ) {
+        self.record("dismiss");
+    }
+
     fn resume_retained(&self) {
         self.record("resume retained");
     }

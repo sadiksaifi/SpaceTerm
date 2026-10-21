@@ -168,6 +168,12 @@ pub(crate) trait RemoteServerOperations: Send + Sync {
     /// unchanged.
     fn discard(&self, destination: &SshDestination, scope: RemoteOperationScope);
 
+    /// Clears an entry whose original the service has no record of, which is as settled as that
+    /// original can become. The record was retired when the service answered, so nothing is
+    /// retained to retire and nothing is sent. `scope` names the listing the step was offered
+    /// from, because one destination can appear in both.
+    fn dismiss(&self, destination: &SshDestination, scope: RemoteOperationScope);
+
     /// Continues unresolved originals quietly after relaunch, using available noninteractive
     /// authority only. Called once, after a Workspace Window exists.
     fn resume_retained(&self);
@@ -176,7 +182,6 @@ pub(crate) trait RemoteServerOperations: Send + Sync {
     /// write has. A surface reads it to say that acknowledging or discarding did not save,
     /// instead of leaving a row the person clicked looking inert. An owner that retains nothing
     /// has nothing to report.
-    #[allow(dead_code, reason = "the Servers surface reads it")]
     fn persistence_error(&self) -> Option<SshIntentStoreError> {
         None
     }
@@ -775,6 +780,36 @@ impl RemoteServerOperations for SshServerOperations {
             note_storage(&owner, Some(SshIntentStoreError::Unavailable));
             release_claim(&owner, &released, generation);
         }
+    }
+
+    fn dismiss(&self, destination: &SshDestination, scope: RemoteOperationScope) {
+        let Ok(mut state) = self.inner.state.lock() else {
+            return;
+        };
+        let removed = scope == RemoteOperationScope::Removed;
+        let Some(index) = state.entries.iter().position(|entry| {
+            entry.destination == *destination
+                && entry.removed == removed
+                && !entry.running
+                && entry.submitted.is_none()
+                && matches!(
+                    entry.state,
+                    RemoteOperationState::Failed {
+                        failure: SshMaintenanceFailure::Forgotten,
+                        ..
+                    }
+                )
+        }) else {
+            return;
+        };
+        // A removed connection's entry exists only to carry this last word, so clearing it ends
+        // the listing. A saved connection keeps its row and returns to having nothing read.
+        if removed {
+            state.entries.remove(index);
+        } else {
+            state.entries[index].state = RemoteOperationState::Unread;
+        }
+        notify(&mut state);
     }
 
     fn persistence_error(&self) -> Option<SshIntentStoreError> {
@@ -2596,6 +2631,89 @@ mod tests {
         assert!(
             owner.entries().iter().any(|entry| entry.removed),
             "the removed connection still has something to say"
+        );
+    }
+
+    /// An original the service has no record of is as settled as it can become: the record is
+    /// already retired, so the only thing left is to clear the row. The step names the listing it
+    /// was offered from, because one destination can hold both a sealed entry and a saved one.
+    #[test]
+    fn dismissing_clears_the_entry_whose_original_the_service_forgot() {
+        let script = Arc::new(Script::default());
+        let records = Arc::new(Records::default());
+        let mut sealed = record(None);
+        sealed.removed = true;
+        sealed.operation = [9; 32];
+        records.operations.lock().unwrap().push(sealed);
+        let (connections, _) = connected();
+        let owner = SshServerOperations::new(script.clone(), records.clone(), connections.clone());
+
+        // The sealed entry is adopted first, and the service has no record of its original.
+        script.resolves(Err(SshMaintenanceFailure::Forgotten));
+        owner.resume_retained();
+        eventually(|| {
+            owner.entries().iter().any(|entry| {
+                entry.removed
+                    && matches!(
+                        entry.state,
+                        RemoteOperationState::Failed {
+                            failure: SshMaintenanceFailure::Forgotten,
+                            ..
+                        }
+                    )
+            })
+        });
+
+        // The connection saved again submits its own original, which the service also forgets.
+        script
+            .observes(Ok(facts()))
+            .prepares(Ok(Some(change())))
+            .applies(Err(SshMaintenanceFailure::Forgotten));
+        owner.describe(
+            &destination(),
+            RemoteMaintenanceRequest::Service(Action::Stop),
+        );
+        let handle = described(owner.as_ref());
+        owner.confirm(handle);
+        eventually(|| {
+            matches!(
+                owner.state(&destination()),
+                RemoteOperationState::Failed {
+                    failure: SshMaintenanceFailure::Forgotten,
+                    ..
+                }
+            )
+        });
+        assert_eq!(
+            owner.entries().len(),
+            2,
+            "the sealed entry and the saved one are both listed"
+        );
+
+        owner.dismiss(&destination(), RemoteOperationScope::Removed);
+
+        eventually(|| owner.entries().len() == 1);
+        assert!(
+            !owner.entries().iter().any(|entry| entry.removed),
+            "the removed connection's entry is the one that was cleared"
+        );
+        assert!(
+            matches!(
+                owner.state(&destination()),
+                RemoteOperationState::Failed {
+                    failure: SshMaintenanceFailure::Forgotten,
+                    ..
+                }
+            ),
+            "the saved row still has its own last word to give"
+        );
+
+        owner.dismiss(&destination(), RemoteOperationScope::Saved);
+
+        eventually(|| matches!(owner.state(&destination()), RemoteOperationState::Unread));
+        assert!(
+            script.applied.lock().unwrap().len() == 1,
+            "dismissing sends nothing"
         );
     }
 
