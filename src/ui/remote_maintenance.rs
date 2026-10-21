@@ -438,7 +438,7 @@ pub(crate) fn removed_actions(
 }
 
 /// The row that reports a submitted operation: the one whose journey the person asked for.
-fn owning_row(
+pub(crate) fn owning_row(
     state: &RemoteOperationState,
     asked: Option<RemoteMaintenanceRequest>,
 ) -> MaintenanceRow {
@@ -1636,16 +1636,22 @@ fn forgotten_final_word(machine: &str) -> MaintenancePresentation {
 /// What a server whose saved connection was removed still has to tell the person, and the one
 /// step it offers. `None` once nothing is left to tell, so a removed connection disappears as
 /// soon as its operation is settled.
+/// Which of a removed connection's states its entry reports. A step offered there acts on this
+/// one, so the selection and the presentation must read the same rule.
+pub(crate) fn removed_subject(states: &[RemoteOperationState]) -> Option<usize> {
+    states
+        .iter()
+        .position(|state| removed_word("", state).is_some())
+}
+
 pub(crate) fn removed_presentation(
     machine: &str,
     states: &[RemoteOperationState],
 ) -> Option<MaintenancePresentation> {
     // A removed connection can hold two originals for the same reason a saved one can, so its
     // entry reports one of them and names the ones it has still to report.
-    let (reported, presentation) = states
-        .iter()
-        .enumerate()
-        .find_map(|(index, state)| Some((index, removed_word(machine, state)?)))?;
+    let reported = removed_subject(states)?;
+    let presentation = removed_word(machine, states.get(reported)?)?;
     let waiting: Vec<&SubmittedKind> = states
         .iter()
         .enumerate()

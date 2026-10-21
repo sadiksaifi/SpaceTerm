@@ -270,6 +270,10 @@ const RESOLVE_READS: u32 = 8;
 struct Submitted {
     operation: [u8; 32],
     kind: SubmittedKind,
+    /// Whether the service validated this original's outcome. A settled original still holds the
+    /// entry until the person acknowledges it, but it no longer refuses the next step, and it
+    /// stays settled while the next step is being described and confirmed.
+    settled: bool,
 }
 
 /// One destination's maintenance state. An entry whose saved connection was removed is sealed:
@@ -968,6 +972,7 @@ fn adopt(state: &mut State, record: RetainedRemoteOperation) -> Option<(Admitted
     entry.submitted = Some(Submitted {
         operation: record.operation,
         kind: record.kind.clone(),
+        settled: record.outcome.is_some(),
     });
     let kind = record.kind;
     if let Some(outcome) = record.outcome {
@@ -1021,12 +1026,8 @@ fn start_submission(
     // record can say nothing this client does not know. Returning to the previous version after
     // a failed update is submitted from exactly that state, so refusing it would take away the
     // only step that recovers the server.
-    let settled = matches!(
-        state.entries[index].state,
-        RemoteOperationState::Resolved { .. }
-    );
     if let Some(submitted) = &state.entries[index].submitted
-        && !settled
+        && !submitted.settled
     {
         let kind = submitted.kind.clone();
         state.entries[index].state = RemoteOperationState::Failed {
@@ -1048,6 +1049,7 @@ fn start_submission(
     state.entries[index].submitted = Some(Submitted {
         operation: submission.operation,
         kind: submission.kind.clone(),
+        settled: false,
     });
     Some((admitted, submission))
 }
@@ -1500,10 +1502,14 @@ fn await_outcome(
                 facts.approved = Some(build.clone());
             }
         }
-        if let Some(submitted) = &entry.submitted {
+        if let Some(submitted) = &mut entry.submitted {
+            // The outcome is validated, so this original no longer refuses the next step, and it
+            // stays settled while that step is described and confirmed.
+            submitted.settled = true;
+            let kind = submitted.kind.clone();
             entry.state = RemoteOperationState::Resolved {
                 handle,
-                kind: submitted.kind.clone(),
+                kind,
                 outcome: retained,
             };
         }
@@ -2838,7 +2844,18 @@ mod tests {
             )
         });
 
-        owner.start(&destination());
+        // The step the person chooses is described first, which replaces the resolved row, and
+        // only confirming it submits. Both must see the held original as settled.
+        script
+            .observes(Ok(facts()))
+            .prepares(Ok(Some(change())))
+            .applies(Ok(outcome(OperationResolution::Completed)));
+        owner.describe(
+            &destination(),
+            RemoteMaintenanceRequest::Service(Action::Stop),
+        );
+        let handle = described(owner.as_ref());
+        owner.confirm(handle);
 
         eventually(|| script.applied.lock().unwrap().len() == 2);
         assert!(

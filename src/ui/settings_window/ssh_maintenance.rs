@@ -33,7 +33,8 @@ use crate::ui::appearance::{ChromeAppearance, gpui_color};
 use crate::ui::chrome_typography::{ChromeTextStyleExt as _, TextRole};
 use crate::ui::remote_maintenance::{
     MaintenanceConfirmation, MaintenancePresentation, MaintenanceRow, RemoteAction,
-    discarded_operation, dismissed_operation, observed, present_machine, removed_presentation,
+    discarded_operation, dismissed_operation, observed, owning_row, present_machine,
+    removed_presentation, removed_subject,
 };
 use crate::ui::sidebar_window::form::{CaptionTone, badge};
 
@@ -257,13 +258,15 @@ impl SettingsWindow {
             RemoteAction::Cancel => operations.cancel(&destination),
             RemoteAction::Finish | RemoteAction::CheckAgain => operations.resume(&destination),
             RemoteAction::Acknowledge => {
-                if let Some(handle) = acknowledged(&states) {
+                if let Some(handle) =
+                    self.acknowledgeable(&destination, RemoteOperationScope::Saved, row)
+                {
                     operations.acknowledge(handle);
                 }
             }
             RemoteAction::Discard => {
                 if let Some((operation, kind)) =
-                    self.discardable(&destination, RemoteOperationScope::Saved)
+                    self.discardable(&destination, RemoteOperationScope::Saved, row)
                 {
                     self.confirm_discard(destination, &kind, operation, cx);
                 }
@@ -371,19 +374,57 @@ impl SettingsWindow {
 
     /// Asks before Discard retires the only record that could still say what a submitted
     /// operation did. Nothing is sent to the machine either way, and cancelling keeps the record.
-    /// The original a Discard offered on this listing would retire, and the operation that
-    /// names it. The step acts on the entry whose row offered it, never on whichever record for
-    /// that machine happens to be listed first.
+    /// Every entry one row reports, in the order it reports them. A row reports the originals
+    /// whose journey the person asked for, so a step offered on the service row never reaches an
+    /// update original and the other way round.
+    fn row_entries(
+        &self,
+        destination: &SshDestination,
+        scope: RemoteOperationScope,
+        row: MaintenanceRow,
+    ) -> Vec<RemoteOperationEntry> {
+        let asked = self
+            .ssh_maintenance
+            .as_ref()
+            .and_then(|rows| rows.asked.as_ref())
+            .filter(|(asked, _)| asked == destination)
+            .map(|(_, request)| *request);
+        self.maintenance_entries(destination, scope)
+            .into_iter()
+            .filter(|entry| owning_row(&entry.state, asked) == row)
+            .collect()
+    }
+
+    /// The original a Discard offered on one row would retire, and the operation that names it.
+    /// The step acts on the entry whose row offered it, never on whichever record for that
+    /// machine happens to be listed first.
     fn discardable(
         &self,
         destination: &SshDestination,
         scope: RemoteOperationScope,
+        row: MaintenanceRow,
     ) -> Option<([u8; 32], SubmittedKind)> {
-        self.maintenance_entries(destination, scope)
+        self.row_entries(destination, scope, row)
             .into_iter()
             .find_map(|entry| {
                 let kind = discarded_operation(&entry.state)?;
                 Some((entry.operation?, kind.clone()))
+            })
+    }
+
+    /// The result a row's OK would retire. A second resolved original on the same machine is
+    /// reported by its own row and acknowledged there.
+    fn acknowledgeable(
+        &self,
+        destination: &SshDestination,
+        scope: RemoteOperationScope,
+        row: MaintenanceRow,
+    ) -> Option<RemoteOperationHandle> {
+        self.row_entries(destination, scope, row)
+            .into_iter()
+            .find_map(|entry| match entry.state {
+                RemoteOperationState::Resolved { handle, .. } => Some(handle),
+                _ => None,
             })
     }
 
@@ -668,18 +709,25 @@ impl SettingsWindow {
         // The step settles the original this entry reports, which the removed listing's own
         // states name. The selected server's states are a different listing and a different
         // original, so neither settles the other's.
-        let states = self.maintenance_states(&destination, RemoteOperationScope::Removed);
+        // The entry reports one of this machine's removed originals, and the step acts on that
+        // one. Reading the same rule the listing renders keeps them from naming different records.
+        let entries = self.maintenance_entries(&destination, RemoteOperationScope::Removed);
+        let states: Vec<RemoteOperationState> =
+            entries.iter().map(|entry| entry.state.clone()).collect();
+        let reported = removed_subject(&states).and_then(|index| entries.into_iter().nth(index));
         match action {
             RemoteAction::Finish | RemoteAction::CheckAgain => operations.resume(&destination),
             RemoteAction::Acknowledge => {
-                if let Some(handle) = acknowledged(&states) {
-                    operations.acknowledge(handle);
+                if let Some(RemoteOperationState::Resolved { handle, .. }) =
+                    reported.as_ref().map(|entry| &entry.state)
+                {
+                    operations.acknowledge(*handle);
                 }
             }
             RemoteAction::Discard => {
-                if let Some((operation, kind)) =
-                    self.discardable(&destination, RemoteOperationScope::Removed)
-                {
+                if let Some((operation, kind)) = reported.as_ref().and_then(|entry| {
+                    Some((entry.operation?, discarded_operation(&entry.state)?.clone()))
+                }) {
                     self.confirm_discard(destination, &kind, operation, cx);
                 }
             }
