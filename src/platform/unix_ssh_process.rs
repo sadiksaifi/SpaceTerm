@@ -508,6 +508,68 @@ mod tests {
         assert!(exit.is_some_and(ProcessExit::is_success));
     }
 
+    #[test]
+    fn cleanup_after_observed_leader_exit_closes_member_stdout() {
+        use std::io::Read;
+
+        let adapter = UnixSshProcessAdapter;
+        let mut spawned = adapter
+            .spawn(SshProcessSpawnRequest::new(
+                PathBuf::from("/bin/sh"),
+                vec!["-c".into(), "read value".into()],
+                short_temporary_root().to_path_buf(),
+                Vec::new(),
+                SshProcessStdio::Piped,
+                SshProcessStdio::Null,
+                SshProcessStdio::Null,
+            ))
+            .unwrap();
+        let group = spawned.process_mut().process_group;
+        let mut member = Command::new("/bin/sleep")
+            .arg("30")
+            .process_group(group)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut stdout = member.stdout.take().unwrap();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            sender.send(stdout.read_to_end(&mut bytes)).unwrap();
+        });
+        // Dropping the owned stdin lets the leader exit, while the other owned group member
+        // still holds stdout. No signal is sent before observing that exit.
+        let mut process = spawned.into_process();
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let exited = loop {
+            if adapter.try_status(&mut process).unwrap().is_some() {
+                break true;
+            }
+            if std::time::Instant::now() >= deadline {
+                break false;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        if !exited {
+            adapter.signal(&mut process, ProcessSignal::Kill).unwrap();
+        }
+        let cleanup = adapter.reap(process);
+        let eof = receiver.recv_timeout(Duration::from_secs(2));
+        // Keep the test's direct child owned until cleanup even when the regression returns.
+        let _ = member.kill();
+        let _ = member.wait();
+        reader.join().unwrap();
+
+        assert!(exited, "the fixture leader must exit before cleanup");
+        cleanup.unwrap();
+        assert!(
+            eof.unwrap().is_ok(),
+            "cleanup must close the member-held pipe"
+        );
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn reaping_a_group_with_multiple_zombies_should_succeed() {
