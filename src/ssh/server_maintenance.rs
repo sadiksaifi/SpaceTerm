@@ -16,7 +16,6 @@
 //! authority may read and acknowledge its outcome. It never repeats a destructive dispatch, renews
 //! its approval, selects another artifact or starts a stopped server.
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use spaceterm_server::account_bridge::AccountDiscovery;
@@ -32,7 +31,7 @@ use super::server_connection::{
     SshConnectFailure, SshServerContinuity, UnavailableKind,
 };
 use super::server_process::{
-    NativeRoute, NativeSshConnectBackend, SshDispatchFailure, VerifiedArtifact,
+    NativeRoute, NativeSshConnectBackend, RouteClaim, SshDispatchFailure, VerifiedArtifact,
 };
 use crate::domain::SshDestination;
 
@@ -317,13 +316,17 @@ impl<A: SshProcessAdapter> NativeSshConnectBackend<A> {
     /// Acquires the original route and proves the account, application identity and server are
     /// the ones the original bound. Nothing is asked of the service until all of them match, so a
     /// destination that now reaches another computer, account or server sends nothing.
+    ///
+    /// The route comes back held for as long as the caller keeps it. Disconnect or Remove chosen
+    /// on this server meanwhile therefore waits for the operation to finish rather than cutting
+    /// its reply and leaving a dispatch that may already have taken effect unconfirmed.
     fn bound(
         &self,
         target: &MaintenanceTarget,
         authority: MaintenanceAuthority,
         cancellation: &SshCancellationToken,
         progress: &MaintenanceProgress<'_>,
-    ) -> Result<(Arc<NativeRoute<A>>, AccountDiscovery), SshMaintenanceFailure> {
+    ) -> Result<(RouteClaim<A>, AccountDiscovery), SshMaintenanceFailure> {
         progress(MaintenancePhase::Authenticating);
         let route = self
             .maintenance_route(
@@ -338,6 +341,9 @@ impl<A: SshProcessAdapter> NativeSshConnectBackend<A> {
                 &|_| {},
             )
             .map_err(failure)?;
+        // The route its owner has already begun ending carries nothing, and the next attempt
+        // acquires one of its own.
+        let route = route.claim().ok_or(SshMaintenanceFailure::Cancelled)?;
         if route.digest() != target.continuity.route {
             return Err(SshMaintenanceFailure::Changed(
                 ContinuityChange::HostChanged,
@@ -541,6 +547,8 @@ impl<A: SshProcessAdapter> SshMaintenanceBackend for NativeSshConnectBackend<A> 
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use sha2::{Digest, Sha256};
     use spaceterm_server::service::maintenance::{OperationKind, OperationResolution, RemoteBuild};
     use spaceterm_server::service::{ServiceStartup, ServiceStatus};
@@ -1169,6 +1177,144 @@ mod tests {
         assert!(
             connecting.join().expect("the connection finished"),
             "releasing ended a route the connection was still establishing"
+        );
+    }
+
+    /// A maintenance exchange holds the route it runs on. Disconnect or Remove chosen on that
+    /// server while the operation is in flight therefore waits for the reply instead of cutting
+    /// it, so a dispatch that already took effect does not become an Unconfirmed Outcome the
+    /// person has to resolve from the row.
+    #[gpui::test]
+    fn a_dispatch_in_flight_keeps_its_reply_through_disconnect(cx: &mut gpui::TestAppContext) {
+        use crate::ssh::server_connection::SshConnectBackend;
+        use std::sync::{Mutex, mpsc::channel};
+
+        let (entered, reached) = channel();
+        let (release, proceed) = channel();
+        let discovered = serde_json::to_vec(&discovery(SERVER)).unwrap();
+        let answered = encoded(&Reply::Outcome(completed()));
+        let proceed = Mutex::new(proceed);
+        let account = answering(move |command, _| {
+            if command.contains("ssh-discover") {
+                return (discovered.clone(), 0);
+            }
+            // The service has admitted the dispatch and its reply is still in flight.
+            entered.send(()).ok();
+            proceed.lock().unwrap().recv().ok();
+            (answered.clone(), 0)
+        });
+        let (backend, _) = backend(cx.background_executor.clone(), account, artifacts());
+        let backend = Arc::new(backend);
+        let destination = target(bound()).destination;
+        // The route the connection registry authenticated, which the exchange then runs on.
+        let connected = SshCancellationToken::default();
+        assert!(
+            SshConnectBackend::observe(backend.as_ref(), &destination, None, &connected, &|_| {})
+                .is_ok(),
+            "the registry admitted its connection"
+        );
+
+        let dispatching = {
+            let backend = Arc::clone(&backend);
+            std::thread::spawn(move || {
+                backend.apply(
+                    &target(bound()),
+                    &OperationSubmission {
+                        operation: OPERATION,
+                        kind: SubmittedKind::Service(Action::Stop),
+                        confirmation: Some("2".repeat(64)),
+                    },
+                    &SshCancellationToken::default(),
+                    &silent,
+                )
+            })
+        };
+        reached.recv().expect("the dispatch reached the service");
+
+        // The person chooses Disconnect and then Remove on this server in the Servers section.
+        connected.cancel();
+        SshConnectBackend::forget(backend.as_ref(), &destination);
+        // The route's owner polls that cancellation every 20ms, so this is well past the point
+        // where it would otherwise have ended the route under the exchange.
+        std::thread::sleep(Duration::from_millis(250));
+
+        release.send(()).expect("the service answers");
+        let outcome = dispatching.join().expect("the exchange finished");
+        assert!(
+            matches!(
+                outcome,
+                Ok(OperationOutcome {
+                    resolution: OperationResolution::Completed,
+                    ..
+                })
+            ),
+            "Disconnect cut a dispatch in flight and left it unconfirmed: {outcome:?}"
+        );
+    }
+
+    /// The route an exchange holds is released when that exchange ends, on every exit path. A
+    /// route nothing releases would stay up with the processes it owns and leave the person
+    /// unable to disconnect from that server at all.
+    #[gpui::test]
+    fn a_route_an_exchange_holds_is_released_once_it_ends(cx: &mut gpui::TestAppContext) {
+        use std::sync::{Mutex, mpsc::channel};
+
+        let (entered, reached) = channel();
+        let (release, proceed) = channel();
+        let discovered = serde_json::to_vec(&discovery(SERVER)).unwrap();
+        let answered = encoded(&Reply::Outcome(completed()));
+        let proceed = Mutex::new(proceed);
+        let account = answering(move |command, _| {
+            if command.contains("ssh-discover") {
+                return (discovered.clone(), 0);
+            }
+            entered.send(()).ok();
+            proceed.lock().unwrap().recv().ok();
+            (answered.clone(), 0)
+        });
+        let (backend, _) = backend(cx.background_executor.clone(), account, artifacts());
+        let backend = Arc::new(backend);
+        let destination = target(bound()).destination;
+
+        let dispatching = {
+            let backend = Arc::clone(&backend);
+            std::thread::spawn(move || {
+                backend.apply(
+                    &target(bound()),
+                    &OperationSubmission {
+                        operation: OPERATION,
+                        kind: SubmittedKind::Service(Action::Stop),
+                        confirmation: Some("2".repeat(64)),
+                    },
+                    &SshCancellationToken::default(),
+                    &silent,
+                )
+            })
+        };
+        reached.recv().expect("the dispatch reached the service");
+
+        // Releasing while the exchange holds the route leaves it where it is.
+        SshMaintenanceBackend::release(backend.as_ref(), &destination);
+        release.send(()).expect("the service answers");
+        assert!(
+            dispatching.join().expect("the exchange finished").is_ok(),
+            "releasing ended a route an exchange was still running on"
+        );
+
+        // The exchange has let go, so the route is released like any other.
+        SshMaintenanceBackend::release(backend.as_ref(), &destination);
+        assert!(
+            matches!(
+                SshMaintenanceBackend::observe(
+                    backend.as_ref(),
+                    &target(bound()),
+                    MaintenanceAuthority::Quiet,
+                    &SshCancellationToken::default(),
+                    &silent,
+                ),
+                Err(SshMaintenanceFailure::NeedsPerson(_))
+            ),
+            "a route the exchange had finished with was never released"
         );
     }
 

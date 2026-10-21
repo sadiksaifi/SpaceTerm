@@ -310,7 +310,7 @@ impl<A: SshProcessAdapter> NativeSshConnectBackend<A> {
             clients: self.clients.clone(),
             cancellation: cancellation.clone(),
             presented: std::sync::atomic::AtomicBool::new(false),
-            claims: std::sync::atomic::AtomicUsize::new(0),
+            holders: std::sync::atomic::AtomicUsize::new(0),
         });
         {
             let mut routes = self
@@ -331,10 +331,7 @@ impl<A: SshProcessAdapter> NativeSshConnectBackend<A> {
                         return;
                     };
                     if route.cancellation.is_cancelled() {
-                        route.environment.cancel_authentication();
-                        if let Ok(mut control) = route.control.lock() {
-                            control.cancel_owned();
-                        }
+                        route.retire();
                         return;
                     }
                     drop(route);
@@ -366,8 +363,7 @@ impl<A: SshProcessAdapter> NativeSshConnectBackend<A> {
     pub(super) fn release_owned_route(&self, destination: &SshDestination) {
         let owned = self.routes.lock().ok().and_then(|routes| {
             routes.get(destination.as_str()).map(|route| {
-                !route.presented.load(std::sync::atomic::Ordering::Acquire)
-                    && route.claims.load(std::sync::atomic::Ordering::Acquire) == 0
+                !route.presented.load(std::sync::atomic::Ordering::Acquire) && !route.held()
             })
         });
         if owned == Some(true) {
@@ -383,10 +379,7 @@ impl<A: SshProcessAdapter> SshConnectBackend for NativeSshConnectBackend<A> {
             .ok()
             .and_then(|mut routes| routes.remove(destination.as_str()));
         if let Some(route) = route {
-            route.environment.cancel_authentication();
-            if let Ok(mut control) = route.control.lock() {
-                control.cancel_owned();
-            }
+            route.retire();
         }
     }
     fn forget(&self, destination: &SshDestination) {
@@ -415,7 +408,9 @@ impl<A: SshProcessAdapter> SshConnectBackend for NativeSshConnectBackend<A> {
     ) -> Result<ConnectedSshServer, SshConnectFailure> {
         let route = self.route(destination, mode, cancellation, progress)?;
         // A Connect presents its server only at the end, so the route is held meanwhile.
-        let _claim = RouteClaim::hold(&route);
+        let Some(_claim) = route.claim() else {
+            return Err(SshConnectFailure::Cancelled);
+        };
         if expected.is_some_and(|expected| expected.route != route.route_id) {
             return Err(SshConnectFailure::Changed(ContinuityChange::HostChanged));
         }
@@ -456,7 +451,9 @@ impl<A: SshProcessAdapter> SshConnectBackend for NativeSshConnectBackend<A> {
         progress: &ConnectProgress<'_>,
     ) -> Result<SshServerObservation, SshConnectFailure> {
         let route = self.route(destination, ConnectMode::Requested, cancellation, progress)?;
-        let _claim = RouteClaim::hold(&route);
+        let Some(_claim) = route.claim() else {
+            return Err(SshConnectFailure::Cancelled);
+        };
         if expected.is_some_and(|expected| expected.route != route.route_id) {
             return Err(SshConnectFailure::Changed(ContinuityChange::HostChanged));
         }
@@ -474,26 +471,39 @@ pub(super) struct NativeRoute<A: SshProcessAdapter> {
     /// Whether Connect has presented a server over this route. Such a route belongs to the
     /// connection registry, which alone ends it.
     presented: std::sync::atomic::AtomicBool,
-    /// How much connection work holds this route now. A Connect only presents its server at the
-    /// end, so the flag above says nothing about one still underway.
-    claims: std::sync::atomic::AtomicUsize,
+    /// Who holds this route now and whether its owner's teardown is waiting for them. A Connect
+    /// only presents its server at the end, so the flag above says nothing about one still
+    /// underway, and a maintenance exchange holds a route no Connect ever presented.
+    holders: std::sync::atomic::AtomicUsize,
 }
 
-/// One holder of a route, counted while connection work runs on it.
-struct RouteClaim<A: SshProcessAdapter>(Arc<NativeRoute<A>>);
-impl<A: SshProcessAdapter> RouteClaim<A> {
-    fn hold(route: &Arc<NativeRoute<A>>) -> Self {
-        route
-            .claims
-            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-        Self(Arc::clone(route))
+/// `holders` carries both facts in one value: bit zero is the owner's teardown and the rest
+/// counts the work holding the route. One value settles both in a single atomic step, so a
+/// teardown and the last holder leaving can neither end the route twice nor both leave it to the
+/// other.
+const RETIRING: usize = 1;
+const ONE_HOLDER: usize = 2;
+
+/// One holder of a route, kept while work runs on it. Dropping it on any exit path, including an
+/// early return or an unwinding panic, releases the route and performs a teardown that was
+/// waiting, so a route is never left behind that the person can no longer disconnect.
+pub(super) struct RouteClaim<A: SshProcessAdapter>(Arc<NativeRoute<A>>);
+impl<A: SshProcessAdapter> std::ops::Deref for RouteClaim<A> {
+    type Target = NativeRoute<A>;
+    fn deref(&self) -> &Self::Target {
+        &self.0
     }
 }
 impl<A: SshProcessAdapter> Drop for RouteClaim<A> {
     fn drop(&mut self) {
-        self.0
-            .claims
-            .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+        if self
+            .0
+            .holders
+            .fetch_sub(ONE_HOLDER, std::sync::atomic::Ordering::AcqRel)
+            == ONE_HOLDER | RETIRING
+        {
+            self.0.end();
+        }
     }
 }
 impl<A: SshProcessAdapter> SshServerLease for NativeRoute<A> {
@@ -506,6 +516,49 @@ impl<A: SshProcessAdapter> SshServerLease for NativeRoute<A> {
     }
 }
 impl<A: SshProcessAdapter> NativeRoute<A> {
+    /// Holds this route while one piece of work runs on it, so a teardown its owner asks for
+    /// meanwhile waits instead of cutting that work's reply. `None` once the teardown has begun,
+    /// which leaves the work to start again on a route of its own.
+    pub(super) fn claim(self: &Arc<Self>) -> Option<RouteClaim<A>> {
+        let mut holders = self.holders.load(std::sync::atomic::Ordering::Acquire);
+        loop {
+            if holders & RETIRING != 0 {
+                return None;
+            }
+            match self.holders.compare_exchange_weak(
+                holders,
+                holders + ONE_HOLDER,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            ) {
+                Ok(_) => return Some(RouteClaim(Arc::clone(self))),
+                Err(seen) => holders = seen,
+            }
+        }
+    }
+    /// Begins the teardown this route's owner asked for. Work still holding the route keeps it,
+    /// and whoever leaves last ends it, so exactly one teardown happens and nothing in flight is
+    /// cut. Asking twice is the same as asking once.
+    fn retire(&self) {
+        if self
+            .holders
+            .fetch_or(RETIRING, std::sync::atomic::Ordering::AcqRel)
+            == 0
+        {
+            self.end();
+        }
+    }
+    /// Whether work holds this route now, so a teardown would have to wait for it.
+    fn held(&self) -> bool {
+        self.holders.load(std::sync::atomic::Ordering::Acquire) >= ONE_HOLDER
+    }
+    /// Ends this route's authentication and the processes it owns.
+    fn end(&self) {
+        self.environment.cancel_authentication();
+        if let Ok(mut control) = self.control.lock() {
+            control.cancel_owned();
+        }
+    }
     fn command(
         &self,
         script: &str,
