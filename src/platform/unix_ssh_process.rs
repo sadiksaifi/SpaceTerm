@@ -733,45 +733,74 @@ case "$digest" in *[!0-9a-f]*) exit 74;; esac
         digest: &str,
         password: bool,
     ) -> String {
-        use base64::Engine;
-        let signature = base64::engine::general_purpose::STANDARD.encode(signature);
-        let read_authorization = if password {
-            "IFS= read -r authorization\n"
-        } else {
-            ""
-        };
-        let authorize = if password {
-            format!(
-                "printf '%s\\n' \"$authorization\" | \"$work/runtime/server/bin/spaceterm-server\" ssh-enable-linger-password {} || exit 77\nunset authorization",
-                quote(identity)
-            )
-        } else {
-            format!(
-                "\"$work/runtime/server/bin/spaceterm-server\" ssh-enable-linger {} || exit 77",
-                quote(identity)
-            )
-        };
-        format!(
-            r#"set -eu
+        transfer_script(
+            "ssh-install",
+            identity,
+            archive_length,
+            signature,
+            digest,
+            Some(password),
+        )
+    }
+    fn stage(
+        &self,
+        identity: &str,
+        archive_length: usize,
+        signature: &[u8],
+        digest: &str,
+    ) -> String {
+        transfer_script("ssh-stage", identity, archive_length, signature, digest, None)
+    }
+}
+
+/// The body both transferred-runtime actions share. Boot authorization belongs to installation
+/// alone: staging changes no service policy, so it never asks for one.
+#[cfg(feature = "desktop")]
+fn transfer_script(
+    action: &str,
+    identity: &str,
+    archive_length: usize,
+    signature: &[u8],
+    digest: &str,
+    linger: Option<bool>,
+) -> String {
+    use base64::Engine;
+    let signature = base64::engine::general_purpose::STANDARD.encode(signature);
+    let work = action.trim_start_matches("ssh-");
+    let password = linger == Some(true);
+    let read_authorization = if password {
+        "IFS= read -r authorization\n"
+    } else {
+        ""
+    };
+    let authorize = match linger {
+        Some(true) => format!(
+            "if [ \"$(uname -s)\" = Linux ]; then\n    printf '%s\\n' \"$authorization\" | \"$work/runtime/server/bin/spaceterm-server\" ssh-enable-linger-password {} || exit 77\nunset authorization\nfi\n",
+            quote(identity)
+        ),
+        Some(false) => format!(
+            "if [ \"$(uname -s)\" = Linux ]; then\n    \"$work/runtime/server/bin/spaceterm-server\" ssh-enable-linger {} || exit 77\nfi\n",
+            quote(identity)
+        ),
+        None => String::new(),
+    };
+    format!(
+        r#"set -eu
 PATH=/usr/bin:/bin:/usr/sbin:/sbin
 export PATH
 umask 077
-work=$(mktemp -d "${{TMPDIR:-/tmp}}/spaceterm-install.XXXXXXXX")
+work=$(mktemp -d "${{TMPDIR:-/tmp}}/spaceterm-{work}.XXXXXXXX")
 trap 'rm -rf "$work"' EXIT HUP INT TERM
 {read_authorization}cat > "$work/artifact.tar.gz"
-[ "$(wc -c < "$work/artifact.tar.gz")" -eq {} ] || exit 75
+[ "$(wc -c < "$work/artifact.tar.gz")" -eq {archive_length} ] || exit 75
 printf %s {} | openssl base64 -d -A > "$work/artifact.sig"
 mkdir "$work/runtime"
 tar -xzf "$work/artifact.tar.gz" -C "$work/runtime"
-if [ "$(uname -s)" = Linux ]; then
-    {authorize}
-fi
-"$work/runtime/server/bin/spaceterm-server" ssh-install {} "$work/artifact.tar.gz" "$work/artifact.sig" {}
+{authorize}"$work/runtime/server/bin/spaceterm-server" {} {} "$work/artifact.tar.gz" "$work/artifact.sig" {}
 "#,
-            archive_length,
-            quote(&signature),
-            quote(identity),
-            quote(digest)
-        )
-    }
+        quote(&signature),
+        quote(action),
+        quote(identity),
+        quote(digest)
+    )
 }
