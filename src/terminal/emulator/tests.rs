@@ -3536,6 +3536,49 @@ fn snapshot_selection_presence_reflects_screen_switch_clearing() {
 }
 
 #[test]
+fn server_accessibility_selection_survives_pending_changes_to_other_rows() {
+    let mut emulator = emulator(32, 3);
+    emulator.feed(b"native-selection-target\r\n");
+    let model = drain_accessibility(&mut emulator);
+    let row = model.row(0).unwrap();
+    let reference = |column| AccessibilityCellRef {
+        row: row.id,
+        row_revision: row.revision,
+        column,
+    };
+    let selection = AccessibilitySelectionRefs {
+        start: reference(0),
+        end: reference(5),
+        rectangle: false,
+    };
+
+    // Rendering captures the prompt's dirtiness before the next paced semantic update.
+    emulator.feed(b"prompt> ");
+    _ = emulator.snapshot().unwrap();
+    assert!(
+        emulator
+            .set_accessibility_selection_refs(Some(selection))
+            .unwrap(),
+        "an unchanged target row must remain selectable while another row is pending"
+    );
+    assert_eq!(
+        emulator.selection_text().unwrap().as_deref(),
+        Some("native")
+    );
+    assert!(emulator.set_accessibility_selection_refs(None).unwrap());
+
+    // A changed target must still be rejected before its new revision is published.
+    emulator.feed(b"\x1b[Hchanged-selection-target");
+    _ = emulator.snapshot().unwrap();
+    assert!(
+        !emulator
+            .set_accessibility_selection_refs(Some(selection))
+            .unwrap()
+    );
+    assert_eq!(emulator.selection_text().unwrap(), None);
+}
+
+#[test]
 fn accessibility_selection_requires_the_current_semantic_snapshot() {
     let mut emulator = emulator(12, 3);
     emulator.feed(b"hello");
