@@ -27,6 +27,85 @@ def require(condition, classification):
         raise SmokeFailure(classification)
 
 
+def fixture_document(text, marker):
+    """Observe marker and caret against one unchanged native Text document."""
+    before = text.getText(0, -1)
+    caret = text.caretOffset
+    after = text.getText(0, -1)
+    if before != after or marker not in after or not 0 <= caret <= len(after):
+        return None
+    start = after.index(marker)
+    return after, start, start + len(marker), caret
+
+
+def fixture_line_offsets(start, end, caret, document_scalars, events):
+    """Query current positions; insertion events can describe an older, longer document."""
+    current = {start, end - 1, caret}
+    require(
+        all(0 <= offset <= document_scalars for offset in current),
+        "fixture_current_offset_invalid",
+    )
+    historical = {
+        offset
+        for event in events
+        for offset in (event["start"], event["start"] + event["payload_scalars"] - 1)
+    }
+    valid = {offset for offset in historical if 0 <= offset <= document_scalars}
+    return sorted(current | valid), sorted(historical - valid)
+
+
+def fixture_lines(text, marker, events, granularity):
+    """Observe all native line boundaries against one unchanged fixture document."""
+    observed = fixture_document(text, marker)
+    if observed is None:
+        return None, {"document_coherent": False}
+    document, start, end, caret = observed
+    offsets, expired = fixture_line_offsets(start, end, caret, len(document), events)
+    proof = {
+        "document_scalars": len(document),
+        "caret_offset": caret,
+        "requested_offsets": offsets,
+        "expired_event_offsets": expired,
+        "marker_event_offsets": list(events),
+        "queries": [],
+    }
+    for offset in offsets:
+        line, line_start, line_end = text.getStringAtOffset(offset, granularity)
+        current_document = text.getText(0, -1)
+        evidence = {
+            "requested_offset": offset,
+            "document_scalars": len(current_document),
+            "start": line_start,
+            "end": line_end,
+            "scalars": len(line),
+            "contains_fixture_marker": marker in line,
+            "ends_newline": line.endswith("\n"),
+            "matches_document_slice": line == current_document[line_start:line_end],
+            "returned_range_bounded": 0 <= line_start <= line_end <= len(current_document),
+            "offset_inside_range": (
+                line_start <= offset < line_end
+                or (
+                    offset == len(current_document)
+                    and line_end == offset
+                    and (not current_document.endswith("\n") or line_start == offset)
+                )
+            ),
+            "document_unchanged": current_document == document,
+        }
+        proof["queries"].append(evidence)
+        if not all(
+            evidence[key]
+            for key in (
+                "matches_document_slice",
+                "returned_range_bounded",
+                "offset_inside_range",
+                "document_unchanged",
+            )
+        ):
+            return None, proof
+    return observed, proof
+
+
 class ReadinessStep(Enum):
     DISPLAY_ENVIRONMENT = "display_environment"
     SPEECH_DISPATCHER = "speech_dispatcher"
@@ -143,6 +222,37 @@ def require_prerequisites(backend):
         any(Path("/usr/share/vulkan/icd.d").glob("lvp_icd*.json")),
         "lavapipe_driver_missing",
     )
+
+
+def require_account_server(binary):
+    """Observe the approved native service without installing, starting or reversing Stop."""
+    try:
+        service = subprocess.run(
+            [str(binary), "service-status", "spaceterm-development"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=30,
+        )
+        require(service.returncode == 0, "account_server_service_unavailable")
+        state = re.search(
+            rb"(?:^|\n)Installed: (true|false); enabled: (true|false); "
+            rb"running: (true|false); stopped: (true|false)\.\n?$",
+            service.stdout,
+        )
+        if state is None:
+            raise SmokeFailure("account_server_service_unavailable")
+        require(state[1] == b"true", "account_server_not_installed")
+        require(state[4] == b"false", "account_server_stopped")
+        require(state[3] == b"true", "account_server_not_running")
+        connection = subprocess.run(
+            [str(binary), "status", "spaceterm-development"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=30,
+        )
+        require(connection.returncode == 0, "account_server_connection_unavailable")
+    except (OSError, subprocess.TimeoutExpired):
+        raise SmokeFailure("account_server_observation_failed") from None
 
 
 class Processes:

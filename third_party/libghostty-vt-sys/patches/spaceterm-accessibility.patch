@@ -165,7 +165,7 @@ diff --git a/src/terminal/c/accessibility.zig b/src/terminal/c/accessibility.zig
 new file mode 100644
 --- /dev/null
 +++ b/src/terminal/c/accessibility.zig
-@@ -0,0 +1,746 @@
+@@ -0,0 +1,748 @@
 +const std = @import("std");
 +const lib = @import("../lib.zig");
 +const PageList = @import("../PageList.zig");
@@ -644,7 +644,7 @@ new file mode 100644
 +    out_changed.* = false;
 +    const screen_tag: Screen = if (t.screens.active_key == .primary) .primary else .alternate;
 +    const current = &state.screens[screenIndex(screen_tag)];
-+    if (!current.initialized or current.topology_active or current.pending.items.len != 0)
++    if (!current.initialized or current.topology_active)
 +        return .success;
 +    const live_generation: u64 = @intCast(t.screens.generation(t.screens.active_key));
 +    if (current.generation != live_generation) return .success;
@@ -658,6 +658,8 @@ new file mode 100644
 +    }
 +    const start = (start_ orelse return .invalid_value).*;
 +    const end = (end_ orelse return .invalid_value).*;
++    // Unrelated rows may await extraction. Each endpoint is checked against its
++    // live semantic hash below, so pending work alone does not make it stale.
 +    const start_pin = (livePinForRef(t, current, screen_tag, start) catch
 +        return .out_of_memory) orelse return .success;
 +    const end_pin = (livePinForRef(t, current, screen_tag, end) catch

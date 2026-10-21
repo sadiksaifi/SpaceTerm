@@ -46,8 +46,10 @@ from spaceterm_tasks.accessibility_linux import (
     SmokeFailure,
     cleanup_private_processes,
     create_private_runtime,
+    fixture_lines,
     orca_registered,
     require,
+    require_account_server,
     require_prerequisites,
     require_private_runtime,
     retire_direct_child,
@@ -202,8 +204,16 @@ class Probe:
         return None
 
     def activate_control(self, name, root=None):
+        control_id = {
+            "New Workspace": "new_workspace",
+            "Switch Workspace": "switch_workspace",
+            "Local Workspace": "local_workspace",
+            "Rename Workspace": "rename_workspace",
+            "Kill Workspace": "kill_workspace",
+        }[name]
         control = self.wait(
-            lambda: self.find_named_control(name, root), "server_workspace_control_missing"
+            lambda: self.find_named_control(name, root),
+            "server_workspace_control_missing:" + control_id,
         )
         self.press_control(control)
 
@@ -235,21 +245,27 @@ class Probe:
         rows = [
             row
             for row in self.workspace_rows()
-            if row not in self.server_workspace_before
+            if row.name == self.server_workspace_name
             and row.getState().contains(self.atspi.STATE_SELECTED)
         ]
         require(len(rows) <= 1, "server_workspace_creation_ambiguous")
         return rows[0] if rows else None
 
     def open_workspace_menu(self, row, input_driver):
-        self.press_control(row)
+        def row_has_state(state):
+            row.clear_cache()
+            return row.getState().contains(state)
+
+        row.clear_cache()
+        if not row.getState().contains(self.atspi.STATE_SELECTED):
+            self.press_control(row)
         self.wait(
-            lambda: row.getState().contains(self.atspi.STATE_SELECTED),
+            lambda: row_has_state(self.atspi.STATE_SELECTED),
             "server_workspace_not_selected",
         )
         require(row.queryComponent().grabFocus(), "server_workspace_focus_rejected")
         self.wait(
-            lambda: row.getState().contains(self.atspi.STATE_FOCUSED),
+            lambda: row_has_state(self.atspi.STATE_FOCUSED),
             "server_workspace_not_focused",
         )
         input_driver.context_menu()
@@ -257,8 +273,8 @@ class Probe:
     def retire_server_workspace(self, input_driver):
         if self.server_workspace_before is None:
             return
-        # Native objects can be replaced when the performance check reactivates AccessKit.
-        # The unique name was assigned through the exact new row before any workload started.
+        # Native proxies can be replaced. Only the unique name supplied at creation proves
+        # fixture ownership; a proxy absent from an earlier tree can still be retained work.
         input_driver.escape()
         self.wait(
             lambda: self.find_named_control("Workspace name") is None,
@@ -267,10 +283,8 @@ class Probe:
         rows = self.workspace_rows()
         named = [row for row in rows if row.name == self.server_workspace_name]
         require(len(named) <= 1, "server_workspace_cleanup_ambiguous")
-        row = named[0] if named else self.server_workspace_row
-        if row not in rows and not self.server_workspace_named:
-            row = self.wait(self.created_workspace_row, "server_workspace_cleanup_identity_missing")
-        require(row in self.workspace_rows(), "server_workspace_cleanup_identity_missing")
+        require(named, "server_workspace_cleanup_identity_missing")
+        row = named[0]
         name = row.name
         self.open_workspace_menu(row, input_driver)
         self.activate_control("Kill Workspace")
@@ -291,34 +305,46 @@ class Probe:
         # Normal launch already presents the account server's Workspaces. Exercise the same
         # creation controls as the native client. The fixture's named client owns its
         # presentation; the already-running account server owns the PTY.
-        self.activate_control("New Workspace")
         self.server_workspace_name = os.environ["SPACETERM_DEVELOPMENT_CLIENT"]
         rows = self.workspace_rows()
         require(
             all(row.name != self.server_workspace_name for row in rows),
             "server_workspace_fixture_name_in_use",
         )
+        # Supply the unique name in the creation request. Native proxy replacement cannot
+        # prove which unnamed row is new, and renaming a guessed row can touch retained work.
+        self.activate_control("Switch Workspace")
+        field = self.wait(
+            lambda: self.find_named_control("Workspace name"), "server_workspace_query_missing"
+        )
+        input_driver.workspace_query(self.server_workspace_name, field)
+        self.wait(
+            lambda: field.queryText().getText(0, -1) == self.server_workspace_name,
+            "server_workspace_query_not_published",
+        )
         self.server_workspace_before = rows
         self.activate_control("Local Workspace")
         self.server_workspace_row = self.wait(
             self.created_workspace_row, "server_workspace_created_row_missing"
         )
-        self.open_workspace_menu(self.server_workspace_row, input_driver)
-        self.activate_control("Rename Workspace")
-        field = self.wait(
-            lambda: self.find_named_control("Workspace name"), "server_workspace_rename_missing"
-        )
-        self.wait(
-            lambda: field.getState().contains(self.atspi.STATE_FOCUSED),
-            "server_workspace_rename_not_focused",
-        )
-        input_driver.workspace_name(self.server_workspace_name, field)
-        self.wait(
-            lambda: any(row.name == self.server_workspace_name for row in self.workspace_rows()),
-            "server_workspace_rename_not_confirmed",
-        )
         self.server_workspace_named = True
 
+        # WorkspaceManager::render_chrome derives this selected row and the single presented
+        # Tab manager from the same Active Workspace. This fresh client never navigates the
+        # sidebar cursor, so the named selection identifies the content of this Window too.
+        def fixture_pane():
+            require(self.created_workspace_row() is not None, "fixture_workspace_not_selected")
+            window = self.find_window(self.application_pid)
+            return self.find_terminal() or (
+                self.find_named_control("Start New Shell", window) if window is not None else None
+            )
+
+        pane = self.wait(
+            fixture_pane,
+            "server_workspace_pane_missing",
+        )
+        if pane.name == "Start New Shell":
+            self.press_control(pane)
         self.terminal = self.wait(self.find_terminal, "server_terminal_object_missing")
         require(self.terminal.queryComponent().grabFocus(), "server_terminal_focus_rejected")
 
@@ -498,14 +524,20 @@ class Input:
             "fixture_terminal_not_selected",
         )
 
-    def workspace_name(self, name, field):
+    def workspace_query(self, name, field):
         require(
-            field.getState().contains(self.probe.atspi.STATE_FOCUSED),
-            "server_workspace_rename_not_focused",
+            field.queryComponent().grabFocus(),
+            "server_workspace_query_focus_rejected",
         )
-        self._submit_text(name)
 
-    def _submit_text(self, command, *, wait_for_echo=False):
+        def focused():
+            field.clear_cache()
+            return field.getState().contains(self.probe.atspi.STATE_FOCUSED)
+
+        self.probe.wait(focused, "server_workspace_query_not_focused")
+        self._type_text(name)
+
+    def _type_text(self, command):
         if self.backend == "x11":
             run(["xdotool", "type", "--clearmodifiers", "--delay", "2", "--", command])
         else:
@@ -514,6 +546,9 @@ class Input:
                 self.key(code if code < 256 else 0x01000000 | code)
                 self.probe.drain()
                 time.sleep(0.003)
+
+    def _submit_text(self, command, *, wait_for_echo=False):
+        self._type_text(command)
 
         def command_echoed():
             self.probe.terminal.clear_cache()
@@ -697,58 +732,28 @@ def validate_tree(probe, input_driver, output, fixture_speech, readiness):
     probe.wait(lambda: probe.insert_marker, "shell_text_event_missing")
     # Orca derives inserted output from the CURRENT caret line. Let it finish
     # genuine output presentation before selection changes that caret.
-    document = text.getText(0, -1)
-    start = document.index(MARKER)
-    end = start + len(MARKER)
-    line_queries = []
-    offsets = {start, end - 1, text.caretOffset}
-    for event in probe.marker_event_offsets:
-        offsets.update((event["start"], event["start"] + event["payload_scalars"] - 1))
-    for offset in sorted(offsets):
+    line_proof = {}
 
-        def current_line():
-            line, line_start, line_end = text.getStringAtOffset(offset, atspi.TEXT_GRANULARITY_LINE)
-            current_document = text.getText(0, -1)
-            evidence = {
-                "requested_offset": offset,
-                "start": line_start,
-                "end": line_end,
-                "scalars": len(line),
-                "contains_fixture_marker": MARKER in line,
-                "ends_newline": line.endswith("\n"),
-                "matches_document_slice": line == current_document[line_start:line_end],
-                "returned_range_bounded": 0 <= line_start <= line_end <= len(current_document),
-                "offset_inside_range": (
-                    line_start <= offset < line_end
-                    or (
-                        offset == len(current_document)
-                        and line_end == offset
-                        and (not current_document.endswith("\n") or line_start == offset)
-                    )
-                ),
-            }
-            if (
-                evidence["matches_document_slice"]
-                and evidence["offset_inside_range"]
-                and evidence["returned_range_bounded"]
-            ):
-                return evidence, current_document
-            return None
-
-        evidence, document = probe.wait(current_line, "terminal_line_boundary_invalid")
-        line_queries.append(evidence)
-        (output / "fixture-line-verification.json").write_text(
-            json.dumps(
-                {
-                    "queries": line_queries,
-                    "marker_event_offsets": probe.marker_event_offsets,
-                    "document_scalars": len(document),
-                    "caret_offset": text.caretOffset,
-                },
-                indent=2,
-            )
-            + "\n"
+    def current_lines():
+        nonlocal line_proof
+        observed, line_proof = fixture_lines(
+            text, MARKER, probe.marker_event_offsets, atspi.TEXT_GRANULARITY_LINE
         )
+        return observed
+
+    try:
+        document, start, end, fixture_caret = probe.wait(
+            current_lines, "terminal_line_boundary_invalid"
+        )
+    except SmokeFailure:
+        (output / "fixture-line-failure.json").write_text(json.dumps(line_proof, indent=2) + "\n")
+        raise
+    (output / "fixture-line-query-plan.json").write_text(
+        json.dumps({key: value for key, value in line_proof.items() if key != "queries"}, indent=2)
+        + "\n"
+    )
+    (output / "fixture-line-verification.json").write_text(json.dumps(line_proof, indent=2) + "\n")
+    line_queries = line_proof["queries"]
     readiness.wait(ReadinessStep.FIXTURE_SPEECH, fixture_speech)
     shell = probe.end()
     coordinates = atspi.DESKTOP_COORDS if input_driver.backend == "x11" else atspi.WINDOW_COORDS
@@ -1806,7 +1811,7 @@ def private_session(args):
         )
         # Account-local admission resolves getpwuid, not the private HOME/XDG fixture.
         # Starting or stopping the owning account's server remains an explicit host action.
-        run([str(args.server_binary), "status", "spaceterm-development"])
+        require_account_server(args.server_binary)
         report["server_backed"] = {"existing_account_server_connected": True}
         application = processes.start([str(args.binary)], stderr=frame_output.writer)
         probe.application_pid = application.pid

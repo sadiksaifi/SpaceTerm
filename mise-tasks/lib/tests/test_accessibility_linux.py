@@ -16,7 +16,11 @@ from spaceterm_tasks.accessibility_linux import (
     Readiness,
     ReadinessStep,
     SmokeFailure,
+    fixture_document,
+    fixture_line_offsets,
+    fixture_lines,
     orca_registered,
+    require_account_server,
     require_prerequisites,
 )
 
@@ -61,6 +65,99 @@ class AccessibilityPrerequisiteTests(unittest.TestCase):
         with patch("spaceterm_tasks.accessibility_linux.Path.glob", return_value=iter([])):
             with self.assertRaisesRegex(SmokeFailure, "^lavapipe_driver_missing$"):
                 require_prerequisites("both")
+
+    def test_account_server_prerequisite_distinguishes_service_state_without_disclosing_output(
+        self,
+    ):
+        for installed, running, stopped, failure in (
+            (False, False, False, "account_server_not_installed"),
+            (True, False, True, "account_server_stopped"),
+            (True, False, False, "account_server_not_running"),
+        ):
+            with self.subTest(failure=failure):
+                self.probe_command.return_value = subprocess.CompletedProcess(
+                    [],
+                    0,
+                    stdout=(
+                        "private service details\nInstalled: "
+                        + str(installed).lower()
+                        + "; enabled: true; running: "
+                        + str(running).lower()
+                        + "; stopped: "
+                        + str(stopped).lower()
+                        + ".\n"
+                    ).encode(),
+                )
+                with self.assertRaisesRegex(SmokeFailure, "^" + failure + "$"):
+                    require_account_server(Path("server"))
+        self.probe_command.return_value = subprocess.CompletedProcess(
+            [], 1, stdout=b"raw error with private values"
+        )
+        with self.assertRaisesRegex(SmokeFailure, "^account_server_service_unavailable$"):
+            require_account_server(Path("server"))
+
+    def test_running_service_requires_authenticated_account_connection(self):
+        service = subprocess.CompletedProcess(
+            [],
+            0,
+            stdout=b"Installed: true; enabled: true; running: true; stopped: false.\n",
+        )
+        self.probe_command.side_effect = [service, subprocess.CompletedProcess([], 1)]
+        with self.assertRaisesRegex(SmokeFailure, "^account_server_connection_unavailable$"):
+            require_account_server(Path("server"))
+        self.probe_command.side_effect = [service, subprocess.CompletedProcess([], 0)]
+        require_account_server(Path("server"))
+
+
+class AccessibilityLineQueryTests(unittest.TestCase):
+    def test_document_growth_cannot_pair_an_old_length_with_a_new_caret(self):
+        text = SimpleNamespace(
+            caretOffset=8,
+            getText=Mock(side_effect=["M\n", "M\nprompt", "M\nprompt", "M\nprompt"]),
+        )
+        self.assertIsNone(fixture_document(text, "M"))
+        self.assertEqual(fixture_document(text, "M"), ("M\nprompt", 0, 1, 8))
+
+    def test_document_trimming_replans_lines_before_querying_expired_events(self):
+        text = SimpleNamespace(
+            caretOffset=2,
+            getText=Mock(side_effect=["M\nlong", "M\nlong", "M\n", "M\n", "M\n", "M\n", "M\n"]),
+            getStringAtOffset=Mock(side_effect=[("M\n", 0, 2), ("M\n", 0, 2), ("", 2, 2)]),
+        )
+        events = [{"start": 0, "payload_scalars": 6}]
+        observed, proof = fixture_lines(text, "M", events, "line")
+        self.assertIsNone(observed)
+        self.assertFalse(proof["queries"][0]["document_unchanged"])
+        self.assertEqual(text.getStringAtOffset.call_count, 1)
+        observed, proof = fixture_lines(text, "M", events, "line")
+        self.assertEqual(observed, ("M\n", 0, 1, 2))
+        self.assertEqual(proof["requested_offsets"], [0, 2])
+        self.assertEqual(proof["expired_event_offsets"], [5])
+
+    def test_stable_incorrect_native_line_boundary_is_rejected(self):
+        text = SimpleNamespace(
+            caretOffset=1,
+            getText=Mock(return_value="M\n"),
+            getStringAtOffset=Mock(return_value=("M", 0, 2)),
+        )
+        observed, proof = fixture_lines(text, "M", [], "line")
+        self.assertIsNone(observed)
+        self.assertTrue(proof["queries"][0]["document_unchanged"])
+        self.assertFalse(proof["queries"][0]["matches_document_slice"])
+
+    def test_current_queries_exclude_only_expired_insertion_positions(self):
+        self.assertEqual(
+            fixture_line_offsets(75, 89, 95, 113, [{"start": 75, "payload_scalars": 75}]),
+            ([75, 88, 95], [149]),
+        )
+        self.assertEqual(
+            fixture_line_offsets(2, 7, 10, 10, [{"start": 1, "payload_scalars": 4}]),
+            ([1, 2, 4, 6, 10], []),
+        )
+
+    def test_invalid_current_caret_is_not_discarded_as_a_historical_event(self):
+        with self.assertRaisesRegex(SmokeFailure, "^fixture_current_offset_invalid$"):
+            fixture_line_offsets(2, 7, 11, 10, [])
 
 
 class AccessibilityReadinessTests(unittest.TestCase):
@@ -293,12 +390,24 @@ class AccessibilityTerminalDiscoveryTests(unittest.TestCase):
         retained.queryText.assert_not_called()
         driver.command.assert_not_called()
 
-    def test_fixture_creation_precedes_terminal_targeting_even_when_retained_work_is_visible(self):
+    def test_missing_control_failure_identifies_the_known_operation(self):
+        self.desktop([Accessible("application", pid=42)])
+        self.probe.wait = lambda predicate, classification: (
+            predicate() or self.smoke.require(False, classification)
+        )
+        with self.assertRaisesRegex(
+            SmokeFailure, "^server_workspace_control_missing:rename_workspace$"
+        ):
+            self.probe.activate_control("Rename Workspace")
+
+    def test_fixture_is_named_at_creation_without_targeting_replaced_retained_proxies(self):
         retained = Accessible("terminal", name="Terminal Pane")
         retained.queryText = Mock()
         existing = Accessible("tree item", name="Retained work", states=())
-        owned = Accessible("tree item", name="Default")
+        replacement = Accessible("tree item", name="Retained work", states=())
+        owned = Accessible("tree item", name=self.probe.server_workspace_name)
         terminal = Accessible("terminal", name="Terminal Pane")
+        start = Accessible("button", name="Start New Shell")
         tree = Accessible("tree", name="Workspaces", children=[existing])
         frame = Accessible("frame", children=[tree, retained])
         self.desktop([Accessible("application", pid=42, children=[frame])])
@@ -309,45 +418,79 @@ class AccessibilityTerminalDiscoveryTests(unittest.TestCase):
         self.probe.wait = lambda predicate, classification: (
             predicate() or self.smoke.require(False, classification)
         )
-        new = Accessible("button", name="New Workspace")
+        switch = Accessible("button", name="Switch Workspace")
         local = Accessible("menu item", name="Local Workspace")
-        rename = Accessible("menu item", name="Rename Workspace")
         field = Accessible("entry", name="Workspace name")
-        frame.append(new)
-        new.action = lambda: frame.append(local)
+        query = ""
+        field.queryText.side_effect = lambda: SimpleNamespace(getText=lambda start, end: query)
+        frame.append(switch)
+        switch.action = lambda: frame.extend([local, field])
 
         def create():
+            self.assertEqual(query, owned.name, "the name must precede native creation")
             frame.remove(local)
+            frame.remove(field)
             frame.remove(retained)
-            tree.append(owned)
-            frame.append(terminal)
+            tree[:] = [replacement, owned]
+            frame.append(start)
 
         local.action = create
 
-        def show_rename():
-            frame.remove(rename)
-            frame.append(field)
+        def start_fixture():
+            self.assertTrue(self.probe.server_workspace_named)
+            frame.remove(start)
+            frame.append(terminal)
 
-        rename.action = show_rename
+        start.action = start_fixture
 
-        def name_fixture(name):
-            self.assertIn(field, frame)
+        def name_fixture(name, field):
+            nonlocal query
             self.assertIsNone(self.probe.find_terminal(), "unnamed Workspace is not a target")
-            owned.name = name
-            frame.remove(field)
+            query = name
 
-        driver = SimpleNamespace(
-            context_menu=lambda: frame.append(rename),
-            workspace_name=lambda name, field: name_fixture(name),
-        )
+        driver = SimpleNamespace(workspace_query=name_fixture)
         with patch.dict(
             os.environ, {"SPACETERM_DEVELOPMENT_CLIENT": self.probe.server_workspace_name}
         ):
             self.probe.open_server_workspace(driver)
         self.assertIs(self.probe.terminal, terminal)
         self.assertIs(self.probe.server_workspace_row, owned)
-        self.assertEqual(existing.name, "Retained work")
+        self.assertEqual(replacement.name, "Retained work")
         retained.queryText.assert_not_called()
+
+    def test_replaced_retained_proxy_is_not_the_created_workspace(self):
+        self.probe.wait = lambda predicate, classification: (
+            predicate() or self.smoke.require(False, classification)
+        )
+        retained = Accessible("tree item", name="Retained work")
+        replacement = Accessible("tree item", name="Retained work")
+        owned = Accessible("tree item", name=self.probe.server_workspace_name, states=())
+        tree = Accessible("tree", name="Workspaces", children=[replacement, owned])
+        self.desktop(
+            [Accessible("application", pid=42, children=[Accessible("frame", children=[tree])])]
+        )
+        self.probe.server_workspace_before = [retained]
+        self.assertIsNone(self.probe.created_workspace_row())
+        replacement.states = ()
+        owned.states = ("selected",)
+        self.assertIs(self.probe.created_workspace_row(), owned)
+
+    def test_cleanup_refuses_a_retained_proxy_when_the_fixture_name_is_missing(self):
+        retained = Accessible("tree item", name="Retained work")
+        tree = Accessible("tree", name="Workspaces", children=[retained])
+        self.desktop(
+            [Accessible("application", pid=42, children=[Accessible("frame", children=[tree])])]
+        )
+        self.probe.server_workspace_before = []
+        self.probe.server_workspace_row = retained
+        self.probe.wait = lambda predicate, classification: (
+            predicate() or self.smoke.require(False, classification)
+        )
+        driver = Mock()
+        with self.assertRaisesRegex(SmokeFailure, "^server_workspace_cleanup_identity_missing$"):
+            self.probe.retire_server_workspace(driver)
+        driver.context_menu.assert_not_called()
+        self.assertEqual(list(tree), [retained])
 
     def test_foreign_terminal_cannot_satisfy_missing_application_readiness(self):
         self.desktop(
@@ -403,7 +546,7 @@ class AccessibilityTerminalDiscoveryTests(unittest.TestCase):
         confirmation.action = retire
         driver = SimpleNamespace(escape=lambda: None, context_menu=lambda: frame.append(menu_item))
         self.probe.retire_server_workspace(driver)
-        self.assertEqual(pressed, ["owned row", "confirmed"])
+        self.assertEqual(pressed, ["confirmed"])
         self.assertEqual(list(tree), [other, survivor])
 
     def test_cleanup_refuses_ambiguous_owned_identity_without_deleting_a_workspace(self):

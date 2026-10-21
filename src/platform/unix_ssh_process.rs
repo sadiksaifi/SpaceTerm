@@ -17,7 +17,7 @@ pub(crate) struct UnixSshProcessAdapter;
 pub(crate) struct UnixSshProcess {
     child: Child,
     process_group: libc::pid_t,
-    collected_exit: Option<ProcessExit>,
+    observed_exit: Option<ProcessExit>,
 }
 
 impl SshProcessAdapter for UnixSshProcessAdapter {
@@ -83,7 +83,7 @@ impl SshProcessAdapter for UnixSshProcessAdapter {
             UnixSshProcess {
                 child,
                 process_group,
-                collected_exit: None,
+                observed_exit: None,
             },
             SshProcessPipes::new_pollable(
                 stdin.map(|pipe| Box::new(pipe) as Box<dyn std::io::Write + Send>),
@@ -98,20 +98,7 @@ impl SshProcessAdapter for UnixSshProcessAdapter {
         &self,
         process: &mut Self::Process,
     ) -> Result<Option<ProcessExit>, SshProcessMechanismError> {
-        if let Some(exit) = process.collected_exit {
-            return Ok(Some(exit));
-        }
-        process
-            .child
-            .try_wait()
-            .map_err(|_| SshProcessMechanismError::StatusFailed)
-            .map(|status| {
-                status.map(|status| {
-                    let exit = ProcessExit::new(status.success(), status.code());
-                    process.collected_exit = Some(exit);
-                    exit
-                })
-            })
+        process.observe_status(true)
     }
 
     fn signal(
@@ -123,7 +110,7 @@ impl SshProcessAdapter for UnixSshProcessAdapter {
             ProcessSignal::Terminate => libc::SIGTERM,
             ProcessSignal::Kill => libc::SIGKILL,
         };
-        signal_group(process.process_group, signal)
+        signal_group(process, signal)
     }
 
     fn observe_exit(&self, process: &mut Self::Process) -> Option<SshProcessExitObservation> {
@@ -131,13 +118,61 @@ impl SshProcessAdapter for UnixSshProcessAdapter {
     }
 
     fn reap(&self, mut process: Self::Process) -> Result<(), SshProcessMechanismError> {
-        if process.collected_exit.is_none() {
-            process
-                .child
-                .wait()
-                .map_err(|_| SshProcessMechanismError::ReapFailed)?;
+        // A group signal can miss a child still being forked by its leader. Reaping runs on
+        // the cleanup worker: observe the leader's exit without releasing its identity, then
+        // signal the group after its final fork has completed. Signal delivery itself never
+        // waits for exit, so a caller can still enforce its shutdown deadline.
+        process
+            .observe_status(false)
+            .map_err(|_| SshProcessMechanismError::ReapFailed)?;
+        let group = signal_group(&mut process, libc::SIGKILL);
+        let reaped = process
+            .child
+            .wait()
+            .map(|_| ())
+            .map_err(|_| SshProcessMechanismError::ReapFailed);
+        reaped.and(group)
+    }
+}
+
+impl UnixSshProcess {
+    fn observe_status(
+        &mut self,
+        nonblocking: bool,
+    ) -> Result<Option<ProcessExit>, SshProcessMechanismError> {
+        if let Some(exit) = self.observed_exit {
+            return Ok(Some(exit));
         }
-        Ok(())
+        loop {
+            let mut information = MaybeUninit::<libc::siginfo_t>::zeroed();
+            // SAFETY: this exclusively owned child is unreaped. WNOWAIT retains its PID and
+            // process group identity until reap, including after a successful status query.
+            let result = unsafe {
+                libc::waitid(
+                    libc::P_PID,
+                    self.child.id() as libc::id_t,
+                    information.as_mut_ptr(),
+                    libc::WEXITED | libc::WNOWAIT | if nonblocking { libc::WNOHANG } else { 0 },
+                )
+            };
+            if result == -1 {
+                if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(SshProcessMechanismError::StatusFailed);
+            }
+            // SAFETY: the structure was zeroed and waitid succeeded. WNOHANG leaves si_pid zero
+            // when no exit is available; otherwise si_code and si_status describe that exit.
+            let information = unsafe { information.assume_init() };
+            if unsafe { information.si_pid() } == 0 {
+                return Ok(None);
+            }
+            let code = (information.si_code == libc::CLD_EXITED)
+                .then(|| unsafe { information.si_status() });
+            let exit = ProcessExit::new(code == Some(0), code);
+            self.observed_exit = Some(exit);
+            return Ok(Some(exit));
+        }
     }
 }
 
@@ -164,20 +199,98 @@ fn stdio(mode: SshProcessStdio) -> Stdio {
 }
 
 fn signal_group(
-    process_group: libc::pid_t,
+    process: &mut UnixSshProcess,
     signal: libc::c_int,
 ) -> Result<(), SshProcessMechanismError> {
-    // SAFETY: the positive process group belongs to a child launched above with a private group.
-    let result = unsafe { libc::kill(-process_group, signal) };
+    // SAFETY: the unreaped child reserves the private process group until final cleanup.
+    let result = unsafe { libc::kill(-process.process_group, signal) };
     if result == 0 {
         return Ok(());
     }
     let error = io::Error::last_os_error();
+    #[cfg(target_os = "macos")]
+    if error.raw_os_error() == Some(libc::EPERM)
+        && process.observe_status(true).ok().flatten().is_some()
+        && retained_group_has_only_zombies(process.process_group)
+    {
+        // macOS reports EPERM when every group member is a zombie. Prove that state rather
+        // than suppressing a permission failure for a live descendant.
+        return Ok(());
+    }
     if error.raw_os_error() == Some(libc::ESRCH) {
         Ok(())
     } else {
         Err(SshProcessMechanismError::SignalFailed)
     }
+}
+
+#[cfg(target_os = "macos")]
+fn retained_group_has_only_zombies(leader: libc::pid_t) -> bool {
+    let Some(members) = process_group_members(leader) else {
+        return false;
+    };
+    if !members.contains(&leader) {
+        return false;
+    }
+    let exited = members.iter().all(|member| {
+        let mut information = MaybeUninit::<libc::proc_bsdinfo>::zeroed();
+        let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+        // SAFETY: proc_pidinfo writes at most size bytes into this valid structure. Process
+        // identities here are observed only; no descendant PID is ever used for signalling.
+        let bytes = unsafe {
+            libc::proc_pidinfo(
+                *member,
+                libc::PROC_PIDTBSDINFO,
+                0,
+                information.as_mut_ptr().cast(),
+                size,
+            )
+        };
+        if bytes != size {
+            return bytes == 0 && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
+        }
+        // SAFETY: proc_pidinfo returned the complete initialized BSD information structure.
+        let information = unsafe { information.assume_init() };
+        information.pbi_pid == *member as u32
+            && information.pbi_pgid == leader as u32
+            && information.pbi_status == libc::SZOMB
+    });
+    // A member could finish a fork while membership was being read. Once the observed
+    // members are all dead, reject any later member rather than guessing its state.
+    exited
+        && process_group_members(leader)
+            .is_some_and(|current| current.iter().all(|member| members.contains(member)))
+}
+
+#[cfg(target_os = "macos")]
+fn process_group_members(leader: libc::pid_t) -> Option<Vec<libc::pid_t>> {
+    // PROC_PGRP_ONLY from sys/proc_info.h.
+    const PROC_PGRP_ONLY: u32 = 2;
+    let width = std::mem::size_of::<libc::pid_t>();
+    // SAFETY: a null buffer queries the required byte count without writing memory.
+    let size =
+        unsafe { libc::proc_listpids(PROC_PGRP_ONLY, leader as u32, std::ptr::null_mut(), 0) };
+    let count = usize::try_from(size)
+        .ok()?
+        .checked_div(width)?
+        .checked_add(1)?;
+    let mut members = vec![0; count];
+    let capacity = libc::c_int::try_from(std::mem::size_of_val(members.as_slice())).ok()?;
+    // SAFETY: proc_listpids writes at most capacity bytes into this live PID buffer.
+    let bytes = unsafe {
+        libc::proc_listpids(
+            PROC_PGRP_ONLY,
+            leader as u32,
+            members.as_mut_ptr().cast(),
+            capacity,
+        )
+    };
+    let bytes = usize::try_from(bytes).ok()?;
+    if bytes >= capacity as usize || bytes % width != 0 {
+        return None;
+    }
+    members.truncate(bytes / width);
+    Some(members)
 }
 
 #[cfg(all(test, feature = "native-tests"))]
@@ -314,7 +427,7 @@ mod tests {
     }
 
     #[test]
-    fn collected_process_exit_should_remain_observable() {
+    fn observed_process_exit_should_retain_its_identity_and_remain_observable() {
         let adapter = UnixSshProcessAdapter;
         let mut spawned = adapter.spawn(shell_request("exit 7")).unwrap();
         let deadline = std::time::Instant::now() + Duration::from_secs(2);
@@ -335,7 +448,25 @@ mod tests {
         let observed = receiver.recv_timeout(Duration::from_secs(2));
         interrupt.interrupt();
         waiter.join().unwrap();
+        let process = spawned.process_mut().process_group;
+        let mut retained = MaybeUninit::<libc::siginfo_t>::zeroed();
+        // SAFETY: this checks that status observation has left our child waitable. WNOWAIT
+        // preserves that child for the adapter's final cleanup below.
+        let waitable = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                process as libc::id_t,
+                retained.as_mut_ptr(),
+                libc::WEXITED | libc::WNOWAIT | libc::WNOHANG,
+            )
+        };
         adapter.reap(spawned.into_process()).unwrap();
+        assert_eq!(
+            waitable, 0,
+            "status observation must not reap the owned child"
+        );
+        // SAFETY: waitid succeeded and initialized the zeroed information structure.
+        assert_eq!(unsafe { retained.assume_init().si_pid() }, process);
         assert_eq!(exit.code(), Some(7));
         assert_eq!(
             observed.unwrap(),
@@ -375,6 +506,104 @@ mod tests {
         adapter.reap(spawned.into_process()).unwrap();
 
         assert!(exit.is_some_and(ProcessExit::is_success));
+    }
+
+    #[test]
+    fn cleanup_after_observed_leader_exit_closes_member_stdout() {
+        use std::io::Read;
+
+        let adapter = UnixSshProcessAdapter;
+        let mut spawned = adapter
+            .spawn(SshProcessSpawnRequest::new(
+                PathBuf::from("/bin/sh"),
+                vec!["-c".into(), "read value".into()],
+                short_temporary_root().to_path_buf(),
+                Vec::new(),
+                SshProcessStdio::Piped,
+                SshProcessStdio::Null,
+                SshProcessStdio::Null,
+            ))
+            .unwrap();
+        let group = spawned.process_mut().process_group;
+        let mut member = Command::new("/bin/sleep")
+            .arg("30")
+            .process_group(group)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut stdout = member.stdout.take().unwrap();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            sender.send(stdout.read_to_end(&mut bytes)).unwrap();
+        });
+        // Dropping the owned stdin lets the leader exit, while the other owned group member
+        // still holds stdout. No signal is sent before observing that exit.
+        let mut process = spawned.into_process();
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let exited = loop {
+            if adapter.try_status(&mut process).unwrap().is_some() {
+                break true;
+            }
+            if std::time::Instant::now() >= deadline {
+                break false;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        if !exited {
+            adapter.signal(&mut process, ProcessSignal::Kill).unwrap();
+        }
+        let cleanup = adapter.reap(process);
+        let eof = receiver.recv_timeout(Duration::from_secs(2));
+        // Keep the test's direct child owned until cleanup even when the regression returns.
+        let _ = member.kill();
+        let _ = member.wait();
+        reader.join().unwrap();
+
+        assert!(exited, "the fixture leader must exit before cleanup");
+        cleanup.unwrap();
+        assert!(
+            eof.unwrap().is_ok(),
+            "cleanup must close the member-held pipe"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn reaping_a_group_with_multiple_zombies_should_succeed() {
+        let adapter = UnixSshProcessAdapter;
+        let mut spawned = adapter.spawn(shell_request("exec /bin/sleep 30")).unwrap();
+        let group = spawned.process_mut().process_group;
+        let mut member = Command::new("/bin/sh")
+            .args(["-c", "exit 7"])
+            .env_clear()
+            .process_group(group)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut information = MaybeUninit::<libc::siginfo_t>::zeroed();
+        // SAFETY: this child belongs to the test. Retain its zombie in the owned group until
+        // after adapter cleanup, so the all-exited group state does not depend on launchd.
+        let waitable = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                member.id() as libc::id_t,
+                information.as_mut_ptr(),
+                libc::WEXITED | libc::WNOWAIT,
+            )
+        };
+        let signal = adapter.signal(spawned.process_mut(), ProcessSignal::Kill);
+        let cleanup = adapter.reap(spawned.into_process());
+        let exit = member.wait().unwrap();
+
+        assert_eq!(waitable, 0);
+        assert_eq!(exit.code(), Some(7));
+        signal.unwrap();
+        cleanup.unwrap();
     }
 
     #[test]
