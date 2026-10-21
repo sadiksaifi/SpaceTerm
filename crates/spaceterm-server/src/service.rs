@@ -2,11 +2,11 @@
 pub mod activation;
 mod command;
 pub mod control;
-pub mod maintenance;
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
+pub mod maintenance;
 mod registration;
 mod runtime;
 pub use runtime::CandidateMetadata;
