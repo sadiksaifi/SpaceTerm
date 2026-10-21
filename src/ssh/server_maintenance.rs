@@ -263,7 +263,11 @@ fn outcome(
 ) -> Result<OperationOutcome, SshMaintenanceFailure> {
     match reply {
         Reply::Outcome(outcome) if outcome.operation == original => Ok(outcome),
-        Reply::Refused { refusal } => Err(SshMaintenanceFailure::Refused(refusal)),
+        // A refusal the service decided before any effect arrives as that original's outcome.
+        // A bare refusal to a dispatched request means something failed around the dispatch
+        // itself, so this client cannot tell whether the operation ran and must not say that
+        // nothing changed.
+        Reply::Refused { refusal } if !dispatched => Err(SshMaintenanceFailure::Refused(refusal)),
         Reply::Unknown if !dispatched => Err(SshMaintenanceFailure::Forgotten),
         _ if dispatched => Err(SshMaintenanceFailure::Unconfirmed),
         reply => Err(unexpected(reply)),
@@ -793,6 +797,50 @@ mod tests {
             }],
             "the dispatch carried exactly the original it bound"
         );
+    }
+
+    /// The service answers a bare refusal to a dispatched request only when something failed
+    /// around the dispatch itself, such as retaining the result. It never proves the operation
+    /// did not run, so it stays unconfirmed rather than claiming nothing changed.
+    #[gpui::test]
+    fn a_bare_refusal_to_a_dispatched_request_is_unconfirmed(cx: &mut gpui::TestAppContext) {
+        let account = account(
+            discovery(SERVER),
+            Reply::Refused {
+                refusal: MaintenanceRefusal::StorageUnavailable,
+            },
+        );
+        let (backend, _) = backend(cx.background_executor.clone(), account.clone(), artifacts());
+
+        let outcome = backend.apply(
+            &target(bound()),
+            &OperationSubmission {
+                operation: OPERATION,
+                kind: SubmittedKind::Service(Action::Stop),
+                confirmation: Some("2".repeat(64)),
+            },
+            &SshCancellationToken::default(),
+            &silent,
+        );
+
+        assert!(
+            matches!(outcome, Err(SshMaintenanceFailure::Unconfirmed)),
+            "a dispatched request must not report that nothing changed: {outcome:?}"
+        );
+        // The same refusal to a read is what the service decided, so it reads as a refusal.
+        let read = SshMaintenanceBackend::observe(
+            &backend,
+            &target(bound()),
+            MaintenanceAuthority::Requested,
+            &SshCancellationToken::default(),
+            &silent,
+        );
+        assert!(matches!(
+            read,
+            Err(SshMaintenanceFailure::Refused(
+                MaintenanceRefusal::StorageUnavailable
+            ))
+        ));
     }
 
     /// A destructive submission without the confirmation the service issued for one exact
