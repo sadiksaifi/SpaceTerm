@@ -603,7 +603,9 @@ impl SettingsWindow {
             }
             // Nothing is retained for an original the service has no record of and nothing is
             // sent, so clearing the entry gives up nothing and asks nothing.
-            RemoteAction::Dismiss => operations.dismiss(&destination, RemoteOperationScope::Removed),
+            RemoteAction::Dismiss => {
+                operations.dismiss(&destination, RemoteOperationScope::Removed)
+            }
             _ => return,
         }
         cx.notify();

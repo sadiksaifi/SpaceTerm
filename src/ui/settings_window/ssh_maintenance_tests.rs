@@ -1269,7 +1269,10 @@ fn a_result_this_client_cannot_save_says_what_ok_leaves_behind(cx: &mut TestAppC
         "the notice names what SpaceTerm couldn\u{2019}t save"
     );
     assert!(
-        announces("Choosing OK or Discard leaves the operation listed.", servers.cx),
+        announces(
+            "Choosing OK or Discard leaves the operation listed.",
+            servers.cx
+        ),
         "the notice says the step the person is about to take doesn\u{2019}t clear it"
     );
     assert!(
@@ -1324,7 +1327,10 @@ fn a_discard_this_client_cannot_save_says_the_original_stays(cx: &mut TestAppCon
         rendered("settings-ssh-server-maintenance-discard", servers.cx),
         "the original SpaceTerm couldn\u{2019}t stop following stays"
     );
-    assert!(announces("Choosing OK or Discard leaves the operation listed.", servers.cx));
+    assert!(announces(
+        "Choosing OK or Discard leaves the operation listed.",
+        servers.cx
+    ));
 }
 
 /// A removed connection's server that has no record of its original leaves nothing to resolve, so
@@ -1375,7 +1381,10 @@ fn a_removed_connections_unknown_original_ends_with_a_word(cx: &mut TestAppConte
         );
     }
 
-    click("settings-ssh-server-maintenance-dismiss-penguin", servers.cx);
+    click(
+        "settings-ssh-server-maintenance-dismiss-penguin",
+        servers.cx,
+    );
 
     assert_eq!(
         servers.operations.calls(),
