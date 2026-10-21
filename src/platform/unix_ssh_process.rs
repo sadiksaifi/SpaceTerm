@@ -108,21 +108,7 @@ impl SshProcessAdapter for UnixSshProcessAdapter {
     ) -> Result<(), SshProcessMechanismError> {
         let signal = match signal {
             ProcessSignal::Terminate => libc::SIGTERM,
-            ProcessSignal::Kill => {
-                // A group signal can miss a child still being forked by its leader. End the
-                // leader first, then observe exit without releasing its PID before the group
-                // signal. No new leader-owned fork can join the group after that observation.
-                if process.observed_exit.is_none() {
-                    process
-                        .child
-                        .kill()
-                        .map_err(|_| SshProcessMechanismError::SignalFailed)?;
-                    process
-                        .observe_status(false)
-                        .map_err(|_| SshProcessMechanismError::SignalFailed)?;
-                }
-                libc::SIGKILL
-            }
+            ProcessSignal::Kill => libc::SIGKILL,
         };
         signal_group(process, signal)
     }
@@ -132,11 +118,20 @@ impl SshProcessAdapter for UnixSshProcessAdapter {
     }
 
     fn reap(&self, mut process: Self::Process) -> Result<(), SshProcessMechanismError> {
+        // A group signal can miss a child still being forked by its leader. Reaping runs on
+        // the cleanup worker: observe the leader's exit without releasing its identity, then
+        // signal the group after its final fork has completed. Signal delivery itself never
+        // waits for exit, so a caller can still enforce its shutdown deadline.
         process
+            .observe_status(false)
+            .map_err(|_| SshProcessMechanismError::ReapFailed)?;
+        let group = signal_group(&mut process, libc::SIGKILL);
+        let reaped = process
             .child
             .wait()
-            .map_err(|_| SshProcessMechanismError::ReapFailed)?;
-        Ok(())
+            .map(|_| ())
+            .map_err(|_| SshProcessMechanismError::ReapFailed);
+        reaped.and(group)
     }
 }
 
@@ -204,7 +199,7 @@ fn stdio(mode: SshProcessStdio) -> Stdio {
 }
 
 fn signal_group(
-    process: &UnixSshProcess,
+    process: &mut UnixSshProcess,
     signal: libc::c_int,
 ) -> Result<(), SshProcessMechanismError> {
     // SAFETY: the unreaped child reserves the private process group until final cleanup.
@@ -215,7 +210,7 @@ fn signal_group(
     let error = io::Error::last_os_error();
     #[cfg(target_os = "macos")]
     if error.raw_os_error() == Some(libc::EPERM)
-        && process.observed_exit.is_some()
+        && process.observe_status(true).ok().flatten().is_some()
         && retained_leader_is_only_group_member(process.process_group)
     {
         // macOS reports EPERM when a group's only member is its zombie leader. Prove that
