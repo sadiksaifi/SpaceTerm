@@ -1112,4 +1112,76 @@ mod tests {
         backend.release(&target(bound()).destination);
         backend.release(&SshDestination::new("other-host".into()).unwrap());
     }
+
+    /// Start is the only remote operation that reverses a deliberate Stop. It ends no work, so it
+    /// carries its bound operation identity and no confirmation.
+    #[gpui::test]
+    fn starting_a_stopped_server_carries_its_original_and_no_confirmation(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let stopped = AccountDiscovery {
+            running: false,
+            stopped: true,
+            ..discovery(SERVER)
+        };
+        let started = OperationOutcome {
+            kind: OperationKind::Start,
+            ..completed()
+        };
+        let account = account(stopped, Reply::Outcome(started));
+        let (backend, _) = backend(cx.background_executor.clone(), account.clone(), artifacts());
+
+        let outcome = backend.apply(
+            &target(bound()),
+            &OperationSubmission {
+                operation: OPERATION,
+                kind: SubmittedKind::Start,
+                confirmation: None,
+            },
+            &SshCancellationToken::default(),
+            &silent,
+        );
+
+        assert!(matches!(
+            outcome,
+            Ok(OperationOutcome {
+                kind: OperationKind::Start,
+                resolution: OperationResolution::Completed,
+                ..
+            })
+        ));
+        let dispatched = account
+            .commands()
+            .into_iter()
+            .find(|command| command.contains("ssh-maintain"))
+            .unwrap();
+        assert!(
+            dispatched.contains(&format!("start {}'", "04".repeat(32))),
+            "{dispatched}"
+        );
+    }
+
+    /// Cancellation before dispatch sends nothing at all, so there is no admitted effect to
+    /// explain.
+    #[gpui::test]
+    fn cancellation_before_dispatch_sends_nothing(cx: &mut gpui::TestAppContext) {
+        let account = account(discovery(SERVER), Reply::Outcome(completed()));
+        let (backend, prompts) =
+            backend(cx.background_executor.clone(), account.clone(), artifacts());
+
+        let outcome = backend.apply(
+            &target(bound()),
+            &OperationSubmission {
+                operation: OPERATION,
+                kind: SubmittedKind::Service(Action::Restart),
+                confirmation: Some("2".repeat(64)),
+            },
+            &SshCancellationToken::cancelled(),
+            &silent,
+        );
+
+        assert!(matches!(outcome, Err(SshMaintenanceFailure::Cancelled)));
+        assert!(account.commands().is_empty());
+        assert_eq!(prompts.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
 }
