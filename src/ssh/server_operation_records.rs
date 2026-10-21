@@ -20,7 +20,8 @@ use crate::{
 const FILE: &str = "ssh-remote-operations.json";
 const MAX_OPERATIONS: usize = 64;
 const MAX_BYTES: usize = 64 * 1024;
-const MAX_DIGEST: usize = 128;
+/// A whole-package digest is a SHA-256, so a record naming anything else does not name a build.
+const DIGEST: usize = 64;
 
 /// Construction is inert. Only explicit owner operations read or retain operation intent.
 pub(crate) struct PrivateRemoteOperationRecords {
@@ -202,8 +203,7 @@ impl PrivateRemoteOperationRecords {
             return Err(SshIntentStoreError::Malformed);
         }
         if let SubmittedKind::Update { candidate } = &operation.kind
-            && (candidate.is_empty()
-                || candidate.len() > MAX_DIGEST
+            && (candidate.len() != DIGEST
                 || !candidate
                     .bytes()
                     .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)))
@@ -377,7 +377,7 @@ mod tests {
             "other",
             8,
             SubmittedKind::Update {
-                candidate: "abc123".into(),
+                candidate: "ab".repeat(32),
             },
         );
         resolved.outcome = Some(RetainedOutcome::Completed {
@@ -480,6 +480,14 @@ mod tests {
                 8,
                 SubmittedKind::Update {
                     candidate: "NOTHEX".into(),
+                },
+            ),
+            // A whole-package digest is a SHA-256, so a shorter run of hex names no build.
+            operation(
+                "other",
+                8,
+                SubmittedKind::Update {
+                    candidate: "abc123".into(),
                 },
             ),
             unnamed,

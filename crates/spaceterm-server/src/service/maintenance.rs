@@ -250,8 +250,13 @@ impl Maintenance {
         Self { service }
     }
 
-    /// Whether this service retains an original that still needs resolving. Scoped evidence
-    /// refuses to run against work it did not submit.
+    /// Whether this service retains an original that still needs resolving.
+    ///
+    /// No control surface asks this. It exists so that the scoped checks a client-enabled build
+    /// runs against disposable service state can refuse to touch work they did not submit, which
+    /// is a question the request contract deliberately does not answer: a client resolves the
+    /// originals it submitted and learns nothing about anyone else's.
+    #[cfg(any(feature = "client", test))]
     pub fn unresolved(&self) -> Result<bool, MaintenanceRefusal> {
         let data = match Directory::open(&self.service.paths.data, false) {
             Ok(data) => data,
