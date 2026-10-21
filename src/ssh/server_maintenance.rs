@@ -38,6 +38,11 @@ use super::server_process::{
 use crate::domain::SshDestination;
 
 /// The remote action every maintenance exchange runs on the approved installation.
+///
+/// One exchange is one bounded request and one bounded reply. The request travels as this
+/// action's validated arguments, which carry only names this build fixes and 32-byte values the
+/// client holds, and the service writes one serialized [`Reply`] on standard output. The staging
+/// transfer answers the same way.
 const MAINTAIN: &str = "ssh-maintain";
 /// One bounded read or description, which changes nothing on the other computer.
 const READ: Duration = Duration::from_secs(20);
