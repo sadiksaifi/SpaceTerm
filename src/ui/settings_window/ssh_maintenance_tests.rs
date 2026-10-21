@@ -25,9 +25,10 @@ use crate::settings::SettingsDocument;
 use crate::settings::storage::testing::MemoryStorage;
 use crate::ssh::cancellation::SshCancellationToken;
 use crate::ssh::server_connection::{
-    ConnectMode, ConnectProgress, ConnectedSshServer, InteractionReason, RetainedSshConnection,
-    SshConnectBackend, SshConnectFailure, SshConnectionIntentStore, SshIntentStoreError,
-    SshServerConnections, SshServerContinuity, SshServerObservation,
+    ConnectMode, ConnectProgress, ConnectedSshServer, InteractionReason, RemoteConnectionStatus,
+    RetainedSshConnection, ServerAvailability, SshConnectBackend, SshConnectFailure,
+    SshConnectionIntentStore, SshIntentStoreError, SshServerConnections, SshServerContinuity,
+    SshServerFacts, SshServerObservation,
 };
 use crate::ssh::server_maintenance::{MaintenancePhase, SubmittedKind};
 use crate::ssh::server_operations::{
@@ -325,10 +326,11 @@ impl RemoteServerOperations for ScriptedOperations {
     }
 }
 
-/// A computer SpaceTerm never reaches, so no test connects to anything.
-struct Unreached;
+/// A computer whose state Check Status observes and whose connection waits for the person, so no
+/// test connects to anything.
+struct Observed;
 
-impl SshConnectBackend for Unreached {
+impl SshConnectBackend for Observed {
     fn connect(
         &self,
         _: &SshDestination,
@@ -349,9 +351,14 @@ impl SshConnectBackend for Unreached {
         _: &SshCancellationToken,
         _: &ConnectProgress<'_>,
     ) -> Result<SshServerObservation, SshConnectFailure> {
-        Err(SshConnectFailure::NeedsPerson(
-            InteractionReason::Authentication,
-        ))
+        Ok(SshServerObservation {
+            availability: ServerAvailability::Running,
+            facts: SshServerFacts {
+                platform: ("Example OS".to_owned(), "x86_64".to_owned()),
+                version: Some("1.4.0".to_owned()),
+                starts_automatically: true,
+            },
+        })
     }
 }
 
@@ -393,7 +400,7 @@ fn open_maintenance<'a>(cx: &'a mut TestAppContext) -> Servers<'a> {
         continuity: None,
         active: false,
     }])));
-    let connections = SshServerConnections::new(Arc::new(Unreached), saved);
+    let connections = SshServerConnections::new(Arc::new(Observed), saved);
     connections.resume_retained();
     let deadline = Instant::now() + Duration::from_secs(5);
     while connections.connections().is_empty() {
@@ -921,4 +928,95 @@ fn a_removed_connection_with_nothing_to_say_is_not_listed(cx: &mut TestAppContex
         "settings-row-removed-server-operations",
         servers.cx
     ));
+}
+
+fn search(window: &Entity<SettingsWindow>, query: &str, cx: &mut VisualTestContext) {
+    cx.update(|_, cx| {
+        let search = window.read(cx).search.clone();
+        search.update(cx, |search, cx| search.set_value(query.to_owned(), cx));
+    });
+    cx.run_until_parked();
+}
+
+/// Settings Search reaches the remote maintenance rows by the words a person types for these
+/// operations, and searching asks the other computer nothing.
+#[gpui::test]
+fn settings_search_reaches_the_maintenance_rows_without_reaching_the_machine(
+    cx: &mut TestAppContext,
+) {
+    let servers = open_maintenance(cx);
+
+    for (query, row) in [
+        ("stop server", SERVICE_ROW),
+        ("restart server", SERVICE_ROW),
+        ("uninstall", SERVICE_ROW),
+        ("update server", UPDATE_ROW),
+        ("finish update", UPDATE_ROW),
+    ] {
+        search(&servers.window, query, servers.cx);
+
+        assert!(
+            rendered(row, servers.cx),
+            "{query:?} should reach {row}, and the row's machine is the one selected"
+        );
+        assert!(
+            servers.operations.calls().is_empty(),
+            "{query:?} must ask the machine nothing, got {:?}",
+            servers.operations.calls()
+        );
+    }
+}
+
+/// What Check Status already observed decides what the rows offer before any maintenance read,
+/// so a server the person just checked can be stopped without a reading step of its own.
+#[gpui::test]
+fn an_observed_server_offers_its_steps_before_any_maintenance_read(cx: &mut TestAppContext) {
+    let servers = open_maintenance(cx);
+    let destination = SshDestination::new("penguin".to_owned()).expect("destination");
+
+    servers.connections.check(&destination);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !matches!(
+        servers.connections.status(&destination),
+        RemoteConnectionStatus::Checked { .. }
+    ) {
+        assert!(Instant::now() < deadline, "the check settles");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    servers.cx.run_until_parked();
+
+    assert!(rendered(
+        "settings-ssh-server-service-state-observed",
+        servers.cx
+    ));
+    assert!(says(
+        "was running when SpaceTerm last reached it",
+        servers.cx
+    ));
+    for offered in [
+        "settings-ssh-server-service-stop",
+        "settings-ssh-server-service-restart",
+        "settings-ssh-server-service-uninstall",
+        "settings-ssh-server-service-check",
+        "settings-ssh-server-update",
+    ] {
+        assert!(rendered(offered, servers.cx), "{offered} should be offered");
+    }
+    assert!(!rendered("settings-ssh-server-service-start", servers.cx));
+    assert!(
+        servers.operations.calls().is_empty(),
+        "the observation needed no maintenance read, got {:?}",
+        servers.operations.calls()
+    );
+
+    click("settings-ssh-server-service-stop", servers.cx);
+
+    assert_eq!(
+        servers.operations.calls(),
+        vec![Call::Describe(RemoteMaintenanceRequest::Service(
+            Action::Stop
+        ))],
+        "the step still describes its change against fresh facts"
+    );
+    assert!(alert_open("settings-ssh-server-stop-confirm", servers.cx));
 }

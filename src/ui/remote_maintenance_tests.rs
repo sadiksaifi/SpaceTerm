@@ -594,3 +594,89 @@ fn updating_a_stopped_server_leaves_it_stopped() {
         confirmation.detail
     );
 }
+
+/// A connection or a Check Status has already observed whether that account's server runs, so a
+/// surface offers what that observation allows before any maintenance read, and says when the
+/// observation was made. Only explicit Start still reverses a deliberate Stop.
+#[test]
+fn an_observation_decides_what_is_offered_before_any_read() {
+    use crate::ssh::server_connection::{
+        RemoteConnectionStatus, ServerAvailability, SshServerFacts,
+    };
+
+    let facts = || SshServerFacts {
+        platform: ("Example OS".to_owned(), "x86_64".to_owned()),
+        version: Some("1.4.0".to_owned()),
+        starts_automatically: true,
+    };
+    let connected = RemoteConnectionStatus::Connected {
+        protocol_major: 1,
+        facts: facts(),
+    };
+    let checked = |availability| RemoteConnectionStatus::Checked {
+        availability,
+        facts: facts(),
+        at: std::time::SystemTime::UNIX_EPOCH,
+    };
+
+    let service = observed("penguin", &connected, MaintenanceRow::Service)
+        .expect("a connection observes whether the server runs");
+    assert_eq!(service.state, Some("Running"));
+    assert_eq!(
+        service.actions,
+        vec![
+            RemoteAction::Stop,
+            RemoteAction::Restart,
+            RemoteAction::Uninstall,
+            RemoteAction::Check
+        ]
+    );
+    assert!(
+        service
+            .explanation
+            .contains("when SpaceTerm last reached it"),
+        "an earlier observation says when it was made, got {:?}",
+        service.explanation
+    );
+    assert_eq!(
+        observed_menu_actions(&connected),
+        vec![
+            RemoteAction::Stop,
+            RemoteAction::Restart,
+            RemoteAction::Update,
+            RemoteAction::Uninstall
+        ]
+    );
+    let stopped = observed(
+        "penguin",
+        &RemoteConnectionStatus::Stopped,
+        MaintenanceRow::Service,
+    )
+    .expect("a stopped server was observed");
+    assert_eq!(stopped.state, Some("Stopped"));
+    assert_eq!(
+        stopped.actions,
+        vec![
+            RemoteAction::Start,
+            RemoteAction::Uninstall,
+            RemoteAction::Check
+        ]
+    );
+    let bare = observed(
+        "penguin",
+        &checked(ServerAvailability::NotInstalled),
+        MaintenanceRow::Service,
+    )
+    .expect("a check observed that no server is installed");
+    assert_eq!(bare.actions, vec![RemoteAction::Check]);
+    assert!(observed_menu_actions(&checked(ServerAvailability::NotInstalled)).is_empty());
+    assert!(
+        observed(
+            "penguin",
+            &RemoteConnectionStatus::Inactive,
+            MaintenanceRow::Service
+        )
+        .is_none(),
+        "nothing has been observed, so nothing is offered from an observation"
+    );
+}

@@ -13,7 +13,8 @@ use gpui::{App, Context, Window};
 use super::{ServerBindings, ServerOrigin, WorkspaceManager};
 use crate::domain::{SshDestination, WorkspaceEntry, WorkspaceId, WorkspaceLocation};
 use crate::ssh::server_connection::RemoteConnectionStatus;
-use crate::ui::remote_maintenance::{menu_actions, working_state};
+use crate::ssh::server_operations::RemoteOperationState;
+use crate::ui::remote_maintenance::{menu_actions, observed_menu_actions, working_state};
 use crate::ui::workspace_sidebar::{MachineMenuCommand, MachineSection};
 
 /// The machine whose group a Workspace joins.
@@ -225,10 +226,20 @@ impl WorkspaceManager {
                         // stopped or failing after it connected, and ends reconnect intent.
                         disconnects: controlled,
                         awaiting_connection: !presented && intended,
-                        maintenance: maintenance
-                            .as_ref()
-                            .map(|state| menu_actions(state, None))
-                            .unwrap_or_default(),
+                        maintenance: match &maintenance {
+                            Some(state) if !matches!(state, RemoteOperationState::Unread) => {
+                                menu_actions(state, None)
+                            }
+                            // Before any maintenance read, the heading offers what the connection
+                            // already observed about that account's server.
+                            Some(_) => connections
+                                .as_ref()
+                                .map(|connections| {
+                                    observed_menu_actions(&connections.status(&destination))
+                                })
+                                .unwrap_or_default(),
+                            None => Vec::new(),
+                        },
                         // Settings lists saved SSH connections; native Remote Workspaces alone
                         // name no server there.
                         has_settings: saved,

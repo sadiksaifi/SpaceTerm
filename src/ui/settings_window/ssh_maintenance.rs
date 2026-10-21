@@ -29,8 +29,8 @@ use crate::ssh::server_operations::{
 use crate::ui::appearance::{ChromeAppearance, gpui_color};
 use crate::ui::chrome_typography::{ChromeTextStyleExt as _, TextRole};
 use crate::ui::remote_maintenance::{
-    MaintenanceConfirmation, MaintenancePresentation, MaintenanceRow, RemoteAction, present,
-    removed_presentation,
+    MaintenanceConfirmation, MaintenancePresentation, MaintenanceRow, RemoteAction, observed,
+    present, removed_presentation,
 };
 use crate::ui::sidebar_window::form::{CaptionTone, badge};
 
@@ -133,6 +133,18 @@ impl SettingsWindow {
     fn maintenance_presentation(&self, row: MaintenanceRow) -> Option<MaintenancePresentation> {
         let (destination, state) = self.selected_maintenance()?;
         let rows = self.ssh_maintenance.as_ref()?;
+        // Before any maintenance read, what the connection already observed decides what the row
+        // offers, so a connected server can be stopped without a reading step first.
+        if matches!(state, RemoteOperationState::Unread)
+            && let Some(connections) = self.ssh_servers.as_ref()
+            && let Some(presentation) = observed(
+                destination.as_str(),
+                &connections.connections.status(&destination),
+                row,
+            )
+        {
+            return Some(presentation);
+        }
         let asked = rows
             .asked
             .as_ref()

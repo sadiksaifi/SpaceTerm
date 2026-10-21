@@ -20,7 +20,8 @@ use crate::local_server::service::maintenance::{
 };
 use crate::local_server::service::{RetainedInstallation, ServiceStatus};
 use crate::ssh::server_connection::{
-    ContinuityChange, IncompatibilityKind, InteractionReason, UnavailableKind,
+    ContinuityChange, IncompatibilityKind, InteractionReason, RemoteConnectionStatus,
+    ServerAvailability, UnavailableKind,
 };
 use crate::ssh::server_maintenance::{MaintenancePhase, SshMaintenanceFailure, SubmittedKind};
 use crate::ssh::server_operations::{RemoteMaintenanceRequest, RemoteOperationState};
@@ -248,9 +249,17 @@ pub(crate) fn menu_actions(
     asked: Option<RemoteMaintenanceRequest>,
 ) -> Vec<RemoteAction> {
     let offered = |row| present("", state, row, asked).actions;
-    let mut actions: Vec<_> = offered(MaintenanceRow::Service)
-        .into_iter()
-        .chain(offered(MaintenanceRow::Update))
+    menu_order(
+        offered(MaintenanceRow::Service)
+            .into_iter()
+            .chain(offered(MaintenanceRow::Update)),
+    )
+}
+
+/// The steps a menu carries, in menu order. The everyday acknowledgement and the cancellation
+/// belong to the row that reports the operation, not to a menu.
+fn menu_order(actions: impl Iterator<Item = RemoteAction>) -> Vec<RemoteAction> {
+    let mut actions: Vec<_> = actions
         .filter(|action| {
             !matches!(
                 action,
@@ -429,9 +438,21 @@ fn read_service(machine: &str, facts: &MaintenanceFacts) -> MaintenancePresentat
             )),
         ),
     };
-    // Installing a first server belongs to Connect, which offers the verified build and explains
-    // what it does on that computer.
-    let mut actions: Vec<_> = phase
+    MaintenancePresentation {
+        state: Some(state),
+        state_selector,
+        explanation,
+        tone,
+        actions: service_actions(facts.status),
+        working: false,
+    }
+}
+
+/// The steps one service state allows, from the phase table the local service row uses, with the
+/// read every state offers. Installing a first server belongs to Connect, which offers the
+/// verified build and explains what it does on that computer.
+fn service_actions(status: ServiceStatus) -> Vec<RemoteAction> {
+    let mut actions: Vec<_> = ServicePhase::of(status)
         .actions()
         .iter()
         .filter_map(|action| match action {
@@ -443,14 +464,7 @@ fn read_service(machine: &str, facts: &MaintenanceFacts) -> MaintenancePresentat
         })
         .collect();
     actions.push(RemoteAction::Check);
-    MaintenancePresentation {
-        state: Some(state),
-        state_selector,
-        explanation,
-        tone,
-        actions,
-        working: false,
-    }
+    actions
 }
 
 fn read_update(machine: &str, facts: &MaintenanceFacts) -> MaintenancePresentation {
@@ -462,7 +476,16 @@ fn read_update(machine: &str, facts: &MaintenanceFacts) -> MaintenancePresentati
     {
         return presentation;
     }
-    if !facts.status.installed {
+    update_offer(machine, facts.status, facts.approved.as_ref())
+}
+
+/// The Update Server offer for one observed service state.
+fn update_offer(
+    machine: &str,
+    status: ServiceStatus,
+    approved: Option<&RemoteBuild>,
+) -> MaintenancePresentation {
+    if !status.installed {
         let (explanation, tone) = guidance(format!(
             "{machine} has no SpaceTerm server for this account, so there is nothing to update."
         ));
@@ -475,17 +498,15 @@ fn read_update(machine: &str, facts: &MaintenanceFacts) -> MaintenancePresentati
             working: false,
         };
     }
-    let approved = facts
-        .approved
-        .as_ref()
+    let approved = approved
         .map(|approved| format!("Version {} is approved on {machine}. ", build(approved)))
         .unwrap_or_default();
-    let effect = if facts.status.running {
+    let effect = if status.running {
         format!(
             "Updating ends the Terminal Sessions on {machine} for every client, so SpaceTerm asks \
              first."
         )
-    } else if facts.status.stopped {
+    } else if status.stopped {
         "Updating keeps the server stopped until you choose Start Server.".to_owned()
     } else {
         "The server isn\u{2019}t running, so updating ends no Terminal Sessions.".to_owned()
@@ -501,6 +522,98 @@ fn read_update(machine: &str, facts: &MaintenanceFacts) -> MaintenancePresentati
         tone,
         actions: vec![RemoteAction::Update],
         working: false,
+    }
+}
+
+/// What a server allows as this client last observed it through its connection, before any
+/// maintenance read. A connection or a Check Status already observed whether that account's
+/// server runs, so a surface offers what that observation allows and says when it was made.
+/// `None` when nothing has been observed.
+///
+/// It uses the same phase table a validated read uses, so the two cannot disagree. Every step it
+/// offers still describes its change against fresh facts before anything is sent.
+pub(crate) fn observed(
+    machine: &str,
+    connection: &RemoteConnectionStatus,
+    row: MaintenanceRow,
+) -> Option<MaintenancePresentation> {
+    let status = observed_status(connection)?;
+    let phase = ServicePhase::of(status);
+    Some(match row {
+        MaintenanceRow::Service => {
+            let (explanation, tone) = match phase {
+                ServicePhase::NotInstalled => guidance(format!(
+                    "{machine} had no SpaceTerm server for this account when SpaceTerm last                      reached it. Connect offers to install a verified one."
+                )),
+                ServicePhase::Running => guidance(format!(
+                    "The server on {machine} was running when SpaceTerm last reached it. Choose                      Check Now to read its service."
+                )),
+                ServicePhase::Stopped => guidance(format!(
+                    "The server on {machine} was stopped when SpaceTerm last reached it. It stays                      stopped until you choose Start Server."
+                )),
+                ServicePhase::NotRunning => warning(format!(
+                    "The server on {machine} was installed but not running when SpaceTerm last                      reached it. Choose Check Now to read its service."
+                )),
+            };
+            MaintenancePresentation {
+                state: Some(phase_badge(phase)),
+                state_selector: selector(row, "observed"),
+                explanation,
+                tone,
+                actions: service_actions(status),
+                working: false,
+            }
+        }
+        MaintenanceRow::Update => update_offer(machine, status, None),
+    })
+}
+
+/// The steps a machine heading's menu offers for a server this client has only observed through
+/// its connection.
+pub(crate) fn observed_menu_actions(connection: &RemoteConnectionStatus) -> Vec<RemoteAction> {
+    let offered = |row| {
+        observed("", connection, row).map_or_else(Vec::new, |presentation| presentation.actions)
+    };
+    menu_order(
+        offered(MaintenanceRow::Service)
+            .into_iter()
+            .chain(offered(MaintenanceRow::Update)),
+    )
+}
+
+/// The service state one connection observation establishes, or `None` when it observed none.
+/// Only a connection or an explicit Check Status observes this; nothing here reaches a computer.
+fn observed_status(connection: &RemoteConnectionStatus) -> Option<ServiceStatus> {
+    let installed = |running| ServiceStatus {
+        installed: true,
+        enabled: running,
+        running,
+        stopped: false,
+    };
+    Some(match connection {
+        RemoteConnectionStatus::Connected { .. } => installed(true),
+        RemoteConnectionStatus::Checked { availability, .. } => match availability {
+            ServerAvailability::Running => installed(true),
+            ServerAvailability::NotRunning => installed(false),
+            ServerAvailability::NotInstalled => ServiceStatus::default(),
+        },
+        RemoteConnectionStatus::Stopped => ServiceStatus {
+            installed: true,
+            enabled: false,
+            running: false,
+            stopped: true,
+        },
+        _ => return None,
+    })
+}
+
+/// The badge one service state carries, in the words every control surface uses.
+const fn phase_badge(phase: ServicePhase) -> &'static str {
+    match phase {
+        ServicePhase::NotInstalled => "Not Installed",
+        ServicePhase::Running => "Running",
+        ServicePhase::Stopped => "Stopped",
+        ServicePhase::NotRunning => "Not Running",
     }
 }
 
