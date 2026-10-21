@@ -32,6 +32,7 @@ pub(crate) enum DevelopmentPaneStatus {
     TakeoverFailed(ServerError),
     TakingOver,
     Reconnecting,
+    SessionEnded,
     Ended,
     Failed(ServerError),
 }
@@ -39,6 +40,7 @@ pub(crate) struct DevelopmentPaneState {
     status: Mutex<DevelopmentPaneStatus>,
     /// Who controlled the Pane when the server last offered Take Over.
     controller: Mutex<Option<pane::control::Controller>>,
+    session_dormant: AtomicBool,
     retry: AtomicBool,
     selected: AtomicBool,
     take_over: AtomicBool,
@@ -66,6 +68,7 @@ impl DevelopmentPaneState {
         Self {
             status: Mutex::new(DevelopmentPaneStatus::Connecting),
             controller: Mutex::default(),
+            session_dormant: AtomicBool::new(false),
             retry: AtomicBool::new(false),
             selected: AtomicBool::new(false),
             take_over: AtomicBool::new(false),
@@ -104,6 +107,9 @@ impl DevelopmentPaneState {
             .unwrap_or_else(|e| e.into_inner())
             .clone()
     }
+    pub(crate) fn session_dormant(&self) -> bool {
+        self.session_dormant.load(Ordering::Acquire)
+    }
     /// What the current connection answered about interactive terminal input.
     ///
     /// Only a Connected status carries an answer: attachment records the negotiated capability
@@ -136,6 +142,7 @@ impl DevelopmentPaneState {
             self.status(),
             DevelopmentPaneStatus::Connecting
                 | DevelopmentPaneStatus::Restored
+                | DevelopmentPaneStatus::SessionEnded
                 | DevelopmentPaneStatus::Takeover
         ) {
             self.selected.store(true, Ordering::Release);
@@ -151,6 +158,7 @@ impl DevelopmentPaneState {
         if matches!(
             self.status(),
             DevelopmentPaneStatus::Restored
+                | DevelopmentPaneStatus::SessionEnded
                 | DevelopmentPaneStatus::Failed(ServerError::DirectoryUnavailable)
         ) {
             self.directory_busy.store(true, Ordering::Release);
@@ -212,8 +220,9 @@ impl DevelopmentPaneState {
     /// The server offered Take Over and named who controls the Pane. Every offer replaces the
     /// last one, so the Takeover Screen follows control as it moves. A Take Over in progress
     /// stays in progress until the server answers it.
-    fn offered_take_over(&self, controller: pane::control::Controller) {
+    fn offered_take_over(&self, controller: pane::control::Controller, session_ended: bool) {
         let mut status = self.status.lock().unwrap_or_else(|e| e.into_inner());
+        self.session_dormant.store(session_ended, Ordering::Release);
         *self.controller.lock().unwrap_or_else(|e| e.into_inner()) = Some(controller);
         if *status != DevelopmentPaneStatus::TakingOver {
             *status = DevelopmentPaneStatus::Takeover;
@@ -1234,8 +1243,7 @@ fn present(
         state,
     } = factory;
     let presenter = reservation.activate(&alive);
-    let mut expected_session: Option<Lease> = None;
-    let mut expected_target: Option<pane::PaneTarget> = None;
+    let mut attached_session = false;
     let mut generation = PresentationGeneration::default();
     let mut takeover = false;
     let mut paste_unconfirmed = false;
@@ -1274,195 +1282,203 @@ fn present(
                     other => other,
                 })?,
             };
-            let mut dormant = false;
-            while let Reply::Restored {
-                server: boot,
-                pane,
-                ref recovery,
-                directory_unavailable,
-                ..
-            } = reply
-            {
-                if !dormant {
-                    dormant = true;
-                    expected_session = None;
-                    expected_target = None;
-                    takeover = false;
-                    paste_unconfirmed = false;
-                    state.invalidate();
-                    if state.directory_busy.swap(false, Ordering::AcqRel) {
-                        *state
-                            .directory_note
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner()) =
-                            Some("Starting the shell was not confirmed.");
-                    }
-                    state.start_restored.store(false, Ordering::Release);
-                    drain_input(&state, &input);
-                    clear_presentation(&events, &mut generation, &appearance);
-                }
-                *state.recovery.lock().unwrap_or_else(|e| e.into_inner()) = recovery
-                    .clone()
-                    .filter(|_| connection.supports_directory_recovery());
-                unavailable |= directory_unavailable;
-                state.set(if unavailable {
-                    DevelopmentPaneStatus::Failed(ServerError::DirectoryUnavailable)
-                } else {
-                    DevelopmentPaneStatus::Restored
-                });
-                if !alive.load(Ordering::Acquire)
-                    || attachment.as_ref().is_some_and(|permit| !permit.active())
+            while matches!(reply, Reply::Restored { .. } | Reply::Takeover { .. }) {
+                let mut dormant = false;
+                while let Reply::Restored {
+                    server: boot,
+                    pane,
+                    ref recovery,
+                    directory_unavailable,
+                    session_ended,
+                    ..
+                } = reply
                 {
-                    return Ok(());
-                }
-                let repair = state
-                    .repair
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .take();
-                if repair.is_some()
-                    || state.start_restored.swap(false, Ordering::AcqRel)
-                    || state.selected.swap(false, Ordering::AcqRel)
-                {
-                    grant_size = *size.lock().unwrap_or_else(|e| e.into_inner());
-                    let update = appearance.lock().unwrap_or_else(|e| e.into_inner()).clone();
-                    grant_appearance = Some(update.generation);
-                    let action = match repair {
-                        Some((target, replacement)) => Request::RepairDirectory {
-                            target,
-                            replacement: Some(replacement),
-                            size: grant_size,
-                            style: Some(encode_style(&update)),
-                        },
-                        None if unavailable && recovery.is_some() => Request::RepairDirectory {
-                            target: recovery.clone().ok_or(ServerError::Protocol)?,
-                            replacement: None,
-                            size: grant_size,
-                            style: Some(encode_style(&update)),
-                        },
-                        None => Request::StartRestored {
-                            server: boot,
-                            pane,
-                            size: grant_size,
-                            style: Some(encode_style(&update)),
-                        },
-                    };
-                    let replacing = matches!(
-                        &action,
-                        Request::RepairDirectory {
-                            replacement: Some(_),
-                            ..
-                        }
-                    );
-                    reply = match send(&presenter, &alive, &attachment, &mut connection, &action) {
-                        Err(ServerError::DirectoryUnavailable) => {
-                            unavailable = true;
-                            state.directory_busy.store(false, Ordering::Release);
+                    if !dormant {
+                        dormant = true;
+                        attached_session = false;
+                        takeover = false;
+                        paste_unconfirmed = false;
+                        state.invalidate();
+                        if state.directory_busy.swap(false, Ordering::AcqRel) {
                             *state
                                 .directory_note
                                 .lock()
-                                .unwrap_or_else(|e| e.into_inner()) = Some(if replacing {
-                                "That directory is no longer available. Choose another."
-                            } else {
-                                "The directory is still unavailable."
-                            });
-                            state.invalidate();
-                            reply
+                                .unwrap_or_else(|e| e.into_inner()) =
+                                Some("Starting the shell was not confirmed.");
                         }
-                        result => result?,
-                    };
-                } else {
-                    // Take Over, Start and selection wake this check early.
+                        state.start_restored.store(false, Ordering::Release);
+                        drain_input(&state, &input);
+                        clear_presentation(&events, &mut generation, &appearance);
+                    }
+                    *state.recovery.lock().unwrap_or_else(|e| e.into_inner()) = recovery
+                        .clone()
+                        .filter(|_| connection.supports_directory_recovery());
+                    unavailable |= directory_unavailable;
                     state
-                        .wake
-                        .wait_until(std::time::Instant::now() + Duration::from_millis(100));
-                    let size = *size.lock().unwrap_or_else(|e| e.into_inner());
-                    grant_size = size;
-                    grant_appearance = None;
-                    reply = send(
-                        &presenter,
-                        &alive,
-                        &attachment,
-                        &mut connection,
-                        &Request::SelectPane {
-                            pane: pane_id,
-                            explicit: false,
-                            size,
-                            style: None,
-                        },
-                    )?;
+                        .session_dormant
+                        .store(session_ended, Ordering::Release);
+                    state.set(if unavailable {
+                        DevelopmentPaneStatus::Failed(ServerError::DirectoryUnavailable)
+                    } else if session_ended {
+                        DevelopmentPaneStatus::SessionEnded
+                    } else {
+                        DevelopmentPaneStatus::Restored
+                    });
+                    if !alive.load(Ordering::Acquire)
+                        || attachment.as_ref().is_some_and(|permit| !permit.active())
+                    {
+                        return Ok(());
+                    }
+                    let repair = state
+                        .repair
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .take();
+                    if repair.is_some()
+                        || state.start_restored.swap(false, Ordering::AcqRel)
+                        || state.selected.swap(false, Ordering::AcqRel)
+                    {
+                        grant_size = *size.lock().unwrap_or_else(|e| e.into_inner());
+                        let update = appearance.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                        grant_appearance = Some(update.generation);
+                        let action = match repair {
+                            Some((target, replacement)) => Request::RepairDirectory {
+                                target,
+                                replacement: Some(replacement),
+                                size: grant_size,
+                                style: Some(encode_style(&update)),
+                            },
+                            None if unavailable && recovery.is_some() => Request::RepairDirectory {
+                                target: recovery.clone().ok_or(ServerError::Protocol)?,
+                                replacement: None,
+                                size: grant_size,
+                                style: Some(encode_style(&update)),
+                            },
+                            None => Request::StartRestored {
+                                server: boot,
+                                pane,
+                                size: grant_size,
+                                style: Some(encode_style(&update)),
+                            },
+                        };
+                        let replacing = matches!(
+                            &action,
+                            Request::RepairDirectory {
+                                replacement: Some(_),
+                                ..
+                            }
+                        );
+                        reply =
+                            match send(&presenter, &alive, &attachment, &mut connection, &action) {
+                                Err(ServerError::DirectoryUnavailable) => {
+                                    unavailable = true;
+                                    state.directory_busy.store(false, Ordering::Release);
+                                    *state
+                                        .directory_note
+                                        .lock()
+                                        .unwrap_or_else(|e| e.into_inner()) = Some(if replacing {
+                                        "That directory is no longer available. Choose another."
+                                    } else {
+                                        "The directory is still unavailable."
+                                    });
+                                    state.invalidate();
+                                    reply
+                                }
+                                result => result?,
+                            };
+                    } else {
+                        // Take Over, Start and selection wake this check early.
+                        state
+                            .wake
+                            .wait_until(std::time::Instant::now() + Duration::from_millis(100));
+                        let size = *size.lock().unwrap_or_else(|e| e.into_inner());
+                        grant_size = size;
+                        grant_appearance = None;
+                        reply = send(
+                            &presenter,
+                            &alive,
+                            &attachment,
+                            &mut connection,
+                            &Request::SelectPane {
+                                pane: pane_id,
+                                explicit: false,
+                                size,
+                                style: None,
+                            },
+                        )?;
+                    }
                 }
-            }
-            state.directory_busy.store(false, Ordering::Release);
-            state
-                .recovery
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .take();
-            while let Reply::Takeover {
-                target,
-                ref controller,
-            } = reply
-            {
-                expected_target = Some(target);
-                state.paste_unconfirmed.store(false, Ordering::Release);
-                if !takeover {
-                    takeover = true;
-                    paste_unconfirmed = false;
-                    state.invalidate();
-                    drain_input(&state, &input);
-                    // Erase cached terminal presentation before the window replaces its surface.
-                    clear_presentation(&events, &mut generation, &appearance);
-                }
-                state.offered_take_over(controller.clone());
-                if !alive.load(Ordering::Acquire)
-                    || attachment.as_ref().is_some_and(|permit| !permit.active())
+                state.directory_busy.store(false, Ordering::Release);
+                state
+                    .recovery
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .take();
+                while let Reply::Takeover {
+                    target,
+                    ref controller,
+                    session_ended,
+                } = reply
                 {
-                    return Ok(());
-                }
-                if state.take_over.swap(false, Ordering::AcqRel) {
-                    state.set(DevelopmentPaneStatus::TakingOver);
-                    grant_size = *size.lock().unwrap_or_else(|e| e.into_inner());
-                    let update = appearance.lock().unwrap_or_else(|e| e.into_inner()).clone();
-                    grant_appearance = Some(update.generation);
-                    reply = send(
-                        &presenter,
-                        &alive,
-                        &attachment,
-                        &mut connection,
-                        &Request::TakeOver {
-                            target,
-                            size: grant_size,
-                            style: Some(encode_style(&update)),
-                        },
-                    )?;
-                } else {
-                    // Take Over, Start and selection wake this check early.
-                    state
-                        .wake
-                        .wait_until(std::time::Instant::now() + Duration::from_millis(100));
-                    let size = *size.lock().unwrap_or_else(|e| e.into_inner());
-                    grant_size = size;
-                    grant_appearance = None;
-                    reply = send(
-                        &presenter,
-                        &alive,
-                        &attachment,
-                        &mut connection,
-                        &Request::SelectPane {
-                            pane: pane_id,
-                            explicit: state.selected.swap(false, Ordering::AcqRel),
-                            size,
-                            style: None,
-                        },
-                    )?;
+                    state.paste_unconfirmed.store(false, Ordering::Release);
+                    if !takeover {
+                        takeover = true;
+                        paste_unconfirmed = false;
+                        state.invalidate();
+                        drain_input(&state, &input);
+                        // Erase cached terminal presentation before the window replaces its surface.
+                        clear_presentation(&events, &mut generation, &appearance);
+                    }
+                    state.offered_take_over(controller.clone(), session_ended);
+                    if !alive.load(Ordering::Acquire)
+                        || attachment.as_ref().is_some_and(|permit| !permit.active())
+                    {
+                        return Ok(());
+                    }
+                    if state.take_over.swap(false, Ordering::AcqRel) {
+                        state.set(DevelopmentPaneStatus::TakingOver);
+                        grant_size = *size.lock().unwrap_or_else(|e| e.into_inner());
+                        let update = appearance.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                        grant_appearance = Some(update.generation);
+                        reply = send(
+                            &presenter,
+                            &alive,
+                            &attachment,
+                            &mut connection,
+                            &Request::TakeOver {
+                                target,
+                                size: grant_size,
+                                style: Some(encode_style(&update)),
+                            },
+                        )?;
+                    } else {
+                        // Take Over, Start and selection wake this check early.
+                        state
+                            .wake
+                            .wait_until(std::time::Instant::now() + Duration::from_millis(100));
+                        let size = *size.lock().unwrap_or_else(|e| e.into_inner());
+                        grant_size = size;
+                        grant_appearance = None;
+                        reply = send(
+                            &presenter,
+                            &alive,
+                            &attachment,
+                            &mut connection,
+                            &Request::SelectPane {
+                                pane: pane_id,
+                                explicit: state.selected.swap(false, Ordering::AcqRel),
+                                size,
+                                style: None,
+                            },
+                        )?;
+                    }
                 }
             }
             let Reply::Attached { lease } = reply else {
                 return Err(ServerError::Protocol);
             };
-            expected_session = Some(lease);
-            expected_target = Some(lease.into());
+            state.session_dormant.store(false, Ordering::Release);
+            attached_session = true;
             // Authenticate and receive the authoritative screen before enabling input.
             let epoch = state.attach(&presenter)?;
             drain_input(&state, &input);
@@ -1768,6 +1784,15 @@ fn present(
             // A successor owns this Pane's state now; leave it untouched.
             Err(_) if !alive.load(Ordering::Acquire) || !presenter.current() => return,
             Err(error) => {
+                // A missing old Session does not mean its retained Pane was removed. Reconcile
+                // by Pane identity before deciding, even after several End All operations.
+                let error = if error == ServerError::SessionUnavailable
+                    && std::mem::take(&mut attached_session)
+                {
+                    ServerError::StaleControl
+                } else {
+                    error
+                };
                 if error == ServerError::SessionUnavailable {
                     state.set(DevelopmentPaneStatus::Ended);
                     let _ = events
@@ -3947,13 +3972,15 @@ mod tests {
         };
         let state = DevelopmentPaneState::new();
         assert_eq!(state.controller(), None);
-        state.offered_take_over(client("Studio"));
+        state.offered_take_over(client("Studio"), false);
         assert_eq!(state.status(), DevelopmentPaneStatus::Takeover);
         assert_eq!(state.controller(), Some(client("Studio")));
-        state.offered_take_over(Controller::Nobody);
+        state.offered_take_over(Controller::Nobody, true);
         assert_eq!(state.controller(), Some(Controller::Nobody));
+        assert!(state.session_dormant());
         state.take_over();
-        state.offered_take_over(client("Laptop"));
+        state.offered_take_over(client("Laptop"), false);
+        assert!(!state.session_dormant());
         assert_eq!(
             state.status(),
             DevelopmentPaneStatus::TakingOver,

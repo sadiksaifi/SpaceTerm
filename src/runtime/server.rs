@@ -42,9 +42,15 @@ pub struct DevelopmentPaneHost {
     uncertain: bool,
     directory_unavailable: bool,
     failed_directory_session: Option<PaneTarget>,
+    dormant: Option<DormantPane>,
     directories: directories::DirectoryReads,
     /// Shared by every Pane of one server, so each names its Controlling Client the same way.
     names: Arc<std::sync::Mutex<control::ClientNames>>,
+}
+#[derive(Clone, Copy)]
+struct DormantPane {
+    device: Option<[u8; 32]>,
+    attachment_generation: Option<u64>,
 }
 struct OwnedPane {
     device: Option<[u8; 32]>,
@@ -61,6 +67,7 @@ struct OwnedPane {
     ended: bool,
     failed: bool,
     directory_failed: bool,
+    ended_restart: bool,
     appearance_generation: u64,
     focus_generation: u64,
     focus: FocusTarget,
@@ -91,6 +98,7 @@ impl DevelopmentPaneHost {
             uncertain: false,
             directory_unavailable: false,
             failed_directory_session: None,
+            dormant: None,
             directories: directories::DirectoryReads::default(),
             names: Arc::default(),
         })
@@ -136,6 +144,7 @@ impl DevelopmentPaneHost {
             uncertain: false,
             directory_unavailable: false,
             failed_directory_session: None,
+            dormant: None,
             directories: directories::DirectoryReads::default(),
             names: Arc::default(),
         })
@@ -149,6 +158,7 @@ impl DevelopmentPaneHost {
     ) -> Reply {
         let names = self.names.lock().unwrap_or_else(|e| e.into_inner());
         Reply::Takeover {
+            session_ended: self.dormant.is_some(),
             target,
             controller: names.controller(controlling, asking),
         }
@@ -190,6 +200,7 @@ impl DevelopmentPaneHost {
     fn restored(&self) -> Result<Reply, Refusal> {
         let organization = self.organization.as_ref().ok_or(Refusal::Missing)?;
         Ok(Reply::Restored {
+            session_ended: self.dormant.is_some(),
             recovery: Some(pane::directories::Target {
                 boot: self.boot,
                 pane: organization.pane,
@@ -296,6 +307,7 @@ impl DevelopmentPaneHost {
             ended: false,
             failed: false,
             directory_failed: false,
+            ended_restart: self.dormant.is_some(),
             appearance_generation: 1,
             focus_generation: 0,
             focus: FocusTarget::Unfocused,
@@ -306,6 +318,7 @@ impl DevelopmentPaneHost {
             reading: reading::Reading::default(),
             accessibility: accessibility::Accessibility::default(),
         });
+        self.dormant = None;
         Ok(lease)
     }
     fn select(
@@ -319,6 +332,18 @@ impl DevelopmentPaneHost {
     ) -> Result<Reply, Refusal> {
         size.validate().map_err(|_| Refusal::Unsupported)?;
         self.reconcile_selection()?;
+        if let Some(dormant) = self.dormant
+            && dormant.device.is_some_and(|owner| owner != device)
+        {
+            return Ok(self.takeover(
+                PaneTarget {
+                    server: self.boot,
+                    session: self.organization.as_ref().ok_or(Refusal::Missing)?.pane,
+                },
+                dormant.device,
+                device,
+            ));
+        }
         if let Some(pane) = &self.pane {
             let target = PaneTarget::from(pane.lease);
             if resume.is_some_and(|old| old != target) {
@@ -402,6 +427,7 @@ impl DevelopmentPaneHost {
                 accessibility: true,
                 directory_recovery: true,
                 worktree_writes: false,
+                end_all_sessions: false,
                 workspace_policy: false,
                 presentation_changes: true,
             });
@@ -439,9 +465,7 @@ impl DevelopmentPaneHost {
                 if self.pane.is_some() {
                     return self.select(device, connection, false, size, None, style);
                 }
-                return self
-                    .start(device, connection, size, style)
-                    .map(|lease| Reply::Attached { lease });
+                return self.select(device, connection, true, size, None, style);
             }
             Request::Attach {
                 create,
@@ -735,6 +759,12 @@ impl DevelopmentPaneHost {
                 .shutdown_and_wait(Duration::from_secs(5))
                 .map_err(|_| Refusal::CleanupUnresolved)?;
             self.failed_directory_session = Some(pane.lease.into());
+            if pane.ended_restart {
+                self.dormant = Some(DormantPane {
+                    device: pane.device,
+                    attachment_generation: pane.attachment_generation,
+                });
+            }
             self.pane = None;
             self.directory_unavailable = true;
             return Ok(());
@@ -748,6 +778,33 @@ impl DevelopmentPaneHost {
             self.retain(None)?;
         }
         Ok(())
+    }
+    fn end_session(&mut self, session: [u8; 32]) -> Result<(), Refusal> {
+        let Some(pane) = self.pane.as_ref().filter(|p| p.lease.session == session) else {
+            return Ok(());
+        };
+        self.dormant = Some(DormantPane {
+            device: pane.device,
+            attachment_generation: pane.attachment_generation,
+        });
+        // Use ordinary shutdown to invalidate input/effects and wait for native cleanup, but
+        // retain organization and its control grant rather than retiring an ordinary exit.
+        self.shutdown().map_err(|_| Refusal::CleanupUnresolved)
+    }
+    fn take_over_ended(
+        &mut self,
+        device: [u8; 32],
+        attachment_generation: Option<u64>,
+    ) -> Result<Reply, Refusal> {
+        if self.pane.is_some() || self.dormant.is_none() {
+            return Err(Refusal::Stale);
+        }
+        let reply = self.restored()?;
+        self.dormant = Some(DormantPane {
+            device: Some(device),
+            attachment_generation,
+        });
+        Ok(reply)
     }
     fn reconcile_selection(&mut self) -> Result<(), Refusal> {
         self.retire_exited()?;

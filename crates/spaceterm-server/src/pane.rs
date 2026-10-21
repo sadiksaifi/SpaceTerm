@@ -389,11 +389,16 @@ pub enum Reply {
         #[serde(default)]
         worktree_writes: bool,
         #[serde(default)]
+        end_all_sessions: bool,
+        #[serde(default)]
         workspace_policy: bool,
         #[serde(default)]
         presentation_changes: bool,
     },
     Restored {
+        /// End All Sessions cleared this Pane in the current running server.
+        #[serde(default)]
+        session_ended: bool,
         #[serde(default)]
         recovery: Option<directories::Target>,
         #[serde(default)]
@@ -405,6 +410,8 @@ pub enum Reply {
     },
     /// This client does not control the Pane. `controller` says who does, for presentation only.
     Takeover {
+        #[serde(default)]
+        session_ended: bool,
         target: PaneTarget,
         controller: control::Controller,
     },
@@ -544,6 +551,7 @@ struct PaneTransport {
     accessibility: bool,
     directory_recovery: bool,
     worktree_writes: bool,
+    end_all_sessions: bool,
 }
 /// One transport for a desktop's inventory and Pane workers. It retains no credential.
 #[cfg(feature = "client")]
@@ -577,6 +585,9 @@ impl SharedPaneConnection {
 }
 #[cfg(feature = "client")]
 impl PaneConnection {
+    pub fn supports_end_all_sessions(&self) -> bool {
+        self.transport.end_all_sessions
+    }
     pub fn worktree_writes(&self) -> bool {
         self.transport.worktree_writes
     }
@@ -597,6 +608,7 @@ impl PaneConnection {
                 accessibility,
                 directory_recovery,
                 worktree_writes,
+                end_all_sessions,
                 workspace_policy: true,
                 presentation_changes,
             } => {
@@ -607,6 +619,9 @@ impl PaneConnection {
                 std::sync::Arc::get_mut(&mut connection.transport)
                     .ok_or(ServerError::Protocol)?
                     .worktree_writes = worktree_writes;
+                std::sync::Arc::get_mut(&mut connection.transport)
+                    .ok_or(ServerError::Protocol)?
+                    .end_all_sessions = end_all_sessions;
                 std::sync::Arc::get_mut(&mut connection.transport)
                     .ok_or(ServerError::Protocol)?
                     .interactive_input = interactive_input;
@@ -650,6 +665,7 @@ impl PaneConnection {
                 accessibility: false,
                 directory_recovery: false,
                 worktree_writes: false,
+                end_all_sessions: false,
             }),
             last_exchange: None,
         }
@@ -760,6 +776,28 @@ mod transport_tests {
         assert!(!connection.supports_graphics());
         assert!(!connection.supports_interactive_input());
         assert!(!connection.supports_reading());
+        assert!(!connection.supports_end_all_sessions());
+        peer.join().unwrap();
+    }
+
+    #[test]
+    fn end_all_sessions_support_requires_an_explicit_optional_capability() {
+        let (client, mut server) = UnixStream::pair().unwrap();
+        let peer = std::thread::spawn(move || {
+            let mut wire = crate::protocol::Wire::terminal(&mut server).unwrap();
+            assert!(matches!(
+                wire.read::<Request>().unwrap(),
+                Request::Capabilities
+            ));
+            wire.write(&serde_json::json!({
+                "Capabilities": { "development_pane": true, "workspace_policy": true, "end_all_sessions": true }
+            })).unwrap();
+        });
+        assert!(
+            PaneConnection::negotiate(client)
+                .unwrap()
+                .supports_end_all_sessions()
+        );
         peer.join().unwrap();
     }
 

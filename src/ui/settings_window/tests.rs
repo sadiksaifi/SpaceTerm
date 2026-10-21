@@ -2697,6 +2697,7 @@ fn rendered_control_selector(row: SettingsRowId) -> Option<String> {
             SettingsRowId::ServerService => "settings-server-service-control",
             SettingsRowId::ServerUpdate => "settings-server-update-control",
             SettingsRowId::ServerList => "settings-server-list",
+            SettingsRowId::EndAllSessions => "settings-server-end-all-sessions",
             SettingsRowId::ServerConnection => "settings-row-server-connection-value",
             SettingsRowId::DirectNetworkPairing => "settings-row-direct-network-pairing-value",
             // The fixture installs no SSH server registry, so the SSH rows are absent.

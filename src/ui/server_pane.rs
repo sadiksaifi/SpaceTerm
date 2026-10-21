@@ -36,23 +36,50 @@ pub(crate) const EARLIER_ATTACHMENT_DETAIL: &str = "This SpaceTerm controlled it
                                                     type and resize here.";
 pub(crate) const TAKEOVER_FAILED_DETAIL: &str =
     "Take Over is available once SpaceTerm connects again.";
+/// The Takeover Screen's detail once End All Sessions ended the Pane's shell. The control grant
+/// outlives the Session, so the title still names who controls the Pane.
+pub(crate) const TAKEOVER_ENDED_DETAIL: &str = "End All Sessions ended the shell in this Pane. \
+                                                Take Over, then Start Session to start a new \
+                                                shell here.";
+pub(crate) const UNCONTROLLED_ENDED_DETAIL: &str = "No SpaceTerm controls this Pane, and End All \
+                                                    Sessions ended its shell. Take Over, then \
+                                                    Start Session to start a new shell here.";
+pub(crate) const EARLIER_ATTACHMENT_ENDED_DETAIL: &str = "This SpaceTerm controlled it before the \
+                                                          Workspace was attached again, and End \
+                                                          All Sessions ended its shell. Take \
+                                                          Over, then Start Session to start a \
+                                                          new shell here.";
 /// The Takeover Screen's title and detail while it offers Take Over, naming the Controlling Client
 /// the server reported. `None` means the server has not said, so the screen claims only what this
-/// window knows.
-pub(crate) fn takeover_copy(controller: Option<&Controller>) -> (SharedString, &'static str) {
+/// window knows. `dormant` means End All Sessions ended the Pane's shell, so the detail never
+/// says the shell keeps running.
+pub(crate) fn takeover_copy(
+    controller: Option<&Controller>,
+    dormant: bool,
+) -> (SharedString, &'static str) {
+    let detail = |running: &'static str, ended: &'static str| if dormant { ended } else { running };
     match controller {
         Some(Controller::Client {
             name,
             this_client: false,
         }) => (
             format!("Controlled by {}", name.as_str()).into(),
-            TAKEOVER_DETAIL,
+            detail(TAKEOVER_DETAIL, TAKEOVER_ENDED_DETAIL),
         ),
         Some(Controller::Client {
             this_client: true, ..
-        }) => (TAKEOVER_TITLE.into(), EARLIER_ATTACHMENT_DETAIL),
-        Some(Controller::Nobody) => (UNCONTROLLED_TITLE.into(), UNCONTROLLED_DETAIL),
-        None => (TAKEOVER_TITLE.into(), TAKEOVER_DETAIL),
+        }) => (
+            TAKEOVER_TITLE.into(),
+            detail(EARLIER_ATTACHMENT_DETAIL, EARLIER_ATTACHMENT_ENDED_DETAIL),
+        ),
+        Some(Controller::Nobody) => (
+            UNCONTROLLED_TITLE.into(),
+            detail(UNCONTROLLED_DETAIL, UNCONTROLLED_ENDED_DETAIL),
+        ),
+        None => (
+            TAKEOVER_TITLE.into(),
+            detail(TAKEOVER_DETAIL, TAKEOVER_ENDED_DETAIL),
+        ),
     }
 }
 pub(crate) const SESSION_ENDED_TITLE: &str = "Session Ended";
@@ -61,6 +88,56 @@ pub(crate) const SESSION_ENDED_DETAIL: &str =
 pub(crate) const TAKING_OVER: &str = "Taking Over…";
 pub(crate) const TAKE_OVER_UNCONFIRMED: &str = "Take Over was not confirmed.";
 pub(crate) const RESTORED_TITLE: &str = "Server Restarted";
+/// End All Sessions ended this Pane's shell and cleared its output. The Pane, its Tab, and its
+/// control stay, so only an explicit start brings a shell back.
+pub(crate) const ENDED_DETAIL: &str = "End All Sessions ended the shell in this Pane and cleared \
+                                       its output. Start Session to start a new shell in its \
+                                       last directory.";
+
+/// The copy and selectors of a Pane waiting for an explicit start. End All Sessions and a server
+/// restart both leave a Pane there, and each screen names its own cause and action.
+pub(crate) struct DormantCopy {
+    /// Names the screen's selector.
+    pub(crate) screen: &'static str,
+    pub(crate) title: &'static str,
+    pub(crate) detail: &'static str,
+    /// Names the action's selector, and its status slot's.
+    pub(crate) action: &'static str,
+    pub(crate) label: &'static str,
+    pub(crate) description: &'static str,
+    pub(crate) progress: &'static str,
+    pub(crate) unconfirmed: &'static str,
+}
+
+impl DormantCopy {
+    /// `ended` means End All Sessions ended the Session; otherwise the server restarted.
+    pub(crate) const fn of(ended: bool) -> Self {
+        if ended {
+            Self {
+                screen: "session-ended",
+                title: SESSION_ENDED_TITLE,
+                detail: ENDED_DETAIL,
+                action: "start-session",
+                label: "Start Session",
+                description: START_DESCRIPTION,
+                progress: "Starting Session…",
+                unconfirmed: "Start Session was not confirmed.",
+            }
+        } else {
+            Self {
+                screen: "restored",
+                title: RESTORED_TITLE,
+                detail: RESTORED_DETAIL,
+                action: "start-shell",
+                label: "Start New Shell",
+                description: START_DESCRIPTION,
+                progress: STARTING_SHELL,
+                unconfirmed: START_SHELL_UNCONFIRMED,
+            }
+        }
+    }
+}
+const START_DESCRIPTION: &str = "Starts a new shell on the server in this Pane's last directory.";
 pub(crate) const RESTORED_DETAIL: &str = "Programs that were running in this Pane ended when the \
                                           server stopped. Start a new shell to keep working here.";
 pub(crate) const DIRECTORY_UNAVAILABLE_TITLE: &str = "Directory Unavailable";
@@ -86,6 +163,8 @@ pub(crate) const START_SHELL_UNCONFIRMED: &str = "Starting the shell was not con
 pub(crate) enum Dormant {
     /// The Pane waits for a person to start a fresh shell.
     Restored,
+    /// End All Sessions ended the Pane's Session. It waits for a person to start a fresh one.
+    Ended,
     /// The server refused to start a shell, because the Pane's directory is unavailable.
     DirectoryUnavailable,
 }
@@ -598,6 +677,12 @@ mod connection {
         /// Who controlled the Pane when the server last offered Take Over, if it ever did.
         fn controller(&self) -> Option<Controller>;
 
+        /// Whether End All Sessions ended the Pane's shell and nobody has started a new one, as
+        /// the server last said, including while another client controls the Pane.
+        fn session_dormant(&self) -> bool {
+            false
+        }
+
         /// Identifies the connection that last supplied an authoritative screen. It changes when a
         /// new connection reaches the Terminal Session and when another client takes control, and
         /// it outlives any status the Pane misses.
@@ -638,6 +723,10 @@ mod connection {
 
         fn controller(&self) -> Option<Controller> {
             Self::controller(self)
+        }
+
+        fn session_dormant(&self) -> bool {
+            Self::session_dormant(self)
         }
 
         fn connection_generation(&self) -> u64 {
@@ -689,12 +778,16 @@ mod connection {
             offered: bool,
             ended: bool,
             controller: Option<Controller>,
+            /// End All Sessions ended the shell, so nothing here says it keeps running.
+            dormant: bool,
         },
-        /// The server restarted, so the Pane kept its place and lost its shell.
+        /// The Pane kept its place and lost its shell: the server restarted, or `ended` says
+        /// End All Sessions ended it. Either way only an explicit start brings a shell back.
         Restored {
             starting: bool,
             unconfirmed: bool,
             offered: bool,
+            ended: bool,
         },
         /// The server refused to start a shell because the Pane's directory is unavailable.
         /// Repairing it belongs to directory repair, which is not available yet.
@@ -724,6 +817,7 @@ mod connection {
         connection: Arc<dyn ServerPaneConnection>,
         status: DevelopmentPaneStatus,
         controller: Option<Controller>,
+        session_dormant: bool,
         generation: u64,
         takeover_shown: bool,
         take_over_unconfirmed: bool,
@@ -739,6 +833,7 @@ mod connection {
                 announcements: ScreenAnnouncements::default(),
                 status: connection.status(),
                 controller: connection.controller(),
+                session_dormant: connection.session_dormant(),
                 generation: connection.connection_generation(),
                 connection: Arc::clone(&connection),
                 takeover_shown: false,
@@ -767,15 +862,18 @@ mod connection {
             let generation_changed = generation != self.generation;
             let progress = self.connection.directory_progress();
             let controller = self.connection.controller();
+            let session_dormant = self.connection.session_dormant();
             if status == self.status
                 && !generation_changed
                 && progress == self.directory_progress
                 && controller == self.controller
+                && session_dormant == self.session_dormant
             {
                 return ServerPaneSync::default();
             }
             self.directory_progress = progress;
             self.controller = controller;
+            self.session_dormant = session_dormant;
             // Take Over that returns to the Takeover Screen on the same connection generation is
             // unconfirmed: the server may have refused it, or committed it and lost the reply.
             // A new generation means this client held control and another client took it since.
@@ -791,7 +889,12 @@ mod connection {
             }
             // A new connection that still finds the Pane dormant never received the start, or
             // lost its answer. The Pane claims neither and offers Start New Shell again.
-            if self.start_pending && generation_changed && status == DevelopmentPaneStatus::Restored
+            if self.start_pending
+                && generation_changed
+                && matches!(
+                    status,
+                    DevelopmentPaneStatus::Restored | DevelopmentPaneStatus::SessionEnded
+                )
             {
                 self.start_pending = false;
                 self.start_unconfirmed = true;
@@ -851,6 +954,7 @@ mod connection {
         fn apply_dormancy(&mut self) -> bool {
             let dormant = match self.status {
                 DevelopmentPaneStatus::Restored => Dormant::Restored,
+                DevelopmentPaneStatus::SessionEnded => Dormant::Ended,
                 DevelopmentPaneStatus::Failed(ServerError::DirectoryUnavailable) => {
                     Dormant::DirectoryUnavailable
                 }
@@ -865,7 +969,8 @@ mod connection {
                 }
                 _ => return false,
             };
-            let entering = self.dormant.is_none();
+            // A Pane that changes why it waits presents its new screen, and its focus follows.
+            let entering = self.dormant != Some(dormant);
             if dormant == Dormant::DirectoryUnavailable {
                 self.start_pending = false;
                 self.start_unconfirmed = false;
@@ -889,10 +994,11 @@ mod connection {
                         starting: self.start_pending || self.directory_progress.0,
                         offered: self.can_start_shell(),
                     },
-                    Dormant::Restored => ServerPaneScreen::Restored {
+                    Dormant::Restored | Dormant::Ended => ServerPaneScreen::Restored {
                         starting: self.starting_shell(),
                         unconfirmed: self.start_unconfirmed,
                         offered: self.can_start_shell(),
+                        ended: dormant == Dormant::Ended,
                     },
                 });
             }
@@ -905,6 +1011,7 @@ mod connection {
                 ended: self.session_ended(),
                 // An interrupted connection cannot say who controls the Pane now.
                 controller: self.controller.clone().filter(|_| offered || taking_over),
+                dormant: self.session_dormant,
             })
         }
 
@@ -913,6 +1020,7 @@ mod connection {
                 && matches!(
                     self.status,
                     DevelopmentPaneStatus::Restored
+                        | DevelopmentPaneStatus::SessionEnded
                         | DevelopmentPaneStatus::Connecting
                         | DevelopmentPaneStatus::Failed(ServerError::DirectoryUnavailable)
                 )
@@ -922,6 +1030,7 @@ mod connection {
             matches!(
                 self.status,
                 DevelopmentPaneStatus::Restored
+                    | DevelopmentPaneStatus::SessionEnded
                     | DevelopmentPaneStatus::Failed(ServerError::DirectoryUnavailable)
             ) && !self.start_pending
                 && !self.directory_progress.0
@@ -951,11 +1060,15 @@ mod connection {
                 DevelopmentPaneStatus::Reconnecting
                 | DevelopmentPaneStatus::TakeoverReconnecting => Some((
                     SharedString::new_static("Reconnecting…"),
-                    SharedString::new_static(if self.takeover_shown {
+                    SharedString::new_static(if self.takeover_shown && self.session_dormant {
+                        "Take Over is available once SpaceTerm reconnects."
+                    } else if self.takeover_shown {
                         "Take Over is available once SpaceTerm reconnects. The shell keeps \
                          running on the server."
                     } else if self.dormant == Some(Dormant::Restored) {
                         "Start New Shell is available once SpaceTerm reconnects."
+                    } else if self.dormant == Some(Dormant::Ended) {
+                        "Start Session is available once SpaceTerm reconnects."
                     } else if self.dormant.is_some() {
                         "No shell is running in this Pane."
                     } else {

@@ -3,6 +3,9 @@ use super::*;
 use spaceterm_server::hierarchy::{CloseInventory, ConfirmedPane, Id, Inventory, State};
 use std::collections::BTreeMap;
 
+#[cfg(test)]
+#[path = "shared/session_end_tests.rs"]
+mod session_end_tests;
 mod worktrees;
 
 pub struct SharedWorkspaceHost {
@@ -99,6 +102,17 @@ impl SharedWorkspaceHost {
     }
     fn synchronize(&mut self) -> Result<(), Refusal> {
         self.recover()?;
+        if let Some(ends) = self.state.session_ends()
+            && ends.boot == self.prototype.boot
+        {
+            for original in &ends.sessions {
+                if let Some(session) = original.session
+                    && let Some(host) = self.panes.get_mut(&original.id)
+                {
+                    host.end_session(session)?;
+                }
+            }
+        }
         // Durable deletion is the cleanup intent. An uncertain commit is read back before any
         // process is stopped, and an incomplete stop blocks replies and new work until resolved.
         for (id, host) in &mut self.panes {
@@ -126,7 +140,8 @@ impl SharedWorkspaceHost {
         }
         // Keep an exited runtime until its controller has observed its final screen.
         self.panes.retain(|id, h| {
-            self.state.pane(*id).is_some() && (h.pane.is_some() || h.directory_unavailable)
+            self.state.pane(*id).is_some()
+                && (h.pane.is_some() || h.directory_unavailable || h.dormant.is_some())
         });
         self.attachment_generations.retain(|(_, workspace), _| {
             self.state
@@ -179,6 +194,7 @@ impl SharedWorkspaceHost {
                 uncertain: false,
                 directory_unavailable: false,
                 failed_directory_session: None,
+                dormant: None,
                 directories: super::directories::DirectoryReads::default(),
                 names: Arc::clone(&self.prototype.names),
             };
@@ -204,7 +220,23 @@ impl SharedWorkspaceHost {
         size.validate().map_err(|_| Refusal::Unsupported)?;
         let creator = self.state.pane(id).ok_or(Refusal::Missing)?.2.creator;
         let host = self.pane_host(id)?;
-        if host.pane.is_none() && creator.is_some_and(|owner| owner != device) {
+        if !explicit
+            && let Some(dormant) = host.dormant
+            && dormant.device != Some(device)
+        {
+            return Ok(host.takeover(
+                PaneTarget {
+                    server: host.boot,
+                    session: id,
+                },
+                dormant.device,
+                device,
+            ));
+        }
+        if host.pane.is_none()
+            && host.dormant.is_none()
+            && creator.is_some_and(|owner| owner != device)
+        {
             let target = PaneTarget {
                 server: host.boot,
                 session: id,
@@ -238,7 +270,12 @@ impl SharedWorkspaceHost {
             return self.select(device, connection, id, false, size, style);
         }
         let (_, _, pane) = self.state.pane(id).ok_or(Refusal::Missing)?;
-        if pane.creator.is_some_and(|creator| creator != device) {
+        let controller = self
+            .panes
+            .get(&id)
+            .and_then(|host| host.dormant)
+            .map_or(pane.creator, |dormant| dormant.device);
+        if controller.is_some_and(|controller| controller != device) {
             return self.select(device, connection, id, false, size, style);
         }
         if target.original != super::repositories::pane_directory(pane) {
@@ -288,6 +325,7 @@ impl SharedWorkspaceHost {
                 size,
                 style,
             } => {
+                size.validate().map_err(|_| Refusal::Unsupported)?;
                 let workspace = self.state.pane(id).ok_or(Refusal::Missing)?.0.id;
                 if workspace != attachment.workspace || attachment.generation == 0 {
                     return Err(Refusal::Stale);
@@ -301,6 +339,20 @@ impl SharedWorkspaceHost {
                 }
                 generations.0 = attachment.generation;
                 let host = self.pane_host(id)?;
+                if matches!(claim, AttachmentClaim::Select { explicit: false })
+                    && let Some(dormant) = host.dormant
+                    && dormant.device == Some(device)
+                    && dormant.attachment_generation != Some(attachment.generation)
+                {
+                    return Ok(host.takeover(
+                        PaneTarget {
+                            server: host.boot,
+                            session: id,
+                        },
+                        dormant.device,
+                        device,
+                    ));
+                }
                 // A new attachment observes an old grant without resuming it. Selection can only
                 // acquire unclaimed work; Take Over remains explicit.
                 if matches!(claim, AttachmentClaim::Select { explicit: false })
@@ -348,8 +400,12 @@ impl SharedWorkspaceHost {
                             if target.server != host.boot || target.session != id {
                                 return Err(Refusal::Stale);
                             }
-                            Reply::Attached {
-                                lease: host.start(device, connection, size, style)?,
+                            if host.dormant.is_some() {
+                                host.take_over_ended(device, Some(attachment.generation))?
+                            } else {
+                                Reply::Attached {
+                                    lease: host.start(device, connection, size, style)?,
+                                }
                             }
                         }
                     }
@@ -387,6 +443,19 @@ impl SharedWorkspaceHost {
                         .state
                         .pane(*id)
                         .is_some_and(|(w, _, _)| w.id == attachment.workspace)
+                        && let Some(dormant) = &mut host.dormant
+                        && dormant.device == Some(device)
+                        && dormant
+                            .attachment_generation
+                            .is_some_and(|generation| generation <= attachment.generation)
+                    {
+                        dormant.device = None;
+                        dormant.attachment_generation = None;
+                    }
+                    if self
+                        .state
+                        .pane(*id)
+                        .is_some_and(|(w, _, _)| w.id == attachment.workspace)
                         && let Some(pane) = &mut host.pane
                         && pane.device == Some(device)
                         && pane
@@ -412,6 +481,7 @@ impl SharedWorkspaceHost {
                 accessibility: true,
                 directory_recovery: true,
                 worktree_writes: true,
+                end_all_sessions: true,
                 workspace_policy: true,
                 presentation_changes: true,
             }),
@@ -507,12 +577,16 @@ impl SharedWorkspaceHost {
                 size,
                 style,
             } if self.state.pane(target.session).is_some() => {
+                size.validate().map_err(|_| Refusal::Unsupported)?;
                 if target.server != self.prototype.boot {
                     return Err(Refusal::Stale);
                 }
                 let host = self.pane_host(target.session)?;
                 if host.pane.is_some() {
                     return Err(Refusal::Stale);
+                }
+                if host.dormant.is_some() {
+                    return host.take_over_ended(device, None);
                 }
                 host.start(device, connection, size, style)
                     .map(|lease| Reply::Attached { lease })
@@ -608,7 +682,19 @@ impl SharedWorkspaceHost {
                             .as_ref()
                             .is_some_and(|p| PaneTarget::from(p.lease) == target)
                     })
-                    .ok_or(Refusal::Missing)?;
+                    .ok_or_else(|| {
+                        if self.state.session_ends().is_some_and(|ends| {
+                            ends.boot == target.server
+                                && ends
+                                    .sessions
+                                    .iter()
+                                    .any(|p| p.session == Some(target.session))
+                        }) {
+                            Refusal::Stale
+                        } else {
+                            Refusal::Missing
+                        }
+                    })?;
                 let reply = host.handle(device, connection, request)?;
                 self.synchronize()?;
                 Ok(reply)
@@ -689,6 +775,85 @@ mod tests {
             &serde_json::to_vec(&host.state.envelope(&host.prototype.directory).unwrap()).unwrap(),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn end_all_sessions_clears_runtime_and_preserves_control_without_incidental_restart() {
+        use spaceterm_server::hierarchy::{Mutation, Outcome};
+        use spaceterm_server::pane::control::Controller;
+        let mut host = SharedWorkspaceHost::new(host());
+        host.prepare_initial_organization().unwrap();
+        host.admitted([1; 32], "Studio".into());
+        let original = shared_inventory(&mut host);
+        let pane = original.workspaces[0].tabs[0].root_pane;
+        let select = |explicit| Request::SelectPane {
+            pane,
+            explicit,
+            size: size(),
+            style: None,
+        };
+        let Reply::Attached { lease } = host.request([1; 32], [1; 32], select(true)) else {
+            panic!("explicit first use");
+        };
+        host.disconnected([1; 32]);
+        let mutation = Mutation::EndAllSessions {
+            server: lease.server,
+        };
+        assert!(matches!(host.request([2; 32], [2; 32], Request::Mutate {
+            sequence: 1, mutation: mutation.clone(),
+        }), Reply::Outcome(result) if result.outcome == Outcome::Accepted { target: lease.server }));
+        let ended = shared_inventory(&mut host);
+        assert!(
+            ended
+                .close
+                .unwrap()
+                .sessions
+                .iter()
+                .all(|p| p.session.is_none()),
+            "no runtime survives End All Sessions"
+        );
+        assert_eq!(ended.workspaces, original.workspaces);
+        assert!(matches!(
+            host.request([1; 32], [3; 32], select(false)),
+            Reply::Restored {
+                session_ended: true,
+                ..
+            }
+        ));
+        assert!(
+            matches!(host.request([2; 32], [2; 32], select(true)), Reply::Takeover {
+            controller: Controller::Client { name, .. }, ..
+        } if name.as_str() == "Studio")
+        );
+        assert!(matches!(
+            host.request([1; 32], [1; 32], Request::Poll { lease }),
+            Reply::Refused(Refusal::Stale)
+        ));
+        let Reply::Attached { lease: replacement } = host.request([1; 32], [3; 32], select(true))
+        else {
+            panic!("controller explicitly starts replacement");
+        };
+        assert_ne!(replacement.session, lease.session);
+        assert!(matches!(
+            host.request(
+                [2; 32],
+                [2; 32],
+                Request::Mutate {
+                    sequence: 1,
+                    mutation
+                }
+            ),
+            Reply::Outcome(_)
+        ));
+        assert!(matches!(
+            host.request([2; 32], [2; 32], Request::Resolve { sequence: 1 }),
+            Reply::Outcome(_)
+        ));
+        assert_eq!(
+            shared_inventory(&mut host).close.unwrap().sessions[0].session,
+            Some(replacement.session)
+        );
+        host.shutdown().unwrap();
     }
 
     #[test]

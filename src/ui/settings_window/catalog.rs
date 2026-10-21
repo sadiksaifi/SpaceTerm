@@ -168,6 +168,8 @@ pub(super) enum SettingsRowId {
     SshServerCompatibility,
     /// Whether the selected SSH server's computer starts the server on its own.
     SshServerStartup,
+    /// Ends every live Terminal Session on the selected server, keeping its organization.
+    EndAllSessions,
     /// How SpaceTerm reaches the selected server, and whose authority admits it.
     ServerConnection,
     /// The devices paired with the selected server for direct network connections.
@@ -244,6 +246,7 @@ impl SettingsRowId {
             | Self::SshServerPlatform
             | Self::SshServerCompatibility
             | Self::SshServerStartup
+            | Self::EndAllSessions
             | Self::ServerConnection
             | Self::DirectNetworkPairing
             | Self::RemoveServer
@@ -862,6 +865,23 @@ const PREFERENCE_ROWS: &[SettingsRowDescriptor] = &[
         selector: "settings-row-ssh-server-startup",
     },
     SettingsRowDescriptor {
+        id: SettingsRowId::EndAllSessions,
+        section: SettingsSectionId::Servers,
+        group: super::server_list::SERVER_GROUP,
+        label: "Terminal Sessions",
+        keywords: &[
+            "end all sessions",
+            "end sessions",
+            "sessions",
+            "terminal sessions",
+            "kill",
+            "shells",
+            "clear",
+            "scrollback",
+        ],
+        selector: "settings-row-end-all-sessions",
+    },
+    SettingsRowDescriptor {
         id: SettingsRowId::ServerConnection,
         section: SettingsSectionId::Servers,
         group: super::server_list::CONNECTION_GROUP,
@@ -1178,7 +1198,7 @@ mod tests {
     }
 
     /// The complete preference row identity set, so the catalog cannot silently omit one.
-    const EVERY_PREFERENCE_ROW: [SettingsRowId; 47] = [
+    const EVERY_PREFERENCE_ROW: [SettingsRowId; 48] = [
         SettingsRowId::AppearanceMode,
         SettingsRowId::Opacity,
         SettingsRowId::Blur,
@@ -1214,6 +1234,7 @@ mod tests {
         SettingsRowId::SshServerPlatform,
         SettingsRowId::SshServerCompatibility,
         SettingsRowId::SshServerStartup,
+        SettingsRowId::EndAllSessions,
         SettingsRowId::ServerConnection,
         SettingsRowId::DirectNetworkPairing,
         SettingsRowId::RemoveServer,
@@ -1529,6 +1550,7 @@ mod tests {
                     | SettingsRowId::SshServerPlatform
                     | SettingsRowId::SshServerCompatibility
                     | SettingsRowId::SshServerStartup
+                    | SettingsRowId::EndAllSessions
                     | SettingsRowId::ServerConnection
                     | SettingsRowId::DirectNetworkPairing
                     | SettingsRowId::RemoveServer

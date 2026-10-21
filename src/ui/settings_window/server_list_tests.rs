@@ -1060,3 +1060,157 @@ fn connecting_a_typed_host_lists_and_selects_it(cx: &mut TestAppContext) {
         ]
     );
 }
+
+/// One server run with `live` running Terminal Sessions and a Pane waiting for its first shell.
+fn running_sessions(boot: u8, live: u8) -> spaceterm_server::hierarchy::Inventory {
+    use spaceterm_server::hierarchy::{CloseInventory, ConfirmedPane, Inventory};
+    let mut sessions: Vec<_> = (0..live)
+        .map(|pane| ConfirmedPane {
+            id: [pane + 1; 32],
+            session: Some([pane + 100; 32]),
+        })
+        .collect();
+    sessions.push(ConfirmedPane {
+        id: [99; 32],
+        session: None,
+    });
+    Inventory {
+        repositories: None,
+        revision: 1,
+        workspaces: Vec::new(),
+        close: Some(CloseInventory {
+            boot: [boot; 32],
+            sessions,
+        }),
+    }
+}
+
+fn end_all_sessions_caption(servers: &Servers<'_>) -> String {
+    servers.window.read_with(servers.cx, |settings, _| {
+        settings.end_all_sessions_caption().0.to_string()
+    })
+}
+
+/// The confirmation names the selected server, and only that server's current run is asked to
+/// end its Sessions, once. Cancelling asks nothing.
+#[gpui::test]
+fn end_all_sessions_confirms_and_reaches_only_the_selected_server(cx: &mut TestAppContext) {
+    use super::super::end_sessions::{END_CANCEL_SELECTOR, END_CONFIRM_SELECTOR, END_SELECTOR};
+    use spaceterm_server::hierarchy::{Mutation, Outcome};
+
+    let (servers, alpha, bravo) = present_both(cx);
+    alpha.set_inventory(running_sessions(1, 3));
+    bravo.set_inventory(running_sessions(2, 2));
+    select("bravo", servers.cx);
+    servers.cx.run_until_parked();
+    assert!(rendered("settings-row-end-all-sessions", servers.cx));
+    assert_eq!(
+        end_all_sessions_caption(&servers),
+        "Ends all 2 running Terminal Sessions on bravo for every client and clears their output. \
+         The server keeps running, and its Workspaces, Tabs, and Panes remain."
+    );
+
+    click(END_SELECTOR, servers.cx);
+    let tree = A11yTree::read(servers.cx);
+    assert!(
+        tree.find("End All Sessions on bravo?").is_some(),
+        "the confirmation names the selected server"
+    );
+    answer_alert(END_CANCEL_SELECTOR, servers.cx);
+    assert!(bravo.submitted().is_empty(), "Cancel asks nothing");
+
+    click(END_SELECTOR, servers.cx);
+    answer_alert(END_CONFIRM_SELECTOR, servers.cx);
+    assert_eq!(
+        bravo.submitted(),
+        vec![Mutation::EndAllSessions { server: [2; 32] }],
+        "the confirmation names bravo's current run"
+    );
+    assert!(
+        alpha.submitted().is_empty(),
+        "the other server is untouched"
+    );
+
+    bravo.answer(Outcome::Accepted { target: [2; 32] });
+    let caption = |cx: &mut VisualTestContext| {
+        servers
+            .window
+            .read_with(cx, |settings, _| settings.end_all_sessions_caption().0)
+    };
+    settle(servers.cx, |cx| {
+        cx.executor().advance_clock(Duration::from_millis(100));
+        caption(cx).starts_with("Every Terminal Session on bravo ended.")
+    });
+    assert_eq!(bravo.submitted().len(), 1, "nothing asks again");
+}
+
+/// A confirmation answers for the server run it showed. A restart since then submits nothing,
+/// and a server's stale answer says nothing ended.
+#[gpui::test]
+fn end_all_sessions_refuses_a_confirmation_for_an_earlier_server_run(cx: &mut TestAppContext) {
+    use super::super::end_sessions::{END_CONFIRM_SELECTOR, END_SELECTOR};
+    use spaceterm_server::hierarchy::{Mutation, Outcome};
+
+    let (servers, _alpha, bravo) = present_both(cx);
+    bravo.set_inventory(running_sessions(2, 1));
+    select("bravo", servers.cx);
+    servers.cx.run_until_parked();
+
+    click(END_SELECTOR, servers.cx);
+    bravo.set_inventory(running_sessions(3, 1));
+    answer_alert(END_CONFIRM_SELECTOR, servers.cx);
+    assert!(
+        bravo.submitted().is_empty(),
+        "a restarted server's Sessions were never confirmed"
+    );
+    assert!(end_all_sessions_caption(&servers).starts_with("bravo restarted after you confirmed"));
+
+    // The server itself answers a confirmation it outran with the same explanation.
+    servers
+        .cx
+        .executor()
+        .advance_clock(Duration::from_millis(600));
+    servers.cx.run_until_parked();
+    click(END_SELECTOR, servers.cx);
+    answer_alert(END_CONFIRM_SELECTOR, servers.cx);
+    assert_eq!(
+        bravo.submitted(),
+        vec![Mutation::EndAllSessions { server: [3; 32] }]
+    );
+    bravo.answer(Outcome::StaleConfirmation);
+    let caption = |cx: &mut VisualTestContext| {
+        servers
+            .window
+            .read_with(cx, |settings, _| settings.end_all_sessions_caption().0)
+    };
+    settle(servers.cx, |cx| {
+        cx.executor().advance_clock(Duration::from_millis(100));
+        caption(cx).starts_with("bravo restarted after you confirmed")
+    });
+}
+
+/// A connected server that doesn't offer End All Sessions says so and asks nothing.
+#[gpui::test]
+fn end_all_sessions_is_unavailable_on_a_server_without_it(cx: &mut TestAppContext) {
+    use super::super::end_sessions::END_SELECTOR;
+
+    let (servers, _alpha, bravo) = present_both(cx);
+    bravo.set_inventory(running_sessions(2, 2));
+    bravo.set_end_all_sessions(false);
+    select("bravo", servers.cx);
+    servers.cx.run_until_parked();
+
+    assert_eq!(
+        end_all_sessions_caption(&servers),
+        "bravo doesn\u{2019}t support ending all its Terminal Sessions. Update the server to use \
+         End All Sessions."
+    );
+    click(END_SELECTOR, servers.cx);
+    assert!(
+        A11yTree::read(servers.cx)
+            .find("End All Sessions on bravo?")
+            .is_none(),
+        "nothing asks to confirm an action the server doesn't offer"
+    );
+    assert!(bravo.submitted().is_empty());
+}

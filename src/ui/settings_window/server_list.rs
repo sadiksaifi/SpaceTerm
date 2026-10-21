@@ -78,7 +78,8 @@ const SSH_ROWS: [SettingsRowId; 6] = [
     SettingsRowId::RemoveServer,
 ];
 /// The rows that present whichever server is selected.
-const SELECTED_ROWS: [SettingsRowId; 3] = [
+const SELECTED_ROWS: [SettingsRowId; 4] = [
+    SettingsRowId::EndAllSessions,
     SettingsRowId::ServerConnection,
     SettingsRowId::DirectNetworkPairing,
     SettingsRowId::ServerWorktreeLocation,
