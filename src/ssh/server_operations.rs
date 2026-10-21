@@ -759,11 +759,12 @@ impl SshServerOperations {
 /// Takes one retained record into an entry and admits its quiet continuation. A record with a
 /// validated outcome needs no exchange: it waits for acknowledgement.
 fn adopt(state: &mut State, record: RetainedRemoteOperation) -> Option<(Admitted, [u8; 32])> {
+    // One live entry presents a destination, so a record for a connection still saved joins it.
     let existing = state.entries.iter().position(|entry| {
         entry.destination == record.target.destination
             && entry.submitted.is_none()
             && entry.removed == record.removed
-            && entry.generation == 0
+            && !entry.running
     });
     let index = match existing {
         Some(index) => index,
@@ -783,7 +784,11 @@ fn adopt(state: &mut State, record: RetainedRemoteOperation) -> Option<(Admitted
         }
     };
     let handle = next_handle(state);
+    // Every entry owns a distinct generation, so one destination's two records never report
+    // each other's results.
+    let generation = next_generation(state);
     let entry = &mut state.entries[index];
+    entry.generation = generation;
     entry.removed = record.removed;
     entry.target = Some(record.target);
     entry.submitted = Some(Submitted {
@@ -2010,6 +2015,38 @@ mod tests {
             records.only().outcome,
             Some(RetainedOutcome::Completed { running: false })
         );
+    }
+
+    #[test]
+    fn a_result_reloaded_after_relaunch_waits_for_acknowledgement_without_asking_the_host() {
+        let script = Arc::new(Script::default());
+        let records = Arc::new(Records::default());
+        records
+            .operations
+            .lock()
+            .unwrap()
+            .push(record(Some(RetainedOutcome::Completed { running: false })));
+        let (connections, _) = registry();
+        let owner = SshServerOperations::new(script.clone(), records.clone(), connections);
+        owner.resume_retained();
+        let handle = resolved(owner.as_ref());
+        assert!(matches!(
+            owner.state(&destination()),
+            RemoteOperationState::Resolved {
+                kind: SubmittedKind::Service(Action::Stop),
+                outcome: RetainedOutcome::Completed { running: false },
+                ..
+            }
+        ));
+        assert!(
+            script.resolved.lock().unwrap().is_empty()
+                && script.observed.lock().unwrap().is_empty(),
+            "a validated result needs no computer to present it again"
+        );
+
+        owner.acknowledge(handle);
+        eventually(|| records.operations.lock().unwrap().is_empty());
+        eventually(|| matches!(owner.state(&destination()), RemoteOperationState::Unread));
     }
 
     #[test]
