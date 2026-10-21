@@ -167,10 +167,17 @@ impl AskPassAttemptFactory for NativeBroker {
         attempt
     }
 }
-/// Explicit env selects a disposable account. This test never invokes Stop or Start.
-#[gpui::test]
-#[ignore = "requires an explicitly selected disposable OpenSSH destination and signed artifacts"]
-fn native_account_server_connect(cx: &mut gpui::TestAppContext) {
+/// One explicitly selected disposable account, its own client state and the real adapters.
+struct NativeFixture {
+    destination: SshDestination,
+    /// What the person running this expects of the account: stopped, missing or ready.
+    expected: String,
+    /// The disposable client state this fixture owns and removes.
+    root: PathBuf,
+    adapter: ObservedAdapter,
+    backend: NativeSshConnectBackend<ObservedAdapter>,
+}
+fn native_fixture(cx: &mut gpui::TestAppContext, name: &str) -> NativeFixture {
     use crate::platform::{
         app_directories::{AppDirectories, AppDirectoryEnvironment},
         unix_local_socket::UnixControlSocketProbe,
@@ -184,7 +191,7 @@ fn native_account_server_connect(cx: &mut gpui::TestAppContext) {
         std::env::var("SPACETERM_SSH_NATIVE_EXPECT").unwrap_or_else(|_| "stopped".into());
     let root = std::fs::canonicalize("/tmp")
         .unwrap()
-        .join(format!("sts-{}", std::process::id()));
+        .join(format!("sts-{name}-{}", std::process::id()));
     std::fs::create_dir(&root).unwrap();
     std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
     let home = PathBuf::from(std::env::var_os("HOME").unwrap());
@@ -252,6 +259,26 @@ fn native_account_server_connect(cx: &mut gpui::TestAppContext) {
         ),
         bootstrap: Arc::new(crate::platform::unix_ssh_process::UnixSshProcessAdapter),
     });
+    NativeFixture {
+        destination,
+        expected,
+        root,
+        adapter,
+        backend,
+    }
+}
+
+/// Explicit env selects a disposable account. This test never invokes Stop or Start.
+#[gpui::test]
+#[ignore = "requires an explicitly selected disposable OpenSSH destination and signed artifacts"]
+fn native_account_server_connect(cx: &mut gpui::TestAppContext) {
+    let NativeFixture {
+        destination,
+        expected,
+        root,
+        adapter,
+        backend,
+    } = native_fixture(cx, "connect");
     let cancellation = SshCancellationToken::default();
     // Check Status reads the account's state without preparing, starting or installing anything.
     let observed = backend.observe(&destination, None, &cancellation, &|phase| {
@@ -360,6 +387,113 @@ fn native_account_server_connect(cx: &mut gpui::TestAppContext) {
     drop(backend);
     let _ = std::fs::remove_dir_all(root);
 }
+/// Explicit env selects a disposable account whose server is ready. This test reads one remote
+/// maintenance observation and dispatches nothing: it never stops, restarts, uninstalls, stages,
+/// updates or starts a server.
+#[gpui::test]
+#[ignore = "requires an explicitly selected disposable OpenSSH destination with a ready server"]
+fn native_account_server_maintenance_observe(cx: &mut gpui::TestAppContext) {
+    use crate::ssh::server_maintenance::{
+        MaintenanceAuthority, MaintenanceTarget, SshMaintenanceBackend, SshMaintenanceFailure,
+    };
+    let NativeFixture {
+        destination,
+        expected,
+        root,
+        adapter,
+        backend,
+    } = native_fixture(cx, "maintenance");
+    let cancellation = SshCancellationToken::default();
+    // Only a connection admitted here can bind an original. Recovering an operation of a stopped
+    // or uninstalled server belongs to the retained records in issue #560.
+    assert_eq!(
+        expected, "ready",
+        "remote maintenance observation needs a ready server"
+    );
+    let connected = backend
+        .connect(
+            &destination,
+            ConnectMode::Requested,
+            None,
+            &cancellation,
+            &|phase| eprintln!("native connect phase: {phase:?}"),
+        )
+        .unwrap_or_else(|error| panic!("unexpected classification: {}", failure_name(&error)));
+    let target = MaintenanceTarget {
+        destination: destination.clone(),
+        continuity: connected.continuity.clone(),
+    };
+
+    let facts = SshMaintenanceBackend::observe(
+        &backend,
+        &target,
+        MaintenanceAuthority::Requested,
+        &cancellation,
+        &|phase| eprintln!("native maintenance phase: {phase:?}"),
+    )
+    .unwrap_or_else(|error| panic!("unexpected maintenance classification: {error:?}"));
+    eprintln!(
+        "native maintenance facts: status={:?}, startup={:?}, approved={:?}, activation={:?}",
+        facts.status,
+        facts.startup,
+        facts.approved.as_ref().map(|build| &build.version),
+        facts.activation.as_ref().map(|activation| activation.phase),
+    );
+    assert_eq!(
+        (facts.server, facts.account, facts.build.as_str()),
+        (
+            connected.continuity.server,
+            connected.continuity.account,
+            connected.continuity.build.as_str()
+        ),
+        "the observation must come from the server the original bound"
+    );
+    assert!(facts.status.installed && !facts.status.stopped);
+
+    // Background continuation reuses the admitted route without asking for authority.
+    SshMaintenanceBackend::observe(
+        &backend,
+        &target,
+        MaintenanceAuthority::Quiet,
+        &cancellation,
+        &|_| {},
+    )
+    .unwrap_or_else(|error| panic!("quiet continuation did not reuse the route: {error:?}"));
+
+    // A server that is not the one bound pauses instead of being read.
+    let changed = MaintenanceTarget {
+        destination: destination.clone(),
+        continuity: crate::ssh::server_connection::SshServerContinuity {
+            server: [0xff; 32],
+            ..connected.continuity.clone()
+        },
+    };
+    assert!(
+        matches!(
+            SshMaintenanceBackend::observe(
+                &backend,
+                &changed,
+                MaintenanceAuthority::Requested,
+                &cancellation,
+                &|_| {},
+            ),
+            Err(SshMaintenanceFailure::Changed(_))
+        ),
+        "a changed server must refuse before it is read"
+    );
+
+    eprintln!(
+        "native maintenance observations: spawns={}, last_exit={}",
+        adapter.spawns.load(std::sync::atomic::Ordering::SeqCst),
+        adapter.last_exit.load(std::sync::atomic::Ordering::SeqCst)
+    );
+    SshMaintenanceBackend::release(&backend, &destination);
+    drop(connected);
+    backend.disconnect(&destination);
+    drop(backend);
+    let _ = std::fs::remove_dir_all(root);
+}
+
 fn failure_name(error: &SshConnectFailure) -> &'static str {
     match error {
         SshConnectFailure::Cancelled => "cancelled",

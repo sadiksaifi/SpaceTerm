@@ -607,3 +607,6 @@ arg "<candidate-sha256>" help="Candidate complete archive SHA256"
 flag "--confirm-disposable-development" help="Authorize replacement of disposable Development server work"
 '''
 run = "target/debug/examples/server_maintenance {{usage.previous_archive | quote}} {{usage.previous_signature | quote}} {{usage.previous_sha256 | quote}} {{usage.candidate_archive | quote}} {{usage.candidate_signature | quote}} {{usage.candidate_sha256 | quote}} {% if usage.confirm_disposable_development %}--confirm-disposable-development{% endif %}"
+[tasks."server:ssh:maintenance:native:test"]
+description = "Observe an explicitly selected SSH account server's maintenance state on the native host"
+run = "cargo test --package spaceterm --lib --all-features --locked -- ssh::server_process::unix_adapter_tests::native_account_server_maintenance_observe --ignored --exact --nocapture"
