@@ -28,8 +28,8 @@ use crate::ssh::server_connection::{
 };
 use crate::ssh::server_maintenance::{MaintenancePhase, SshMaintenanceFailure, SubmittedKind};
 use crate::ssh::server_operations::{
-    RemoteMaintenanceRequest, RemoteOperationEntry, RemoteOperationHandle, RemoteOperationScope,
-    RemoteOperationState, RemoteServerOperations, RetainedOutcome,
+    RemoteMaintenanceRequest, RemoteOperationEntry, RemoteOperationHandle, RemoteOperationState,
+    RemoteServerOperations, RetainedOutcome,
 };
 use crate::ui::appearance_runtime;
 use crate::ui::settings_window::SettingsWindow;
@@ -52,8 +52,8 @@ enum Call {
     Cancel,
     Resume,
     Acknowledge(RemoteOperationHandle),
-    Discard(RemoteOperationScope),
-    Dismiss(RemoteOperationScope),
+    Discard([u8; 32]),
+    Dismiss([u8; 32]),
     ResumeRetained,
 }
 
@@ -99,6 +99,9 @@ fn facts(status: ServiceStatus) -> MaintenanceFacts {
 struct Held {
     destination: String,
     removed: bool,
+    /// The original this entry holds, which names it. Two entries for one destination in one
+    /// listing differ only by this, so a step that retires a record must carry it.
+    operation: [u8; 32],
     state: RemoteOperationState,
 }
 
@@ -140,14 +143,30 @@ impl ScriptedOperations {
             .find(|held| held.destination == destination)
         {
             Some(held) => held.state = state,
-            None => states.push(Held {
-                destination: destination.to_owned(),
-                removed: false,
-                state,
-            }),
+            None => {
+                let operation = [states.len() as u8 + 1; 32];
+                states.push(Held {
+                    destination: destination.to_owned(),
+                    removed: false,
+                    operation,
+                    state,
+                })
+            }
         }
         drop(states);
         self.publish();
+    }
+
+    /// The original one entry holds, which a step that retires a record carries. A test reads it
+    /// before the step, because clearing an entry ends its listing.
+    fn operation_of(&self, destination: &str, removed: bool) -> [u8; 32] {
+        self.states
+            .lock()
+            .expect("states")
+            .iter()
+            .find(|held| held.destination == destination && held.removed == removed)
+            .map(|held| held.operation)
+            .expect("an entry for that destination")
     }
 
     /// Holds more than one entry for one server, in the order the owner reports them. A read of
@@ -157,9 +176,11 @@ impl ScriptedOperations {
     fn hold(&self, destination: &str, held: impl IntoIterator<Item = RemoteOperationState>) {
         let mut states = self.states.lock().expect("states");
         states.retain(|held| held.destination != destination);
-        states.extend(held.into_iter().map(|state| Held {
+        let base = states.len() as u8;
+        states.extend(held.into_iter().enumerate().map(|(offset, state)| Held {
             destination: destination.to_owned(),
             removed: false,
+            operation: [base + offset as u8 + 1; 32],
             state,
         }));
         drop(states);
@@ -251,6 +272,7 @@ impl RemoteServerOperations for ScriptedOperations {
             .map(|held| RemoteOperationEntry {
                 destination: SshDestination::new(held.destination.clone()).expect("destination"),
                 removed: held.removed,
+                operation: Some(held.operation),
                 state: held.state.clone(),
             })
             .collect();
@@ -405,8 +427,8 @@ impl RemoteServerOperations for ScriptedOperations {
 
     /// Retires the first entry in the named listing that holds an original a Discard settles, as
     /// the owner does, so a second entry for the same destination keeps its own original.
-    fn discard(&self, destination: &SshDestination, scope: RemoteOperationScope) {
-        self.record(Call::Discard(scope));
+    fn discard(&self, operation: [u8; 32]) {
+        self.record(Call::Discard(operation));
         if !self.retires() {
             // An unretired record is still followed, so the original stays.
             self.publish();
@@ -414,8 +436,7 @@ impl RemoteServerOperations for ScriptedOperations {
         }
         let mut states = self.states.lock().expect("states");
         if let Some(held) = states.iter_mut().find(|held| {
-            held.destination == destination.as_str()
-                && held.removed == (scope == RemoteOperationScope::Removed)
+            held.operation == operation
                 && matches!(
                     held.state,
                     RemoteOperationState::Paused { .. } | RemoteOperationState::Unconfirmed { .. }
@@ -427,15 +448,13 @@ impl RemoteServerOperations for ScriptedOperations {
         self.publish();
     }
 
-    fn dismiss(&self, destination: &SshDestination, scope: RemoteOperationScope) {
-        self.record(Call::Dismiss(scope));
+    fn dismiss(&self, operation: [u8; 32]) {
+        self.record(Call::Dismiss(operation));
         // Nothing was retained for an original the service has no record of, so the entry goes
         // whether or not this client can write.
-        let removed = scope == RemoteOperationScope::Removed;
         let mut states = self.states.lock().expect("states");
         if let Some(index) = states.iter().position(|held| {
-            held.destination == destination.as_str()
-                && held.removed == removed
+            held.operation == operation
                 && matches!(
                     held.state,
                     RemoteOperationState::Failed {
@@ -446,7 +465,7 @@ impl RemoteServerOperations for ScriptedOperations {
         }) {
             // A removed connection's entry exists only to carry this last word, so clearing it
             // ends the listing. A saved connection keeps its row with nothing read.
-            if removed {
+            if states[index].removed {
                 states.remove(index);
             } else {
                 states[index].state = RemoteOperationState::Unread;
@@ -1135,7 +1154,9 @@ fn discarding_an_operation_asks_before_it_retires_the_record(cx: &mut TestAppCon
 
     assert_eq!(
         servers.operations.calls(),
-        vec![Call::Discard(RemoteOperationScope::Saved)],
+        vec![Call::Discard(
+            servers.operations.operation_of("penguin", false)
+        )],
         "the selected server's own row settles its own original"
     );
 }
@@ -1176,7 +1197,9 @@ fn discarding_a_removed_connections_operation_asks_first(cx: &mut TestAppContext
 
     assert_eq!(
         servers.operations.calls(),
-        vec![Call::Discard(RemoteOperationScope::Removed)],
+        vec![Call::Discard(
+            servers.operations.operation_of("penguin", true)
+        )],
         "the removed connections row settles the removed connection's original"
     );
 }
@@ -1411,7 +1434,9 @@ fn a_discard_this_client_cannot_save_says_the_original_stays(cx: &mut TestAppCon
 
     assert_eq!(
         servers.operations.calls(),
-        vec![Call::Discard(RemoteOperationScope::Saved)]
+        vec![Call::Discard(
+            servers.operations.operation_of("penguin", false)
+        )]
     );
     assert!(
         rendered("settings-ssh-server-maintenance-discard", servers.cx),
@@ -1471,6 +1496,8 @@ fn a_removed_connections_unknown_original_ends_with_a_word(cx: &mut TestAppConte
         );
     }
 
+    // The entry's listing ends when it is cleared, so its original is read before the step.
+    let cleared = servers.operations.operation_of("penguin", true);
     click(
         "settings-ssh-server-maintenance-dismiss-penguin",
         servers.cx,
@@ -1478,7 +1505,7 @@ fn a_removed_connections_unknown_original_ends_with_a_word(cx: &mut TestAppConte
 
     assert_eq!(
         servers.operations.calls(),
-        vec![Call::Dismiss(RemoteOperationScope::Removed)],
+        vec![Call::Dismiss(cleared)],
         "clearing the entry sends nothing and asks nothing"
     );
     assert!(
@@ -1540,7 +1567,9 @@ fn a_second_original_on_one_machine_is_named_and_settled_in_turn(cx: &mut TestAp
 
     assert_eq!(
         servers.operations.calls(),
-        vec![Call::Discard(RemoteOperationScope::Saved)],
+        vec![Call::Discard(
+            servers.operations.operation_of("penguin", false)
+        )],
         "the row settles the one original it reports"
     );
     assert!(
@@ -1607,7 +1636,9 @@ fn a_removed_connection_with_two_originals_is_listed_once(cx: &mut TestAppContex
 
     assert_eq!(
         servers.operations.calls(),
-        vec![Call::Discard(RemoteOperationScope::Removed)]
+        vec![Call::Discard(
+            servers.operations.operation_of("penguin", true)
+        )]
     );
     assert!(
         says(

@@ -1590,6 +1590,18 @@ impl MaintenanceConfirmation {
 
 /// The submitted operation a Discard here would stop following, or `None` for a state that offers
 /// no Discard. The step is offered only where the destination can no longer answer for it.
+/// Whether this entry is one a Dismiss clears: an original the service has no record of, which
+/// is as settled as that original can become.
+pub(crate) const fn dismissed_operation(state: &RemoteOperationState) -> bool {
+    matches!(
+        state,
+        RemoteOperationState::Failed {
+            failure: SshMaintenanceFailure::Forgotten,
+            ..
+        }
+    )
+}
+
 pub(crate) const fn discarded_operation(state: &RemoteOperationState) -> Option<&SubmittedKind> {
     match state {
         RemoteOperationState::Paused { kind, .. } => kind.as_ref(),

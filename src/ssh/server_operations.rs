@@ -119,6 +119,10 @@ pub(crate) struct RemoteOperationEntry {
     /// Whether its saved connection was removed while this operation was unresolved. Such an
     /// entry offers only resolving and acknowledging the original, never reconnecting.
     pub removed: bool,
+    /// The original this entry holds, which names it. One destination can hold more than one
+    /// entry in one scope, so a step that retires a record addresses this rather than the
+    /// machine: retiring by machine destroys whichever record happens to be listed first.
+    pub operation: Option<[u8; 32]>,
     pub state: RemoteOperationState,
 }
 
@@ -171,13 +175,13 @@ pub(crate) trait RemoteServerOperations: Send + Sync {
     /// `scope` names the listing the step was offered from, because one destination can appear
     /// in both. The record is retired and nothing is sent. What the server already did is
     /// unchanged.
-    fn discard(&self, destination: &SshDestination, scope: RemoteOperationScope);
+    fn discard(&self, operation: [u8; 32]);
 
     /// Clears an entry whose original the service has no record of, which is as settled as that
     /// original can become. The record was retired when the service answered, so nothing is
     /// retained to retire and nothing is sent. `scope` names the listing the step was offered
     /// from, because one destination can appear in both.
-    fn dismiss(&self, destination: &SshDestination, scope: RemoteOperationScope);
+    fn dismiss(&self, operation: [u8; 32]);
 
     /// Continues unresolved originals quietly after relaunch, using available noninteractive
     /// authority only. Called once, after a Workspace Window exists.
@@ -279,6 +283,9 @@ struct Entry {
     /// The facts the last validated read found, which a description needing no change returns to.
     facts: Option<MaintenanceFacts>,
     submitted: Option<Submitted>,
+    /// The original this entry last held, kept after the record is retired so a step offered on
+    /// the entry still names the entry rather than the machine.
+    retired: Option<[u8; 32]>,
     removed: bool,
     cancellation: SshCancellationToken,
     generation: u64,
@@ -425,6 +432,7 @@ impl SshServerOperations {
                     target: None,
                     facts: None,
                     submitted: None,
+                    retired: None,
                     removed: false,
                     cancellation: SshCancellationToken::default(),
                     generation: 0,
@@ -536,6 +544,11 @@ impl RemoteServerOperations for SshServerOperations {
                     .map(|entry| RemoteOperationEntry {
                         destination: entry.destination.clone(),
                         removed: entry.removed,
+                        operation: entry
+                            .submitted
+                            .as_ref()
+                            .map(|submitted| submitted.operation)
+                            .or(entry.retired),
                         state: entry.state.clone(),
                     })
                     .collect()
@@ -748,10 +761,12 @@ impl RemoteServerOperations for SshServerOperations {
         }
     }
 
-    fn discard(&self, destination: &SshDestination, scope: RemoteOperationScope) {
+    fn discard(&self, operation: [u8; 32]) {
         let Some((destination, generation, operation)) = self.claim_for_retirement(|entry| {
-            entry.destination == *destination
-                && entry.removed == (scope == RemoteOperationScope::Removed)
+            entry
+                .submitted
+                .as_ref()
+                .is_some_and(|submitted| submitted.operation == operation)
                 && matches!(
                     entry.state,
                     // A pause can no longer reach the identity the original bound, and asking
@@ -788,14 +803,12 @@ impl RemoteServerOperations for SshServerOperations {
         }
     }
 
-    fn dismiss(&self, destination: &SshDestination, scope: RemoteOperationScope) {
+    fn dismiss(&self, operation: [u8; 32]) {
         let Ok(mut state) = self.inner.state.lock() else {
             return;
         };
-        let removed = scope == RemoteOperationScope::Removed;
         let Some(index) = state.entries.iter().position(|entry| {
-            entry.destination == *destination
-                && entry.removed == removed
+            entry.retired.is_some_and(|retired| retired == operation)
                 && !entry.running
                 && entry.submitted.is_none()
                 && matches!(
@@ -810,7 +823,7 @@ impl RemoteServerOperations for SshServerOperations {
         };
         // A removed connection's entry exists only to carry this last word, so clearing it ends
         // the listing. A saved connection keeps its row and returns to having nothing read.
-        if removed {
+        if state.entries[index].removed {
             state.entries.remove(index);
         } else {
             state.entries[index].state = RemoteOperationState::Unread;
@@ -935,6 +948,7 @@ fn adopt(state: &mut State, record: RetainedRemoteOperation) -> Option<(Admitted
                 target: None,
                 facts: None,
                 submitted: None,
+                retired: None,
                 removed: record.removed,
                 cancellation: SshCancellationToken::default(),
                 generation: 0,
@@ -1597,7 +1611,10 @@ fn unsubmitted(
     failure: SshMaintenanceFailure,
 ) {
     update(inner, destination, generation, |state, index| {
-        state.entries[index].submitted = None;
+        state.entries[index].retired = state.entries[index]
+            .submitted
+            .take()
+            .map(|submitted| submitted.operation);
     });
     settle(inner, destination, generation, failure);
 }
@@ -2642,7 +2659,7 @@ mod tests {
         });
         assert_eq!(records.operations.lock().unwrap().len(), 2);
 
-        owner.discard(&destination(), RemoteOperationScope::Saved);
+        owner.discard(held(owner.as_ref(), false));
 
         eventually(|| records.operations.lock().unwrap().len() == 1);
         assert_eq!(
@@ -2712,7 +2729,7 @@ mod tests {
             "the sealed entry and the saved one are both listed"
         );
 
-        owner.dismiss(&destination(), RemoteOperationScope::Removed);
+        owner.dismiss(held(owner.as_ref(), true));
 
         eventually(|| owner.entries().len() == 1);
         assert!(
@@ -2730,12 +2747,75 @@ mod tests {
             "the saved row still has its own last word to give"
         );
 
-        owner.dismiss(&destination(), RemoteOperationScope::Saved);
+        owner.dismiss(held(owner.as_ref(), false));
 
         eventually(|| matches!(owner.state(&destination()), RemoteOperationState::Unread));
         assert!(
             script.applied.lock().unwrap().len() == 1,
             "dismissing sends nothing"
+        );
+    }
+
+    /// The original one listing's first entry holds. A step that retires a record carries this,
+    /// so a test names the record it means rather than the machine.
+    fn held(owner: &SshServerOperations, removed: bool) -> [u8; 32] {
+        owner
+            .entries()
+            .into_iter()
+            .find(|entry| entry.removed == removed)
+            .and_then(|entry| entry.operation)
+            .expect("an entry holding an original")
+    }
+
+    /// One destination can hold two entries in one listing. A step that retires a record must
+    /// name the record whose row offered it: retiring by machine destroys whichever is listed
+    /// first, which is the one thing that could still say what the other operation did.
+    #[test]
+    fn discarding_retires_the_record_the_step_named_not_the_first_for_that_machine() {
+        let script = Arc::new(Script::default());
+        let records = Arc::new(Records::default());
+        let mut sealed = record(None);
+        sealed.removed = true;
+        sealed.operation = [9; 32];
+        records.operations.lock().unwrap().push(sealed);
+        let mut second = record(None);
+        second.removed = true;
+        second.operation = [7; 32];
+        records.operations.lock().unwrap().push(second);
+        let (connections, _) = connected();
+        let owner = SshServerOperations::new(script.clone(), records.clone(), connections.clone());
+
+        // Both sealed originals are resumed, and neither reaches a validated result.
+        script
+            .resolves(Err(SshMaintenanceFailure::Unconfirmed))
+            .resolves(Err(SshMaintenanceFailure::Unconfirmed));
+        owner.resume_retained();
+        eventually(|| {
+            owner
+                .entries()
+                .iter()
+                .filter(|entry| {
+                    entry.removed && matches!(entry.state, RemoteOperationState::Unconfirmed { .. })
+                })
+                .count()
+                == 2
+        });
+
+        // The second listed entry is the one the person's row offered the step from.
+        let chosen = owner
+            .entries()
+            .into_iter()
+            .filter(|entry| entry.removed)
+            .nth(1)
+            .and_then(|entry| entry.operation)
+            .expect("a second entry for that machine");
+        owner.discard(chosen);
+
+        eventually(|| records.operations.lock().unwrap().len() == 1);
+        assert_eq!(
+            records.only().operation,
+            if chosen == [9; 32] { [7; 32] } else { [9; 32] },
+            "the record the step named is the one retired"
         );
     }
 
@@ -2838,7 +2918,7 @@ mod tests {
         });
         assert_eq!(records.only().kind, SubmittedKind::Service(Action::Stop));
 
-        owner.discard(&destination(), RemoteOperationScope::Saved);
+        owner.discard(held(owner.as_ref(), false));
 
         eventually(|| records.operations.lock().unwrap().is_empty());
         eventually(|| matches!(owner.state(&destination()), RemoteOperationState::Unread));
@@ -2880,7 +2960,7 @@ mod tests {
         assert_eq!(records.only().kind, SubmittedKind::Service(Action::Stop));
 
         // Without the discard the original stays forever: the identity it bound can never answer.
-        owner.discard(&destination(), RemoteOperationScope::Saved);
+        owner.discard(held(owner.as_ref(), false));
 
         eventually(|| records.operations.lock().unwrap().is_empty());
         eventually(|| matches!(owner.state(&destination()), RemoteOperationState::Unread));

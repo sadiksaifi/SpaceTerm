@@ -26,14 +26,14 @@ use crate::domain::SshDestination;
 use crate::local_server::service::maintenance::PreparedChange;
 use crate::ssh::server_maintenance::SubmittedKind;
 use crate::ssh::server_operations::{
-    RemoteMaintenanceRequest, RemoteOperationHandle, RemoteOperationScope, RemoteOperationState,
-    RemoteServerOperations,
+    RemoteMaintenanceRequest, RemoteOperationEntry, RemoteOperationHandle, RemoteOperationScope,
+    RemoteOperationState, RemoteServerOperations,
 };
 use crate::ui::appearance::{ChromeAppearance, gpui_color};
 use crate::ui::chrome_typography::{ChromeTextStyleExt as _, TextRole};
 use crate::ui::remote_maintenance::{
     MaintenanceConfirmation, MaintenancePresentation, MaintenanceRow, RemoteAction,
-    discarded_operation, observed, present_machine, removed_presentation,
+    discarded_operation, dismissed_operation, observed, present_machine, removed_presentation,
 };
 use crate::ui::sidebar_window::form::{CaptionTone, badge};
 
@@ -141,6 +141,20 @@ impl SettingsWindow {
         destination: &SshDestination,
         scope: RemoteOperationScope,
     ) -> Vec<RemoteOperationState> {
+        self.maintenance_entries(destination, scope)
+            .into_iter()
+            .map(|entry| entry.state)
+            .collect()
+    }
+
+    /// Every entry the owner holds for one server in one listing, in the owner's order. A step
+    /// that retires a record reads its subject from here, because one destination can hold more
+    /// than one entry in one listing and only the entry names which record the person chose.
+    fn maintenance_entries(
+        &self,
+        destination: &SshDestination,
+        scope: RemoteOperationScope,
+    ) -> Vec<RemoteOperationEntry> {
         let Some(rows) = self.ssh_maintenance.as_ref() else {
             return Vec::new();
         };
@@ -151,7 +165,6 @@ impl SettingsWindow {
                 entry.destination == *destination
                     && entry.removed == (scope == RemoteOperationScope::Removed)
             })
-            .map(|entry| entry.state)
             .collect()
     }
 
@@ -249,8 +262,10 @@ impl SettingsWindow {
                 }
             }
             RemoteAction::Discard => {
-                if let Some(kind) = states.iter().find_map(discarded_operation) {
-                    self.confirm_discard(destination, kind, RemoteOperationScope::Saved, cx);
+                if let Some((operation, kind)) =
+                    self.discardable(&destination, RemoteOperationScope::Saved)
+                {
+                    self.confirm_discard(destination, &kind, operation, cx);
                 }
             }
             step => {
@@ -356,11 +371,27 @@ impl SettingsWindow {
 
     /// Asks before Discard retires the only record that could still say what a submitted
     /// operation did. Nothing is sent to the machine either way, and cancelling keeps the record.
+    /// The original a Discard offered on this listing would retire, and the operation that
+    /// names it. The step acts on the entry whose row offered it, never on whichever record for
+    /// that machine happens to be listed first.
+    fn discardable(
+        &self,
+        destination: &SshDestination,
+        scope: RemoteOperationScope,
+    ) -> Option<([u8; 32], SubmittedKind)> {
+        self.maintenance_entries(destination, scope)
+            .into_iter()
+            .find_map(|entry| {
+                let kind = discarded_operation(&entry.state)?;
+                Some((entry.operation?, kind.clone()))
+            })
+    }
+
     fn confirm_discard(
         &mut self,
         destination: SshDestination,
         kind: &SubmittedKind,
-        scope: RemoteOperationScope,
+        operation: [u8; 32],
         cx: &mut Context<Self>,
     ) {
         let Some(rows) = self.ssh_maintenance.as_ref() else {
@@ -372,7 +403,7 @@ impl SettingsWindow {
             DISCARD_SELECTORS,
             move |confirmed, _| {
                 if confirmed {
-                    operations.discard(&destination, scope);
+                    operations.discard(operation);
                 }
             },
             cx,
@@ -646,14 +677,23 @@ impl SettingsWindow {
                 }
             }
             RemoteAction::Discard => {
-                if let Some(kind) = states.iter().find_map(discarded_operation) {
-                    self.confirm_discard(destination, kind, RemoteOperationScope::Removed, cx);
+                if let Some((operation, kind)) =
+                    self.discardable(&destination, RemoteOperationScope::Removed)
+                {
+                    self.confirm_discard(destination, &kind, operation, cx);
                 }
             }
             // Nothing is retained for an original the service has no record of and nothing is
             // sent, so clearing the entry gives up nothing and asks nothing.
             RemoteAction::Dismiss => {
-                operations.dismiss(&destination, RemoteOperationScope::Removed)
+                if let Some(operation) = self
+                    .maintenance_entries(&destination, RemoteOperationScope::Removed)
+                    .into_iter()
+                    .find(|entry| dismissed_operation(&entry.state))
+                    .and_then(|entry| entry.operation)
+                {
+                    operations.dismiss(operation);
+                }
             }
             _ => return,
         }

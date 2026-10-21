@@ -12677,6 +12677,7 @@ impl crate::ssh::server_operations::RemoteServerOperations for ScriptedMaintenan
         vec![crate::ssh::server_operations::RemoteOperationEntry {
             destination: self.destination.clone(),
             removed: false,
+            operation: Some([1; 32]),
             state: self.state.lock().unwrap().clone(),
         }]
     }
@@ -12721,19 +12722,11 @@ impl crate::ssh::server_operations::RemoteServerOperations for ScriptedMaintenan
         self.record("acknowledge");
     }
 
-    fn discard(
-        &self,
-        _: &crate::domain::SshDestination,
-        _: crate::ssh::server_operations::RemoteOperationScope,
-    ) {
+    fn discard(&self, _: [u8; 32]) {
         self.record("discard");
     }
 
-    fn dismiss(
-        &self,
-        _: &crate::domain::SshDestination,
-        _: crate::ssh::server_operations::RemoteOperationScope,
-    ) {
+    fn dismiss(&self, _: [u8; 32]) {
         self.record("dismiss");
     }
 
