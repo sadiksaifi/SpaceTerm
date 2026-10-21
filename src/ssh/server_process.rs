@@ -122,12 +122,21 @@ fn read_bounded(
     }
     Ok(bytes)
 }
-struct VerifiedArtifact {
+pub(super) struct VerifiedArtifact {
     bytes: Vec<u8>,
     signature: Vec<u8>,
     digest: String,
     version: String,
     platform: (String, String),
+}
+impl VerifiedArtifact {
+    /// The verified whole-package digest, which names this build everywhere it is retained.
+    pub(super) fn digest(&self) -> &str {
+        &self.digest
+    }
+    pub(super) fn version(&self) -> &str {
+        &self.version
+    }
 }
 
 /// All dependencies are captured by host composition; construction starts no SSH process.
@@ -303,6 +312,7 @@ impl<A: SshProcessAdapter> NativeSshConnectBackend<A> {
             route_id,
             clients: self.clients.clone(),
             cancellation: cancellation.clone(),
+            presented: std::sync::atomic::AtomicBool::new(false),
         });
         {
             let mut routes = self
@@ -339,6 +349,31 @@ impl<A: SshProcessAdapter> NativeSshConnectBackend<A> {
             return Err(SshConnectFailure::Unavailable(UnavailableKind::SshFailed));
         }
         Ok(route)
+    }
+}
+impl<A: SshProcessAdapter> NativeSshConnectBackend<A> {
+    /// Acquires the route one maintenance exchange runs on, from the cache Connect shares.
+    pub(super) fn maintenance_route(
+        &self,
+        destination: &SshDestination,
+        mode: ConnectMode,
+        cancellation: &SshCancellationToken,
+        progress: &ConnectProgress<'_>,
+    ) -> Result<Arc<NativeRoute<A>>, SshConnectFailure> {
+        self.route(destination, mode, cancellation, progress)
+    }
+    /// Ends a route no presented connection depends on, with the processes it owns. A route
+    /// Connect presented a server over belongs to the connection registry, which ends it through
+    /// Disconnect, so releasing a maintenance exchange leaves it connected.
+    pub(super) fn release_owned_route(&self, destination: &SshDestination) {
+        let presented = self.routes.lock().ok().and_then(|routes| {
+            routes
+                .get(destination.as_str())
+                .map(|route| route.presented.load(std::sync::atomic::Ordering::Acquire))
+        });
+        if presented == Some(false) {
+            self.disconnect(destination);
+        }
     }
 }
 impl<A: SshProcessAdapter> SshConnectBackend for NativeSshConnectBackend<A> {
@@ -427,13 +462,16 @@ impl<A: SshProcessAdapter> SshConnectBackend for NativeSshConnectBackend<A> {
         observation(route.discover(cancellation)?, expected, route.route_id)
     }
 }
-struct NativeRoute<A: SshProcessAdapter> {
+pub(super) struct NativeRoute<A: SshProcessAdapter> {
     control: Mutex<OpenSshControlConnection<SshProcessSupervisor<A>>>,
     config: Arc<NativeSshServerConfig<A>>,
     environment: SshProcessEnvironment,
     route_id: [u8; 32],
     clients: Arc<Mutex<HashMap<[u8; 32], NativeCachedClient<A>>>>,
     cancellation: SshCancellationToken,
+    /// Whether Connect has presented a server over this route. Such a route belongs to the
+    /// connection registry, which alone ends it.
+    presented: std::sync::atomic::AtomicBool,
 }
 impl<A: SshProcessAdapter> SshServerLease for NativeRoute<A> {
     fn is_alive(&self) -> bool {
@@ -486,37 +524,127 @@ impl<A: SshProcessAdapter> NativeRoute<A> {
         )
         .map_err(map_process_error)
     }
-    fn prepare_service(
+    /// The digest of the configuration that admitted this route, which binds an original to it.
+    pub(super) fn digest(&self) -> [u8; 32] {
+        self.route_id
+    }
+    /// One bounded read of the approved installation. Nothing is dispatched, so a lost reply
+    /// leaves the account as it was.
+    pub(super) fn server_read(
         &self,
+        action: &str,
+        arguments: &[ValidatedRemoteServerArgument],
+        timeout: Duration,
         cancellation: &SshCancellationToken,
-    ) -> Result<AccountDiscovery, SshConnectFailure> {
+    ) -> Result<super::process::CapturedProcessOutput, SshConnectFailure> {
+        self.run(
+            &self
+                .config
+                .bootstrap
+                .locator(identity(), action, false, arguments),
+            Vec::new(),
+            timeout,
+            cancellation,
+        )
+    }
+    /// One bounded action of the approved installation that may take effect.
+    pub(super) fn server_effect(
+        &self,
+        action: &str,
+        arguments: &[ValidatedRemoteServerArgument],
+        timeout: Duration,
+        cancellation: &SshCancellationToken,
+    ) -> Result<super::process::CapturedProcessOutput, SshDispatchFailure> {
         use super::process::{CapturedEffectError, run_captured_effect};
-        let (command, capability) = self.command(&self.config.bootstrap.locator(
-            identity(),
-            "ssh-prepare",
-            false,
-            &[],
-        ))?;
-        capability
-            .authorize()
-            .map_err(|_| SshConnectFailure::Unavailable(UnavailableKind::Network))?;
+        let script = self
+            .config
+            .bootstrap
+            .locator(identity(), action, false, arguments);
+        let (command, capability) = self
+            .command(&script)
+            .map_err(SshDispatchFailure::NotDispatched)?;
+        capability.authorize().map_err(|_| {
+            SshDispatchFailure::NotDispatched(SshConnectFailure::Unavailable(
+                UnavailableKind::Network,
+            ))
+        })?;
         let cancellation = SshCancellationToken::linked(cancellation, &capability.cancellation());
-        let output = run_captured_effect(
+        run_captured_effect(
             &self.config.adapter,
             &command,
             &self.environment,
             Vec::new(),
             MAX_DISCOVERY,
             &cancellation,
-            Instant::now() + OBSERVATION,
+            Instant::now() + timeout,
         )
         .map_err(|error| match error {
-            CapturedEffectError::NotAdmitted(error) => map_process_error(error),
-            CapturedEffectError::Unconfirmed => {
-                SshConnectFailure::Unconfirmed(UnconfirmedOperation::Connect)
+            CapturedEffectError::NotAdmitted(error) => {
+                SshDispatchFailure::NotDispatched(map_process_error(error))
             }
-        })?;
-        observe_preparation(output.exit.is_success(), || self.discover(&cancellation))
+            CapturedEffectError::Unconfirmed => SshDispatchFailure::Unconfirmed,
+        })
+    }
+    /// The account's existing discovery. For a bound original, a missing server is a changed one.
+    pub(super) fn account_discovery(
+        &self,
+        cancellation: &SshCancellationToken,
+    ) -> Result<AccountDiscovery, SshConnectFailure> {
+        match self.discover(cancellation)? {
+            Discovery::Existing(discovery) => Ok(discovery),
+            Discovery::Missing { .. } => {
+                Err(SshConnectFailure::Changed(ContinuityChange::ServerChanged))
+            }
+        }
+    }
+    /// Verifies the exact artifact this client holds for `target` before anything is transferred.
+    pub(super) fn candidate(&self, target: &str) -> Result<VerifiedArtifact, SshConnectFailure> {
+        self.config
+            .artifacts
+            .candidate(self.config.filesystem.as_ref(), target)
+    }
+    /// Transfers one verified artifact for the account to retain beside its approved
+    /// installation. As first installation does, the transfer is cancellable and carries no
+    /// whole-journey deadline, while each later observation stays bounded.
+    pub(super) fn stage(
+        &self,
+        artifact: &VerifiedArtifact,
+        cancellation: &SshCancellationToken,
+    ) -> Result<super::process::CapturedProcessOutput, SshConnectFailure> {
+        let script = self.config.bootstrap.stage(
+            identity(),
+            artifact.bytes.len(),
+            &artifact.signature,
+            &artifact.digest,
+        );
+        let (command, capability) = self.command(&script)?;
+        capability
+            .authorize()
+            .map_err(|_| SshConnectFailure::Unavailable(UnavailableKind::Network))?;
+        let cancellation = SshCancellationToken::linked(cancellation, &capability.cancellation());
+        run_captured_transfer(
+            &self.config.adapter,
+            &command,
+            &self.environment,
+            artifact.bytes.clone(),
+            MAX_DISCOVERY,
+            &cancellation,
+        )
+        .map_err(map_process_error)
+    }
+    fn prepare_service(
+        &self,
+        cancellation: &SshCancellationToken,
+    ) -> Result<AccountDiscovery, SshConnectFailure> {
+        let output = self
+            .server_effect("ssh-prepare", &[], OBSERVATION, cancellation)
+            .map_err(|error| match error {
+                SshDispatchFailure::NotDispatched(error) => error,
+                SshDispatchFailure::Unconfirmed => {
+                    SshConnectFailure::Unconfirmed(UnconfirmedOperation::Connect)
+                }
+            })?;
+        observe_preparation(output.exit.is_success(), || self.discover(cancellation))
     }
     fn discover(
         &self,
@@ -616,6 +744,8 @@ impl<A: SshProcessAdapter> NativeRoute<A> {
         drop(cache);
         let status = client.refresh().map_err(map_server_error)?;
         let health = client.connect_pane().map_err(map_server_error)?;
+        self.presented
+            .store(true, std::sync::atomic::Ordering::Release);
         Ok(ConnectedSshServer {
             server: client.clone(),
             continuity,
@@ -998,6 +1128,12 @@ enum Discovery {
     Existing(AccountDiscovery),
     Missing { account: u32, target: String },
 }
+/// Why one action of the approved installation produced no bounded reply. `Unconfirmed` means the
+/// process was admitted, so the action may have taken effect and must never be repeated.
+pub(super) enum SshDispatchFailure {
+    NotDispatched(SshConnectFailure),
+    Unconfirmed,
+}
 fn parse_discovery(bytes: &[u8]) -> Result<Discovery, SshConnectFailure> {
     if bytes.len() > MAX_DISCOVERY {
         return Err(SshConnectFailure::Unavailable(
@@ -1156,6 +1292,232 @@ pub(crate) trait SshServerBootstrap: Send + Sync {
         signature: &[u8],
         digest: &str,
     ) -> String;
+}
+
+#[cfg(test)]
+pub(crate) mod testing {
+    //! One deterministic account server behind the real route, discovery and exchange code.
+    use std::io::{Cursor, Write, sink};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::*;
+    use crate::platform::testing::{
+        EmptyHostConfigFilesystem, RecordingControlSocketProbe, RecordingFilesystem,
+    };
+    use crate::ssh::askpass::{
+        AskPassAttempt, AskPassAttemptObservation, AskPassBrokerLease, AskPassLease,
+        AskPassUnavailable,
+    };
+    use crate::ssh::process::{
+        ProcessExit, ProcessSignal, SpawnedSshProcess, SshProcessMechanismError, SshProcessPipes,
+        SshProcessSpawnRequest, SshProcessStdio,
+    };
+
+    /// The account this fake answers for, and every remote command it was asked to run.
+    pub(crate) struct FakeAccount {
+        /// The effective OpenSSH configuration, whose digest is the route an original binds.
+        configuration: Vec<u8>,
+        answer: Box<dyn Fn(&str) -> (Vec<u8>, i32) + Send + Sync>,
+        commands: Mutex<Vec<String>>,
+    }
+    impl FakeAccount {
+        /// `answer` receives one remote command and returns its reply and exit code.
+        pub(crate) fn new(
+            configuration: &str,
+            answer: impl Fn(&str) -> (Vec<u8>, i32) + Send + Sync + 'static,
+        ) -> Arc<Self> {
+            Arc::new(Self {
+                configuration: configuration.as_bytes().to_vec(),
+                answer: Box::new(answer),
+                commands: Mutex::new(Vec::new()),
+            })
+        }
+        /// Every remote command this account ran, in order.
+        pub(crate) fn commands(&self) -> Vec<String> {
+            self.commands.lock().unwrap().clone()
+        }
+        /// How many commands name `action`.
+        pub(crate) fn ran(&self, action: &str) -> usize {
+            self.commands()
+                .iter()
+                .filter(|command| command.contains(action))
+                .count()
+        }
+    }
+
+    #[derive(Clone)]
+    pub(crate) struct FakeAdapter {
+        account: Arc<FakeAccount>,
+        /// The control socket the master publishes, which readiness then registers.
+        filesystem: Arc<RecordingFilesystem>,
+    }
+    pub(crate) struct FakeProcess(Option<ProcessExit>);
+    impl SshProcessAdapter for FakeAdapter {
+        type Process = FakeProcess;
+        fn spawn(
+            &self,
+            request: SshProcessSpawnRequest,
+        ) -> Result<SpawnedSshProcess<Self::Process>, SshProcessMechanismError> {
+            let arguments: Vec<_> = request
+                .arguments()
+                .iter()
+                .map(|argument| argument.to_string_lossy().into_owned())
+                .collect();
+            let (stdout, exit) = if arguments.iter().any(|argument| argument == "-G") {
+                (
+                    self.account.configuration.clone(),
+                    Some(ProcessExit::successful()),
+                )
+            } else if arguments.iter().any(|argument| argument == "-N") {
+                // The master publishes its control socket and stays up until the backend ends it.
+                if let Some(socket) = arguments.windows(2).find(|pair| pair[0] == "-S") {
+                    self.filesystem
+                        .create_socket(std::path::Path::new(&socket[1]));
+                }
+                (Vec::new(), None)
+            } else if arguments.iter().any(|argument| argument == "-O") {
+                (Vec::new(), Some(ProcessExit::successful()))
+            } else {
+                let command = arguments.last().cloned().unwrap_or_default();
+                self.account.commands.lock().unwrap().push(command.clone());
+                let (reply, code) = (self.account.answer)(&command);
+                (reply, Some(ProcessExit::new(code == 0, Some(code))))
+            };
+            let pipes = SshProcessPipes::new(
+                (request.stdin() == SshProcessStdio::Piped)
+                    .then(|| Box::new(sink()) as Box<dyn Write + Send>),
+                (request.stdout() == SshProcessStdio::Piped)
+                    .then(|| Box::new(Cursor::new(stdout)) as Box<dyn std::io::Read + Send>),
+                (request.stderr() == SshProcessStdio::Piped)
+                    .then(|| Box::new(Cursor::new(Vec::new())) as Box<dyn std::io::Read + Send>),
+            );
+            Ok(SpawnedSshProcess::new(FakeProcess(exit), pipes))
+        }
+        fn try_status(
+            &self,
+            process: &mut Self::Process,
+        ) -> Result<Option<ProcessExit>, SshProcessMechanismError> {
+            Ok(process.0)
+        }
+        fn signal(
+            &self,
+            _: &mut Self::Process,
+            _: ProcessSignal,
+        ) -> Result<(), SshProcessMechanismError> {
+            Ok(())
+        }
+        fn reap(&self, _: Self::Process) -> Result<(), SshProcessMechanismError> {
+            Ok(())
+        }
+    }
+
+    /// An askpass factory that records every attempt. Quiet continuation must never reach it.
+    struct CountingAskPass(Arc<AtomicUsize>);
+    struct NoPrompt;
+    impl AskPassLease for NoPrompt {
+        fn entries(&self) -> Vec<(&'static str, &std::ffi::OsStr)> {
+            Vec::new()
+        }
+        fn cancel(&self) {}
+        fn capability(&self) -> &[u8] {
+            b"fixture"
+        }
+    }
+    impl AskPassAttemptFactory for CountingAskPass {
+        fn start_attempt(&self, _: &AppPaths) -> Result<AskPassAttempt, AskPassUnavailable> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(AskPassAttempt {
+                lease: AskPassBrokerLease::new(Arc::new(NoPrompt)),
+                observation: AskPassAttemptObservation::default(),
+            })
+        }
+    }
+
+    /// The locator and transfer scripts as compact markers, so a test reads exactly what the
+    /// client asked of the approved installation.
+    struct FakeBootstrap;
+    impl SshServerBootstrap for FakeBootstrap {
+        fn key_public(&self, _: &std::path::Path) -> Option<super::super::command::SshCommandSpec> {
+            None
+        }
+        fn locator(
+            &self,
+            identity: &str,
+            action: &str,
+            _: bool,
+            arguments: &[ValidatedRemoteServerArgument],
+        ) -> String {
+            let mut script = format!("{action} {identity}");
+            for argument in arguments {
+                script.push(' ');
+                script.push_str(argument.as_str());
+            }
+            script
+        }
+        fn install(&self, identity: &str, _: usize, _: &[u8], digest: &str, _: bool) -> String {
+            format!("ssh-install {identity} {digest}")
+        }
+        fn stage(&self, identity: &str, _: usize, _: &[u8], digest: &str) -> String {
+            format!("ssh-stage {identity} {digest}")
+        }
+    }
+
+    /// A backend over one fake account, with the prompt counter quiet work must leave at zero.
+    pub(crate) fn backend(
+        executor: BackgroundExecutor,
+        account: Arc<FakeAccount>,
+        artifacts: SshServerArtifacts,
+    ) -> (NativeSshConnectBackend<FakeAdapter>, Arc<AtomicUsize>) {
+        let filesystem = Arc::new(RecordingFilesystem::default());
+        let paths = crate::platform::testing::resolve_app_paths(
+            &crate::platform::app_directories::AppDirectoryEnvironment {
+                home: Some("/fixture/ssh".into()),
+                xdg_runtime_dir: Some("/fixture/ssh/runtime".into()),
+                ..Default::default()
+            },
+            Some("/fixture/ssh/temporary".into()),
+            103,
+            filesystem.clone(),
+        )
+        .unwrap();
+        let prompts = Arc::new(AtomicUsize::new(0));
+        let backend = NativeSshConnectBackend::new(NativeSshServerConfig {
+            paths: Arc::new(paths),
+            filesystem: Arc::new(EmptyHostConfigFilesystem),
+            bootstrap: Arc::new(FakeBootstrap),
+            home: "/fixture/ssh".into(),
+            startup: StartupSshEnvironment::default(),
+            executable: OpenSshExecutable::for_test(),
+            adapter: FakeAdapter {
+                account,
+                filesystem: filesystem.clone(),
+            },
+            socket_probe: Arc::new(RecordingControlSocketProbe(filesystem)),
+            askpass: Arc::new(CountingAskPass(prompts.clone())),
+            executor,
+            artifacts,
+        });
+        (backend, prompts)
+    }
+
+    /// The discovery one installed, running server reports.
+    pub(crate) fn discovery(server: [u8; 32]) -> AccountDiscovery {
+        AccountDiscovery {
+            schema: 1,
+            account: 501,
+            build: identity().into(),
+            server: Some(server),
+            installed: true,
+            enabled: true,
+            running: true,
+            stopped: false,
+            protocol_majors: vec![1],
+            capabilities: vec!["workspace_policy".into()],
+            target: "x86_64-unknown-linux-gnu".into(),
+            version: "0.1.0".into(),
+            commit: "a".repeat(40),
+        }
+    }
 }
 
 #[cfg(test)]

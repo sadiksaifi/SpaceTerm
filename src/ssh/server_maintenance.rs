@@ -16,15 +16,34 @@
 //! authority may read and acknowledge its outcome. It never repeats a destructive dispatch, renews
 //! its approval, selects another artifact or starts a stopped server.
 
+use std::sync::Arc;
+use std::time::Duration;
+
+use spaceterm_server::account_bridge::AccountDiscovery;
+use spaceterm_server::service::activation::is_released_downgrade;
 use spaceterm_server::service::maintenance::{
-    Action, MaintenanceFacts, MaintenanceRefusal, OperationOutcome, PreparedChange,
+    Action, MaintenanceFacts, MaintenanceRefusal, OperationOutcome, PreparedChange, Reply, Request,
 };
 
 use super::cancellation::SshCancellationToken;
+use super::command::ValidatedRemoteServerArgument;
+use super::process::{CapturedProcessOutput, SshProcessAdapter};
 use super::server_connection::{
-    ContinuityChange, IncompatibilityKind, InteractionReason, SshServerContinuity, UnavailableKind,
+    ConnectMode, ContinuityChange, IncompatibilityKind, InteractionReason, RefusalKind,
+    SshConnectFailure, SshServerContinuity, UnavailableKind,
+};
+use super::server_process::{
+    NativeRoute, NativeSshConnectBackend, SshDispatchFailure, VerifiedArtifact,
 };
 use crate::domain::SshDestination;
+
+/// The remote action every maintenance exchange runs on the approved installation.
+const MAINTAIN: &str = "ssh-maintain";
+/// One bounded read or description, which changes nothing on the other computer.
+const READ: Duration = Duration::from_secs(20);
+/// One bounded dispatch. The service bounds its own lock and supervisor observation again, so a
+/// request that outlives this is admitted and unconfirmed rather than repeated.
+const DISPATCH: Duration = Duration::from_secs(120);
 
 /// The server one maintenance operation names, bound before dispatch and never widened.
 ///
@@ -181,4 +200,537 @@ pub(crate) trait SshMaintenanceBackend: Send + Sync {
     /// Releases the bounded route and owned processes this backend holds for `destination`.
     /// Pending originals are unaffected.
     fn release(&self, destination: &SshDestination);
+}
+
+/// Encodes one request as the arguments its exchange carries.
+///
+/// Only values this build composes cross the boundary: the names of the exchange and the action,
+/// the operation identity the client bound, a whole-package digest and the exact-observation
+/// confirmation the service issued. Nothing the other computer wrote becomes an argument.
+fn arguments(
+    request: &Request,
+) -> Result<Vec<ValidatedRemoteServerArgument>, SshMaintenanceFailure> {
+    let protocol = || SshMaintenanceFailure::Refused(MaintenanceRefusal::Protocol);
+    let name = |value| ValidatedRemoteServerArgument::name(value).map_err(|_| protocol());
+    let value = |value: &str| {
+        ValidatedRemoteServerArgument::hexadecimal(value).map_err(|_| protocol())
+    };
+    let operation = ValidatedRemoteServerArgument::bytes;
+    let action = |action: &Action| {
+        name(match action {
+            Action::Stop => "stop",
+            Action::Restart => "restart",
+            Action::Uninstall => "uninstall",
+        })
+    };
+    Ok(match request {
+        Request::Observe => vec![name("observe")?],
+        Request::Prepare { action: asked } => vec![name("prepare")?, action(asked)?],
+        Request::PrepareUpdate { candidate } => {
+            vec![name("prepare-update")?, value(candidate)?]
+        }
+        Request::PrepareReturn => vec![name("prepare-return")?],
+        Request::Apply {
+            operation: original,
+            action: asked,
+            confirmation,
+        } => vec![
+            name("apply")?,
+            operation(*original),
+            action(asked)?,
+            value(confirmation)?,
+        ],
+        Request::ApplyUpdate {
+            operation: original,
+            candidate,
+            confirmation,
+        } => vec![
+            name("apply-update")?,
+            operation(*original),
+            value(candidate)?,
+            value(confirmation)?,
+        ],
+        Request::ApplyReturn {
+            operation: original,
+            confirmation,
+        } => vec![
+            name("apply-return")?,
+            operation(*original),
+            value(confirmation)?,
+        ],
+        Request::Start {
+            operation: original,
+        } => vec![name("start")?, operation(*original)],
+        Request::Resolve {
+            operation: original,
+        } => vec![name("resolve")?, operation(*original)],
+    })
+}
+
+/// Whether admitting this request may change the account. A lost reply to one of these stays
+/// unconfirmed, because only the service can say what its original did.
+const fn dispatches(request: &Request) -> bool {
+    matches!(
+        request,
+        Request::Apply { .. }
+            | Request::ApplyUpdate { .. }
+            | Request::ApplyReturn { .. }
+            | Request::Start { .. }
+    )
+}
+
+/// Reads the one bounded reply an exchange wrote. The locator's own refusals happen before it
+/// runs the approved installation, so they classify truthfully even for a dispatched request.
+fn reply(
+    output: &CapturedProcessOutput,
+    dispatched: bool,
+) -> Result<Reply, SshMaintenanceFailure> {
+    if let Ok(reply) = serde_json::from_slice::<Reply>(&output.stdout) {
+        return Ok(reply);
+    }
+    Err(match output.exit.code() {
+        Some(72) => SshMaintenanceFailure::Incompatible(IncompatibilityKind::Platform),
+        Some(73) => SshMaintenanceFailure::Refused(MaintenanceRefusal::NotInstalled),
+        Some(74) => SshMaintenanceFailure::Refused(MaintenanceRefusal::StorageUnavailable),
+        _ if dispatched => SshMaintenanceFailure::Unconfirmed,
+        _ => SshMaintenanceFailure::Unavailable(UnavailableKind::ServiceUnavailable),
+    })
+}
+
+/// A reply that does not answer what was asked, so the exchange reached no validated result.
+fn unexpected(reply: Reply) -> SshMaintenanceFailure {
+    match reply {
+        Reply::Refused(refusal) => SshMaintenanceFailure::Refused(refusal),
+        Reply::Unknown => SshMaintenanceFailure::Forgotten,
+        _ => SshMaintenanceFailure::Unavailable(UnavailableKind::ServiceUnavailable),
+    }
+}
+
+fn prepared(reply: Reply) -> Result<PreparedChange, SshMaintenanceFailure> {
+    match reply {
+        Reply::Prepared(change) => Ok(change),
+        reply => Err(unexpected(reply)),
+    }
+}
+
+/// One original's outcome. A dispatched request whose outcome cannot be matched to the original
+/// stays unconfirmed, because repeating it could end work the original never admitted.
+fn outcome(
+    reply: Reply,
+    original: [u8; 32],
+    dispatched: bool,
+) -> Result<OperationOutcome, SshMaintenanceFailure> {
+    match reply {
+        Reply::Outcome(outcome) if outcome.operation == original => Ok(outcome),
+        Reply::Refused(refusal) => Err(SshMaintenanceFailure::Refused(refusal)),
+        Reply::Unknown if !dispatched => Err(SshMaintenanceFailure::Forgotten),
+        _ if dispatched => Err(SshMaintenanceFailure::Unconfirmed),
+        reply => Err(unexpected(reply)),
+    }
+}
+
+/// Every route, discovery and artifact failure as one maintenance classification.
+fn failure(error: SshConnectFailure) -> SshMaintenanceFailure {
+    match error {
+        SshConnectFailure::Cancelled => SshMaintenanceFailure::Cancelled,
+        SshConnectFailure::NeedsPerson(reason) => SshMaintenanceFailure::NeedsPerson(reason),
+        SshConnectFailure::Changed(change) => SshMaintenanceFailure::Changed(change),
+        SshConnectFailure::Stopped => {
+            SshMaintenanceFailure::Refused(MaintenanceRefusal::Stopped)
+        }
+        SshConnectFailure::Incompatible(kind) => SshMaintenanceFailure::Incompatible(kind),
+        SshConnectFailure::Refused(RefusalKind::AuthorizationRefused) => {
+            SshMaintenanceFailure::Refused(MaintenanceRefusal::AuthorizationRequired)
+        }
+        SshConnectFailure::Refused(RefusalKind::InvalidArtifact) => {
+            SshMaintenanceFailure::Refused(MaintenanceRefusal::CandidateChanged)
+        }
+        SshConnectFailure::Unavailable(UnavailableKind::CandidateUnavailable) => {
+            SshMaintenanceFailure::Refused(MaintenanceRefusal::CandidateUnavailable)
+        }
+        SshConnectFailure::Unavailable(kind) => SshMaintenanceFailure::Unavailable(kind),
+        SshConnectFailure::Unconfirmed(_) => SshMaintenanceFailure::Unconfirmed,
+        SshConnectFailure::Refused(RefusalKind::InstallRefused)
+        | SshConnectFailure::InstallationOffered(_) => {
+            SshMaintenanceFailure::Unavailable(UnavailableKind::ServiceUnavailable)
+        }
+    }
+}
+
+impl<A: SshProcessAdapter> NativeSshConnectBackend<A> {
+    /// Acquires the original route and proves the account, application identity and server are
+    /// the ones the original bound. Nothing is asked of the service until all of them match, so a
+    /// destination that now reaches another computer, account or server sends nothing.
+    fn bound(
+        &self,
+        target: &MaintenanceTarget,
+        authority: MaintenanceAuthority,
+        cancellation: &SshCancellationToken,
+        progress: &MaintenanceProgress<'_>,
+    ) -> Result<(Arc<NativeRoute<A>>, AccountDiscovery), SshMaintenanceFailure> {
+        progress(MaintenancePhase::Authenticating);
+        let route = self
+            .maintenance_route(
+                &target.destination,
+                match authority {
+                    // Background continuation reuses an authenticated route or a proven quiet
+                    // one. It never starts an askpass attempt or any other prompt.
+                    MaintenanceAuthority::Quiet => ConnectMode::QuietContinuation,
+                    MaintenanceAuthority::Requested => ConnectMode::Requested,
+                },
+                cancellation,
+                &|_| {},
+            )
+            .map_err(failure)?;
+        if route.digest() != target.continuity.route {
+            return Err(SshMaintenanceFailure::Changed(ContinuityChange::HostChanged));
+        }
+        progress(MaintenancePhase::Validating);
+        let discovery = route.account_discovery(cancellation).map_err(failure)?;
+        target
+            .continuity
+            .verify(&SshServerContinuity {
+                route: route.digest(),
+                account: discovery.account,
+                build: discovery.build.clone(),
+                server: discovery.server.unwrap_or([0; 32]),
+            })
+            .map_err(failure)?;
+        Ok((route, discovery))
+    }
+
+    /// One bounded request and one bounded reply on an already bound route.
+    fn exchange(
+        &self,
+        route: &NativeRoute<A>,
+        request: &Request,
+        cancellation: &SshCancellationToken,
+    ) -> Result<Reply, SshMaintenanceFailure> {
+        let arguments = arguments(request)?;
+        let dispatched = dispatches(request);
+        let output = if dispatched {
+            route
+                .server_effect(MAINTAIN, &arguments, DISPATCH, cancellation)
+                .map_err(|error| match error {
+                    SshDispatchFailure::NotDispatched(error) => failure(error),
+                    SshDispatchFailure::Unconfirmed => SshMaintenanceFailure::Unconfirmed,
+                })?
+        } else {
+            route
+                .server_read(MAINTAIN, &arguments, READ, cancellation)
+                .map_err(failure)?
+        };
+        reply(&output, dispatched)
+    }
+
+    /// Transfers the exact artifact this client holds and returns the build the account retained.
+    fn staged(
+        &self,
+        route: &NativeRoute<A>,
+        artifact: &VerifiedArtifact,
+        cancellation: &SshCancellationToken,
+    ) -> Result<Option<String>, SshMaintenanceFailure> {
+        let output = route.stage(artifact, cancellation).map_err(failure)?;
+        match reply(&output, false)? {
+            // Staging installs, activates and starts nothing, so a lost reply leaves the
+            // approved runtime and its Terminal Sessions exactly as they were.
+            Reply::Staged { candidate } if candidate.digest == artifact.digest() => {
+                Ok(Some(candidate.digest))
+            }
+            Reply::Staged { .. } => Err(SshMaintenanceFailure::Refused(
+                MaintenanceRefusal::CandidateChanged,
+            )),
+            Reply::AlreadyApproved => Ok(None),
+            reply => Err(unexpected(reply)),
+        }
+    }
+}
+
+impl<A: SshProcessAdapter> SshMaintenanceBackend for NativeSshConnectBackend<A> {
+    fn observe(
+        &self,
+        target: &MaintenanceTarget,
+        authority: MaintenanceAuthority,
+        cancellation: &SshCancellationToken,
+        progress: &MaintenanceProgress<'_>,
+    ) -> Result<MaintenanceFacts, SshMaintenanceFailure> {
+        let (route, _) = self.bound(target, authority, cancellation, progress)?;
+        match self.exchange(&route, &Request::Observe, cancellation)? {
+            Reply::Facts(facts) => Ok(facts),
+            reply => Err(unexpected(reply)),
+        }
+    }
+
+    fn prepare(
+        &self,
+        target: &MaintenanceTarget,
+        action: Action,
+        authority: MaintenanceAuthority,
+        cancellation: &SshCancellationToken,
+        progress: &MaintenanceProgress<'_>,
+    ) -> Result<PreparedChange, SshMaintenanceFailure> {
+        let (route, _) = self.bound(target, authority, cancellation, progress)?;
+        prepared(self.exchange(&route, &Request::Prepare { action }, cancellation)?)
+    }
+
+    fn prepare_update(
+        &self,
+        target: &MaintenanceTarget,
+        authority: MaintenanceAuthority,
+        cancellation: &SshCancellationToken,
+        progress: &MaintenanceProgress<'_>,
+    ) -> Result<Option<PreparedChange>, SshMaintenanceFailure> {
+        let (route, discovery) = self.bound(target, authority, cancellation, progress)?;
+        let artifact = route.candidate(&discovery.target).map_err(failure)?;
+        if is_released_downgrade(artifact.version(), &discovery.version) {
+            // The account's approved build is a later release, so this client holds no artifact
+            // that may replace it. Nothing is transferred.
+            return Err(SshMaintenanceFailure::Refused(
+                MaintenanceRefusal::CandidateUnavailable,
+            ));
+        }
+        progress(MaintenancePhase::Transferring);
+        let Some(candidate) = self.staged(&route, &artifact, cancellation)? else {
+            return Ok(None);
+        };
+        match self.exchange(&route, &Request::PrepareUpdate { candidate }, cancellation)? {
+            Reply::Prepared(change) => Ok(Some(change)),
+            Reply::AlreadyApproved => Ok(None),
+            reply => Err(unexpected(reply)),
+        }
+    }
+
+    fn prepare_return(
+        &self,
+        target: &MaintenanceTarget,
+        authority: MaintenanceAuthority,
+        cancellation: &SshCancellationToken,
+        progress: &MaintenanceProgress<'_>,
+    ) -> Result<PreparedChange, SshMaintenanceFailure> {
+        let (route, _) = self.bound(target, authority, cancellation, progress)?;
+        prepared(self.exchange(&route, &Request::PrepareReturn, cancellation)?)
+    }
+
+    fn apply(
+        &self,
+        target: &MaintenanceTarget,
+        submission: &OperationSubmission,
+        cancellation: &SshCancellationToken,
+        progress: &MaintenanceProgress<'_>,
+    ) -> Result<OperationOutcome, SshMaintenanceFailure> {
+        let operation = submission.operation;
+        let request = match (&submission.kind, &submission.confirmation) {
+            (SubmittedKind::Start, None) => Request::Start { operation },
+            (SubmittedKind::Service(action), Some(confirmation)) => Request::Apply {
+                operation,
+                action: *action,
+                confirmation: confirmation.clone(),
+            },
+            (SubmittedKind::Update { candidate }, Some(confirmation)) => Request::ApplyUpdate {
+                operation,
+                candidate: candidate.clone(),
+                confirmation: confirmation.clone(),
+            },
+            (SubmittedKind::Return, Some(confirmation)) => Request::ApplyReturn {
+                operation,
+                confirmation: confirmation.clone(),
+            },
+            // A destructive submission without its exact-observation confirmation, or a Start
+            // carrying one, is not a submission this contract admits.
+            _ => {
+                return Err(SshMaintenanceFailure::Refused(MaintenanceRefusal::Protocol));
+            }
+        };
+        // The person confirmed here, so this exchange may authenticate in front of them.
+        let (route, _) = self.bound(
+            target,
+            MaintenanceAuthority::Requested,
+            cancellation,
+            progress,
+        )?;
+        progress(MaintenancePhase::Dispatching);
+        outcome(self.exchange(&route, &request, cancellation)?, operation, true)
+    }
+
+    fn resolve(
+        &self,
+        target: &MaintenanceTarget,
+        operation: [u8; 32],
+        authority: MaintenanceAuthority,
+        cancellation: &SshCancellationToken,
+        progress: &MaintenanceProgress<'_>,
+    ) -> Result<OperationOutcome, SshMaintenanceFailure> {
+        let (route, _) = self.bound(target, authority, cancellation, progress)?;
+        progress(MaintenancePhase::Resolving);
+        outcome(
+            self.exchange(&route, &Request::Resolve { operation }, cancellation)?,
+            operation,
+            false,
+        )
+    }
+
+    fn release(&self, destination: &SshDestination) {
+        // Route ownership is shared. One route cache per backend is keyed by destination, so a
+        // maintenance exchange reuses the route Connect already authenticated rather than
+        // opening a second one. Releasing therefore ends only a route no presented connection
+        // depends on: the connection registry keeps ending its own routes through Disconnect,
+        // and Connect behavior is unchanged. Each exchange's own processes are bounded and
+        // already reaped, and submitted originals live in their retained records either way.
+        self.release_owned_route(destination);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use sha2::{Digest, Sha256};
+    use spaceterm_server::service::maintenance::{
+        OperationKind, OperationResolution, RemoteBuild,
+    };
+    use spaceterm_server::service::{ServiceStartup, ServiceStatus};
+
+    use super::*;
+    use crate::ssh::server_process::SshServerArtifacts;
+    use crate::ssh::server_process::testing::{FakeAccount, backend, discovery};
+
+    /// The effective OpenSSH configuration whose digest is the route the original bound.
+    const CONFIGURATION: &str = "hostname example.test\nuser tester\nport 22\n";
+    const SERVER: [u8; 32] = [9; 32];
+    const OPERATION: [u8; 32] = [4; 32];
+
+    fn build() -> String {
+        crate::application_identity::ApplicationIdentity::current()
+            .directory_name()
+            .to_owned()
+    }
+    fn bound() -> SshServerContinuity {
+        SshServerContinuity {
+            route: Sha256::digest(CONFIGURATION.as_bytes()).into(),
+            account: 501,
+            build: build(),
+            server: SERVER,
+        }
+    }
+    fn target(continuity: SshServerContinuity) -> MaintenanceTarget {
+        MaintenanceTarget {
+            destination: SshDestination::new("maintenance-host".into()).unwrap(),
+            continuity,
+        }
+    }
+    fn facts() -> MaintenanceFacts {
+        MaintenanceFacts {
+            server: SERVER,
+            account: 501,
+            build: build(),
+            status: ServiceStatus {
+                installed: true,
+                enabled: true,
+                running: true,
+                stopped: false,
+            },
+            startup: ServiceStartup::AtBoot,
+            approved: Some(RemoteBuild {
+                version: "0.1.0".into(),
+                commit: "a".repeat(40),
+                digest: "1".repeat(64),
+            }),
+            activation: None,
+        }
+    }
+    fn completed() -> OperationOutcome {
+        OperationOutcome {
+            operation: OPERATION,
+            kind: OperationKind::Service {
+                action: Action::Stop,
+            },
+            resolution: OperationResolution::Completed,
+            status: None,
+        }
+    }
+    fn encoded(reply: &Reply) -> Vec<u8> {
+        serde_json::to_vec(reply).unwrap()
+    }
+    /// An account that reports `discovery` and answers every exchange with `reply`.
+    fn account(discovery: AccountDiscovery, reply: Reply) -> Arc<FakeAccount> {
+        let discovered = serde_json::to_vec(&discovery).unwrap();
+        let reply = encoded(&reply);
+        answering(move |command| {
+            if command.contains("ssh-discover") {
+                (discovered.clone(), 0)
+            } else {
+                (reply.clone(), 0)
+            }
+        })
+    }
+    fn answering(
+        answer: impl Fn(&str) -> (Vec<u8>, i32) + Send + Sync + 'static,
+    ) -> Arc<FakeAccount> {
+        FakeAccount::new(CONFIGURATION, answer)
+    }
+    fn artifacts() -> SshServerArtifacts {
+        SshServerArtifacts::new(None)
+    }
+    fn silent(_: MaintenancePhase) {}
+
+    /// Every exchange proves the route, account, application identity and server before it asks
+    /// for anything, so a destination that now reaches another one sends nothing.
+    #[gpui::test]
+    fn a_changed_route_account_build_or_server_refuses_before_anything_is_sent(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let changed = [
+            (
+                SshServerContinuity {
+                    route: [1; 32],
+                    ..bound()
+                },
+                discovery(SERVER),
+                ContinuityChange::HostChanged,
+            ),
+            (
+                bound(),
+                AccountDiscovery {
+                    account: 502,
+                    ..discovery(SERVER)
+                },
+                ContinuityChange::AccountChanged,
+            ),
+            (
+                bound(),
+                AccountDiscovery {
+                    build: "spaceterm-other".into(),
+                    ..discovery(SERVER)
+                },
+                ContinuityChange::BuildChanged,
+            ),
+            (
+                bound(),
+                AccountDiscovery {
+                    server: Some([8; 32]),
+                    ..discovery(SERVER)
+                },
+                ContinuityChange::ServerChanged,
+            ),
+        ];
+        for (continuity, discovered, expected) in changed {
+            let account = account(discovered, Reply::Facts(facts()));
+            let (backend, _) = backend(cx.background_executor.clone(), account.clone(), artifacts());
+            let failure = backend
+                .observe(
+                    &target(continuity),
+                    MaintenanceAuthority::Requested,
+                    &SshCancellationToken::default(),
+                    &silent,
+                )
+                .err();
+            assert!(
+                matches!(failure, Some(SshMaintenanceFailure::Changed(change)) if change == expected),
+                "{expected:?} was not refused"
+            );
+            assert_eq!(
+                account.ran("ssh-maintain"),
+                0,
+                "a changed original must send no maintenance request"
+            );
+        }
+    }
 }
