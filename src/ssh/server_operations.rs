@@ -45,6 +45,17 @@ pub(crate) enum RemoteMaintenanceRequest {
     Return,
 }
 
+/// Which listing a step was offered from. One destination can appear twice: the connection the
+/// person saved again, and the sealed entry a removed connection left behind with its own
+/// unresolved original. A step must settle the one it was offered for.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RemoteOperationScope {
+    /// The selected server's own detail in the Servers section.
+    Saved,
+    /// The removed connections the Servers section still has something to say about.
+    Removed,
+}
+
 /// Names one described change or one validated result inside the owner. It is an opaque handle,
 /// so no surface composes an operation identity or a confirmation token.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -152,8 +163,10 @@ pub(crate) trait RemoteServerOperations: Send + Sync {
 
     /// Stops following an original this client cannot settle: the destination no longer reaches
     /// the identity the original bound, or the service admitted it and never produced a result.
-    /// The record is retired and nothing is sent. What the server already did is unchanged.
-    fn discard(&self, destination: &SshDestination);
+    /// `scope` names the listing the step was offered from, because one destination can appear
+    /// in both. The record is retired and nothing is sent. What the server already did is
+    /// unchanged.
+    fn discard(&self, destination: &SshDestination, scope: RemoteOperationScope);
 
     /// Continues unresolved originals quietly after relaunch, using available noninteractive
     /// authority only. Called once, after a Workspace Window exists.
@@ -698,9 +711,10 @@ impl RemoteServerOperations for SshServerOperations {
         }
     }
 
-    fn discard(&self, destination: &SshDestination) {
+    fn discard(&self, destination: &SshDestination, scope: RemoteOperationScope) {
         let Some((destination, generation, operation)) = self.claim_for_retirement(|entry| {
             entry.destination == *destination
+                && entry.removed == (scope == RemoteOperationScope::Removed)
                 && matches!(
                     entry.state,
                     // A pause can no longer reach the identity the original bound, and asking
@@ -2332,6 +2346,62 @@ mod tests {
         );
     }
 
+    /// One destination can hold two unresolved originals: the sealed entry a removed connection
+    /// left behind, and the connection the person saved again. Discard settles the one whose row
+    /// offered it, not whichever entry comes first.
+    #[test]
+    fn discarding_settles_the_original_whose_row_offered_it() {
+        let script = Arc::new(Script::default());
+        let records = Arc::new(Records::default());
+        let mut sealed = record(None);
+        sealed.removed = true;
+        sealed.operation = [9; 32];
+        records.operations.lock().unwrap().push(sealed);
+        let (connections, _) = connected();
+        let owner = SshServerOperations::new(script.clone(), records.clone(), connections.clone());
+
+        // The sealed entry is adopted first, so it is the one a destination match finds first.
+        script.resolves(Err(SshMaintenanceFailure::Unconfirmed));
+        owner.resume_retained();
+        eventually(|| {
+            owner.entries().iter().any(|entry| {
+                entry.removed && matches!(entry.state, RemoteOperationState::Unconfirmed { .. })
+            })
+        });
+
+        // The connection saved again submits its own original, which also ends unconfirmed.
+        script
+            .observes(Ok(facts()))
+            .prepares(Ok(Some(change())))
+            .applies(Err(SshMaintenanceFailure::Unconfirmed));
+        owner.describe(
+            &destination(),
+            RemoteMaintenanceRequest::Service(Action::Stop),
+        );
+        let handle = described(owner.as_ref());
+        owner.confirm(handle);
+        eventually(|| {
+            matches!(
+                owner.state(&destination()),
+                RemoteOperationState::Unconfirmed { .. }
+            )
+        });
+        assert_eq!(records.operations.lock().unwrap().len(), 2);
+
+        owner.discard(&destination(), RemoteOperationScope::Saved);
+
+        eventually(|| records.operations.lock().unwrap().len() == 1);
+        assert_eq!(
+            records.only().operation,
+            [9; 32],
+            "the removed connection's original is not the one the saved row discarded"
+        );
+        assert!(
+            owner.entries().iter().any(|entry| entry.removed),
+            "the removed connection still has something to say"
+        );
+    }
+
     /// Asking about an unconfirmed original may never produce an answer, so the person can stop
     /// following it. Nothing is sent, and the entry admits ordinary work again.
     #[test]
@@ -2347,7 +2417,7 @@ mod tests {
         });
         assert_eq!(records.only().kind, SubmittedKind::Service(Action::Stop));
 
-        owner.discard(&destination());
+        owner.discard(&destination(), RemoteOperationScope::Saved);
 
         eventually(|| records.operations.lock().unwrap().is_empty());
         eventually(|| matches!(owner.state(&destination()), RemoteOperationState::Unread));
@@ -2389,7 +2459,7 @@ mod tests {
         assert_eq!(records.only().kind, SubmittedKind::Service(Action::Stop));
 
         // Without the discard the original stays forever: the identity it bound can never answer.
-        owner.discard(&destination());
+        owner.discard(&destination(), RemoteOperationScope::Saved);
 
         eventually(|| records.operations.lock().unwrap().is_empty());
         eventually(|| matches!(owner.state(&destination()), RemoteOperationState::Unread));

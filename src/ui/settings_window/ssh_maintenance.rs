@@ -26,7 +26,8 @@ use crate::domain::SshDestination;
 use crate::local_server::service::maintenance::PreparedChange;
 use crate::ssh::server_maintenance::SubmittedKind;
 use crate::ssh::server_operations::{
-    RemoteMaintenanceRequest, RemoteOperationHandle, RemoteOperationState, RemoteServerOperations,
+    RemoteMaintenanceRequest, RemoteOperationHandle, RemoteOperationScope, RemoteOperationState,
+    RemoteServerOperations,
 };
 use crate::ui::appearance::{ChromeAppearance, gpui_color};
 use crate::ui::chrome_typography::{ChromeTextStyleExt as _, TextRole};
@@ -218,7 +219,7 @@ impl SettingsWindow {
             }
             RemoteAction::Discard => {
                 if let Some(kind) = discarded_operation(&state) {
-                    self.confirm_discard(destination, kind, cx);
+                    self.confirm_discard(destination, kind, RemoteOperationScope::Saved, cx);
                 }
             }
             step => {
@@ -320,6 +321,7 @@ impl SettingsWindow {
         &mut self,
         destination: SshDestination,
         kind: &SubmittedKind,
+        scope: RemoteOperationScope,
         cx: &mut Context<Self>,
     ) {
         let Some(rows) = self.ssh_maintenance.as_ref() else {
@@ -331,7 +333,7 @@ impl SettingsWindow {
             DISCARD_SELECTORS,
             move |confirmed, _| {
                 if confirmed {
-                    operations.discard(&destination);
+                    operations.discard(&destination, scope);
                 }
             },
             cx,
@@ -595,7 +597,7 @@ impl SettingsWindow {
             }
             RemoteAction::Discard => {
                 if let Some(kind) = discarded_operation(&state) {
-                    self.confirm_discard(destination, kind, cx);
+                    self.confirm_discard(destination, kind, RemoteOperationScope::Removed, cx);
                 }
             }
             _ => return,

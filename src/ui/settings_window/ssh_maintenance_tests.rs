@@ -29,8 +29,8 @@ use crate::ssh::server_connection::{
 };
 use crate::ssh::server_maintenance::{MaintenancePhase, SubmittedKind};
 use crate::ssh::server_operations::{
-    RemoteMaintenanceRequest, RemoteOperationEntry, RemoteOperationHandle, RemoteOperationState,
-    RemoteServerOperations, RetainedOutcome,
+    RemoteMaintenanceRequest, RemoteOperationEntry, RemoteOperationHandle, RemoteOperationScope,
+    RemoteOperationState, RemoteServerOperations, RetainedOutcome,
 };
 use crate::ui::appearance_runtime;
 use crate::ui::settings_window::SettingsWindow;
@@ -51,7 +51,7 @@ enum Call {
     Cancel,
     Resume,
     Acknowledge(RemoteOperationHandle),
-    Discard,
+    Discard(RemoteOperationScope),
     ResumeRetained,
 }
 
@@ -322,8 +322,8 @@ impl RemoteServerOperations for ScriptedOperations {
         }
     }
 
-    fn discard(&self, destination: &SshDestination) {
-        self.record(Call::Discard);
+    fn discard(&self, destination: &SshDestination, scope: RemoteOperationScope) {
+        self.record(Call::Discard(scope));
         self.set(destination.as_str(), RemoteOperationState::Unread);
     }
 
@@ -991,7 +991,11 @@ fn discarding_an_operation_asks_before_it_retires_the_record(cx: &mut TestAppCon
     click("settings-ssh-server-maintenance-discard", servers.cx);
     click_modal("settings-ssh-server-discard-confirm", servers.cx);
 
-    assert_eq!(servers.operations.calls(), vec![Call::Discard]);
+    assert_eq!(
+        servers.operations.calls(),
+        vec![Call::Discard(RemoteOperationScope::Saved)],
+        "the selected server's own row settles its own original"
+    );
 }
 
 /// A removed connection's entry offers the same Discard, and it asks there too.
@@ -1028,7 +1032,11 @@ fn discarding_a_removed_connections_operation_asks_first(cx: &mut TestAppContext
 
     click_modal("settings-ssh-server-discard-confirm", servers.cx);
 
-    assert_eq!(servers.operations.calls(), vec![Call::Discard]);
+    assert_eq!(
+        servers.operations.calls(),
+        vec![Call::Discard(RemoteOperationScope::Removed)],
+        "the removed connections row settles the removed connection's original"
+    );
 }
 
 /// A removed connection with nothing left to tell is not listed, so the surface never invites a
