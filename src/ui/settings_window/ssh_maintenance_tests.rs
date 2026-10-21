@@ -678,9 +678,9 @@ fn the_local_server_keeps_its_own_rows(cx: &mut TestAppContext) {
     assert!(!rendered(UPDATE_ROW, servers.cx));
 }
 
-/// One explicit read reads the service once and starts nothing.
+/// One explicit read reports the service and its approved version without connecting.
 #[gpui::test]
-fn check_now_reads_the_service_once(cx: &mut TestAppContext) {
+fn check_now_shows_the_approved_version_without_connecting(cx: &mut TestAppContext) {
     let servers = open_maintenance(cx);
 
     click("settings-ssh-server-service-control-check", servers.cx);
@@ -691,6 +691,19 @@ fn check_now_reads_the_service_once(cx: &mut TestAppContext) {
         servers.cx
     ));
     assert!(says("The server on penguin is running", servers.cx));
+    assert!(
+        A11yTree::read(servers.cx)
+            .with_role("Label")
+            .iter()
+            .any(|label| label["aria"]["value"] == "1.4.0"),
+        "the Server version value must show the approved build, not only the update caption"
+    );
+    let destination = SshDestination::new("penguin".to_owned()).expect("destination");
+    assert!(matches!(
+        servers.connections.status(&destination),
+        RemoteConnectionStatus::Inactive
+    ));
+    assert!(servers.connections.last_facts(&destination).is_none());
 }
 
 /// Stop describes its change, names the machine and the Sessions that end, and sends nothing

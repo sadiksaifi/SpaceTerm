@@ -3,8 +3,8 @@
 //! The selected SSH server shows its state and the steps that state allows: Connect, Cancel,
 //! Disconnect, Check Status, and Install after the person reviews what installing does. Its facts
 //! come from the latest observation, which outlives Disconnect as the facts last observed. Every
-//! row reads the registry's snapshot, so rendering asks no computer anything. The host list reads
-//! this computer's SSH configuration when the section opens.
+//! row reads connection and maintenance snapshots, so rendering asks no computer anything. The
+//! host list reads this computer's SSH configuration when the section opens.
 
 use std::sync::Arc;
 
@@ -27,6 +27,7 @@ use crate::ssh::server_connection::{
     IncompatibilityKind, RemoteConnectionStatus, ServerAvailability, SshServerConnections,
     SshServerFacts,
 };
+use crate::ssh::server_operations::RemoteOperationState;
 use crate::ui::appearance::{ChromeAppearance, gpui_color};
 use crate::ui::chrome_geometry::RadiusRole;
 use crate::ui::chrome_typography::{ChromeTextStyleExt as _, TextRole};
@@ -299,13 +300,26 @@ impl SettingsWindow {
         Some((destination, status))
     }
 
-    /// One SSH detail row's value and caption for the selected server, from its latest status
-    /// and the facts the registry last observed.
+    /// One SSH detail row's value and caption for the selected server, from maintenance facts or
+    /// the connection registry's latest observation.
     fn selected_ssh_server_fact(
         &self,
         row: SettingsRowId,
     ) -> Option<(SharedString, Option<SharedString>)> {
         let (destination, status) = self.selected_ssh_server()?;
+        // A service read knows the approved build without opening a connection.
+        if row == SettingsRowId::SshServerVersion
+            && let Some(entry) = self.ssh_maintenance.as_ref().and_then(|rows| {
+                rows.operations
+                    .entries()
+                    .into_iter()
+                    .find(|entry| entry.destination == destination && !entry.removed)
+            })
+            && let RemoteOperationState::Read(facts) = entry.state
+            && let Some(approved) = facts.approved
+        {
+            return Some((approved.version.into(), None));
+        }
         let last = self
             .ssh_servers
             .as_ref()
