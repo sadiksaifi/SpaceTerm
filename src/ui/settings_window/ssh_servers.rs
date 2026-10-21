@@ -30,6 +30,7 @@ use crate::ssh::server_connection::{
 use crate::ui::appearance::{ChromeAppearance, gpui_color};
 use crate::ui::chrome_geometry::RadiusRole;
 use crate::ui::chrome_typography::{ChromeTextStyleExt as _, TextRole};
+use crate::ui::remote_maintenance::operations_persistence_warning;
 use crate::ui::sidebar_window::form::{CaptionTone, badge};
 use crate::ui::ssh_servers::{
     SshHostSource, SshServerAction, installation_consequence, persistence_warning, platform_name,
@@ -45,6 +46,10 @@ pub(super) const CONNECT_CHOICE_SELECTOR: &str = "settings-ssh-server-connect-ch
 pub(super) const INSTALL_CONFIRM_SELECTOR: &str = "settings-ssh-server-install-confirm";
 pub(super) const INSTALL_CANCEL_SELECTOR: &str = "settings-ssh-server-install-cancel";
 pub(super) const PERSISTENCE_SELECTOR: &str = "settings-ssh-servers-persistence";
+/// The notice that this client couldn't read or write its own record of the maintenance
+/// operations it submitted. It is a different record from the saved connections above it, so it
+/// is a notice of its own that says only what that record changes.
+pub(super) const OPERATIONS_PERSISTENCE_SELECTOR: &str = "settings-ssh-operations-persistence";
 pub(super) const UNSAVED_REMOVAL_SELECTOR: &str = "settings-ssh-server-unsaved-removal";
 pub(super) const REMOVE_AGAIN_SELECTOR: &str = "settings-ssh-server-remove-again";
 /// The unsaved-removal notice's name for assistive technology.
@@ -551,6 +556,12 @@ impl SettingsWindow {
             .connections
             .persistence_error()
             .filter(|_| unsaved.is_empty());
+        // The record of submitted operations is this client's own, so its failure says only what
+        // it changes: a step that clears a finished operation, and what survives a relaunch.
+        let operations = self
+            .ssh_maintenance
+            .as_ref()
+            .and_then(|rows| rows.operations.persistence_error());
         let offered = rows.offered(&listed);
         let colors = appearance.host_colors(spaceterm_ui::ControlHost::Card);
         let owner = cx.weak_entity();
@@ -647,6 +658,18 @@ impl SettingsWindow {
                 .whitespace_normal()
                 .child(persistence_warning(error))
         });
+        let operations = operations.map(|error| {
+            let notice = operations_persistence_warning(error);
+            div()
+                .id(OPERATIONS_PERSISTENCE_SELECTOR)
+                .debug_selector(|| OPERATIONS_PERSISTENCE_SELECTOR.to_owned())
+                .role(accesskit::Role::Status)
+                .aria_label(SharedString::new_static(notice))
+                .chrome_text(appearance.typography.style(TextRole::Secondary))
+                .text_color(gpui_color(colors.warning))
+                .whitespace_normal()
+                .child(notice)
+        });
         let unsaved = (!unsaved.is_empty()).then(|| {
             let text = unsaved_removal_warning(&unsaved);
             let again_owner = owner.clone();
@@ -696,6 +719,7 @@ impl SettingsWindow {
             .gap(appearance.spacing(4.0))
             .children(unsaved)
             .children(persistence)
+            .children(operations)
             .child(
                 div()
                     .flex()

@@ -21,7 +21,7 @@ use crate::local_server::service::maintenance::{
 };
 use crate::ssh::server_connection::{
     ContinuityChange, IncompatibilityKind, InteractionReason, RemoteConnectionStatus,
-    ServerAvailability, UnavailableKind,
+    ServerAvailability, SshIntentStoreError, UnavailableKind,
 };
 use crate::ssh::server_maintenance::{MaintenancePhase, SshMaintenanceFailure, SubmittedKind};
 use crate::ssh::server_operations::{
@@ -1469,6 +1469,29 @@ pub(crate) fn removed_presentation(
                 ..presentation
             })
         })
+}
+
+/// Why clearing a finished operation on an SSH server does not stick, and why a result on screen
+/// now is not there after a relaunch.
+///
+/// This client's record of the operations it submitted is its own, separate from saved
+/// connections and from the Settings Document, so this says only what that record changes. It
+/// names no file, no path and no reason the operating system gave, which the person could not act
+/// on.
+pub(crate) const fn operations_persistence_warning(error: SshIntentStoreError) -> &'static str {
+    match error {
+        SshIntentStoreError::Unavailable => {
+            "SpaceTerm couldn\u{2019}t save what it knows about the operations you asked for on \
+             your SSH servers. Choosing OK or Discard leaves the operation listed. A result shown \
+             now is gone after SpaceTerm quits. What your servers already did is unchanged."
+        }
+        SshIntentStoreError::Malformed => {
+            "SpaceTerm\u{2019}s record of the operations you asked for on your SSH servers is \
+             damaged, so it left the record unchanged. Choosing OK or Discard leaves the \
+             operation listed. A result shown now is gone after SpaceTerm quits. What your \
+             servers already did is unchanged."
+        }
+    }
 }
 
 /// The progress badge a machine heading shows while an operation on that machine is underway.

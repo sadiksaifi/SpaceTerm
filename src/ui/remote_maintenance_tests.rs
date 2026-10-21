@@ -859,3 +859,48 @@ fn an_observation_decides_what_is_offered_before_any_read() {
         "nothing has been observed, so nothing is offered from an observation"
     );
 }
+
+/// This client's private record of these operations is not the record of saved connections, so
+/// its failure says only what it changes: the step the person just took leaves the operation
+/// listed, and a result on screen now is gone after SpaceTerm quits. The two storage conditions
+/// read differently, and neither names a file, a path or an operating-system error.
+#[test]
+fn an_unsaved_operation_record_says_what_it_leaves_the_person_with() {
+    let unavailable = operations_persistence_warning(SshIntentStoreError::Unavailable);
+    let malformed = operations_persistence_warning(SshIntentStoreError::Malformed);
+
+    assert_ne!(
+        unavailable, malformed,
+        "storage SpaceTerm couldn\u{2019}t reach reads differently from a damaged record"
+    );
+    assert!(
+        unavailable.contains("couldn\u{2019}t save what it knows about the operations"),
+        "got {unavailable:?}"
+    );
+    assert!(
+        malformed.contains("is damaged, so it left the record unchanged"),
+        "got {malformed:?}"
+    );
+    for notice in [unavailable, malformed] {
+        assert!(
+            notice.contains("Choosing OK or Discard leaves the operation listed."),
+            "the notice says the step the person took doesn\u{2019}t clear it, got {notice:?}"
+        );
+        assert!(
+            notice.contains("gone after SpaceTerm quits"),
+            "the notice says a result on screen now doesn\u{2019}t survive quitting, got \
+             {notice:?}"
+        );
+        assert!(
+            notice.contains("What your servers already did is unchanged."),
+            "the notice says the other computers are unaffected, got {notice:?}"
+        );
+        for named in [".json", "/", "\\", "errno", "Error", "Os {"] {
+            assert!(
+                !notice.contains(named),
+                "the notice carries {named:?}, which names storage the person can\u{2019}t act \
+                 on: {notice:?}"
+            );
+        }
+    }
+}

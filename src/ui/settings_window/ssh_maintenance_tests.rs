@@ -39,6 +39,8 @@ use super::REMOVED_SELECTOR;
 
 const NAVIGATION_SELECTOR: &str = "settings-navigation-settings-section-servers";
 const SERVICE_ROW: &str = "settings-row-ssh-server-service";
+/// The notice that this client couldn't read or write its record of these operations.
+const OPERATIONS_PERSISTENCE: &str = super::super::ssh_servers::OPERATIONS_PERSISTENCE_SELECTOR;
 const UPDATE_ROW: &str = "settings-row-ssh-server-update";
 
 /// One call the maintenance rows made on the owner.
@@ -102,6 +104,9 @@ struct ScriptedOperations {
     resumed: Mutex<Option<RemoteOperationState>>,
     changes: (async_channel::Sender<()>, async_channel::Receiver<()>),
     handles: Mutex<u64>,
+    /// The failure this client's private record of these operations last reported, which leaves
+    /// every retirement unapplied.
+    unsaved: Mutex<Option<SshIntentStoreError>>,
 }
 
 impl ScriptedOperations {
@@ -112,6 +117,7 @@ impl ScriptedOperations {
             resumed: Mutex::new(None),
             changes: async_channel::unbounded(),
             handles: Mutex::new(0),
+            unsaved: Mutex::new(None),
         })
     }
 
@@ -143,6 +149,17 @@ impl ScriptedOperations {
 
     fn record(&self, call: Call) {
         self.calls.lock().expect("calls").push(call);
+    }
+
+    /// Makes every retirement fail as storage SpaceTerm can neither read nor write does, so the
+    /// record stays and the state the person was looking at is unchanged.
+    fn cannot_save(&self, error: SshIntentStoreError) {
+        *self.unsaved.lock().expect("unsaved") = Some(error);
+        self.publish();
+    }
+
+    fn retires(&self) -> bool {
+        self.unsaved.lock().expect("unsaved").is_none()
     }
 
     fn resume_with(&self, state: RemoteOperationState) {
@@ -291,6 +308,11 @@ impl RemoteServerOperations for ScriptedOperations {
 
     fn acknowledge(&self, handle: RemoteOperationHandle) {
         self.record(Call::Acknowledge(handle));
+        if !self.retires() {
+            // An unretired record still awaits acknowledgement, so the result stays.
+            self.publish();
+            return;
+        }
         let acknowledged: Vec<_> = self
             .states
             .lock()
@@ -324,7 +346,16 @@ impl RemoteServerOperations for ScriptedOperations {
 
     fn discard(&self, destination: &SshDestination, scope: RemoteOperationScope) {
         self.record(Call::Discard(scope));
+        if !self.retires() {
+            // An unretired record is still followed, so the original stays.
+            self.publish();
+            return;
+        }
         self.set(destination.as_str(), RemoteOperationState::Unread);
+    }
+
+    fn persistence_error(&self) -> Option<SshIntentStoreError> {
+        *self.unsaved.lock().expect("unsaved")
     }
 
     fn resume_retained(&self) {
@@ -488,6 +519,15 @@ fn click_modal(selector: &str, cx: &mut VisualTestContext) {
 fn says(text: &str, cx: &mut VisualTestContext) -> bool {
     A11yTree::read(cx).with_role("Label").iter().any(|node| {
         node["aria"]["value"]
+            .as_str()
+            .is_some_and(|published| published.contains(text))
+    })
+}
+
+/// Whether any status the page publishes carries `text`, as assistive technology announces it.
+fn announces(text: &str, cx: &mut VisualTestContext) -> bool {
+    A11yTree::read(cx).with_role("Status").iter().any(|node| {
+        node["aria"]["label"]
             .as_str()
             .is_some_and(|published| published.contains(text))
     })
@@ -1183,4 +1223,94 @@ fn the_detail_presents_the_controls_above_the_facts(cx: &mut TestAppContext) {
         tops.windows(2).all(|pair| pair[0] < pair[1]),
         "the detail should read in order, got {order:?} at {tops:?}"
     );
+}
+
+/// The record of these operations is this client's own, and the Servers section says when it
+/// cannot be written. The result stays on the row, OK leaves it there, and the section says that
+/// it is gone after SpaceTerm quits. The saved connections are a different record, so their
+/// notice stays silent.
+#[gpui::test]
+fn a_result_this_client_cannot_save_says_what_ok_leaves_behind(cx: &mut TestAppContext) {
+    let servers = open_maintenance(cx);
+    servers
+        .operations
+        .cannot_save(SshIntentStoreError::Unavailable);
+    servers.operations.set(
+        "penguin",
+        RemoteOperationState::Resolved {
+            handle: RemoteOperationHandle(4),
+            kind: SubmittedKind::Service(Action::Stop),
+            outcome: completed(Some(status(true, false, true))),
+        },
+    );
+    servers.cx.run_until_parked();
+
+    assert!(
+        rendered(OPERATIONS_PERSISTENCE, servers.cx),
+        "the section says what it couldn\u{2019}t save before the person clicks anything"
+    );
+    assert!(
+        announces(
+            "couldn\u{2019}t save what it knows about the operations",
+            servers.cx
+        ),
+        "the notice names what SpaceTerm couldn\u{2019}t save"
+    );
+    assert!(
+        announces("Choosing OK or Discard leaves the operation listed.", servers.cx),
+        "the notice says the step the person is about to take doesn\u{2019}t clear it"
+    );
+    assert!(
+        announces("gone after SpaceTerm quits", servers.cx),
+        "the notice says the result on screen doesn\u{2019}t survive quitting"
+    );
+    assert!(
+        !rendered(super::super::ssh_servers::PERSISTENCE_SELECTOR, servers.cx),
+        "the saved connections saved, so their own notice claims nothing"
+    );
+
+    click("settings-ssh-server-maintenance-acknowledge", servers.cx);
+
+    assert_eq!(
+        servers.operations.calls(),
+        vec![Call::Acknowledge(RemoteOperationHandle(4))]
+    );
+    assert!(
+        rendered("settings-ssh-server-maintenance-acknowledge", servers.cx),
+        "the result SpaceTerm couldn\u{2019}t retire stays on the row"
+    );
+    assert!(says("The server on penguin stopped", servers.cx));
+    assert!(rendered(OPERATIONS_PERSISTENCE, servers.cx));
+}
+
+/// A damaged record reads differently from storage SpaceTerm couldn't reach, and discarding an
+/// original it cannot retire leaves that original followed.
+#[gpui::test]
+fn a_discard_this_client_cannot_save_says_the_original_stays(cx: &mut TestAppContext) {
+    let servers = open_maintenance(cx);
+    servers
+        .operations
+        .cannot_save(SshIntentStoreError::Malformed);
+    servers
+        .operations
+        .set("penguin", paused(SubmittedKind::Service(Action::Stop)));
+    servers.cx.run_until_parked();
+
+    assert!(
+        announces("is damaged, so it left the record unchanged", servers.cx),
+        "a damaged record says that SpaceTerm left it as it was"
+    );
+
+    click("settings-ssh-server-maintenance-discard", servers.cx);
+    click_modal("settings-ssh-server-discard-confirm", servers.cx);
+
+    assert_eq!(
+        servers.operations.calls(),
+        vec![Call::Discard(RemoteOperationScope::Saved)]
+    );
+    assert!(
+        rendered("settings-ssh-server-maintenance-discard", servers.cx),
+        "the original SpaceTerm couldn\u{2019}t stop following stays"
+    );
+    assert!(announces("Choosing OK or Discard leaves the operation listed.", servers.cx));
 }
