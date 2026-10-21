@@ -454,6 +454,13 @@ run = [
   "cargo run --package spaceterm-server-host --features client --example pane_takeover --locked -- 1",
 ]
 
+[tasks."server:sessions:smoke"]
+description = "Prepare disposable Preflight Sessions and verify End All Sessions through Settings"
+usage = '''
+flag "--confirm-disposable-preflight" help="Authorize only disposable Preflight test work; refuse unrelated live Sessions and pending originals"
+'''
+run = "cargo run --package spaceterm-server-host --features client --example end_all_sessions --locked -- spaceterm-preflight {% if usage.confirm_disposable_preflight %}--confirm-disposable-preflight{% endif %}"
+
 [tasks."server:input:smoke"]
 description = "Verify account-local terminal input and native effects with the initial protocol major on an idle server"
 run = [
