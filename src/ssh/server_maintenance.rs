@@ -733,4 +733,43 @@ mod tests {
             );
         }
     }
+
+    /// Background continuation uses authority that is already available. It never starts an
+    /// askpass attempt, so a route it cannot reuse quietly waits for the person instead.
+    #[gpui::test]
+    fn quiet_authority_never_starts_an_authentication_prompt(cx: &mut gpui::TestAppContext) {
+        let account = account(discovery(SERVER), Reply::Facts(facts()));
+        let (backend, prompts) =
+            backend(cx.background_executor.clone(), account.clone(), artifacts());
+        let observe = |authority| {
+            backend.observe(
+                &target(bound()),
+                authority,
+                &SshCancellationToken::default(),
+                &silent,
+            )
+        };
+
+        let quiet = observe(MaintenanceAuthority::Quiet);
+        assert!(matches!(
+            quiet,
+            Err(SshMaintenanceFailure::NeedsPerson(
+                InteractionReason::CredentialProvider
+            ))
+        ));
+        assert_eq!(prompts.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert!(account.commands().is_empty(), "nothing reached the account");
+
+        assert!(observe(MaintenanceAuthority::Requested).is_ok());
+        assert_eq!(prompts.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(
+            observe(MaintenanceAuthority::Quiet).is_ok(),
+            "continuation must reuse the authenticated route"
+        );
+        assert_eq!(
+            prompts.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "reusing an authenticated route asks for no authority"
+        );
+    }
 }
