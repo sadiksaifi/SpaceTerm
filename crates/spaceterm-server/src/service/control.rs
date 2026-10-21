@@ -5,7 +5,8 @@ pub mod cli;
 use super::{LingerAuthorization, RetainedInstallation, Service, ServiceStartup, ServiceStatus};
 use crate::ServerError;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Action {
     Stop,
     Restart,

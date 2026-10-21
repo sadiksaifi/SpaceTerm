@@ -145,7 +145,7 @@ pub(crate) enum RemoteConnectionStatus {
     },
 }
 
-#[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct SshServerContinuity {
     pub route: [u8; 32],

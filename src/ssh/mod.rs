@@ -29,6 +29,10 @@ pub(crate) mod testing;
 #[cfg(feature = "desktop")]
 pub(crate) mod server_connection;
 #[cfg(feature = "desktop")]
+pub(crate) mod server_maintenance;
+#[cfg(feature = "desktop")]
+pub(crate) mod server_operations;
+#[cfg(feature = "desktop")]
 pub(crate) mod server_intents;
 #[cfg(feature = "desktop")]
 pub(crate) mod server_process;
