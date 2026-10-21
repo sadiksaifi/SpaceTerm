@@ -17,7 +17,8 @@
 use super::{
     Run, Service, ServiceStartup, ServiceStatus,
     activation::{ActivationPhase, ActivationStatus},
-    control, runtime,
+    control::{self, Controller},
+    runtime,
 };
 use crate::{ServerError, service::RetainedInstallation, storage::Directory};
 use serde::{Deserialize, Serialize};
@@ -266,6 +267,7 @@ impl Maintenance {
     fn perform(&self, request: Request) -> Result<Reply, ServerError> {
         match request {
             Request::Observe => Ok(Reply::Facts(self.facts()?)),
+            Request::Prepare { action } => Ok(Reply::Prepared(self.prepare(action)?)),
             _ => Err(ServerError::Unsupported),
         }
     }
@@ -286,6 +288,23 @@ impl Maintenance {
             startup: observation.startup,
             approved: observation.approved,
             activation,
+        })
+    }
+
+    /// Describe one destructive action and issue the confirmation for the observation it
+    /// describes. The local control surface owns the same preconditions, and preparing changes
+    /// nothing.
+    fn prepare(&self, action: Action) -> Result<PreparedChange, ServerError> {
+        let observation = self.observe()?;
+        Controller::new(self.service.clone()).prepare(action)?;
+        Ok(PreparedChange {
+            confirmation: observation
+                .confirmation(&self.service.identity, &Change::Service { action })?,
+            running: observation.status.running,
+            stopped: observation.status.stopped,
+            startup: observation.startup,
+            previous: None,
+            candidate: None,
         })
     }
 
@@ -358,6 +377,50 @@ struct Observation {
     /// The server's current process run, which changes whenever the server runs again.
     run: Option<Run>,
     activation: Option<ActivationStatus>,
+}
+
+impl Observation {
+    /// The nonsecret exact-observation confirmation for one change.
+    ///
+    /// It binds the application identity, server identity, account, boot, approved build and
+    /// installed, enabled, running and stopped policy, together with the server's process run.
+    /// Apply recomputes it, so a confirmation taken while the server was running cannot authorize
+    /// stopping work that started afterwards.
+    fn confirmation(&self, identity: &str, change: &Change<'_>) -> Result<String, ServerError> {
+        super::activation::confirmation_token(&Binding {
+            identity,
+            server: self.server,
+            account: self.account,
+            boot: &self.boot,
+            status: self.status,
+            startup: self.startup,
+            approved: self.approved.as_ref(),
+            run: self.run.as_ref(),
+            change,
+        })
+    }
+}
+
+#[derive(Serialize)]
+struct Binding<'a> {
+    identity: &'a str,
+    server: [u8; 32],
+    account: u32,
+    boot: &'a str,
+    status: ServiceStatus,
+    startup: ServiceStartup,
+    approved: Option<&'a RemoteBuild>,
+    run: Option<&'a Run>,
+    change: &'a Change<'a>,
+}
+
+/// What one confirmation authorizes. A confirmation for one change never authorizes another.
+#[derive(Serialize)]
+#[serde(tag = "change", rename_all = "snake_case")]
+enum Change<'a> {
+    Service { action: Action },
+    Update { candidate: &'a RemoteBuild },
+    Return { previous: &'a RemoteBuild },
 }
 
 impl RemoteBuild {
@@ -709,6 +772,68 @@ mod tests {
             );
             assert!(!text.contains('/'));
             assert!(!text.contains(&ServerError::StorageUnavailable.to_string()));
+        });
+    }
+
+    #[test]
+    fn a_prepared_confirmation_binds_the_run_it_observed_and_changes_nothing() {
+        with_service(true, false, |harness| {
+            let request = Request::Prepare {
+                action: Action::Stop,
+            };
+            let Reply::Prepared(prepared) = harness.exchange(&request) else {
+                panic!("preparation unavailable");
+            };
+            assert!(prepared.running && !prepared.stopped);
+            assert_eq!(prepared.startup, ServiceStartup::AtLogin);
+            assert_eq!((prepared.previous, prepared.candidate), (None, None));
+            assert_eq!(prepared.confirmation.len(), 64);
+            // Preparing reads policy only.
+            assert!(!harness.state().stopped);
+            assert_eq!(harness.manager.stops.load(Ordering::SeqCst), 0);
+            // The same observation repeats its confirmation; another action never shares it.
+            let Reply::Prepared(again) = harness.exchange(&request) else {
+                panic!("preparation unavailable");
+            };
+            assert_eq!(again.confirmation, prepared.confirmation);
+            let Reply::Prepared(restart) = harness.exchange(&Request::Prepare {
+                action: Action::Restart,
+            }) else {
+                panic!("preparation unavailable");
+            };
+            assert_ne!(restart.confirmation, prepared.confirmation);
+            // A new process run is a different observation.
+            let mut state = harness.state();
+            state.run = Some(Run {
+                boot: crate::service::boot().unwrap(),
+                token: [2; 32],
+            });
+            harness.write_state(&state);
+            let Reply::Prepared(after) = harness.exchange(&request) else {
+                panic!("preparation unavailable");
+            };
+            assert_ne!(after.confirmation, prepared.confirmation);
+        });
+    }
+
+    #[test]
+    fn preparation_refuses_an_action_the_local_control_surface_refuses() {
+        with_service(false, true, |harness| {
+            for action in [Action::Stop, Action::Restart] {
+                assert_eq!(
+                    harness.exchange(&Request::Prepare { action }),
+                    Reply::Refused(MaintenanceRefusal::Stopped)
+                );
+            }
+            let mut state = harness.state();
+            state.installed = false;
+            harness.write_state(&state);
+            assert_eq!(
+                harness.exchange(&Request::Prepare {
+                    action: Action::Uninstall
+                }),
+                Reply::Refused(MaintenanceRefusal::NotInstalled)
+            );
         });
     }
 }
