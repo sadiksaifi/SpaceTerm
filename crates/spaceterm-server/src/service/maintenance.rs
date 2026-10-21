@@ -285,6 +285,23 @@ impl Maintenance {
                 },
             ),
             Request::Start { operation } => self.apply(operation, Applied::Start),
+            Request::PrepareUpdate { candidate } => self.prepare_update(&candidate),
+            Request::PrepareReturn => Ok(Reply::Prepared(self.prepare_return()?)),
+            Request::ApplyUpdate {
+                operation,
+                candidate,
+                confirmation,
+            } => self.apply(
+                operation,
+                Applied::Update {
+                    candidate,
+                    confirmation,
+                },
+            ),
+            Request::ApplyReturn {
+                operation,
+                confirmation,
+            } => self.apply(operation, Applied::Return { confirmation }),
             _ => Err(ServerError::Unsupported),
         }
     }
@@ -322,6 +339,72 @@ impl Maintenance {
             startup: observation.startup,
             previous: None,
             candidate: None,
+        })
+    }
+
+    /// Describe activation of one exact staged candidate and issue its confirmation. Changes
+    /// nothing, and an artifact that is already the approved build needs no update.
+    fn prepare_update(&self, candidate: &str) -> Result<Reply, ServerError> {
+        let installation = self.retained(candidate)?;
+        let observation = self.observe()?;
+        let Some(approval) = self.service.prepare_activation(&installation)? else {
+            return Ok(Reply::AlreadyApproved);
+        };
+        let previous = RemoteBuild::describe(approval.previous())?;
+        let candidate = RemoteBuild::describe(approval.candidate())?;
+        Ok(Reply::Prepared(PreparedChange {
+            confirmation: observation.confirmation(
+                &self.service.identity,
+                &Change::Update {
+                    candidate: &candidate,
+                },
+            )?,
+            running: approval.running(),
+            stopped: approval.stopped(),
+            startup: observation.startup,
+            previous: Some(previous),
+            candidate: Some(candidate),
+        }))
+    }
+
+    /// Describe returning to the retained previous runtime of an update that never became ready.
+    fn prepare_return(&self) -> Result<PreparedChange, ServerError> {
+        let observation = self.observe()?;
+        let approval = self.service.prepare_return()?;
+        let previous = RemoteBuild::describe(approval.previous())?;
+        let candidate = RemoteBuild::describe(approval.candidate())?;
+        Ok(PreparedChange {
+            confirmation: observation.confirmation(
+                &self.service.identity,
+                &Change::Return {
+                    previous: &previous,
+                },
+            )?,
+            running: observation.status.running,
+            stopped: approval.stopped(),
+            startup: observation.startup,
+            previous: Some(previous),
+            candidate: Some(candidate),
+        })
+    }
+
+    /// Resolve one retained installation by its whole-package digest, exactly as the local
+    /// service-update control does. No caller-supplied path reaches this account's storage.
+    fn retained(&self, digest: &str) -> Result<RetainedInstallation, ServerError> {
+        if !runtime::digest_valid(digest) {
+            return Err(ServerError::RuntimeUnavailable);
+        }
+        let directory = self.service.paths.data.join("installations").join(digest);
+        // A digest the client names may not be retained here. Verification still owns every
+        // safety decision about the entry; this only reports an absent candidate truthfully.
+        if !directory.is_dir() {
+            return Err(ServerError::RuntimeUnavailable);
+        }
+        let (version, commit) = runtime::describe(&directory, &self.service.identity)?;
+        Ok(RetainedInstallation {
+            directory,
+            version,
+            commit,
         })
     }
 
@@ -423,6 +506,73 @@ impl Maintenance {
                     }),
                 }
             }
+            Applied::Update {
+                candidate,
+                confirmation,
+            } => {
+                let installation = self.retained(&candidate)?;
+                let candidate = RemoteBuild::describe(&installation)?;
+                let kind = OperationKind::Update {
+                    candidate: candidate.clone(),
+                };
+                let observation = self.observe()?;
+                let expected = observation.confirmation(
+                    &self.service.identity,
+                    &Change::Update {
+                        candidate: &candidate,
+                    },
+                )?;
+                if expected != confirmation {
+                    return Ok(Admission::Refused {
+                        kind,
+                        bound: observation.status,
+                        refusal: MaintenanceRefusal::Changed,
+                    });
+                }
+                // A candidate that cannot be approved, including an incompatible one, neither
+                // stages nor activates anything.
+                match self.service.prepare_activation(&installation) {
+                    Ok(None) => Ok(Admission::AlreadyApproved),
+                    Ok(Some(approval)) => Ok(Admission::Ready {
+                        kind,
+                        bound: observation.status,
+                        confirmation: Some(expected),
+                        dispatch: Dispatch::Update(approval),
+                    }),
+                    Err(error) => Ok(Admission::Refused {
+                        kind,
+                        bound: observation.status,
+                        refusal: error.into(),
+                    }),
+                }
+            }
+            Applied::Return { confirmation } => {
+                let observation = self.observe()?;
+                let approval = self.service.prepare_return()?;
+                let previous = RemoteBuild::describe(approval.previous())?;
+                let kind = OperationKind::Return {
+                    previous: previous.clone(),
+                };
+                let expected = observation.confirmation(
+                    &self.service.identity,
+                    &Change::Return {
+                        previous: &previous,
+                    },
+                )?;
+                if expected != confirmation {
+                    return Ok(Admission::Refused {
+                        kind,
+                        bound: observation.status,
+                        refusal: MaintenanceRefusal::Changed,
+                    });
+                }
+                Ok(Admission::Ready {
+                    kind,
+                    bound: observation.status,
+                    confirmation: Some(expected),
+                    dispatch: Dispatch::Return(approval),
+                })
+            }
         }
     }
 
@@ -445,6 +595,34 @@ impl Maintenance {
             Dispatch::Service(prepared) => match controller.confirm(prepared) {
                 Ok(status) => (OperationResolution::Completed, None, Some(status)),
                 Err(error) => (resolution_after(error), None, self.policy()),
+            },
+            Dispatch::Update(approval) => self.activated(self.service.activate(approval)),
+            Dispatch::Return(approval) => self.activated(self.service.return_to_previous(approval)),
+        }
+    }
+
+    /// Report what the service retains for an activation rather than what its reply claimed.
+    fn activated(
+        &self,
+        result: Result<ActivationStatus, ServerError>,
+    ) -> (OperationResolution, Option<[u8; 32]>, Option<ServiceStatus>) {
+        match result {
+            Ok(status) => (
+                resolution_of(status.phase),
+                Some(status.operation),
+                self.policy(),
+            ),
+            Err(error) => match resolution_after(error) {
+                // Refused before the service admitted any activation.
+                refused @ OperationResolution::Refused(_) => (refused, None, self.policy()),
+                unresolved => match self.service.activation_status() {
+                    Ok(Some(status)) => (
+                        resolution_of(status.phase),
+                        Some(status.operation),
+                        self.policy(),
+                    ),
+                    _ => (unresolved, None, self.policy()),
+                },
             },
         }
     }
@@ -532,12 +710,21 @@ enum Applied {
         action: Action,
         confirmation: String,
     },
+    Update {
+        candidate: String,
+        confirmation: String,
+    },
+    Return {
+        confirmation: String,
+    },
 }
 
 /// One validated original, ready for its single dispatch.
 enum Dispatch {
     Start,
     Service(control::Confirmation),
+    Update(super::activation::ActivationApproval),
+    Return(super::activation::ReturnApproval),
 }
 
 /// What admission decided before anything was performed.
@@ -567,6 +754,16 @@ fn resolution_after(error: ServerError) -> OperationResolution {
         | ServerError::Changed
         | ServerError::AuthenticationRefused => OperationResolution::Refused(error.into()),
         _ => OperationResolution::Unconfirmed,
+    }
+}
+
+/// How far a retained activation got, as one original's outcome.
+fn resolution_of(phase: ActivationPhase) -> OperationResolution {
+    match phase {
+        ActivationPhase::Activating => OperationResolution::Admitted,
+        ActivationPhase::Completed { .. } => OperationResolution::Completed,
+        ActivationPhase::Failed { can_return } => OperationResolution::Failed { can_return },
+        ActivationPhase::Uncertain => OperationResolution::Unconfirmed,
     }
 }
 
@@ -1298,6 +1495,176 @@ mod tests {
                     Reply::Outcome(outcome) if outcome.operation == operation
                 ));
             }
+        });
+    }
+
+    #[test]
+    fn a_staged_candidate_leaves_the_approved_runtime_policy_and_stop_unchanged() {
+        with_service(false, true, |harness| {
+            let policy = std::fs::read(harness.service.paths.data.join("service.json")).unwrap();
+            let identity = std::fs::read(harness.service.paths.data.join("identity.json")).unwrap();
+            let Reply::Facts(facts) = harness.exchange(&Request::Observe) else {
+                panic!("observation unavailable");
+            };
+            assert_eq!(
+                facts.approved,
+                Some(RemoteBuild::describe(&harness.previous).unwrap())
+            );
+            assert!(facts.status.installed && facts.status.stopped && !facts.status.running);
+            // The verified different artifact is retained and describable without activating it.
+            let Reply::Prepared(prepared) = harness.exchange(&Request::PrepareUpdate {
+                candidate: Harness::digest(&harness.candidate),
+            }) else {
+                panic!("the staged candidate was not described");
+            };
+            assert_eq!(
+                (prepared.previous, prepared.candidate),
+                (
+                    Some(RemoteBuild::describe(&harness.previous).unwrap()),
+                    Some(RemoteBuild::describe(&harness.candidate).unwrap())
+                )
+            );
+            assert!(prepared.stopped && !prepared.running);
+            assert_eq!(
+                *harness.manager.approved.lock().unwrap(),
+                harness.previous.directory
+            );
+            assert_eq!(
+                policy,
+                std::fs::read(harness.service.paths.data.join("service.json")).unwrap()
+            );
+            assert_eq!(
+                identity,
+                std::fs::read(harness.service.paths.data.join("identity.json")).unwrap()
+            );
+            assert_eq!(harness.manager.stops.load(Ordering::SeqCst), 0);
+            assert_eq!(harness.manager.starts.load(Ordering::SeqCst), 0);
+            // Only a verified retained artifact is a candidate.
+            for candidate in ["b".repeat(64), "not-a-digest".into()] {
+                assert_eq!(
+                    harness.exchange(&Request::PrepareUpdate { candidate }),
+                    Reply::Refused(MaintenanceRefusal::CandidateUnavailable)
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn updating_a_stopped_server_leaves_it_stopped() {
+        with_service(false, true, |harness| {
+            let candidate = Harness::digest(&harness.candidate);
+            let Reply::Prepared(prepared) = harness.exchange(&Request::PrepareUpdate {
+                candidate: candidate.clone(),
+            }) else {
+                panic!("the staged candidate was not described");
+            };
+            // A confirmation naming another observation is refused without dispatch.
+            assert_eq!(
+                harness.exchange(&Request::ApplyUpdate {
+                    operation: [7; 32],
+                    candidate: candidate.clone(),
+                    confirmation: "a".repeat(64),
+                }),
+                Reply::Outcome(OperationOutcome {
+                    operation: [7; 32],
+                    kind: OperationKind::Update {
+                        candidate: RemoteBuild::describe(&harness.candidate).unwrap()
+                    },
+                    resolution: OperationResolution::Refused(MaintenanceRefusal::Changed),
+                    status: None,
+                })
+            );
+            assert_eq!(
+                *harness.manager.approved.lock().unwrap(),
+                harness.previous.directory
+            );
+            let Reply::Outcome(outcome) = harness.exchange(&Request::ApplyUpdate {
+                operation: [8; 32],
+                candidate: candidate.clone(),
+                confirmation: prepared.confirmation,
+            }) else {
+                panic!("the update was not performed");
+            };
+            assert_eq!(outcome.resolution, OperationResolution::Completed);
+            let status = outcome.status.expect("resolved policy unavailable");
+            assert!(status.installed && status.stopped && !status.running);
+            assert_eq!(
+                *harness.manager.approved.lock().unwrap(),
+                harness.candidate.directory
+            );
+            assert_eq!(harness.manager.stops.load(Ordering::SeqCst), 0);
+            assert_eq!(harness.manager.starts.load(Ordering::SeqCst), 0);
+            let Reply::Facts(facts) = harness.exchange(&Request::Observe) else {
+                panic!("observation unavailable");
+            };
+            assert_eq!(
+                facts.approved,
+                Some(RemoteBuild::describe(&harness.candidate).unwrap())
+            );
+            assert!(facts.status.stopped && !facts.status.running);
+            // The exact artifact is now this account's approved build.
+            assert_eq!(
+                harness.exchange(&Request::PrepareUpdate { candidate }),
+                Reply::AlreadyApproved
+            );
+        });
+    }
+
+    #[test]
+    fn a_failed_update_offers_a_separately_confirmed_return_without_repeating_dispatch() {
+        with_service(true, false, |harness| {
+            let Reply::Prepared(prepared) = harness.exchange(&Request::PrepareUpdate {
+                candidate: Harness::digest(&harness.candidate),
+            }) else {
+                panic!("the staged candidate was not described");
+            };
+            assert!(prepared.running && !prepared.stopped);
+            let Reply::Outcome(outcome) = harness.exchange(&Request::ApplyUpdate {
+                operation: [10; 32],
+                candidate: Harness::digest(&harness.candidate),
+                confirmation: prepared.confirmation,
+            }) else {
+                panic!("the update was not performed");
+            };
+            // This service manager never reaches readiness, so the candidate failed.
+            assert_eq!(
+                outcome.resolution,
+                OperationResolution::Failed { can_return: true }
+            );
+            assert_eq!(harness.manager.stops.load(Ordering::SeqCst), 1);
+            assert_eq!(harness.manager.starts.load(Ordering::SeqCst), 1);
+            let Reply::Prepared(returning) = harness.exchange(&Request::PrepareReturn) else {
+                panic!("the return was not described");
+            };
+            assert_eq!(
+                (returning.previous, returning.candidate),
+                (
+                    Some(RemoteBuild::describe(&harness.previous).unwrap()),
+                    Some(RemoteBuild::describe(&harness.candidate).unwrap())
+                )
+            );
+            let Reply::Outcome(returned) = harness.exchange(&Request::ApplyReturn {
+                operation: [11; 32],
+                confirmation: returning.confirmation,
+            }) else {
+                panic!("the return was not performed");
+            };
+            assert_eq!(returned.resolution, OperationResolution::Completed);
+            assert_eq!(
+                returned.kind,
+                OperationKind::Return {
+                    previous: RemoteBuild::describe(&harness.previous).unwrap()
+                }
+            );
+            // The previous runtime stays stopped, and neither Stop nor Start was repeated.
+            let status = returned.status.expect("resolved policy unavailable");
+            assert!(status.stopped && !status.running);
+            assert_eq!(
+                *harness.manager.approved.lock().unwrap(),
+                harness.previous.directory
+            );
+            assert_eq!(harness.manager.stops.load(Ordering::SeqCst), 1);
+            assert_eq!(harness.manager.starts.load(Ordering::SeqCst), 1);
         });
     }
 }
