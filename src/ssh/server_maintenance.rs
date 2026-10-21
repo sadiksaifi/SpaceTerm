@@ -77,7 +77,9 @@ pub(crate) enum SubmittedKind {
     Start,
     Service(Action),
     /// Activation of one exact verified artifact, named by its whole-package digest.
-    Update { candidate: String },
+    Update {
+        candidate: String,
+    },
     /// A return to the retained previous runtime of an update that never became ready.
     Return,
 }
@@ -212,9 +214,8 @@ fn arguments(
 ) -> Result<Vec<ValidatedRemoteServerArgument>, SshMaintenanceFailure> {
     let protocol = || SshMaintenanceFailure::Refused(MaintenanceRefusal::Protocol);
     let name = |value| ValidatedRemoteServerArgument::name(value).map_err(|_| protocol());
-    let value = |value: &str| {
-        ValidatedRemoteServerArgument::hexadecimal(value).map_err(|_| protocol())
-    };
+    let value =
+        |value: &str| ValidatedRemoteServerArgument::hexadecimal(value).map_err(|_| protocol());
     let operation = ValidatedRemoteServerArgument::bytes;
     let action = |action: &Action| {
         name(match action {
@@ -281,10 +282,7 @@ const fn dispatches(request: &Request) -> bool {
 
 /// Reads the one bounded reply an exchange wrote. The locator's own refusals happen before it
 /// runs the approved installation, so they classify truthfully even for a dispatched request.
-fn reply(
-    output: &CapturedProcessOutput,
-    dispatched: bool,
-) -> Result<Reply, SshMaintenanceFailure> {
+fn reply(output: &CapturedProcessOutput, dispatched: bool) -> Result<Reply, SshMaintenanceFailure> {
     if let Ok(reply) = serde_json::from_slice::<Reply>(&output.stdout) {
         return Ok(reply);
     }
@@ -346,9 +344,7 @@ fn failure(error: SshConnectFailure) -> SshMaintenanceFailure {
         SshConnectFailure::Cancelled => SshMaintenanceFailure::Cancelled,
         SshConnectFailure::NeedsPerson(reason) => SshMaintenanceFailure::NeedsPerson(reason),
         SshConnectFailure::Changed(change) => SshMaintenanceFailure::Changed(change),
-        SshConnectFailure::Stopped => {
-            SshMaintenanceFailure::Refused(MaintenanceRefusal::Stopped)
-        }
+        SshConnectFailure::Stopped => SshMaintenanceFailure::Refused(MaintenanceRefusal::Stopped),
         SshConnectFailure::Incompatible(kind) => SshMaintenanceFailure::Incompatible(kind),
         SshConnectFailure::Refused(RefusalKind::AuthorizationRefused) => {
             SshMaintenanceFailure::Refused(MaintenanceRefusal::AuthorizationRequired)
@@ -394,7 +390,9 @@ impl<A: SshProcessAdapter> NativeSshConnectBackend<A> {
             )
             .map_err(failure)?;
         if route.digest() != target.continuity.route {
-            return Err(SshMaintenanceFailure::Changed(ContinuityChange::HostChanged));
+            return Err(SshMaintenanceFailure::Changed(
+                ContinuityChange::HostChanged,
+            ));
         }
         progress(MaintenancePhase::Validating);
         let discovery = route.account_discovery(cancellation).map_err(failure)?;
@@ -554,7 +552,11 @@ impl<A: SshProcessAdapter> SshMaintenanceBackend for NativeSshConnectBackend<A> 
             progress,
         )?;
         progress(MaintenancePhase::Dispatching);
-        outcome(self.exchange(&route, &request, cancellation)?, operation, true)
+        outcome(
+            self.exchange(&route, &request, cancellation)?,
+            operation,
+            true,
+        )
     }
 
     fn resolve(
@@ -588,9 +590,7 @@ impl<A: SshProcessAdapter> SshMaintenanceBackend for NativeSshConnectBackend<A> 
 #[cfg(test)]
 mod tests {
     use sha2::{Digest, Sha256};
-    use spaceterm_server::service::maintenance::{
-        OperationKind, OperationResolution, RemoteBuild,
-    };
+    use spaceterm_server::service::maintenance::{OperationKind, OperationResolution, RemoteBuild};
     use spaceterm_server::service::{ServiceStartup, ServiceStatus};
 
     use super::*;
@@ -728,7 +728,8 @@ mod tests {
         ];
         for (continuity, discovered, expected) in changed {
             let account = account(discovered, Reply::Facts(facts()));
-            let (backend, _) = backend(cx.background_executor.clone(), account.clone(), artifacts());
+            let (backend, _) =
+                backend(cx.background_executor.clone(), account.clone(), artifacts());
             let failure = backend
                 .observe(
                     &target(continuity),
@@ -830,10 +831,7 @@ mod tests {
             .find(|command| command.contains("ssh-maintain"))
             .unwrap();
         assert!(
-            dispatched.contains(&format!(
-                "apply {} stop {confirmation}",
-                "04".repeat(32)
-            )),
+            dispatched.contains(&format!("apply {} stop {confirmation}", "04".repeat(32))),
             "{dispatched}"
         );
     }
@@ -972,7 +970,10 @@ mod tests {
                     &silent,
                 ),
             };
-            assert_eq!(prepared.ok().map(|change| change.confirmation), Some("2".repeat(64)));
+            assert_eq!(
+                prepared.ok().map(|change| change.confirmation),
+                Some("2".repeat(64))
+            );
             let requests: Vec<_> = account
                 .commands()
                 .into_iter()

@@ -749,7 +749,14 @@ case "$digest" in *[!0-9a-f]*) exit 74;; esac
         signature: &[u8],
         digest: &str,
     ) -> String {
-        transfer_script("ssh-stage", identity, archive_length, signature, digest, None)
+        transfer_script(
+            "ssh-stage",
+            identity,
+            archive_length,
+            signature,
+            digest,
+            None,
+        )
     }
 }
 
