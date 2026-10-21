@@ -215,7 +215,7 @@ where
         &self,
         prompts: Arc<dyn crate::ssh::askpass::AskPassAttemptFactory>,
         cx: &mut App,
-    ) -> Option<crate::ssh::server_connection::SshServerConnections> {
+    ) -> Option<crate::ui::ssh_servers::CreatedSshServers> {
         use crate::ssh::server_process::{
             NativeSshConnectBackend, NativeSshServerConfig, SshServerArtifacts,
         };
@@ -237,14 +237,30 @@ where
             executor: cx.background_executor().clone(),
             artifacts: SshServerArtifacts::new(self.artifacts.clone()),
         });
-        Some(crate::ssh::server_connection::SshServerConnections::new(
-            Arc::new(backend),
+        // One backend owns the authenticated routes, so maintenance reuses the route Connect
+        // already established rather than opening its own.
+        let backend = Arc::new(backend);
+        let connections = crate::ssh::server_connection::SshServerConnections::new(
+            Arc::clone(&backend) as Arc<_>,
             Arc::new(
                 crate::ssh::server_intents::PrivateSshConnectionIntents::new(Arc::clone(
                     &self.paths,
                 )),
             ),
-        ))
+        );
+        let operations = crate::ssh::server_operations::SshServerOperations::new(
+            backend,
+            Arc::new(
+                crate::ssh::server_operation_records::PrivateRemoteOperationRecords::new(
+                    Arc::clone(&self.paths),
+                ),
+            ),
+            connections.clone(),
+        );
+        Some(crate::ui::ssh_servers::CreatedSshServers {
+            connections,
+            operations: Some(operations),
+        })
     }
 
     fn prompts(

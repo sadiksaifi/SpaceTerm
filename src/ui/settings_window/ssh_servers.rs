@@ -3,8 +3,8 @@
 //! The selected SSH server shows its state and the steps that state allows: Connect, Cancel,
 //! Disconnect, Check Status, and Install after the person reviews what installing does. Its facts
 //! come from the latest observation, which outlives Disconnect as the facts last observed. Every
-//! row reads the registry's snapshot, so rendering asks no computer anything. The host list reads
-//! this computer's SSH configuration when the section opens.
+//! row reads connection and maintenance snapshots, so rendering asks no computer anything. The
+//! host list reads this computer's SSH configuration when the section opens.
 
 use std::sync::Arc;
 
@@ -27,9 +27,11 @@ use crate::ssh::server_connection::{
     IncompatibilityKind, RemoteConnectionStatus, ServerAvailability, SshServerConnections,
     SshServerFacts,
 };
+use crate::ssh::server_operations::RemoteOperationState;
 use crate::ui::appearance::{ChromeAppearance, gpui_color};
 use crate::ui::chrome_geometry::RadiusRole;
 use crate::ui::chrome_typography::{ChromeTextStyleExt as _, TextRole};
+use crate::ui::remote_maintenance::operations_persistence_warning;
 use crate::ui::sidebar_window::form::{CaptionTone, badge};
 use crate::ui::ssh_servers::{
     SshHostSource, SshServerAction, installation_consequence, persistence_warning, platform_name,
@@ -45,6 +47,10 @@ pub(super) const CONNECT_CHOICE_SELECTOR: &str = "settings-ssh-server-connect-ch
 pub(super) const INSTALL_CONFIRM_SELECTOR: &str = "settings-ssh-server-install-confirm";
 pub(super) const INSTALL_CANCEL_SELECTOR: &str = "settings-ssh-server-install-cancel";
 pub(super) const PERSISTENCE_SELECTOR: &str = "settings-ssh-servers-persistence";
+/// The notice that this client couldn't read or write its own record of the maintenance
+/// operations it submitted. It is a different record from the saved connections above it, so it
+/// is a notice of its own that says only what that record changes.
+pub(super) const OPERATIONS_PERSISTENCE_SELECTOR: &str = "settings-ssh-operations-persistence";
 pub(super) const UNSAVED_REMOVAL_SELECTOR: &str = "settings-ssh-server-unsaved-removal";
 pub(super) const REMOVE_AGAIN_SELECTOR: &str = "settings-ssh-server-remove-again";
 /// The unsaved-removal notice's name for assistive technology.
@@ -294,13 +300,26 @@ impl SettingsWindow {
         Some((destination, status))
     }
 
-    /// One SSH detail row's value and caption for the selected server, from its latest status
-    /// and the facts the registry last observed.
+    /// One SSH detail row's value and caption for the selected server, from maintenance facts or
+    /// the connection registry's latest observation.
     fn selected_ssh_server_fact(
         &self,
         row: SettingsRowId,
     ) -> Option<(SharedString, Option<SharedString>)> {
         let (destination, status) = self.selected_ssh_server()?;
+        // A service read knows the approved build without opening a connection.
+        if row == SettingsRowId::SshServerVersion
+            && let Some(entry) = self.ssh_maintenance.as_ref().and_then(|rows| {
+                rows.operations
+                    .entries()
+                    .into_iter()
+                    .find(|entry| entry.destination == destination && !entry.removed)
+            })
+            && let RemoteOperationState::Read(facts) = entry.state
+            && let Some(approved) = facts.approved
+        {
+            return Some((approved.version.into(), None));
+        }
         let last = self
             .ssh_servers
             .as_ref()
@@ -551,6 +570,12 @@ impl SettingsWindow {
             .connections
             .persistence_error()
             .filter(|_| unsaved.is_empty());
+        // The record of submitted operations is this client's own, so its failure says only what
+        // it changes: a step that clears a finished operation, and what survives a relaunch.
+        let operations = self
+            .ssh_maintenance
+            .as_ref()
+            .and_then(|rows| rows.operations.persistence_error());
         let offered = rows.offered(&listed);
         let colors = appearance.host_colors(spaceterm_ui::ControlHost::Card);
         let owner = cx.weak_entity();
@@ -647,6 +672,18 @@ impl SettingsWindow {
                 .whitespace_normal()
                 .child(persistence_warning(error))
         });
+        let operations = operations.map(|error| {
+            let notice = operations_persistence_warning(error);
+            div()
+                .id(OPERATIONS_PERSISTENCE_SELECTOR)
+                .debug_selector(|| OPERATIONS_PERSISTENCE_SELECTOR.to_owned())
+                .role(accesskit::Role::Status)
+                .aria_label(SharedString::new_static(notice))
+                .chrome_text(appearance.typography.style(TextRole::Secondary))
+                .text_color(gpui_color(colors.warning))
+                .whitespace_normal()
+                .child(notice)
+        });
         let unsaved = (!unsaved.is_empty()).then(|| {
             let text = unsaved_removal_warning(&unsaved);
             let again_owner = owner.clone();
@@ -696,6 +733,7 @@ impl SettingsWindow {
             .gap(appearance.spacing(4.0))
             .children(unsaved)
             .children(persistence)
+            .children(operations)
             .child(
                 div()
                     .flex()

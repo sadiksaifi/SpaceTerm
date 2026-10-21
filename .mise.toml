@@ -259,6 +259,10 @@ run = "cargo test --package spaceterm --all-targets --features native-tests --lo
 description = "Run native Linux and shared Unix Adapter tests"
 run = "cargo test --package spaceterm --all-targets --features native-tests --locked -- linux unix"
 
+[tasks."test:native:ssh"]
+description = "Run native Unix SSH process Adapter tests"
+run = "cargo test --package spaceterm --lib --features native-tests --locked -- platform::unix_ssh_process:: ssh::process::unix_adapter_tests --nocapture"
+
 [tasks."test:tools"]
 description = "Test the shared task code in mise-tasks/lib"
 usage = 'arg "[filter]" help="Run one unittest module or test by its full name"'
@@ -590,3 +594,33 @@ arg "[major]" default="1" help="Initial protocol major (1)"
 flag "--cleanup-exercise" help="Remove only the retained directory-recovery test Workspace"
 '''
 run = "target/debug/examples/directory_recovery {{usage.major}} {% if usage.cleanup_exercise %}--cleanup{% endif %}"
+
+[tasks."server:maintenance:build"]
+description = "Build the remote maintenance check before native code signing"
+run = "cargo build --package spaceterm-server-host --features client --example server_maintenance --locked"
+
+[tasks."server:maintenance:smoke"]
+description = "Exercise remote maintenance originals against disposable Development service state"
+usage = '''
+arg "<previous-archive>" help="Verified signed initial server archive"
+arg "<previous-signature>" help="Initial archive signature"
+arg "<previous-sha256>" help="Initial complete archive SHA256"
+arg "<candidate-archive>" help="Verified signed different server archive"
+arg "<candidate-signature>" help="Candidate archive signature"
+arg "<candidate-sha256>" help="Candidate complete archive SHA256"
+flag "--confirm-disposable-development" help="Authorize replacement of disposable Development server work"
+'''
+run = "target/debug/examples/server_maintenance {{usage.previous_archive | quote}} {{usage.previous_signature | quote}} {{usage.previous_sha256 | quote}} {{usage.candidate_archive | quote}} {{usage.candidate_signature | quote}} {{usage.candidate_sha256 | quote}} {% if usage.confirm_disposable_development %}--confirm-disposable-development{% endif %}"
+[tasks."server:ssh:maintenance:native:test"]
+description = "Observe an explicitly selected SSH account server's maintenance state on the native host"
+run = "cargo test --package spaceterm --lib --all-features --locked -- ssh::server_process::unix_adapter_tests::native_account_server_maintenance_observe --ignored --exact --nocapture"
+
+[tasks."server:ssh:maintenance:native:originals"]
+description = "Stop, start and update an explicitly authorized disposable SSH account server"
+env = { SPACETERM_SSH_NATIVE_MAINTAIN = "1" }
+run = "cargo test --package spaceterm --lib --all-features --locked -- ssh::server_process::unix_adapter_tests::native_account_server_maintenance_originals --ignored --exact --nocapture"
+
+[tasks."server:ssh:maintenance:native:recovery"]
+description = "Finish a submitted SSH server original from a new client after the first one is lost"
+env = { SPACETERM_SSH_NATIVE_MAINTAIN = "1" }
+run = "cargo test --package spaceterm --lib --all-features --locked -- ssh::server_process::unix_adapter_tests::native_remote_original_finishes_after_the_client_is_lost --ignored --exact --nocapture"

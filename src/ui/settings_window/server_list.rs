@@ -69,8 +69,10 @@ const LOCAL_ROWS: [SettingsRowId; 3] = [
     SettingsRowId::ServerUpdate,
 ];
 /// The rows that present one saved SSH server alone.
-const SSH_ROWS: [SettingsRowId; 6] = [
+const SSH_ROWS: [SettingsRowId; 8] = [
     SettingsRowId::SshServerStatus,
+    SettingsRowId::SshServerService,
+    SettingsRowId::SshServerUpdate,
     SettingsRowId::SshServerVersion,
     SettingsRowId::SshServerPlatform,
     SettingsRowId::SshServerCompatibility,
@@ -219,6 +221,9 @@ impl SettingsWindow {
                         None => false,
                     }
             }
+            // Servers whose saved connection the person removed are not selected servers, so the
+            // row appears only while SpaceTerm still has something to tell them.
+            SettingsRowId::RemovedServerOperations => self.has_removed_operations(),
             row => row_presents(row, selected),
         }
     }
@@ -583,6 +588,13 @@ impl SettingsWindow {
                 SharedString::new_static(DIRECT_NETWORK_PAIRING),
                 CaptionTone::Guidance,
             )),
+            SettingsRowId::RemovedServerOperations => Some((
+                SharedString::new_static(super::ssh_maintenance::REMOVED_GUIDANCE),
+                CaptionTone::Guidance,
+            )),
+            row if super::ssh_maintenance::maintenance_row(row).is_some() => {
+                self.ssh_maintenance_caption(row)
+            }
             row if SSH_ROWS.contains(&row) => self.ssh_server_caption(row),
             _ => None,
         }

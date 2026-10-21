@@ -92,6 +92,10 @@ pub(crate) struct SshServerFacts {
 pub(crate) struct SshServerObservation {
     pub availability: ServerAvailability,
     pub facts: SshServerFacts,
+    /// The route, account, application identity and server this observation signed in to and
+    /// validated. `None` when the account has no server to identify. An operation submitted
+    /// afterwards binds it, so a check is enough to maintain a server without connecting to it.
+    pub continuity: Option<SshServerContinuity>,
 }
 
 #[derive(Clone)]
@@ -145,7 +149,7 @@ pub(crate) enum RemoteConnectionStatus {
     },
 }
 
-#[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct SshServerContinuity {
     pub route: [u8; 32],
@@ -188,6 +192,11 @@ pub(crate) trait SshConnectionIntentStore: Send + Sync {
     fn retain(&self, connection: RetainedSshConnection) -> Result<(), SshIntentStoreError>;
     fn remove(&self, destination: &SshDestination) -> Result<(), SshIntentStoreError>;
 }
+/// Watches removal of a saved connection. The registry tells it after the removal has applied,
+/// so nothing an observer does can recreate the connection or its reconnect intent.
+pub(crate) trait SshConnectionRemovals: Send + Sync {
+    fn removed(&self, destination: &SshDestination);
+}
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ConnectMode {
     Requested,
@@ -222,7 +231,10 @@ pub(crate) enum SshConnectFailure {
     Cancelled,
     NeedsPerson(InteractionReason),
     Changed(ContinuityChange),
-    Stopped,
+    /// The account's server was deliberately stopped. It carries the identity the exchange
+    /// validated before it found that out, so a server this client has not connected to can
+    /// still be started explicitly.
+    Stopped(Option<SshServerContinuity>),
     Incompatible(IncompatibilityKind),
     Refused(RefusalKind),
     Unavailable(UnavailableKind),
@@ -306,6 +318,8 @@ struct Inner {
     backend: Arc<dyn SshConnectBackend>,
     intents: Arc<dyn SshConnectionIntentStore>,
     persistence: async_channel::Sender<PersistenceCommand>,
+    /// Held weakly, so watching removal keeps neither owner alive.
+    removals: Mutex<Option<Weak<dyn SshConnectionRemovals>>>,
 }
 impl Drop for Inner {
     fn drop(&mut self) {
@@ -341,6 +355,7 @@ impl SshServerConnections {
             backend,
             intents,
             persistence,
+            removals: Mutex::new(None),
         });
         let weak = Arc::downgrade(&inner);
         if std::thread::Builder::new()
@@ -352,6 +367,12 @@ impl SshServerConnections {
             state.persistence_error = Some(SshIntentStoreError::Unavailable);
         }
         Self { inner }
+    }
+    /// Makes `observer` the one watcher of saved-connection removal.
+    pub(crate) fn watch_removals(&self, observer: &Arc<dyn SshConnectionRemovals>) {
+        if let Ok(mut removals) = self.inner.removals.lock() {
+            *removals = Some(Arc::downgrade(observer));
+        }
     }
     pub(crate) fn status(&self, destination: &SshDestination) -> RemoteConnectionStatus {
         self.inner
@@ -415,6 +436,16 @@ impl SshServerConnections {
                 .entries
                 .get(destination.as_str())
                 .and_then(|entry| entry.last_facts.clone())
+        })
+    }
+    /// The identity the latest admitted connection validated, which one maintenance operation
+    /// binds before dispatch. `None` until a connection has been admitted for this destination.
+    pub(crate) fn continuity(&self, destination: &SshDestination) -> Option<SshServerContinuity> {
+        self.inner.state.lock().ok().and_then(|state| {
+            state
+                .entries
+                .get(destination.as_str())
+                .and_then(|entry| entry.continuity.clone())
         })
     }
     pub(crate) fn server(&self, destination: &SshDestination) -> Option<LocalServer> {
@@ -497,6 +528,18 @@ impl SshServerConnections {
             .persistence
             .try_send(PersistenceCommand::Remove(destination.clone()));
         notify(&mut state);
+        drop(state);
+        // Told after the removal applied, and told again when the person retries one that could
+        // not be saved, so what a removed connection still owns stays understandable.
+        let observer = self
+            .inner
+            .removals
+            .lock()
+            .ok()
+            .and_then(|removals| removals.as_ref()?.upgrade());
+        if let Some(observer) = observer {
+            observer.removed(destination);
+        }
     }
     /// Observes a saved connection that has no work running, once, and reports what it found.
     /// It may ask the person to sign in, because they asked for it. It connects, starts and
@@ -562,6 +605,11 @@ impl SshServerConnections {
                                 RemoteConnectionStatus::Inactive
                             } else {
                                 entry.last_facts = Some(observation.facts.clone());
+                                // The check signed in and validated the account's server, so an
+                                // operation submitted afterwards can bind what it saw.
+                                if let Some(continuity) = observation.continuity {
+                                    entry.continuity = Some(continuity);
+                                }
                                 RemoteConnectionStatus::Checked {
                                     availability: observation.availability,
                                     facts: observation.facts,
@@ -613,7 +661,11 @@ impl SshServerConnections {
         if cancelling {
             self.inner.backend.disconnect(destination);
         } else {
-            entry.continuity = None;
+            // The identity the account last admitted is a fact about the saved connection, like
+            // the facts the row keeps. Disconnect ends the live capability, not the record of
+            // which computer, account and server this destination reached. Keeping it lets a
+            // later connection refuse a destination that now reaches another one, and lets the
+            // operations this client submitted bind the server they were sent to.
             self.inner.backend.forget(destination);
         }
         if saves {
@@ -747,7 +799,8 @@ fn update(
     notify(&mut state);
     true
 }
-fn wait(cancellation: &SshCancellationToken, duration: Duration) -> bool {
+/// Waits for `duration` unless cancellation ends it first, and reports whether it ran out.
+pub(super) fn wait(cancellation: &SshCancellationToken, duration: Duration) -> bool {
     let deadline = Instant::now() + duration;
     while !cancellation.is_cancelled() && Instant::now() < deadline {
         std::thread::sleep(
@@ -925,7 +978,14 @@ fn finish(
         SshConnectFailure::Cancelled => RemoteConnectionStatus::Inactive,
         SshConnectFailure::NeedsPerson(reason) => RemoteConnectionStatus::NeedsPerson { reason },
         SshConnectFailure::Changed(reason) => RemoteConnectionStatus::Paused { reason },
-        SshConnectFailure::Stopped => RemoteConnectionStatus::Stopped,
+        SshConnectFailure::Stopped(continuity) => {
+            // The exchange validated the account's server before it found it stopped, so an
+            // explicit Start can bind it even though this client never connected to it.
+            if let Some(continuity) = continuity {
+                entry.continuity = Some(continuity);
+            }
+            RemoteConnectionStatus::Stopped
+        }
         SshConnectFailure::Incompatible(kind) => RemoteConnectionStatus::Incompatible { kind },
         SshConnectFailure::Refused(kind) => RemoteConnectionStatus::Refused { kind },
         SshConnectFailure::Unavailable(kind) => RemoteConnectionStatus::Unavailable { kind },
@@ -1219,7 +1279,7 @@ mod tests {
             self.entered.send_blocking(mode).unwrap();
             self.release.recv_blocking().unwrap();
             if self.stopped {
-                Err(SshConnectFailure::Stopped)
+                Err(SshConnectFailure::Stopped(None))
             } else {
                 Ok(connected())
             }
@@ -1233,11 +1293,13 @@ mod tests {
         ) -> Result<SshServerObservation, SshConnectFailure> {
             self.observations.fetch_add(1, Ordering::SeqCst);
             if self.stopped {
-                Err(SshConnectFailure::Stopped)
+                // A real check validates the account's server before it finds it stopped.
+                Err(SshConnectFailure::Stopped(Some(pin())))
             } else {
                 Ok(SshServerObservation {
                     availability: ServerAvailability::NotRunning,
                     facts: facts(),
+                    continuity: Some(pin()),
                 })
             }
         }
@@ -1326,6 +1388,97 @@ mod tests {
         assert_eq!(registry.connections().len(), 1, "it stays saved");
         assert_eq!(backend.disconnects.load(Ordering::SeqCst), 1);
     }
+    /// A deliberately stopped server is the one state explicit Start exists for. The exchange
+    /// validated the account's server before it found it stopped, so an operation submitted
+    /// afterwards can bind it even though this client never connected to it.
+    #[test]
+    fn a_stopped_server_leaves_the_identity_an_explicit_start_binds() {
+        let (registry, _, intents, _, _) = setup(true);
+        let mut unknown = saved(false);
+        unknown.continuity = None;
+        intents.records.lock().unwrap().push(unknown);
+        registry.resume_retained();
+        eventually(|| registry.connections().len() == 1);
+
+        registry.check(&destination());
+
+        eventually(|| {
+            matches!(
+                registry.status(&destination()),
+                RemoteConnectionStatus::Stopped
+            )
+        });
+        assert_eq!(
+            registry.continuity(&destination()),
+            Some(pin()),
+            "a stopped server names the identity an explicit Start binds"
+        );
+    }
+
+    /// Check Status signs in and validates the account's server, so a server the person only
+    /// checked can be maintained without connecting to it and presenting its Workspaces.
+    #[test]
+    fn a_check_records_the_identity_it_validated() {
+        let (registry, _, intents, _, _) = setup(false);
+        let mut unknown = saved(false);
+        unknown.continuity = None;
+        intents.records.lock().unwrap().push(unknown);
+        registry.resume_retained();
+        eventually(|| registry.connections().len() == 1);
+        assert_eq!(
+            registry.continuity(&destination()),
+            None,
+            "a saved connection nothing has reached names no server"
+        );
+
+        registry.check(&destination());
+
+        eventually(|| {
+            matches!(
+                registry.status(&destination()),
+                RemoteConnectionStatus::Checked { .. }
+            )
+        });
+        assert_eq!(
+            registry.continuity(&destination()),
+            Some(pin()),
+            "a check leaves the identity an operation binds"
+        );
+    }
+
+    /// Disconnect ends the live connection, not the record of which computer, account and
+    /// server the destination reached. A server the person disconnected from can still be
+    /// maintained, and a later connection still verifies the identity it admitted before.
+    #[test]
+    fn the_admitted_identity_outlives_disconnect() {
+        let (registry, _, intents, entered, release) = setup(false);
+        registry.connect(destination());
+        entered.recv_blocking().unwrap();
+        release.send_blocking(()).unwrap();
+        eventually(|| registry.continuity(&destination()).is_some());
+        let admitted = registry.continuity(&destination()).unwrap();
+
+        registry.disconnect(&destination());
+
+        eventually(|| intents.active(&destination()) == Some(false));
+        assert_eq!(
+            registry.continuity(&destination()),
+            Some(admitted.clone()),
+            "the identity the account admitted survives Disconnect"
+        );
+        assert_eq!(
+            intents
+                .records
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|record| record.destination == destination())
+                .and_then(|record| record.continuity.clone()),
+            Some(admitted),
+            "a saved connection reopens knowing the server it reached"
+        );
+    }
+
     #[test]
     fn the_latest_observed_facts_outlive_disconnect_until_removal() {
         let (registry, _, intents, entered, release) = setup(false);
@@ -1428,7 +1581,7 @@ mod tests {
             _: &SshCancellationToken,
             _: &ConnectProgress<'_>,
         ) -> Result<SshServerObservation, SshConnectFailure> {
-            Err(SshConnectFailure::Stopped)
+            Err(SshConnectFailure::Stopped(None))
         }
     }
     #[test]
@@ -1461,6 +1614,46 @@ mod tests {
                 RemoteConnectionStatus::Connected { .. }
             )
         });
+    }
+    /// Records each saved connection the registry reports as removed.
+    #[derive(Default)]
+    struct Removals(Mutex<Vec<SshDestination>>);
+    impl SshConnectionRemovals for Removals {
+        fn removed(&self, destination: &SshDestination) {
+            self.0.lock().unwrap().push(destination.clone());
+        }
+    }
+    #[test]
+    fn removal_reports_each_removal_it_applied_including_a_retried_one() {
+        let (registry, _, intents, _, _) = setup(false);
+        let removals = Arc::new(Removals::default());
+        let observer: Arc<dyn SshConnectionRemovals> = removals.clone();
+        registry.watch_removals(&observer);
+        registry.remove(&destination());
+        assert!(
+            removals.0.lock().unwrap().is_empty(),
+            "a connection that was never saved has nothing to remove"
+        );
+
+        intents.records.lock().unwrap().push(saved(false));
+        registry.resume_retained();
+        eventually(|| registry.connections().len() == 1);
+        *intents.fails.lock().unwrap() = Some(SshIntentStoreError::Unavailable);
+        registry.remove(&destination());
+        eventually(|| !registry.unsaved_removals().is_empty());
+        *intents.fails.lock().unwrap() = None;
+        registry.remove(&destination());
+        eventually(|| registry.unsaved_removals().is_empty());
+        assert_eq!(
+            *removals.0.lock().unwrap(),
+            vec![destination(), destination()],
+            "the retried removal is reported again"
+        );
+
+        // The watcher is held weakly, so removal outlives it.
+        drop(observer);
+        drop(removals);
+        registry.remove(&destination());
     }
     #[test]
     fn a_removal_that_could_not_be_saved_is_reported_until_a_later_removal_saves() {
@@ -1591,7 +1784,7 @@ mod tests {
             Arc::new(ConnectsThen {
                 route: route.clone(),
                 attempts: AtomicUsize::new(0),
-                later: || SshConnectFailure::Stopped,
+                later: || SshConnectFailure::Stopped(None),
             }),
             intents.clone(),
         );

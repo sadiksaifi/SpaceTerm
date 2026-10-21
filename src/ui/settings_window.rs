@@ -14,9 +14,10 @@ mod microphone;
 mod permission_access;
 mod server_list;
 mod server_location;
-mod server_update;
-mod servers;
+pub(crate) mod server_update;
+pub(crate) mod servers;
 mod sidebar;
+mod ssh_maintenance;
 mod ssh_servers;
 mod theme_gallery;
 mod theme_store;
@@ -285,6 +286,26 @@ pub(crate) fn open_server_update(cx: &mut App) {
     });
 }
 
+/// Opens Settings on Servers and takes one remote maintenance step there for `destination`, for a
+/// surface that offers these steps elsewhere, such as the sidebar machine heading menu. Every step
+/// that ends work still describes its change and asks before anything is sent.
+pub(crate) fn open_remote_maintenance(
+    destination: crate::domain::SshDestination,
+    action: crate::ui::remote_maintenance::RemoteAction,
+    cx: &mut App,
+) {
+    open_or_activate(Some(SettingsSectionId::Servers), cx);
+    // An existing window selects the section in a deferred update, so the request follows it.
+    cx.defer(move |cx| {
+        if let Some(settings) = open_settings_window(cx) {
+            let _ = settings.update(cx, |settings, _, cx| {
+                settings.select_server(server_list::ServerChoice::Ssh(destination.clone()), cx);
+                settings.request_remote_maintenance(destination, action, cx);
+            });
+        }
+    });
+}
+
 /// Retains Settings until its latest edit is saved, then completes an authorized application quit.
 /// Closes the Settings window the way its own close button does: it saves first and stays open
 /// when saving fails. Reports whether `window` is the Settings window.
@@ -385,6 +406,8 @@ pub(crate) struct SettingsWindow {
     server_update: Option<server_update::ServerUpdateRow>,
     /// The desktop's SSH server connections. `None` omits their row.
     ssh_servers: Option<ssh_servers::SshServerRows>,
+    /// The submitted remote maintenance operations. `None` omits the maintenance rows.
+    ssh_maintenance: Option<ssh_maintenance::SshMaintenanceRows>,
     /// The server the person selected in the Servers list. A server no longer listed gives way
     /// to the local server or the first saved one.
     selected_server: Option<server_list::ServerChoice>,
@@ -644,6 +667,9 @@ impl SettingsWindow {
         let ssh_hosts = crate::ui::ssh_servers::host_source(cx);
         let ssh_servers = crate::ui::ssh_servers::installed(cx)
             .map(|connections| ssh_servers::SshServerRows::new(connections, ssh_hosts, window, cx));
+        let ssh_maintenance = crate::ssh::server_operations::installed(cx).map(|operations| {
+            ssh_maintenance::SshMaintenanceRows::new(operations, window.window_handle(), cx)
+        });
         let presentation = crate::desktop_profile::DesktopPresentation::get(cx);
         let this_computer = presentation.wording().this_computer;
         let available_sections = SettingsSectionId::ALL
@@ -671,6 +697,13 @@ impl SettingsWindow {
                             .as_ref()
                             .is_none_or(|offered| offered.update.is_none()))
                     || (*row == SettingsRowId::SshConnect && ssh_servers.is_none())
+                    // A build with no operations owner offers no remote maintenance.
+                    || (matches!(
+                        *row,
+                        SettingsRowId::SshServerService
+                            | SettingsRowId::SshServerUpdate
+                            | SettingsRowId::RemovedServerOperations
+                    ) && ssh_maintenance.is_none())
             })
             .collect();
         Self {
@@ -720,6 +753,7 @@ impl SettingsWindow {
             local_server: local_server
                 .map(|offered| servers::LocalServerRow::new(offered.connection)),
             ssh_servers,
+            ssh_maintenance,
             selected_server: None,
             search_selected_server: None,
             server_list_focus: cx.focus_handle().tab_stop(true),
@@ -1428,6 +1462,11 @@ impl SettingsWindow {
             SettingsRowId::ServerList => self.render_server_list(appearance, window, cx),
             SettingsRowId::SshConnect => self.render_ssh_connect(appearance, cx),
             SettingsRowId::SshServerStatus => self.render_ssh_server_status(appearance, cx),
+            SettingsRowId::SshServerService => self.render_ssh_server_service(appearance, cx),
+            SettingsRowId::SshServerUpdate => self.render_ssh_server_update(appearance, cx),
+            SettingsRowId::RemovedServerOperations => {
+                self.render_removed_operations(appearance, cx)
+            }
             SettingsRowId::SshServerVersion
             | SettingsRowId::SshServerPlatform
             | SettingsRowId::SshServerCompatibility
@@ -2280,6 +2319,7 @@ fn row_layout(row: SettingsRowId) -> FormRowLayout {
         | SettingsRowId::InstalledThemes
         | SettingsRowId::ServerList
         | SettingsRowId::SshConnect
+        | SettingsRowId::RemovedServerOperations
         | SettingsRowId::SettingsFile => FormRowLayout::Full,
         SettingsRowId::WorktreeLocation | SettingsRowId::ServerWorktreeLocation => {
             FormRowLayout::Above

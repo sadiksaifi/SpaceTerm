@@ -10,6 +10,7 @@ use crate::ssh::process::{
 };
 
 mod exit_observation;
+mod owner_guard;
 
 #[derive(Clone, Copy, Default)]
 pub(crate) struct UnixSshProcessAdapter;
@@ -18,6 +19,7 @@ pub(crate) struct UnixSshProcess {
     child: Child,
     process_group: libc::pid_t,
     observed_exit: Option<ProcessExit>,
+    _owner_guard: owner_guard::OwnerGuard,
 }
 
 impl SshProcessAdapter for UnixSshProcessAdapter {
@@ -27,12 +29,14 @@ impl SshProcessAdapter for UnixSshProcessAdapter {
         &self,
         request: SshProcessSpawnRequest,
     ) -> Result<SpawnedSshProcess<Self::Process>, SshProcessMechanismError> {
+        let owner_guard =
+            owner_guard::OwnerGuard::spawn().map_err(|_| SshProcessMechanismError::LaunchFailed)?;
         let mut command = Command::new(request.executable());
         command
             .args(request.arguments())
             .env_clear()
             .current_dir(request.current_directory())
-            .process_group(0)
+            .process_group(owner_guard.group())
             .stdin(stdio(request.stdin()))
             .stdout(stdio(request.stdout()))
             .stderr(stdio(request.stderr()));
@@ -42,10 +46,14 @@ impl SshProcessAdapter for UnixSshProcessAdapter {
         if let Some((name, capability)) = request.askpass_capability_environment() {
             command.env(name, std::ffi::OsStr::from_bytes(capability));
         }
-        // SAFETY: the callback runs after fork and performs only async-signal-safe signal-mask
-        // operations before exec. It does not access shared application state.
+        let lease = owner_guard.lease_fd();
+        // SAFETY: the callback performs only async-signal-safe descriptor and signal-mask
+        // operations. The command must never retain its owner's lifetime writer.
         unsafe {
-            command.pre_exec(clear_child_signal_mask);
+            command.pre_exec(move || {
+                libc::close(lease);
+                clear_child_signal_mask()
+            });
         }
         let mut child = command.spawn().map_err(|error| {
             if error.kind() == io::ErrorKind::NotFound {
@@ -54,14 +62,7 @@ impl SshProcessAdapter for UnixSshProcessAdapter {
                 SshProcessMechanismError::LaunchFailed
             }
         })?;
-        let process_group = match libc::pid_t::try_from(child.id()) {
-            Ok(process_group) => process_group,
-            Err(_) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(SshProcessMechanismError::LaunchFailed);
-            }
-        };
+        let process_group = owner_guard.group();
         let stdin = child.stdin.take();
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
@@ -84,6 +85,7 @@ impl SshProcessAdapter for UnixSshProcessAdapter {
                 child,
                 process_group,
                 observed_exit: None,
+                _owner_guard: owner_guard,
             },
             SshProcessPipes::new_pollable(
                 stdin.map(|pipe| Box::new(pipe) as Box<dyn std::io::Write + Send>),
@@ -118,8 +120,8 @@ impl SshProcessAdapter for UnixSshProcessAdapter {
     }
 
     fn reap(&self, mut process: Self::Process) -> Result<(), SshProcessMechanismError> {
-        // A group signal can miss a child still being forked by its leader. Reaping runs on
-        // the cleanup worker: observe the leader's exit without releasing its identity, then
+        // A group signal can miss a descendant still being forked by the command. Reaping runs
+        // on the cleanup worker: observe command exit without releasing its identity, then
         // signal the group after its final fork has completed. Signal delivery itself never
         // waits for exit, so a caller can still enforce its shutdown deadline.
         process
@@ -145,8 +147,8 @@ impl UnixSshProcess {
         }
         loop {
             let mut information = MaybeUninit::<libc::siginfo_t>::zeroed();
-            // SAFETY: this exclusively owned child is unreaped. WNOWAIT retains its PID and
-            // process group identity until reap, including after a successful status query.
+            // SAFETY: this exclusively owned child is unreaped. WNOWAIT retains its PID until
+            // reap; the separately owned guard reserves the group throughout cleanup.
             let result = unsafe {
                 libc::waitid(
                     libc::P_PID,
@@ -202,7 +204,7 @@ fn signal_group(
     process: &mut UnixSshProcess,
     signal: libc::c_int,
 ) -> Result<(), SshProcessMechanismError> {
-    // SAFETY: the unreaped child reserves the private process group until final cleanup.
+    // SAFETY: the unreaped guard reserves the private process group until final cleanup.
     let result = unsafe { libc::kill(-process.process_group, signal) };
     if result == 0 {
         return Ok(());
@@ -213,8 +215,8 @@ fn signal_group(
         && process.observe_status(true).ok().flatten().is_some()
         && retained_group_has_only_zombies(process.process_group)
     {
-        // macOS reports EPERM when every group member is a zombie. Prove that state rather
-        // than suppressing a permission failure for a live descendant.
+        // macOS reports EPERM when every group member is a zombie. Prove that state for every
+        // member, including the guard, rather than suppressing failure for a live process.
         return Ok(());
     }
     if error.raw_os_error() == Some(libc::ESRCH) {
@@ -303,6 +305,62 @@ mod tests {
     use super::*;
     use crate::platform::unix_adapter_tests::short_temporary_root;
     use crate::ssh::askpass::AskPassCapabilityCopy;
+
+    use crate::ssh::server_process::SshServerBootstrap as _;
+
+    const IDENTITY: &str = "spaceterm-development";
+
+    /// A remote server command names only the action and the compiled application identity, each
+    /// quoted as data. What one maintenance request asks for travels on standard input instead,
+    /// so no request value is ever a shell argument.
+    #[test]
+    fn a_remote_server_command_names_only_its_action_and_application_identity() {
+        let adapter = UnixSshProcessAdapter;
+        for action in ["ssh-maintain", "ssh-discover", "ssh-connect", "ssh-prepare"] {
+            let script = adapter.locator(IDENTITY, action, action == "ssh-discover");
+            assert!(
+                script.ends_with(&format!(
+                    "exec \"$root/installations/$digest/bin/spaceterm-server\" '{action}' '{}'\n",
+                    IDENTITY
+                )),
+                "{script}"
+            );
+        }
+    }
+
+    /// Staging retains a verified artifact beside the approved one. It shares the installer's
+    /// transfer and verification body, and asks for neither boot authorization nor installation.
+    #[test]
+    fn staging_transfers_a_verified_artifact_without_installing_or_authorizing_boot() {
+        let bootstrap = UnixSshProcessAdapter;
+        let digest = "0123456789abcdef".repeat(4);
+        let stage = bootstrap.stage(IDENTITY, 4096, &[7; 64], &digest);
+        for shared in [
+            "umask 077",
+            "cat > \"$work/artifact.tar.gz\"",
+            "[ \"$(wc -c < \"$work/artifact.tar.gz\")\" -eq 4096 ] || exit 75",
+            "tar -xzf \"$work/artifact.tar.gz\" -C \"$work/runtime\"",
+        ] {
+            assert!(stage.contains(shared), "{stage}");
+        }
+        assert!(stage.ends_with(&format!(
+            "\"$work/runtime/server/bin/spaceterm-server\" 'ssh-stage' '{}' \
+             \"$work/artifact.tar.gz\" \"$work/artifact.sig\" '{digest}'\n",
+            IDENTITY
+        )));
+        for refused in ["ssh-install", "ssh-enable-linger", "read -r authorization"] {
+            assert!(!stage.contains(refused), "staging asked for {refused}");
+        }
+        for password in [false, true] {
+            let install = bootstrap.install(IDENTITY, 4096, &[7; 64], &digest, password);
+            assert!(install.contains("ssh-enable-linger") && install.contains("'ssh-install'"));
+            assert_eq!(
+                install.contains("IFS= read -r authorization"),
+                password,
+                "only a password installation reads one"
+            );
+        }
+    }
 
     fn shell_request(script: &str) -> SshProcessSpawnRequest {
         SshProcessSpawnRequest::new(
@@ -414,6 +472,7 @@ mod tests {
         let adapter = UnixSshProcessAdapter;
         let mut spawned = adapter.spawn(shell_request("sleep 1")).unwrap();
         let process_group = spawned.process_mut().process_group;
+        let child = spawned.process_mut().child.id() as libc::pid_t;
 
         // SAFETY: getpgid only reads the identity of the live child owned by this test.
         let group = unsafe { libc::getpgid(process_group) };
@@ -424,6 +483,7 @@ mod tests {
         adapter.reap(spawned.into_process()).unwrap();
 
         assert!(group > 0 && group == process_group && initial.is_none());
+        assert!(wait_for_missing_process(child) && wait_for_missing_process(process_group));
     }
 
     #[test]
@@ -448,7 +508,7 @@ mod tests {
         let observed = receiver.recv_timeout(Duration::from_secs(2));
         interrupt.interrupt();
         waiter.join().unwrap();
-        let process = spawned.process_mut().process_group;
+        let process = spawned.process_mut().child.id() as libc::pid_t;
         let mut retained = MaybeUninit::<libc::siginfo_t>::zeroed();
         // SAFETY: this checks that status observation has left our child waitable. WNOWAIT
         // preserves that child for the adapter's final cleanup below.
@@ -641,6 +701,168 @@ mod tests {
         }
     }
 
+    #[test]
+    #[ignore = "runs only as the separate owner in the SSH owner-death regression"]
+    fn ssh_owner_death_fixture() {
+        let pid_file = std::env::var_os("SPACETERM_OWNER_CHILD").unwrap();
+        let ready_file = PathBuf::from(&pid_file).with_extension("ready");
+        // Exercise a closed standard descriptor as well as descriptor inheritance.
+        // This is a freshly exec'd fixture, so ordinary Rust and native adapter calls are safe.
+        unsafe {
+            libc::close(1);
+        }
+        let mode = if std::env::var_os("SPACETERM_OWNER_PIPED").is_some() {
+            SshProcessStdio::Piped
+        } else {
+            SshProcessStdio::Null
+        };
+        let request = SshProcessSpawnRequest::new(
+            "/bin/sh".into(),
+            vec![
+                "-c".into(),
+                concat!(
+                    "trap '' TERM; if [ \"$SPACETERM_OWNER_PIPED\" = 1 ]; then ",
+                    "[ -p /dev/fd/0 ] && [ -p /dev/fd/1 ] && [ -p /dev/fd/2 ] || exit 1; fi; ",
+                    "sleep 120 & echo \"$$ $!\" > \"$SPACETERM_OWNER_CHILD\"; wait"
+                )
+                .into(),
+            ],
+            short_temporary_root().to_path_buf(),
+            vec![
+                ("PATH".into(), "/usr/bin:/bin".into()),
+                ("SPACETERM_OWNER_CHILD".into(), pid_file),
+                (
+                    "SPACETERM_OWNER_PIPED".into(),
+                    if std::env::var_os("SPACETERM_OWNER_PIPED").is_some() {
+                        "1"
+                    } else {
+                        "0"
+                    }
+                    .into(),
+                ),
+            ],
+            mode,
+            mode,
+            mode,
+        );
+        let _owned = UnixSshProcessAdapter.spawn(request).unwrap();
+        // A second guard must close the first process's inherited lease and capture descriptors.
+        // Retain both handles until SIGKILL; neither gets a Drop cleanup opportunity.
+        let _other_owned = UnixSshProcessAdapter
+            .spawn(shell_request("exit 0"))
+            .unwrap();
+        fs::write(ready_file, b"ready").unwrap();
+        loop {
+            std::thread::park();
+        }
+    }
+
+    #[test]
+    fn sigkill_of_the_actual_owner_should_kill_its_ssh_group() {
+        use std::os::unix::process::ExitStatusExt;
+
+        for piped in [false, true] {
+            let pid_file = short_temporary_root().join(format!(
+                "spaceterm-owner-death-{}-{piped}.pid",
+                std::process::id()
+            ));
+            let _ = fs::remove_file(&pid_file);
+            let ready_file = pid_file.with_extension("ready");
+            let _ = fs::remove_file(&ready_file);
+            let mut command = Command::new(std::env::current_exe().unwrap());
+            command
+                .args([
+                    "--ignored",
+                    "--exact",
+                    "platform::unix_ssh_process::tests::ssh_owner_death_fixture",
+                ])
+                .env("SPACETERM_OWNER_CHILD", &pid_file)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::inherit());
+            if piped {
+                command.env("SPACETERM_OWNER_PIPED", "1");
+            }
+            let mut owner = command.spawn().unwrap();
+            let pids = (0..200).find_map(|_| {
+                let pids = ready_file
+                    .exists()
+                    .then(|| fs::read_to_string(&pid_file).ok())
+                    .flatten()
+                    .and_then(|text| {
+                        let mut pids = text.split_whitespace();
+                        Some((
+                            pids.next()?.parse::<libc::pid_t>().ok()?,
+                            pids.next()?.parse::<libc::pid_t>().ok()?,
+                        ))
+                    });
+                if pids.is_none() {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                pids
+            });
+            let Some((leader, descendant)) = pids else {
+                let _ = owner.kill();
+                let _ = owner.wait();
+                panic!("the separate owner did not publish its live child group");
+            };
+            // A direct, unreaped witness reserves the group's identity for failure cleanup.
+            // It also proves that owner death kills group members beyond the command itself.
+            // SAFETY: these calls only observe the fixture's live child and this test group.
+            let group = unsafe { libc::getpgid(leader) };
+            assert!(group > 0 && group != unsafe { libc::getpgrp() });
+            let mut witness = Command::new("/bin/sleep")
+                .arg("120")
+                .process_group(group)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap();
+            owner.kill().unwrap();
+            let owner_exit = owner.wait().unwrap();
+            let mut observed = MaybeUninit::<libc::siginfo_t>::zeroed();
+            let killed = (0..200).any(|_| {
+                // SAFETY: this direct child is kept unreaped until after failure cleanup.
+                let result = unsafe {
+                    libc::waitid(
+                        libc::P_PID,
+                        witness.id(),
+                        observed.as_mut_ptr(),
+                        libc::WEXITED | libc::WNOWAIT | libc::WNOHANG,
+                    )
+                };
+                assert_eq!(result, 0);
+                let exited = unsafe { observed.assume_init().si_pid() } != 0;
+                if !exited {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                exited
+            });
+            let children_gone = wait_for_missing_process(leader)
+                && wait_for_missing_process(descendant)
+                && (group == leader || wait_for_missing_process(group));
+            // Capture the regression result first, then clean only the still-reserved test group.
+            unsafe {
+                libc::kill(-group, libc::SIGKILL);
+            }
+            let witness_exit = witness.wait().unwrap();
+            let _ = fs::remove_file(&pid_file);
+            let _ = fs::remove_file(&ready_file);
+            eprintln!(
+                "owner-death piped={piped}: owner={} signal={:?}, child={leader}, descendant={descendant}, group={group}, group_killed={killed}, children_gone={children_gone}",
+                owner.id(),
+                owner_exit.signal()
+            );
+            assert_eq!(owner_exit.signal(), Some(libc::SIGKILL));
+            assert!(
+                killed && children_gone,
+                "SIGKILL of the real adapter owner must terminate its private group (piped={piped})"
+            );
+            assert_eq!(witness_exit.signal(), Some(libc::SIGKILL));
+        }
+    }
+
     fn wait_for_missing_process(process: libc::pid_t) -> bool {
         (0..100).any(|_| {
             // SAFETY: signal zero checks process existence and dereferences no pointers.
@@ -722,45 +944,81 @@ case "$digest" in *[!0-9a-f]*) exit 74;; esac
         digest: &str,
         password: bool,
     ) -> String {
-        use base64::Engine;
-        let signature = base64::engine::general_purpose::STANDARD.encode(signature);
-        let read_authorization = if password {
-            "IFS= read -r authorization\n"
-        } else {
-            ""
-        };
-        let authorize = if password {
-            format!(
-                "printf '%s\\n' \"$authorization\" | \"$work/runtime/server/bin/spaceterm-server\" ssh-enable-linger-password {} || exit 77\nunset authorization",
-                quote(identity)
-            )
-        } else {
-            format!(
-                "\"$work/runtime/server/bin/spaceterm-server\" ssh-enable-linger {} || exit 77",
-                quote(identity)
-            )
-        };
-        format!(
-            r#"set -eu
+        transfer_script(
+            "ssh-install",
+            identity,
+            archive_length,
+            signature,
+            digest,
+            Some(password),
+        )
+    }
+    fn stage(
+        &self,
+        identity: &str,
+        archive_length: usize,
+        signature: &[u8],
+        digest: &str,
+    ) -> String {
+        transfer_script(
+            "ssh-stage",
+            identity,
+            archive_length,
+            signature,
+            digest,
+            None,
+        )
+    }
+}
+
+/// The body both transferred-runtime actions share. Boot authorization belongs to installation
+/// alone: staging changes no service policy, so it never asks for one.
+#[cfg(feature = "desktop")]
+fn transfer_script(
+    action: &str,
+    identity: &str,
+    archive_length: usize,
+    signature: &[u8],
+    digest: &str,
+    linger: Option<bool>,
+) -> String {
+    use base64::Engine;
+    let signature = base64::engine::general_purpose::STANDARD.encode(signature);
+    let work = action.trim_start_matches("ssh-");
+    let password = linger == Some(true);
+    let read_authorization = if password {
+        "IFS= read -r authorization\n"
+    } else {
+        ""
+    };
+    let authorize = match linger {
+        Some(true) => format!(
+            "if [ \"$(uname -s)\" = Linux ]; then\n    printf '%s\\n' \"$authorization\" | \"$work/runtime/server/bin/spaceterm-server\" ssh-enable-linger-password {} || exit 77\nunset authorization\nfi\n",
+            quote(identity)
+        ),
+        Some(false) => format!(
+            "if [ \"$(uname -s)\" = Linux ]; then\n    \"$work/runtime/server/bin/spaceterm-server\" ssh-enable-linger {} || exit 77\nfi\n",
+            quote(identity)
+        ),
+        None => String::new(),
+    };
+    format!(
+        r#"set -eu
 PATH=/usr/bin:/bin:/usr/sbin:/sbin
 export PATH
 umask 077
-work=$(mktemp -d "${{TMPDIR:-/tmp}}/spaceterm-install.XXXXXXXX")
+work=$(mktemp -d "${{TMPDIR:-/tmp}}/spaceterm-{work}.XXXXXXXX")
 trap 'rm -rf "$work"' EXIT HUP INT TERM
 {read_authorization}cat > "$work/artifact.tar.gz"
-[ "$(wc -c < "$work/artifact.tar.gz")" -eq {} ] || exit 75
+[ "$(wc -c < "$work/artifact.tar.gz")" -eq {archive_length} ] || exit 75
 printf %s {} | openssl base64 -d -A > "$work/artifact.sig"
 mkdir "$work/runtime"
 tar -xzf "$work/artifact.tar.gz" -C "$work/runtime"
-if [ "$(uname -s)" = Linux ]; then
-    {authorize}
-fi
-"$work/runtime/server/bin/spaceterm-server" ssh-install {} "$work/artifact.tar.gz" "$work/artifact.sig" {}
+{authorize}"$work/runtime/server/bin/spaceterm-server" {} {} "$work/artifact.tar.gz" "$work/artifact.sig" {}
 "#,
-            archive_length,
-            quote(&signature),
-            quote(identity),
-            quote(digest)
-        )
-    }
+        quote(&signature),
+        quote(action),
+        quote(identity),
+        quote(digest)
+    )
 }

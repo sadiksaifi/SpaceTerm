@@ -6,8 +6,8 @@ use std::rc::Rc;
 
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, App, Bounds, Pixels, Rgba, SharedString, StyledText, Text, Window, accesskit, div,
-    px,
+    AnyElement, App, Bounds, ElementId, Pixels, Rgba, SharedString, StyledText, Text, Window,
+    accesskit, div, px,
 };
 use spaceterm_ui::{
     Button, ButtonSize, ButtonVariant, Icon, IconButton, IconName, Tooltip, highlight_ranges,
@@ -815,7 +815,7 @@ impl gpui::RenderOnce for StepperElement {
 /// element role because a theme may resolve the plain element background to the window background.
 /// The id names the status text published to assistive technology.
 pub(crate) fn badge(
-    id: &'static str,
+    id: impl Into<ElementId>,
     label: impl Into<SharedString>,
     appearance: &ChromeAppearance,
 ) -> impl IntoElement {

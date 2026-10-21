@@ -6,6 +6,7 @@ pub mod control;
 mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
+pub mod maintenance;
 mod registration;
 mod runtime;
 pub use runtime::CandidateMetadata;
@@ -43,7 +44,8 @@ pub enum LingerAuthorization {
 }
 
 /// When the owning account's service manager can automatically start this server.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ServiceStartup {
     /// Starts at account login and stops at logout.
     #[default]
@@ -53,7 +55,8 @@ pub enum ServiceStartup {
 }
 
 /// The retained policy and the service manager's current process observation.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ServiceStatus {
     pub installed: bool,
     pub enabled: bool,

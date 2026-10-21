@@ -2700,14 +2700,19 @@ fn rendered_control_selector(row: SettingsRowId) -> Option<String> {
             SettingsRowId::EndAllSessions => "settings-server-end-all-sessions",
             SettingsRowId::ServerConnection => "settings-row-server-connection-value",
             SettingsRowId::DirectNetworkPairing => "settings-row-direct-network-pairing-value",
-            // The fixture installs no SSH server registry, so the SSH rows are absent.
+            // The fixture installs no SSH server registry or operations owner, so the SSH rows
+            // are absent.
             SettingsRowId::SshConnect
             | SettingsRowId::SshServerStatus
+            | SettingsRowId::SshServerService
+            | SettingsRowId::SshServerUpdate
             | SettingsRowId::SshServerVersion
             | SettingsRowId::SshServerPlatform
             | SettingsRowId::SshServerCompatibility
             | SettingsRowId::SshServerStartup
-            | SettingsRowId::RemoveServer => return None,
+            | SettingsRowId::RemoveServer
+            // No connection was removed, so nothing is kept for one.
+            | SettingsRowId::RemovedServerOperations => return None,
             // The fixture installs no update service, so this row presents no action control.
             SettingsRowId::UpdateStatus => return None,
             SettingsRowId::AutomaticUpdateDownloads => "settings-automatic-update-downloads",

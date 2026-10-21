@@ -401,7 +401,10 @@ impl Service {
         }
         Ok(())
     }
-    fn describe_approved(&self, state: &State) -> Result<RetainedInstallation, ServerError> {
+    pub(super) fn describe_approved(
+        &self,
+        state: &State,
+    ) -> Result<RetainedInstallation, ServerError> {
         let directory = self.runtime(state);
         let (version, commit) = runtime::describe(&directory, &self.identity)?;
         Ok(RetainedInstallation {
@@ -410,7 +413,7 @@ impl Service {
             commit,
         })
     }
-    fn activation_status_locked(
+    pub(super) fn activation_status_locked(
         &self,
         data: &Directory,
     ) -> Result<Option<ActivationStatus>, ServerError> {
@@ -647,7 +650,7 @@ impl Service {
     }
 }
 
-fn confirmation_token(value: &impl Serialize) -> Result<String, ServerError> {
+pub(super) fn confirmation_token(value: &impl Serialize) -> Result<String, ServerError> {
     let bytes = serde_json::to_vec(value).map_err(|_| ServerError::StorageUnavailable)?;
     Ok(ring::digest::digest(&ring::digest::SHA256, &bytes)
         .as_ref()

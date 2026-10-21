@@ -20,6 +20,7 @@ pub(crate) mod pane_lifecycle;
 mod pane_motion;
 pub(crate) mod permission_setup;
 mod remote_child_launch;
+pub(crate) mod remote_maintenance;
 pub(crate) mod remote_workspace_flow;
 mod render_lifecycle;
 pub(crate) mod repository_status_store;

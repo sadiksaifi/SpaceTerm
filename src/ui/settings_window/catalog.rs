@@ -160,6 +160,10 @@ pub(super) enum SettingsRowId {
     ServerUpdate,
     /// The selected saved SSH server's state and the steps it allows.
     SshServerStatus,
+    /// The service that runs the selected SSH server on its machine, and its controls.
+    SshServerService,
+    /// The Update Server journey for the selected SSH server.
+    SshServerUpdate,
     /// The selected SSH server's version, as last observed.
     SshServerVersion,
     /// The operating system and processor of the selected SSH server's computer.
@@ -178,6 +182,9 @@ pub(super) enum SettingsRowId {
     RemoveServer,
     /// The selected server's New Worktree Location, a Server Setting.
     ServerWorktreeLocation,
+    /// What SpaceTerm still has to tell the person about servers whose saved connection they
+    /// removed.
+    RemovedServerOperations,
     /// Connects to a computer by its SSH host name or alias, or one SSH configuration names.
     SshConnect,
     /// The installed version, the latest check, and the next step the update service offers.
@@ -235,6 +242,7 @@ impl SettingsRowId {
             | Self::ShowPullRequests
             | Self::GitHubCli
             | Self::ServerWorktreeLocation
+            | Self::RemovedServerOperations
             | Self::WorktreeLocation
             // The server rows hold status and actions, not a preference.
             | Self::ServerList
@@ -242,6 +250,8 @@ impl SettingsRowId {
             | Self::ServerService
             | Self::ServerUpdate
             | Self::SshServerStatus
+            | Self::SshServerService
+            | Self::SshServerUpdate
             | Self::SshServerVersion
             | Self::SshServerPlatform
             | Self::SshServerCompatibility
@@ -727,6 +737,26 @@ const PREFERENCE_ROWS: &[SettingsRowDescriptor] = &[
         selector: "settings-row-ssh-connect",
     },
     SettingsRowDescriptor {
+        id: SettingsRowId::RemovedServerOperations,
+        section: SettingsSectionId::Servers,
+        // The list carries its own name, as the server list above it does.
+        group: "",
+        label: "Removed connections",
+        keywords: &[
+            "removed",
+            "forgotten",
+            "result",
+            "results",
+            "unconfirmed",
+            "unfinished",
+            "pending",
+            "acknowledge",
+            "stop server",
+            "update server",
+        ],
+        selector: "settings-row-removed-server-operations",
+    },
+    SettingsRowDescriptor {
         id: SettingsRowId::LocalServer,
         section: SettingsSectionId::Servers,
         // The detail's heading names the selected machine.
@@ -814,6 +844,50 @@ const PREFERENCE_ROWS: &[SettingsRowDescriptor] = &[
             "sign in",
         ],
         selector: "settings-row-ssh-server-status",
+    },
+    SettingsRowDescriptor {
+        id: SettingsRowId::SshServerService,
+        section: SettingsSectionId::Servers,
+        group: super::server_list::SERVER_GROUP,
+        label: "Background service",
+        keywords: &[
+            "service",
+            "background",
+            "start server",
+            "stop server",
+            "restart server",
+            "start",
+            "stop",
+            "restart",
+            "uninstall",
+            "remove",
+            "running",
+            "boot",
+            "login",
+            "systemd",
+            "launchd",
+            "linger",
+            "maintenance",
+        ],
+        selector: "settings-row-ssh-server-service",
+    },
+    SettingsRowDescriptor {
+        id: SettingsRowId::SshServerUpdate,
+        section: SettingsSectionId::Servers,
+        group: super::server_list::SERVER_GROUP,
+        label: "Server update",
+        keywords: &[
+            "update",
+            "update server",
+            "server update",
+            "upgrade",
+            "version",
+            "finish update",
+            "return",
+            "previous version",
+            "maintenance",
+        ],
+        selector: "settings-row-ssh-server-update",
     },
     SettingsRowDescriptor {
         id: SettingsRowId::SshServerVersion,
@@ -1198,7 +1272,7 @@ mod tests {
     }
 
     /// The complete preference row identity set, so the catalog cannot silently omit one.
-    const EVERY_PREFERENCE_ROW: [SettingsRowId; 48] = [
+    const EVERY_PREFERENCE_ROW: [SettingsRowId; 51] = [
         SettingsRowId::AppearanceMode,
         SettingsRowId::Opacity,
         SettingsRowId::Blur,
@@ -1226,10 +1300,13 @@ mod tests {
         SettingsRowId::WorktreeLocation,
         SettingsRowId::ServerList,
         SettingsRowId::SshConnect,
+        SettingsRowId::RemovedServerOperations,
         SettingsRowId::LocalServer,
         SettingsRowId::ServerService,
         SettingsRowId::ServerUpdate,
         SettingsRowId::SshServerStatus,
+        SettingsRowId::SshServerService,
+        SettingsRowId::SshServerUpdate,
         SettingsRowId::SshServerVersion,
         SettingsRowId::SshServerPlatform,
         SettingsRowId::SshServerCompatibility,
@@ -1540,12 +1617,15 @@ mod tests {
                     | SettingsRowId::ShowPullRequests
                     | SettingsRowId::GitHubCli
                     | SettingsRowId::ServerWorktreeLocation
+                    | SettingsRowId::RemovedServerOperations
                     | SettingsRowId::WorktreeLocation
                     | SettingsRowId::ServerList
                     | SettingsRowId::LocalServer
                     | SettingsRowId::ServerService
                     | SettingsRowId::ServerUpdate
                     | SettingsRowId::SshServerStatus
+                    | SettingsRowId::SshServerService
+                    | SettingsRowId::SshServerUpdate
                     | SettingsRowId::SshServerVersion
                     | SettingsRowId::SshServerPlatform
                     | SettingsRowId::SshServerCompatibility

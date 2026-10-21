@@ -5,7 +5,8 @@ pub mod cli;
 use super::{LingerAuthorization, RetainedInstallation, Service, ServiceStartup, ServiceStatus};
 use crate::ServerError;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Action {
     Stop,
     Restart,
@@ -55,9 +56,21 @@ pub struct Wording {
 }
 
 impl Wording {
+    /// Names the server from the compiled application identity.
     pub fn new(identity: &str, action: Action, running: bool, startup: ServiceStartup) -> Self {
+        Self::for_server(display_name(identity), action, running, startup)
+    }
+
+    /// Names the server from a supplied name, so a remote confirmation names the machine the
+    /// person selected rather than the application identity this process was built as.
+    pub fn for_server(
+        server: &str,
+        action: Action,
+        running: bool,
+        startup: ServiceStartup,
+    ) -> Self {
         Self {
-            server: display_name(identity).into(),
+            server: server.into(),
             action,
             running,
             startup,
@@ -147,9 +160,30 @@ impl UpdateWording {
         running: bool,
         stopped: bool,
     ) -> Self {
-        let (previous, candidate) = build_labels(BuildName::of(previous), BuildName::of(candidate));
+        Self::for_server(
+            display_name(identity),
+            change,
+            BuildName::of(previous),
+            BuildName::of(candidate),
+            running,
+            stopped,
+        )
+    }
+
+    /// Names the server from a supplied name and each build from supplied nonsecret values, so a
+    /// remote confirmation names the machine the person selected and the builds a remote service
+    /// reported, without a local installation directory.
+    pub fn for_server(
+        server: &str,
+        change: UpdateChange,
+        previous: BuildName<'_>,
+        candidate: BuildName<'_>,
+        running: bool,
+        stopped: bool,
+    ) -> Self {
+        let (previous, candidate) = build_labels(previous, candidate);
         Self {
-            server: display_name(identity).into(),
+            server: server.into(),
             change,
             previous,
             candidate,
@@ -354,5 +388,58 @@ impl Controller {
         }
         self.service
             .apply_control(confirmation.action, Some(confirmation.running))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_remote_confirmation_names_the_selected_server_with_the_same_copy() {
+        let local = Wording::new(
+            "spaceterm-development",
+            Action::Stop,
+            true,
+            ServiceStartup::AtLogin,
+        );
+        let remote = Wording::for_server("penguin", Action::Stop, true, ServiceStartup::AtLogin);
+        assert_eq!(
+            local.message(),
+            "Stop the SpaceTerm Development server and end all of its Terminal Sessions?"
+        );
+        assert_eq!(
+            remote.message(),
+            "Stop the penguin server and end all of its Terminal Sessions?"
+        );
+        assert_eq!(local.title(), remote.title());
+        assert_eq!(local.detail(), remote.detail());
+    }
+
+    #[test]
+    fn a_remote_update_confirmation_names_the_selected_server_and_both_builds() {
+        let build = |version: &'static str| BuildName {
+            version,
+            commit: "0123456789abcdef0123456789abcdef01234567",
+            package: "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+        };
+        let wording = UpdateWording::for_server(
+            "penguin",
+            UpdateChange::Update,
+            build("0.6.8"),
+            build("0.7.0"),
+            true,
+            false,
+        );
+        assert_eq!(
+            wording.message(),
+            "Update the penguin server to version 0.7.0 (commit 0123456) and end all of its \
+             Terminal Sessions?"
+        );
+        assert!(
+            wording
+                .detail()
+                .contains("from version 0.6.8 (commit 0123456)")
+        );
     }
 }

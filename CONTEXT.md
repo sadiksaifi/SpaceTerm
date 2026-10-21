@@ -65,7 +65,19 @@ The account-local SpaceTerm Server owns local terminal work. Production SSH Work
 
 **Stop Server**: The explicit action that stops a SpaceTerm Server and ends its Terminal Sessions.
 
+**Restart Server**: The explicit action that stops and starts a SpaceTerm Server, ending its Terminal Sessions and retaining its Workspace organization.
+
+**Uninstall Server**: The explicit action that removes a SpaceTerm Server's service registration, ending its Terminal Sessions and retaining its Workspace organization and verified installations.
+
 **End All Sessions**: The action that ends every live Terminal Session on one SpaceTerm Server while retaining the running server and its Workspace organization.
+
+**Server Candidate**: A signed SpaceTerm Server build a SpaceTerm Client holds for one application identity and machine, verified before it is staged or activated.
+
+**Update Server**: The explicit journey that stages a Server Candidate on one SpaceTerm Server and activates it after confirmation, ending that server's Terminal Sessions.
+
+**Original Operation**: An explicit operation a SpaceTerm Client submitted to a SpaceTerm Server, carrying the route, account, application identity, server, client and operation identities bound before dispatch, and retained until its outcome is validated and acknowledged.
+
+**Unconfirmed Outcome**: An Original Operation whose dispatch the server admitted and whose result could not be validated. Only resolving that same Original Operation settles it.
 
 **Client Identity**: A stable nonsecret identifier distinguishing one SpaceTerm Client's views, attachments, Pane control and operations.
 

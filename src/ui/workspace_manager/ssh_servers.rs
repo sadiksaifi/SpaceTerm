@@ -35,6 +35,32 @@ impl WorkspaceManager {
         }));
     }
 
+    /// Follows the submitted remote maintenance operations for this window's life, so a machine
+    /// heading offers what the server's state allows and reports an operation underway. Following
+    /// reaches no computer. It also continues this client's unresolved operations once, quietly,
+    /// now that a Workspace Window exists.
+    pub(super) fn follow_remote_maintenance(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(operations) = crate::ssh::server_operations::installed(cx) else {
+            return;
+        };
+        let changes = operations.subscribe();
+        self._remote_maintenance = Some(cx.spawn_in(window, async move |manager, cx| {
+            loop {
+                if manager.update(cx, |_, cx| cx.notify()).is_err() {
+                    break;
+                }
+                if changes.recv().await.is_err() {
+                    break;
+                }
+            }
+        }));
+        crate::ui::remote_maintenance::resume_retained_once(cx);
+    }
+
     /// Binds each newly presented SSH server and withdraws each one the registry no longer
     /// presents.
     fn sync_ssh_servers(&mut self, window: &mut Window, cx: &mut Context<Self>) {
