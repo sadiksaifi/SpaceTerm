@@ -219,6 +219,11 @@ pub enum MaintenanceRefusal {
 /// 64-character confirmation, so a request never approaches this bound.
 const MAX_REQUEST: u64 = 8 * 1024;
 
+/// How many originals this service retains. A person maintains one server from a few surfaces at
+/// a time, each original is resolved on the next Connect or Resume, and an unresolved original is
+/// never evicted, so eight keeps every plausible outstanding original in a few kilobytes.
+const RETAINED: usize = 8;
+
 /// Account-authorized maintenance of one application identity's service.
 ///
 /// One instance answers exactly one request. Every operation reuses the local service controls
@@ -268,6 +273,18 @@ impl Maintenance {
         match request {
             Request::Observe => Ok(Reply::Facts(self.facts()?)),
             Request::Prepare { action } => Ok(Reply::Prepared(self.prepare(action)?)),
+            Request::Apply {
+                operation,
+                action,
+                confirmation,
+            } => self.apply(
+                operation,
+                Applied::Service {
+                    action,
+                    confirmation,
+                },
+            ),
+            Request::Start { operation } => self.apply(operation, Applied::Start),
             _ => Err(ServerError::Unsupported),
         }
     }
@@ -306,6 +323,135 @@ impl Maintenance {
             previous: None,
             candidate: None,
         })
+    }
+
+    /// Perform one original exactly once under the submitted operation identity.
+    ///
+    /// Admission is durable before dispatch, so an interrupted original is resolvable instead of
+    /// repeatable, and resubmitting the same identity returns the retained outcome.
+    fn apply(&self, operation: [u8; 32], applied: Applied) -> Result<Reply, ServerError> {
+        if operation == [0; 32] {
+            return Err(ServerError::Protocol);
+        }
+        let data = Directory::open(&self.service.paths.data, false)?;
+        // This fence serializes maintenance originals. The service's own operation lock belongs
+        // to each dispatch, so exactly-once admission needs its own lock at the same discipline.
+        let _fence = data.lock("maintenance.lock", false)?;
+        data.verify_path(&self.service.paths.data)?;
+        let mut journal = Journal::read(&data)?;
+        if let Some(original) = journal.find(operation) {
+            return Ok(Reply::Outcome(original.outcome()));
+        }
+        let original = match self.admit(applied)? {
+            Admission::AlreadyApproved => return Ok(Reply::AlreadyApproved),
+            Admission::Refused {
+                kind,
+                bound,
+                refusal,
+            } => {
+                let original = Original::refused(operation, kind, bound, refusal);
+                journal.retain(&data, original.clone())?;
+                return Ok(Reply::Outcome(original.outcome()));
+            }
+            Admission::Ready {
+                kind,
+                bound,
+                confirmation,
+                dispatch,
+            } => {
+                let original = Original {
+                    operation,
+                    kind,
+                    confirmation,
+                    bound,
+                    activation: None,
+                    resolution: OperationResolution::Admitted,
+                    status: None,
+                };
+                journal.retain(&data, original.clone())?;
+                let (resolution, activation, status) = self.dispatch(dispatch);
+                Original {
+                    resolution,
+                    activation,
+                    status,
+                    ..original
+                }
+            }
+        };
+        journal.retain(&data, original.clone())?;
+        Ok(Reply::Outcome(original.outcome()))
+    }
+
+    /// Validate one original against a fresh observation. No branch here dispatches anything.
+    fn admit(&self, applied: Applied) -> Result<Admission, ServerError> {
+        let controller = Controller::new(self.service.clone());
+        match applied {
+            // Start carries no confirmation: it ends no work, and it is the only operation that
+            // reverses a deliberate Stop.
+            Applied::Start => Ok(Admission::Ready {
+                kind: OperationKind::Start,
+                bound: self.observe()?.status,
+                confirmation: None,
+                dispatch: Dispatch::Start,
+            }),
+            Applied::Service {
+                action,
+                confirmation,
+            } => {
+                let observation = self.observe()?;
+                let kind = OperationKind::Service { action };
+                let expected = observation
+                    .confirmation(&self.service.identity, &Change::Service { action })?;
+                if expected != confirmation {
+                    return Ok(Admission::Refused {
+                        kind,
+                        bound: observation.status,
+                        refusal: MaintenanceRefusal::Changed,
+                    });
+                }
+                match controller.prepare(action) {
+                    Ok(prepared) => Ok(Admission::Ready {
+                        kind,
+                        bound: observation.status,
+                        confirmation: Some(expected),
+                        dispatch: Dispatch::Service(prepared),
+                    }),
+                    Err(error) => Ok(Admission::Refused {
+                        kind,
+                        bound: observation.status,
+                        refusal: error.into(),
+                    }),
+                }
+            }
+        }
+    }
+
+    /// Perform exactly one admitted original and validate what it achieved. A reply is not
+    /// completion: an unvalidated result stays unconfirmed.
+    fn dispatch(
+        &self,
+        dispatch: Dispatch,
+    ) -> (OperationResolution, Option<[u8; 32]>, Option<ServiceStatus>) {
+        let controller = Controller::new(self.service.clone());
+        match dispatch {
+            Dispatch::Start => match controller.start() {
+                // Only an observed running server completes an explicit Start.
+                Ok(status) if status.running => {
+                    (OperationResolution::Completed, None, Some(status))
+                }
+                Ok(status) => (OperationResolution::Unconfirmed, None, Some(status)),
+                Err(error) => (resolution_after(error), None, self.policy()),
+            },
+            Dispatch::Service(prepared) => match controller.confirm(prepared) {
+                Ok(status) => (OperationResolution::Completed, None, Some(status)),
+                Err(error) => (resolution_after(error), None, self.policy()),
+            },
+        }
+    }
+
+    /// The service policy after an original resolved, when it can still be read.
+    fn policy(&self) -> Option<ServiceStatus> {
+        self.observe().ok().map(|observation| observation.status)
     }
 
     /// Observe this account's service once, without dispatching or recovering anything.
@@ -377,6 +523,167 @@ struct Observation {
     /// The server's current process run, which changes whenever the server runs again.
     run: Option<Run>,
     activation: Option<ActivationStatus>,
+}
+
+/// What one submitted original asks this service to perform once.
+enum Applied {
+    Start,
+    Service {
+        action: Action,
+        confirmation: String,
+    },
+}
+
+/// One validated original, ready for its single dispatch.
+enum Dispatch {
+    Start,
+    Service(control::Confirmation),
+}
+
+/// What admission decided before anything was performed.
+enum Admission {
+    Ready {
+        kind: OperationKind,
+        bound: ServiceStatus,
+        confirmation: Option<String>,
+        dispatch: Dispatch,
+    },
+    /// Refused before any effect, with the original known well enough to retain its refusal.
+    Refused {
+        kind: OperationKind,
+        bound: ServiceStatus,
+        refusal: MaintenanceRefusal,
+    },
+    /// The exact artifact is already approved, so the request names no change.
+    AlreadyApproved,
+}
+
+/// Only the guards that precede any durable change refuse an admitted original. Every other
+/// failure leaves its result unvalidated rather than claiming that nothing happened.
+fn resolution_after(error: ServerError) -> OperationResolution {
+    match error {
+        ServerError::NotInstalled
+        | ServerError::Stopped
+        | ServerError::Changed
+        | ServerError::AuthenticationRefused => OperationResolution::Refused(error.into()),
+        _ => OperationResolution::Unconfirmed,
+    }
+}
+
+/// One original operation as this service retains it: what it asked for, the observation it
+/// bound, how far it got and its validated outcome.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Original {
+    operation: [u8; 32],
+    kind: OperationKind,
+    /// The confirmation the client submitted, which named one exact observation.
+    confirmation: Option<String>,
+    /// The service policy this original bound.
+    bound: ServiceStatus,
+    /// The service activation this original admitted, once the service generated it.
+    activation: Option<[u8; 32]>,
+    resolution: OperationResolution,
+    /// The service policy observed after the original resolved, when it could be read.
+    status: Option<ServiceStatus>,
+}
+impl Original {
+    fn refused(
+        operation: [u8; 32],
+        kind: OperationKind,
+        bound: ServiceStatus,
+        refusal: MaintenanceRefusal,
+    ) -> Self {
+        Self {
+            operation,
+            kind,
+            confirmation: None,
+            bound,
+            activation: None,
+            resolution: OperationResolution::Refused(refusal),
+            status: None,
+        }
+    }
+    fn outcome(&self) -> OperationOutcome {
+        OperationOutcome {
+            operation: self.operation,
+            kind: self.kind.clone(),
+            resolution: self.resolution,
+            status: self.status,
+        }
+    }
+    /// Only an unresolved original still needs resolving, so only it may never be evicted.
+    fn resolved(&self) -> bool {
+        !matches!(
+            self.resolution,
+            OperationResolution::Admitted | OperationResolution::Unconfirmed
+        )
+    }
+}
+
+/// The account's retained originals, in a private file beside its service policy.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Journal {
+    schema: u32,
+    originals: Vec<Original>,
+}
+impl Default for Journal {
+    fn default() -> Self {
+        Self {
+            schema: 1,
+            originals: Vec::new(),
+        }
+    }
+}
+impl Journal {
+    /// Read the retained originals. Unreadable or unexpected contents are refused, never
+    /// replaced, because an original this service cannot read may still be unresolved.
+    fn read(data: &Directory) -> Result<Self, ServerError> {
+        let journal: Self = data.read_json("maintenance.json")?.unwrap_or_default();
+        let readable = journal.schema == 1
+            && journal.originals.len() <= RETAINED
+            && journal
+                .originals
+                .iter()
+                .enumerate()
+                .all(|(index, original)| {
+                    original.operation != [0; 32]
+                        && !journal.originals[..index]
+                            .iter()
+                            .any(|earlier| earlier.operation == original.operation)
+                });
+        if !readable {
+            return Err(ServerError::UnsafeStorage);
+        }
+        Ok(journal)
+    }
+    fn find(&self, operation: [u8; 32]) -> Option<&Original> {
+        self.originals
+            .iter()
+            .find(|original| original.operation == operation)
+    }
+    /// Publish one original durably. The caller holds the maintenance fence.
+    fn retain(&mut self, data: &Directory, original: Original) -> Result<(), ServerError> {
+        match self
+            .originals
+            .iter()
+            .position(|retained| retained.operation == original.operation)
+        {
+            Some(index) => self.originals[index] = original,
+            None => {
+                while self.originals.len() >= RETAINED {
+                    let Some(index) = self.originals.iter().position(Original::resolved) else {
+                        // Every retained original still needs resolving, so none may be evicted.
+                        return Err(ServerError::StorageUnavailable);
+                    };
+                    self.originals.remove(index);
+                }
+                self.originals.push(original);
+            }
+        }
+        data.write_json(c"maintenance.json", self)
+    }
 }
 
 impl Observation {
@@ -557,6 +864,7 @@ mod tests {
     /// A service manager that counts every dispatch, so a test can prove that a refused request
     /// performed nothing and that an admitted original was performed once.
     struct ServiceManager {
+        data: PathBuf,
         approved: Mutex<PathBuf>,
         running: AtomicBool,
         stops: AtomicUsize,
@@ -588,6 +896,13 @@ mod tests {
         fn disable(&self) -> Result<(), ServerError> {
             self.stops.fetch_add(1, Ordering::SeqCst);
             self.running.store(false, Ordering::SeqCst);
+            // A real server process clears its own run marker as it exits.
+            let data = Directory::open(&self.data, false)?;
+            let _intent = data.lock("service-intent.lock", false)?;
+            if let Some(mut state) = Service::state(&data)? {
+                state.run = None;
+                data.write_json(c"service.json", &state)?;
+            }
             Ok(())
         }
         fn uninstall(&self, _: &Path) -> Result<(), ServerError> {
@@ -656,6 +971,7 @@ mod tests {
             &fixture.paths.identity,
             |archive, signature| {
                 let manager = Arc::new(ServiceManager {
+                    data: fixture.paths.data.clone(),
                     approved: Mutex::new(PathBuf::new()),
                     running: AtomicBool::new(running),
                     stops: AtomicUsize::new(0),
@@ -834,6 +1150,154 @@ mod tests {
                 }),
                 Reply::Refused(MaintenanceRefusal::NotInstalled)
             );
+        });
+    }
+
+    #[test]
+    fn one_admitted_original_is_performed_once_and_keeps_its_retained_outcome() {
+        with_service(true, false, |harness| {
+            let operation = [9; 32];
+            let Reply::Prepared(prepared) = harness.exchange(&Request::Prepare {
+                action: Action::Stop,
+            }) else {
+                panic!("preparation unavailable");
+            };
+            let apply = Request::Apply {
+                operation,
+                action: Action::Stop,
+                confirmation: prepared.confirmation,
+            };
+            let Reply::Outcome(outcome) = harness.exchange(&apply) else {
+                panic!("the original was not performed");
+            };
+            assert_eq!(outcome.operation, operation);
+            assert_eq!(
+                outcome.kind,
+                OperationKind::Service {
+                    action: Action::Stop
+                }
+            );
+            assert_eq!(outcome.resolution, OperationResolution::Completed);
+            let status = outcome.status.expect("resolved policy unavailable");
+            assert!(status.stopped && !status.running && !status.enabled);
+            assert_eq!(harness.manager.stops.load(Ordering::SeqCst), 1);
+            // The retained originals stay private to the owning account.
+            let retained = harness.service.paths.data.join("maintenance.json");
+            let mode = std::os::unix::fs::PermissionsExt::mode(
+                &std::fs::metadata(&retained).unwrap().permissions(),
+            );
+            assert_eq!(mode & 0o777, 0o600);
+            // A resubmission returns the retained outcome and dispatches nothing, including when
+            // it names a different action under the same original identity.
+            for request in [
+                apply,
+                Request::Apply {
+                    operation,
+                    action: Action::Uninstall,
+                    confirmation: "a".repeat(64),
+                },
+                Request::Start { operation },
+            ] {
+                assert_eq!(harness.exchange(&request), Reply::Outcome(outcome.clone()));
+            }
+            assert_eq!(harness.manager.stops.load(Ordering::SeqCst), 1);
+            assert_eq!(harness.manager.uninstalls.load(Ordering::SeqCst), 0);
+            assert_eq!(harness.manager.starts.load(Ordering::SeqCst), 0);
+        });
+    }
+
+    #[test]
+    fn a_confirmation_bound_while_running_cannot_stop_work_started_afterwards() {
+        with_service(true, false, |harness| {
+            let Reply::Prepared(prepared) = harness.exchange(&Request::Prepare {
+                action: Action::Stop,
+            }) else {
+                panic!("preparation unavailable");
+            };
+            // The server ran again, so the observation the confirmation named is gone.
+            let mut state = harness.state();
+            state.run = Some(Run {
+                boot: crate::service::boot().unwrap(),
+                token: [3; 32],
+            });
+            harness.write_state(&state);
+            let apply = Request::Apply {
+                operation: [4; 32],
+                action: Action::Stop,
+                confirmation: prepared.confirmation,
+            };
+            let refused = Reply::Outcome(OperationOutcome {
+                operation: [4; 32],
+                kind: OperationKind::Service {
+                    action: Action::Stop,
+                },
+                resolution: OperationResolution::Refused(MaintenanceRefusal::Changed),
+                status: None,
+            });
+            assert_eq!(harness.exchange(&apply), refused);
+            assert_eq!(harness.manager.stops.load(Ordering::SeqCst), 0);
+            assert!(!harness.state().stopped);
+            // The refused original keeps its outcome, so only a fresh original can stop it.
+            assert_eq!(harness.exchange(&apply), refused);
+            let Reply::Prepared(fresh) = harness.exchange(&Request::Prepare {
+                action: Action::Stop,
+            }) else {
+                panic!("preparation unavailable");
+            };
+            let Reply::Outcome(outcome) = harness.exchange(&Request::Apply {
+                operation: [5; 32],
+                action: Action::Stop,
+                confirmation: fresh.confirmation,
+            }) else {
+                panic!("the original was not performed");
+            };
+            assert_eq!(outcome.resolution, OperationResolution::Completed);
+            assert_eq!(harness.manager.stops.load(Ordering::SeqCst), 1);
+        });
+    }
+
+    #[test]
+    fn an_explicit_start_needs_no_confirmation_and_is_dispatched_once() {
+        with_service(false, true, |harness| {
+            let request = Request::Start { operation: [6; 32] };
+            let Reply::Outcome(outcome) = harness.exchange(&request) else {
+                panic!("the original was not performed");
+            };
+            // This service manager never reaches readiness, so the result stays unconfirmed.
+            assert_eq!(outcome.kind, OperationKind::Start);
+            assert_eq!(outcome.resolution, OperationResolution::Unconfirmed);
+            assert_eq!(harness.manager.starts.load(Ordering::SeqCst), 1);
+            assert_eq!(harness.exchange(&request), Reply::Outcome(outcome));
+            assert_eq!(harness.manager.starts.load(Ordering::SeqCst), 1);
+        });
+    }
+
+    #[test]
+    fn an_unresolved_original_is_never_evicted_for_a_newer_one() {
+        with_service(false, true, |harness| {
+            for index in 0..RETAINED {
+                let operation = [index as u8 + 1; 32];
+                let Reply::Outcome(outcome) = harness.exchange(&Request::Start { operation })
+                else {
+                    panic!("the original was not performed");
+                };
+                assert_eq!(outcome.resolution, OperationResolution::Unconfirmed);
+            }
+            assert_eq!(harness.manager.starts.load(Ordering::SeqCst), RETAINED);
+            assert_eq!(
+                harness.exchange(&Request::Start {
+                    operation: [200; 32]
+                }),
+                Reply::Refused(MaintenanceRefusal::StorageUnavailable)
+            );
+            assert_eq!(harness.manager.starts.load(Ordering::SeqCst), RETAINED);
+            for index in 0..RETAINED {
+                let operation = [index as u8 + 1; 32];
+                assert!(matches!(
+                    harness.exchange(&Request::Start { operation }),
+                    Reply::Outcome(outcome) if outcome.operation == operation
+                ));
+            }
         });
     }
 }
