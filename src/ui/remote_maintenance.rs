@@ -552,16 +552,20 @@ pub(crate) fn observed(
         MaintenanceRow::Service => {
             let (explanation, tone) = match phase {
                 ServicePhase::NotInstalled => guidance(format!(
-                    "{machine} had no SpaceTerm server for this account when SpaceTerm last                      reached it. Connect offers to install a verified one."
+                    "{machine} had no SpaceTerm server for this account when SpaceTerm last \
+                     reached it. Connect offers to install a verified one."
                 )),
                 ServicePhase::Running => guidance(format!(
-                    "The server on {machine} was running when SpaceTerm last reached it. Choose                      Check Now to read its service."
+                    "The server on {machine} was running when SpaceTerm last reached it. Choose \
+                     Check Now to read its service."
                 )),
                 ServicePhase::Stopped => guidance(format!(
-                    "The server on {machine} was stopped when SpaceTerm last reached it. It stays                      stopped until you choose Start Server."
+                    "The server on {machine} was stopped when SpaceTerm last reached it. It stays \
+                     stopped until you choose Start Server."
                 )),
                 ServicePhase::NotRunning => warning(format!(
-                    "The server on {machine} was installed but not running when SpaceTerm last                      reached it. Choose Check Now to read its service."
+                    "The server on {machine} was installed but not running when SpaceTerm last \
+                     reached it. Choose Check Now to read its service."
                 )),
             };
             MaintenancePresentation {

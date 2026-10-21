@@ -417,6 +417,15 @@ fn the_machine_menu_carries_the_operations_without_inline_affordances() {
     );
 }
 
+/// Every caption reads as one sentence. A literal split across source lines without a
+/// continuation leaves the source indentation in the middle of the sentence.
+fn reads_as_one_sentence(explanation: &str) {
+    assert!(
+        !explanation.contains("  "),
+        "a caption runs two spaces together: {explanation:?}"
+    );
+}
+
 /// Every state a person can land in reads differently from every other, so no two are mistaken
 /// for one another.
 #[test]
@@ -484,6 +493,8 @@ fn every_state_reads_distinctly() {
             "{state} must name the machine it reports, got {:?}",
             presentation.explanation
         );
+        reads_as_one_sentence(&presentation.explanation);
+        reads_as_one_sentence(&update("penguin", &states[index]).explanation);
         assert!(
             !presentation.actions.contains(&RemoteAction::Start)
                 || matches!(states[index], RemoteOperationState::Read(_)),
@@ -627,6 +638,18 @@ fn an_observation_decides_what_is_offered_before_any_read() {
             RemoteAction::Check
         ]
     );
+    for connection in [
+        connected.clone(),
+        RemoteConnectionStatus::Stopped,
+        checked(ServerAvailability::NotInstalled),
+        checked(ServerAvailability::NotRunning),
+    ] {
+        for row in [MaintenanceRow::Service, MaintenanceRow::Update] {
+            if let Some(presentation) = observed("penguin", &connection, row) {
+                reads_as_one_sentence(&presentation.explanation);
+            }
+        }
+    }
     let bare = observed(
         "penguin",
         &checked(ServerAvailability::NotInstalled),
