@@ -18,9 +18,7 @@
 
 use std::sync::Arc;
 
-use spaceterm_server::service::maintenance::{
-    Action, MaintenanceFacts, OperationOutcome, PreparedChange,
-};
+use spaceterm_server::service::maintenance::{Action, MaintenanceFacts, PreparedChange};
 
 use super::server_connection::{ContinuityChange, InteractionReason, SshIntentStoreError};
 use super::server_maintenance::{
@@ -66,11 +64,13 @@ pub(crate) enum RemoteOperationState {
         change: Box<PreparedChange>,
         facts: Box<MaintenanceFacts>,
     },
-    /// A submitted original whose outcome the service validated, awaiting acknowledgement.
+    /// A submitted original whose outcome the service validated, awaiting acknowledgement. The
+    /// outcome is the retained form, so a result read before relaunch presents what it presented
+    /// then without inventing facts this client never read.
     Resolved {
         handle: RemoteOperationHandle,
         kind: SubmittedKind,
-        outcome: Box<OperationOutcome>,
+        outcome: RetainedOutcome,
     },
     /// A submitted original whose result could not be validated. It stays unconfirmed until
     /// resolving the same original settles it; nothing here repeats it.
