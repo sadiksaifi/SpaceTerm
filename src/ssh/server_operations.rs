@@ -20,7 +20,7 @@ use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
 use spaceterm_server::service::maintenance::{
-    Action, MaintenanceFacts, OperationOutcome, OperationResolution, PreparedChange,
+    Action, MaintenanceFacts, OperationKind, OperationOutcome, OperationResolution, PreparedChange,
 };
 
 use super::cancellation::SshCancellationToken;
@@ -174,10 +174,20 @@ pub(crate) struct RetainedRemoteOperation {
     pub removed: bool,
 }
 
-/// A validated outcome as it survives relaunch, reduced to what a person must still be told.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// A validated outcome as it survives relaunch, holding what a person must still be told.
+///
+/// The service's own reply cannot be kept: it names a run that has moved on. What is kept is the
+/// state the service validated and, for an update or a return, the build it validated as active,
+/// so the same sentence reads the same after the desktop reopens.
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum RetainedOutcome {
-    Completed { running: bool },
+    /// The service performed it and validated the result.
+    Completed {
+        /// The service policy observed after it resolved, when that could be read.
+        status: Option<spaceterm_server::service::ServiceStatus>,
+        /// The build the server runs after an update or a return, as the service named it.
+        build: Option<spaceterm_server::service::maintenance::RemoteBuild>,
+    },
     Refused(spaceterm_server::service::maintenance::MaintenanceRefusal),
     Failed { can_return: bool },
 }
@@ -1252,7 +1262,13 @@ fn await_outcome(
     }
     let retained = match outcome.resolution {
         OperationResolution::Completed => Some(RetainedOutcome::Completed {
-            running: outcome.status.is_some_and(|status| status.running),
+            status: outcome.status,
+            // Only an update or a return changes which build runs, so only they name one.
+            build: match &outcome.kind {
+                OperationKind::Update { candidate } => Some(candidate.clone()),
+                OperationKind::Return { previous } => Some(previous.clone()),
+                OperationKind::Start | OperationKind::Service { .. } => None,
+            },
         }),
         OperationResolution::Refused(refusal) => Some(RetainedOutcome::Refused(refusal)),
         OperationResolution::Failed { can_return } => Some(RetainedOutcome::Failed { can_return }),
@@ -1414,7 +1430,7 @@ fn record_for(entry: &Entry, client: [u8; 32]) -> Option<RetainedRemoteOperation
         operation: submitted.operation,
         kind: submitted.kind.clone(),
         outcome: match &entry.state {
-            RemoteOperationState::Resolved { outcome, .. } => Some(*outcome),
+            RemoteOperationState::Resolved { outcome, .. } => Some(outcome.clone()),
             _ => None,
         },
         removed: entry.removed,
@@ -1775,6 +1791,19 @@ mod tests {
             candidate: None,
         }
     }
+    /// The validated result the scripted service reports, as it survives relaunch.
+    fn stopped_outcome() -> RetainedOutcome {
+        RetainedOutcome::Completed {
+            status: Some(ServiceStatus {
+                installed: true,
+                enabled: true,
+                running: false,
+                stopped: true,
+            }),
+            build: None,
+        }
+    }
+
     fn outcome(resolution: OperationResolution) -> OperationOutcome {
         OperationOutcome {
             operation: [0; 32],
@@ -1932,10 +1961,7 @@ mod tests {
             Some("exact-observation"),
             "the dispatch carries the confirmation for the observation it described"
         );
-        assert_eq!(
-            records.only().outcome,
-            Some(RetainedOutcome::Completed { running: false })
-        );
+        assert_eq!(records.only().outcome, Some(stopped_outcome()));
         assert_eq!(script.observed.lock().unwrap().len(), 1);
     }
 
@@ -2011,10 +2037,7 @@ mod tests {
             reopened.applied.lock().unwrap().is_empty(),
             "resolution repeats no dispatch"
         );
-        assert_eq!(
-            records.only().outcome,
-            Some(RetainedOutcome::Completed { running: false })
-        );
+        assert_eq!(records.only().outcome, Some(stopped_outcome()));
     }
 
     #[test]
@@ -2025,7 +2048,7 @@ mod tests {
             .operations
             .lock()
             .unwrap()
-            .push(record(Some(RetainedOutcome::Completed { running: false })));
+            .push(record(Some(stopped_outcome())));
         let (connections, _) = registry();
         let owner = SshServerOperations::new(script.clone(), records.clone(), connections);
         owner.resume_retained();
@@ -2034,7 +2057,7 @@ mod tests {
             owner.state(&destination()),
             RemoteOperationState::Resolved {
                 kind: SubmittedKind::Service(Action::Stop),
-                outcome: RetainedOutcome::Completed { running: false },
+                outcome: RetainedOutcome::Completed { .. },
                 ..
             }
         ));

@@ -15,7 +15,7 @@ use crate::appearance::Appearance;
 use crate::domain::SshDestination;
 use crate::local_server::service::control::Action;
 use crate::local_server::service::maintenance::{
-    MaintenanceFacts, OperationKind, OperationOutcome, OperationResolution, PreparedChange,
+    MaintenanceFacts, PreparedChange,
     RemoteBuild,
 };
 use crate::local_server::service::{ServiceStartup, ServiceStatus};
@@ -33,7 +33,7 @@ use crate::ssh::server_connection::{
 use crate::ssh::server_maintenance::{MaintenancePhase, SubmittedKind};
 use crate::ssh::server_operations::{
     RemoteMaintenanceRequest, RemoteOperationEntry, RemoteOperationHandle, RemoteOperationState,
-    RemoteServerOperations,
+    RemoteServerOperations, RetainedOutcome,
 };
 use crate::ui::appearance_runtime;
 use crate::ui::settings_window::SettingsWindow;
@@ -72,6 +72,14 @@ const fn status(installed: bool, running: bool, stopped: bool) -> ServiceStatus 
     }
 }
 
+/// A validated result the service reported, as it survives relaunch.
+const fn completed(after: Option<ServiceStatus>) -> RetainedOutcome {
+    RetainedOutcome::Completed {
+        status: after,
+        build: None,
+    }
+}
+
 fn facts(status: ServiceStatus) -> MaintenanceFacts {
     MaintenanceFacts {
         server: [2; 32],
@@ -90,7 +98,6 @@ struct ScriptedOperations {
     states: Mutex<BTreeMap<String, (bool, RemoteOperationState)>>,
     calls: Mutex<Vec<Call>>,
     /// What a confirmed change resolves to.
-    outcome: Mutex<OperationResolution>,
     /// What resolving an unresolved original answers.
     resumed: Mutex<Option<RemoteOperationState>>,
     changes: (async_channel::Sender<()>, async_channel::Receiver<()>),
@@ -102,7 +109,6 @@ impl ScriptedOperations {
         Arc::new(Self {
             states: Mutex::new(BTreeMap::new()),
             calls: Mutex::new(Vec::new()),
-            outcome: Mutex::new(OperationResolution::Completed),
             resumed: Mutex::new(None),
             changes: async_channel::unbounded(),
             handles: Mutex::new(0),
@@ -137,10 +143,6 @@ impl ScriptedOperations {
 
     fn record(&self, call: Call) {
         self.calls.lock().expect("calls").push(call);
-    }
-
-    fn answer(&self, resolution: OperationResolution) {
-        *self.outcome.lock().expect("outcome") = resolution;
     }
 
     fn resume_with(&self, state: RemoteOperationState) {
@@ -242,26 +244,20 @@ impl RemoteServerOperations for ScriptedOperations {
                 },
                 RemoteMaintenanceRequest::Return => SubmittedKind::Return,
             };
-            let outcome = OperationOutcome {
-                operation: [7; 32],
-                kind: match request {
-                    RemoteMaintenanceRequest::Service(action) => OperationKind::Service { action },
-                    RemoteMaintenanceRequest::Update => OperationKind::Update {
-                        candidate: build("1.5.0", 'b'),
-                    },
-                    RemoteMaintenanceRequest::Return => OperationKind::Return {
-                        previous: build("1.4.0", 'a'),
-                    },
-                },
-                resolution: *self.outcome.lock().expect("outcome"),
+            let outcome = RetainedOutcome::Completed {
                 status: Some(status(true, false, true)),
+                build: match request {
+                    RemoteMaintenanceRequest::Service(_) => None,
+                    RemoteMaintenanceRequest::Update => Some(build("1.5.0", 'b')),
+                    RemoteMaintenanceRequest::Return => Some(build("1.4.0", 'a')),
+                },
             };
             self.set(
                 &destination,
                 RemoteOperationState::Resolved {
                     handle,
                     kind,
-                    outcome: Box::new(outcome),
+                    outcome,
                 },
             );
         }
@@ -274,12 +270,7 @@ impl RemoteServerOperations for ScriptedOperations {
             RemoteOperationState::Resolved {
                 handle: self.next_handle(),
                 kind: SubmittedKind::Start,
-                outcome: Box::new(OperationOutcome {
-                    operation: [8; 32],
-                    kind: OperationKind::Start,
-                    resolution: OperationResolution::Completed,
-                    status: Some(status(true, true, false)),
-                }),
+                outcome: completed(Some(status(true, true, false))),
             },
         );
     }
@@ -666,14 +657,7 @@ fn a_validated_result_waits_for_an_ordinary_acknowledgement(cx: &mut TestAppCont
         RemoteOperationState::Resolved {
             handle: RemoteOperationHandle(4),
             kind: SubmittedKind::Service(Action::Stop),
-            outcome: Box::new(OperationOutcome {
-                operation: [7; 32],
-                kind: OperationKind::Service {
-                    action: Action::Stop,
-                },
-                resolution: OperationResolution::Completed,
-                status: Some(status(true, false, true)),
-            }),
+            outcome: completed(Some(status(true, false, true))),
         },
     );
     servers.cx.run_until_parked();
@@ -710,14 +694,7 @@ fn an_unconfirmed_operation_is_resolved_and_never_repeated(cx: &mut TestAppConte
         .resume_with(RemoteOperationState::Resolved {
             handle: RemoteOperationHandle(5),
             kind: SubmittedKind::Service(Action::Stop),
-            outcome: Box::new(OperationOutcome {
-                operation: [7; 32],
-                kind: OperationKind::Service {
-                    action: Action::Stop,
-                },
-                resolution: OperationResolution::Completed,
-                status: Some(status(true, false, true)),
-            }),
+            outcome: completed(Some(status(true, false, true))),
         });
     servers.cx.run_until_parked();
 
@@ -848,14 +825,7 @@ fn a_removed_connection_keeps_what_spaceterm_still_has_to_say(cx: &mut TestAppCo
         .resume_with(RemoteOperationState::Resolved {
             handle: RemoteOperationHandle(7),
             kind: SubmittedKind::Service(Action::Stop),
-            outcome: Box::new(OperationOutcome {
-                operation: [7; 32],
-                kind: OperationKind::Service {
-                    action: Action::Stop,
-                },
-                resolution: OperationResolution::Completed,
-                status: Some(status(true, false, true)),
-            }),
+            outcome: completed(Some(status(true, false, true))),
         });
     servers.cx.run_until_parked();
 

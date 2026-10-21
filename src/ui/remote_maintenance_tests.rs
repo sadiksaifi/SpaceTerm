@@ -45,16 +45,11 @@ fn change(running: bool, stopped: bool) -> PreparedChange {
     }
 }
 
-fn outcome(
-    kind: OperationKind,
-    resolution: OperationResolution,
-    after: Option<ServiceStatus>,
-) -> OperationOutcome {
-    OperationOutcome {
-        operation: [7; 32],
-        kind,
-        resolution,
+/// A validated result the service reported, as it survives relaunch.
+fn completed(after: Option<ServiceStatus>) -> RetainedOutcome {
+    RetainedOutcome::Completed {
         status: after,
+        build: None,
     }
 }
 
@@ -245,13 +240,7 @@ fn a_validated_result_is_acknowledged_and_nothing_else() {
     let stopped = RemoteOperationState::Resolved {
         handle: RemoteOperationHandle(3),
         kind: SubmittedKind::Service(Action::Stop),
-        outcome: Box::new(outcome(
-            OperationKind::Service {
-                action: Action::Stop,
-            },
-            OperationResolution::Completed,
-            Some(status(true, false, true)),
-        )),
+        outcome: completed(Some(status(true, false, true))),
     };
 
     let service = service("penguin", &stopped);
@@ -272,13 +261,7 @@ fn a_refusal_says_nothing_changed() {
     let refused = RemoteOperationState::Resolved {
         handle: RemoteOperationHandle(4),
         kind: SubmittedKind::Service(Action::Restart),
-        outcome: Box::new(outcome(
-            OperationKind::Service {
-                action: Action::Restart,
-            },
-            OperationResolution::Refused(MaintenanceRefusal::Stopped),
-            None,
-        )),
+        outcome: RetainedOutcome::Refused(MaintenanceRefusal::Stopped),
     };
 
     let service = service("penguin", &refused);
@@ -368,13 +351,7 @@ fn a_removed_connection_offers_only_resolving_and_acknowledging() {
         RemoteOperationState::Resolved {
             handle: RemoteOperationHandle(7),
             kind: SubmittedKind::Service(Action::Stop),
-            outcome: Box::new(outcome(
-                OperationKind::Service {
-                    action: Action::Stop,
-                },
-                OperationResolution::Completed,
-                None,
-            )),
+            outcome: completed(None),
         },
         RemoteOperationState::Read(Box::new(facts(status(true, true, false)))),
         RemoteOperationState::Unread,
@@ -430,13 +407,7 @@ fn the_machine_menu_carries_the_operations_without_inline_affordances() {
     let resolved = RemoteOperationState::Resolved {
         handle: RemoteOperationHandle(8),
         kind: SubmittedKind::Service(Action::Stop),
-        outcome: Box::new(outcome(
-            OperationKind::Service {
-                action: Action::Stop,
-            },
-            OperationResolution::Completed,
-            None,
-        )),
+        outcome: completed(None),
     };
     assert!(menu_actions(&resolved, None).is_empty());
     let working = RemoteOperationState::Working {

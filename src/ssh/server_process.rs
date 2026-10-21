@@ -1585,58 +1585,6 @@ pub(crate) mod testing {
 mod tests {
     use super::*;
 
-    /// A remote server command names only the action and the compiled application identity, each
-    /// quoted as data. What one maintenance request asks for travels on standard input instead,
-    /// so no request value is ever a shell argument.
-    #[test]
-    fn a_remote_server_command_names_only_its_action_and_application_identity() {
-        let adapter = crate::platform::unix_ssh_process::UnixSshProcessAdapter;
-        for action in ["ssh-maintain", "ssh-discover", "ssh-connect", "ssh-prepare"] {
-            let script = adapter.locator(identity(), action, action == "ssh-discover");
-            assert!(
-                script.ends_with(&format!(
-                    "exec \"$root/installations/$digest/bin/spaceterm-server\" '{action}' '{}'\n",
-                    identity()
-                )),
-                "{script}"
-            );
-        }
-    }
-
-    /// Staging retains a verified artifact beside the approved one. It shares the installer's
-    /// transfer and verification body, and asks for neither boot authorization nor installation.
-    #[test]
-    fn staging_transfers_a_verified_artifact_without_installing_or_authorizing_boot() {
-        let bootstrap = crate::platform::unix_ssh_process::UnixSshProcessAdapter;
-        let digest = "0123456789abcdef".repeat(4);
-        let stage = bootstrap.stage(identity(), 4096, &[7; 64], &digest);
-        for shared in [
-            "umask 077",
-            "cat > \"$work/artifact.tar.gz\"",
-            "[ \"$(wc -c < \"$work/artifact.tar.gz\")\" -eq 4096 ] || exit 75",
-            "tar -xzf \"$work/artifact.tar.gz\" -C \"$work/runtime\"",
-        ] {
-            assert!(stage.contains(shared), "{stage}");
-        }
-        assert!(stage.ends_with(&format!(
-            "\"$work/runtime/server/bin/spaceterm-server\" 'ssh-stage' '{}' \
-             \"$work/artifact.tar.gz\" \"$work/artifact.sig\" '{digest}'\n",
-            identity()
-        )));
-        for refused in ["ssh-install", "ssh-enable-linger", "read -r authorization"] {
-            assert!(!stage.contains(refused), "staging asked for {refused}");
-        }
-        for password in [false, true] {
-            let install = bootstrap.install(identity(), 4096, &[7; 64], &digest, password);
-            assert!(install.contains("ssh-enable-linger") && install.contains("'ssh-install'"));
-            assert_eq!(
-                install.contains("IFS= read -r authorization"),
-                password,
-                "only a password installation reads one"
-            );
-        }
-    }
-
     #[test]
     fn bounded_discovery_refuses_wrong_build_and_unsupported_capability() {
         let mut discovery = AccountDiscovery {

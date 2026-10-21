@@ -15,16 +15,18 @@ use crate::local_server::service::control::{
     Action, BuildName, UpdateChange, UpdateWording, Wording, build_label, build_labels,
 };
 use crate::local_server::service::maintenance::{
-    MaintenanceFacts, MaintenanceRefusal, OperationKind, OperationOutcome, OperationResolution,
-    PreparedChange, RemoteActivation, RemoteActivationPhase, RemoteBuild,
+    MaintenanceFacts, MaintenanceRefusal, PreparedChange, RemoteActivation,
+    RemoteActivationPhase, RemoteBuild,
 };
-use crate::local_server::service::{RetainedInstallation, ServiceStatus};
+use crate::local_server::service::ServiceStatus;
 use crate::ssh::server_connection::{
     ContinuityChange, IncompatibilityKind, InteractionReason, RemoteConnectionStatus,
     ServerAvailability, UnavailableKind,
 };
 use crate::ssh::server_maintenance::{MaintenancePhase, SshMaintenanceFailure, SubmittedKind};
-use crate::ssh::server_operations::{RemoteMaintenanceRequest, RemoteOperationState};
+use crate::ssh::server_operations::{
+    RemoteMaintenanceRequest, RemoteOperationState, RetainedOutcome,
+};
 use crate::ui::settings_window::server_update::UpdateAction;
 use crate::ui::settings_window::servers::{ServiceAction, ServicePhase};
 use crate::ui::sidebar_window::form::CaptionTone;
@@ -778,51 +780,29 @@ fn submitted(
 fn resolved(
     machine: &str,
     kind: &SubmittedKind,
-    outcome: &OperationOutcome,
+    outcome: &RetainedOutcome,
     row: MaintenanceRow,
 ) -> Parts {
-    match outcome.resolution {
-        OperationResolution::Completed => (
-            Some(completed_badge(kind, outcome.status)),
+    match outcome {
+        RetainedOutcome::Completed { status, build } => (
+            Some(completed_badge(kind, *status)),
             selector(row, "done"),
-            guidance(completed_detail(machine, &outcome.kind, outcome.status)),
+            guidance(completed_detail(machine, kind, build.as_ref(), *status)),
             vec![RemoteAction::Acknowledge],
             false,
         ),
-        OperationResolution::Admitted => (
-            Some("Underway"),
-            selector(row, "underway"),
-            guidance(format!(
-                "{machine} accepted the operation and it is still underway. Choose {} to ask for \
-                 its result.",
-                plain(resolve_action(kind).label())
-            )),
-            vec![resolve_action(kind)],
-            false,
-        ),
-        OperationResolution::Refused(reason) => (
+        RetainedOutcome::Refused(reason) => (
             Some("Refused"),
             selector(row, "refused"),
             failure(format!(
                 "{} Nothing changed on {machine}.",
-                refusal(reason, machine)
+                refusal(*reason, machine)
             )),
             vec![RemoteAction::Acknowledge],
             false,
         ),
-        OperationResolution::Unconfirmed => (
-            Some("Unconfirmed"),
-            selector(row, "unconfirmed"),
-            warning(format!(
-                "SpaceTerm didn\u{2019}t hear whether {machine} {}. Choose {} to ask it for the \
-                 answer; it isn\u{2019}t asked to do it again.",
-                did(kind),
-                plain(resolve_action(kind).label())
-            )),
-            vec![resolve_action(kind)],
-            false,
-        ),
-        OperationResolution::Failed { can_return } => {
+        RetainedOutcome::Failed { can_return } => {
+            let can_return = *can_return;
             let mut actions = Vec::new();
             if can_return {
                 actions.push(RemoteAction::Return);
@@ -1079,44 +1059,57 @@ fn completed_badge(kind: &SubmittedKind, status: Option<ServiceStatus>) -> &'sta
     }
 }
 
-fn completed_detail(machine: &str, kind: &OperationKind, status: Option<ServiceStatus>) -> String {
+fn completed_detail(
+    machine: &str,
+    kind: &SubmittedKind,
+    active: Option<&RemoteBuild>,
+    status: Option<ServiceStatus>,
+) -> String {
     let kept = "Its Workspaces and each client\u{2019}s attachments and views are kept, and each \
                 Pane starts a new shell when you next use it.";
     let stays_stopped = status.is_some_and(|status| status.stopped && !status.running);
     let detail = match kind {
-        OperationKind::Start => format!("The server on {machine} started."),
-        OperationKind::Service {
-            action: Action::Stop,
-        } => format!(
+        SubmittedKind::Start => format!("The server on {machine} started."),
+        SubmittedKind::Service(Action::Stop) => format!(
             "The server on {machine} stopped, and its Terminal Sessions ended for every client. \
              Its Workspaces are kept. It stays stopped until you choose Start Server."
         ),
-        OperationKind::Service {
-            action: Action::Restart,
-        } => format!(
+        SubmittedKind::Service(Action::Restart) => format!(
             "The server on {machine} restarted, and its Terminal Sessions ended for every client. \
              {kept}"
         ),
-        OperationKind::Service {
-            action: Action::Uninstall,
-        } => format!(
+        SubmittedKind::Service(Action::Uninstall) => format!(
             "The service on {machine} was removed, and its Terminal Sessions ended for every \
              client. The server\u{2019}s Workspaces and verified installations are kept, so it \
              can be installed again."
         ),
-        OperationKind::Update { candidate } => format!(
-            "The server on {machine} now runs version {}, and its Terminal Sessions ended for \
-             every client. {kept}",
-            build(candidate)
-        ),
-        OperationKind::Return { previous } => format!(
-            "The server on {machine} returned to version {}. Terminal Sessions that ended \
-             don\u{2019}t return.",
-            build(previous)
-        ),
+        // The service named the build it validated as active, so the sentence reads the same
+        // after the desktop reopens. A reply that named none says only what changed.
+        SubmittedKind::Update { .. } => match active {
+            Some(active) => format!(
+                "The server on {machine} now runs version {}, and its Terminal Sessions ended for \
+                 every client. {kept}",
+                build(active)
+            ),
+            None => format!(
+                "The server on {machine} was updated, and its Terminal Sessions ended for every \
+                 client. {kept}"
+            ),
+        },
+        SubmittedKind::Return => match active {
+            Some(active) => format!(
+                "The server on {machine} returned to version {}. Terminal Sessions that ended \
+                 don\u{2019}t return.",
+                build(active)
+            ),
+            None => format!(
+                "The server on {machine} returned to its previous version. Terminal Sessions that \
+                 ended don\u{2019}t return."
+            ),
+        },
     };
     let stopped = match kind {
-        OperationKind::Update { .. } | OperationKind::Return { .. } if stays_stopped => {
+        SubmittedKind::Update { .. } | SubmittedKind::Return if stays_stopped => {
             format!(" The server on {machine} stays stopped until you choose Start Server.")
         }
         _ => String::new(),
@@ -1273,10 +1266,7 @@ impl MaintenanceConfirmation {
     ///
     /// The copy is the shared destructive copy every control surface shows, so a remote
     /// confirmation reads like the local one with the selected machine in place of this
-    /// computer. It reaches that copy through the constructors that take a compiled application
-    /// identity: `Wording::for_server` and `UpdateWording::for_server` name a supplied server
-    /// instead and belong here once they are in this branch. The only difference is a machine
-    /// whose name is itself an application identity, which the identity constructor renames.
+    /// computer.
     pub(crate) fn of(
         machine: &str,
         request: RemoteMaintenanceRequest,
@@ -1284,7 +1274,7 @@ impl MaintenanceConfirmation {
     ) -> Option<Self> {
         match request {
             RemoteMaintenanceRequest::Service(action) => {
-                let wording = Wording::new(machine, action, change.running, change.startup);
+                let wording = Wording::for_server(machine, action, change.running, change.startup);
                 Some(Self {
                     title: wording.title(),
                     message: wording.message().into(),
@@ -1293,17 +1283,17 @@ impl MaintenanceConfirmation {
                 })
             }
             RemoteMaintenanceRequest::Update | RemoteMaintenanceRequest::Return => {
-                let previous = change.previous.as_ref().map(installation)?;
-                let candidate = change.candidate.as_ref().map(installation)?;
+                let previous = change.previous.as_ref()?;
+                let candidate = change.candidate.as_ref()?;
                 let update = match request {
                     RemoteMaintenanceRequest::Return => UpdateChange::Return,
                     _ => UpdateChange::Update,
                 };
-                let wording = UpdateWording::new(
+                let wording = UpdateWording::for_server(
                     machine,
                     update,
-                    &previous,
-                    &candidate,
+                    name(previous),
+                    name(candidate),
                     change.running,
                     change.stopped,
                 );
@@ -1362,18 +1352,6 @@ pub(crate) fn resume_retained_once(cx: &mut gpui::App) {
 struct ResumedRetained;
 
 impl gpui::Global for ResumedRetained {}
-
-/// One remote build in the shape the identity constructor reads builds from. The wording names a
-/// build by its version, commit and package digest, and reads the digest from the installation
-/// directory's name, so a remote build supplies its digest there. `UpdateWording::for_server`
-/// takes [`BuildName`] directly and replaces this.
-fn installation(build: &RemoteBuild) -> RetainedInstallation {
-    RetainedInstallation {
-        directory: std::path::PathBuf::from(&build.digest),
-        version: build.version.clone(),
-        commit: build.commit.clone(),
-    }
-}
 
 #[cfg(test)]
 #[path = "remote_maintenance_tests.rs"]

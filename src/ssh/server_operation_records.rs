@@ -2,7 +2,8 @@
 use std::{collections::BTreeSet, ffi::OsStr, sync::Arc};
 
 use serde::{Deserialize, Serialize};
-use spaceterm_server::service::maintenance::{Action, MaintenanceRefusal};
+use spaceterm_server::service::ServiceStatus;
+use spaceterm_server::service::maintenance::{Action, MaintenanceRefusal, RemoteBuild};
 
 use super::server_connection::{SshIntentStoreError, SshServerContinuity};
 use super::server_maintenance::{MaintenanceTarget, SubmittedKind};
@@ -65,7 +66,10 @@ enum RecordKind {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "outcome", rename_all = "snake_case", deny_unknown_fields)]
 enum RecordOutcome {
-    Completed { running: bool },
+    Completed {
+        status: Option<ServiceStatus>,
+        build: Option<RemoteBuild>,
+    },
     Refused { refusal: MaintenanceRefusal },
     Failed { can_return: bool },
 }
@@ -131,8 +135,8 @@ impl PrivateRemoteOperationRecords {
                         RecordKind::Return => SubmittedKind::Return,
                     },
                     outcome: record.outcome.map(|outcome| match outcome {
-                        RecordOutcome::Completed { running } => {
-                            RetainedOutcome::Completed { running }
+                        RecordOutcome::Completed { status, build } => {
+                            RetainedOutcome::Completed { status, build }
                         }
                         RecordOutcome::Refused { refusal } => RetainedOutcome::Refused(refusal),
                         RecordOutcome::Failed { can_return } => {
@@ -164,7 +168,9 @@ impl PrivateRemoteOperationRecords {
                 SubmittedKind::Return => RecordKind::Return,
             },
             outcome: operation.outcome.map(|outcome| match outcome {
-                RetainedOutcome::Completed { running } => RecordOutcome::Completed { running },
+                RetainedOutcome::Completed { status, build } => {
+                    RecordOutcome::Completed { status, build }
+                }
                 RetainedOutcome::Refused(refusal) => RecordOutcome::Refused { refusal },
                 RetainedOutcome::Failed { can_return } => RecordOutcome::Failed { can_return },
             }),
@@ -370,7 +376,10 @@ mod tests {
                 candidate: "abc123".into(),
             },
         );
-        resolved.outcome = Some(RetainedOutcome::Completed { running: false });
+        resolved.outcome = Some(RetainedOutcome::Completed {
+            status: None,
+            build: None,
+        });
         resolved.removed = true;
         store.retain(resolved.clone()).unwrap();
 
