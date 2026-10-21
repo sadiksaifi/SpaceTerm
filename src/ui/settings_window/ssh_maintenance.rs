@@ -531,10 +531,12 @@ impl SettingsWindow {
     }
 }
 
-/// Why a removed connection still appears, and what the person can do about it.
+/// Why a removed connection still appears, and what the person can do about it. The section lists
+/// an operation that is still working or still unconfirmed as well as a validated result, so the
+/// caption promises no result an entry may not have.
 pub(super) const REMOVED_GUIDANCE: &str = "You removed these saved connections. SpaceTerm still \
-     has the result of work you asked for on them. Nothing here reconnects, and answering \
-     doesn\u{2019}t bring a connection back.";
+     follows the work you asked for on them, whether or not it has a result yet. Nothing here \
+     reconnects, and answering doesn\u{2019}t bring a connection back.";
 
 impl SettingsWindow {
     /// The servers whose saved connection was removed and that still have something to say,

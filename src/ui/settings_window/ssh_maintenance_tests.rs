@@ -35,6 +35,8 @@ use crate::ssh::server_operations::{
 use crate::ui::appearance_runtime;
 use crate::ui::settings_window::SettingsWindow;
 
+use super::REMOVED_SELECTOR;
+
 const NAVIGATION_SELECTOR: &str = "settings-navigation-settings-section-servers";
 const SERVICE_ROW: &str = "settings-row-ssh-server-service";
 const UPDATE_ROW: &str = "settings-row-ssh-server-update";
@@ -886,6 +888,56 @@ fn a_removed_connection_keeps_what_spaceterm_still_has_to_say(cx: &mut TestAppCo
         !rendered("settings-row-removed-server-operations", servers.cx),
         "an acknowledged result leaves nothing to say about a removed connection"
     );
+}
+
+/// The removed-connections section also lists operations that have no result: one still
+/// unconfirmed, and one still working. Its caption says what is true of every entry it lists.
+#[gpui::test]
+fn the_removed_section_claims_no_result_it_does_not_have(cx: &mut TestAppContext) {
+    let servers = open_maintenance(cx);
+    let destination = SshDestination::new("penguin".to_owned()).expect("destination");
+    servers.operations.set(
+        "penguin",
+        RemoteOperationState::Unconfirmed {
+            kind: SubmittedKind::Service(Action::Stop),
+        },
+    );
+    servers.cx.run_until_parked();
+    servers.connections.remove(&destination);
+    servers.operations.remove("penguin");
+    servers.cx.run_until_parked();
+
+    let listed = ["settings-row-removed-server-operations", REMOVED_SELECTOR];
+    let unresolved = [
+        RemoteOperationState::Unconfirmed {
+            kind: SubmittedKind::Service(Action::Stop),
+        },
+        RemoteOperationState::Working {
+            phase: MaintenancePhase::Resolving,
+            kind: Some(SubmittedKind::Service(Action::Stop)),
+            cancellable: true,
+        },
+    ];
+    for state in unresolved {
+        servers.operations.set("penguin", state.clone());
+        servers.cx.run_until_parked();
+
+        for selector in listed {
+            assert!(
+                rendered(selector, servers.cx),
+                "{state:?} is still something to say about a removed connection"
+            );
+        }
+        assert!(
+            !says("has the result of work you asked for", servers.cx),
+            "{state:?} has no result, so the section must not claim one"
+        );
+        assert!(
+            says("whether or not it has a result yet", servers.cx),
+            "the section says that an entry may have no result yet"
+        );
+        assert!(says("Nothing here reconnects", servers.cx));
+    }
 }
 
 /// One paused operation the destination can no longer answer, as Discard finds it.
