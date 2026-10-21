@@ -3,8 +3,9 @@ mod check;
 use spaceterm_server::{
     ServerError,
     service::{
-        LingerAuthorization, Service,
+        LingerAuthorization, RetainedInstallation, Service,
         control::{cli, display_name},
+        maintenance::{self, RemoteBuild, Reply},
     },
 };
 use std::{ffi::OsString, path::Path, process::ExitCode};
@@ -35,6 +36,11 @@ enum Request<'a> {
         signature: &'a Path,
         digest: &'a str,
     },
+    SshStage {
+        archive: &'a Path,
+        signature: &'a Path,
+        digest: &'a str,
+    },
     SshEnableLinger(LingerAuthorization),
 }
 
@@ -60,14 +66,25 @@ impl<'a> Request<'a> {
             (Some("ssh-enable-linger-password"), []) => {
                 Ok(Self::SshEnableLinger(LingerAuthorization::RemoteStdin))
             }
-            (Some("ssh-install"), [archive, signature, digest])
+            (Some(command @ ("ssh-install" | "ssh-stage")), [archive, signature, digest])
                 if !archive.as_encoded_bytes().starts_with(b"-")
                     && !signature.as_encoded_bytes().starts_with(b"-") =>
             {
-                Ok(Self::SshInstall {
-                    archive: Path::new(archive),
-                    signature: Path::new(signature),
-                    digest: digest.to_str().ok_or(ServerError::Protocol)?,
+                let archive = Path::new(archive);
+                let signature = Path::new(signature);
+                let digest = digest.to_str().ok_or(ServerError::Protocol)?;
+                Ok(if command == "ssh-stage" {
+                    Self::SshStage {
+                        archive,
+                        signature,
+                        digest,
+                    }
+                } else {
+                    Self::SshInstall {
+                        archive,
+                        signature,
+                        digest,
+                    }
                 })
             }
             (Some("service-install"), [installation])
@@ -78,6 +95,16 @@ impl<'a> Request<'a> {
             _ => Err(ServerError::Protocol),
         }
     }
+}
+
+/// Verify and retain one exact signed candidate for this account's installation store.
+fn stage(
+    service: &Service,
+    archive: &Path,
+    signature: &Path,
+    digest: &str,
+) -> Result<RetainedInstallation, ServerError> {
+    service.provision_candidate(archive, signature, digest, 1, &["workspace_policy"])
 }
 
 fn run() -> Result<ExitCode, cli::Error> {
@@ -96,6 +123,8 @@ fn run() -> Result<ExitCode, cli::Error> {
                ssh-connect IDENTITY                        Carry protocol over non-PTY stdio\n\
                ssh-prepare IDENTITY                        Start approved service, preserving Stop\n\
                ssh-install IDENTITY ARCHIVE SIGNATURE SHA256\n\
+               ssh-stage IDENTITY ARCHIVE SIGNATURE SHA256 Retain a verified candidate only\n\
+               ssh-maintain IDENTITY                       Answer one maintenance request over stdio\n\
                ssh-enable-linger IDENTITY                  Try account boot authorization without prompting\n\
                ssh-enable-linger-password IDENTITY         Authorize account boot using standard input\n\
                --version | --build-info | --check | --help",
@@ -126,6 +155,18 @@ fn run() -> Result<ExitCode, cli::Error> {
         check::run()?;
         return Ok(ExitCode::SUCCESS);
     }
+    if args
+        .first()
+        .is_some_and(|command| command == "ssh-maintain")
+    {
+        return maintenance::run(
+            IDENTITY,
+            &args,
+            &mut std::io::stdin().lock(),
+            &mut std::io::stdout().lock(),
+        )
+        .map(ExitCode::from);
+    }
     if args.first().is_some_and(|command| {
         command.as_encoded_bytes().starts_with(b"service-")
             && command != "service-install"
@@ -153,14 +194,29 @@ fn run() -> Result<ExitCode, cli::Error> {
             digest,
         } => {
             let service = Service::for_identity(IDENTITY)?;
-            let candidate = service.provision_candidate(
+            let candidate = stage(&service, archive, signature, digest)?;
+            service.install(&candidate.directory)?;
+        }
+        Request::SshStage {
+            archive,
+            signature,
+            digest,
+        } => {
+            // Staging retains the verified candidate only. It installs, activates and starts
+            // nothing, so the approved runtime and its Terminal Sessions continue.
+            let candidate = stage(
+                &Service::for_identity(IDENTITY)?,
                 archive,
                 signature,
                 digest,
-                1,
-                &["workspace_policy"],
             )?;
-            service.install(&candidate.directory)?;
+            let reply = Reply::Staged {
+                candidate: RemoteBuild::describe(&candidate)?,
+            };
+            println!(
+                "{}",
+                serde_json::to_string(&reply).map_err(|_| ServerError::Protocol)?
+            );
         }
         Request::SshEnableLinger(authorization) => {
             Service::for_identity(IDENTITY)?.enable_linger(authorization)?
@@ -267,5 +323,61 @@ mod tests {
             let args: Vec<_> = malformed.into_iter().map(OsString::from).collect();
             assert!(matches!(Request::parse(&args), Err(ServerError::Protocol)));
         }
+    }
+
+    #[test]
+    fn staging_and_maintenance_require_the_compiled_identity_and_their_exact_arguments() {
+        let args = ["ssh-stage", IDENTITY, "/archive", "/signature", "sha256"].map(OsString::from);
+        assert!(matches!(
+            Request::parse(&args),
+            Ok(Request::SshStage { digest, .. }) if digest == "sha256"
+        ));
+        let args =
+            ["ssh-install", IDENTITY, "/archive", "/signature", "sha256"].map(OsString::from);
+        assert!(matches!(
+            Request::parse(&args),
+            Ok(Request::SshInstall { digest, .. }) if digest == "sha256"
+        ));
+        for malformed in [
+            vec!["ssh-stage", IDENTITY],
+            vec![
+                "ssh-stage",
+                "foreign-identity",
+                "/archive",
+                "/signature",
+                "sha256",
+            ],
+            vec!["ssh-stage", IDENTITY, "--archive", "/signature", "sha256"],
+            vec![
+                "ssh-stage",
+                IDENTITY,
+                "/archive",
+                "/signature",
+                "sha256",
+                "extra",
+            ],
+            vec!["ssh-maintain", IDENTITY, "--confirm"],
+            vec!["ssh-maintain", "foreign-identity"],
+        ] {
+            let malformed: Vec<_> = malformed.into_iter().map(OsString::from).collect();
+            assert!(matches!(
+                Request::parse(&malformed),
+                Err(ServerError::Protocol)
+            ));
+        }
+    }
+
+    #[test]
+    fn a_maintenance_request_for_another_identity_is_refused_as_one_reply() {
+        let args = ["ssh-maintain", "foreign-identity"].map(OsString::from);
+        let mut output = Vec::new();
+        assert_eq!(
+            maintenance::run(IDENTITY, &args, &mut &b"{}"[..], &mut output),
+            Ok(0)
+        );
+        assert_eq!(
+            serde_json::from_slice::<Reply>(&output).unwrap(),
+            Reply::Refused(spaceterm_server::service::maintenance::MaintenanceRefusal::Protocol)
+        );
     }
 }
