@@ -665,7 +665,13 @@ impl crate::ssh::server_process::SshServerBootstrap for UnixSshProcessAdapter {
     }
     /// This script selects only the approved digest in a fixed account/build namespace.
     /// It never evaluates a path or an endpoint supplied by the remote protocol.
-    fn locator(&self, identity: &str, action: &str, missing: bool) -> String {
+    fn locator(
+        &self,
+        identity: &str,
+        action: &str,
+        missing: bool,
+        arguments: &[crate::ssh::command::ValidatedRemoteServerArgument],
+    ) -> String {
         let mut script = format!(
             r#"set -eu
 PATH=/usr/bin:/bin:/usr/sbin:/sbin
@@ -708,10 +714,15 @@ case "$digest" in *[!0-9a-f]*) exit 74;; esac
 [ ! -L "$root/installations" ] && [ ! -L "$root/installations/$digest" ] && [ ! -L "$root/installations/$digest/bin" ] && [ ! -L "$root/installations/$digest/bin/spaceterm-server" ] || exit 74
 "#);
         script.push_str(&format!(
-            "exec \"$root/installations/$digest/bin/spaceterm-server\" {} {}\n",
+            "exec \"$root/installations/$digest/bin/spaceterm-server\" {} {}",
             quote(action),
             quote(identity)
         ));
+        for argument in arguments {
+            script.push(' ');
+            script.push_str(&quote(argument.as_str()));
+        }
+        script.push('\n');
         script
     }
     fn install(

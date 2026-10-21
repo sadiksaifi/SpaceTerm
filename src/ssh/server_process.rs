@@ -14,7 +14,10 @@ use spaceterm_server::{
 
 use super::askpass::AskPassAttemptFactory;
 use super::cancellation::SshCancellationToken;
-use super::command::{OpenSshExecutable, SshCommandContext, ValidatedRemoteShellCommand};
+use super::command::{
+    OpenSshExecutable, SshCommandContext, ValidatedRemoteServerArgument,
+    ValidatedRemoteShellCommand,
+};
 use super::control_connection::{
     ControlConnectionState, ControlConnectionTiming, OpenSshControlConnection,
 };
@@ -492,6 +495,7 @@ impl<A: SshProcessAdapter> NativeRoute<A> {
             identity(),
             "ssh-prepare",
             false,
+            &[],
         ))?;
         capability
             .authorize()
@@ -522,7 +526,7 @@ impl<A: SshProcessAdapter> NativeRoute<A> {
             &self
                 .config
                 .bootstrap
-                .locator(identity(), "ssh-discover", true),
+                .locator(identity(), "ssh-discover", true, &[]),
             Vec::new(),
             OBSERVATION,
             cancellation,
@@ -661,7 +665,7 @@ impl<A: SshProcessAdapter> AccountConnector for NativeConnector<A> {
                 &route
                     .config
                     .bootstrap
-                    .locator(identity(), "ssh-connect", false),
+                    .locator(identity(), "ssh-connect", false, &[]),
             )
             .map_err(|_| ServerError::NotRunning)?;
         capability
@@ -1128,7 +1132,13 @@ fn map_server_error(error: ServerError) -> SshConnectFailure {
 /// Native shell construction only; policy owns admission and verified artifact bytes.
 pub(crate) trait SshServerBootstrap: Send + Sync {
     fn key_public(&self, path: &std::path::Path) -> Option<super::command::SshCommandSpec>;
-    fn locator(&self, identity: &str, action: &str, missing: bool) -> String;
+    fn locator(
+        &self,
+        identity: &str,
+        action: &str,
+        missing: bool,
+        arguments: &[ValidatedRemoteServerArgument],
+    ) -> String;
     fn install(
         &self,
         identity: &str,
@@ -1142,6 +1152,62 @@ pub(crate) trait SshServerBootstrap: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A remote server command carries only values this build composes, each quoted as data.
+    #[test]
+    fn a_remote_server_command_carries_only_fixed_names_and_client_values() {
+        let digest = "0123456789abcdef".repeat(4);
+        assert_eq!(
+            ValidatedRemoteServerArgument::bytes([0xab; 32]).as_str(),
+            "ab".repeat(32)
+        );
+        assert!(ValidatedRemoteServerArgument::hexadecimal(&digest).is_ok());
+        for refused in [
+            digest.to_uppercase(),
+            digest[..63].to_owned(),
+            format!("{digest}0"),
+            "g".repeat(64),
+            String::new(),
+        ] {
+            assert!(
+                ValidatedRemoteServerArgument::hexadecimal(&refused).is_err(),
+                "accepted {refused}"
+            );
+        }
+        for refused in ["", "ssh maintain", "Resolve", "resolve;rm", &"a".repeat(33)] {
+            assert!(
+                ValidatedRemoteServerArgument::name(refused).is_err(),
+                "accepted {refused}"
+            );
+        }
+
+        let script = crate::platform::unix_ssh_process::UnixSshProcessAdapter.locator(
+            identity(),
+            "ssh-maintain",
+            false,
+            &[
+                ValidatedRemoteServerArgument::name("resolve").unwrap(),
+                ValidatedRemoteServerArgument::hexadecimal(&digest).unwrap(),
+            ],
+        );
+        assert!(
+            script.ends_with(&format!(
+                "exec \"$root/installations/$digest/bin/spaceterm-server\" 'ssh-maintain' '{}' \
+                 'resolve' '{digest}'\n",
+                identity()
+            )),
+            "{script}"
+        );
+        assert!(
+            crate::platform::unix_ssh_process::UnixSshProcessAdapter
+                .locator(identity(), "ssh-discover", true, &[])
+                .ends_with(&format!(
+                    "exec \"$root/installations/$digest/bin/spaceterm-server\" 'ssh-discover' \
+                     '{}'\n",
+                    identity()
+                ))
+        );
+    }
 
     #[test]
     fn bounded_discovery_refuses_wrong_build_and_unsupported_capability() {
