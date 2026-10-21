@@ -1002,7 +1002,18 @@ fn start_submission(
     // One entry keeps one original, and an unresolved original's record is the only thing that
     // could still say what it did. So a second submission is refused rather than retained over
     // it: nothing is dispatched, and nothing reached the other computer.
-    if let Some(submitted) = &state.entries[index].submitted {
+    //
+    // A resolved original is not that: its outcome is validated and already held here, so its
+    // record can say nothing this client does not know. Returning to the previous version after
+    // a failed update is submitted from exactly that state, so refusing it would take away the
+    // only step that recovers the server.
+    let settled = matches!(
+        state.entries[index].state,
+        RemoteOperationState::Resolved { .. }
+    );
+    if let Some(submitted) = &state.entries[index].submitted
+        && !settled
+    {
         let kind = submitted.kind.clone();
         state.entries[index].state = RemoteOperationState::Failed {
             failure: SshMaintenanceFailure::NotRetained,
@@ -2720,6 +2731,40 @@ mod tests {
         assert!(
             script.applied.lock().unwrap().len() == 1,
             "dismissing sends nothing"
+        );
+    }
+
+    /// A settled original must not block the next one. Returning to the previous version after a
+    /// failed update is submitted from exactly that state, so refusing it there would take away
+    /// the only step that recovers the server.
+    #[test]
+    fn a_settled_original_gives_way_to_the_next_submission() {
+        let script = Arc::new(Script::default());
+        let records = Arc::new(Records::default());
+        let (owner, _, _) = submit(
+            &script,
+            &records,
+            Ok(outcome(OperationResolution::Completed)),
+        );
+        eventually(|| {
+            matches!(
+                owner.state(&destination()),
+                RemoteOperationState::Resolved { .. }
+            )
+        });
+
+        owner.start(&destination());
+
+        eventually(|| script.applied.lock().unwrap().len() == 2);
+        assert!(
+            !matches!(
+                owner.state(&destination()),
+                RemoteOperationState::Failed {
+                    failure: SshMaintenanceFailure::NotRetained,
+                    ..
+                }
+            ),
+            "a settled original does not refuse the step the person just chose"
         );
     }
 
