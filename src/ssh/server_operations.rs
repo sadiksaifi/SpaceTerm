@@ -343,6 +343,26 @@ impl SshServerOperations {
         owner
     }
 
+    /// Takes the entry a retirement is about, so no exchange is admitted while the record is
+    /// being retired. A retirement that lost its entry would retire the record and leave the
+    /// original in place, and a later outcome would write that record back.
+    fn claim_for_retirement(
+        &self,
+        matching: impl Fn(&Entry) -> bool,
+    ) -> Option<(SshDestination, u64, [u8; 32])> {
+        let mut state = self.inner.state.lock().ok()?;
+        let index = state
+            .entries
+            .iter()
+            .position(|entry| !entry.running && entry.submitted.is_some() && matching(entry))?;
+        let generation = next_generation(&mut state);
+        let entry = &mut state.entries[index];
+        entry.generation = generation;
+        entry.running = true;
+        let operation = entry.submitted.as_ref()?.operation;
+        Some((entry.destination.clone(), generation, operation))
+    }
+
     /// Finds the entry that admits new work for `destination`, creating it when the registry
     /// knows the identity an exchange must bind. A removed entry admits no new work, and an
     /// identity this client has never validated asks the person to connect instead of guessing.
@@ -645,26 +665,10 @@ impl RemoteServerOperations for SshServerOperations {
     }
 
     fn acknowledge(&self, handle: RemoteOperationHandle) {
-        let acknowledged = {
-            let Ok(state) = self.inner.state.lock() else {
-                return;
-            };
-            state
-                .entries
-                .iter()
-                .find(|entry| {
-                    matches!(entry.state, RemoteOperationState::Resolved { handle: named, .. }
-                        if named == handle)
-                })
-                .and_then(|entry| {
-                    Some((
-                        entry.destination.clone(),
-                        entry.generation,
-                        entry.submitted.as_ref()?.operation,
-                    ))
-                })
-        };
-        let Some((destination, generation, operation)) = acknowledged else {
+        let Some((destination, generation, operation)) = self.claim_for_retirement(|entry| {
+            matches!(entry.state, RemoteOperationState::Resolved { handle: named, .. }
+                    if named == handle)
+        }) else {
             return;
         };
         let owner = Arc::downgrade(&self.inner);
@@ -674,24 +678,19 @@ impl RemoteServerOperations for SshServerOperations {
             .name("spaceterm-ssh-operation".into())
             .spawn(move || match store.retire(operation) {
                 // The result is retired with its record, so relaunch never presents it again.
-                Ok(()) => {
-                    update(&inner, &destination, generation, |state, index| {
-                        let entry = &mut state.entries[index];
-                        entry.submitted = None;
-                        if entry.removed {
-                            state.entries.remove(index);
-                        } else {
-                            entry.state = entry
-                                .facts
-                                .clone()
-                                .map_or(RemoteOperationState::Unread, |facts| {
-                                    RemoteOperationState::Read(Box::new(facts))
-                                });
-                        }
-                    });
-                }
+                Ok(()) => retired(&inner, &destination, generation, |entry| {
+                    entry.state = entry
+                        .facts
+                        .clone()
+                        .map_or(RemoteOperationState::Unread, |facts| {
+                            RemoteOperationState::Read(Box::new(facts))
+                        });
+                }),
                 // An unretired record still awaits acknowledgement, so the result stays.
-                Err(error) => note_storage(&inner, Some(error)),
+                Err(error) => {
+                    note_storage(&inner, Some(error));
+                    release_claim(&inner, &destination, generation);
+                }
             })
             .is_err()
         {
@@ -724,19 +723,14 @@ impl RemoteServerOperations for SshServerOperations {
             .name("spaceterm-ssh-operation".into())
             .spawn(move || match store.retire(operation) {
                 // The original is forgotten with its record, so relaunch never reads it again.
-                Ok(()) => {
-                    update(&inner, &destination, generation, |state, index| {
-                        let entry = &mut state.entries[index];
-                        entry.submitted = None;
-                        if entry.removed {
-                            state.entries.remove(index);
-                        } else {
-                            entry.state = RemoteOperationState::Unread;
-                        }
-                    });
-                }
+                Ok(()) => retired(&inner, &destination, generation, |entry| {
+                    entry.state = RemoteOperationState::Unread;
+                }),
                 // An unretired record is still followed, so the original stays.
-                Err(error) => note_storage(&inner, Some(error)),
+                Err(error) => {
+                    note_storage(&inner, Some(error));
+                    release_claim(&inner, &destination, generation);
+                }
             })
             .is_err()
         {
@@ -1353,6 +1347,37 @@ fn await_outcome(
         let result = retain_record(inner, store, destination, generation, client);
         note_storage(inner, result.err());
     }
+}
+
+/// Applies a retirement to the entry it claimed. The record is already gone, so a change that
+/// cannot be applied is reported rather than dropped: leaving the original in place would let a
+/// later outcome write the retired record back.
+fn retired(
+    inner: &Weak<Inner>,
+    destination: &SshDestination,
+    generation: u64,
+    present: impl FnOnce(&mut Entry),
+) {
+    let applied = update(inner, destination, generation, |state, index| {
+        let entry = &mut state.entries[index];
+        entry.submitted = None;
+        entry.running = false;
+        if entry.removed {
+            state.entries.remove(index);
+        } else {
+            present(entry);
+        }
+    });
+    if !applied {
+        note_storage(inner, Some(SshIntentStoreError::Unavailable));
+    }
+}
+
+/// Returns a claimed entry to the state it was in, for a retirement that did not happen.
+fn release_claim(inner: &Weak<Inner>, destination: &SshDestination, generation: u64) {
+    update(inner, destination, generation, |state, index| {
+        state.entries[index].running = false;
+    });
 }
 
 /// Presents the facts the last validated read found.
@@ -2266,6 +2291,50 @@ mod tests {
         owner.acknowledge(handle);
         std::thread::sleep(Duration::from_millis(30));
         assert_eq!(owner.entries().len(), 1);
+    }
+
+    /// A retirement takes the entry it is about, so an exchange admitted at the same moment
+    /// cannot leave the record retired and the original in place for a later outcome to write
+    /// back.
+    #[test]
+    fn a_retirement_in_flight_admits_no_other_exchange() {
+        let script = Arc::new(Script::default());
+        let records = Arc::new(Records::default());
+        let (owner, _, _) = submit(
+            &script,
+            &records,
+            Ok(outcome(OperationResolution::Completed)),
+        );
+        let handle = resolved(owner.as_ref());
+        *records.fails.lock().unwrap() = Some(SshIntentStoreError::Unavailable);
+
+        owner.acknowledge(handle);
+        // The refused retirement leaves the result waiting and the entry free again.
+        eventually(|| records.refused.load(Ordering::SeqCst) == 1);
+        eventually(|| {
+            matches!(
+                owner.state(&destination()),
+                RemoteOperationState::Resolved { .. }
+            )
+        });
+
+        // A read admitted while a retirement runs would bump the generation and strand it.
+        *records.fails.lock().unwrap() = None;
+        script.observes(Ok(facts()));
+        owner.acknowledge(handle);
+        owner.refresh(&destination());
+        eventually(|| records.operations.lock().unwrap().is_empty());
+        eventually(|| {
+            !matches!(
+                owner.state(&destination()),
+                RemoteOperationState::Resolved { .. }
+            )
+        });
+        std::thread::sleep(Duration::from_millis(40));
+        assert!(
+            records.operations.lock().unwrap().is_empty(),
+            "a retired record must not be written back"
+        );
     }
 
     /// A destination that now reaches another computer can never answer about the original it
