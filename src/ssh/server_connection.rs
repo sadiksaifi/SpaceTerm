@@ -417,6 +417,16 @@ impl SshServerConnections {
                 .and_then(|entry| entry.last_facts.clone())
         })
     }
+    /// The identity the latest admitted connection validated, which one maintenance operation
+    /// binds before dispatch. `None` until a connection has been admitted for this destination.
+    pub(crate) fn continuity(&self, destination: &SshDestination) -> Option<SshServerContinuity> {
+        self.inner.state.lock().ok().and_then(|state| {
+            state
+                .entries
+                .get(destination.as_str())
+                .and_then(|entry| entry.continuity.clone())
+        })
+    }
     pub(crate) fn server(&self, destination: &SshDestination) -> Option<LocalServer> {
         self.inner.state.lock().ok().and_then(|state| {
             state
@@ -747,7 +757,8 @@ fn update(
     notify(&mut state);
     true
 }
-fn wait(cancellation: &SshCancellationToken, duration: Duration) -> bool {
+/// Waits for `duration` unless cancellation ends it first, and reports whether it ran out.
+pub(super) fn wait(cancellation: &SshCancellationToken, duration: Duration) -> bool {
     let deadline = Instant::now() + duration;
     while !cancellation.is_cancelled() && Instant::now() < deadline {
         std::thread::sleep(
