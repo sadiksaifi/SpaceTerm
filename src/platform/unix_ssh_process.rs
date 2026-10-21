@@ -211,10 +211,10 @@ fn signal_group(
     #[cfg(target_os = "macos")]
     if error.raw_os_error() == Some(libc::EPERM)
         && process.observe_status(true).ok().flatten().is_some()
-        && retained_leader_is_only_group_member(process.process_group)
+        && retained_group_has_only_zombies(process.process_group)
     {
-        // macOS reports EPERM when a group's only member is its zombie leader. Prove that
-        // exact state rather than suppressing a permission failure for a live descendant.
+        // macOS reports EPERM when every group member is a zombie. Prove that state rather
+        // than suppressing a permission failure for a live descendant.
         return Ok(());
     }
     if error.raw_os_error() == Some(libc::ESRCH) {
@@ -225,21 +225,72 @@ fn signal_group(
 }
 
 #[cfg(target_os = "macos")]
-fn retained_leader_is_only_group_member(leader: libc::pid_t) -> bool {
-    // PROC_PGRP_ONLY from sys/proc_info.h. Two slots distinguish the known leader from a
-    // group with any additional member, without enumerating or polling the process tree.
+fn retained_group_has_only_zombies(leader: libc::pid_t) -> bool {
+    let Some(members) = process_group_members(leader) else {
+        return false;
+    };
+    if !members.contains(&leader) {
+        return false;
+    }
+    let exited = members.iter().all(|member| {
+        let mut information = MaybeUninit::<libc::proc_bsdinfo>::zeroed();
+        let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+        // SAFETY: proc_pidinfo writes at most size bytes into this valid structure. Process
+        // identities here are observed only; no descendant PID is ever used for signalling.
+        let bytes = unsafe {
+            libc::proc_pidinfo(
+                *member,
+                libc::PROC_PIDTBSDINFO,
+                0,
+                information.as_mut_ptr().cast(),
+                size,
+            )
+        };
+        if bytes != size {
+            return bytes == 0 && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
+        }
+        // SAFETY: proc_pidinfo returned the complete initialized BSD information structure.
+        let information = unsafe { information.assume_init() };
+        information.pbi_pid == *member as u32
+            && information.pbi_pgid == leader as u32
+            && information.pbi_status == libc::SZOMB
+    });
+    // A member could finish a fork while membership was being read. Once the observed
+    // members are all dead, reject any later member rather than guessing its state.
+    exited
+        && process_group_members(leader)
+            .is_some_and(|current| current.iter().all(|member| members.contains(member)))
+}
+
+#[cfg(target_os = "macos")]
+fn process_group_members(leader: libc::pid_t) -> Option<Vec<libc::pid_t>> {
+    // PROC_PGRP_ONLY from sys/proc_info.h.
     const PROC_PGRP_ONLY: u32 = 2;
-    let mut members = [0 as libc::pid_t; 2];
-    // SAFETY: proc_listpids writes at most the size of this live fixed-size buffer.
+    let width = std::mem::size_of::<libc::pid_t>();
+    // SAFETY: a null buffer queries the required byte count without writing memory.
+    let size =
+        unsafe { libc::proc_listpids(PROC_PGRP_ONLY, leader as u32, std::ptr::null_mut(), 0) };
+    let count = usize::try_from(size)
+        .ok()?
+        .checked_div(width)?
+        .checked_add(1)?;
+    let mut members = vec![0; count];
+    let capacity = libc::c_int::try_from(std::mem::size_of_val(members.as_slice())).ok()?;
+    // SAFETY: proc_listpids writes at most capacity bytes into this live PID buffer.
     let bytes = unsafe {
         libc::proc_listpids(
             PROC_PGRP_ONLY,
             leader as u32,
             members.as_mut_ptr().cast(),
-            std::mem::size_of_val(&members) as libc::c_int,
+            capacity,
         )
     };
-    bytes == std::mem::size_of::<libc::pid_t>() as libc::c_int && members[0] == leader
+    let bytes = usize::try_from(bytes).ok()?;
+    if bytes >= capacity as usize || bytes % width != 0 {
+        return None;
+    }
+    members.truncate(bytes / width);
+    Some(members)
 }
 
 #[cfg(all(test, feature = "native-tests"))]
@@ -455,6 +506,42 @@ mod tests {
         adapter.reap(spawned.into_process()).unwrap();
 
         assert!(exit.is_some_and(ProcessExit::is_success));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn reaping_a_group_with_multiple_zombies_should_succeed() {
+        let adapter = UnixSshProcessAdapter;
+        let mut spawned = adapter.spawn(shell_request("exec /bin/sleep 30")).unwrap();
+        let group = spawned.process_mut().process_group;
+        let mut member = Command::new("/bin/sh")
+            .args(["-c", "exit 7"])
+            .env_clear()
+            .process_group(group)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut information = MaybeUninit::<libc::siginfo_t>::zeroed();
+        // SAFETY: this child belongs to the test. Retain its zombie in the owned group until
+        // after adapter cleanup, so the all-exited group state does not depend on launchd.
+        let waitable = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                member.id() as libc::id_t,
+                information.as_mut_ptr(),
+                libc::WEXITED | libc::WNOWAIT,
+            )
+        };
+        let signal = adapter.signal(spawned.process_mut(), ProcessSignal::Kill);
+        let cleanup = adapter.reap(spawned.into_process());
+        let exit = member.wait().unwrap();
+
+        assert_eq!(waitable, 0);
+        assert_eq!(exit.code(), Some(7));
+        signal.unwrap();
+        cleanup.unwrap();
     }
 
     #[test]
