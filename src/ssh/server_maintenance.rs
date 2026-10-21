@@ -1052,4 +1052,64 @@ mod tests {
             );
         }
     }
+
+    /// Reading a server's maintenance state starts, stages and installs nothing, so remote Check
+    /// Status keeps its behavior and a deliberately stopped server stays stopped.
+    #[gpui::test]
+    fn observing_a_stopped_server_reads_it_without_starting_it(cx: &mut gpui::TestAppContext) {
+        let stopped = AccountDiscovery {
+            running: false,
+            stopped: true,
+            ..discovery(SERVER)
+        };
+        let account = account(stopped, Reply::Facts(facts()));
+        let (backend, _) = backend(cx.background_executor.clone(), account.clone(), artifacts());
+
+        let observed = backend.observe(
+            &target(bound()),
+            MaintenanceAuthority::Requested,
+            &SshCancellationToken::default(),
+            &silent,
+        );
+
+        assert_eq!(observed.ok().map(|facts| facts.server), Some(SERVER));
+        for effect in ["ssh-prepare", "ssh-stage", "ssh-install", "start", "apply"] {
+            assert_eq!(account.ran(effect), 0, "observing asked for {effect}");
+        }
+        assert_eq!(account.ran("observe"), 1);
+    }
+
+    /// Releasing ends only a route maintenance alone holds, together with its processes. The next
+    /// background exchange finds no route to reuse and waits for the person.
+    #[gpui::test]
+    fn releasing_ends_the_route_maintenance_alone_holds(cx: &mut gpui::TestAppContext) {
+        let account = account(discovery(SERVER), Reply::Facts(facts()));
+        let (backend, prompts) =
+            backend(cx.background_executor.clone(), account.clone(), artifacts());
+        let observe = |authority| {
+            backend.observe(
+                &target(bound()),
+                authority,
+                &SshCancellationToken::default(),
+                &silent,
+            )
+        };
+        assert!(observe(MaintenanceAuthority::Requested).is_ok());
+
+        backend.release(&target(bound()).destination);
+
+        assert!(matches!(
+            observe(MaintenanceAuthority::Quiet),
+            Err(SshMaintenanceFailure::NeedsPerson(_))
+        ));
+        assert!(observe(MaintenanceAuthority::Requested).is_ok());
+        assert_eq!(
+            prompts.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "a released route is acquired again only when the person asks"
+        );
+        // Releasing a destination with no route of its own leaves nothing to end.
+        backend.release(&target(bound()).destination);
+        backend.release(&SshDestination::new("other-host".into()).unwrap());
+    }
 }
