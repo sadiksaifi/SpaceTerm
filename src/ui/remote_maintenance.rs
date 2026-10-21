@@ -905,23 +905,52 @@ fn failed(
             vec![resolve.unwrap_or(RemoteAction::Check)],
             false,
         ),
-        SshMaintenanceFailure::Refused(reason) => (
-            Some("Refused"),
-            selector(row, "refused"),
-            failure(format!(
-                "{} Nothing changed on {machine}.",
-                refusal(reason, machine)
-            )),
-            vec![RemoteAction::Check],
-            false,
-        ),
-        SshMaintenanceFailure::Incompatible(kind) => (
-            Some("Incompatible"),
-            selector(row, "incompatible"),
-            failure(incompatibility(kind, machine)),
-            vec![RemoteAction::Check],
-            false,
-        ),
+        // A refusal or an incompatibility that ended an attempt to resolve a submitted operation
+        // says nothing about what that operation did on the machine, so it keeps the one step
+        // that settles it and claims nothing about its effect.
+        SshMaintenanceFailure::Refused(reason) => match kind {
+            Some(submitted) => (
+                Some("Refused"),
+                selector(row, "refused-unresolved"),
+                failure(format!(
+                    "{} {}",
+                    refusal(reason, machine),
+                    unsettled(machine, submitted)
+                )),
+                vec![resolve_action(submitted)],
+                false,
+            ),
+            None => (
+                Some("Refused"),
+                selector(row, "refused"),
+                failure(format!(
+                    "{} Nothing changed on {machine}.",
+                    refusal(reason, machine)
+                )),
+                vec![RemoteAction::Check],
+                false,
+            ),
+        },
+        SshMaintenanceFailure::Incompatible(incompatible) => match kind {
+            Some(submitted) => (
+                Some("Incompatible"),
+                selector(row, "incompatible-unresolved"),
+                failure(format!(
+                    "{} {}",
+                    incompatible_cause(incompatible, machine),
+                    unsettled(machine, submitted)
+                )),
+                vec![resolve_action(submitted)],
+                false,
+            ),
+            None => (
+                Some("Incompatible"),
+                selector(row, "incompatible"),
+                failure(incompatibility(incompatible, machine)),
+                vec![RemoteAction::Check],
+                false,
+            ),
+        },
         SshMaintenanceFailure::Unavailable(kind) => (
             Some("Unavailable"),
             selector(row, "unavailable"),
@@ -1001,6 +1030,18 @@ const fn resolve_action(kind: &SubmittedKind) -> RemoteAction {
         SubmittedKind::Update { .. } | SubmittedKind::Return => RemoteAction::Finish,
         SubmittedKind::Start | SubmittedKind::Service(_) => RemoteAction::CheckAgain,
     }
+}
+
+/// Says that a submitted operation is still unsettled, and names the one step that settles it.
+/// It asserts nothing about what that operation did, which this client cannot know until the
+/// machine answers for it.
+fn unsettled(machine: &str, kind: &SubmittedKind) -> String {
+    format!(
+        "SpaceTerm can\u{2019}t tell whether {machine} {}. Choose {} to ask for the result; it \
+         isn\u{2019}t asked to do it again.",
+        did(kind),
+        plain(resolve_action(kind).label())
+    )
 }
 
 /// A label without its trailing ellipsis, for use inside a sentence.
@@ -1244,22 +1285,33 @@ fn refusal(reason: MaintenanceRefusal, machine: &str) -> String {
     }
 }
 
-fn incompatibility(kind: IncompatibilityKind, machine: &str) -> String {
+/// Why SpaceTerm and the server for this account cannot work together. It says nothing about what
+/// that server is doing, so a sentence about an operation already dispatched can use it.
+fn incompatible_cause(kind: IncompatibilityKind, machine: &str) -> String {
     match kind {
         IncompatibilityKind::Protocol => format!(
             "SpaceTerm and the server for this account on {machine} have no protocol version in \
-             common, so SpaceTerm sent nothing. The server and its Terminal Sessions keep running."
+             common, so SpaceTerm sent nothing."
         ),
         IncompatibilityKind::Capability => format!(
             "The server for this account on {machine} doesn\u{2019}t support a feature this \
-             SpaceTerm requires, so SpaceTerm sent nothing. The server and its Terminal Sessions \
-             keep running."
+             SpaceTerm requires, so SpaceTerm sent nothing."
         ),
         IncompatibilityKind::Platform => format!(
-            "SpaceTerm has no verified server for {machine}\u{2019}s operating system or \
-             processor. Nothing was installed."
+            "SpaceTerm has no verified server for {machine}\u{2019}s operating system or processor."
         ),
     }
+}
+
+/// The incompatibility of a server nothing was submitted to, which leaves it as it was.
+fn incompatibility(kind: IncompatibilityKind, machine: &str) -> String {
+    let unchanged = match kind {
+        IncompatibilityKind::Protocol | IncompatibilityKind::Capability => {
+            "The server and its Terminal Sessions keep running."
+        }
+        IncompatibilityKind::Platform => "Nothing was installed.",
+    };
+    format!("{} {unchanged}", incompatible_cause(kind, machine))
 }
 
 fn unavailable(kind: UnavailableKind, machine: &str) -> String {

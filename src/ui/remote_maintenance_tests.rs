@@ -270,6 +270,74 @@ fn a_refusal_says_nothing_changed() {
     assert_eq!(service.actions, vec![RemoteAction::Acknowledge]);
 }
 
+/// A refusal or an incompatibility that ends an attempt to resolve an operation already
+/// dispatched says nothing about what that operation did, and keeps the one step that settles it.
+/// Only a state with nothing submitted promises that nothing changed.
+#[test]
+fn a_refused_resolution_keeps_the_original_it_was_resolving() {
+    for failure in [
+        SshMaintenanceFailure::Refused(MaintenanceRefusal::Unsupported),
+        SshMaintenanceFailure::Incompatible(IncompatibilityKind::Capability),
+    ] {
+        let state = |kind| RemoteOperationState::Failed { failure, kind };
+        let stop = state(Some(SubmittedKind::Service(Action::Stop)));
+
+        let submitted = service("penguin", &stop);
+        assert_eq!(
+            submitted.actions,
+            vec![RemoteAction::CheckAgain],
+            "{failure:?} must keep the step that resolves the operation it was resolving"
+        );
+        assert!(
+            !submitted.explanation.contains("Nothing changed"),
+            "{failure:?} must not assert what a dispatched operation did, got {:?}",
+            submitted.explanation
+        );
+        assert!(
+            submitted
+                .explanation
+                .contains("can\u{2019}t tell whether penguin stopped its server"),
+            "{failure:?} must say the result is still unknown, got {:?}",
+            submitted.explanation
+        );
+        assert!(
+            submitted
+                .explanation
+                .contains("isn\u{2019}t asked to do it again"),
+            "{failure:?} must promise the operation is not repeated, got {:?}",
+            submitted.explanation
+        );
+        assert_eq!(
+            update("penguin", &state(Some(SubmittedKind::Return))).actions,
+            vec![RemoteAction::Finish],
+            "{failure:?} keeps the update journey's own resolving step"
+        );
+        // The step resolves the original without reaching the connection, so a removed
+        // connection holding this state stays listed with it.
+        assert_eq!(
+            removed_actions(&stop, MaintenanceRow::Service),
+            vec![RemoteAction::CheckAgain],
+            "{failure:?} must keep a removed connection's record reachable"
+        );
+
+        // Nothing was submitted, so the refusal is the whole story and a read is the only step.
+        let bare = service("penguin", &state(None));
+        assert_eq!(bare.actions, vec![RemoteAction::Check]);
+        assert_ne!(
+            bare.state_selector, submitted.state_selector,
+            "{failure:?} with an operation submitted reads differently from one without"
+        );
+    }
+    let bare = service(
+        "penguin",
+        &RemoteOperationState::Failed {
+            failure: SshMaintenanceFailure::Refused(MaintenanceRefusal::Unsupported),
+            kind: None,
+        },
+    );
+    assert!(bare.explanation.contains("Nothing changed on penguin"));
+}
+
 /// A failed update offers the return only when the service proved it is safe, and never rolls
 /// back on its own.
 #[test]
@@ -351,6 +419,10 @@ fn a_removed_connection_offers_only_resolving_and_acknowledging() {
         },
         RemoteOperationState::Read(Box::new(facts(status(true, true, false)))),
         RemoteOperationState::Unread,
+        RemoteOperationState::Failed {
+            failure: SshMaintenanceFailure::Refused(MaintenanceRefusal::Unsupported),
+            kind: Some(SubmittedKind::Service(Action::Stop)),
+        },
     ];
 
     for state in &states {
@@ -381,6 +453,11 @@ fn a_removed_connection_offers_only_resolving_and_acknowledging() {
     assert!(
         removed_actions(&states[3], MaintenanceRow::Service).is_empty(),
         "a removed connection offers no read and no new operation"
+    );
+    assert_eq!(
+        removed_actions(&states[5], MaintenanceRow::Service),
+        vec![RemoteAction::CheckAgain],
+        "a refused resolution keeps the step that settles the operation it was resolving"
     );
 }
 
@@ -501,6 +578,16 @@ fn every_state_reads_distinctly() {
         RemoteOperationState::Failed {
             failure: SshMaintenanceFailure::Incompatible(IncompatibilityKind::Protocol),
             kind: None,
+        },
+        RemoteOperationState::Failed {
+            failure: SshMaintenanceFailure::Refused(MaintenanceRefusal::Unsupported),
+            kind: None,
+        },
+        // The same refusal while an operation was already dispatched is a different state: it
+        // cannot promise that nothing changed, and only resolving that operation settles it.
+        RemoteOperationState::Failed {
+            failure: SshMaintenanceFailure::Refused(MaintenanceRefusal::Unsupported),
+            kind: Some(SubmittedKind::Service(Action::Stop)),
         },
     ];
 
