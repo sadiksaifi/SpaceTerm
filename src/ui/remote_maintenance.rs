@@ -1372,7 +1372,7 @@ pub(crate) fn removed_presentation(
             let actions = removed_actions(state, row);
             // Work underway on a removed connection's own original is still something to say,
             // so the entry reports its progress instead of disappearing until it settles.
-            (!actions.is_empty() || presentation.working).then(|| MaintenancePresentation {
+            (!actions.is_empty() || presentation.working).then_some(MaintenancePresentation {
                 actions,
                 ..presentation
             })
