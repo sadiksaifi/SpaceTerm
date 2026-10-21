@@ -145,8 +145,13 @@ fn end_all_sessions_retains_directory_confirmed_between_admission_and_shutdown()
         Some(std::path::Path::new("/"))
     );
     let fresh = start(&mut host, 1, pane);
-    command(&mut host, 1, fresh, "stty -echo; pwd\n");
-    await_text(&mut host, 1, fresh, "/");
+    command(
+        &mut host,
+        1,
+        fresh,
+        "stty -echo; printf '\\nRESTART-DIRECTORY:'; pwd\n",
+    );
+    await_text(&mut host, 1, fresh, "RESTART-DIRECTORY:/");
     host.shutdown().unwrap();
 }
 
