@@ -171,6 +171,15 @@ pub(crate) trait RemoteServerOperations: Send + Sync {
     /// Continues unresolved originals quietly after relaunch, using available noninteractive
     /// authority only. Called once, after a Workspace Window exists.
     fn resume_retained(&self);
+
+    /// Why the last write of this client's retained records did not land, or `None` when every
+    /// write has. A surface reads it to say that acknowledging or discarding did not save,
+    /// instead of leaving a row the person clicked looking inert. An owner that retains nothing
+    /// has nothing to report.
+    #[allow(dead_code, reason = "the Servers surface reads it")]
+    fn persistence_error(&self) -> Option<SshIntentStoreError> {
+        None
+    }
 }
 
 /// One submitted operation as it survives relaunch and saved-connection removal. It holds only
@@ -755,6 +764,14 @@ impl RemoteServerOperations for SshServerOperations {
         }
     }
 
+    fn persistence_error(&self) -> Option<SshIntentStoreError> {
+        self.inner
+            .state
+            .lock()
+            .ok()
+            .and_then(|state| state.persistence_error)
+    }
+
     fn resume_retained(&self) {
         {
             let Ok(mut state) = self.inner.state.lock() else {
@@ -1197,7 +1214,7 @@ fn submit(
         );
     }
     match retain_record(inner, store, destination, generation, client) {
-        Ok(true) => {}
+        Ok(true) => note_storage(inner, None),
         // The exchange no longer owns its entry, so nothing may be dispatched for it.
         Ok(false) => return,
         Err(error) => {
@@ -1385,7 +1402,10 @@ fn retired(
             present(entry);
         }
     });
-    if !applied {
+    if applied {
+        // The record was written, so an earlier write's notice no longer describes storage.
+        note_storage(inner, None);
+    } else {
         note_storage(inner, Some(SshIntentStoreError::Unavailable));
     }
 }
@@ -1944,10 +1964,14 @@ mod tests {
         eventually(|| connections.continuity(&destination()).is_some());
         (connections, intents)
     }
-    fn eventually(mut predicate: impl FnMut() -> bool) {
+    fn eventually(predicate: impl FnMut() -> bool) {
+        eventually_says("the owner did not reach it", predicate);
+    }
+    /// Waits for `predicate`, naming what never happened when it does not.
+    fn eventually_says(expectation: &str, mut predicate: impl FnMut() -> bool) {
         let deadline = Instant::now() + Duration::from_secs(5);
         while !predicate() {
-            assert!(Instant::now() < deadline, "the owner did not reach it");
+            assert!(Instant::now() < deadline, "{expectation}");
             std::thread::sleep(Duration::from_millis(2));
         }
     }
@@ -2308,6 +2332,47 @@ mod tests {
         owner.acknowledge(handle);
         std::thread::sleep(Duration::from_millis(30));
         assert_eq!(owner.entries().len(), 1);
+    }
+
+    /// A record this client could not write leaves the step the person chose with nothing to
+    /// show, so the owner reports the failure and withdraws it once a later write lands.
+    #[test]
+    fn a_record_that_could_not_be_written_is_reported_until_a_later_write_lands() {
+        let script = Arc::new(Script::default());
+        let records = Arc::new(Records::default());
+        let (owner, _, _) = submit(
+            &script,
+            &records,
+            Ok(outcome(OperationResolution::Completed)),
+        );
+        let handle = resolved(owner.as_ref());
+        assert_eq!(owner.persistence_error(), None);
+        let updates = owner.subscribe();
+
+        *records.write_fails.lock().unwrap() = Some(SshIntentStoreError::Unavailable);
+        owner.acknowledge(handle);
+        eventually_says("the failed write is reported", || {
+            owner.persistence_error() == Some(SshIntentStoreError::Unavailable)
+        });
+        assert!(
+            updates.try_recv().is_ok(),
+            "the surface is told, so the row does not stay inert"
+        );
+        assert!(
+            matches!(
+                owner.state(&destination()),
+                RemoteOperationState::Resolved { .. }
+            ),
+            "the unretired result still awaits acknowledgement"
+        );
+
+        // The retirement lands this time, so the notice goes with it.
+        *records.write_fails.lock().unwrap() = None;
+        owner.acknowledge(handle);
+        eventually(|| records.operations.lock().unwrap().is_empty());
+        eventually_says("a write that lands withdraws the notice", || {
+            owner.persistence_error().is_none()
+        });
     }
 
     /// A retirement takes the entry it is about, so an exchange admitted at the same moment
