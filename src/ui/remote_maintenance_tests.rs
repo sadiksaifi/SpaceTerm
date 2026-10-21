@@ -132,11 +132,13 @@ fn a_running_server_offers_the_steps_that_ask_before_ending_its_work() {
         RemoteAction::Restart,
         RemoteAction::Uninstall,
     ] {
-        assert!(action.asks_first(), "{action:?} must ask first");
-        assert!(action.request().is_some());
+        assert!(
+            action.request().is_some(),
+            "{action:?} must describe its change and ask first"
+        );
     }
     assert!(
-        !RemoteAction::Start.asks_first() && RemoteAction::Start.request().is_none(),
+        RemoteAction::Start.request().is_none(),
         "Start ends no work, so it asks nothing"
     );
     assert_eq!(

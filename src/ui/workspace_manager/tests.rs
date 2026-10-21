@@ -12632,6 +12632,277 @@ fn a_machine_headings_menu_should_disconnect_only_its_server(cx: &mut TestAppCon
     ));
 }
 
+/// An operations owner whose state the test sets and whose calls it counts. Nothing here reaches
+/// a computer.
+struct ScriptedMaintenance {
+    state: Mutex<crate::ssh::server_operations::RemoteOperationState>,
+    calls: Mutex<Vec<String>>,
+    changes: (async_channel::Sender<()>, async_channel::Receiver<()>),
+}
+
+impl ScriptedMaintenance {
+    fn new(state: crate::ssh::server_operations::RemoteOperationState) -> std::sync::Arc<Self> {
+        std::sync::Arc::new(Self {
+            state: Mutex::new(state),
+            calls: Mutex::new(Vec::new()),
+            changes: async_channel::unbounded(),
+        })
+    }
+
+    fn calls(&self) -> Vec<String> {
+        self.calls.lock().unwrap().clone()
+    }
+
+    fn record(&self, call: &str) {
+        self.calls.lock().unwrap().push(call.to_owned());
+    }
+}
+
+impl crate::ssh::server_operations::RemoteServerOperations for ScriptedMaintenance {
+    fn subscribe(&self) -> async_channel::Receiver<()> {
+        self.changes.1.clone()
+    }
+
+    fn entries(&self) -> Vec<crate::ssh::server_operations::RemoteOperationEntry> {
+        Vec::new()
+    }
+
+    fn state(
+        &self,
+        _: &crate::domain::SshDestination,
+    ) -> crate::ssh::server_operations::RemoteOperationState {
+        self.state.lock().unwrap().clone()
+    }
+
+    fn refresh(&self, _: &crate::domain::SshDestination) {
+        self.record("refresh");
+    }
+
+    fn describe(
+        &self,
+        _: &crate::domain::SshDestination,
+        request: crate::ssh::server_operations::RemoteMaintenanceRequest,
+    ) {
+        self.record(&format!("describe {request:?}"));
+    }
+
+    fn confirm(&self, _: crate::ssh::server_operations::RemoteOperationHandle) {
+        self.record("confirm");
+    }
+
+    fn start(&self, _: &crate::domain::SshDestination) {
+        self.record("start");
+    }
+
+    fn cancel(&self, _: &crate::domain::SshDestination) {
+        self.record("cancel");
+    }
+
+    fn resume(&self, _: &crate::domain::SshDestination) {
+        self.record("resume");
+    }
+
+    fn acknowledge(&self, _: crate::ssh::server_operations::RemoteOperationHandle) {
+        self.record("acknowledge");
+    }
+
+    fn resume_retained(&self) {
+        self.record("resume retained");
+    }
+}
+
+/// The service facts one validated read found on another machine.
+fn remote_facts(
+    running: bool,
+    stopped: bool,
+) -> crate::local_server::service::maintenance::MaintenanceFacts {
+    crate::local_server::service::maintenance::MaintenanceFacts {
+        server: [2; 32],
+        account: 501,
+        build: "spaceterm-development".to_owned(),
+        status: crate::local_server::service::ServiceStatus {
+            installed: true,
+            enabled: running,
+            running,
+            stopped,
+        },
+        startup: crate::local_server::service::ServiceStartup::AtLogin,
+        approved: Some(crate::local_server::service::maintenance::RemoteBuild {
+            version: "1.4.0".to_owned(),
+            commit: "a".repeat(40),
+            digest: "a".repeat(64),
+        }),
+        activation: None,
+    }
+}
+
+/// Installs the owner and one saved connection for `destination`, so the heading's menu offers
+/// the steps that machine's server state allows.
+fn remote_maintenance(
+    state: crate::ssh::server_operations::RemoteOperationState,
+    destination: &str,
+    cx: &mut VisualTestContext,
+) -> (
+    std::sync::Arc<ScriptedMaintenance>,
+    crate::ssh::server_connection::SshServerConnections,
+) {
+    let operations = ScriptedMaintenance::new(state);
+    let owner = std::sync::Arc::clone(&operations)
+        as std::sync::Arc<dyn crate::ssh::server_operations::RemoteServerOperations>;
+    cx.update(|_, cx| crate::ssh::server_operations::install(owner, cx));
+    let (connections, _connects) = waiting_ssh_registry(cx);
+    connections.connect(crate::domain::SshDestination::new(destination.to_owned()).unwrap());
+    wait_for_person(&connections, destination);
+    (operations, connections)
+}
+
+/// A machine heading offers the steps its server's observed state allows, and only explicit Start
+/// can start a server that was stopped.
+#[gpui::test]
+fn a_machine_heading_should_offer_the_steps_its_server_state_allows(cx: &mut TestAppContext) {
+    use crate::ssh::server_operations::RemoteOperationState;
+
+    let (harness, cx) = MachineGroupsHarness::new(cx);
+    let (operations, _connections) = remote_maintenance(
+        RemoteOperationState::Read(Box::new(remote_facts(true, false))),
+        "penguin",
+        cx,
+    );
+    harness.present_ssh("penguin", &[], cx);
+    redraw(cx);
+
+    right_click("machine-heading-penguin", cx);
+    let running = [
+        "machine-menu-stop",
+        "machine-menu-restart",
+        "machine-menu-update",
+        "machine-menu-uninstall",
+        "machine-menu-start",
+    ]
+    .map(|selector| cx.debug_bounds(selector).is_some());
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    *operations.state.lock().unwrap() =
+        RemoteOperationState::Read(Box::new(remote_facts(false, true)));
+    redraw(cx);
+    right_click("machine-heading-penguin", cx);
+    let stopped = [
+        "machine-menu-start",
+        "machine-menu-uninstall",
+        "machine-menu-stop",
+        "machine-menu-restart",
+    ]
+    .map(|selector| cx.debug_bounds(selector).is_some());
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+
+    assert_eq!(running, [true, true, true, true, false]);
+    assert_eq!(
+        stopped,
+        [true, true, false, false],
+        "only Start reverses a deliberate Stop"
+    );
+    assert!(
+        operations.calls().is_empty(),
+        "presenting the menu asks the machine nothing, got {:?}",
+        operations.calls()
+    );
+}
+
+/// A machine heading reports an operation underway on its server, which outranks the connection
+/// state it would otherwise show.
+#[gpui::test]
+fn a_machine_heading_should_report_an_operation_underway(cx: &mut TestAppContext) {
+    use crate::local_server::service::control::Action;
+    use crate::ssh::server_maintenance::{MaintenancePhase, SubmittedKind};
+    use crate::ssh::server_operations::RemoteOperationState;
+
+    let (harness, cx) = MachineGroupsHarness::new(cx);
+    let (_operations, _connections) = remote_maintenance(
+        RemoteOperationState::Working {
+            phase: MaintenancePhase::Dispatching,
+            kind: Some(SubmittedKind::Service(Action::Stop)),
+            cancellable: false,
+        },
+        "penguin",
+        cx,
+    );
+    harness.present_ssh("penguin", &[], cx);
+    redraw(cx);
+
+    assert!(cx.debug_bounds("machine-heading-status-penguin").is_some());
+    assert_eq!(heading_names(cx), ["This Computer", "penguin, Stopping"]);
+    right_click("machine-heading-penguin", cx);
+    assert!(
+        cx.debug_bounds("machine-menu-stop").is_none(),
+        "nothing is offered while an operation is underway"
+    );
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+}
+
+/// Choosing a step from the heading opens the Servers Settings Section on that machine and takes
+/// the step there, where it describes its change before anything is sent.
+#[gpui::test]
+fn a_machine_headings_step_should_describe_its_change_in_settings(cx: &mut TestAppContext) {
+    use crate::ssh::server_operations::RemoteOperationState;
+
+    let (harness, cx) = MachineGroupsHarness::new(cx);
+    let (operations, _connections) = remote_maintenance(
+        RemoteOperationState::Read(Box::new(remote_facts(true, false))),
+        "penguin",
+        cx,
+    );
+    harness.present_ssh("penguin", &[], cx);
+    let settings = crate::settings::Settings::load(
+        crate::settings::storage::testing::MemoryStorage::with_document(
+            &crate::settings::SettingsDocument::default(),
+        ),
+    );
+    cx.update(|_, cx| {
+        crate::ui::appearance_runtime::install(
+            settings,
+            Rc::new(crate::platform::appearance::testing::RecordingAppearancePlatform::default()),
+            cx,
+        )
+        .expect("appearance runtime should install");
+        crate::ui::settings_window::configure_window_chrome(
+            Rc::new(SettingsMovement),
+            Default::default(),
+            None,
+            cx,
+        );
+    });
+    redraw(cx);
+
+    right_click("machine-heading-penguin", cx);
+    click("machine-menu-stop", cx);
+
+    assert_eq!(
+        operations.calls(),
+        vec!["describe Service(Stop)".to_owned()],
+        "the step describes its change and sends nothing"
+    );
+    let settings_window = cx
+        .windows()
+        .into_iter()
+        .find(|window| {
+            window
+                .downcast::<crate::ui::settings_window::SettingsWindow>()
+                .is_some()
+        })
+        .expect("Settings should open");
+    let mut settings_cx = VisualTestContext::from_window(settings_window, cx);
+    settings_cx.run_until_parked();
+    let selected: Vec<_> = spaceterm_ui::a11y_testing::A11yTree::read(&mut settings_cx)
+        .with_role("ListBoxOption")
+        .into_iter()
+        .filter(|option| option["aria"]["selected"] == true)
+        .filter_map(|option| option["aria"]["label"].as_str().map(str::to_owned))
+        .collect();
+    assert_eq!(selected, ["Servers", "penguin"]);
+}
+
 /// A shared server Workspace presented in this window, with the server Pane its scripted
 /// connection drives. Its Panes reach the same presentation the local Development server's do.
 struct SharedPaneHarness {

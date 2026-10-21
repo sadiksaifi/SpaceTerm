@@ -1850,8 +1850,22 @@ fn new_worktree_button(
         .into_any_element()
 }
 
+/// The icon one maintenance step carries in a machine heading's menu.
+fn maintenance_icon(action: crate::ui::remote_maintenance::RemoteAction) -> IconName {
+    use crate::ui::remote_maintenance::RemoteAction;
+    match action {
+        RemoteAction::Start => IconName::Play,
+        RemoteAction::Stop => IconName::Square,
+        RemoteAction::Restart => IconName::RefreshCw,
+        RemoteAction::Uninstall => IconName::Trash2,
+        RemoteAction::Update => IconName::ArrowDownToLine,
+        RemoteAction::Return => IconName::RotateCcw,
+        _ => IconName::Check,
+    }
+}
+
 /// A machine heading's commands: connecting and disconnecting its SSH server where its status
-/// allows, and the Servers Settings Section.
+/// allows, the maintenance steps its server state allows, and the Servers Settings Section.
 fn machine_menu_entries(section: &MachineSection) -> Vec<MenuEntry<MachineMenuCommand>> {
     let mut entries = Vec::new();
     if section.connects {
@@ -1871,6 +1885,21 @@ fn machine_menu_entries(section: &MachineSection) -> Vec<MenuEntry<MachineMenuCo
                 })
                 .debug_selector("machine-menu-disconnect"),
         );
+    }
+    if !section.maintenance.is_empty() {
+        if !entries.is_empty() {
+            entries.push(MenuEntry::separator());
+        }
+        for action in &section.maintenance {
+            let action = *action;
+            entries.push(
+                MenuEntry::action(action.label(), MachineMenuCommand::Maintenance(action))
+                    .icon(move |foreground, size| {
+                        Icon::new(maintenance_icon(action), size, foreground).into_any_element()
+                    })
+                    .debug_selector(format!("machine-menu-{}", action.name())),
+            );
+        }
     }
     if !section.has_settings {
         return entries;

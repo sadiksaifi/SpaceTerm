@@ -334,6 +334,9 @@ pub(crate) struct WorkspaceManager {
     shared: ServerBindings,
     /// Follows the desktop's SSH server connections while the window lives.
     _ssh_servers: Option<Task<()>>,
+    /// Follows the submitted remote maintenance operations, so each machine heading offers what
+    /// its server's state allows.
+    _remote_maintenance: Option<Task<()>>,
     /// Where the keyboard rests while the window presents no Workspace.
     empty_focus: FocusHandle,
     /// Normal launch of the account-local server this window presents.
@@ -476,11 +479,13 @@ impl WorkspaceManager {
             shared_repositories: shared_repositories::SharedWorkspaceRepositories::default(),
             shared: ServerBindings::default(),
             _ssh_servers: None,
+            _remote_maintenance: None,
             empty_focus: cx.focus_handle(),
             launch: launch::LocalLaunchState::new(local_server),
         };
         manager.run_local_launch(None, window, cx);
         manager.follow_ssh_servers(window, cx);
+        manager.follow_remote_maintenance(window, cx);
         manager
     }
 

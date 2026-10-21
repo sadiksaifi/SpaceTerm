@@ -147,6 +147,17 @@ impl SettingsWindow {
         Some((presentation.explanation, presentation.tone))
     }
 
+    /// Takes one step another surface offered, such as the sidebar machine heading menu. The
+    /// step still runs through the row that owns it, so the row's own rules decide what happens.
+    pub(crate) fn request_remote_maintenance(
+        &mut self,
+        destination: SshDestination,
+        action: RemoteAction,
+        cx: &mut Context<Self>,
+    ) {
+        self.request_maintenance(destination, action.row(), action, cx);
+    }
+
     /// Takes one step from a maintenance row. A step the row no longer offers does nothing, so a
     /// click that arrives after the state changed never acts on the state it was offered for.
     fn request_maintenance(

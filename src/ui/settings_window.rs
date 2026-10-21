@@ -286,6 +286,26 @@ pub(crate) fn open_server_update(cx: &mut App) {
     });
 }
 
+/// Opens Settings on Servers and takes one remote maintenance step there for `destination`, for a
+/// surface that offers these steps elsewhere, such as the sidebar machine heading menu. Every step
+/// that ends work still describes its change and asks before anything is sent.
+pub(crate) fn open_remote_maintenance(
+    destination: crate::domain::SshDestination,
+    action: crate::ui::remote_maintenance::RemoteAction,
+    cx: &mut App,
+) {
+    open_or_activate(Some(SettingsSectionId::Servers), cx);
+    // An existing window selects the section in a deferred update, so the request follows it.
+    cx.defer(move |cx| {
+        if let Some(settings) = open_settings_window(cx) {
+            let _ = settings.update(cx, |settings, _, cx| {
+                settings.select_server(server_list::ServerChoice::Ssh(destination.clone()), cx);
+                settings.request_remote_maintenance(destination, action, cx);
+            });
+        }
+    });
+}
+
 /// Retains Settings until its latest edit is saved, then completes an authorized application quit.
 /// Closes the Settings window the way its own close button does: it saves first and stays open
 /// when saving fails. Reports whether `window` is the Settings window.

@@ -163,15 +163,33 @@ impl RemoteAction {
         SharedString::from(text)
     }
 
-    /// Whether a described change must be reviewed before this step performs anything.
-    pub(crate) const fn asks_first(self) -> bool {
-        matches!(
-            self,
-            Self::Stop | Self::Restart | Self::Uninstall | Self::Update | Self::Return
-        )
+    /// The row that carries this step, for a surface that offers the steps outside the rows.
+    pub(crate) const fn row(self) -> MaintenanceRow {
+        match self {
+            Self::Update | Self::Return | Self::Finish => MaintenanceRow::Update,
+            _ => MaintenanceRow::Service,
+        }
     }
 
-    /// What this step asks the owner to describe, for a step that describes a change.
+    /// The step's name in a menu's debug selector.
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Check => "check",
+            Self::Start => "start",
+            Self::Stop => "stop",
+            Self::Restart => "restart",
+            Self::Uninstall => "uninstall",
+            Self::Update => "update",
+            Self::Return => "return",
+            Self::Finish => "finish",
+            Self::CheckAgain => "check-again",
+            Self::Cancel => "cancel",
+            Self::Acknowledge => "acknowledge",
+        }
+    }
+
+    /// What this step asks the owner to describe. A step that describes nothing performs itself,
+    /// so only a step with a request asks the person first.
     pub(crate) const fn request(self) -> Option<RemoteMaintenanceRequest> {
         match self {
             Self::Stop => Some(RemoteMaintenanceRequest::Service(Action::Stop)),
@@ -1169,6 +1187,33 @@ impl MaintenanceConfirmation {
         }
     }
 }
+
+/// The progress badge a machine heading shows while an operation on that machine is underway.
+pub(crate) fn working_state(machine: &str, state: &RemoteOperationState) -> Option<&'static str> {
+    [MaintenanceRow::Service, MaintenanceRow::Update]
+        .into_iter()
+        .find_map(|row| {
+            let presentation = present(machine, state, row, None);
+            presentation.working.then_some(presentation.state).flatten()
+        })
+}
+
+/// Continues the operations this client submitted and never resolved, quietly and once, after a
+/// Workspace Window exists. It uses available noninteractive authority only.
+pub(crate) fn resume_retained_once(cx: &mut gpui::App) {
+    if cx.has_global::<ResumedRetained>() {
+        return;
+    }
+    let Some(operations) = crate::ssh::server_operations::installed(cx) else {
+        return;
+    };
+    cx.set_global(ResumedRetained);
+    operations.resume_retained();
+}
+
+struct ResumedRetained;
+
+impl gpui::Global for ResumedRetained {}
 
 /// One remote build as the shared update wording names builds. The wording names a build by its
 /// version, commit and package digest, which is exactly what a remote build carries.

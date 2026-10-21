@@ -115,6 +115,9 @@ pub(super) enum MachineMenuCommand {
     Connect,
     /// Stops presenting the SSH server's Workspaces. They keep running on that machine.
     Disconnect,
+    /// One maintenance step for the machine's SpaceTerm Server. A step that ends work describes
+    /// its change and asks before anything is sent.
+    Maintenance(crate::ui::remote_maintenance::RemoteAction),
     /// Opens the Servers Settings Section.
     ServerSettings,
 }
@@ -136,6 +139,8 @@ pub(super) struct MachineSection {
     /// Whether the machine's server is a Saved Connection that isn't presented yet, so its
     /// Workspaces appear only once it connects.
     pub(super) awaiting_connection: bool,
+    /// The maintenance steps the machine's observed server state allows, in menu order.
+    pub(super) maintenance: Vec<crate::ui::remote_maintenance::RemoteAction>,
     /// How many Workspace rows follow the heading.
     pub(super) workspaces: usize,
 }

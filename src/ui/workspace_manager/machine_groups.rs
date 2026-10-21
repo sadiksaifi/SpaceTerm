@@ -13,6 +13,7 @@ use gpui::{App, Context, Window};
 use super::{ServerBindings, ServerOrigin, WorkspaceManager};
 use crate::domain::{SshDestination, WorkspaceEntry, WorkspaceId, WorkspaceLocation};
 use crate::ssh::server_connection::RemoteConnectionStatus;
+use crate::ui::remote_maintenance::{menu_actions, working_state};
 use crate::ui::workspace_sidebar::{MachineMenuCommand, MachineSection};
 
 /// The machine whose group a Workspace joins.
@@ -116,6 +117,9 @@ impl WorkspaceManager {
             }
         }
         let connections = crate::ui::ssh_servers::installed(cx);
+        // Reading the submitted operations reaches no computer, as reading a connection's status
+        // does not.
+        let operations = crate::ssh::server_operations::installed(cx);
         // A Saved Connection the person wants kept up has its heading before it connects, so a
         // connection that waits for sign-in after relaunch shows that state here.
         let intended = connections
@@ -160,6 +164,9 @@ impl WorkspaceManager {
                     disconnects: false,
                     has_settings: true,
                     awaiting_connection: false,
+                    // The account-local server's own service and update controls live in its
+                    // Settings detail, which this heading opens.
+                    maintenance: Vec::new(),
                     workspaces,
                 },
                 Machine::Ssh(destination) => {
@@ -167,6 +174,14 @@ impl WorkspaceManager {
                         .shared
                         .key_of(&ServerOrigin::Ssh(destination.clone()))
                         .is_some();
+                    // Settings lists saved SSH connections; native Remote Workspaces alone name
+                    // no server there.
+                    let saved = connections.as_ref().is_some_and(|connections| {
+                        connections
+                            .connections()
+                            .iter()
+                            .any(|(saved, _)| *saved == destination)
+                    });
                     let intended = connections
                         .as_ref()
                         .is_some_and(|connections| connections.intends(&destination));
@@ -185,27 +200,38 @@ impl WorkspaceManager {
                                 presentation.actions.contains(&action)
                             })
                     };
+                    // A saved connection's server is the one these steps act on, whether it is
+                    // presented now or not.
+                    let maintenance = operations
+                        .as_ref()
+                        .filter(|_| saved)
+                        .map(|operations| operations.state(&destination));
                     MachineSection {
                         label: destination.as_str().to_owned().into(),
                         // A Remote Workspace reports its own connection on its row. The heading
-                        // reports the SSH server's.
-                        status: presentation
+                        // reports the SSH server's, and an operation underway on that server
+                        // outranks it: it is what is happening to the machine now.
+                        status: maintenance
                             .as_ref()
-                            .filter(|(connected, _)| controlled && !connected)
-                            .map(|(_, presentation)| presentation.state),
+                            .and_then(|state| working_state(destination.as_str(), state))
+                            .or_else(|| {
+                                presentation
+                                    .as_ref()
+                                    .filter(|(connected, _)| controlled && !connected)
+                                    .map(|(_, presentation)| presentation.state)
+                            }),
                         connects: offers(crate::ui::ssh_servers::SshServerAction::Connect),
                         // Disconnect withdraws a presented server whatever its state, such as one
                         // stopped or failing after it connected, and ends reconnect intent.
                         disconnects: controlled,
                         awaiting_connection: !presented && intended,
+                        maintenance: maintenance
+                            .as_ref()
+                            .map(|state| menu_actions(state, None))
+                            .unwrap_or_default(),
                         // Settings lists saved SSH connections; native Remote Workspaces alone
                         // name no server there.
-                        has_settings: connections.as_ref().is_some_and(|connections| {
-                            connections
-                                .connections()
-                                .iter()
-                                .any(|(saved, _)| *saved == destination)
-                        }),
+                        has_settings: saved,
                         destination: Some(destination),
                         workspaces,
                     }
@@ -238,7 +264,17 @@ impl WorkspaceManager {
                     connections.disconnect(&destination);
                 }
             }
-            (MachineMenuCommand::Connect | MachineMenuCommand::Disconnect, None) => {}
+            (MachineMenuCommand::Maintenance(action), Some(destination)) => {
+                // Settings owns these steps, so one surface describes a change, asks about it and
+                // keeps its result afterwards. The heading opens that surface on this machine.
+                crate::ui::settings_window::open_remote_maintenance(destination, action, cx);
+            }
+            (
+                MachineMenuCommand::Connect
+                | MachineMenuCommand::Disconnect
+                | MachineMenuCommand::Maintenance(_),
+                None,
+            ) => {}
         }
     }
 }
