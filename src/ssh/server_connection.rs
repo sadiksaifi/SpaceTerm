@@ -293,6 +293,9 @@ struct State {
     /// connection saved again under the same destination.
     next_generation: u64,
     resumed: bool,
+    /// Whether the saved connections have been read. A read that fails at launch is tried again
+    /// once storage works.
+    loaded: bool,
     persistence_error: Option<SshIntentStoreError>,
     /// Removed connections whose removal SpaceTerm couldn't save, so they come back when it
     /// reopens until a later removal saves.
@@ -331,6 +334,7 @@ impl SshServerConnections {
                 next_offer: 0,
                 next_generation: 0,
                 resumed: false,
+                loaded: false,
                 persistence_error: None,
                 unsaved_removals: Vec::new(),
             }),
@@ -963,38 +967,7 @@ fn persistence_worker(inner: Weak<Inner>, receiver: async_channel::Receiver<Pers
             return;
         };
         let result = match command {
-            PersistenceCommand::Load => match owner.intents.load() {
-                Ok(connections) => {
-                    for retained in connections {
-                        let Ok(mut state) = owner.state.lock() else {
-                            continue;
-                        };
-                        let entry = state
-                            .entries
-                            .entry(retained.destination.as_str().to_owned())
-                            .or_default();
-                        if entry.generation != 0 {
-                            continue;
-                        }
-                        entry.continuity = retained.continuity;
-                        entry.active = retained.active;
-                        notify(&mut state);
-                        drop(state);
-                        if retained.active {
-                            SshServerConnections {
-                                inner: owner.clone(),
-                            }
-                            .begin(
-                                retained.destination,
-                                ConnectMode::QuietContinuation,
-                                None,
-                            );
-                        }
-                    }
-                    Ok(())
-                }
-                Err(error) => Err(error),
-            },
+            PersistenceCommand::Load => load(&owner),
             PersistenceCommand::Save(destination) => {
                 let record = owner.state.lock().ok().and_then(|state| {
                     state
@@ -1041,14 +1014,14 @@ fn persistence_worker(inner: Weak<Inner>, receiver: async_channel::Receiver<Pers
             }
         };
         let result = match result {
-            // Storage works again, so what failed before is saved now.
+            // Storage works again, so what failed before is read or saved now.
             Ok(())
                 if owner
                     .state
                     .lock()
                     .is_ok_and(|state| state.persistence_error.is_some()) =>
             {
-                resync(&owner)
+                load(&owner).and_then(|()| resync(&owner))
             }
             result => result,
         };
@@ -1060,6 +1033,45 @@ fn persistence_worker(inner: Weak<Inner>, receiver: async_channel::Receiver<Pers
             }
         }
     }
+}
+
+/// Reads the saved connections once a Workspace Window exists, then lists each one and continues
+/// the active ones quietly. A connection the person already changed keeps their change.
+fn load(owner: &Arc<Inner>) -> Result<(), SshIntentStoreError> {
+    if owner
+        .state
+        .lock()
+        .map_or(true, |state| !state.resumed || state.loaded)
+    {
+        return Ok(());
+    }
+    let connections = owner.intents.load()?;
+    if let Ok(mut state) = owner.state.lock() {
+        state.loaded = true;
+    }
+    for retained in connections {
+        let Ok(mut state) = owner.state.lock() else {
+            continue;
+        };
+        let entry = state
+            .entries
+            .entry(retained.destination.as_str().to_owned())
+            .or_default();
+        if entry.generation != 0 {
+            continue;
+        }
+        entry.continuity = retained.continuity;
+        entry.active = retained.active;
+        notify(&mut state);
+        drop(state);
+        if retained.active {
+            SshServerConnections {
+                inner: owner.clone(),
+            }
+            .begin(retained.destination, ConnectMode::QuietContinuation, None);
+        }
+    }
+    Ok(())
 }
 
 /// Saves every saved connection as it stands and every removal that wasn't saved, after an
@@ -1115,6 +1127,9 @@ mod tests {
     impl SshConnectionIntentStore for Intents {
         fn load(&self) -> Result<Vec<RetainedSshConnection>, SshIntentStoreError> {
             self.loads.fetch_add(1, Ordering::SeqCst);
+            if let Some(error) = *self.fails.lock().unwrap() {
+                return Err(error);
+            }
             Ok(self.records.lock().unwrap().clone())
         }
         fn retain(&self, record: RetainedSshConnection) -> Result<(), SshIntentStoreError> {
@@ -1458,6 +1473,39 @@ mod tests {
             Some(false),
             "the write that failed is saved with the next one"
         );
+    }
+    #[test]
+    fn saved_connections_that_failed_to_load_return_once_storage_works() {
+        let (registry, _, intents, entered, release) = setup(false);
+        intents.records.lock().unwrap().push(saved(true));
+        *intents.fails.lock().unwrap() = Some(SshIntentStoreError::Unavailable);
+        registry.resume_retained();
+        eventually(|| registry.persistence_error() == Some(SshIntentStoreError::Unavailable));
+        assert!(registry.connections().is_empty());
+
+        *intents.fails.lock().unwrap() = None;
+        let other = SshDestination::new("other-host".into()).unwrap();
+        registry.connect(other.clone());
+        eventually(|| entered.len() == 2);
+        let mut modes = [entered.try_recv().unwrap(), entered.try_recv().unwrap()];
+        modes.sort_by_key(|mode| *mode == ConnectMode::QuietContinuation);
+        assert_eq!(
+            modes,
+            [ConnectMode::Requested, ConnectMode::QuietContinuation],
+            "the saved active connection resumes quietly once it loads"
+        );
+        eventually(|| registry.persistence_error().is_none());
+        assert_eq!(
+            registry
+                .connections()
+                .into_iter()
+                .map(|(destination, _)| destination)
+                .collect::<Vec<_>>(),
+            vec![other, destination()],
+            "the warning clears only once the saved connections are listed"
+        );
+        release.send_blocking(()).unwrap();
+        release.send_blocking(()).unwrap();
     }
     /// A route that stays up until the test ends it.
     struct Route(Arc<std::sync::atomic::AtomicBool>);
