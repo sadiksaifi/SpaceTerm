@@ -14,10 +14,7 @@ use spaceterm_server::{
 
 use super::askpass::AskPassAttemptFactory;
 use super::cancellation::SshCancellationToken;
-use super::command::{
-    OpenSshExecutable, SshCommandContext,
-    ValidatedRemoteShellCommand,
-};
+use super::command::{OpenSshExecutable, SshCommandContext, ValidatedRemoteShellCommand};
 use super::control_connection::{
     ControlConnectionState, ControlConnectionTiming, OpenSshControlConnection,
 };
@@ -553,10 +550,7 @@ impl<A: SshProcessAdapter> NativeRoute<A> {
         cancellation: &SshCancellationToken,
     ) -> Result<super::process::CapturedProcessOutput, SshDispatchFailure> {
         use super::process::{CapturedEffectError, run_captured_effect};
-        let script = self
-            .config
-            .bootstrap
-            .locator(identity(), action, false);
+        let script = self.config.bootstrap.locator(identity(), action, false);
         let (command, capability) = self
             .command(&script)
             .map_err(SshDispatchFailure::NotDispatched)?;

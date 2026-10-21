@@ -70,8 +70,12 @@ enum RecordOutcome {
         status: Option<ServiceStatus>,
         build: Option<RemoteBuild>,
     },
-    Refused { refusal: MaintenanceRefusal },
-    Failed { can_return: bool },
+    Refused {
+        refusal: MaintenanceRefusal,
+    },
+    Failed {
+        can_return: bool,
+    },
 }
 
 impl PrivateRemoteOperationRecords {

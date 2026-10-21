@@ -185,7 +185,9 @@ pub(crate) enum RetainedOutcome {
         build: Option<spaceterm_server::service::maintenance::RemoteBuild>,
     },
     Refused(spaceterm_server::service::maintenance::MaintenanceRefusal),
-    Failed { can_return: bool },
+    Failed {
+        can_return: bool,
+    },
 }
 
 /// Private retained operation records, separate from saved connections and shipped Settings.

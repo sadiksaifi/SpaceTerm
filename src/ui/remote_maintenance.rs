@@ -11,14 +11,14 @@
 
 use gpui::SharedString;
 
+use crate::local_server::service::ServiceStatus;
 use crate::local_server::service::control::{
     Action, BuildName, UpdateChange, UpdateWording, Wording, build_label, build_labels,
 };
 use crate::local_server::service::maintenance::{
-    MaintenanceFacts, MaintenanceRefusal, PreparedChange, RemoteActivation,
-    RemoteActivationPhase, RemoteBuild,
+    MaintenanceFacts, MaintenanceRefusal, PreparedChange, RemoteActivation, RemoteActivationPhase,
+    RemoteBuild,
 };
-use crate::local_server::service::ServiceStatus;
 use crate::ssh::server_connection::{
     ContinuityChange, IncompatibilityKind, InteractionReason, RemoteConnectionStatus,
     ServerAvailability, UnavailableKind,

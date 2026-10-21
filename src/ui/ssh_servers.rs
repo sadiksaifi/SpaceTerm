@@ -13,12 +13,12 @@ use gpui::{App, Global, SharedString, Window, WindowId};
 use crate::domain::SshDestination;
 use crate::platform::app_paths::AppPaths;
 use crate::ssh::askpass::{AskPassAttempt, AskPassAttemptFactory, AskPassUnavailable};
-use crate::ssh::server_operations::RemoteServerOperations;
 use crate::ssh::server_connection::{
     ConnectPhase, ContinuityChange, IncompatibilityKind, InteractionReason, RefusalKind,
     RemoteConnectionStatus, ServerAvailability, SshIntentStoreError, SshServerConnections,
     SshServerFacts, UnavailableKind, UnconfirmedOperation,
 };
+use crate::ssh::server_operations::RemoteServerOperations;
 use crate::ui::sidebar_window::form::CaptionTone;
 
 struct InstalledSshServers {
@@ -706,10 +706,7 @@ mod tests {
         ) -> Option<CreatedSshServers> {
             *self.registries.lock().unwrap() += 1;
             Some(CreatedSshServers {
-                connections: SshServerConnections::new(
-                    Arc::new(NeedsSignIn),
-                    Arc::new(NoIntents),
-                ),
+                connections: SshServerConnections::new(Arc::new(NeedsSignIn), Arc::new(NoIntents)),
                 operations: None,
             })
         }

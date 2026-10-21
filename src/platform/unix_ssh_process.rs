@@ -360,7 +360,6 @@ mod tests {
         }
     }
 
-
     fn shell_request(script: &str) -> SshProcessSpawnRequest {
         SshProcessSpawnRequest::new(
             PathBuf::from("/bin/sh"),
@@ -722,12 +721,7 @@ impl crate::ssh::server_process::SshServerBootstrap for UnixSshProcessAdapter {
     }
     /// This script selects only the approved digest in a fixed account/build namespace.
     /// It never evaluates a path or an endpoint supplied by the remote protocol.
-    fn locator(
-        &self,
-        identity: &str,
-        action: &str,
-        missing: bool,
-    ) -> String {
+    fn locator(&self, identity: &str, action: &str, missing: bool) -> String {
         let mut script = format!(
             r#"set -eu
 PATH=/usr/bin:/bin:/usr/sbin:/sbin

@@ -14,10 +14,7 @@ use super::super::servers::{LocalServerControl, OfferedLocalServer, OfferedServe
 use crate::appearance::Appearance;
 use crate::domain::SshDestination;
 use crate::local_server::service::control::Action;
-use crate::local_server::service::maintenance::{
-    MaintenanceFacts, PreparedChange,
-    RemoteBuild,
-};
+use crate::local_server::service::maintenance::{MaintenanceFacts, PreparedChange, RemoteBuild};
 use crate::local_server::service::{ServiceStartup, ServiceStatus};
 use crate::platform::appearance::testing::RecordingAppearancePlatform;
 use crate::platform::window_movement::RecordingOperatingSystemWindowDragPlatform;
