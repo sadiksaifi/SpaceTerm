@@ -710,6 +710,9 @@ impl Maintenance {
     }
 
     /// Observe this account's service once, without dispatching or recovering anything.
+    ///
+    /// Every maintenance lock is taken before the service's own operation lock, so the two
+    /// never form a cycle.
     fn observe(&self) -> Result<Observation, ServerError> {
         let data = Directory::open(&self.service.paths.data, false)?;
         let _operation = data.lock("service.lock", false)?;
@@ -719,11 +722,12 @@ impl Maintenance {
         let (status, approved, activation) = match &state {
             Some(state) => (
                 self.service.snapshot(state)?,
-                match state.installed {
-                    true => Some(RemoteBuild::describe(
+                if state.installed {
+                    Some(RemoteBuild::describe(
                         &self.service.describe_approved(state)?,
-                    )?),
-                    false => None,
+                    )?)
+                } else {
+                    None
                 },
                 self.service.activation_status_locked(&data)?,
             ),
