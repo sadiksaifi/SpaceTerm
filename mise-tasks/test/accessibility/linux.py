@@ -205,6 +205,7 @@ class Probe:
     def activate_control(self, name, root=None):
         control_id = {
             "New Workspace": "new_workspace",
+            "Switch Workspace": "switch_workspace",
             "Local Workspace": "local_workspace",
             "Rename Workspace": "rename_workspace",
             "Kill Workspace": "kill_workspace",
@@ -243,21 +244,27 @@ class Probe:
         rows = [
             row
             for row in self.workspace_rows()
-            if row not in self.server_workspace_before
+            if row.name == self.server_workspace_name
             and row.getState().contains(self.atspi.STATE_SELECTED)
         ]
         require(len(rows) <= 1, "server_workspace_creation_ambiguous")
         return rows[0] if rows else None
 
     def open_workspace_menu(self, row, input_driver):
-        self.press_control(row)
+        def row_has_state(state):
+            row.clear_cache()
+            return row.getState().contains(state)
+
+        row.clear_cache()
+        if not row.getState().contains(self.atspi.STATE_SELECTED):
+            self.press_control(row)
         self.wait(
-            lambda: row.getState().contains(self.atspi.STATE_SELECTED),
+            lambda: row_has_state(self.atspi.STATE_SELECTED),
             "server_workspace_not_selected",
         )
         require(row.queryComponent().grabFocus(), "server_workspace_focus_rejected")
         self.wait(
-            lambda: row.getState().contains(self.atspi.STATE_FOCUSED),
+            lambda: row_has_state(self.atspi.STATE_FOCUSED),
             "server_workspace_not_focused",
         )
         input_driver.context_menu()
@@ -265,8 +272,8 @@ class Probe:
     def retire_server_workspace(self, input_driver):
         if self.server_workspace_before is None:
             return
-        # Native objects can be replaced when the performance check reactivates AccessKit.
-        # The unique name was assigned through the exact new row before any workload started.
+        # Native proxies can be replaced. Only the unique name supplied at creation proves
+        # fixture ownership; a proxy absent from an earlier tree can still be retained work.
         input_driver.escape()
         self.wait(
             lambda: self.find_named_control("Workspace name") is None,
@@ -275,10 +282,8 @@ class Probe:
         rows = self.workspace_rows()
         named = [row for row in rows if row.name == self.server_workspace_name]
         require(len(named) <= 1, "server_workspace_cleanup_ambiguous")
-        row = named[0] if named else self.server_workspace_row
-        if row not in rows and not self.server_workspace_named:
-            row = self.wait(self.created_workspace_row, "server_workspace_cleanup_identity_missing")
-        require(row in self.workspace_rows(), "server_workspace_cleanup_identity_missing")
+        require(named, "server_workspace_cleanup_identity_missing")
+        row = named[0]
         name = row.name
         self.open_workspace_menu(row, input_driver)
         self.activate_control("Kill Workspace")
@@ -299,35 +304,42 @@ class Probe:
         # Normal launch already presents the account server's Workspaces. Exercise the same
         # creation controls as the native client. The fixture's named client owns its
         # presentation; the already-running account server owns the PTY.
-        self.activate_control("New Workspace")
         self.server_workspace_name = os.environ["SPACETERM_DEVELOPMENT_CLIENT"]
         rows = self.workspace_rows()
         require(
             all(row.name != self.server_workspace_name for row in rows),
             "server_workspace_fixture_name_in_use",
         )
+        # Supply the unique name in the creation request. Native proxy replacement cannot
+        # prove which unnamed row is new, and renaming a guessed row can touch retained work.
+        previous_terminal = self.find_named_control("Terminal Pane")
+        self.activate_control("Switch Workspace")
+        field = self.wait(
+            lambda: self.find_named_control("Workspace name"), "server_workspace_query_missing"
+        )
+        input_driver.workspace_query(self.server_workspace_name, field)
+        self.wait(
+            lambda: field.queryText().getText(0, -1) == self.server_workspace_name,
+            "server_workspace_query_not_published",
+        )
         self.server_workspace_before = rows
         self.activate_control("Local Workspace")
         self.server_workspace_row = self.wait(
             self.created_workspace_row, "server_workspace_created_row_missing"
         )
-        self.open_workspace_menu(self.server_workspace_row, input_driver)
-        self.activate_control("Rename Workspace")
-        field = self.wait(
-            lambda: self.find_named_control("Workspace name"), "server_workspace_rename_missing"
-        )
-        self.wait(
-            lambda: field.getState().contains(self.atspi.STATE_FOCUSED),
-            "server_workspace_rename_not_focused",
-        )
-        input_driver.workspace_name(self.server_workspace_name, field)
-        self.wait(
-            lambda: any(row.name == self.server_workspace_name for row in self.workspace_rows()),
-            "server_workspace_rename_not_confirmed",
-        )
         self.server_workspace_named = True
 
-        self.terminal = self.wait(self.find_terminal, "server_terminal_object_missing")
+        def fixture_terminal():
+            terminal = self.find_terminal()
+            return terminal if terminal is not None and terminal != previous_terminal else None
+
+        pane = self.wait(
+            lambda: fixture_terminal() or self.find_named_control("Start New Shell"),
+            "server_workspace_pane_missing",
+        )
+        if pane.name == "Start New Shell":
+            self.press_control(pane)
+        self.terminal = self.wait(fixture_terminal, "server_terminal_object_missing")
         require(self.terminal.queryComponent().grabFocus(), "server_terminal_focus_rejected")
 
     def event(self, event):
@@ -506,14 +518,20 @@ class Input:
             "fixture_terminal_not_selected",
         )
 
-    def workspace_name(self, name, field):
+    def workspace_query(self, name, field):
         require(
-            field.getState().contains(self.probe.atspi.STATE_FOCUSED),
-            "server_workspace_rename_not_focused",
+            field.queryComponent().grabFocus(),
+            "server_workspace_query_focus_rejected",
         )
-        self._submit_text(name)
 
-    def _submit_text(self, command, *, wait_for_echo=False):
+        def focused():
+            field.clear_cache()
+            return field.getState().contains(self.probe.atspi.STATE_FOCUSED)
+
+        self.probe.wait(focused, "server_workspace_query_not_focused")
+        self._type_text(name)
+
+    def _type_text(self, command):
         if self.backend == "x11":
             run(["xdotool", "type", "--clearmodifiers", "--delay", "2", "--", command])
         else:
@@ -522,6 +540,9 @@ class Input:
                 self.key(code if code < 256 else 0x01000000 | code)
                 self.probe.drain()
                 time.sleep(0.003)
+
+    def _submit_text(self, command, *, wait_for_echo=False):
+        self._type_text(command)
 
         def command_echoed():
             self.probe.terminal.clear_cache()
