@@ -1,5 +1,6 @@
 //! Desktop presentation and fenced input for an authenticated server Pane.
 mod accessibility;
+mod claim;
 mod control;
 mod effects;
 use super::server_graphics as graphics;
@@ -138,8 +139,9 @@ impl DevelopmentPaneState {
         self.connected_epoch.load(Ordering::Acquire)
     }
     pub(crate) fn select(&self) {
+        let status = self.status.lock().unwrap_or_else(|e| e.into_inner());
         if matches!(
-            self.status(),
+            *status,
             DevelopmentPaneStatus::Connecting
                 | DevelopmentPaneStatus::Restored
                 | DevelopmentPaneStatus::SessionEnded
@@ -211,6 +213,8 @@ impl DevelopmentPaneState {
     pub(crate) fn take_over(&self) {
         let mut status = self.status.lock().unwrap_or_else(|e| e.into_inner());
         if *status == DevelopmentPaneStatus::Takeover {
+            // This action supersedes earlier selection; a later eligible selection stays queued.
+            self.selected.store(false, Ordering::Release);
             *status = DevelopmentPaneStatus::TakingOver;
             self.take_over.store(true, Ordering::Release);
             self.retry.store(true, Ordering::Release);
@@ -1254,228 +1258,31 @@ fn present(
         state.retry.store(false, Ordering::Release);
         let connected = (|| {
             let mut connection = server.connect_shared_pane()?;
-            let mut grant_size = *size.lock().unwrap_or_else(|e| e.into_inner());
-            let grant_update = appearance.lock().unwrap_or_else(|e| e.into_inner()).clone();
-            let mut grant_appearance = Some(grant_update.generation);
-            let style = Some(encode_style(&grant_update));
-            let request = Request::SelectPane {
-                pane: pane_id,
-                explicit: state.selected.swap(false, Ordering::AcqRel),
+            let Some(claim::Granted {
+                lease,
                 size: grant_size,
-                style,
-            };
-            let mut unavailable = false;
-            let mut reply = match send(&presenter, &alive, &attachment, &mut connection, &request) {
-                Err(ServerError::DirectoryUnavailable) => {
-                    unavailable = true;
-                    let passive = Request::SelectPane {
-                        pane: pane_id,
-                        explicit: false,
-                        size: grant_size,
-                        style: None,
-                    };
-                    send(&presenter, &alive, &attachment, &mut connection, &passive)?
-                }
-                other => other.map_err(|error| match error {
-                    ServerError::Controlled => ServerError::Unsupported,
-                    ServerError::StaleControl => ServerError::SessionUnavailable,
-                    other => other,
-                })?,
-            };
-            while matches!(reply, Reply::Restored { .. } | Reply::Takeover { .. }) {
-                let mut dormant = false;
-                while let Reply::Restored {
-                    server: boot,
-                    pane,
-                    ref recovery,
-                    directory_unavailable,
-                    session_ended,
-                    ..
-                } = reply
-                {
-                    if !dormant {
-                        dormant = true;
-                        attached_session = false;
-                        takeover = false;
-                        paste_unconfirmed = false;
-                        state.invalidate();
-                        if state.directory_busy.swap(false, Ordering::AcqRel) {
-                            *state
-                                .directory_note
-                                .lock()
-                                .unwrap_or_else(|e| e.into_inner()) =
-                                Some("Starting the shell was not confirmed.");
-                        }
-                        state.start_restored.store(false, Ordering::Release);
-                        drain_input(&state, &input);
-                        clear_presentation(&events, &mut generation, &appearance);
-                    }
-                    *state.recovery.lock().unwrap_or_else(|e| e.into_inner()) = recovery
-                        .clone()
-                        .filter(|_| connection.supports_directory_recovery());
-                    unavailable |= directory_unavailable;
-                    state
-                        .session_dormant
-                        .store(session_ended, Ordering::Release);
-                    state.set(if unavailable {
-                        DevelopmentPaneStatus::Failed(ServerError::DirectoryUnavailable)
-                    } else if session_ended {
-                        DevelopmentPaneStatus::SessionEnded
-                    } else {
-                        DevelopmentPaneStatus::Restored
-                    });
-                    if !alive.load(Ordering::Acquire)
-                        || attachment.as_ref().is_some_and(|permit| !permit.active())
-                    {
-                        return Ok(());
-                    }
-                    let repair = state
-                        .repair
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .take();
-                    if repair.is_some()
-                        || state.start_restored.swap(false, Ordering::AcqRel)
-                        || state.selected.swap(false, Ordering::AcqRel)
-                    {
-                        grant_size = *size.lock().unwrap_or_else(|e| e.into_inner());
-                        let update = appearance.lock().unwrap_or_else(|e| e.into_inner()).clone();
-                        grant_appearance = Some(update.generation);
-                        let action = match repair {
-                            Some((target, replacement)) => Request::RepairDirectory {
-                                target,
-                                replacement: Some(replacement),
-                                size: grant_size,
-                                style: Some(encode_style(&update)),
-                            },
-                            None if unavailable && recovery.is_some() => Request::RepairDirectory {
-                                target: recovery.clone().ok_or(ServerError::Protocol)?,
-                                replacement: None,
-                                size: grant_size,
-                                style: Some(encode_style(&update)),
-                            },
-                            None => Request::StartRestored {
-                                server: boot,
-                                pane,
-                                size: grant_size,
-                                style: Some(encode_style(&update)),
-                            },
-                        };
-                        let replacing = matches!(
-                            &action,
-                            Request::RepairDirectory {
-                                replacement: Some(_),
-                                ..
-                            }
-                        );
-                        reply =
-                            match send(&presenter, &alive, &attachment, &mut connection, &action) {
-                                Err(ServerError::DirectoryUnavailable) => {
-                                    unavailable = true;
-                                    state.directory_busy.store(false, Ordering::Release);
-                                    *state
-                                        .directory_note
-                                        .lock()
-                                        .unwrap_or_else(|e| e.into_inner()) = Some(if replacing {
-                                        "That directory is no longer available. Choose another."
-                                    } else {
-                                        "The directory is still unavailable."
-                                    });
-                                    state.invalidate();
-                                    reply
-                                }
-                                result => result?,
-                            };
-                    } else {
-                        // Take Over, Start and selection wake this check early.
-                        state
-                            .wake
-                            .wait_until(std::time::Instant::now() + Duration::from_millis(100));
-                        let size = *size.lock().unwrap_or_else(|e| e.into_inner());
-                        grant_size = size;
-                        grant_appearance = None;
-                        reply = send(
-                            &presenter,
-                            &alive,
-                            &attachment,
-                            &mut connection,
-                            &Request::SelectPane {
-                                pane: pane_id,
-                                explicit: false,
-                                size,
-                                style: None,
-                            },
-                        )?;
-                    }
-                }
-                state.directory_busy.store(false, Ordering::Release);
-                state
-                    .recovery
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .take();
-                while let Reply::Takeover {
-                    target,
-                    ref controller,
-                    session_ended,
-                } = reply
-                {
-                    state.paste_unconfirmed.store(false, Ordering::Release);
-                    if !takeover {
-                        takeover = true;
-                        paste_unconfirmed = false;
-                        state.invalidate();
-                        drain_input(&state, &input);
-                        // Erase cached terminal presentation before the window replaces its surface.
-                        clear_presentation(&events, &mut generation, &appearance);
-                    }
-                    state.offered_take_over(controller.clone(), session_ended);
-                    if !alive.load(Ordering::Acquire)
-                        || attachment.as_ref().is_some_and(|permit| !permit.active())
-                    {
-                        return Ok(());
-                    }
-                    if state.take_over.swap(false, Ordering::AcqRel) {
-                        state.set(DevelopmentPaneStatus::TakingOver);
-                        grant_size = *size.lock().unwrap_or_else(|e| e.into_inner());
-                        let update = appearance.lock().unwrap_or_else(|e| e.into_inner()).clone();
-                        grant_appearance = Some(update.generation);
-                        reply = send(
-                            &presenter,
-                            &alive,
-                            &attachment,
-                            &mut connection,
-                            &Request::TakeOver {
-                                target,
-                                size: grant_size,
-                                style: Some(encode_style(&update)),
-                            },
-                        )?;
-                    } else {
-                        // Take Over, Start and selection wake this check early.
-                        state
-                            .wake
-                            .wait_until(std::time::Instant::now() + Duration::from_millis(100));
-                        let size = *size.lock().unwrap_or_else(|e| e.into_inner());
-                        grant_size = size;
-                        grant_appearance = None;
-                        reply = send(
-                            &presenter,
-                            &alive,
-                            &attachment,
-                            &mut connection,
-                            &Request::SelectPane {
-                                pane: pane_id,
-                                explicit: state.selected.swap(false, Ordering::AcqRel),
-                                size,
-                                style: None,
-                            },
-                        )?;
-                    }
-                }
-            }
-            let Reply::Attached { lease } = reply else {
-                return Err(ServerError::Protocol);
+                appearance: grant_appearance,
+            }) = (claim::ClaimWorker {
+                state: &state,
+                pane_id,
+                alive: &alive,
+                attachment: &attachment,
+                size: &size,
+                appearance: &appearance,
+                directory_recovery: connection.supports_directory_recovery(),
+                attached_session: &mut attached_session,
+                takeover: &mut takeover,
+                paste_unconfirmed: &mut paste_unconfirmed,
+            })
+            .run(
+                |request| send(&presenter, &alive, &attachment, &mut connection, request),
+                || {
+                    drain_input(&state, &input);
+                    clear_presentation(&events, &mut generation, &appearance);
+                },
+            )?
+            else {
+                return Ok(());
             };
             state.session_dormant.store(false, Ordering::Release);
             attached_session = true;

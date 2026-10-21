@@ -29,11 +29,125 @@ fn mutate(host: &mut SharedWorkspaceHost, device: u8, sequence: u64, mutation: M
     }
 }
 
+fn end_all(host: &mut SharedWorkspaceHost, device: u8, sequence: u64) {
+    let confirmation = shared_inventory(host).close.unwrap();
+    mutate(
+        host,
+        device,
+        sequence,
+        Mutation::EndAllSessions { confirmation },
+    );
+}
+
 fn start(host: &mut SharedWorkspaceHost, device: u8, pane: Id) -> Lease {
     match select(host, device, pane, true) {
         Reply::Attached { lease } => lease,
         other => panic!("explicit startup unavailable: {other:?}"),
     }
+}
+
+#[test]
+fn end_all_sessions_missing_original_cannot_end_replacement_work_during_recovery() {
+    let mut host = SharedWorkspaceHost::new(host());
+    host.prepare_initial_organization().unwrap();
+    let pane = shared_inventory(&mut host).workspaces[0].tabs[0].root_pane;
+    let old = start(&mut host, 1, pane);
+    let confirmation = shared_inventory(&mut host).close.unwrap();
+    let pending = Mutation::EndAllSessions { confirmation };
+    // Client 1 retains this original locally, but its first dispatch never reaches the server.
+    mutate(&mut host, 2, 1, pending.clone());
+    host.request(
+        [2; 32],
+        [2; 32],
+        Request::TakeOver {
+            target: PaneTarget {
+                server: old.server,
+                session: pane,
+            },
+            size: size(),
+            style: None,
+        },
+    );
+    let replacement = start(&mut host, 2, pane);
+    assert!(matches!(
+        host.request([1; 32], [1; 32], Request::Resolve { sequence: 1 }),
+        Reply::Refused(Refusal::Missing)
+    ));
+    assert!(
+        matches!(host.request([1; 32], [1; 32], Request::Mutate { sequence: 1, mutation: pending }),
+        Reply::Outcome(result) if result.outcome == Outcome::StaleConfirmation)
+    );
+    assert_eq!(
+        shared_inventory(&mut host).close.unwrap().sessions[0].session,
+        Some(replacement.session)
+    );
+    assert!(
+        matches!(select(&mut host, 2, pane, false), Reply::Attached { lease } if lease.session == replacement.session)
+    );
+    host.shutdown().unwrap();
+}
+
+#[test]
+fn end_all_sessions_retains_directory_confirmed_between_admission_and_shutdown() {
+    let mut host = SharedWorkspaceHost::new(host());
+    host.prepare_initial_organization().unwrap();
+    let pane = shared_inventory(&mut host).workspaces[0].tabs[0].root_pane;
+    let lease = start(&mut host, 1, pane);
+    let confirmation = shared_inventory(&mut host).close.unwrap();
+    // Stage the admitted mutation before cleanup, matching the production commit boundary.
+    let mut next = host.state.clone();
+    next.inventory.close = Some(confirmation.clone());
+    next.apply(
+        [2; 32],
+        1,
+        Mutation::EndAllSessions { confirmation },
+        &host.prototype.directory,
+        |_| true,
+    )
+    .unwrap();
+    host.commit(next).unwrap();
+    // The shell confirms its directory after admission. No shared request copies it early.
+    let child = host.pane_host(pane).unwrap();
+    command(
+        child,
+        1,
+        lease,
+        "cd /; printf '\\033]7;file://localhost/\\007\\033]133;A;spaceterm=%s\\007' \"$SPACETERM_PROMPT_OWNER\"\n",
+    );
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if child
+            .pane
+            .as_ref()
+            .unwrap()
+            .runtime
+            .metadata_snapshot()
+            .and_then(|metadata| metadata.confirmed_directory.clone())
+            .is_some_and(|directory| directory.as_ref() == "/")
+        {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "shell directory was not confirmed"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(matches!(
+        host.request([2; 32], [2; 32], Request::Resolve { sequence: 1 }),
+        Reply::Outcome(_)
+    ));
+    let saved = shared_inventory(&mut host);
+    assert_eq!(
+        saved.workspaces[0].tabs[0].panes[0]
+            .confirmed_directory
+            .as_deref(),
+        Some(std::path::Path::new("/"))
+    );
+    let fresh = start(&mut host, 1, pane);
+    command(&mut host, 1, fresh, "stty -echo; pwd\n");
+    await_text(&mut host, 1, fresh, "/");
+    host.shutdown().unwrap();
 }
 
 fn ended_takeover_waits_for_explicit_start(attached: bool) {
@@ -49,12 +163,7 @@ fn ended_takeover_waits_for_explicit_start(attached: bool) {
         generation: 7,
     };
     let old = start(&mut host, 1, pane);
-    mutate(
-        &mut host,
-        1,
-        1,
-        Mutation::EndAllSessions { server: old.server },
-    );
+    end_all(&mut host, 1, 1);
     let Reply::Takeover {
         target,
         session_ended: true,
@@ -192,19 +301,12 @@ fn end_all_sessions_preserves_independent_grants_unclaimed_panes_and_other_serve
             axis: Axis::Right,
         },
     );
-    let first_lease = start(&mut selected, 1, first);
+    start(&mut selected, 1, first);
     start(&mut selected, 2, second);
     let released = start(&mut selected, 2, unclaimed);
     selected.request([2; 32], [2; 32], Request::Release { lease: released });
     let before = shared_inventory(&mut selected).workspaces;
-    mutate(
-        &mut selected,
-        3,
-        1,
-        Mutation::EndAllSessions {
-            server: first_lease.server,
-        },
-    );
+    end_all(&mut selected, 3, 1);
     assert_eq!(shared_inventory(&mut selected).workspaces, before);
     assert!(
         shared_inventory(&mut selected)
@@ -253,12 +355,14 @@ fn end_all_sessions_replay_and_recovered_cleanup_never_end_replacement_sessions(
     host.prepare_initial_organization().unwrap();
     let pane = shared_inventory(&mut host).workspaces[0].tabs[0].root_pane;
     let first = start(&mut host, 1, pane);
-    let mutation = Mutation::EndAllSessions {
-        server: first.server,
-    };
+    let mut originals = Vec::new();
     let mut previous = first;
     for sequence in 1..=3 {
-        mutate(&mut host, 2, sequence, mutation.clone());
+        let mutation = Mutation::EndAllSessions {
+            confirmation: shared_inventory(&mut host).close.unwrap(),
+        };
+        originals.push(mutation.clone());
+        mutate(&mut host, 2, sequence, mutation);
         assert!(matches!(
             select(&mut host, 1, pane, false),
             Reply::Restored {
@@ -274,7 +378,7 @@ fn end_all_sessions_replay_and_recovered_cleanup_never_end_replacement_sessions(
                 host.request([2; 32], [2; 32], Request::Resolve { sequence: old }),
                 Reply::Outcome(_)
             ));
-            mutate(&mut host, 2, old, mutation.clone());
+            mutate(&mut host, 2, old, originals[old as usize - 1].clone());
         }
         let record: Organization = serde_json::from_slice(
             &serde_json::to_vec(&host.state.envelope(&host.prototype.directory).unwrap()).unwrap(),
@@ -327,12 +431,7 @@ fn end_all_sessions_drops_output_and_fences_old_input_effects_and_snapshots() {
     ) else {
         panic!("unsafe paste requires approval");
     };
-    mutate(
-        &mut host,
-        2,
-        1,
-        Mutation::EndAllSessions { server: old.server },
-    );
+    end_all(&mut host, 2, 1);
     let replacement = start(&mut host, 1, pane);
     let retired = [
         Request::Poll { lease: old },
@@ -461,14 +560,7 @@ fn end_all_sessions_directory_repair_requires_the_preserved_controller() {
         Reply::Attached { .. }
     ));
     host.disconnected([2; 32]);
-    mutate(
-        &mut host,
-        1,
-        2,
-        Mutation::EndAllSessions {
-            server: lease.server,
-        },
-    );
+    end_all(&mut host, 1, 2);
     std::fs::remove_dir(&root).unwrap();
     assert!(matches!(
         select(&mut host, 2, pane, true),
@@ -531,12 +623,7 @@ fn end_all_sessions_retains_the_controller_if_replacement_directory_disappears_d
             style: None,
         },
     );
-    mutate(
-        &mut host,
-        1,
-        1,
-        Mutation::EndAllSessions { server: old.server },
-    );
+    end_all(&mut host, 1, 1);
     // Reproduce the real boundary between host validation and native worker preparation.
     std::fs::remove_dir(&root).unwrap();
     let child = host.pane_host(pane).unwrap();

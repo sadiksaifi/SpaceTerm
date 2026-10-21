@@ -11,7 +11,7 @@ use crate::ui::server_worktrees::Client;
 use crate::ui::shared_workspaces::SharedRefusalReason;
 use crate::ui::sidebar_window::form::CaptionTone;
 use gpui::Task;
-use spaceterm_server::hierarchy::{Id, Mutation, Outcome, RetainedOutcome};
+use spaceterm_server::hierarchy::{CloseInventory, Id, Mutation, Outcome, RetainedOutcome};
 use spaceterm_ui::{
     Alert, AlertIntent, AlertOutcome, Button, ButtonSize, ButtonVariant, ModalAction,
     ModalActionEmphasis, ModalActionIntent, ModalActionRole, ModalId, ProgressRing, ProgressSize,
@@ -26,7 +26,7 @@ const LABEL: &str = "End All Sessions\u{2026}";
 const CONFIRM: &str = "End All Sessions";
 
 /// What the selected server's writer allows now.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) enum Availability {
     /// No writer has answered for this server yet.
     Unknown,
@@ -36,8 +36,8 @@ pub(super) enum Availability {
     Unsupported,
     /// Another shared edit awaits its answer, and one edit is asked at a time.
     Pending,
-    /// `live` Terminal Sessions run in the server's current run, which `boot` names.
-    Ready { boot: Id, live: usize },
+    /// The server's current run and its Panes' Sessions, as the server last published them.
+    Ready(CloseInventory),
 }
 
 impl Availability {
@@ -56,16 +56,38 @@ impl Availability {
             .as_ref()
             .and_then(|inventory| inventory.close.as_ref())
         {
-            Some(close) => Self::Ready {
-                boot: close.boot,
-                live: close
-                    .sessions
-                    .iter()
-                    .filter(|pane| pane.session.is_some())
-                    .count(),
-            },
+            Some(close) => Self::Ready(close.clone()),
             None => Self::Unknown,
         }
+    }
+}
+
+/// Each running Session, by its Pane.
+fn live_sessions(close: &CloseInventory) -> std::collections::BTreeSet<(Id, Id)> {
+    close
+        .sessions
+        .iter()
+        .filter_map(|pane| Some((pane.id, pane.session?)))
+        .collect()
+}
+
+/// Why a confirmation no longer describes the server, if it doesn't. A confirmation names the
+/// exact Sessions it showed, so a restart, an ended Session, and a newly started one each make it
+/// stale.
+pub(super) fn recheck(confirmed: &CloseInventory, current: &CloseInventory) -> Option<Ended> {
+    if current.boot != confirmed.boot {
+        Some(Ended::Restarted)
+    } else if live_sessions(current) != live_sessions(confirmed) {
+        Some(Ended::Changed)
+    } else {
+        None
+    }
+}
+
+/// The request for the Sessions the person confirmed, which recovery resends unchanged.
+fn request(confirmed: &CloseInventory) -> Mutation {
+    Mutation::EndAllSessions {
+        confirmation: confirmed.clone(),
     }
 }
 
@@ -74,7 +96,10 @@ impl Availability {
 pub(super) enum Ended {
     Accepted,
     /// The server restarted after the person confirmed, so the confirmation named other Sessions.
-    Stale,
+    Restarted,
+    /// The server's Sessions changed after the person confirmed. The server answers a stale
+    /// confirmation this way too, restart or not.
+    Changed,
     Refused(SharedRefusalReason),
     /// The server answered with a refusal that has no specific explanation.
     Failed,
@@ -121,7 +146,7 @@ impl EndAllSessions {
 /// The row's caption, derived from its state alone so every state reads one way.
 pub(super) fn caption(
     server: &str,
-    availability: Availability,
+    availability: &Availability,
     working: bool,
     ended: Option<Ended>,
 ) -> (SharedString, CaptionTone) {
@@ -136,11 +161,21 @@ pub(super) fn caption(
                  someone selects one or chooses Start Session."
             ));
         }
-        Some(Ended::Stale) => {
+        Some(Ended::Restarted) => {
             return (
                 format!(
                     "{server} restarted after you confirmed, so nothing ended. Review its \
                      Terminal Sessions and try again."
+                )
+                .into(),
+                CaptionTone::Warning,
+            );
+        }
+        Some(Ended::Changed) => {
+            return (
+                format!(
+                    "The Terminal Sessions on {server} changed after you confirmed, so nothing \
+                     ended. Review them and try again."
                 )
                 .into(),
                 CaptionTone::Warning,
@@ -187,14 +222,14 @@ pub(super) fn caption(
         Availability::Pending => guidance(format!(
             "End All Sessions is available once {server} answers an earlier change."
         )),
-        Availability::Ready { live: 0, .. } => {
-            guidance(format!("No Terminal Sessions are running on {server}."))
-        }
-        Availability::Ready { live, .. } => guidance(format!(
-            "Ends {} on {server} for every client and clears their output. The server keeps \
-             running, and its Workspaces, Tabs, and Panes remain.",
-            sessions(live)
-        )),
+        Availability::Ready(close) => match live_sessions(close).len() {
+            0 => guidance(format!("No Terminal Sessions are running on {server}.")),
+            live => guidance(format!(
+                "Ends {} on {server} for every client and clears their output. The server keeps \
+                 running, and its Workspaces, Tabs, and Panes remain.",
+                sessions(live)
+            )),
+        },
     }
 }
 
@@ -279,7 +314,7 @@ impl SettingsWindow {
         let state = &self.end_all_sessions;
         caption(
             &self.selected_server_name(),
-            state.availability,
+            &state.availability,
             state.working,
             state.ended,
         )
@@ -290,7 +325,7 @@ impl SettingsWindow {
         let state = &self.end_all_sessions;
         !state.working
             && state.client.is_some()
-            && matches!(state.availability, Availability::Ready { live, .. } if live > 0)
+            && matches!(&state.availability, Availability::Ready(close) if !live_sessions(close).is_empty())
     }
 
     /// Asks the person to confirm ending the selected server's Sessions. The alert names the
@@ -300,12 +335,13 @@ impl SettingsWindow {
             return;
         }
         let state = &self.end_all_sessions;
-        let Availability::Ready { boot, live } = state.availability else {
+        // The confirmation names these exact Sessions, and only they are asked to end.
+        let Availability::Ready(confirmed) = state.availability.clone() else {
             return;
         };
         let generation = state.generation;
         let server = self.selected_server_name();
-        let (title, message, detail) = confirmation(&server, live);
+        let (title, message, detail) = confirmation(&server, live_sessions(&confirmed).len());
         let owner = cx.weak_entity();
         let result = Alert::new(
             ModalId::new("settings-server-end-all-sessions"),
@@ -342,7 +378,7 @@ impl SettingsWindow {
                 return;
             }
             let _ = owner.update(cx, |settings, cx| {
-                settings.end_all_sessions(generation, boot, cx);
+                settings.end_all_sessions(generation, &confirmed, cx);
             });
         });
         if result.is_err() {
@@ -351,8 +387,13 @@ impl SettingsWindow {
     }
 
     /// Asks the server once to end the Sessions the person confirmed. A confirmation for another
-    /// server, or for the server's earlier run, submits nothing.
-    fn end_all_sessions(&mut self, generation: u64, boot: Id, cx: &mut Context<Self>) {
+    /// server, for the server's earlier run, or for Sessions that changed since, submits nothing.
+    fn end_all_sessions(
+        &mut self,
+        generation: u64,
+        confirmed: &CloseInventory,
+        cx: &mut Context<Self>,
+    ) {
         let state = &mut self.end_all_sessions;
         if state.generation != generation || state.working {
             return;
@@ -360,13 +401,14 @@ impl SettingsWindow {
         let Some(client) = state.client.clone() else {
             return;
         };
-        // Read the server afresh: the confirmation named the run it showed.
+        // Read the server afresh: the confirmation named the Sessions it showed.
         match Availability::of(&client.source.snapshot()) {
-            Availability::Ready { boot: current, .. } if current == boot => {}
-            Availability::Ready { .. } => {
-                state.ended = Some(Ended::Stale);
-                cx.notify();
-                return;
+            Availability::Ready(current) => {
+                if let Some(stale) = recheck(confirmed, &current) {
+                    state.ended = Some(stale);
+                    cx.notify();
+                    return;
+                }
             }
             Availability::Offline | Availability::Unknown => {
                 state.ended = Some(Ended::Refused(SharedRefusalReason::Offline));
@@ -384,10 +426,7 @@ impl SettingsWindow {
                 return;
             }
         }
-        let completion = match client
-            .source
-            .submit_waiting(Mutation::EndAllSessions { server: boot })
-        {
+        let completion = match client.source.submit_waiting(request(confirmed)) {
             Ok(completion) => completion,
             Err(reason) => {
                 state.ended = Some(Ended::Refused(reason));
@@ -425,7 +464,7 @@ impl SettingsWindow {
                     Some(Ok(RetainedOutcome {
                         outcome: Outcome::StaleConfirmation,
                         ..
-                    })) => Ended::Stale,
+                    })) => Ended::Changed,
                     Some(Ok(_)) => Ended::Failed,
                     Some(Err(reason)) => Ended::Refused(reason),
                     None => Ended::Unconfirmed,

@@ -125,9 +125,7 @@ impl SharedWorkspaceHost {
             host.retain_directory()?;
             host.retire_exited()?;
             if let Some(org) = &host.organization {
-                if host.pane.is_some()
-                    && let Some(path) = &org.confirmed_directory
-                {
+                if let Some(path) = &org.confirmed_directory {
                     next.confirm_directory(*id, path.clone());
                 }
             } else if next.pane(*id).is_some() {
@@ -797,7 +795,7 @@ mod tests {
         };
         host.disconnected([1; 32]);
         let mutation = Mutation::EndAllSessions {
-            server: lease.server,
+            confirmation: shared_inventory(&mut host).close.unwrap(),
         };
         assert!(matches!(host.request([2; 32], [2; 32], Request::Mutate {
             sequence: 1, mutation: mutation.clone(),

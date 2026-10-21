@@ -188,7 +188,7 @@ pub enum Axis {
 pub enum Mutation {
     /// End the Sessions on this running server without removing their Panes.
     EndAllSessions {
-        server: Id,
+        confirmation: CloseInventory,
     },
     Worktree(crate::worktree::Operation),
     Close {
@@ -224,6 +224,7 @@ pub enum Mutation {
 impl Mutation {
     pub fn is_bounded(&self) -> bool {
         match self {
+            Self::EndAllSessions { confirmation } => confirmation.sessions.len() <= MAX_PANES,
             Self::Worktree(operation) => operation.is_bounded(),
             Self::Close { confirmation, .. } => {
                 !confirmation.panes.is_empty() && confirmation.panes.len() <= MAX_PANES
@@ -573,15 +574,15 @@ impl State {
             !name.trim().is_empty() && name.len() <= 256 && !name.chars().any(char::is_control)
         };
         let target = match mutation {
-            Mutation::EndAllSessions { server } => {
+            Mutation::EndAllSessions { confirmation } => {
                 let Some(live) = &self.inventory.close else {
                     return Ok(Outcome::StaleConfirmation);
                 };
-                if live.boot != *server {
+                if live != confirmation {
                     return Ok(Outcome::StaleConfirmation);
                 }
-                self.session_ends = Some(live.clone());
-                *server
+                self.session_ends = Some(confirmation.clone());
+                confirmation.boot
             }
             Mutation::Worktree(_) => return Ok(Outcome::Pending),
             Mutation::Close {
@@ -1219,7 +1220,12 @@ mod tests {
                 .apply(
                     [2; 32],
                     1,
-                    Mutation::EndAllSessions { server: [8; 32] },
+                    Mutation::EndAllSessions {
+                        confirmation: CloseInventory {
+                            boot: [8; 32],
+                            ..original.clone()
+                        }
+                    },
                     "/home/test".as_ref(),
                     |_| true
                 )
@@ -1227,7 +1233,9 @@ mod tests {
             Outcome::StaleConfirmation
         );
         assert!(state.session_ends().is_none());
-        let mutation = Mutation::EndAllSessions { server: [9; 32] };
+        let mutation = Mutation::EndAllSessions {
+            confirmation: original.clone(),
+        };
         state
             .apply([2; 32], 2, mutation.clone(), "/home/test".as_ref(), |_| {
                 true

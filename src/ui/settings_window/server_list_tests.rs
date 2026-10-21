@@ -1123,8 +1123,10 @@ fn end_all_sessions_confirms_and_reaches_only_the_selected_server(cx: &mut TestA
     answer_alert(END_CONFIRM_SELECTOR, servers.cx);
     assert_eq!(
         bravo.submitted(),
-        vec![Mutation::EndAllSessions { server: [2; 32] }],
-        "the confirmation names bravo's current run"
+        vec![Mutation::EndAllSessions {
+            confirmation: running_sessions(2, 2).close.unwrap()
+        }],
+        "the request names the exact Sessions bravo's confirmation showed"
     );
     assert!(
         alpha.submitted().is_empty(),
@@ -1175,8 +1177,11 @@ fn end_all_sessions_refuses_a_confirmation_for_an_earlier_server_run(cx: &mut Te
     answer_alert(END_CONFIRM_SELECTOR, servers.cx);
     assert_eq!(
         bravo.submitted(),
-        vec![Mutation::EndAllSessions { server: [3; 32] }]
+        vec![Mutation::EndAllSessions {
+            confirmation: running_sessions(3, 1).close.unwrap()
+        }]
     );
+    // The server's stale answer can't say whether it restarted, so the row claims only a change.
     bravo.answer(Outcome::StaleConfirmation);
     let caption = |cx: &mut VisualTestContext| {
         servers
@@ -1185,8 +1190,39 @@ fn end_all_sessions_refuses_a_confirmation_for_an_earlier_server_run(cx: &mut Te
     };
     settle(servers.cx, |cx| {
         cx.executor().advance_clock(Duration::from_millis(100));
-        caption(cx).starts_with("bravo restarted after you confirmed")
+        caption(cx).starts_with("The Terminal Sessions on bravo changed after you confirmed")
     });
+}
+
+/// A confirmation names the exact Sessions it showed. Another client starting or ending one in
+/// the same server run makes it stale: nothing is submitted, and the row doesn't claim the server
+/// restarted.
+#[gpui::test]
+fn end_all_sessions_refuses_a_confirmation_whose_sessions_changed(cx: &mut TestAppContext) {
+    use super::super::end_sessions::{END_CONFIRM_SELECTOR, END_SELECTOR};
+
+    let (servers, _alpha, bravo) = present_both(cx);
+    bravo.set_inventory(running_sessions(2, 1));
+    select("bravo", servers.cx);
+    servers.cx.run_until_parked();
+
+    click(END_SELECTOR, servers.cx);
+    // Another client ends the confirmed Session and starts a replacement in the same run.
+    let mut replaced = running_sessions(2, 1);
+    replaced.close.as_mut().unwrap().sessions[0].session = Some([200; 32]);
+    bravo.set_inventory(replaced);
+    answer_alert(END_CONFIRM_SELECTOR, servers.cx);
+
+    assert!(
+        bravo.submitted().is_empty(),
+        "a replacement Session was never confirmed"
+    );
+    let caption = end_all_sessions_caption(&servers);
+    assert!(
+        caption.starts_with("The Terminal Sessions on bravo changed after you confirmed"),
+        "got {caption:?}"
+    );
+    assert!(!caption.contains("restarted"), "got {caption:?}");
 }
 
 /// A connected server that doesn't offer End All Sessions says so and asks nothing.
