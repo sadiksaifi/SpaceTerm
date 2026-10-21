@@ -150,9 +150,9 @@ pub(crate) trait RemoteServerOperations: Send + Sync {
     /// Retires a validated result the person acknowledged, and its retained record with it.
     fn acknowledge(&self, handle: RemoteOperationHandle);
 
-    /// Stops following an original this client can no longer resolve, because the destination no
-    /// longer reaches the computer, account or server the original bound. The record is retired
-    /// and nothing is sent. What the server already did is unchanged.
+    /// Stops following an original this client cannot settle: the destination no longer reaches
+    /// the identity the original bound, or the service admitted it and never produced a result.
+    /// The record is retired and nothing is sent. What the server already did is unchanged.
     fn discard(&self, destination: &SshDestination);
 
     /// Continues unresolved originals quietly after relaunch, using available noninteractive
@@ -699,26 +699,21 @@ impl RemoteServerOperations for SshServerOperations {
     }
 
     fn discard(&self, destination: &SshDestination) {
-        let discarded = {
-            let Ok(state) = self.inner.state.lock() else {
-                return;
-            };
-            state
-                .entries
-                .iter()
-                .find(|entry| {
-                    entry.destination == *destination
-                        && matches!(entry.state, RemoteOperationState::Paused { .. })
-                })
-                .and_then(|entry| Some((entry.generation, entry.submitted.as_ref()?.operation)))
-        };
-        let Some((generation, operation)) = discarded else {
+        let Some((destination, generation, operation)) = self.claim_for_retirement(|entry| {
+            entry.destination == *destination
+                && matches!(
+                    entry.state,
+                    // A pause can no longer reach the identity the original bound, and asking
+                    // about an unconfirmed original may never produce an answer. Both leave the
+                    // person following something that cannot be settled.
+                    RemoteOperationState::Paused { .. } | RemoteOperationState::Unconfirmed { .. }
+                )
+        }) else {
             return;
         };
         let owner = Arc::downgrade(&self.inner);
         let inner = Arc::downgrade(&self.inner);
         let store = Arc::clone(&self.inner.store);
-        let destination = destination.clone();
         if std::thread::Builder::new()
             .name("spaceterm-ssh-operation".into())
             .spawn(move || match store.retire(operation) {
@@ -2334,6 +2329,31 @@ mod tests {
         assert!(
             records.operations.lock().unwrap().is_empty(),
             "a retired record must not be written back"
+        );
+    }
+
+    /// Asking about an unconfirmed original may never produce an answer, so the person can stop
+    /// following it. Nothing is sent, and the entry admits ordinary work again.
+    #[test]
+    fn an_unconfirmed_original_can_be_discarded() {
+        let script = Arc::new(Script::default());
+        let records = Arc::new(Records::default());
+        let (owner, _, _) = submit(&script, &records, Err(SshMaintenanceFailure::Unconfirmed));
+        eventually(|| {
+            matches!(
+                owner.state(&destination()),
+                RemoteOperationState::Unconfirmed { .. }
+            )
+        });
+        assert_eq!(records.only().kind, SubmittedKind::Service(Action::Stop));
+
+        owner.discard(&destination());
+
+        eventually(|| records.operations.lock().unwrap().is_empty());
+        eventually(|| matches!(owner.state(&destination()), RemoteOperationState::Unread));
+        assert!(
+            script.resolved.lock().unwrap().is_empty() && script.applied.lock().unwrap().len() == 1,
+            "discarding sends nothing"
         );
     }
 

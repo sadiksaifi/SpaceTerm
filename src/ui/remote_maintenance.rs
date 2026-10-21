@@ -756,7 +756,8 @@ fn submitted(
                 did(kind),
                 plain(resolve_action(kind).label())
             )),
-            vec![resolve_action(kind)],
+            // Asking may never produce an answer, so the person can also stop following it.
+            vec![resolve_action(kind), RemoteAction::Discard],
             false,
         ),
         RemoteOperationState::NeedsPerson { reason, kind } => {
@@ -1444,6 +1445,7 @@ impl MaintenanceConfirmation {
 pub(crate) const fn discarded_operation(state: &RemoteOperationState) -> Option<&SubmittedKind> {
     match state {
         RemoteOperationState::Paused { kind, .. } => kind.as_ref(),
+        RemoteOperationState::Unconfirmed { kind } => Some(kind),
         _ => None,
     }
 }

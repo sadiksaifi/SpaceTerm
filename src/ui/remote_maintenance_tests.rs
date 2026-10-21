@@ -197,8 +197,9 @@ fn only_the_row_that_owns_an_operation_reports_its_progress() {
     );
 }
 
-/// A submitted operation whose answer was lost stays unconfirmed. The row says so and offers only
-/// to ask the machine for the answer, never to repeat the operation.
+/// A submitted operation whose answer was lost stays unconfirmed. The row says so and offers to
+/// ask the machine for the answer, never to repeat the operation. Asking may never produce one,
+/// so it also offers to stop following it.
 #[test]
 fn an_unconfirmed_operation_only_asks_the_machine_again() {
     let lost = RemoteOperationState::Unconfirmed {
@@ -207,7 +208,10 @@ fn an_unconfirmed_operation_only_asks_the_machine_again() {
 
     let service = service("penguin", &lost);
     assert_eq!(service.state, Some("Unconfirmed"));
-    assert_eq!(service.actions, vec![RemoteAction::CheckAgain]);
+    assert_eq!(
+        service.actions,
+        vec![RemoteAction::CheckAgain, RemoteAction::Discard]
+    );
     assert!(
         service
             .explanation
@@ -228,7 +232,7 @@ fn an_unconfirmed_operation_only_asks_the_machine_again() {
     };
     assert_eq!(
         update("penguin", &lost_update).actions,
-        vec![RemoteAction::Finish]
+        vec![RemoteAction::Finish, RemoteAction::Discard]
     );
 }
 
@@ -448,11 +452,11 @@ fn a_removed_connection_offers_only_resolving_and_acknowledging() {
     }
     assert_eq!(
         removed_actions(&states[0], MaintenanceRow::Service),
-        vec![RemoteAction::CheckAgain]
+        vec![RemoteAction::CheckAgain, RemoteAction::Discard]
     );
     assert_eq!(
         removed_actions(&states[1], MaintenanceRow::Update),
-        vec![RemoteAction::Finish]
+        vec![RemoteAction::Finish, RemoteAction::Discard]
     );
     assert_eq!(
         removed_actions(&states[2], MaintenanceRow::Service),
