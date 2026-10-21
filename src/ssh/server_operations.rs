@@ -1370,8 +1370,13 @@ fn submit(
     }
 }
 
-/// Whether one dispatch attempt proves the service performed nothing, so this client keeps no
-/// original for it. A lost or cancelled reply proves nothing and is never counted here.
+/// Whether one dispatch attempt leaves this client no original worth keeping. A lost or
+/// cancelled reply is never counted here, because it proves nothing.
+///
+/// Most of these prove the service performed nothing. `Forgotten` does not: a service with no
+/// record of an original may have admitted it and evicted it unvalidated. The record is retired
+/// anyway, because resolving it again can only ever get the same answer, and the row says that
+/// this client cannot tell whether it took effect.
 fn reached_no_effect(failure: SshMaintenanceFailure) -> bool {
     matches!(
         failure,

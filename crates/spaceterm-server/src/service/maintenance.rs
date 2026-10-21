@@ -873,9 +873,9 @@ fn resolution_after(error: ServerError) -> OperationResolution {
 ///
 /// Stop Server leaves the server durably stopped and not running. Uninstall Server leaves this
 /// account no service registration. Restart Server leaves it running and not deliberately
-/// stopped, which is all the retained policy can show: a server that is running again has been
-/// stopped and started, because that is the only way this service reaches a running server from
-/// any dispatch, but the policy alone never names which operation did it.
+/// stopped, which is all the retained policy can show: the policy alone never names which
+/// operation left the server running. An apply that only resumed an interrupted activation also
+/// leaves it running, so a Restart admitted into that window still reports completed.
 fn promised(action: Action, status: ServiceStatus) -> bool {
     match action {
         Action::Stop => status.stopped && !status.running,
