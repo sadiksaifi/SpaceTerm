@@ -1313,11 +1313,14 @@ pub(crate) mod testing {
         SshProcessSpawnRequest, SshProcessStdio,
     };
 
+    /// How the fake account answers one remote command: its reply and its exit code.
+    type AccountAnswer = dyn Fn(&str) -> (Vec<u8>, i32) + Send + Sync;
+
     /// The account this fake answers for, and every remote command it was asked to run.
     pub(crate) struct FakeAccount {
         /// The effective OpenSSH configuration, whose digest is the route an original binds.
         configuration: Vec<u8>,
-        answer: Box<dyn Fn(&str) -> (Vec<u8>, i32) + Send + Sync>,
+        answer: Box<AccountAnswer>,
         commands: Mutex<Vec<String>>,
     }
     impl FakeAccount {
