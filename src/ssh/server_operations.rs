@@ -1275,6 +1275,19 @@ fn await_outcome(
         let handle = next_handle(state);
         let entry = &mut state.entries[index];
         entry.running = false;
+        // The operation moved the server on from the observation its description bound, so the
+        // facts the row returns to once the result is acknowledged are the ones the service
+        // validated, not the ones it described against.
+        if let (Some(facts), RetainedOutcome::Completed { status, build }) =
+            (entry.facts.as_mut(), &retained)
+        {
+            if let Some(status) = status {
+                facts.status = *status;
+            }
+            if let Some(build) = build {
+                facts.approved = Some(build.clone());
+            }
+        }
         if let Some(submitted) = &entry.submitted {
             entry.state = RemoteOperationState::Resolved {
                 handle,
@@ -2189,6 +2202,16 @@ mod tests {
         owner.acknowledge(handle);
         eventually(|| records.operations.lock().unwrap().is_empty());
         eventually(|| matches!(owner.state(&destination()), RemoteOperationState::Read(_)));
+        // The row returns to the state the service validated, not the one the Stop was
+        // described against, so it never says the server is running after it stopped it.
+        let RemoteOperationState::Read(facts) = owner.state(&destination()) else {
+            unreachable!("matched above")
+        };
+        assert_eq!(
+            (facts.status.running, facts.status.stopped),
+            (false, true),
+            "an acknowledged result leaves the facts the operation produced"
+        );
         owner.acknowledge(handle);
         std::thread::sleep(Duration::from_millis(30));
         assert_eq!(owner.entries().len(), 1);

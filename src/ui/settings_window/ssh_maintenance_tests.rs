@@ -294,16 +294,27 @@ impl RemoteServerOperations for ScriptedOperations {
             .expect("states")
             .iter()
             .filter_map(|(destination, (_, state))| match state {
-                RemoteOperationState::Resolved { handle: held, .. } if *held == handle => {
-                    Some(destination.clone())
-                }
+                RemoteOperationState::Resolved {
+                    handle: held,
+                    outcome,
+                    ..
+                } if *held == handle => Some((destination.clone(), outcome.clone())),
                 _ => None,
             })
             .collect();
-        for destination in acknowledged {
+        for (destination, outcome) in acknowledged {
+            // The owner returns to the facts the operation produced, so this reads them from the
+            // outcome rather than inventing a state the row is then asserted to show.
+            let observed = match outcome {
+                RetainedOutcome::Completed {
+                    status: Some(status),
+                    ..
+                } => status,
+                _ => status(true, true, false),
+            };
             self.set(
                 &destination,
-                RemoteOperationState::Read(Box::new(facts(status(true, false, true)))),
+                RemoteOperationState::Read(Box::new(facts(observed))),
             );
         }
     }
