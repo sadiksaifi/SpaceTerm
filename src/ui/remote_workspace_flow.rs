@@ -1209,6 +1209,8 @@ mod tests {
         registry: SshServerConnections,
         cx: &mut TestAppContext,
     ) -> (Entity<RemoteWorkspaceFlow>, &mut VisualTestContext) {
+        // Connection and AskPass workers notify from their real process-boundary threads.
+        cx.executor().allow_parking();
         cx.update(crate::ui::init).unwrap();
         let (harness, cx) = cx.add_window_view(|window, cx| {
             Harness(cx.new(|cx| RemoteWorkspaceFlow::new(registry, Arc::new(Hosts), window, cx)))
