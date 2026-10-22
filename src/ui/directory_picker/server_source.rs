@@ -339,6 +339,12 @@ fn serve(connector: &dyn DirectoryConnector, jobs: &Jobs) {
         } else {
             1
         };
+        // The server closes a channel that stays idle, and the picker can sit idle on its
+        // confirmation alert, so a creation is sent only over a channel that was just admitted.
+        // Opening it changes nothing on the server.
+        if matches!(queued.job, Job::Create(_)) {
+            connection = None;
+        }
         let mut answer = Err(Failure::ChannelUnavailable);
         for _ in 0..attempts {
             if queued.cancelled.load(Ordering::Acquire) {
@@ -346,6 +352,11 @@ fn serve(connector: &dyn DirectoryConnector, jobs: &Jobs) {
             }
             if connection.is_none() {
                 connection = connector.connect().ok();
+                // Connecting can take a while; an operation the picker abandoned meanwhile is
+                // never sent.
+                if queued.cancelled.load(Ordering::Acquire) {
+                    break;
+                }
             }
             let Some(open) = connection.as_mut() else {
                 answer = Err(Failure::ChannelUnavailable);

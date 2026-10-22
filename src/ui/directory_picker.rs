@@ -2953,6 +2953,288 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// What the test controls about the route to the owning server.
+    #[derive(Default)]
+    struct RouteControls {
+        /// Connections opened so far; each one remembers its place.
+        opened: AtomicUsize,
+        /// Connections opened before this count have been closed by the server, as it closes a
+        /// channel that stays idle.
+        closed_before: AtomicUsize,
+        /// Creation requests that reached the server.
+        creates: AtomicUsize,
+        /// Whether the reply to a creation is lost after the server acted on it.
+        lose_create_reply: std::sync::atomic::AtomicBool,
+        /// While set, opening a connection waits.
+        hold_connect: Mutex<bool>,
+        released: std::sync::Condvar,
+    }
+
+    impl RouteControls {
+        /// The server closes every connection opened so far.
+        fn close_open_channels(&self) {
+            self.closed_before.store(
+                self.opened.load(AtomicOrdering::SeqCst),
+                AtomicOrdering::SeqCst,
+            );
+        }
+        fn hold_connect(&self, held: bool) {
+            *self.hold_connect.lock().unwrap() = held;
+            self.released.notify_all();
+        }
+    }
+
+    struct ControlledRoute {
+        server: InProcessServer,
+        controls: Arc<RouteControls>,
+    }
+
+    struct ControlledConnection {
+        inner: Box<dyn DirectoryConnection>,
+        place: usize,
+        controls: Arc<RouteControls>,
+    }
+
+    impl DirectoryConnector for ControlledRoute {
+        fn connect(&self) -> Result<Box<dyn DirectoryConnection>, ()> {
+            let held = self.controls.hold_connect.lock().unwrap();
+            let _released = self
+                .controls
+                .released
+                .wait_timeout_while(held, Duration::from_secs(10), |held| *held)
+                .unwrap();
+            let place = self.controls.opened.fetch_add(1, AtomicOrdering::SeqCst);
+            Ok(Box::new(ControlledConnection {
+                inner: self.server.connect()?,
+                place,
+                controls: Arc::clone(&self.controls),
+            }))
+        }
+    }
+
+    impl DirectoryConnection for ControlledConnection {
+        fn reads_directories(&self) -> bool {
+            self.inner.reads_directories()
+        }
+        fn creates_directories(&self) -> bool {
+            self.inner.creates_directories()
+        }
+        fn exchange(&mut self, request: &PaneRequest) -> Result<Reply, ()> {
+            if self.place < self.controls.closed_before.load(AtomicOrdering::SeqCst) {
+                return Err(());
+            }
+            let begins_creation = matches!(
+                request,
+                PaneRequest::DirectoryCreate(
+                    spaceterm_server::pane::directories::CreationRequest::Begin { .. }
+                )
+            );
+            if begins_creation {
+                self.controls.creates.fetch_add(1, AtomicOrdering::SeqCst);
+            }
+            let reply = self.inner.exchange(request);
+            if begins_creation && self.controls.lose_create_reply.load(AtomicOrdering::SeqCst) {
+                return Err(());
+            }
+            reply
+        }
+    }
+
+    /// A server picker showing its creation alert for a missing directory under a fresh root.
+    struct CreationAlert {
+        picker: gpui::Entity<DirectoryPicker>,
+        events: Rc<RefCell<Vec<DirectoryPickerEvent>>>,
+        root: PathBuf,
+        missing: PathBuf,
+    }
+
+    /// Opens a server picker over `controls` and asks it to create a missing directory, up to
+    /// its creation alert.
+    fn creation_alert<'a>(
+        controls: &Arc<RouteControls>,
+        name: &str,
+        cx: &'a mut TestAppContext,
+    ) -> (CreationAlert, &'a mut VisualTestContext) {
+        // The server answers from its own directory channel thread.
+        cx.executor().allow_parking();
+        let root = std::env::temp_dir().join(format!(
+            "spaceterm-server-directory-{name}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let missing = root.join("new/nested");
+        let handler: Box<dyn FnMut(&PaneRequest) -> Reply + Send> =
+            Box::new(crate::runtime::directory_testing::directory_host());
+        let server: Arc<dyn DirectoryConnector> = Arc::new(ControlledRoute {
+            server: InProcessServer(Arc::new(Mutex::new(handler))),
+            controls: Arc::clone(controls),
+        });
+        cx.update(crate::ui::init).unwrap();
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let recorded = Rc::clone(&events);
+        let (harness, cx) = cx.add_window_view(move |window, cx| {
+            let source = ServerDirectorySource::browsing_through(
+                server,
+                Some("penguin".to_owned()),
+                Rc::new(|| true),
+            );
+            let picker = cx.new(|cx| {
+                DirectoryPicker::new(Rc::new(source), "Open Remote Directory", window, cx)
+            });
+            cx.subscribe(&picker, move |_, _, event: &DirectoryPickerEvent, _| {
+                recorded.borrow_mut().push(event.clone());
+            })
+            .detach();
+            DirectoryPickerHarness { picker }
+        });
+        let picker = harness.read_with(cx, |harness, _| harness.picker.clone());
+        cx.update(|window, cx| {
+            window.activate_window();
+            picker.update(cx, |picker, cx| assert!(picker.open(window, cx)));
+        });
+        wait_for(
+            |cx| picker.read_with(cx, |picker, _| picker.source.allows_creation()),
+            cx,
+        );
+        set_remote_input(&picker, &missing.display().to_string(), cx);
+        wait_for(
+            |cx| {
+                picker.read_with(cx, |picker, _| {
+                    picker.status == DirectoryPickerStatus::Missing
+                })
+            },
+            cx,
+        );
+        cx.update(|window, cx| {
+            picker.update(cx, |picker, cx| picker.confirm_current(window, cx));
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("modal-action-directory-picker-create")
+                .is_some()
+        );
+        (
+            CreationAlert {
+                picker,
+                events,
+                root,
+                missing,
+            },
+            cx,
+        )
+    }
+
+    fn click_create(cx: &mut VisualTestContext) {
+        let create = cx
+            .debug_bounds("modal-action-directory-picker-create")
+            .expect("the picker asks before the server creates the directory");
+        cx.simulate_click(create.center(), Modifiers::none());
+    }
+
+    fn confirmed(events: &Rc<RefCell<Vec<DirectoryPickerEvent>>>) -> bool {
+        events.borrow().iter().any(|event| {
+            matches!(
+                event,
+                DirectoryPickerEvent::Confirmed(DirectorySelection::Server(_))
+            )
+        })
+    }
+
+    /// The server closed the picker's channel while the person read the creation alert. The
+    /// creation still reaches the server once, over a channel admitted just before it.
+    #[gpui::test]
+    fn creating_after_an_idle_alert_should_reach_the_server_over_a_fresh_channel(
+        cx: &mut TestAppContext,
+    ) {
+        let controls = Arc::new(RouteControls::default());
+        let (alert, cx) = creation_alert(&controls, "idle-create", cx);
+        let CreationAlert {
+            events,
+            root,
+            missing,
+            ..
+        } = alert;
+
+        controls.close_open_channels();
+        click_create(cx);
+        wait_for(|_| confirmed(&events), cx);
+
+        assert!(missing.is_dir(), "the server created the directory");
+        assert_eq!(controls.creates.load(AtomicOrdering::SeqCst), 1);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A creation whose reply is lost may have taken effect, so it is reported as failed and
+    /// never sent again.
+    #[gpui::test]
+    fn a_creation_whose_reply_is_lost_should_fail_without_being_sent_again(
+        cx: &mut TestAppContext,
+    ) {
+        let controls = Arc::new(RouteControls::default());
+        let (alert, cx) = creation_alert(&controls, "lost-create", cx);
+        let CreationAlert {
+            picker,
+            events,
+            root,
+            missing,
+        } = alert;
+
+        controls
+            .lose_create_reply
+            .store(true, AtomicOrdering::SeqCst);
+        click_create(cx);
+        wait_for(
+            |cx| picker.read_with(cx, |picker, _| picker.busy.is_none()),
+            cx,
+        );
+        std::thread::sleep(Duration::from_millis(200));
+        cx.run_until_parked();
+
+        assert!(
+            !confirmed(&events),
+            "nothing claims the directory was created"
+        );
+        assert_eq!(
+            controls.creates.load(AtomicOrdering::SeqCst),
+            1,
+            "the creation is sent once"
+        );
+        assert!(missing.is_dir(), "what the server already did stays");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A creation abandoned while its channel was still opening never reaches the server.
+    #[gpui::test]
+    fn a_creation_abandoned_while_connecting_should_never_reach_the_server(
+        cx: &mut TestAppContext,
+    ) {
+        let controls = Arc::new(RouteControls::default());
+        let (alert, cx) = creation_alert(&controls, "abandoned-create", cx);
+        let CreationAlert {
+            picker,
+            events,
+            root,
+            missing,
+        } = alert;
+
+        controls.hold_connect(true);
+        click_create(cx);
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            picker.update(cx, |picker, cx| picker.cancel(window, cx));
+        });
+        cx.run_until_parked();
+        controls.hold_connect(false);
+        std::thread::sleep(Duration::from_millis(300));
+        cx.run_until_parked();
+
+        assert_eq!(controls.creates.load(AtomicOrdering::SeqCst), 0);
+        assert!(!missing.exists());
+        assert!(!confirmed(&events));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     fn set_remote_input(
         picker: &gpui::Entity<DirectoryPicker>,
         value: &str,
