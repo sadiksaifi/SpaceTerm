@@ -6206,6 +6206,33 @@ fn non_composing_zwj_prefix_does_not_fit_the_single_glyph_slot(cx: &mut TestAppC
 }
 
 #[gpui::test]
+fn an_oversized_server_input_method_commit_preserves_the_entire_host_text(cx: &mut TestAppContext) {
+    let (pane, cx, records) =
+        terminal_pane_with_session_options(cx, |sessions| sessions.server_backed());
+    let text = "界🙂".repeat(10_000);
+    cx.update(|window, cx| {
+        pane.update(cx, |pane, cx| {
+            pane.replace_text_in_range(None, &text, window, cx);
+            assert_eq!(pane.ime.marked_text(), Some(text.as_str()));
+            assert!(pane.status.as_ref().unwrap().contains("65,536 bytes"));
+        })
+    });
+    assert!(
+        !records
+            .commands()
+            .iter()
+            .any(|call| matches!(call.command, RecordedCommand::Key(_)))
+    );
+    cx.update(|window, cx| {
+        pane.update(cx, |pane, cx| {
+            pane.replace_text_in_range(None, "short", window, cx);
+            assert!(pane.ime.marked_text().is_none());
+        })
+    });
+    assert!(records.commands().iter().any(|call| matches!(&call.command, RecordedCommand::Key(key) if key.text.as_deref() == Some("short"))));
+}
+
+#[gpui::test]
 fn marked_text_stays_local_and_commits_each_input_method_once(cx: &mut TestAppContext) {
     let (pane, cx, records) = connected_terminal_pane(cx);
     let screen_before = pane.read_with(cx, |pane, _| pane.screen.clone());

@@ -16,6 +16,7 @@ pub const MAX_COLUMNS: u16 = 240;
 pub const MAX_ROWS: u16 = 100;
 /// Maximum number of ordered key events accepted by one focused batch.
 pub const MAX_KEY_BATCH: usize = 32;
+pub const MAX_KEY_TEXT_BYTES: usize = 4096;
 pub const MAX_TERMINAL_FRAME: usize = 16 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

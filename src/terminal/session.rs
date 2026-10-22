@@ -493,6 +493,24 @@ pub enum InteractiveInput {
     Refused,
 }
 
+/// Bounds one host commit and the text retained while its transport completes.
+pub const MAX_INPUT_METHOD_BYTES: usize = 64 * 1024;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Error)]
+pub enum InputMethodRefusal {
+    #[error("Input method text exceeds 65,536 bytes. The text remains available for editing.")]
+    TooLarge,
+    #[error("Input method text could not be queued. The text remains available for editing.")]
+    Unavailable,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InputMethodOutcome {
+    Written,
+    /// Some text may have reached the terminal. Never replay this commit automatically.
+    Interrupted,
+}
+
 pub trait TerminalSessionHandle {
     /// Drains bounded native requests independently of replaceable presentation wakeups.
     fn take_client_effects(&self) -> Vec<ClientEffectRequest> {
@@ -515,6 +533,23 @@ pub trait TerminalSessionHandle {
     }
 
     fn key(&self, input: KeyInput);
+
+    /// Accepts the entire commit as one ordered unit, or refuses before consuming its text.
+    fn commit_input_method(
+        &self,
+        text: &str,
+    ) -> Result<async_channel::Receiver<InputMethodOutcome>, InputMethodRefusal> {
+        if text.len() > MAX_INPUT_METHOD_BYTES {
+            return Err(InputMethodRefusal::TooLarge);
+        }
+        if !self.interactive_input_available() {
+            return Err(InputMethodRefusal::Unavailable);
+        }
+        self.key(KeyInput::input_method_commit(text));
+        let (sender, receiver) = async_channel::bounded(1);
+        let _ = sender.try_send(InputMethodOutcome::Written);
+        Ok(receiver)
+    }
     fn clear_screen_and_scrollback(&self);
     fn focus(&self, focused: bool);
 

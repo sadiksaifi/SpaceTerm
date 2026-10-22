@@ -18,8 +18,12 @@ mod directories;
 pub(crate) mod testing {
     use super::*;
 
+    pub(crate) fn terminal_host() -> SharedWorkspaceHost {
+        SharedWorkspaceHost::new(super::tests::host())
+    }
+
     pub(crate) fn directory_host() -> impl FnMut(&Request) -> Reply + Send {
-        let mut host = SharedWorkspaceHost::new(super::tests::host());
+        let mut host = terminal_host();
         move |request| host.request([3; 32], [4; 32], request.clone())
     }
 }
@@ -1525,7 +1529,10 @@ fn decode_modifiers(bits: u16) -> InputModifiers {
 }
 pub(crate) fn decode_key(key: Key) -> Option<KeyInput> {
     if key.logical.len() > 128
-        || key.text.as_ref().is_some_and(|t| t.len() > 4096)
+        || key
+            .text
+            .as_ref()
+            .is_some_and(|t| t.len() > pane::MAX_KEY_TEXT_BYTES)
         || key.modifiers > 1023
         || key.consumed > 1023
     {

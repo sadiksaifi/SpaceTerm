@@ -4570,12 +4570,51 @@ impl EntityInputHandler for TerminalPane {
             self.invalidate_preedit_layout();
             return;
         }
-        self.ime.commit(text);
-        self.invalidate_preedit_layout();
-        if let Some(text) = self.ime.take_commit() {
-            let translation = self.key_input_adapter.input_method_commit(text);
-            self.send_key_translation(translation, cx);
+        if self.server_backed() && !text.is_empty() {
+            let submitted = self
+                .terminal_session
+                .session
+                .as_ref()
+                .ok_or(crate::terminal::session::InputMethodRefusal::Unavailable)
+                .and_then(|session| session.commit_input_method(text));
+            match submitted {
+                Ok(outcome) => {
+                    self.ime.cancel();
+                    self.clear_attention(cx);
+                    if self.screen.cursor.visible && self.screen.cursor.blinking {
+                        self.reset_blink_phase();
+                    }
+                    // A queued commit belongs to this Terminal Session. A later interruption
+                    // is reported, never repaired by replaying committed text.
+                    let identity = self.terminal_session.native_service_session_identity;
+                    cx.spawn(async move |this, cx| {
+                        if outcome.recv().await != Ok(crate::terminal::session::InputMethodOutcome::Written) {
+                            let _ = this.update(cx, |this, cx| {
+                                if this.terminal_session.native_service_session_identity == identity {
+                                    this.status = Some("Input method text was not fully confirmed. Check the shell before entering it again.".to_owned());
+                                    this.status_intent = StatusIntent::Warning;
+                                    cx.notify();
+                                }
+                            });
+                        }
+                    }).detach();
+                }
+                Err(refusal) => {
+                    // Preserve the entire host string, including a direct emoji-picker commit
+                    // with no preceding marked text. No prefix has been queued.
+                    self.ime.replace_and_mark(None, text, None);
+                    self.status = Some(refusal.to_string());
+                    self.status_intent = StatusIntent::Warning;
+                }
+            }
+        } else {
+            self.ime.commit(text);
+            if let Some(text) = self.ime.take_commit() {
+                let translation = self.key_input_adapter.input_method_commit(text);
+                self.send_key_translation(translation, cx);
+            }
         }
+        self.invalidate_preedit_layout();
         self.pending_accessibility_notifications
             .insert(AccessibilityNotification::Value);
         cx.notify();
