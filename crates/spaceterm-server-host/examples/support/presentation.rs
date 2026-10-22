@@ -4,6 +4,7 @@ use super::terminal_semantics::{Failure, stage};
 use spaceterm::runtime::PhysicalKey;
 use spaceterm_server::{
     ServerError,
+    hierarchy::{Id, Inventory},
     pane::{
         InteractiveInput, Key, Lease, PaneConnection, Reply, Request, Screen,
         metadata::{
@@ -50,10 +51,7 @@ pub struct Witness {
 }
 
 /// A separate admitted client observes the Pane without selecting or painting it.
-pub fn observe_hidden_inventory(
-    connection: &mut PaneConnection,
-    pane: spaceterm_server::hierarchy::Id,
-) -> Result<()> {
+pub fn observe_hidden_inventory(connection: &mut PaneConnection, pane: Id) -> Result<()> {
     let until = Instant::now() + WAIT;
     loop {
         let Reply::Inventory { inventory, .. } = stage(
@@ -63,23 +61,29 @@ pub fn observe_hidden_inventory(
         else {
             return Err("observer inventory reply missing".into());
         };
-        if inventory
-            .workspaces
-            .iter()
-            .flat_map(|work| &work.tabs)
-            .flat_map(|tab| &tab.panes)
-            .find(|candidate| candidate.id == pane)
-            .and_then(|pane| pane.presentation.as_deref())
-            .is_some_and(|snapshot| {
-                snapshot.title == HIDDEN_TITLE
-                    && snapshot.directory == "/"
-                    && snapshot.progress == Progress::Normal(73)
-            })
-        {
+        if presentation(&inventory, pane)?.is_some_and(|snapshot| {
+            snapshot.title == HIDDEN_TITLE
+                && snapshot.directory == "/"
+                && snapshot.progress == Progress::Normal(73)
+        }) {
             return Ok(());
         }
         pause(until)?;
     }
+}
+
+fn presentation(inventory: &Inventory, pane: Id) -> Result<Option<&Snapshot>> {
+    let snapshot = inventory
+        .workspaces
+        .iter()
+        .flat_map(|work| &work.tabs)
+        .flat_map(|tab| &tab.panes)
+        .find(|candidate| candidate.id == pane)
+        .and_then(|pane| pane.presentation.as_deref());
+    if let Some(snapshot) = snapshot {
+        stage("inventory-presentation-validation", snapshot.validate())?;
+    }
+    Ok(snapshot)
 }
 
 fn require(condition: bool, failure: &'static str) -> Result<()> {
@@ -148,7 +152,6 @@ fn has_row(screen: &Screen, marker: &str) -> bool {
 fn metadata(
     connection: &mut PaneConnection,
     lease: Lease,
-    revision: Option<u64>,
     hidden: bool,
     predicate: impl Fn(&Snapshot) -> bool,
 ) -> Result<Box<Snapshot>> {
@@ -166,13 +169,29 @@ fn metadata(
                 "hidden Pane published a Screen",
             )?;
         }
-        match stage(
-            "presentation-metadata",
-            connection.exchange(&Request::Metadata { lease, revision }),
-        )? {
-            Reply::Metadata(snapshot) if predicate(&snapshot) => return Ok(snapshot),
-            Reply::Metadata(_) | Reply::Unchanged => {}
-            _ => return Err("unexpected metadata reply".into()),
+        let Reply::Inventory { inventory, .. } = stage(
+            "presentation-inventory",
+            connection.exchange(&Request::Inventory),
+        )?
+        else {
+            return Err("presentation inventory reply missing".into());
+        };
+        let pane = inventory
+            .close
+            .as_ref()
+            .filter(|close| close.boot == lease.server)
+            .and_then(|close| {
+                close
+                    .sessions
+                    .iter()
+                    .find(|pane| pane.session == Some(lease.session))
+            })
+            .ok_or("inventory no longer contains the exact test Session")?
+            .id;
+        if let Some(snapshot) = presentation(&inventory, pane)?
+            && predicate(snapshot)
+        {
+            return Ok(Box::new(snapshot.clone()));
         }
         pause(until)?;
     }
@@ -188,7 +207,7 @@ pub fn begin(
     let script = format!("python3 -c 'exec({})'", program.replace('\'', "'\\''"));
     stage("presentation-producer", command(connection, lease, &script))?;
     screen(connection, lease, |screen| has_row(screen, READY))?;
-    let initial = metadata(connection, lease, None, false, |snapshot| {
+    let initial = metadata(connection, lease, false, |snapshot| {
         snapshot.title == TITLE
             && snapshot.directory == "/tmp"
             && snapshot.progress == Progress::Normal(42)
@@ -223,35 +242,11 @@ pub fn begin(
         }),
     )?;
     send(connection, lease, "h")?;
-    let changed = metadata(
-        connection,
-        lease,
-        Some(initial.revision),
-        true,
-        |snapshot| {
-            snapshot.title == HIDDEN_TITLE
-                && snapshot.directory == "/"
-                && snapshot.progress == Progress::Normal(73)
-        },
-    )?;
-    require(
-        changed.revision != initial.revision,
-        "metadata-only update did not advance revision",
-    )?;
-    // The same revision must suppress retransmission even though the Pane is hidden.
-    require(
-        matches!(
-            stage(
-                "metadata-revision",
-                connection.exchange(&Request::Metadata {
-                    lease,
-                    revision: Some(changed.revision),
-                })
-            )?,
-            Reply::Unchanged
-        ),
-        "unchanged metadata revision was republished",
-    )?;
+    let changed = metadata(connection, lease, true, |snapshot| {
+        snapshot.title == HIDDEN_TITLE
+            && snapshot.directory == "/"
+            && snapshot.progress == Progress::Normal(73)
+    })?;
     Ok(Witness { metadata: changed })
 }
 
@@ -266,7 +261,7 @@ pub fn finish(
         lease.session == previous.session && lease.connection != previous.connection,
         "reconnect did not retain the Session with a fresh connection",
     )?;
-    let resumed = metadata(connection, lease, None, false, |snapshot| {
+    let resumed = metadata(connection, lease, false, |snapshot| {
         snapshot.title == witness.metadata.title
             && snapshot.directory == witness.metadata.directory
             && snapshot.progress == witness.metadata.progress
@@ -309,21 +304,13 @@ pub fn finish(
         wrong.push((stale, refusal));
     }
     for (stale, refusal) in wrong {
-        for request in [
-            Request::Metadata {
-                lease: stale,
-                revision: None,
-            },
-            Request::ClearScreenAndScrollback { lease: stale },
-        ] {
-            require(
-                matches!(
-                    connection.exchange(&request),
-                    Err(error) if error == refusal
-                ),
-                "wrong lease admitted metadata or clear",
-            )?;
-        }
+        require(
+            matches!(
+                connection.exchange(&Request::ClearScreenAndScrollback { lease: stale }),
+                Err(error) if error == refusal
+            ),
+            "wrong lease admitted clear",
+        )?;
     }
     // Stale clears must have preserved the actual retained history.
     stage(
