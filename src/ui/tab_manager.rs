@@ -3009,6 +3009,21 @@ impl TabManager {
         self.tabs.tab(tab_id)?.read(cx).shared_server_pane(pane_id)
     }
 
+    pub(crate) fn shared_pane_closes_directly(
+        &self,
+        server: spaceterm_server::hierarchy::Id,
+        live_session: bool,
+        cx: &App,
+    ) -> bool {
+        self.tabs
+            .iter()
+            .find_map(|(_, view)| {
+                view.read(cx)
+                    .shared_pane_closes_directly(server, live_session, cx)
+            })
+            .unwrap_or(false)
+    }
+
     /// Delivers the Active Tab's Focused Pane exit, as its Terminal Session does when the server
     /// ends it.
     #[cfg(test)]

@@ -1493,6 +1493,7 @@ mod development {
                 .close_confirmation(target)
                 .ok_or(SharedCloseUnavailable::Unreported)?;
             let scope = match target {
+                _ if confirmation.removes_workspace => SharedCloseScope::Workspace,
                 ServerCloseTarget::Pane { .. } => SharedCloseScope::Pane,
                 ServerCloseTarget::Tab { .. } => SharedCloseScope::Tab,
                 ServerCloseTarget::Workspace { .. } => SharedCloseScope::Workspace,
@@ -1983,6 +1984,20 @@ mod development {
     }
 
     impl SharedCloseApproval {
+        /// Workspace removal always needs review; smaller closes use each Pane's current
+        /// control and busy-work facts without changing the exact server-side approval.
+        pub(crate) fn requires_confirmation(
+            &self,
+            directly_closable: impl Fn(Id, bool) -> bool,
+        ) -> bool {
+            self.scope == SharedCloseScope::Workspace
+                || self
+                    .confirmation
+                    .panes
+                    .iter()
+                    .any(|pane| !directly_closable(pane.id, pane.session.is_some()))
+        }
+
         /// The live Terminal Sessions the close ends. A retained Pane whose shell has not
         /// started yet has none.
         fn sessions(&self) -> usize {

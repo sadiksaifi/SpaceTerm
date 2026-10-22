@@ -2367,6 +2367,44 @@ impl TabView {
             .is_some_and(|shared| shared.holds(server))
     }
 
+    pub(crate) fn shared_pane_closes_directly(
+        &self,
+        server: spaceterm_server::hierarchy::Id,
+        live_session: bool,
+        cx: &App,
+    ) -> Option<bool> {
+        use crate::terminal::server_session::DevelopmentPaneStatus;
+        let shared = self.shared.as_ref()?;
+        let pane = shared.local_pane(server)?;
+        let status = shared.view(pane)?.connection().status();
+        if matches!(
+            status,
+            DevelopmentPaneStatus::Takeover
+                | DevelopmentPaneStatus::TakeoverReconnecting
+                | DevelopmentPaneStatus::TakeoverFailed(_)
+                | DevelopmentPaneStatus::TakingOver
+        ) {
+            return Some(false);
+        }
+        Some(if live_session {
+            status == DevelopmentPaneStatus::Connected
+                && !self
+                    .tab
+                    .pane(pane)?
+                    .read(cx)
+                    .close_facts()
+                    .requires_confirmation()
+        } else {
+            matches!(
+                status,
+                DevelopmentPaneStatus::Connected
+                    | DevelopmentPaneStatus::Restored
+                    | DevelopmentPaneStatus::SessionEnded
+                    | DevelopmentPaneStatus::Ended
+            )
+        })
+    }
+
     /// Whether the keyboard rests anywhere in this Tab: its Tab strip item, one of its Panes, or
     /// the screen replacing one of them.
     pub(crate) fn holds_keyboard(&self, window: &Window, cx: &App) -> bool {

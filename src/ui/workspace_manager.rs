@@ -1489,6 +1489,19 @@ impl WorkspaceManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        let open_pane = !self.sidebar.read(cx).is_focused(window)
+            && !self.sidebar.read(cx).rename_is_focused(window)
+            && !self.sidebar.read(cx).menu_open();
+        self.activate_workspace_focusing(workspace_id, open_pane, window, cx)
+    }
+
+    fn activate_workspace_focusing(
+        &mut self,
+        workspace_id: WorkspaceId,
+        open_pane: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
         let Some(next_manager) = self
             .workspaces
             .workspace(workspace_id)
@@ -1505,9 +1518,6 @@ impl WorkspaceManager {
         }
 
         self.synchronize_tab_manager_layout(workspace_id, window, cx);
-        let preserve_sidebar_focus = self.sidebar.read(cx).is_focused(window)
-            || self.sidebar.read(cx).rename_is_focused(window)
-            || self.sidebar.read(cx).menu_open();
         if previous_workspace_id != Some(workspace_id) {
             if let Some(previous_manager) = &previous_manager {
                 previous_manager.update(cx, |manager, cx| manager.deactivate(cx));
@@ -1516,7 +1526,7 @@ impl WorkspaceManager {
                 sidebar.cancel_rename(cx);
             });
         }
-        if preserve_sidebar_focus {
+        if !open_pane {
             next_manager.update(cx, |manager, cx| manager.activate_without_focus(cx));
         } else {
             next_manager.update(cx, |manager, cx| manager.activate(window, cx));
@@ -1883,7 +1893,7 @@ impl WorkspaceManager {
                 workspace_id,
                 focus_pane,
             } => {
-                if self.activate_workspace(workspace_id, window, cx) {
+                if self.activate_workspace_focusing(workspace_id, focus_pane, window, cx) {
                     // An expanded row stands for the Tabs outside its Worktrees.
                     if self
                         .worktree_section(workspace_id, cx)
@@ -1979,7 +1989,11 @@ impl WorkspaceManager {
                 self.perform_machine_command(target, command, window, cx)
             }
             SidebarEvent::LayoutChanged => self.synchronize_tab_manager_layouts(window, cx),
-            SidebarEvent::FocusPane => self.focus(window, cx),
+            SidebarEvent::FocusPane => {
+                if let Some(manager) = self.active_tab_manager() {
+                    manager.update(cx, |manager, cx| manager.activate(window, cx));
+                }
+            }
             SidebarEvent::FocusChanged => {}
         }
         self.sync_terminal_focus_blocker(window, cx);
@@ -2277,6 +2291,14 @@ impl WorkspaceManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // A missing descendant handler lets the action reach this ancestor. Forward only from
+        // outside the active Tab; an unavailable operation then terminates on its second pass.
+        if self
+            .active_tab_manager()
+            .is_none_or(|manager| manager.read(cx).holds_keyboard(window, cx))
+        {
+            return;
+        }
         self.focus(window, cx);
         window.dispatch_action(action.boxed_clone(), cx);
     }
@@ -3523,9 +3545,8 @@ impl WorkspaceManager {
     /// Asks to close a Pane, Tab, or Workspace a SpaceTerm Server owns, returning whether the
     /// target is shared.
     ///
-    /// The close ends Terminal Sessions for every client, including Panes another client
-    /// controls, so it always opens a Close Confirmation. The confirmation captures exactly which
-    /// Panes and Sessions the server reports; a confirmed close asks the server to end only those.
+    /// Captures the exact server targets before applying contextual confirmation. Idle own work
+    /// closes directly; other clients' work and Workspace removal always require review.
     fn request_shared_close(
         &mut self,
         target: CloseTarget,
@@ -3607,6 +3628,29 @@ impl WorkspaceManager {
                 return true;
             }
         };
+        let requires_confirmation = approval.requires_confirmation(|pane, live_session| {
+            self.workspaces
+                .workspace(workspace_id)
+                .is_some_and(|entry| {
+                    entry
+                        .payload()
+                        .read(cx)
+                        .shared_pane_closes_directly(pane, live_session, cx)
+                })
+        });
+        if !requires_confirmation {
+            let key = self.shared.owner(workspace_id);
+            if let Some(shared) = self.shared.owning_mut(workspace_id)
+                && let super::shared_workspaces::SharedSubmission::Refused(reason) =
+                    shared.close(approval, target)
+            {
+                Self::show_shared_refusal(Self::shared_close_operation(target), reason, window, cx);
+            }
+            if let Some(key) = key {
+                self.sync_shared_workspaces(key, window, cx);
+            }
+            return true;
+        }
         let Some(window_handle) = window.window_handle().downcast::<Self>() else {
             return true;
         };
@@ -3784,6 +3828,7 @@ impl WorkspaceManager {
                         cx,
                     );
                 }
+                self.sync_shared_workspaces(key, window, cx);
             }
             SharedCloseState::Changed => {
                 Self::present_shared_close_changed(

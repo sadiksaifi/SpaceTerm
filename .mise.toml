@@ -239,6 +239,11 @@ description = "Run shared tests without native features"
 usage = 'arg "[filter]" help="Run only tests whose names contain this filter"'
 run = "cargo test --package spaceterm --package spaceterm-directories --package spaceterm-server --package spaceterm-server-host --all-targets --no-default-features --locked {{usage.filter | quote}}"
 
+[tasks."test:desktop"]
+description = "Run desktop library regressions without native integration harnesses"
+usage = 'arg "[filter]" help="Run only tests whose names contain this filter"'
+run = "cargo test --package spaceterm --lib --all-features --locked {{usage.filter | quote}}"
+
 [tasks."test:rustdoc"]
 description = "Compile and test Rust documentation examples"
 # Explicit --doc selects generated C-header prose even when the sys crate has doctest = false.

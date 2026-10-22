@@ -27,6 +27,8 @@ use spaceterm_ui::{
 };
 
 use super::*;
+#[path = "interaction_tests.rs"]
+mod interaction_tests;
 use crate::domain::PresentedWorkspace;
 use crate::domain::{PaneId, TabId};
 
