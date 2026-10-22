@@ -3,7 +3,7 @@
 # USAGE flag "--backend <backend>" help="Display backend" default="both" {
 # USAGE   choices "both" "x11" "wayland"
 # USAGE }
-# USAGE flag "--binary <binary>" help="Existing source executable; skips building"
+# USAGE flag "--binary <binary>" help="Existing source executable; skips the client build"
 # USAGE flag "--expected-binary-sha256 <sha256>" help="Required SHA256 pin for --binary"
 # USAGE flag "--output-dir <output_dir>" help="Evidence directory; defaults to a fresh temporary directory"
 # USAGE flag "--session-timeout <seconds>" help="Maximum runtime per backend in seconds" default="600"
@@ -49,13 +49,15 @@ from spaceterm_tasks.accessibility_linux import (
     fixture_lines,
     orca_registered,
     require,
-    require_account_server,
     require_prerequisites,
     require_private_runtime,
     retire_direct_child,
+    source_session,
     wait_until,
 )
 from spaceterm_tasks.cargo import build_executable
+from spaceterm_tasks.development_linux import stage_prefix
+from spaceterm_tasks.development_supervision import source_environment
 
 TASK_LIBRARY = Path(spaceterm_tasks.__file__).resolve().parents[1]
 
@@ -69,7 +71,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--backend", choices=("both", "x11", "wayland"), default="both")
     parser.add_argument(
-        "--binary", type=Path, help="Existing source-built executable; skips building"
+        "--binary", type=Path, help="Existing source-built executable; skips the client build"
     )
     parser.add_argument("--expected-binary-sha256", help="Required SHA256 pin for --binary")
     parser.add_argument("--server-binary", type=Path, help=argparse.SUPPRESS)
@@ -90,6 +92,7 @@ def parse_args():
         help="Verify private bus and dconf ownership without launching a display",
     )
     parser.add_argument("--private-session", choices=("x11", "wayland"), help=argparse.SUPPRESS)
+    parser.add_argument("--source-session", choices=("x11", "wayland"), help=argparse.SUPPRESS)
     return parser.parse_args()
 
 
@@ -302,9 +305,8 @@ class Probe:
         )
 
     def open_server_workspace(self, input_driver):
-        # Normal launch already presents the account server's Workspaces. Exercise the same
-        # creation controls as the native client. The fixture's named client owns its
-        # presentation; the already-running account server owns the PTY.
+        # Exercise the native creation controls. The fixture's named client owns its
+        # presentation; this source run's foreground Server owns the PTY.
         self.server_workspace_name = os.environ["SPACETERM_DEVELOPMENT_CLIENT"]
         rows = self.workspace_rows()
         require(
@@ -1803,17 +1805,17 @@ def private_session(args):
                 WAYLAND_DISPLAY_absent="WAYLAND_DISPLAY" not in os.environ,
             )
         require(all(expected_backend.values()), "application_backend_environment_invalid")
-        require(args.server_binary is not None, "server_status_executable_missing")
+        require(os.environ.get("SPACETERM_DEVELOPMENT_FOREGROUND") == "1", "source_owner_missing")
+        require(os.environ.get("SPACETERM_DEVELOPMENT_OWNER_SOCKET"), "source_owner_socket_missing")
         require(
             os.environ.get("SPACETERM_DEVELOPMENT_CLIENT")
             == f"a11y-{args.private_session}-{output.parent.name}".replace("_", "-"),
             "server_fixture_client_identity_missing",
         )
-        # Account-local admission resolves getpwuid, not the private HOME/XDG fixture.
-        # Starting or stopping the owning account's server remains an explicit host action.
-        require_account_server(args.server_binary)
-        report["server_backed"] = {"existing_account_server_connected": True}
-        application = processes.start([str(args.binary)], stderr=frame_output.writer)
+        report["server_backed"] = {"owned_foreground_server": True}
+        application = processes.start(
+            [str(args.binary), "--new-instance"], stderr=frame_output.writer
+        )
         probe.application_pid = application.pid
         report["application_private_environment"] = readiness.wait(
             ReadinessStep.APPLICATION_ENVIRONMENT, lambda: runtime_child_environment(application)
@@ -2087,7 +2089,9 @@ def private_session(args):
         if input_driver is not None:
             input_driver.close()
         try:
-            processes.close()
+            # Keep the desktop's owner connection alive while retiring reader/display children.
+            # Its exit lets the source supervisor finish this private-session process.
+            processes.close(last=application)
         except SmokeFailure:
             report.update(passed=False, failure="direct_child_cleanup_incomplete")
         if orca_stream is not None:
@@ -2123,14 +2127,14 @@ def prepare_binary(args, output):
         )
     binary = args.binary
     require_prerequisites(args.backend)
+    environment = source_environment({**os.environ, "CARGO_BUILD_JOBS": "2"})
     if binary is None:
         try:
-            binary = build_executable("--locked", env={**os.environ, "CARGO_BUILD_JOBS": "2"})
+            binary = build_executable("--locked", env=environment)
         except TaskError:
             raise SmokeFailure("source_build_failed") from None
     require(binary.is_file() and os.access(binary, os.X_OK), "source_executable_missing")
-    prefix = output / "prefix"
-    destination = prefix / "bin" / "spaceterm"
+    destination = output / "source" / "bin" / "spaceterm"
     destination.parent.mkdir(parents=True)
     try:
         # A source build can contain gigabytes of debug symbols. The prefix only reads it.
@@ -2139,6 +2143,21 @@ def prepare_binary(args, output):
         if error.errno not in (errno.EXDEV, errno.EPERM, errno.EOPNOTSUPP):
             raise
         shutil.copy2(binary, destination)
+    try:
+        server = build_executable(
+            "--package",
+            "spaceterm-server-host",
+            "--no-default-features",
+            "--locked",
+            binary="spaceterm-server",
+            env=environment,
+        )
+        # Reuse Development's resource layout, confined to this run's evidence directory.
+        prefix = stage_prefix(destination, server)
+    except TaskError:
+        raise SmokeFailure("server_source_build_failed") from None
+    destination.unlink()
+    destination = prefix / "bin" / "spaceterm"
     with destination.open("rb") as executable:
         digest = hashlib.file_digest(executable, "sha256").hexdigest()
     expected = (
@@ -2155,19 +2174,53 @@ def prepare_binary(args, output):
     }
     (output / "binary-proof.json").write_text(json.dumps(proof, indent=2) + "\n")
     require(proof["passed"], "source_executable_hash_mismatch")
-    resources = prefix / "share" / "spaceterm"
-    resources.mkdir(parents=True)
-    shutil.copytree(ROOT / "assets" / "shell-integration", resources / "shell-integration")
-    run(
-        [
-            "tic",
-            "-x",
-            "-o",
-            str(resources / "terminfo"),
-            str(ROOT / "assets" / "terminfo" / "xterm-spaceterm.terminfo"),
-        ]
+    server = prefix / "bin" / "spaceterm-server"
+    with server.open("rb") as executable:
+        server_digest = hashlib.file_digest(executable, "sha256").hexdigest()
+    (output / "server-binary-proof.json").write_text(
+        json.dumps({"sha256": server_digest, "size_bytes": server.stat().st_size}) + "\n"
     )
     return destination
+
+
+def supervised_session(args):
+    require(
+        args.binary is not None and args.server_binary is not None, "source_executables_missing"
+    )
+    # supervise removes mise's PYTHONPATH before launching its client. Bootstrap this
+    # task explicitly so its library path never reaches the desktop or terminal programs.
+    command = [
+        "dbus-run-session",
+        "--",
+        "/usr/bin/python3",
+        "-c",
+        "import runpy, sys; sys.path.insert(0, sys.argv.pop(1)); sys.argv.pop(0); "
+        "runpy.run_path(sys.argv[0], run_name='__main__')",
+        str(TASK_LIBRARY),
+        str(Path(__file__).resolve()),
+        "--private-session",
+        args.source_session,
+        "--binary",
+        str(args.binary),
+        "--output-dir",
+        str(args.output_dir),
+    ]
+    measurement = args.output_dir / "measurement.json"
+    try:
+        status = source_session(args.server_binary, command, os.environ)
+    except TaskError:
+        report = json.loads(measurement.read_text()) if measurement.exists() else {}
+        report.update(passed=False, failure="source_session_failed")
+        report["source_run_cleanup"] = {"passed": False}
+        measurement.write_text(json.dumps(report, indent=2) + "\n")
+        return 1
+    # supervise returns only after its exact foreground Server completes cleanup.
+    report = json.loads(measurement.read_text()) if measurement.exists() else {}
+    report["source_run_cleanup"] = {"passed": True}
+    if status:
+        report.update(passed=False)
+    measurement.write_text(json.dumps(report, indent=2) + "\n")
+    return status
 
 
 def main():
@@ -2175,9 +2228,10 @@ def main():
     require(sys.platform == "linux", "linux_required")
     require(sys.version_info >= (3, 11), "system_python_3_11_required")
     require(1 <= args.session_timeout <= 1800, "session_timeout_out_of_range")
-    if args.private_session:
+    if args.source_session or args.private_session:
+        backend = args.source_session or args.private_session
         require(
-            os.environ.get("SPACETERM_ACCESSIBILITY_SMOKE_SESSION") == args.private_session,
+            os.environ.get("SPACETERM_ACCESSIBILITY_SMOKE_SESSION") == backend,
             "private_session_wrapper_required",
         )
         require(args.output_dir is not None, "private_session_output_required")
@@ -2188,7 +2242,7 @@ def main():
             and Path(os.environ.get("HOME", "/")).resolve().is_relative_to(output),
             "private_session_directories_required",
         )
-        return private_session(args)
+        return supervised_session(args) if args.source_session else private_session(args)
     require(
         hasattr(os, "pidfd_open") and hasattr(signal, "pidfd_send_signal"), "pidfd_cleanup_required"
     )
@@ -2219,27 +2273,7 @@ def main():
     # A fresh directory keeps stale workload signals from satisfying a later run.
     run_output = Path(tempfile.mkdtemp(prefix="run-", dir=output))
     binary = None if args.isolation_only else prepare_binary(args, run_output)
-    server_binary = None
-    if not args.isolation_only:
-        try:
-            source_server = build_executable(
-                "--package",
-                "spaceterm-server-host",
-                "--features",
-                "client",
-                "--locked",
-                binary="spaceterm-server",
-                env={**os.environ, "CARGO_BUILD_JOBS": "2"},
-            )
-        except TaskError:
-            raise SmokeFailure("server_source_build_failed") from None
-        server_binary = binary.parent / "spaceterm-server"
-        shutil.copy2(source_server, server_binary)
-        with server_binary.open("rb") as executable:
-            digest = hashlib.file_digest(executable, "sha256").hexdigest()
-        (run_output / "server-binary-proof.json").write_text(
-            json.dumps({"sha256": digest, "size_bytes": server_binary.stat().st_size}) + "\n"
-        )
+    server_binary = binary.parent / "spaceterm-server" if binary is not None else None
     backends = ("x11", "wayland") if args.backend == "both" else (args.backend,)
     status = 0
     for backend in backends:
@@ -2329,11 +2363,9 @@ def main():
             f":{DISPLAY_NUMBER}" if backend == "x11" else WAYLAND_SOCKET
         )
         command = [
-            "dbus-run-session",
-            "--",
             "/usr/bin/python3",
             str(Path(__file__).resolve()),
-            "--private-session",
+            "--private-session" if args.isolation_only else "--source-session",
             backend,
             "--output-dir",
             str(backend_output),
@@ -2343,6 +2375,7 @@ def main():
         if server_binary is not None:
             command.extend(("--server-binary", str(server_binary)))
         if args.isolation_only:
+            command = ["dbus-run-session", "--", *command]
             command.append("--isolation-only")
         process = None
         timed_out = False
@@ -2368,7 +2401,14 @@ def main():
             cleanup_failed = False
             try:
                 if process is not None:
-                    retire_direct_child(process)
+                    if args.isolation_only:
+                        retire_direct_child(process)
+                    else:
+                        # This exact child owns the foreground Server's owner pipe.
+                        # Let admitted Server cleanup finish before sweeping private daemons.
+                        if process.poll() is None:
+                            process.terminate()
+                        process.wait()
             except (OSError, subprocess.TimeoutExpired):
                 cleanup_failed = True
             try:
@@ -2401,6 +2441,11 @@ def main():
             measurement.write_text(json.dumps(report, indent=2) + "\n")
         measurement = backend_output / "measurement.json"
         report = json.loads(measurement.read_text()) if measurement.exists() else {}
+        if not args.isolation_only and not report.get("source_run_cleanup", {}).get("passed"):
+            report.update(passed=False)
+            report.setdefault("failure", "source_run_cleanup_unconfirmed")
+            measurement.write_text(json.dumps(report, indent=2) + "\n")
+            status = 1
         if not args.isolation_only and "server_workspace_cleanup" not in report:
             # A killed or timed-out wrapper cannot confirm cleanup through its retired GUI.
             report.update(passed=False)
@@ -2422,7 +2467,7 @@ def main():
             # These observers retain classifications, counts and timings only.
             diagnostics = {
                 key: report[key]
-                for key in ("readiness", "orca", "server_workspace_cleanup")
+                for key in ("readiness", "orca", "server_workspace_cleanup", "source_run_cleanup")
                 if key in report
             }
             print(f"{backend}: diagnostics " + json.dumps(diagnostics, sort_keys=True))

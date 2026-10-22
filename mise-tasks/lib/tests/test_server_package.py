@@ -1,5 +1,6 @@
 """Signed server archives are authenticated before layout or executable inspection."""
 
+import base64
 import io
 import json
 import os
@@ -25,8 +26,8 @@ class ServerArchiveTests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
-        self.seed = bytes(range(32))
-        self.public = release.derived_public_key(self.seed)
+        self.seed = server_package.artifact_signing_seed("spaceterm-preflight")
+        self.public = release.public_key()
         self.archive = self.root / "server.tar.gz"
         self.signature = self.root / "server.tar.gz.sig"
         self.commit = "a" * 40
@@ -39,9 +40,6 @@ class ServerArchiveTests(unittest.TestCase):
             "commit": self.commit,
             "version": "dev.aaaaaaaaaaaa",
         }
-        trust = patch.object(release, "public_key", return_value=self.public)
-        trust.start()
-        self.addCleanup(trust.stop)
 
     def archive_with(self, entries):
         with tarfile.open(self.archive, "w:gz") as archive:
@@ -61,6 +59,41 @@ class ServerArchiveTests(unittest.TestCase):
         self.archive_with([("server/build.json", json.dumps(self.info).encode(), tarfile.REGTYPE)])
         self.assertEqual(self.unpack(), self.info)
 
+    def test_nonproduction_artifact_trust_needs_no_production_secret_and_cannot_sign_release(self):
+        trust = json.loads((ROOT / "packaging/server-nonproduction-trust.json").read_text())
+        seed = base64.b64decode(trust["seed"])
+        self.assertNotEqual(trust["public_key"], self.public)
+        for identity in ("spaceterm-preflight", "spaceterm-development", "spaceterm"):
+            with self.subTest(identity=identity):
+                info = {**self.info, "identity": identity}
+                self.archive_with(
+                    [("server/build.json", json.dumps(info).encode(), tarfile.REGTYPE)]
+                )
+                destination = self.root / identity
+                environment = {"PATH": os.environ["PATH"]}
+                if identity != "spaceterm":
+                    environment["UPDATE_SIGNING_KEY"] = "invalid production credential"
+                with patch.dict(os.environ, environment, clear=True):
+                    signing_seed = (
+                        seed
+                        if identity == "spaceterm"
+                        else server_package.artifact_signing_seed(identity)
+                    )
+                    release.sign_ed25519(signing_seed, self.archive, self.signature)
+                    if identity == "spaceterm":
+                        with self.assertRaises(TaskError):
+                            server_package.unpack_verified(
+                                self.archive, self.signature, destination, info
+                            )
+                        self.assertFalse(destination.exists())
+                    else:
+                        self.assertEqual(
+                            server_package.unpack_verified(
+                                self.archive, self.signature, destination, info
+                            ),
+                            info,
+                        )
+
     def test_verified_extraction_does_not_leave_group_writable_implicit_directories(self):
         self.archive_with([("server/build.json", json.dumps(self.info).encode(), tarfile.REGTYPE)])
         previous = os.umask(0o002)
@@ -69,6 +102,17 @@ class ServerArchiveTests(unittest.TestCase):
         finally:
             os.umask(previous)
         self.assertEqual(stat.S_IMODE((self.root / "unpacked/server").stat().st_mode), 0o755)
+
+    def test_previous_production_trust_cannot_authenticate_a_new_nonproduction_candidate(self):
+        self.archive_with([("server/build.json", json.dumps(self.info).encode(), tarfile.REGTYPE)])
+        production_fixture_seed = bytes(range(32))
+        release.sign_ed25519(production_fixture_seed, self.archive, self.signature)
+        with patch.object(
+            release, "public_key", return_value=release.derived_public_key(production_fixture_seed)
+        ):
+            with self.assertRaises(TaskError):
+                self.unpack()
+        self.assertFalse((self.root / "unpacked").exists())
 
     def test_unsigned_and_tampered_archives_are_refused_before_extraction(self):
         self.archive_with([("server/build.json", json.dumps(self.info).encode(), tarfile.REGTYPE)])

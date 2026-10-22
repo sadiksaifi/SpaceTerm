@@ -123,12 +123,7 @@ impl ServerUpdateControl for Service {
     }
 
     fn prepare_update(&self) -> Result<Option<PreparedChange>, ServerError> {
-        let candidate =
-            crate::local_startup::discover_candidate().map_err(|error| match error {
-                CandidateError::Unavailable => ServerError::RuntimeUnavailable,
-                CandidateError::ClientRestartRequired => ServerError::CandidateChanged,
-                CandidateError::Verification(error) => error,
-            })?;
+        let candidate = crate::local_startup::discover_candidate().map_err(ServerError::from)?;
         let installation = candidate.stage()?;
         let Some(approval) = self.prepare_activation(&installation)? else {
             return Ok(None);

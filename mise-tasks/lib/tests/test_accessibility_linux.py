@@ -1,16 +1,20 @@
 """Verify bounded prerequisite failures and observable accessibility readiness."""
 
+import hashlib
 import importlib.util
 import json
 import os
+import signal
 import subprocess
+import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from spaceterm_tasks import ROOT
+from spaceterm_tasks import LIBRARY, ROOT
 from spaceterm_tasks.accessibility_linux import (
     OrcaOutput,
     Readiness,
@@ -20,9 +24,67 @@ from spaceterm_tasks.accessibility_linux import (
     fixture_line_offsets,
     fixture_lines,
     orca_registered,
-    require_account_server,
     require_prerequisites,
 )
+
+
+class SourceAccessibilitySessionTests(unittest.TestCase):
+    def test_cold_source_session_owns_server_without_service_or_signed_candidate(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            server = root / "server"
+            server.write_text(
+                f"#!{sys.executable}\n"
+                "import pathlib, sys\n"
+                "assert sys.argv[1:] == ['development-serve', 'spaceterm-development']\n"
+                "print('spaceterm-development-ready-v1', flush=True)\n"
+                "sys.stdin.buffer.read()\n"
+                f"pathlib.Path({str(root / 'server-cleaned')!r}).touch()\n"
+            )
+            server.chmod(0o755)
+            client = root / "client.py"
+            client.write_text(
+                "import os, pathlib, socket\n"
+                "assert os.environ['SPACETERM_DEVELOPMENT_FOREGROUND'] == '1'\n"
+                "assert 'SPACETERM_SERVER_ARCHIVE' not in os.environ\n"
+                "assert 'SPACETERM_SERVER_SIGNATURE' not in os.environ\n"
+                "assert 'PYTHONPATH' not in os.environ\n"
+                "connection = socket.socket(socket.AF_UNIX)\n"
+                "connection.connect(os.environ['SPACETERM_DEVELOPMENT_OWNER_SOCKET'])\n"
+                f"pathlib.Path({str(root / 'client-started')!r}).touch()\n"
+                "connection.recv(1)\n"
+            )
+            driver = (
+                "import os, sys\n"
+                "from spaceterm_tasks.accessibility_linux import source_session\n"
+                "raise SystemExit(source_session(sys.argv[1], "
+                "[sys.executable, sys.argv[2]], os.environ))\n"
+            )
+            process = subprocess.Popen(
+                [sys.executable, "-c", driver, str(server), str(client)],
+                env={
+                    **os.environ,
+                    "PYTHONPATH": str(LIBRARY),
+                    "SPACETERM_SERVER_ARCHIVE": "unusable distribution artifact",
+                    "SPACETERM_SERVER_SIGNATURE": "unusable signature",
+                },
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            try:
+                deadline = time.monotonic() + 10
+                while not (root / "client-started").exists():
+                    if process.poll() is not None:
+                        self.fail(str(process.communicate()))
+                    self.assertLess(time.monotonic(), deadline, "source client did not start")
+                    time.sleep(0.01)
+                process.send_signal(signal.SIGTERM)
+                process.communicate(timeout=15)
+                self.assertTrue((root / "server-cleaned").is_file())
+            finally:
+                if process.poll() is None:
+                    process.terminate()
+                process.communicate(timeout=15)
 
 
 class AccessibilityPrerequisiteTests(unittest.TestCase):
@@ -65,48 +127,6 @@ class AccessibilityPrerequisiteTests(unittest.TestCase):
         with patch("spaceterm_tasks.accessibility_linux.Path.glob", return_value=iter([])):
             with self.assertRaisesRegex(SmokeFailure, "^lavapipe_driver_missing$"):
                 require_prerequisites("both")
-
-    def test_account_server_prerequisite_distinguishes_service_state_without_disclosing_output(
-        self,
-    ):
-        for installed, running, stopped, failure in (
-            (False, False, False, "account_server_not_installed"),
-            (True, False, True, "account_server_stopped"),
-            (True, False, False, "account_server_not_running"),
-        ):
-            with self.subTest(failure=failure):
-                self.probe_command.return_value = subprocess.CompletedProcess(
-                    [],
-                    0,
-                    stdout=(
-                        "private service details\nInstalled: "
-                        + str(installed).lower()
-                        + "; enabled: true; running: "
-                        + str(running).lower()
-                        + "; stopped: "
-                        + str(stopped).lower()
-                        + ".\n"
-                    ).encode(),
-                )
-                with self.assertRaisesRegex(SmokeFailure, "^" + failure + "$"):
-                    require_account_server(Path("server"))
-        self.probe_command.return_value = subprocess.CompletedProcess(
-            [], 1, stdout=b"raw error with private values"
-        )
-        with self.assertRaisesRegex(SmokeFailure, "^account_server_service_unavailable$"):
-            require_account_server(Path("server"))
-
-    def test_running_service_requires_authenticated_account_connection(self):
-        service = subprocess.CompletedProcess(
-            [],
-            0,
-            stdout=b"Installed: true; enabled: true; running: true; stopped: false.\n",
-        )
-        self.probe_command.side_effect = [service, subprocess.CompletedProcess([], 1)]
-        with self.assertRaisesRegex(SmokeFailure, "^account_server_connection_unavailable$"):
-            require_account_server(Path("server"))
-        self.probe_command.side_effect = [service, subprocess.CompletedProcess([], 0)]
-        require_account_server(Path("server"))
 
 
 class AccessibilityLineQueryTests(unittest.TestCase):
@@ -652,8 +672,103 @@ class AccessibilityCommandInputTests(unittest.TestCase):
             send.assert_not_called()
 
 
+class AccessibilitySourceProvenanceTests(unittest.TestCase):
+    def test_existing_binary_pin_covers_the_staged_client_without_rebuilding_it(self):
+        specification = importlib.util.spec_from_file_location(
+            "accessibility_smoke", ROOT / "mise-tasks/test/accessibility/linux.py"
+        )
+        assert specification is not None and specification.loader is not None
+        smoke = importlib.util.module_from_spec(specification)
+        specification.loader.exec_module(smoke)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            binary = root / "selected-client"
+            contents = b"#!/bin/sh\nexit 0\n"
+            binary.write_bytes(contents)
+            binary.chmod(0o755)
+            digest = hashlib.sha256(contents).hexdigest()
+            server = root / "source-server"
+            server.write_bytes(b"source server fixture")
+            server.chmod(0o755)
+            cargo = root / "cargo"
+            cargo.write_text(
+                f"#!{sys.executable}\n"
+                "import json, os, sys\n"
+                "assert sys.argv[sys.argv.index('--bin') + 1] == 'spaceterm-server'\n"
+                "assert '--no-default-features' in sys.argv\n"
+                "assert 'SPACETERM_SERVER_ARCHIVE' not in os.environ\n"
+                "assert 'SPACETERM_SERVER_SIGNATURE' not in os.environ\n"
+                "print(json.dumps({'reason': 'compiler-artifact', "
+                "'target': {'name': 'spaceterm-server'}, "
+                f"'executable': {str(server)!r}}}))\n"
+            )
+            cargo.chmod(0o755)
+            tic = root / "tic"
+            tic.write_text(
+                f"#!{sys.executable}\n"
+                "import pathlib, sys\n"
+                "output = pathlib.Path(sys.argv[sys.argv.index('-o') + 1]) / 'x'\n"
+                "output.mkdir(parents=True)\n"
+                "(output / 'xterm-spaceterm').write_bytes(b'compiled terminfo')\n"
+            )
+            tic.chmod(0o755)
+            native_run = subprocess.run
+
+            def run(command, **options):
+                if command[0] == "/usr/bin/python3":
+                    return subprocess.CompletedProcess(command, 0)
+                return native_run(command, **options)
+
+            with (
+                patch.dict(
+                    os.environ,
+                    {
+                        "PATH": str(root) + os.pathsep + os.environ["PATH"],
+                        "SPACETERM_SERVER_ARCHIVE": "unused candidate",
+                        "SPACETERM_SERVER_SIGNATURE": "unused signature",
+                    },
+                ),
+                patch("spaceterm_tasks.accessibility_linux.shutil.which", return_value="tool"),
+                patch(
+                    "spaceterm_tasks.accessibility_linux.Path.glob",
+                    side_effect=lambda _: iter(["driver"]),
+                ),
+                patch.object(subprocess, "run", side_effect=run),
+            ):
+                for expected in (digest.upper(), "0" * 64):
+                    with self.subTest(expected=expected):
+                        output = root / expected
+                        output.mkdir()
+                        args = SimpleNamespace(
+                            binary=binary, expected_binary_sha256=expected, backend="x11"
+                        )
+                        if expected == "0" * 64:
+                            with self.assertRaisesRegex(
+                                SmokeFailure, "source_executable_hash_mismatch"
+                            ):
+                                smoke.prepare_binary(args, output)
+                        else:
+                            staged = smoke.prepare_binary(args, output)
+                            self.assertEqual(staged.read_bytes(), contents)
+                            self.assertNotEqual(staged, binary)
+                            self.assertEqual(
+                                (staged.parent / "spaceterm-server").read_bytes(),
+                                server.read_bytes(),
+                            )
+                            self.assertTrue(
+                                (
+                                    staged.parents[1] / "share/spaceterm/terminfo/x/xterm-spaceterm"
+                                ).is_file()
+                            )
+                        proof = json.loads((output / "binary-proof.json").read_text())
+                        self.assertEqual(proof["sha256"], digest)
+                        self.assertEqual(proof["expected_sha256"], expected.lower())
+                        self.assertEqual(proof["passed"], expected != "0" * 64)
+                        self.assertTrue(proof["existing_source_executable"])
+
+
 class AccessibilityApplicationIsolationTests(unittest.TestCase):
-    def run_fixture(self, *, cleanup=True, isolation_only=False):
+    def run_fixture(self, *, cleanup=True, source_cleanup=True, isolation_only=False):
         specification = importlib.util.spec_from_file_location(
             "accessibility_smoke", ROOT / "mise-tasks/test/accessibility/linux.py"
         )
@@ -676,10 +791,12 @@ class AccessibilityApplicationIsolationTests(unittest.TestCase):
                 report = {"passed": True}
                 if cleanup:
                     report["server_workspace_cleanup"] = {"passed": True}
+                if source_cleanup:
+                    report["source_run_cleanup"] = {"passed": True}
                 measurement = output / "measurement.json"
                 measurement.write_text(json.dumps(report))
                 reports.append(measurement)
-                return SimpleNamespace(wait=lambda timeout: 0)
+                return SimpleNamespace(wait=lambda timeout=None: 0, poll=lambda: 0)
 
             def runtime(output):
                 path = output / "runtime"
@@ -717,15 +834,15 @@ class AccessibilityApplicationIsolationTests(unittest.TestCase):
                 [json.loads(path.read_text()) for path in reports],
             )
 
-    def test_default_application_runs_always_stage_server_preflight_and_fresh_clients(self):
+    def test_default_application_runs_use_owned_source_sessions_and_fresh_clients(self):
         status, sessions, builds, _ = self.run_fixture()
         self.assertEqual(status, 0)
-        self.assertEqual(builds, 1)
+        self.assertEqual(builds, 0)
         self.assertEqual(len(sessions), 2)
         clients = []
         for command, environment in sessions:
             self.assertIn("--server-binary", command)
-            self.assertNotIn("--server-backed", command)
+            self.assertIn("--source-session", command)
             clients.append(environment["SPACETERM_DEVELOPMENT_CLIENT"])
         self.assertNotEqual(*clients)
         self.assertTrue(all(client.startswith("a11y-") for client in clients))
@@ -736,6 +853,13 @@ class AccessibilityApplicationIsolationTests(unittest.TestCase):
         for report in reports:
             self.assertFalse(report["passed"])
             self.assertEqual(report["failure"], "server_workspace_cleanup_incomplete")
+
+    def test_successful_accessibility_assertions_require_foreground_server_cleanup(self):
+        status, _, _, reports = self.run_fixture(source_cleanup=False)
+        self.assertEqual(status, 1)
+        for report in reports:
+            self.assertFalse(report["passed"])
+            self.assertEqual(report["failure"], "source_run_cleanup_unconfirmed")
 
     def test_bus_only_isolation_run_never_builds_or_preflights_an_application_server(self):
         status, sessions, builds, _ = self.run_fixture(cleanup=False, isolation_only=True)

@@ -13,6 +13,21 @@ pub(super) fn active() -> bool {
 pub(super) fn key() -> Vec<u8> {
     pair().public_key().as_ref().to_vec()
 }
+pub(super) fn production_key() -> Vec<u8> {
+    production_pair().public_key().as_ref().to_vec()
+}
+pub(crate) fn sign_with_previous_production_trust(archive: &Path, signature: &Path) {
+    std::fs::write(
+        signature,
+        production_pair()
+            .sign(&std::fs::read(archive).unwrap())
+            .as_ref(),
+    )
+    .unwrap();
+}
+fn production_pair() -> ring::signature::Ed25519KeyPair {
+    ring::signature::Ed25519KeyPair::from_seed_unchecked(&[43; 32]).unwrap()
+}
 pub(super) fn native_build(identity: &str) -> Vec<u8> {
     serde_json::json!({"schema":1,"identity":identity,"target":target(),"commit":COMMIT,"version":VERSION,"protocol_major":1,"capabilities":["workspace_policy"]}).to_string().into_bytes()
 }

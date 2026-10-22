@@ -62,9 +62,17 @@ impl Supervisor for SupervisorFixture {
 fn with_service(
     run: impl FnOnce(Service, RetainedInstallation, RetainedInstallation, Arc<SupervisorFixture>),
 ) {
+    with_service_identity("spaceterm-development", run);
+}
+
+fn with_service_identity(
+    identity: &str,
+    run: impl FnOnce(Service, RetainedInstallation, RetainedInstallation, Arc<SupervisorFixture>),
+) {
     use ring::signature::KeyPair;
     use runtime::test_support::{COMMIT, VERSION, target, with_artifact};
-    let fixture = super::super::tests::Fixture::new();
+    let mut fixture = super::super::tests::Fixture::new();
+    fixture.paths.identity = identity.to_owned();
     with_artifact(
         &fixture.root.join("source"),
         &fixture.paths.identity,
@@ -113,6 +121,92 @@ fn with_service(
             run(service, previous, candidate, supervisor);
         },
     );
+}
+
+#[test]
+fn approved_legacy_preflight_can_explicitly_update_without_losing_stop_or_saved_state() {
+    for recover in [false, true] {
+        with_service_identity(
+            "spaceterm-preflight",
+            |service, previous, candidate, supervisor| {
+                runtime::test_support::sign_with_previous_production_trust(
+                    &previous.directory.join("artifact.tar.gz"),
+                    &previous.directory.join("artifact.sig"),
+                );
+                {
+                    let data = Directory::open(&service.paths.data, false).unwrap();
+                    let _setup = data.lock("setup.lock", false).unwrap();
+                    let mut record = data.read().unwrap();
+                    let mut organization =
+                        crate::organization::Organization::first(service.paths.data.clone())
+                            .unwrap();
+                    organization.name = "Retained Preflight work".into();
+                    record.organization = Some(organization);
+                    data.write(&record).unwrap();
+                }
+                let identity = std::fs::read(service.paths.data.join("identity.json")).unwrap();
+                let policy = std::fs::read(service.paths.data.join("service.json")).unwrap();
+                assert_eq!(
+                    service.retained_installations().unwrap(),
+                    vec![previous.clone()]
+                );
+                assert_eq!(service.connect(), Err(ServerError::Stopped));
+                let approval = service.prepare_activation(&candidate).unwrap().unwrap();
+                assert_eq!(*supervisor.approved.lock().unwrap(), previous.directory);
+                assert_eq!(
+                    std::fs::read(service.paths.data.join("service.json")).unwrap(),
+                    policy
+                );
+                assert_eq!(supervisor.starts.load(Ordering::SeqCst), 0);
+                let status = if recover {
+                    let id = interrupted(
+                        &service,
+                        &previous,
+                        &candidate,
+                        &supervisor,
+                        Step::Admitted,
+                        true,
+                    );
+                    let status = service.recover_activation().unwrap().unwrap();
+                    assert_eq!(status.operation, id);
+                    status
+                } else {
+                    service.activate(approval).unwrap()
+                };
+                assert_eq!(status.phase, ActivationPhase::Completed { running: false });
+                assert!(service.status().unwrap().stopped);
+                assert_eq!(*supervisor.approved.lock().unwrap(), candidate.directory);
+                assert_eq!(supervisor.starts.load(Ordering::SeqCst), 0);
+                assert_eq!(supervisor.stops.load(Ordering::SeqCst), 0);
+                assert_eq!(
+                    std::fs::read(service.paths.data.join("identity.json")).unwrap(),
+                    identity
+                );
+            },
+        );
+    }
+}
+
+#[test]
+fn explicit_start_of_approved_legacy_preflight_reaches_the_native_supervisor() {
+    with_service_identity("spaceterm-preflight", |service, previous, _, supervisor| {
+        runtime::test_support::sign_with_previous_production_trust(
+            &previous.directory.join("artifact.tar.gz"),
+            &previous.directory.join("artifact.sig"),
+        );
+        let identity = std::fs::read(service.paths.data.join("identity.json")).unwrap();
+        assert!(service.status().unwrap().stopped);
+        assert_eq!(supervisor.starts.load(Ordering::SeqCst), 0);
+        // This fixture deliberately fails native startup. Authentication must pass before
+        // dispatch, and explicit Start must keep selecting the previously approved runtime.
+        assert_eq!(service.start(), Err(ServerError::StartupFailed));
+        assert_eq!(supervisor.starts.load(Ordering::SeqCst), 1);
+        assert_eq!(*supervisor.approved.lock().unwrap(), previous.directory);
+        assert_eq!(
+            std::fs::read(service.paths.data.join("identity.json")).unwrap(),
+            identity
+        );
+    });
 }
 
 #[test]

@@ -329,23 +329,7 @@ fn a_local_server_started_after_an_ssh_server_joins_the_same_window(cx: &mut Tes
     cx.run_until_parked();
     assert_eq!(harness.launch_title(cx), Some(launch::STOPPED_TITLE));
 
-    let remote = Rc::new(ScriptedEdits::new(Some(inventory())));
-    cx.update(|window, cx| {
-        harness.manager.update(cx, |manager, cx| {
-            let key = manager.present_server_workspaces(
-                ServerOrigin::Ssh(crate::domain::SshDestination::new("penguin".into()).unwrap()),
-                SharedEditSource::new(Rc::clone(&remote) as Rc<_>),
-                SharedPaneSessions::with_opener(
-                    Rc::clone(&harness.panes) as Rc<_>,
-                    &PaneConstruction::testing(),
-                ),
-                window,
-                cx,
-            );
-            manager.sync_shared_workspaces(key, window, cx);
-        });
-    });
-    cx.run_until_parked();
+    present_ssh_server(&harness, inventory(), cx);
     assert_eq!(
         harness.shared_rows(cx),
         1,
@@ -363,6 +347,173 @@ fn a_local_server_started_after_an_ssh_server_joins_the_same_window(cx: &mut Tes
         harness.shared_rows(cx),
         2,
         "the local server's Workspace joins the window already presenting the SSH server"
+    );
+}
+
+/// Connects an SSH server publishing `inventory` to the window, as a saved connection does.
+fn present_ssh_server(harness: &LaunchHarness, inventory: Inventory, cx: &mut VisualTestContext) {
+    let remote = Rc::new(ScriptedEdits::new(Some(inventory)));
+    cx.update(|window, cx| {
+        harness.manager.update(cx, |manager, cx| {
+            let key = manager.present_server_workspaces(
+                ServerOrigin::Ssh(crate::domain::SshDestination::new("penguin".into()).unwrap()),
+                SharedEditSource::new(Rc::clone(&remote) as Rc<_>),
+                SharedPaneSessions::with_opener(
+                    Rc::clone(&harness.panes) as Rc<_>,
+                    &PaneConstruction::testing(),
+                ),
+                window,
+                cx,
+            );
+            manager.sync_shared_workspaces(key, window, cx);
+        });
+    });
+    cx.run_until_parked();
+}
+
+/// The controls that arrange or create Workspaces, which need usable server state.
+const WORKSPACE_CONTROLS: [&str; 4] = [
+    "workspace-sidebar",
+    "workspace-sidebar-resize-handle",
+    "toggle-sidebar-button",
+    "workspace-switcher",
+];
+
+fn workspace_controls_presented(cx: &mut VisualTestContext) -> Vec<&'static str> {
+    WORKSPACE_CONTROLS
+        .into_iter()
+        .filter(|selector| cx.debug_bounds(selector).is_some())
+        .collect()
+}
+
+fn creation_available(cx: &mut VisualTestContext) -> bool {
+    cx.update(|window, cx| window.is_action_available(&NewWorkspace, cx))
+}
+
+/// Without usable server state the launch screen takes the whole window beneath its Window
+/// Controls. Nothing offers to create or arrange Workspaces, and Server Settings stays offered.
+#[gpui::test]
+fn startup_without_usable_server_state_presents_recovery_across_the_window(
+    cx: &mut TestAppContext,
+) {
+    let (harness, cx) = launch_harness(vec![Err(ServerError::RuntimeUnavailable), ready()], cx);
+    cx.run_until_parked();
+    assert_eq!(harness.launch_title(cx), Some("Server Not Verified"));
+    assert_eq!(workspace_controls_presented(cx), Vec::<&str>::new());
+    assert!(!creation_available(cx), "New Workspace has nowhere to go");
+    assert!(cx.debug_bounds(launch::LAUNCH_SETTINGS_SELECTOR).is_some());
+    let viewport = cx.update(|window, _| window.viewport_size());
+    let launch = cx
+        .debug_bounds(LAUNCH_SELECTOR)
+        .expect("recovery is presented");
+    let stage = cx
+        .debug_bounds("empty-workspace-stage")
+        .expect("the stage is presented");
+    assert_eq!(stage.size, viewport, "the stage fills the window");
+    assert!(
+        launch.origin.x < gpui::px(16.0) && launch.size.width > viewport.width - gpui::px(32.0),
+        "recovery spans the window rather than sitting beside a sidebar: {launch:?}"
+    );
+
+    // Recovery holds while launch runs again, then the Workspaces bring their controls back.
+    harness.click(LAUNCH_RETRY_SELECTOR, cx);
+    sync(&harness, cx);
+    assert_eq!(harness.shared_rows(cx), 1);
+    assert_eq!(workspace_controls_presented(cx), WORKSPACE_CONTROLS);
+    assert!(creation_available(cx));
+}
+
+/// A build without a server package and a package that failed verification need different
+/// remedies, so each names its own cause.
+#[gpui::test]
+fn a_missing_server_package_and_a_failed_verification_explain_themselves_differently(
+    cx: &mut TestAppContext,
+) {
+    let (harness, cx) = launch_harness(
+        vec![
+            Err(ServerError::CandidateMissing),
+            Err(ServerError::RuntimeUnavailable),
+        ],
+        cx,
+    );
+    cx.run_until_parked();
+    let presentation = |cx: &mut VisualTestContext| {
+        harness
+            .manager
+            .read_with(cx, |manager, _| manager.launch_presentation())
+            .expect("the failure is presented")
+    };
+    let missing = presentation(cx);
+    assert_eq!(missing.title, "Server Not Included");
+    assert!(
+        missing
+            .detail
+            .contains("doesn\u{2019}t include a server package")
+    );
+    assert!(!missing.detail.contains("verif"), "{}", missing.detail);
+    assert!(cx.debug_bounds(launch::LAUNCH_SETTINGS_SELECTOR).is_some());
+
+    harness.click(LAUNCH_RETRY_SELECTOR, cx);
+    let unverified = presentation(cx);
+    assert_eq!(unverified.title, "Server Not Verified");
+    assert!(unverified.detail.contains("could not be verified"));
+    assert!(
+        !unverified.detail.contains("include"),
+        "{}",
+        unverified.detail
+    );
+    assert!(cx.debug_bounds(launch::LAUNCH_SETTINGS_SELECTOR).is_some());
+    assert_eq!(
+        harness.launch.steps(),
+        ["run", "run"],
+        "nothing starts or activates"
+    );
+}
+
+/// This computer's failed server never hides another server's Workspaces or the controls that
+/// arrange them.
+#[gpui::test]
+fn a_failed_local_server_keeps_another_servers_workspaces_presented(cx: &mut TestAppContext) {
+    let (harness, cx) = launch_harness(vec![Err(ServerError::CandidateMissing)], cx);
+    cx.run_until_parked();
+    assert_eq!(workspace_controls_presented(cx), Vec::<&str>::new());
+
+    present_ssh_server(&harness, inventory(), cx);
+    assert_eq!(harness.shared_rows(cx), 1);
+    assert_eq!(
+        workspace_controls_presented(cx).len(),
+        WORKSPACE_CONTROLS.len()
+    );
+    assert!(creation_available(cx));
+}
+
+/// Another server's inventory is usable state even before any of its Workspaces is attached, so
+/// the window keeps the switcher that attaches and creates them beside the local failure.
+#[gpui::test]
+fn another_servers_inventory_without_attached_workspaces_keeps_workspace_controls(
+    cx: &mut TestAppContext,
+) {
+    let (harness, cx) = launch_harness(vec![Err(ServerError::CandidateMissing)], cx);
+    cx.run_until_parked();
+
+    present_ssh_server(
+        &harness,
+        Inventory {
+            workspaces: Vec::new(),
+            ..inventory()
+        },
+        cx,
+    );
+    assert_eq!(harness.workspace_count(cx), 0);
+    assert_eq!(
+        workspace_controls_presented(cx).len(),
+        WORKSPACE_CONTROLS.len()
+    );
+    assert!(creation_available(cx));
+    assert_eq!(
+        harness.launch_title(cx),
+        Some("Server Not Included"),
+        "the stage still explains this computer's server"
     );
 }
 

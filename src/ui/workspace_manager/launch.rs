@@ -264,12 +264,29 @@ const fn failure_title(error: ServerError) -> &'static str {
             "Server Update Unfinished"
         }
         ServerError::CandidateChanged => "Restart SpaceTerm",
-        ServerError::RuntimeUnavailable => "Server Unavailable",
+        ServerError::CandidateMissing => "Server Not Included",
+        ServerError::RuntimeUnavailable => "Server Not Verified",
         ServerError::UnsafeStorage => "Unsafe Server Storage",
         ServerError::StorageUnavailable => "Server Storage Unavailable",
         ServerError::NotInstalled => "Server Not Installed",
         ServerError::AuthenticationRefused => "Connection Refused",
         _ => "Couldn\u{2019}t Open Workspaces",
+    }
+}
+
+/// The detail for a launch that could not finish: the exact reason, and for a server package,
+/// whether this build lacks one or holds one that failed verification.
+fn failure_detail(error: ServerError) -> SharedString {
+    match error {
+        ServerError::CandidateMissing => format!(
+            "{error} SpaceTerm can\u{2019}t set up the server without one. Nothing changed."
+        )
+        .into(),
+        ServerError::RuntimeUnavailable => {
+            format!("{error} SpaceTerm runs only a server package it can verify. Nothing changed.")
+                .into()
+        }
+        error => error.to_string().into(),
     }
 }
 
@@ -386,7 +403,7 @@ pub(super) fn present(state: LaunchState) -> LaunchPresentation {
         }
         LaunchState::Failed(error) => LaunchPresentation {
             title: failure_title(error),
-            detail: error.to_string().into(),
+            detail: failure_detail(error),
             progress: None,
             actions: &[Retry, Settings],
             waiting: false,
@@ -662,7 +679,7 @@ impl WorkspaceManager {
             &self.pane_construction,
             cx,
         ) else {
-            return LaunchState::Failed(ServerError::RuntimeUnavailable);
+            return LaunchState::Failed(ServerError::Protocol);
         };
         self.present_shared_workspaces(connection.edits, connection.sessions, window, cx);
         if let (Some(shared), Some(server)) = (self.shared.local_mut(), connection.retained) {
@@ -730,6 +747,18 @@ impl WorkspaceManager {
             })),
             None => Some(present(self.launch.state)),
         }
+    }
+
+    /// Whether the window has no usable server state: it presents no Workspace, this computer's
+    /// server has not delivered its first inventory, and no other server has delivered one. The
+    /// launch screen then fills the window in place of the sidebar and Workspace creation. Another
+    /// server's inventory, even with no attached Workspace, keeps the normal layout.
+    pub(super) fn startup_recovery(&self) -> bool {
+        self.workspaces.active_workspace_id().is_none()
+            && self.launch_presentation().is_some()
+            && !self.shared.iter().any(|(key, shared)| {
+                key != super::ServerKey::LOCAL && shared.latest_inventory().is_some()
+            })
     }
 
     /// Reads whether a verified build can update a server the open connection refused before

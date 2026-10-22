@@ -161,24 +161,46 @@ fn digest(bytes: &[u8]) -> String {
         .map(|v| format!("{v:02x}"))
         .collect()
 }
-fn public_key() -> Result<Vec<u8>, ServerError> {
+fn public_key(identity: &str) -> Result<Vec<u8>, ServerError> {
     #[cfg(test)]
     if test_support::active() {
-        return Ok(test_support::key());
+        return Ok(if identity == "spaceterm" {
+            test_support::production_key()
+        } else {
+            test_support::key()
+        });
     }
-    let template = include_str!("../../../../packaging/macos/spaceterm/Info.plist");
-    let key = template
-        .split_once("<key>SUPublicEDKey</key>")
-        .and_then(|(_, tail)| tail.trim_start().strip_prefix("<string>"))
-        .and_then(|tail| tail.split_once("</string>"))
-        .ok_or(ServerError::RuntimeUnavailable)?
-        .0;
+    let key = match identity {
+        "spaceterm" => {
+            let template = include_str!("../../../../packaging/macos/spaceterm/Info.plist");
+            template
+                .split_once("<key>SUPublicEDKey</key>")
+                .and_then(|(_, tail)| tail.trim_start().strip_prefix("<string>"))
+                .and_then(|tail| tail.split_once("</string>"))
+                .ok_or(ServerError::RuntimeUnavailable)?
+                .0
+                .to_owned()
+        }
+        "spaceterm-preflight" | "spaceterm-development" => {
+            #[derive(Deserialize)]
+            struct NonproductionTrust {
+                public_key: String,
+            }
+            // The seed in this file is deliberately public and has no Release authority.
+            serde_json::from_str::<NonproductionTrust>(include_str!(
+                "../../../../packaging/server-nonproduction-trust.json"
+            ))
+            .map_err(|_| ServerError::RuntimeUnavailable)?
+            .public_key
+        }
+        _ => return Err(ServerError::RuntimeUnavailable),
+    };
     base64::engine::general_purpose::STANDARD
         .decode(key.trim())
         .map_err(|_| ServerError::RuntimeUnavailable)
 }
-fn authenticate(bytes: &[u8], signature: &[u8]) -> Result<(), ServerError> {
-    ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, public_key()?)
+fn authenticate(bytes: &[u8], signature: &[u8], identity: &str) -> Result<(), ServerError> {
+    ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, public_key(identity)?)
         .verify(bytes, signature)
         .map_err(|_| ServerError::RuntimeUnavailable)
 }
@@ -203,7 +225,7 @@ pub(super) fn verify_candidate_installation(
 fn verify_installation(
     path: &Path,
     identity: &str,
-    requirements: Option<(u16, &[&str])>,
+    candidate_requirements: Option<(u16, &[&str])>,
 ) -> Result<(), ServerError> {
     let directory = owned_directory(path)?;
     let bytes = read_file(&directory, Path::new("artifact.tar.gz"), MAX_ARCHIVE)?;
@@ -211,31 +233,43 @@ fn verify_installation(
     if path.file_name().and_then(|v| v.to_str()) != Some(&digest(&bytes)) {
         return Err(ServerError::RuntimeUnavailable);
     }
-    authenticate(&bytes, &signature)?;
+    let legacy_production = authenticate(&bytes, &signature, identity).is_err();
+    if legacy_production {
+        // Previous builds signed nonproduction runtimes with production trust. Retained
+        // installations remain usable for Start, recovery and the previous side of Update.
+        // Newly offered candidates must use current identity trust at every admission check.
+        if candidate_requirements.is_some()
+            || !matches!(identity, "spaceterm-preflight" | "spaceterm-development")
+        {
+            return Err(ServerError::RuntimeUnavailable);
+        }
+        authenticate(&bytes, &signature, "spaceterm")?;
+    }
     let info = verify_contents(&directory, &bytes, identity)?;
-    if let Some((major, capabilities)) = requirements {
+    if let Some((major, capabilities)) = candidate_requirements {
         info.require_compatibility(major, capabilities)?;
     }
-    verify_native(path, identity)?;
+    verify_native(path, identity, legacy_production)?;
     verify_executable(path, &info)?;
     verify_directory_path(&directory, path)
 }
-fn verify_native(path: &Path, identity: &str) -> Result<(), ServerError> {
+fn verify_native(path: &Path, identity: &str, legacy_production: bool) -> Result<(), ServerError> {
     #[cfg(test)]
     if test_support::active() {
         return Ok(());
     }
     #[cfg(target_os = "macos")]
     {
-        let template = include_str!("../../../../packaging/macos/spaceterm/Packager.toml");
-        let signer = template
-            .lines()
-            .find_map(|line| line.strip_prefix("signing-identity = \""))
-            .and_then(|v| v.strip_suffix('"'))
-            .ok_or(ServerError::RuntimeUnavailable)?;
-        let requirement = format!(
-            "identifier \"io.github.sadiksaifi.{identity}.server\" and certificate leaf = H\"{signer}\""
-        );
+        let mut requirement = format!("identifier \"io.github.sadiksaifi.{identity}.server\"");
+        if identity == "spaceterm" || legacy_production {
+            let template = include_str!("../../../../packaging/macos/spaceterm/Packager.toml");
+            let signer = template
+                .lines()
+                .find_map(|line| line.strip_prefix("signing-identity = \""))
+                .and_then(|v| v.strip_suffix('"'))
+                .ok_or(ServerError::RuntimeUnavailable)?;
+            requirement.push_str(&format!(" and certificate leaf = H\"{signer}\""));
+        }
         command(
             "/usr/bin/codesign",
             &[
@@ -249,7 +283,7 @@ fn verify_native(path: &Path, identity: &str) -> Result<(), ServerError> {
         .map_err(|_| ServerError::RuntimeUnavailable)?;
     }
     #[cfg(not(target_os = "macos"))]
-    let _ = (path, identity);
+    let _ = (path, identity, legacy_production);
     Ok(())
 }
 fn verify_executable(path: &Path, expected: &Build) -> Result<(), ServerError> {
@@ -591,7 +625,7 @@ fn provision(
 ) -> Result<RetainedInstallation, ServerError> {
     let bytes = source(archive, MAX_ARCHIVE)?;
     let signature = source(signature, 64)?;
-    authenticate(&bytes, &signature)?;
+    authenticate(&bytes, &signature, identity)?;
     let info = contents(&bytes, identity, |_, _, _, _| Ok(()))?;
     if info.target != target || info.commit != commit || info.version != version {
         return Err(ServerError::RuntimeUnavailable);
@@ -648,7 +682,7 @@ fn candidate_for_target(
 ) -> Result<(Vec<u8>, Vec<u8>, Build), ServerError> {
     let bytes = source(archive, MAX_ARCHIVE)?;
     let signature = source(signature, 64)?;
-    authenticate(&bytes, &signature)?;
+    authenticate(&bytes, &signature, identity)?;
     if !digest_valid(expected_sha256) || digest(&bytes) != expected_sha256 {
         return Err(ServerError::CandidateChanged);
     }
@@ -703,7 +737,7 @@ fn retain(
         verify_contents(&prepared.directory, bytes, identity)?;
         let prepared_path = prepared.path(parent);
         verify_directory_path(&prepared.directory, &prepared_path)?;
-        verify_native(&prepared_path, identity)?;
+        verify_native(&prepared_path, identity, false)?;
         verify_executable(&prepared_path, info)?;
         verify_directory_path(&directory, parent)?;
         prepared

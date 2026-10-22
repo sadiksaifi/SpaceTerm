@@ -17,6 +17,8 @@ from collections import Counter
 from enum import Enum
 from pathlib import Path
 
+from spaceterm_tasks.development_supervision import development_run, supervise
+
 
 class SmokeFailure(Exception):
     """A bounded, content-free failure classification."""
@@ -224,35 +226,14 @@ def require_prerequisites(backend):
     )
 
 
-def require_account_server(binary):
-    """Observe the approved native service without installing, starting or reversing Stop."""
-    try:
-        service = subprocess.run(
-            [str(binary), "service-status", "spaceterm-development"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            timeout=30,
+def source_session(server, client_command, environment):
+    """Own the fixture's foreground Server and private display client as one source run."""
+    with development_run():
+        return supervise(
+            [str(server), "development-serve", "spaceterm-development"],
+            client_command,
+            environment,
         )
-        require(service.returncode == 0, "account_server_service_unavailable")
-        state = re.search(
-            rb"(?:^|\n)Installed: (true|false); enabled: (true|false); "
-            rb"running: (true|false); stopped: (true|false)\.\n?$",
-            service.stdout,
-        )
-        if state is None:
-            raise SmokeFailure("account_server_service_unavailable")
-        require(state[1] == b"true", "account_server_not_installed")
-        require(state[4] == b"false", "account_server_stopped")
-        require(state[3] == b"true", "account_server_not_running")
-        connection = subprocess.run(
-            [str(binary), "status", "spaceterm-development"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=30,
-        )
-        require(connection.returncode == 0, "account_server_connection_unavailable")
-    except (OSError, subprocess.TimeoutExpired):
-        raise SmokeFailure("account_server_observation_failed") from None
 
 
 class Processes:
@@ -295,11 +276,15 @@ class Processes:
             raise SmokeFailure("session_interrupted")
         return child
 
-    def close(self):
+    def close(self, last=None):
         # Only unreaped direct Popen children are signaled here. The outer
         # wrapper retires private descendants/daemons after this report is saved.
         failed = False
-        for child in reversed(self.children):
+        children = list(reversed(self.children))
+        if last in children:
+            children.remove(last)
+            children.append(last)
+        for child in children:
             try:
                 retire_direct_child(child)
             except (OSError, subprocess.TimeoutExpired):

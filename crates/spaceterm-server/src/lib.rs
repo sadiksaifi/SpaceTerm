@@ -54,6 +54,10 @@ pub enum ServerError {
     ReturnUnavailable,
     #[error("This server package could not be verified for this application identity.")]
     RuntimeUnavailable,
+    /// This build includes no server package to verify. Distinct from a package that failed
+    /// verification.
+    #[error("This SpaceTerm build doesn\u{2019}t include a server package for your account.")]
+    CandidateMissing,
     #[error("Administrator authorization is required to enable linger for this account.")]
     AuthorizationRequired,
     #[error("The local server is not running.")]
@@ -114,4 +118,19 @@ pub fn run_local_with_panes(
 ) -> Result<(), ServerError> {
     host::install_shutdown_signals()?;
     host::serve_with_panes(&host::Paths::for_identity(identity)?, Some(Box::new(panes)))
+}
+
+/// Run a source Development Server whose supervisor pipe owns its lifetime.
+/// This never provisions an artifact, registers a service, or changes Stop intent.
+pub fn run_owned_development(
+    panes: impl pane::PaneService + 'static,
+    owner: impl std::io::Read + Send + 'static,
+    ready: impl FnOnce() -> Result<(), ServerError>,
+) -> Result<(), ServerError> {
+    host::serve_owned(
+        &host::Paths::for_identity("spaceterm-development")?,
+        Box::new(panes),
+        owner,
+        ready,
+    )
 }

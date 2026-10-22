@@ -937,6 +937,13 @@ case "$digest" in *[!0-9a-f]*) exit 74;; esac
         ));
         script
     }
+    fn retained_locator(&self, identity: &str, action: &str, digest: &str) -> String {
+        // The digest comes from the verified staged artifact or the client's retained original,
+        // never a remote reply. Retain the approved locator's account-storage safety checks.
+        let script = self.locator(identity, action, false);
+        let marker = "case \"$digest\" in *[!0-9a-f]*) exit 74;; esac\n";
+        script.replace(marker, &format!("{marker}digest={}\n", quote(digest)))
+    }
     fn install(
         &self,
         identity: &str,

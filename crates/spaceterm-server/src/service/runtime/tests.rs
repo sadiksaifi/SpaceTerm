@@ -3,6 +3,181 @@ use std::os::unix::fs::PermissionsExt;
 use test_support::{COMMIT, VERSION, target, with_artifact};
 
 #[test]
+fn previous_production_signatures_authorize_retained_nonproduction_runtimes_only() {
+    let root = temporary();
+    for identity in ["spaceterm-preflight", "spaceterm-development"] {
+        with_artifact(&root.join(identity), identity, |archive, signature| {
+            let installed = provision(
+                &root.join(identity).join("installations"),
+                identity,
+                archive,
+                signature,
+                target(),
+                COMMIT,
+                VERSION,
+            )
+            .unwrap();
+            test_support::sign_with_previous_production_trust(archive, signature);
+            std::fs::write(
+                installed.directory.join("artifact.sig"),
+                std::fs::read(signature).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(
+                describe(&installed.directory, identity).unwrap(),
+                (VERSION.to_owned(), COMMIT.to_owned())
+            );
+            // The identical authenticated legacy artifact grants no new candidate authority.
+            assert_eq!(
+                verify_candidate_installation(
+                    &installed.directory,
+                    identity,
+                    1,
+                    &["workspace_policy"]
+                ),
+                Err(ServerError::RuntimeUnavailable)
+            );
+            let service = Service::for_identity(identity).unwrap();
+            let pin = digest(&std::fs::read(archive).unwrap());
+            assert_eq!(
+                service.inspect_candidate(archive, signature, &pin, 1, &["workspace_policy"]),
+                Err(ServerError::RuntimeUnavailable)
+            );
+            let staging = root.join(identity).join("new-installations");
+            assert_eq!(
+                provision_candidate(
+                    &staging,
+                    identity,
+                    archive,
+                    signature,
+                    &pin,
+                    1,
+                    &["workspace_policy"]
+                ),
+                Err(ServerError::RuntimeUnavailable)
+            );
+            assert!(!staging.exists());
+            assert_eq!(
+                verify(&installed.directory, "spaceterm"),
+                Err(ServerError::RuntimeUnavailable)
+            );
+            let other = if identity == "spaceterm-preflight" {
+                "spaceterm-development"
+            } else {
+                "spaceterm-preflight"
+            };
+            assert_eq!(
+                verify(&installed.directory, other),
+                Err(ServerError::RuntimeUnavailable)
+            );
+            let legacy_signature = std::fs::read(signature).unwrap();
+            std::fs::write(installed.directory.join("artifact.sig"), [0; 64]).unwrap();
+            assert_eq!(
+                verify(&installed.directory, identity),
+                Err(ServerError::RuntimeUnavailable)
+            );
+            std::fs::write(installed.directory.join("artifact.sig"), legacy_signature).unwrap();
+            let resource = installed
+                .directory
+                .join("share/spaceterm/shell-integration/zsh/.zshenv");
+            std::fs::write(resource, b"tampered retained resource").unwrap();
+            assert_eq!(
+                verify(&installed.directory, identity),
+                Err(ServerError::RuntimeUnavailable)
+            );
+        });
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn nonproduction_signatures_never_authorize_release_even_when_the_manifest_claims_release() {
+    let root = temporary();
+    let trust: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../../../packaging/server-nonproduction-trust.json"
+    ))
+    .unwrap();
+    let seed = base64::engine::general_purpose::STANDARD
+        .decode(trust["seed"].as_str().unwrap())
+        .unwrap();
+    let pair = ring::signature::Ed25519KeyPair::from_seed_unchecked(&seed).unwrap();
+    for identity in ["spaceterm-preflight", "spaceterm-development", "spaceterm"] {
+        let (archive, signature) =
+            with_artifact(&root.join(identity), identity, |archive, signature| {
+                std::fs::write(
+                    signature,
+                    pair.sign(&std::fs::read(archive).unwrap()).as_ref(),
+                )
+                .unwrap();
+                (archive.to_owned(), signature.to_owned())
+            });
+        // Outside fixture trust: use the compiled trust selected by the receiving Service.
+        let service = Service::for_identity(identity).unwrap();
+        let pin = digest(&std::fs::read(&archive).unwrap());
+        let inspect =
+            || service.inspect_candidate(&archive, &signature, &pin, 1, &["workspace_policy"]);
+        if identity == "spaceterm" {
+            assert_eq!(inspect(), Err(ServerError::RuntimeUnavailable));
+            let parent = root.join("release-installations");
+            assert_eq!(
+                provision_candidate(
+                    &parent,
+                    identity,
+                    &archive,
+                    &signature,
+                    &pin,
+                    1,
+                    &["workspace_policy"]
+                ),
+                Err(ServerError::RuntimeUnavailable)
+            );
+            assert!(!parent.exists());
+            // A retained-looking installation cannot turn the public nonproduction key
+            // into Release authority, even when its signed manifest claims Release.
+            let bytes = std::fs::read(&archive).unwrap();
+            let installation = root.join("retained-release").join(&pin);
+            let directory = files::store(&installation).unwrap();
+            contents(&bytes, identity, |path, is_directory, mode, data| {
+                if is_directory {
+                    files::create_directories(&directory, path)?;
+                } else {
+                    files::create_file(&directory, path, data, mode)?;
+                }
+                Ok(())
+            })
+            .unwrap();
+            files::create_file(&directory, Path::new("artifact.tar.gz"), &bytes, 0o644).unwrap();
+            files::create_file(
+                &directory,
+                Path::new("artifact.sig"),
+                &std::fs::read(&signature).unwrap(),
+                0o644,
+            )
+            .unwrap();
+            assert_eq!(
+                verify(&installation, identity),
+                Err(ServerError::RuntimeUnavailable)
+            );
+        } else {
+            assert_eq!(inspect().unwrap().version, VERSION);
+            let other = Service::for_identity(if identity == "spaceterm-preflight" {
+                "spaceterm-development"
+            } else {
+                "spaceterm-preflight"
+            })
+            .unwrap();
+            assert_eq!(
+                other.inspect_candidate(&archive, &signature, &pin, 1, &["workspace_policy"]),
+                Err(ServerError::RuntimeUnavailable)
+            );
+            std::fs::write(&signature, [0; 64]).unwrap();
+            assert_eq!(inspect(), Err(ServerError::RuntimeUnavailable));
+        }
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn remote_candidate_inspection_verifies_the_selected_target_without_executing_it() {
     let root = temporary();
     let remote_target = if target() == "aarch64-apple-darwin" {

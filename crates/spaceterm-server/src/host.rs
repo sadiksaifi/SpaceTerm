@@ -197,8 +197,18 @@ pub(crate) fn serve_with_panes(
 
 pub(crate) fn serve_runtime(
     paths: &Paths,
+    panes: Option<Box<dyn crate::pane::PaneService>>,
+    supervised: bool,
+) -> Result<(), ServerError> {
+    serve_runtime_ready(paths, panes, supervised, || Ok(()))
+}
+
+/// The owner receives readiness only after this process owns and publishes the endpoint.
+fn serve_runtime_ready(
+    paths: &Paths,
     mut panes: Option<Box<dyn crate::pane::PaneService>>,
     supervised: bool,
+    ready: impl FnOnce() -> Result<(), ServerError>,
 ) -> Result<(), ServerError> {
     crate::service::check_runtime(paths, supervised)?;
     let data = Directory::open(&paths.data, false)?;
@@ -268,6 +278,10 @@ pub(crate) fn serve_runtime(
     let mut network_connections: Vec<(std::thread::JoinHandle<()>, std::net::TcpStream)> =
         Vec::new();
     let network_workers = Arc::new(AtomicUsize::new(0));
+    let readiness = ready();
+    if readiness.is_err() {
+        STOP.store(true, Ordering::Release);
+    }
     // The fixed admission limit bounds worker allocation; each frame has an absolute deadline.
     for connection in listener.incoming() {
         if stopping.load(Ordering::Acquire) || STOP.load(Ordering::Acquire) {
@@ -354,7 +368,28 @@ pub(crate) fn serve_runtime(
     }
     runtime.verify_path(&paths.runtime)?;
     runtime.remove_socket(c"s", socket_identity)?;
-    Ok(())
+    readiness
+}
+
+/// A source supervisor owns this foreground run through a pipe, including supervisor death.
+/// Retained organization is loaded and shut down through the ordinary host implementation.
+pub(crate) fn serve_owned(
+    paths: &Paths,
+    panes: Box<dyn crate::pane::PaneService>,
+    mut owner: impl std::io::Read + Send + 'static,
+    ready: impl FnOnce() -> Result<(), ServerError>,
+) -> Result<(), ServerError> {
+    install_shutdown_signals()?;
+    crate::service::check_runtime(paths, false)?;
+    let data = Directory::open(&paths.data, true)?;
+    let setup = data.lock("setup.lock", false)?;
+    data.read_or_create()?;
+    drop(setup);
+    std::thread::spawn(move || {
+        let _ = owner.read(&mut [0]);
+        STOP.store(true, std::sync::atomic::Ordering::Release);
+    });
+    serve_runtime_ready(paths, Some(panes), false, ready)
 }
 
 pub(crate) fn serve_admitted(
@@ -741,6 +776,110 @@ mod startup_tests {
             runtime: root.join("r"),
         });
         assert_eq!(result, Err(ServerError::StorageUnavailable));
+    }
+
+    #[test]
+    #[ignore = "runs only as a child of the owned Development lifetime test"]
+    fn owned_development_child() {
+        struct Panes(PathBuf);
+        impl crate::pane::PaneService for Panes {
+            fn request(
+                &mut self,
+                _: [u8; 32],
+                _: [u8; 32],
+                _: crate::pane::Request,
+            ) -> crate::pane::Reply {
+                crate::pane::Reply::Unchanged
+            }
+            fn disconnected(&mut self, _: [u8; 32]) {}
+            fn shutdown(&mut self) -> Result<(), ServerError> {
+                fs::write(self.0.join("cleaned"), b"done").unwrap();
+                Ok(())
+            }
+        }
+        let root = PathBuf::from(std::env::var_os(CHILD_ROOT).unwrap());
+        let result = serve_owned(
+            &Paths {
+                identity: "spaceterm-development".into(),
+                data: root.join("d"),
+                runtime: root.join("r"),
+            },
+            Box::new(Panes(root.clone())),
+            std::io::stdin(),
+            || {
+                fs::write(root.join("ready"), b"ready").unwrap();
+                Ok(())
+            },
+        );
+        if std::env::var_os("SPACETERM_OWNED_EXPECT_REFUSAL").is_some() {
+            assert_eq!(result, Err(ServerError::StorageUnavailable));
+        } else {
+            result.unwrap();
+        }
+    }
+
+    fn owned_child(fixture: &Fixture, refuse: bool) -> ChildGuard {
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "host::startup_tests::owned_development_child",
+                "--ignored",
+            ])
+            .env(CHILD_ROOT, &fixture.root)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit());
+        if refuse {
+            command.env("SPACETERM_OWNED_EXPECT_REFUSAL", "1");
+        }
+        ChildGuard(command.spawn().unwrap())
+    }
+
+    fn await_owned_exit(child: &mut ChildGuard) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(exit) = child.0.try_wait().unwrap() {
+                assert!(exit.success());
+                return;
+            }
+            assert!(Instant::now() < deadline, "owned server did not finish");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn owned_development_eof_finishes_panes_and_preserves_retained_identity_on_relaunch() {
+        let fixture = Fixture::new();
+        let identity = fs::read(fixture.paths.data.join("identity.json")).unwrap();
+        for _ in 0..2 {
+            let mut child = owned_child(&fixture, false);
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !fixture.root.join("ready").exists() {
+                assert!(child.0.try_wait().unwrap().is_none());
+                assert!(
+                    Instant::now() < deadline,
+                    "owned server did not become ready"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            // Readiness proves this child owns the endpoint. A competing run cannot acquire it.
+            let mut refused = owned_child(&fixture, true);
+            refused.0.stdin.take();
+            await_owned_exit(&mut refused);
+            assert!(child.0.try_wait().unwrap().is_none());
+            assert!(!fixture.root.join("cleaned").exists());
+            child.0.stdin.take();
+            await_owned_exit(&mut child);
+            assert_eq!(fs::read(fixture.root.join("cleaned")).unwrap(), b"done");
+            assert!(!fixture.paths.socket().exists());
+            assert_eq!(
+                fs::read(fixture.paths.data.join("identity.json")).unwrap(),
+                identity
+            );
+            fs::remove_file(fixture.root.join("ready")).unwrap();
+            fs::remove_file(fixture.root.join("cleaned")).unwrap();
+        }
     }
 
     #[test]

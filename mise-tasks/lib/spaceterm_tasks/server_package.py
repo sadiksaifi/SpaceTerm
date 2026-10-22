@@ -1,4 +1,4 @@
-"""Independent server artifacts authenticated by the existing Ed25519 update trust.
+"""Independent server artifacts authenticated by identity-scoped Ed25519 trust.
 
 Supported layouts are server/bin/spaceterm-server and server/share/spaceterm on
 Apple Silicon macOS 26 and x86_64 glibc Linux (Ubuntu 22.04 or newer). Installation
@@ -6,6 +6,7 @@ only retains an exact verified artifact. It never selects an active version or
 writes server identity, organization, credentials, stopped intent, or services.
 """
 
+import base64
 import fcntl
 import json
 import os
@@ -40,6 +41,35 @@ MAX_ARCHIVE = 256 * 1024 * 1024
 MAX_EXPANDED = 512 * 1024 * 1024
 MAX_MEMBERS = 128
 BUILD_KEYS = {"schema", "identity", "target", "commit", "version", "protocol_major", "capabilities"}
+
+
+def artifact_public_key(identity):
+    if identity == "spaceterm":
+        return release.public_key()
+    if identity in ("spaceterm-preflight", "spaceterm-development"):
+        return json.loads((ROOT / "packaging/server-nonproduction-trust.json").read_text())[
+            "public_key"
+        ]
+    raise TaskError("the server artifact application identity is unsupported")
+
+
+def artifact_signing_seed(identity):
+    if identity == "spaceterm":
+        secret = os.environ.get(release.SIGNING_SECRET)
+        if not secret:
+            raise TaskError("the existing update signing key is required")
+        seed = release.signing_seed(secret)
+    elif identity in ("spaceterm-preflight", "spaceterm-development"):
+        # This tracked seed is intentionally public. It grants no Release authority.
+        seed = base64.b64decode(
+            json.loads((ROOT / "packaging/server-nonproduction-trust.json").read_text())["seed"],
+            validate=True,
+        )
+    else:
+        raise TaskError("the server artifact application identity is unsupported")
+    if release.derived_public_key(seed) != artifact_public_key(identity):
+        raise TaskError("the signing key differs from the server artifact identity's trust")
+    return seed
 
 
 def host_target():
@@ -113,7 +143,8 @@ def unpack_verified(
     """
     if archive.stat().st_size > MAX_ARCHIVE or signature.stat().st_size != 64:
         raise TaskError("the signed server artifact has an invalid size")
-    release.verify_ed25519(release.public_key(), archive, signature)
+    trust_identity = identity or (expected["identity"] if expected is not None else None)
+    release.verify_ed25519(artifact_public_key(trust_identity), archive, signature)
     if expected_sha256 is not None and release.sha256(archive) != expected_sha256:
         raise TaskError(
             "the embedded server archive differs from the client's compiled candidate pin"
@@ -265,7 +296,10 @@ def verify_tree(tree, expected, *, native=True):
         if "minos 26.0" not in " ".join(build.split()):
             raise TaskError("the server requires the macOS 26 deployment target")
         identifier = f"io.github.sadiksaifi.{expected['identity']}.server"
-        macos_signing.verify_release_signature(executable, signer(), identifier, "server")
+        if expected["identity"] == "spaceterm":
+            macos_signing.verify_release_signature(executable, signer(), identifier, "server")
+        else:
+            macos_signing.verify_adhoc_signature(executable, identifier, "server")
         dependencies = checked(
             ["otool", "-L", str(executable)], "server dependencies unavailable", text=True
         ).lower()
@@ -403,21 +437,18 @@ def install(archive, signature, expected):
 
 def package(identity, release_tag=None):
     target = host_target()
-    require_clean_checkout()
     if identity not in IDENTITIES or (identity == "spaceterm") != bool(release_tag):
         raise TaskError("only a validated release tag selects the release server identity")
+    if release_tag:
+        require_clean_checkout()
     environment = macos_signing.signing_environment(packaged_environment(release_tag))
     if identity == "spaceterm-development":
         environment.pop("SPACETERM_PACKAGED", None)
     if sys.platform == "darwin":
         environment["MACOSX_DEPLOYMENT_TARGET"] = "26.0"
-        macos_signing.signing_credentials(signer(), os.environ)
-    secret = os.environ.get(release.SIGNING_SECRET)
-    if not secret:
-        raise TaskError("the existing update signing key is required")
-    seed = release.signing_seed(secret)
-    if release.derived_public_key(seed) != release.public_key():
-        raise TaskError("the signing key differs from the existing update trust")
+        if release_tag:
+            macos_signing.signing_credentials(signer(), os.environ)
+    seed = artifact_signing_seed(identity)
     executable = build_executable(
         "--release",
         "--locked",
@@ -456,18 +487,34 @@ def package(identity, release_tag=None):
         (tree / "build.json").write_text(json.dumps(expected, sort_keys=True) + "\n")
         if sys.platform == "darwin":
             identifier = f"io.github.sadiksaifi.{identity}.server"
-            requirement = f'=designated => identifier "{identifier}" and {macos_signing.certificate_requirement(signer())}'
-            with macos_signing.release_keychain(signer(), os.environ):
+            if release_tag:
+                requirement = f'=designated => identifier "{identifier}" and {macos_signing.certificate_requirement(signer())}'
+                with macos_signing.release_keychain(signer(), os.environ):
+                    checked(
+                        [
+                            "codesign",
+                            "--force",
+                            "--sign",
+                            signer(),
+                            "--identifier",
+                            identifier,
+                            "--requirements",
+                            requirement,
+                            "--timestamp=none",
+                            str(server),
+                        ],
+                        "server code signing failed",
+                        env=environment,
+                    )
+            else:
                 checked(
                     [
                         "codesign",
                         "--force",
                         "--sign",
-                        signer(),
+                        "-",
                         "--identifier",
                         identifier,
-                        "--requirements",
-                        requirement,
                         "--timestamp=none",
                         str(server),
                     ],
@@ -527,7 +574,8 @@ def prepare_desktop_artifact(destination, identity, release_tag=None, *, catalog
     signature = os.environ.get("SPACETERM_SERVER_SIGNATURE")
     if (archive is not None or signature is not None) and (not archive or not signature):
         raise TaskError("supply both SPACETERM_SERVER_ARCHIVE and SPACETERM_SERVER_SIGNATURE")
-    require_clean_checkout()
+    if release_tag:
+        require_clean_checkout()
     if not archive:
         archive, signature = package(identity, release_tag)
     environment = stage_desktop_artifact(archive, signature, destination, identity=identity)

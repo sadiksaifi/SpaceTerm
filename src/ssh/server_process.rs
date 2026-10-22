@@ -691,7 +691,7 @@ impl<A: SshProcessAdapter> NativeRoute<A> {
     pub(super) fn digest(&self) -> [u8; 32] {
         self.route_id
     }
-    /// One bounded read of the approved installation. Nothing is dispatched, so a lost reply
+    /// One bounded read through approved or original-bound maintenance code. Nothing is dispatched, so a lost reply
     /// leaves the account as it was.
     pub(super) fn server_read(
         &self,
@@ -699,24 +699,26 @@ impl<A: SshProcessAdapter> NativeRoute<A> {
         input: Vec<u8>,
         timeout: Duration,
         cancellation: &SshCancellationToken,
+        executor: Option<&str>,
     ) -> Result<super::process::CapturedProcessOutput, SshConnectFailure> {
         self.run(
-            &self.config.bootstrap.locator(identity(), action, false),
+            &self.maintenance_locator(action, executor),
             input,
             timeout,
             cancellation,
         )
     }
-    /// One bounded action of the approved installation that may take effect.
+    /// One bounded action through approved or original-bound maintenance code that may take effect.
     pub(super) fn server_effect(
         &self,
         action: &str,
         input: Vec<u8>,
         timeout: Duration,
         cancellation: &SshCancellationToken,
+        executor: Option<&str>,
     ) -> Result<super::process::CapturedProcessOutput, SshDispatchFailure> {
         use super::process::{CapturedEffectError, run_captured_effect};
-        let script = self.config.bootstrap.locator(identity(), action, false);
+        let script = self.maintenance_locator(action, executor);
         let (command, capability) = self
             .command(&script)
             .map_err(SshDispatchFailure::NotDispatched)?;
@@ -752,6 +754,15 @@ impl<A: SshProcessAdapter> NativeRoute<A> {
             Discovery::Missing { .. } => {
                 Err(SshConnectFailure::Changed(ContinuityChange::ServerChanged))
             }
+        }
+    }
+    fn maintenance_locator(&self, action: &str, executor: Option<&str>) -> String {
+        match executor {
+            Some(digest) => self
+                .config
+                .bootstrap
+                .retained_locator(identity(), action, digest),
+            None => self.config.bootstrap.locator(identity(), action, false),
         }
     }
     /// Verifies the exact artifact this client holds for `target` before anything is transferred.
@@ -794,7 +805,7 @@ impl<A: SshProcessAdapter> NativeRoute<A> {
         cancellation: &SshCancellationToken,
     ) -> Result<AccountDiscovery, SshConnectFailure> {
         let output = self
-            .server_effect("ssh-prepare", Vec::new(), OBSERVATION, cancellation)
+            .server_effect("ssh-prepare", Vec::new(), OBSERVATION, cancellation, None)
             .map_err(|error| match error {
                 SshDispatchFailure::NotDispatched(error) => error,
                 SshDispatchFailure::Unconfirmed => {
@@ -1466,6 +1477,9 @@ fn map_server_error(error: ServerError) -> SshConnectFailure {
 pub(crate) trait SshServerBootstrap: Send + Sync {
     fn key_public(&self, path: &std::path::Path) -> Option<super::command::SshCommandSpec>;
     fn locator(&self, identity: &str, action: &str, missing: bool) -> String;
+    /// Execute only a client-verified staged build, bound to an update or its retained original.
+    /// This selects maintenance code, never the approved runtime or an installation candidate.
+    fn retained_locator(&self, identity: &str, action: &str, digest: &str) -> String;
     fn install(
         &self,
         identity: &str,
@@ -1721,6 +1735,9 @@ pub(crate) mod testing {
         fn locator(&self, identity: &str, action: &str, _: bool) -> String {
             format!("{action} {identity}")
         }
+        fn retained_locator(&self, identity: &str, action: &str, digest: &str) -> String {
+            format!("{action} {identity} {digest}")
+        }
         fn install(&self, identity: &str, _: usize, _: &[u8], digest: &str, _: bool) -> String {
             format!("ssh-install {identity} {digest}")
         }
@@ -1734,6 +1751,21 @@ pub(crate) mod testing {
         executor: BackgroundExecutor,
         account: Arc<FakeAccount>,
         artifacts: SshServerArtifacts,
+    ) -> (NativeSshConnectBackend<FakeAdapter>, Arc<AtomicUsize>) {
+        backend_with_mechanisms(
+            executor,
+            account,
+            artifacts,
+            Arc::new(EmptyHostConfigFilesystem),
+            Arc::new(FakeBootstrap),
+        )
+    }
+    pub(crate) fn backend_with_mechanisms(
+        executor: BackgroundExecutor,
+        account: Arc<FakeAccount>,
+        artifacts: SshServerArtifacts,
+        host_filesystem: Arc<dyn HostConfigFilesystem>,
+        bootstrap: Arc<dyn SshServerBootstrap>,
     ) -> (NativeSshConnectBackend<FakeAdapter>, Arc<AtomicUsize>) {
         let filesystem = Arc::new(RecordingFilesystem::default());
         let paths = crate::platform::testing::resolve_app_paths(
@@ -1750,8 +1782,8 @@ pub(crate) mod testing {
         let prompts = Arc::new(AtomicUsize::new(0));
         let backend = NativeSshConnectBackend::new(NativeSshServerConfig {
             paths: Arc::new(paths),
-            filesystem: Arc::new(EmptyHostConfigFilesystem),
-            bootstrap: Arc::new(FakeBootstrap),
+            filesystem: host_filesystem,
+            bootstrap,
             home: "/fixture/ssh".into(),
             startup: StartupSshEnvironment::default(),
             executable: OpenSshExecutable::for_test(),

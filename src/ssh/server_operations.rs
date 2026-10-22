@@ -1220,7 +1220,22 @@ fn run(
             );
         }
         Work::Resolve(operation) => {
-            match backend.resolve(&target, operation, authority, &cancellation, &progress) {
+            let Some(kind) = kind.as_ref() else {
+                return settle(
+                    &inner,
+                    &destination,
+                    generation,
+                    SshMaintenanceFailure::Unconfirmed,
+                );
+            };
+            match backend.resolve(
+                &target,
+                operation,
+                kind,
+                authority,
+                &cancellation,
+                &progress,
+            ) {
                 Ok(outcome) => await_outcome(
                     &inner,
                     &backend,
@@ -1228,6 +1243,7 @@ fn run(
                     &destination,
                     &target,
                     operation,
+                    kind,
                     authority,
                     generation,
                     &cancellation,
@@ -1366,6 +1382,7 @@ fn submit(
             destination,
             target,
             submission.operation,
+            &submission.kind,
             authority,
             generation,
             cancellation,
@@ -1431,6 +1448,7 @@ fn await_outcome(
     destination: &SshDestination,
     target: &MaintenanceTarget,
     operation: [u8; 32],
+    kind: &SubmittedKind,
     authority: MaintenanceAuthority,
     generation: u64,
     cancellation: &SshCancellationToken,
@@ -1448,7 +1466,7 @@ fn await_outcome(
             );
         }
         attempt += 1;
-        match backend.resolve(target, operation, authority, cancellation, progress) {
+        match backend.resolve(target, operation, kind, authority, cancellation, progress) {
             Ok(next) => outcome = next,
             Err(SshMaintenanceFailure::Forgotten) => {
                 return forget(
@@ -1788,6 +1806,7 @@ mod tests {
         observed: Mutex<Vec<MaintenanceAuthority>>,
         applied: Mutex<Vec<OperationSubmission>>,
         resolved: Mutex<Vec<([u8; 32], MaintenanceAuthority)>>,
+        resolved_kinds: Mutex<Vec<SubmittedKind>>,
         /// The target every resolution bound, which names the route it reached.
         bound: Mutex<Vec<MaintenanceTarget>>,
         releases: AtomicUsize,
@@ -1880,11 +1899,13 @@ mod tests {
             &self,
             target: &MaintenanceTarget,
             operation: [u8; 32],
+            kind: &SubmittedKind,
             authority: MaintenanceAuthority,
             _: &SshCancellationToken,
             _: &MaintenanceProgress<'_>,
         ) -> Result<OperationOutcome, SshMaintenanceFailure> {
             self.resolved.lock().unwrap().push((operation, authority));
+            self.resolved_kinds.lock().unwrap().push(kind.clone());
             self.bound.lock().unwrap().push(target.clone());
             Self::next(&self.resolutions)
         }
@@ -2333,6 +2354,39 @@ mod tests {
         owner.acknowledge(handle);
         eventually(|| records.operations.lock().unwrap().is_empty());
         eventually(|| matches!(owner.state(&destination()), RemoteOperationState::Unread));
+    }
+
+    #[test]
+    fn reloaded_update_passes_its_original_candidate_to_recovery() {
+        let script = Arc::new(Script::default());
+        let records = Arc::new(Records::default());
+        let mut original = record(None);
+        let kind = SubmittedKind::Update {
+            candidate: "c".repeat(64),
+        };
+        original.kind = kind.clone();
+        records.operations.lock().unwrap().push(original.clone());
+        script.resolves(Ok(OperationOutcome {
+            operation: original.operation,
+            kind: OperationKind::Update {
+                candidate: spaceterm_server::service::maintenance::RemoteBuild {
+                    version: "1.0.0".into(),
+                    commit: "a".repeat(40),
+                    digest: "c".repeat(64),
+                },
+            },
+            ..outcome(OperationResolution::Completed)
+        }));
+        let (connections, _) = registry();
+        let owner = SshServerOperations::new(script.clone(), records.clone(), connections);
+        owner.resume_retained();
+        resolved(owner.as_ref());
+        assert_eq!(*script.resolved_kinds.lock().unwrap(), vec![kind]);
+        assert_eq!(
+            *script.resolved.lock().unwrap(),
+            vec![(original.operation, MaintenanceAuthority::Quiet)]
+        );
+        assert!(script.applied.lock().unwrap().is_empty());
     }
 
     #[test]
