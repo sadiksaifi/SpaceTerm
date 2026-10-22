@@ -749,6 +749,18 @@ impl WorkspaceManager {
         }
     }
 
+    /// Whether the window has no usable server state: it presents no Workspace, this computer's
+    /// server has not delivered its first inventory, and no other server has delivered one. The
+    /// launch screen then fills the window in place of the sidebar and Workspace creation. Another
+    /// server's inventory, even with no attached Workspace, keeps the normal layout.
+    pub(super) fn startup_recovery(&self) -> bool {
+        self.workspaces.active_workspace_id().is_none()
+            && self.launch_presentation().is_some()
+            && !self.shared.iter().any(|(key, shared)| {
+                key != super::ServerKey::LOCAL && shared.latest_inventory().is_some()
+            })
+    }
+
     /// Reads whether a verified build can update a server the open connection refused before
     /// its first inventory. Admission can succeed before Pane negotiation refuses a required
     /// capability, so this refusal reads the same offer launch reads, once per refusal.

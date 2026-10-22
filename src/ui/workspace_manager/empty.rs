@@ -4,6 +4,9 @@
 //! its place: no replacement Workspace opens here and nothing is created on a server. The window
 //! keeps its sidebar, its Workspace Switcher, and Client Settings, and the empty view points at
 //! the switcher, which attaches detached Workspaces and creates new ones.
+//!
+//! Without usable server state the stage instead fills the window beneath its Window Controls
+//! and presents launch recovery alone: no sidebar, resize handle, or Workspace creation.
 
 use gpui::prelude::*;
 use gpui::{AnyElement, AnyView, Context, Edges, Pixels, SharedString, Window, div, px};
@@ -33,10 +36,11 @@ pub(super) struct EmptySidebar {
 
 impl WorkspaceManager {
     /// The stage presented while the window has no Workspace, beside the sidebar and under the
-    /// top-left chrome, with the title bar's trailing controls the Tab strip would carry.
+    /// top-left chrome, with the title bar's trailing controls the Tab strip would carry. Without
+    /// `sidebar` it fills the window and carries the leading Window Controls itself.
     pub(super) fn render_empty_workspace(
         &self,
-        sidebar: EmptySidebar,
+        sidebar: Option<EmptySidebar>,
         update_control: AnyView,
         close: spaceterm_ui::WindowCloseHandler,
         window: &Window,
@@ -54,6 +58,12 @@ impl WorkspaceManager {
             crate::appearance::SurfaceRole::Base,
             super::super::workspace_frame::base_surface(&appearance.colors),
         ));
+        let recovery = sidebar.is_none();
+        let sidebar = sidebar.unwrap_or(EmptySidebar {
+            width: px(0.0),
+            reveal: 0.0,
+            top_chrome_width: px(0.0),
+        });
         // The stage's leading edge follows the sidebar as it shows or hides.
         let hidden_inset = frame.stage_leading_inset(false);
         let leading_inset =
@@ -64,6 +74,9 @@ impl WorkspaceManager {
             window.window_decorations(),
             gpui::Decorations::Client { .. }
         ) && !window.is_fullscreen();
+        let edge_margin = px(spaceterm_ui::DesktopWindowStyle::current(cx)
+            .control_metrics()
+            .edge_margin);
         let band = WindowDragRegion::new(
             "empty-workspace-drag-region",
             "Move Operating-System Window from Workspace chrome",
@@ -73,6 +86,18 @@ impl WorkspaceManager {
                 .flex()
                 .flex_row()
                 .items_center()
+                // The top-left chrome carries the leading controls, except during recovery.
+                .when(recovery && client_controls, |band| {
+                    band.child(
+                        div().flex_none().pl(edge_margin).child(
+                            spaceterm_ui::ControlHost::TitleBar.mount(
+                                spaceterm_ui::ClientWindowControls::new(close.clone())
+                                    .side(spaceterm_ui::WindowControlSide::Left)
+                                    .surface_color(gpui_color(title_bar)),
+                            ),
+                        ),
+                    )
+                })
                 .child(div().flex_1().min_w_0())
                 .child(
                     div()
@@ -84,17 +109,12 @@ impl WorkspaceManager {
                 )
                 .when(client_controls, |band| {
                     band.child(
-                        div()
-                            .flex_none()
-                            .pr(px(spaceterm_ui::DesktopWindowStyle::current(cx)
-                                .control_metrics()
-                                .edge_margin))
-                            .child(
-                                spaceterm_ui::ControlHost::TitleBar.mount(
-                                    spaceterm_ui::ClientWindowControls::new(close)
-                                        .surface_color(gpui_color(title_bar)),
-                                ),
+                        div().flex_none().pr(edge_margin).child(
+                            spaceterm_ui::ControlHost::TitleBar.mount(
+                                spaceterm_ui::ClientWindowControls::new(close)
+                                    .surface_color(gpui_color(title_bar)),
                             ),
+                        ),
                     )
                 }),
         )
@@ -103,9 +123,16 @@ impl WorkspaceManager {
             gpui::Decorations::Client { .. }
         ))
         .status(self.window_drag_status.clone())
-        .pointer_insets(Edges {
-            left: super::super::control_theme::resize_handle::spacious_target_half_thickness(cx),
-            ..Edges::default()
+        // The sidebar's resize target overlaps the band's leading edge only beside the sidebar.
+        .pointer_insets(if recovery {
+            Edges::default()
+        } else {
+            Edges {
+                left: super::super::control_theme::resize_handle::spacious_target_half_thickness(
+                    cx,
+                ),
+                ..Edges::default()
+            }
         })
         .debug_selector("empty-workspace-drag-region")
         .on_event(move |event, window, cx| {

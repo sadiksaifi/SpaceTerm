@@ -4496,6 +4496,9 @@ impl WorkspaceManager {
         if sidebar_frame.moving {
             window.request_animation_frame();
         }
+        // Without usable server state the launch screen takes the window, and nothing offers to
+        // create or arrange Workspaces that cannot exist yet.
+        let recovery = self.startup_recovery();
         let identity = self.active_chrome_identity(cx);
         let resting_chrome = WorkspaceChromeLayout::resolve(sidebar_layout, &identity, window, cx);
         let chrome =
@@ -4521,11 +4524,11 @@ impl WorkspaceManager {
                 active_tab_manager.into_any_element()
             }
             None => self.render_empty_workspace(
-                empty::EmptySidebar {
+                (!recovery).then_some(empty::EmptySidebar {
                     width: sidebar_layout.width,
                     reveal: sidebar_frame.reveal,
                     top_chrome_width: chrome.width,
-                },
+                }),
                 update_control,
                 close,
                 window,
@@ -4541,12 +4544,15 @@ impl WorkspaceManager {
         });
         // The New Worktree Command is available only where it can act, so its menu item disables
         // elsewhere.
-        let new_worktree = self
-            .workspaces
-            .active_workspace_id()
-            .is_some_and(|workspace_id| self.creates_worktrees(workspace_id, cx));
-        let step_worktrees = self.steps_worktrees(cx);
-        let content = Self::workspace_action_scope(new_worktree, step_worktrees, cx)
+        let actions = WorkspaceActions {
+            new_worktree: self
+                .workspaces
+                .active_workspace_id()
+                .is_some_and(|workspace_id| self.creates_worktrees(workspace_id, cx)),
+            step_worktrees: self.steps_worktrees(cx),
+            workspaces: !recovery,
+        };
+        let content = Self::workspace_action_scope(actions, cx)
             .id("workspace-manager")
             .bg(gpui_color(super::appearance::chrome(cx).surface(
                 crate::appearance::SurfaceRole::Sheet,
@@ -4565,7 +4571,9 @@ impl WorkspaceManager {
             )
             .role(gpui::accesskit::Role::Group)
             .a11y_synthetic_children(publish_in_layout_order)
-            .child(Self::render_top_left_chrome_surface(chrome, window, cx))
+            .when(!recovery, |root| {
+                root.child(Self::render_top_left_chrome_surface(chrome, window, cx))
+            })
             .child(
                 div()
                     .id("workspace-tab-manager")
@@ -4577,24 +4585,31 @@ impl WorkspaceManager {
                     .min_h_0()
                     .child(stage),
             )
-            .when(sidebar_frame.reveal > 0.0, |root| {
+            .when(!recovery && sidebar_frame.reveal > 0.0, |root| {
                 root.child(self.sidebar.clone())
             })
-            .child(
-                self.sidebar.read(cx).render_resize_handle(
-                    self.sidebar.downgrade(),
-                    resting_chrome.width,
-                    chrome.width,
-                    !sidebar_frame.moving,
-                    super::workspace_frame::WorkspaceFrame::for_appearance(
-                        super::appearance::chrome(cx),
-                        cx,
-                    )
-                    .top_chrome_height(super::appearance::chrome(cx).top_height()),
-                ),
-            )
-            .child(self.render_top_left_chrome(chrome, manager.clone(), window, cx));
-        let transients = Self::workspace_action_scope(new_worktree, step_worktrees, cx)
+            .when(!recovery, |root| {
+                root.child(
+                    self.sidebar.read(cx).render_resize_handle(
+                        self.sidebar.downgrade(),
+                        resting_chrome.width,
+                        chrome.width,
+                        !sidebar_frame.moving,
+                        super::workspace_frame::WorkspaceFrame::for_appearance(
+                            super::appearance::chrome(cx),
+                            cx,
+                        )
+                        .top_chrome_height(super::appearance::chrome(cx).top_height()),
+                    ),
+                )
+                .child(self.render_top_left_chrome(
+                    chrome,
+                    manager.clone(),
+                    window,
+                    cx,
+                ))
+            });
+        let transients = Self::workspace_action_scope(actions, cx)
             .absolute()
             .inset_0()
             .children(self.remote_workspace_flow.iter().cloned())
@@ -4604,41 +4619,50 @@ impl WorkspaceManager {
     }
 }
 
+/// The Workspace Commands the window can act on this frame. An unavailable Command has no route,
+/// so its menu item disables.
+#[derive(Clone, Copy)]
+struct WorkspaceActions {
+    new_worktree: bool,
+    step_worktrees: bool,
+    /// Switching, creating, and closing Workspaces, and the sidebar that lists them.
+    workspaces: bool,
+}
+
 impl WorkspaceManager {
     /// Keeps ordinary content and complete transient owners on the same action routes while leaving
     /// the active modal outside those routes.
-    fn workspace_action_scope(
-        new_worktree: bool,
-        step_worktrees: bool,
-        cx: &Context<Self>,
-    ) -> gpui::Div {
+    fn workspace_action_scope(actions: WorkspaceActions, cx: &Context<Self>) -> gpui::Div {
         div()
             .key_context(TERMINAL_KEY_CONTEXT)
-            .when(new_worktree, |scope| {
+            .when(actions.new_worktree, |scope| {
                 scope.on_action(cx.listener(Self::on_new_worktree))
             })
-            .when(step_worktrees, |scope| {
+            .when(actions.step_worktrees, |scope| {
                 scope
                     .on_action(cx.listener(Self::on_next_worktree))
                     .on_action(cx.listener(Self::on_previous_worktree))
             })
-            .on_action(cx.listener(Self::on_switch_workspace))
-            .on_action(cx.listener(Self::on_new_workspace))
-            .on_action(cx.listener(Self::on_new_remote_workspace))
-            .on_action(cx.listener(Self::on_open_local_directory))
-            .on_action(cx.listener(Self::on_open_remote_directory))
-            .on_action(cx.listener(Self::on_close_workspace))
-            .on_action(cx.listener(Self::on_activate_workspace_1))
-            .on_action(cx.listener(Self::on_activate_workspace_2))
-            .on_action(cx.listener(Self::on_activate_workspace_3))
-            .on_action(cx.listener(Self::on_activate_workspace_4))
-            .on_action(cx.listener(Self::on_activate_workspace_5))
-            .on_action(cx.listener(Self::on_activate_workspace_6))
-            .on_action(cx.listener(Self::on_activate_workspace_7))
-            .on_action(cx.listener(Self::on_activate_workspace_8))
-            .on_action(cx.listener(Self::on_activate_workspace_9))
-            .on_action(cx.listener(Self::on_toggle_sidebar))
-            .on_action(cx.listener(Self::on_toggle_sidebar_focus))
+            .when(actions.workspaces, |scope| {
+                scope
+                    .on_action(cx.listener(Self::on_switch_workspace))
+                    .on_action(cx.listener(Self::on_new_workspace))
+                    .on_action(cx.listener(Self::on_new_remote_workspace))
+                    .on_action(cx.listener(Self::on_open_local_directory))
+                    .on_action(cx.listener(Self::on_open_remote_directory))
+                    .on_action(cx.listener(Self::on_close_workspace))
+                    .on_action(cx.listener(Self::on_activate_workspace_1))
+                    .on_action(cx.listener(Self::on_activate_workspace_2))
+                    .on_action(cx.listener(Self::on_activate_workspace_3))
+                    .on_action(cx.listener(Self::on_activate_workspace_4))
+                    .on_action(cx.listener(Self::on_activate_workspace_5))
+                    .on_action(cx.listener(Self::on_activate_workspace_6))
+                    .on_action(cx.listener(Self::on_activate_workspace_7))
+                    .on_action(cx.listener(Self::on_activate_workspace_8))
+                    .on_action(cx.listener(Self::on_activate_workspace_9))
+                    .on_action(cx.listener(Self::on_toggle_sidebar))
+                    .on_action(cx.listener(Self::on_toggle_sidebar_focus))
+            })
             .on_action(cx.listener(Self::forward_active_terminal_action::<CopySelection>))
             .on_action(cx.listener(Self::forward_active_terminal_action::<CreateTab>))
             .on_action(cx.listener(Self::forward_active_terminal_action::<ActivateTab1>))
