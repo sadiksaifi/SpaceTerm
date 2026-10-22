@@ -10,6 +10,10 @@
 mod support;
 
 #[cfg(feature = "client")]
+#[path = "support/terminal_semantics.rs"]
+mod terminal_semantics;
+
+#[cfg(feature = "client")]
 mod exercise {
     use std::fs::File;
     use std::io::{Read, Write};
@@ -26,9 +30,7 @@ mod exercise {
     };
     use spaceterm_server::hierarchy::{CloseTarget, Id, Inventory, Mutation, Outcome};
     use spaceterm_server::pane::control::Controller;
-    use spaceterm_server::pane::{
-        Lease, PaneConnection, PaneSize, Reply, Request, Screen, graphics, reading,
-    };
+    use spaceterm_server::pane::{Lease, PaneConnection, PaneSize, Reply, Request, Screen};
     use spaceterm_server::{LocalServer, ServerError};
 
     type Result<T> = std::result::Result<T, &'static str>;
@@ -624,10 +626,19 @@ mod exercise {
             let response =
                 peer.message(json!({"pane": pane, "owner": name, "session": first.session}))?;
             println!(
-                "PASS delayed WSS consumer: Scrollback checked={}, graphics bytes={}",
+                "PASS delayed WSS consumer: Scrollback checked={}, copied rows={}, accessible rows={}, graphics supported={}, graphics bytes={}",
                 response["reading_checked"]
                     .as_bool()
                     .ok_or("reading capability report missing")?,
+                response["copied_rows"]
+                    .as_u64()
+                    .ok_or("copy report missing")?,
+                response["accessible_rows"]
+                    .as_u64()
+                    .ok_or("accessibility report missing")?,
+                response["graphics_supported"]
+                    .as_bool()
+                    .ok_or("graphics negotiation report missing")?,
                 response["graphics_bytes"]
                     .as_u64()
                     .ok_or("graphics capability report missing")?
@@ -826,81 +837,6 @@ mod exercise {
         Ok((server, connector))
     }
 
-    fn bulk(connection: &mut PaneConnection, lease: Lease) -> Result<(bool, usize)> {
-        let reading = connection.supports_reading();
-        let graphics = connection.supports_graphics();
-        let script = if graphics {
-            "python3 -c 'import base64,sys; w=sys.stdout.write; w(\"\\033[2J\\033[H\"); [w(\"DIRECT-BULK-%05d\\n\"%i) for i in range(5000)]; d=base64.b64encode(bytes([255,0,0,255])*320*240).decode(); [w(\"\\033_G\"+(\"a=T,f=32,s=320,v=240,i=541,q=2,\" if i==0 else \"\")+\"m=%d;\"%int(i+4096<len(d))+d[i:i+4096]+\"\\033\\\\\") for i in range(0,len(d),4096)]; w(\"\\nDIRECT-BULK-DONE\\n\"); sys.stdout.flush()'"
-        } else {
-            "printf '\\033[2J\\033[H'; i=0; while [ \"$i\" -lt 5000 ]; do printf 'DIRECT-BULK-%05d\\n' \"$i\"; i=$((i+1)); done; printf 'DIRECT-BULK-DONE\\n'"
-        };
-        command(connection, lease, script)?;
-        // Delay a real WSS consumer while the scoped terminal produces bulk output.
-        std::thread::sleep(Duration::from_millis(300));
-        let screen = output_snapshot(connection, lease, "DIRECT-BULK-DONE")?;
-        if reading {
-            require(
-                screen
-                    .reading
-                    .as_ref()
-                    .is_some_and(|state| state.total_rows >= 5000),
-                "bulk Scrollback did not retain its rows",
-            )?;
-        }
-        if graphics {
-            let snapshot = screen
-                .graphics
-                .as_ref()
-                .and_then(|result| result.as_ref().ok())
-                .ok_or("negotiated graphics manifest missing")?;
-            api(snapshot.validate())?;
-            let image = snapshot
-                .images
-                .iter()
-                .find(|image| image.width == 320 && image.height == 240)
-                .ok_or("bulk graphics resource missing")?;
-            let mut offset = 0;
-            while offset < 320 * 240 * 4 {
-                let Reply::GraphicsChunk(Ok(chunk)) =
-                    api(connection.exchange(&Request::GraphicsChunk {
-                        lease,
-                        image: image.key,
-                        offset,
-                    }))?
-                else {
-                    return Err("bulk graphics chunk missing");
-                };
-                let (pixels, remainder) = chunk.bytes.as_chunks::<4>();
-                require(
-                    chunk.image == image.key
-                        && chunk.offset == offset
-                        && !chunk.bytes.is_empty()
-                        && chunk.bytes.len() <= graphics::CHUNK_BYTES
-                        && remainder.is_empty()
-                        && pixels.iter().all(|pixel| *pixel == [255, 0, 0, 255]),
-                    "bulk graphics chunk binding or pixels changed",
-                )?;
-                offset += chunk.bytes.len();
-            }
-            require(
-                offset == 320 * 240 * 4,
-                "bulk graphics transfer length changed",
-            )?;
-        }
-        if reading {
-            api(connection.exchange(&Request::Read {
-                lease,
-                operation: reading::Operation::Scroll(reading::Scroll::Top),
-            }))?;
-            output(connection, lease, "DIRECT-BULK-00000")?;
-            api(connection.exchange(&Request::Read {
-                lease,
-                operation: reading::Operation::Scroll(reading::Scroll::Bottom),
-            }))?;
-        }
-        Ok((reading, if graphics { 320 * 240 * 4 } else { 0 }))
-    }
-
     fn device() -> Result<()> {
         require(
             std::env::consts::OS == "linux",
@@ -930,7 +866,8 @@ mod exercise {
             lease.session == session,
             "WSS Take Over changed the Session",
         )?;
-        let (reading_checked, graphics_bytes) = bulk(&mut connection, lease)?;
+        let report =
+            super::terminal_semantics::exercise(&mut connection, lease, super::support::command)?;
         drop(connection);
         let mut connection = api(server.connect_pane())?;
         let lease = attached(select(&mut connection, pane, false)?)?;
@@ -942,8 +879,9 @@ mod exercise {
         output(&mut connection, lease, "DIRECT-RECONNECTED")?;
         send_json(
             &mut output_pipe,
-            json!({"lease": lease, "reading_checked": reading_checked,
-            "graphics_bytes": graphics_bytes}),
+            json!({"lease": lease, "reading_checked": true,
+            "copied_rows": report.copied_rows, "accessible_rows": report.accessible_rows,
+            "graphics_supported": report.graphics_supported, "graphics_bytes": report.graphics_bytes}),
         )?;
         require(
             receive_json(&mut input)?["owner"].as_str() == Some(owner),

@@ -1,6 +1,21 @@
 use super::*;
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
+
+#[path = "../../../crates/spaceterm-server-host/examples/support/repository.rs"]
+#[expect(
+    dead_code,
+    reason = "the SSH fixture reuses owning-server mutation and inventory helpers"
+)]
+mod repository;
+#[path = "../../../crates/spaceterm-server-host/examples/support/terminal_semantics.rs"]
+mod terminal_semantics;
+#[path = "../../../crates/spaceterm-server-host/examples/support/worktree.rs"]
+#[expect(
+    dead_code,
+    reason = "the SSH fixture uses journaled writes and exact removal review"
+)]
+mod worktree_fixture;
 #[test]
 fn installer_executes_the_verified_archive_layout_and_cleans_its_temporary_files() {
     // This fixture exercises the generated shell and archive layout without service effects.
@@ -272,6 +287,320 @@ fn native_fixture(cx: &mut gpui::TestAppContext, name: &str) -> NativeFixture {
     }
 }
 
+fn terminal_command(
+    connection: &mut spaceterm_server::pane::PaneConnection,
+    lease: spaceterm_server::pane::Lease,
+    text: &str,
+) -> Result<(), spaceterm_server::ServerError> {
+    use spaceterm_server::pane::{Key, Request};
+    let key = |physical, logical: &str, text| Key {
+        physical,
+        action: 0,
+        logical: logical.into(),
+        text,
+        unshifted: None,
+        modifiers: 0,
+        consumed: 0,
+        option_as_alt: false,
+    };
+    connection.exchange(&Request::Key {
+        lease,
+        key: key(
+            crate::runtime::PhysicalKey::Unidentified as u32,
+            "text-input",
+            Some(text.into()),
+        ),
+    })?;
+    connection.exchange(&Request::Key {
+        lease,
+        key: key(crate::runtime::PhysicalKey::Enter as u32, "enter", None),
+    })?;
+    Ok(())
+}
+
+/// Every mutation and shell command targets a Workspace this invocation created on this route.
+/// A retained original prevents cleanup until that exact write has been resolved.
+fn native_server_owned_work(server: &spaceterm_server::LocalServer) -> Result<(), &'static str> {
+    use spaceterm_server::{
+        hierarchy::{CloseTarget, Mutation, Outcome},
+        pane::{PaneSize, Reply, Request},
+        worktree::{Branch, BranchName, Operation},
+    };
+    fn api<T, E>(result: Result<T, E>) -> Result<T, &'static str> {
+        result.map_err(|_| "SSH native fixture protocol refused or unavailable")
+    }
+    let mut connection = api(server.connect_shared_pane())?;
+    let baseline = api(repository::inventory(&mut connection))?.0;
+    let created = api(worktree_fixture::journaled_mutation(
+        server,
+        &mut connection,
+        Mutation::CreateWorkspace {
+            name: "SSH native semantics".into(),
+            directory: None,
+        },
+    ))?;
+    let Outcome::Accepted { target: workspace } = created.outcome else {
+        return Err("SSH native fixture Workspace creation refused");
+    };
+    let mut remote_root = None;
+    let mut root_identity = None;
+    let exercise = (|| -> Result<_, &'static str> {
+        let current = api(repository::inventory(&mut connection))?.0;
+        let pane = current
+            .workspaces
+            .iter()
+            .find(|work| work.id == workspace)
+            .and_then(|work| work.tabs.first())
+            .ok_or("SSH fixture Pane missing")?
+            .root_pane;
+        let Reply::Attached { lease } = api(connection.exchange(&Request::SelectPane {
+            pane,
+            explicit: true,
+            style: None,
+            size: PaneSize {
+                columns: 80,
+                rows: 24,
+                cell_width: 8,
+                cell_height: 18,
+            },
+        }))?
+        else {
+            return Err("SSH fixture Pane did not start");
+        };
+        let report = terminal_semantics::exercise(&mut connection, lease, terminal_command)?;
+        if !connection.worktree_writes() {
+            return Err("SSH Worktree capability missing");
+        }
+        // Only the owning server's shell creates or accesses these paths. They never enter local I/O.
+        api(terminal_command(
+            &mut connection,
+            lease,
+            r#"st_561_root=$(mktemp -d /tmp/st561.XXXXXXXX) && st_561_root=$(cd "$st_561_root" && pwd -P) && st_561_identity=$(python3 -c 'import os,sys; s=os.stat(sys.argv[1],follow_symlinks=False); print("%d:%d"%(s.st_dev,s.st_ino))' "$st_561_root") && printf 'ST-FIXTURE-ROOT=%s\nST-FIXTURE-IDENTITY=%s\nST-ROOT-READY\n' "$st_561_root" "$st_561_identity""#,
+        ))?;
+        let output = terminal_semantics::screen(&mut connection, lease, |screen| {
+            screen.rows.iter().any(|row| {
+                row.iter()
+                    .map(|cell| cell.text.as_str())
+                    .collect::<String>()
+                    .trim_end()
+                    == "ST-ROOT-READY"
+            })
+        })?;
+        let lines = output
+            .rows
+            .iter()
+            .map(|row| {
+                row.iter()
+                    .map(|cell| cell.text.as_str())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>();
+        let root = lines
+            .iter()
+            .find_map(|line| line.trim_end().strip_prefix("ST-FIXTURE-ROOT="))
+            .ok_or("SSH fixture root identity missing")?;
+        let path = PathBuf::from(root);
+        if !matches!(
+            path.parent().and_then(|p| p.to_str()),
+            Some("/tmp" | "/private/tmp")
+        ) || !path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|name| {
+                name.starts_with("st561.")
+                    && name.len() == 14
+                    && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.')
+            })
+        {
+            return Err("SSH fixture root shape changed");
+        }
+        let identity = lines
+            .iter()
+            .find_map(|line| line.trim_end().strip_prefix("ST-FIXTURE-IDENTITY="))
+            .and_then(|value| value.split_once(':'))
+            .and_then(|(device, inode)| {
+                Some((device.parse::<u64>().ok()?, inode.parse::<u64>().ok()?))
+            })
+            .ok_or("SSH fixture filesystem identity missing")?;
+        remote_root = Some((path.clone(), lease));
+        root_identity = Some(identity);
+        api(terminal_command(
+            &mut connection,
+            lease,
+            r#"GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 git -C "$st_561_root" -c init.defaultBranch=main init -q && git -C "$st_561_root" config core.hooksPath /dev/null && git -C "$st_561_root" -c commit.gpgSign=false -c user.name=Fixture -c user.email=fixture@invalid commit -q --allow-empty -m fixture && printf 'ST-REPOSITORY-READY\n'"#,
+        ))?;
+        terminal_semantics::screen(&mut connection, lease, |screen| {
+            screen.rows.iter().any(|row| {
+                row.iter()
+                    .map(|cell| cell.text.as_str())
+                    .collect::<String>()
+                    .trim_end()
+                    == "ST-REPOSITORY-READY"
+            })
+        })?;
+        let pinned = api(worktree_fixture::journaled_mutation(
+            server,
+            &mut connection,
+            Mutation::PinWorkspace {
+                workspace,
+                version: 0,
+                directory: Some(path.clone()),
+            },
+        ))?;
+        if !matches!(pinned.outcome, Outcome::Accepted { .. }) {
+            return Err("SSH fixture pin refused");
+        }
+        let worktree = path.join("created");
+        let created = api(worktree_fixture::journaled_mutation(
+            server,
+            &mut connection,
+            Mutation::Worktree(Operation::Create {
+                workspace,
+                root: path.clone(),
+                path: worktree.clone(),
+                branch: Branch::New {
+                    name: "native-created".into(),
+                    base: BranchName::Local("main".into()),
+                },
+            }),
+        ))?;
+        if !matches!(created.outcome, Outcome::Accepted { .. }) {
+            return Err("SSH Worktree creation refused");
+        }
+        let published = api(repository::await_facts(&mut connection, &path, |facts| {
+            facts
+                .worktrees
+                .as_ref()
+                .is_some_and(|list| list.worktrees.iter().any(|row| row.root == worktree))
+        }))?;
+        if !published
+            .workspaces
+            .iter()
+            .filter(|work| work.id == workspace)
+            .flat_map(|work| &work.tabs)
+            .any(|tab| {
+                tab.worktree.as_ref() == Some(&worktree)
+                    && tab.worktree_repository.as_ref() == Some(&path)
+            })
+        {
+            return Err("SSH Worktree Tab did not belong to its owning server");
+        }
+        api(terminal_command(
+            &mut connection,
+            lease,
+            r#"test -d "$st_561_root/created" && printf 'ST-WORKTREE-EXISTS\n'"#,
+        ))?;
+        terminal_semantics::screen(&mut connection, lease, |screen| {
+            screen.rows.iter().any(|row| {
+                row.iter()
+                    .map(|cell| cell.text.as_str())
+                    .collect::<String>()
+                    .trim_end()
+                    == "ST-WORKTREE-EXISTS"
+            })
+        })?;
+        let removal = api(worktree_fixture::review(&mut connection, &path, &worktree))?;
+        let removed = api(worktree_fixture::journaled_mutation(
+            server,
+            &mut connection,
+            Mutation::Worktree(removal),
+        ))?;
+        if !matches!(removed.outcome, Outcome::Accepted { .. }) {
+            return Err("SSH Worktree removal refused");
+        }
+        api(repository::await_facts(&mut connection, &path, |facts| {
+            facts
+                .worktrees
+                .as_ref()
+                .is_some_and(|list| list.worktrees.iter().all(|row| row.root != worktree))
+        }))?;
+        api(terminal_command(
+            &mut connection,
+            lease,
+            r#"test ! -e "$st_561_root/created" && printf 'ST-WORKTREE-REMOVED\n'"#,
+        ))?;
+        terminal_semantics::screen(&mut connection, lease, |screen| {
+            screen.rows.iter().any(|row| {
+                row.iter()
+                    .map(|cell| cell.text.as_str())
+                    .collect::<String>()
+                    .trim_end()
+                    == "ST-WORKTREE-REMOVED"
+            })
+        })?;
+        Ok(report)
+    })();
+    if api(server.shared_journal())?.pending().is_some() {
+        return Err("SSH fixture cleanup waits for original-operation recovery");
+    }
+    // Recheck the exact remote filesystem object before descriptor-safe recursive removal.
+    // A changed target is retained, and an uncertain write never reaches this cleanup.
+    let directory_cleanup = if let (Some((path, lease)), Some((device, inode))) =
+        (remote_root, root_identity)
+    {
+        let root = path.to_str().ok_or("SSH fixture root encoding changed")?;
+        let cleanup = format!(
+            r#"python3 -c 'import os,shutil,stat,sys; p=sys.argv[1]; parent=os.open(os.path.dirname(p),os.O_RDONLY|os.O_DIRECTORY); name=os.path.basename(p); fd=os.open(name,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=parent); s=os.fstat(fd); assert (s.st_dev,s.st_ino)==({device},{inode}) and shutil.rmtree.avoids_symlink_attacks; [shutil.rmtree(n,dir_fd=fd) if stat.S_ISDIR(os.stat(n,dir_fd=fd,follow_symlinks=False).st_mode) else os.unlink(n,dir_fd=fd) for n in os.listdir(fd)]; s=os.stat(name,dir_fd=parent,follow_symlinks=False); assert (s.st_dev,s.st_ino)==({device},{inode}); os.rmdir(name,dir_fd=parent); os.close(fd); os.close(parent); print("ST-ROOT-REMOVED")' '{root}' 2>/dev/null"#
+        );
+        api(terminal_command(&mut connection, lease, &cleanup)).and_then(|_| {
+            terminal_semantics::screen(&mut connection, lease, |screen| {
+                screen.rows.iter().any(|row| {
+                    row.iter()
+                        .map(|cell| cell.text.as_str())
+                        .collect::<String>()
+                        .trim_end()
+                        == "ST-ROOT-REMOVED"
+                })
+            })
+            .map(drop)
+        })
+    } else {
+        Ok(())
+    };
+    let target = CloseTarget::Workspace { workspace };
+    let current = api(repository::inventory(&mut connection))?.0;
+    let confirmation = current
+        .close_confirmation(target)
+        .ok_or("SSH fixture close target missing")?;
+    let closed = api(worktree_fixture::journaled_mutation(
+        server,
+        &mut connection,
+        Mutation::Close {
+            target,
+            confirmation,
+        },
+    ))?;
+    if !matches!(closed.outcome, Outcome::Accepted { .. }) {
+        return Err("SSH fixture close refused");
+    }
+    let after = api(repository::inventory(&mut connection))?.0;
+    if !baseline
+        .workspaces
+        .iter()
+        .all(|before| after.workspaces.iter().any(|work| work.id == before.id))
+        || !baseline.close.as_ref().is_some_and(|before| {
+            after.close.as_ref().is_some_and(|after| {
+                before
+                    .sessions
+                    .iter()
+                    .all(|pane| after.sessions.contains(pane))
+            })
+        })
+    {
+        return Err("baseline server work changed during the SSH fixture");
+    }
+    directory_cleanup?;
+    let report = exercise?;
+    eprintln!(
+        "PASS SSH semantic protocol: copied rows={}, accessible rows={}, graphics supported={}, graphics bytes={}, owning-server Worktree create/remove; fixture cleanup and baseline work retained",
+        report.copied_rows,
+        report.accessible_rows,
+        report.graphics_supported,
+        report.graphics_bytes
+    );
+    Ok(())
+}
+
 /// Explicit env selects a disposable account. This test never invokes Stop or Start.
 #[gpui::test]
 #[ignore = "requires an explicitly selected disposable OpenSSH destination and signed artifacts"]
@@ -326,6 +655,8 @@ fn native_account_server_connect(cx: &mut gpui::TestAppContext) {
         ("missing", Err(SshConnectFailure::InstallationOffered(_))) => {}
         ("ready", Ok(connected)) => {
             assert_eq!(connected.server.refresh().unwrap().protocol_major, 1);
+            native_server_owned_work(&connected.server)
+                .unwrap_or_else(|failure| panic!("{failure}"));
             let reused = backend
                 .connect(
                     &destination,
