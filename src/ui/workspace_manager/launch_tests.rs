@@ -1791,3 +1791,67 @@ fn a_reattached_workspace_names_what_its_hidden_tab_runs_from_an_unchanged_inven
         "presenting the hidden Tab neither selects nor claims its Pane"
     );
 }
+
+/// The root Pane runs a Session that reports `percent` through the inventory.
+fn with_root_progress(revision: u64, metadata_revision: u64, percent: u8) -> Inventory {
+    use spaceterm_server::hierarchy::{CloseInventory, ConfirmedPane};
+    let mut inventory = inventory();
+    inventory.revision = revision;
+    let mut presentation = running(metadata_revision, "cargo build", "/srv/api");
+    presentation.progress = spaceterm_server::pane::metadata::Progress::Normal(percent);
+    inventory.workspaces[0].tabs[0].panes[0].presentation = Some(Box::new(presentation));
+    inventory.close = Some(CloseInventory {
+        boot: BOOT,
+        sessions: vec![ConfirmedPane {
+            id: PANE,
+            session: Some([45; 32]),
+        }],
+    });
+    inventory
+}
+
+/// What each Terminal Session status in the window says.
+fn session_statuses(cx: &mut VisualTestContext) -> Vec<String> {
+    let tree = spaceterm_ui::a11y_testing::A11yTree::read(cx);
+    tree.with_role("Status")
+        .iter()
+        .filter(|node| node["aria"]["label"] == "Terminal Session status")
+        .map(|node| {
+            node["aria"]["value"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned()
+        })
+        .collect()
+}
+
+#[gpui::test]
+fn a_pane_another_client_controls_keeps_showing_its_sessions_progress(cx: &mut TestAppContext) {
+    use crate::terminal::server_session::DevelopmentPaneStatus;
+    let (harness, cx) = launch_harness(vec![ready()], cx);
+    cx.run_until_parked();
+    harness.edits.set_inventory(with_root_progress(2, 3, 40));
+    sync(&harness, cx);
+
+    harness
+        .panes
+        .pane(PANE)
+        .set(DevelopmentPaneStatus::Takeover);
+    cx.executor()
+        .advance_clock(crate::ui::shared_workspaces::POLL_INTERVAL * 3);
+    cx.run_until_parked();
+    harness.edits.set_inventory(with_root_progress(3, 4, 60));
+    sync(&harness, cx);
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+
+    assert!(
+        cx.debug_bounds("shared-pane-takeover-1").is_some(),
+        "typing still belongs to the other client"
+    );
+    assert!(
+        session_statuses(cx).contains(&"Busy, 60%".to_owned()),
+        "the server's live progress still shows: {:?}",
+        session_statuses(cx)
+    );
+}

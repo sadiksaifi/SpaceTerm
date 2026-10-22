@@ -2199,12 +2199,11 @@ impl TerminalPane {
         presentation_changed || directory_changed
     }
 
-    /// Whether the Terminal Session these facts describe is running and reachable. A server's
-    /// Session runs whether or not this client ever presented it, as its inventory says.
+    /// Whether the Terminal Session these facts describe is running. A server's Session runs
+    /// whether or not this client ever presented it or controls it, as its inventory says.
     fn metadata_session_running(&self) -> bool {
         if self.server_backed() {
             self.terminal_session.server_run.is_some()
-                && !self.terminal_session.connection_interrupted
                 && !matches!(self.pane_state, PaneTerminalState::Exited(_))
         } else {
             self.terminal_session_available()
