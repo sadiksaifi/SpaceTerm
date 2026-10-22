@@ -12,6 +12,16 @@ mod accessibility;
 #[cfg(test)]
 mod accessibility_tests;
 mod directories;
+#[cfg(all(test, feature = "desktop"))]
+pub(crate) mod testing {
+    use super::*;
+
+    pub(crate) fn directory_host() -> impl FnMut(&Request) -> Reply + Send {
+        let mut host = SharedWorkspaceHost::new(super::tests::host());
+        move |request| host.request([3; 32], [4; 32], request.clone())
+    }
+}
+
 #[cfg(test)]
 mod directory_tests;
 #[cfg(test)]
@@ -43,7 +53,7 @@ pub struct DevelopmentPaneHost {
     directory_unavailable: bool,
     failed_directory_session: Option<PaneTarget>,
     dormant: Option<DormantPane>,
-    directories: directories::DirectoryReads,
+    directories: directories::DirectoryOperations,
     /// Shared by every Pane of one server, so each names its Controlling Client the same way.
     names: Arc<std::sync::Mutex<control::ClientNames>>,
 }
@@ -99,7 +109,7 @@ impl DevelopmentPaneHost {
             directory_unavailable: false,
             failed_directory_session: None,
             dormant: None,
-            directories: directories::DirectoryReads::default(),
+            directories: directories::DirectoryOperations::default(),
             names: Arc::default(),
         })
     }
@@ -133,7 +143,7 @@ impl DevelopmentPaneHost {
             directory_unavailable: false,
             failed_directory_session: None,
             dormant: None,
-            directories: directories::DirectoryReads::default(),
+            directories: directories::DirectoryOperations::default(),
             names: Arc::default(),
         })
     }
@@ -412,6 +422,7 @@ impl DevelopmentPaneHost {
                 graphics: true,
                 accessibility: true,
                 directory_recovery: true,
+                directory_creation: true,
                 worktree_writes: false,
                 end_all_sessions: false,
                 workspace_policy: false,
@@ -423,6 +434,11 @@ impl DevelopmentPaneHost {
         if let Request::DirectoryRead(request) = request {
             return Ok(Reply::DirectoryRead(
                 self.directories.request(connection, request),
+            ));
+        }
+        if let Request::DirectoryCreate(request) = request {
+            return Ok(Reply::DirectoryCreate(
+                self.directories.create(connection, request),
             ));
         }
         match request {

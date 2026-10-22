@@ -1,4 +1,4 @@
-//! Bounded, cancellable reads on the owning server, outside its terminal operation lock.
+//! Bounded directory reads and explicit idempotent writes outside the terminal operation lock.
 use crate::platform::local_filesystem::LocalFilesystemError;
 use spaceterm_server::pane::directories::*;
 use std::{
@@ -14,23 +14,37 @@ use std::{
 };
 
 type Id = [u8; 32];
-struct Read {
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Kind {
+    Read,
+    Create,
+}
+enum Work {
+    Read(Operation),
+    Create(std::path::PathBuf),
+}
+enum WorkerRequest {
+    Begin { id: u64, work: Work },
+    Poll { id: u64 },
+    Cancel { id: u64 },
+}
+struct Job {
     cancelled: Arc<AtomicBool>,
     result: mpsc::Receiver<Result<Value, Error>>,
     worker: JoinHandle<()>,
     deadline: Instant,
 }
 #[derive(Default)]
-pub(super) struct DirectoryReads {
-    reads: BTreeMap<(Id, u64), Read>,
-    retiring: Vec<Read>,
+pub(super) struct DirectoryOperations {
+    jobs: BTreeMap<(Id, Kind, u64), Job>,
+    retiring: Vec<Job>,
 }
-impl DirectoryReads {
+impl DirectoryOperations {
     pub(super) fn cancel_connection(&mut self, connection: Id) {
         let keys: Vec<_> = self
-            .reads
+            .jobs
             .keys()
-            .filter(|(c, _)| *c == connection)
+            .filter(|(c, _, _)| *c == connection)
             .copied()
             .collect();
         for key in keys {
@@ -38,21 +52,21 @@ impl DirectoryReads {
         }
     }
     pub(super) fn stop(&mut self) {
-        let reads = std::mem::take(&mut self.reads);
-        for (_, read) in reads {
-            read.cancelled.store(true, Ordering::Release);
-            self.retiring.push(read);
+        let jobs = std::mem::take(&mut self.jobs);
+        for (_, job) in jobs {
+            job.cancelled.store(true, Ordering::Release);
+            self.retiring.push(job);
         }
     }
-    fn cancel(&mut self, key: (Id, u64)) {
-        if let Some(read) = self.reads.remove(&key) {
-            read.cancelled.store(true, Ordering::Release);
-            self.retiring.push(read);
+    fn cancel(&mut self, key: (Id, Kind, u64)) {
+        if let Some(job) = self.jobs.remove(&key) {
+            job.cancelled.store(true, Ordering::Release);
+            self.retiring.push(job);
         }
     }
     pub(super) fn tick(&mut self) {
         let expired: Vec<_> = self
-            .reads
+            .jobs
             .iter()
             .filter(|(_, r)| Instant::now() >= r.deadline)
             .map(|(key, _)| *key)
@@ -60,21 +74,57 @@ impl DirectoryReads {
         for key in expired {
             self.cancel(key);
         }
-        self.retiring.retain(|read| !read.worker.is_finished());
+        self.retiring.retain(|job| !job.worker.is_finished());
     }
     pub(super) fn request(&mut self, connection: Id, request: Request) -> Result<Progress, Error> {
+        let request = match request {
+            Request::Begin { id, operation } => WorkerRequest::Begin {
+                id,
+                work: Work::Read(operation),
+            },
+            Request::Poll { id } => WorkerRequest::Poll { id },
+            Request::Cancel { id } => WorkerRequest::Cancel { id },
+        };
+        self.work(connection, Kind::Read, request)
+    }
+    pub(super) fn create(
+        &mut self,
+        connection: Id,
+        request: CreationRequest,
+    ) -> Result<Progress, Error> {
+        let request = match request {
+            CreationRequest::Begin { id, path } => WorkerRequest::Begin {
+                id,
+                work: Work::Create(path),
+            },
+            CreationRequest::Poll { id } => WorkerRequest::Poll { id },
+            CreationRequest::Cancel { id } => WorkerRequest::Cancel { id },
+        };
+        self.work(connection, Kind::Create, request)
+    }
+    fn work(
+        &mut self,
+        connection: Id,
+        kind: Kind,
+        request: WorkerRequest,
+    ) -> Result<Progress, Error> {
         self.tick();
         match request {
-            Request::Cancel { id } => {
-                self.cancel((connection, id));
+            WorkerRequest::Cancel { id } => {
+                self.cancel((connection, kind, id));
                 Ok(Progress::Cancelled)
             }
-            Request::Begin { id, operation } => {
-                if id == 0 || self.reads.contains_key(&(connection, id)) {
+            WorkerRequest::Begin { id, work } => {
+                if id == 0 || self.jobs.contains_key(&(connection, kind, id)) {
                     return Err(Error::Unavailable);
                 }
-                if self.reads.len() + self.retiring.len() >= 32
-                    || self.reads.keys().filter(|(c, _)| *c == connection).count() >= 2
+                if self.jobs.len() + self.retiring.len() >= 32
+                    || self
+                        .jobs
+                        .keys()
+                        .filter(|(c, _, _)| *c == connection)
+                        .count()
+                        >= 2
                 {
                     return Err(Error::Capacity);
                 }
@@ -82,17 +132,20 @@ impl DirectoryReads {
                 let token = Arc::clone(&cancelled);
                 let (sender, result) = mpsc::sync_channel(1);
                 let worker = std::thread::Builder::new()
-                    .name("spaceterm-directory-read".into())
+                    .name("spaceterm-directory-operation".into())
                     .spawn(move || {
-                        let value = read(operation, &token);
+                        let value = match work {
+                            Work::Read(operation) => read(operation, &token),
+                            Work::Create(path) => create(&path, &token),
+                        };
                         if !token.load(Ordering::Acquire) {
                             let _ = sender.send(value);
                         }
                     })
                     .map_err(|_| Error::Capacity)?;
-                self.reads.insert(
-                    (connection, id),
-                    Read {
+                self.jobs.insert(
+                    (connection, kind, id),
+                    Job {
                         cancelled,
                         result,
                         worker,
@@ -101,16 +154,19 @@ impl DirectoryReads {
                 );
                 Ok(Progress::Pending)
             }
-            Request::Poll { id } => {
-                let read = self.reads.get(&(connection, id)).ok_or(Error::Cancelled)?;
-                match read.result.try_recv() {
+            WorkerRequest::Poll { id } => {
+                let job = self
+                    .jobs
+                    .get(&(connection, kind, id))
+                    .ok_or(Error::Cancelled)?;
+                match job.result.try_recv() {
                     Ok(value) => {
-                        self.cancel((connection, id));
+                        self.cancel((connection, kind, id));
                         value.map(Progress::Ready)
                     }
                     Err(mpsc::TryRecvError::Empty) => Ok(Progress::Pending),
                     Err(_) => {
-                        self.cancel((connection, id));
+                        self.cancel((connection, kind, id));
                         Err(Error::Unavailable)
                     }
                 }
@@ -118,7 +174,7 @@ impl DirectoryReads {
         }
     }
 }
-impl Drop for DirectoryReads {
+impl Drop for DirectoryOperations {
     fn drop(&mut self) {
         self.stop();
     }
@@ -186,6 +242,31 @@ fn read(operation: Operation, cancelled: &AtomicBool) -> Result<Value, Error> {
         }
     }
 }
+/// Cancellation never removes created parents, even if the result is no longer observed.
+fn create(path: &Path, cancelled: &AtomicBool) -> Result<Value, Error> {
+    checked_path(path)?;
+    if cancelled.load(Ordering::Acquire) {
+        return Err(Error::Cancelled);
+    }
+    let filesystem = super::local_filesystem();
+    let creation_error = |error| match error {
+        LocalFilesystemError::Missing => Error::Unavailable,
+        error => classify(error),
+    };
+    filesystem
+        .create_directory_all(path)
+        .map_err(creation_error)?;
+    if cancelled.load(Ordering::Acquire) {
+        return Err(Error::Cancelled);
+    }
+    filesystem
+        .validate_directory(path)
+        .map_err(creation_error)?;
+    if cancelled.load(Ordering::Acquire) {
+        return Err(Error::Cancelled);
+    }
+    Ok(Value::Directory(path.to_owned()))
+}
 fn classify(error: LocalFilesystemError) -> Error {
     match error {
         LocalFilesystemError::Missing => Error::Missing,
@@ -200,8 +281,115 @@ fn classify(error: LocalFilesystemError) -> Error {
 mod tests {
     use super::*;
     #[test]
+    fn creation_rejects_invalid_paths_and_files_without_creating_children() {
+        let root = std::env::temp_dir().join(format!(
+            "spaceterm-create-invalid-{:x}",
+            u64::from_ne_bytes(super::super::nonce().unwrap()[..8].try_into().unwrap())
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let file = root.join("file");
+        std::fs::write(&file, b"fixture").unwrap();
+        for path in [file.clone(), file.join("child")] {
+            assert!(matches!(
+                create(&path, &AtomicBool::new(false)),
+                Err(Error::NotDirectory)
+            ));
+        }
+        for path in [
+            std::path::PathBuf::from("relative"),
+            root.join("bad\npath"),
+            root.join("x".repeat(MAX_PATH_BYTES)),
+        ] {
+            assert!(matches!(
+                create(&path, &AtomicBool::new(false)),
+                Err(Error::Unavailable)
+            ));
+        }
+        assert_eq!(std::fs::read(&file).unwrap(), b"fixture");
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn cancelled_creation_preserves_created_directories_and_is_connection_bound() {
+        let root = std::env::temp_dir().join(format!(
+            "spaceterm-create-cancel-{:x}",
+            u64::from_ne_bytes(super::super::nonce().unwrap()[..8].try_into().unwrap())
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let mut operations = DirectoryOperations::default();
+        assert!(matches!(
+            operations.create(
+                [1; 32],
+                CreationRequest::Begin {
+                    id: 1,
+                    path: root.join("parent/child")
+                }
+            ),
+            Ok(Progress::Pending)
+        ));
+        // Wait for the actual write, leaving its result unobserved before cancellation.
+        let until = Instant::now() + Duration::from_secs(2);
+        while !operations
+            .jobs
+            .get(&([1; 32], Kind::Create, 1))
+            .unwrap()
+            .worker
+            .is_finished()
+        {
+            assert!(Instant::now() < until, "creation worker did not finish");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(matches!(
+            operations.create([2; 32], CreationRequest::Cancel { id: 1 }),
+            Ok(Progress::Cancelled)
+        ));
+        assert!(operations.jobs.contains_key(&([1; 32], Kind::Create, 1)));
+        assert!(matches!(
+            operations.request([1; 32], Request::Poll { id: 1 }),
+            Err(Error::Cancelled)
+        ));
+        operations.cancel_connection([1; 32]);
+        assert!(matches!(
+            operations.create([1; 32], CreationRequest::Poll { id: 1 }),
+            Err(Error::Cancelled)
+        ));
+        assert!(root.join("parent/child").is_dir());
+        assert!(matches!(
+            create(&root.join("cancelled"), &AtomicBool::new(true)),
+            Err(Error::Cancelled)
+        ));
+        assert!(!root.join("cancelled").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn reads_and_creation_share_the_same_per_connection_capacity() {
+        let mut operations = DirectoryOperations::default();
+        for id in [1, 2] {
+            assert!(matches!(
+                operations.request(
+                    [1; 32],
+                    Request::Begin {
+                        id,
+                        operation: Operation::Home
+                    }
+                ),
+                Ok(Progress::Pending)
+            ));
+        }
+        assert!(matches!(
+            operations.create(
+                [1; 32],
+                CreationRequest::Begin {
+                    id: 3,
+                    path: std::path::PathBuf::from("/unused")
+                }
+            ),
+            Err(Error::Capacity)
+        ));
+    }
+    #[test]
     fn cancelled_reads_are_fenced_to_their_own_connection() {
-        let mut reads = DirectoryReads::default();
+        let mut reads = DirectoryOperations::default();
         for connection in [[1; 32], [2; 32]] {
             assert!(matches!(
                 reads.request(

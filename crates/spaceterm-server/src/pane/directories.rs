@@ -19,6 +19,19 @@ pub enum Request {
     Poll { id: u64 },
     Cancel { id: u64 },
 }
+/// An explicit, idempotent filesystem write, independent of Workspace or pin edits.
+/// Cancellation stops observation; directories already created are never rolled back.
+#[derive(Clone, Serialize, Deserialize)]
+pub enum CreationRequest {
+    Begin { id: u64, path: PathBuf },
+    Poll { id: u64 },
+    Cancel { id: u64 },
+}
+impl std::fmt::Debug for CreationRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("DirectoryCreation(<redacted>)")
+    }
+}
 #[derive(Clone, Serialize, Deserialize)]
 pub enum Operation {
     Home,

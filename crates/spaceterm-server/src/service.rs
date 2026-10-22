@@ -1234,6 +1234,7 @@ mod tests {
                         graphics: false,
                         accessibility: false,
                         directory_recovery: false,
+                        directory_creation: false,
                         worktree_writes: false,
                         end_all_sessions: false,
                         workspace_policy: true,

@@ -208,6 +208,7 @@ pub enum Request {
     },
     WorktreeRead(crate::worktree::Read),
     DirectoryRead(directories::Request),
+    DirectoryCreate(directories::CreationRequest),
     RepairDirectory {
         target: directories::Target,
         replacement: Option<std::path::PathBuf>,
@@ -346,6 +347,7 @@ pub enum Reply {
     WorktreeRead(Result<crate::worktree::ReadReply, crate::worktree::Error>),
     MutationPending,
     DirectoryRead(Result<directories::Progress, directories::Error>),
+    DirectoryCreate(Result<directories::Progress, directories::Error>),
     GraphicsChunk(Result<graphics::Chunk, graphics::Error>),
     Reading {
         accepted: bool,
@@ -388,6 +390,8 @@ pub enum Reply {
         accessibility: bool,
         #[serde(default)]
         directory_recovery: bool,
+        #[serde(default)]
+        directory_creation: bool,
         #[serde(default)]
         worktree_writes: bool,
         #[serde(default)]
@@ -554,6 +558,7 @@ struct PaneTransport {
     graphics: bool,
     accessibility: bool,
     directory_recovery: bool,
+    directory_creation: bool,
     worktree_writes: bool,
     end_all_sessions: bool,
 }
@@ -611,6 +616,7 @@ impl PaneConnection {
                 graphics,
                 accessibility,
                 directory_recovery,
+                directory_creation,
                 worktree_writes,
                 end_all_sessions,
                 workspace_policy: true,
@@ -643,6 +649,9 @@ impl PaneConnection {
                     .directory_recovery = directory_recovery;
                 std::sync::Arc::get_mut(&mut connection.transport)
                     .ok_or(ServerError::Protocol)?
+                    .directory_creation = directory_creation;
+                std::sync::Arc::get_mut(&mut connection.transport)
+                    .ok_or(ServerError::Protocol)?
                     .presentation_changes = presentation_changes;
                 Ok(connection)
             }
@@ -668,11 +677,15 @@ impl PaneConnection {
                 graphics: false,
                 accessibility: false,
                 directory_recovery: false,
+                directory_creation: false,
                 worktree_writes: false,
                 end_all_sessions: false,
             }),
             last_exchange: None,
         }
+    }
+    pub fn supports_directory_creation(&self) -> bool {
+        self.transport.directory_creation
     }
     pub fn supports_directory_recovery(&self) -> bool {
         self.transport.directory_recovery
@@ -781,7 +794,37 @@ mod transport_tests {
         assert!(!connection.supports_interactive_input());
         assert!(!connection.supports_reading());
         assert!(!connection.supports_end_all_sessions());
+        assert!(!connection.supports_directory_creation());
         peer.join().unwrap();
+    }
+
+    #[test]
+    fn directory_creation_requires_an_explicit_optional_capability() {
+        for supported in [false, true] {
+            let (client, mut server) = UnixStream::pair().unwrap();
+            let peer = std::thread::spawn(move || {
+                let mut wire = crate::protocol::Wire::terminal(&mut server).unwrap();
+                assert!(matches!(
+                    wire.read::<Request>().unwrap(),
+                    Request::Capabilities
+                ));
+                wire.write(&serde_json::json!({
+                    "Capabilities": {
+                        "development_pane": true,
+                        "workspace_policy": true,
+                        "directory_creation": supported
+                    }
+                }))
+                .unwrap();
+            });
+            assert_eq!(
+                PaneConnection::negotiate(client)
+                    .unwrap()
+                    .supports_directory_creation(),
+                supported
+            );
+            peer.join().unwrap();
+        }
     }
 
     #[test]

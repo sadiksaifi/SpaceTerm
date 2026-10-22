@@ -193,7 +193,7 @@ impl SharedWorkspaceHost {
                 directory_unavailable: false,
                 failed_directory_session: None,
                 dormant: None,
-                directories: super::directories::DirectoryReads::default(),
+                directories: super::directories::DirectoryOperations::default(),
                 names: Arc::clone(&self.prototype.names),
             };
             self.panes.insert(id, host);
@@ -309,6 +309,9 @@ impl SharedWorkspaceHost {
             )),
             Request::DirectoryRead(request) => Ok(Reply::DirectoryRead(
                 self.prototype.directories.request(connection, request),
+            )),
+            Request::DirectoryCreate(request) => Ok(Reply::DirectoryCreate(
+                self.prototype.directories.create(connection, request),
             )),
             Request::RepairDirectory {
                 target,
@@ -478,6 +481,7 @@ impl SharedWorkspaceHost {
                 graphics: true,
                 accessibility: true,
                 directory_recovery: true,
+                directory_creation: true,
                 worktree_writes: true,
                 end_all_sessions: true,
                 workspace_policy: true,
