@@ -112,7 +112,7 @@ pub(super) fn connect(
         paired: paired.clone(),
     })
 }
-pub(super) fn claim(
+pub(super) fn prepare(
     invitation: &Invitation,
     name: ClientName,
     credential: &DeviceCredential,
@@ -120,26 +120,44 @@ pub(super) fn claim(
     if invitation.payload.expires <= wire::now()? {
         return Err(DirectError::Expired);
     }
-    let (_, answer) = exchange_checked(
-        &invitation.payload.endpoint,
+    let claim = wire::claim_id(
         &invitation.payload.pin,
-        credential,
-        wire::Action::Claim {
-            token: invitation.payload.token,
-            key: crypto::public(credential.expose_bytes())?,
-            name,
-        },
-        Some(&invitation.payload.server_name),
+        invitation.payload.id,
+        crypto::hash(&invitation.payload.token),
+        crypto::public(credential.expose_bytes())?,
     )?;
-    let wire::Answer::Claim(claim) = answer else {
-        return Err(DirectError::InvalidRequest);
-    };
     Ok(Enrollment {
         endpoint: invitation.payload.endpoint.clone(),
         pin: invitation.payload.pin.clone(),
         claim,
         credential: DeviceCredential::from_bytes(credential.expose_bytes())?,
+        prepared: Some((invitation.payload.clone(), name)),
     })
+}
+pub(super) fn submit(enrollment: &Enrollment) -> Result<(), DirectError> {
+    let (invitation, name) = enrollment
+        .prepared
+        .as_ref()
+        .ok_or(DirectError::InvalidRequest)?;
+    if invitation.expires <= wire::now()? {
+        return Err(DirectError::Expired);
+    }
+    let (_, answer) = exchange_checked(
+        &enrollment.endpoint,
+        &enrollment.pin,
+        &enrollment.credential,
+        wire::Action::Claim {
+            id: enrollment.claim,
+            token: invitation.token,
+            key: crypto::public(enrollment.credential.expose_bytes())?,
+            name: name.clone(),
+        },
+        Some(&invitation.server_name),
+    )?;
+    match answer {
+        wire::Answer::Claim(id) if id == enrollment.claim => Ok(()),
+        _ => Err(DirectError::Substituted),
+    }
 }
 pub(super) fn finish(enrollment: &Enrollment) -> Result<Option<PairedDevice>, DirectError> {
     let (_, answer) = exchange(

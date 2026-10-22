@@ -3,7 +3,7 @@ use super::*;
 pub(super) const MAX_AUTH_FRAME: usize = 16 * 1024;
 pub(super) const INVITATION_SECONDS: u64 = 300;
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Invite {
     pub schema: u8,
@@ -36,6 +36,7 @@ pub(super) enum Action {
         paired: PairedDevice,
     },
     Claim {
+        id: ClaimId,
         token: [u8; 32],
         key: [u8; 32],
         name: ClientName,
@@ -78,6 +79,21 @@ pub(super) fn transcript<T: Serialize>(
     serde_json::to_vec(&("spaceterm-direct-1", purpose, pin, nonce, action))
         .map(zeroize::Zeroizing::new)
         .map_err(|_| DirectError::InvalidRequest)
+}
+/// The token digest remains a secret invitation capability. A client retains only
+/// this one-way, key-bound claim ID for cancellation, never the invitation itself.
+pub(super) fn claim_id(
+    pin: &ServerPin,
+    invitation: ClaimId,
+    token_digest: [u8; 32],
+    key: [u8; 32],
+) -> Result<ClaimId, DirectError> {
+    Ok(crypto::hash(&transcript(
+        "prepared-claim",
+        pin,
+        &invitation,
+        &(token_digest, key),
+    )?))
 }
 pub(super) fn now() -> Result<u64, DirectError> {
     std::time::SystemTime::now()

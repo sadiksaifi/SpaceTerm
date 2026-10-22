@@ -272,6 +272,7 @@ pub struct Enrollment {
     pin: ServerPin,
     claim: ClaimId,
     credential: DeviceCredential,
+    prepared: Option<(wire::Invite, ClientName)>,
 }
 impl Enrollment {
     /// Reconstructs only an original claim for observation or cancellation. Opens nothing.
@@ -300,14 +301,34 @@ impl Enrollment {
             pin,
             claim,
             credential: DeviceCredential::from_bytes(credential.expose_bytes())?,
+            prepared: None,
         })
     }
+    /// Preallocates the exact claim without opening a socket. Retain its ID, endpoint,
+    /// server pin and exact native credential item before calling [`Self::submit`].
+    /// The invitation remains transient and is zeroized when this value is dropped.
+    pub fn prepare(
+        invitation: &Invitation,
+        name: ClientName,
+        credential: &DeviceCredential,
+    ) -> Result<Self, DirectError> {
+        client::prepare(invitation, name, credential)
+    }
+    /// Submits the prepared original. Repeating the same claim and name is idempotent.
+    /// A resumed cleanup has no invitation and cannot submit a replacement claim.
+    pub fn submit(&mut self) -> Result<(), DirectError> {
+        client::submit(self)
+    }
+    /// Prepares and submits an ephemeral enrollment. Durable callers must use
+    /// [`Self::prepare`] and retain recovery metadata before [`Self::submit`].
     pub fn claim(
         invitation: &Invitation,
         name: ClientName,
         credential: &DeviceCredential,
     ) -> Result<Self, DirectError> {
-        client::claim(invitation, name, credential)
+        let mut enrollment = Self::prepare(invitation, name, credential)?;
+        enrollment.submit()?;
+        Ok(enrollment)
     }
     pub fn claim_id(&self) -> ClaimId {
         self.claim

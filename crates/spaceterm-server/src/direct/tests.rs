@@ -73,6 +73,9 @@ impl Fixture {
             .authenticate(
                 credential,
                 wire::Action::Claim {
+                    id: Enrollment::prepare(invitation, "Test device".into(), credential)
+                        .unwrap()
+                        .claim_id(),
                     token: invitation.payload.token,
                     key: crypto::public(credential.expose_bytes()).unwrap(),
                     name: "Test device".into(),
@@ -178,6 +181,9 @@ fn invalid_device_proof_cannot_consume_an_invitation_or_substitute_an_approval()
     let invitation = fixture.invite();
     let credential = DeviceCredential::generate().unwrap();
     let action = wire::Action::Claim {
+        id: Enrollment::prepare(&invitation, "Genuine".into(), &credential)
+            .unwrap()
+            .claim_id(),
         token: invitation.payload.token,
         key: crypto::public(credential.expose_bytes()).unwrap(),
         name: "Genuine".into(),
@@ -213,19 +219,20 @@ fn invalid_device_proof_cannot_consume_an_invitation_or_substitute_an_approval()
         .management(Management::Approve(claim.clone()))
         .unwrap();
     assert!(matches!(
-        fixture.management(Management::Approve(claim)),
+        fixture.management(Management::Approve(claim.clone())),
         Err(DirectError::AlreadyDecided)
     ));
     assert!(matches!(
         fixture.authenticate(
             &credential,
             wire::Action::Claim {
+                id: claim.id,
                 token: invitation.payload.token,
                 key: crypto::public(credential.expose_bytes()).unwrap(),
                 name: "Replay".into()
             }
         ),
-        Err(DirectError::InvalidInvitation)
+        Err(DirectError::Substituted)
     ));
 }
 
@@ -259,6 +266,144 @@ fn withdraw_and_signed_cancel_prevent_late_approval_of_the_original_claim() {
         fixture.management(Management::Approve(claim)),
         Err(DirectError::AlreadyDecided)
     ));
+}
+
+#[test]
+fn prepared_enrollment_cancels_before_submission_and_fences_every_late_retry() {
+    let fixture = Fixture::new();
+    fixture.enable();
+    let invitation = fixture.invite();
+    let credential = DeviceCredential::generate().unwrap();
+    // No accept worker exists: preparation must perform no network operation.
+    let mut enrollment =
+        Enrollment::prepare(&invitation, "Prepared device".into(), &credential).unwrap();
+    let id = enrollment.claim_id();
+    assert!(
+        matches!(fixture.management(Management::Claims), Ok(ManagementReply::Claims(claims)) if claims.is_empty())
+    );
+
+    // Another signing key cannot cancel this prepared original or consume its invitation.
+    let stranger = DeviceCredential::generate().unwrap();
+    assert!(matches!(
+        fixture.authenticate(
+            &stranger,
+            wire::Action::Cancel {
+                claim: id,
+                key: crypto::public(stranger.expose_bytes()).unwrap(),
+            }
+        ),
+        Err(DirectError::Expired)
+    ));
+    let mut cleanup = Enrollment::resume(
+        invitation.endpoint(),
+        invitation.server_pin().clone(),
+        id,
+        &credential,
+    )
+    .unwrap();
+    assert_eq!(cleanup.submit(), Err(DirectError::InvalidRequest));
+    let server = fixture.serve_next();
+    assert_eq!(cleanup.cancel(), Ok(None));
+    server.join().unwrap().unwrap();
+    for _ in 0..2 {
+        let server = fixture.serve_next();
+        assert_eq!(enrollment.submit(), Err(DirectError::AlreadyDecided));
+        server.join().unwrap().unwrap();
+        let server = fixture.serve_next();
+        assert_eq!(cleanup.cancel(), Ok(None));
+        server.join().unwrap().unwrap();
+    }
+    assert!(
+        matches!(fixture.management(Management::Claims), Ok(ManagementReply::Claims(claims)) if claims.is_empty())
+    );
+    assert!(
+        matches!(fixture.management(Management::Devices), Ok(ManagementReply::Devices(devices)) if devices.is_empty())
+    );
+}
+
+#[test]
+fn prepared_submission_replays_only_the_same_claim_key_and_name_after_a_lost_reply() {
+    let fixture = Fixture::new();
+    fixture.enable();
+    let invitation = fixture.invite();
+    let credential = DeviceCredential::generate().unwrap();
+    let mut enrollment =
+        Enrollment::prepare(&invitation, "Original device".into(), &credential).unwrap();
+    let id = enrollment.claim_id();
+    for _ in 0..2 {
+        let server = fixture.serve_next();
+        enrollment.submit().unwrap();
+        server.join().unwrap().unwrap();
+    }
+    let mut changed =
+        Enrollment::prepare(&invitation, "Changed device".into(), &credential).unwrap();
+    assert_eq!(changed.claim_id(), id);
+    let server = fixture.serve_next();
+    assert_eq!(changed.submit(), Err(DirectError::Substituted));
+    server.join().unwrap().unwrap();
+    let key = crypto::public(credential.expose_bytes()).unwrap();
+    assert!(matches!(
+        fixture.authenticate(
+            &credential,
+            wire::Action::Claim {
+                id: [99; 32],
+                token: invitation.payload.token,
+                key,
+                name: "Original device".into(),
+            }
+        ),
+        Err(DirectError::Substituted)
+    ));
+    let ManagementReply::Claims(claims) = fixture.management(Management::Claims).unwrap() else {
+        panic!()
+    };
+    assert_eq!(claims.len(), 1);
+    assert_eq!(claims[0].id, id);
+    fixture
+        .management(Management::Approve(claims[0].clone()))
+        .unwrap();
+    let server = fixture.serve_next();
+    let paired = enrollment.finish().unwrap().unwrap();
+    server.join().unwrap().unwrap();
+    let server = fixture.serve_next();
+    let receipt = enrollment.cancel().unwrap().unwrap();
+    server.join().unwrap().unwrap();
+    assert_eq!(receipt.target, paired.pairing);
+}
+
+#[test]
+fn prepared_claim_identity_binds_every_server_pin_field_and_the_signing_key() {
+    let fixture = Fixture::new();
+    fixture.enable();
+    let invitation = fixture.invite();
+    let credential = DeviceCredential::generate().unwrap();
+    let key = crypto::public(credential.expose_bytes()).unwrap();
+    let digest = crypto::hash(&invitation.payload.token);
+    let pin = invitation.server_pin();
+    let original = wire::claim_id(pin, invitation.id(), digest, key).unwrap();
+    let mut pins = vec![pin.clone(); 4];
+    pins[0].build = "spaceterm-preflight".into();
+    pins[1].server[0] ^= 1;
+    pins[2].public_key[0] ^= 1;
+    pins[3].certificate[0] ^= 1;
+    for changed in pins {
+        assert_ne!(
+            wire::claim_id(&changed, invitation.id(), digest, key).unwrap(),
+            original
+        );
+    }
+    assert_ne!(
+        wire::claim_id(pin, invitation.id(), digest, [99; 32]).unwrap(),
+        original
+    );
+    assert_ne!(
+        wire::claim_id(pin, [99; 32], digest, key).unwrap(),
+        original
+    );
+    assert_ne!(
+        wire::claim_id(pin, invitation.id(), [99; 32], key).unwrap(),
+        original
+    );
 }
 
 #[test]

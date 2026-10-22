@@ -513,21 +513,39 @@ impl State {
         )?;
         match &authentication.action {
             wire::Action::Connect { .. } => Ok(wire::Answer::Connected),
-            wire::Action::Claim { token, key, name } => {
+            wire::Action::Claim {
+                id,
+                token,
+                key,
+                name,
+            } => {
+                let invitation_index = self
+                    .invitations
+                    .iter()
+                    .position(|v| v.token == crypto::hash(token))
+                    .ok_or(DirectError::InvalidInvitation)?;
+                let invitation = &self.invitations[invitation_index];
+                if wire::claim_id(&self.pin, invitation.id, invitation.token, *key)? != *id {
+                    return Err(DirectError::Substituted);
+                }
+                if let Some(pending) = self.claims.iter().find(|c| c.claim.id == *id) {
+                    if pending.claim.device_public_key != *key || pending.claim.device_name != *name
+                    {
+                        return Err(DirectError::Substituted);
+                    }
+                    if let Some(Err(error)) = &pending.decision {
+                        return Err(*error);
+                    }
+                    return Ok(wire::Answer::Claim(*id));
+                }
+                if invitation.used {
+                    return Err(DirectError::AlreadyDecided);
+                }
                 if self.claims.len() >= MAX_PENDING {
                     return Err(DirectError::Capacity);
                 }
-                let invitation = self
-                    .invitations
-                    .iter_mut()
-                    .find(|v| v.token == crypto::hash(token))
-                    .ok_or(DirectError::InvalidInvitation)?;
-                if invitation.used {
-                    return Err(DirectError::InvalidInvitation);
-                }
-                invitation.used = true;
                 let claim = PairingClaim {
-                    id: crypto::random()?,
+                    id: *id,
                     server: self.pin.server,
                     device_public_key: *key,
                     device_name: name.clone(),
@@ -535,6 +553,7 @@ impl State {
                 };
                 let id = claim.id;
                 let invitation = invitation.id;
+                self.invitations[invitation_index].used = true;
                 self.claims.push(PendingClaim {
                     invitation,
                     claim,
@@ -599,16 +618,25 @@ impl State {
                         .revoke(Some(pairing), operation, pairing)
                         .map(|v| wire::Answer::Cancelled(Some(v.0)));
                 }
-                let pending = self
-                    .claims
-                    .iter_mut()
-                    .find(|c| c.claim.id == *claim)
-                    .ok_or(DirectError::Expired)?;
-                if pending.claim.device_public_key != *key {
-                    return Err(DirectError::Substituted);
+                if let Some(pending) = self.claims.iter_mut().find(|c| c.claim.id == *claim) {
+                    if pending.claim.device_public_key != *key {
+                        return Err(DirectError::Substituted);
+                    }
+                    pending.decision = Some(Err(DirectError::AlreadyDecided));
+                    return Ok(wire::Answer::Cancelled(None));
                 }
-                pending.decision = Some(Err(DirectError::AlreadyDecided));
-                Ok(wire::Answer::Cancelled(None))
+                // A prepared original may be cancelled before an older socket submits it.
+                // Derivation proves knowledge of this invitation's capability and binds the
+                // signing key. Consume the existing bounded invitation slot; allocate no
+                // tombstone for arbitrary unauthenticated IDs. Restart invalidates every
+                // transient invitation, so an old submission cannot escape this fence.
+                for invitation in &mut self.invitations {
+                    if wire::claim_id(&self.pin, invitation.id, invitation.token, *key)? == *claim {
+                        invitation.used = true;
+                        return Ok(wire::Answer::Cancelled(None));
+                    }
+                }
+                Err(DirectError::Expired)
             }
         }
     }
@@ -724,6 +752,7 @@ mod tests {
             fixture.authenticate(
                 &credential,
                 wire::Action::Claim {
+                    id: [1; 32],
                     token: invitation.payload.token,
                     key: crypto::public(credential.expose_bytes()).unwrap(),
                     name: "Expired".into()
@@ -733,9 +762,11 @@ mod tests {
         ));
         let invitation = fixture.invite();
         let claim = fixture.claim(&invitation, &credential);
-        fixture.state.lock().unwrap().claims[0]
-            .claim
-            .expires_at_unix_seconds = 0;
+        {
+            let mut state = fixture.state.lock().unwrap();
+            state.claims[0].claim.expires_at_unix_seconds = 0;
+            state.invitations[0].expires = 0;
+        }
         assert!(matches!(
             fixture.management(Management::Approve(claim.clone())),
             Err(DirectError::Expired)
