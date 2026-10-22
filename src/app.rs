@@ -2252,7 +2252,8 @@ mod runtime_tests {
                 records.session_count(),
                 services.calls.borrow().clone(),
             ),
-            (1, 2, vec!["register", "install", "install"])
+            (1, 1, vec!["register", "install", "install"]),
+            "the provisional Workspace starts no Terminal Session before server admission"
         );
     }
 
