@@ -652,7 +652,7 @@ fn optimistic_close_hides_before_a_doomed_pane_status_and_restores_the_same_view
     );
     // The restored Pane retains its original local identity and layout, not a replacement Pane.
     assert!(
-        cx.debug_bounds(&format!("pane-surface-{}", closed_view.1.get()))
+        cx.debug_bounds(format!("pane-surface-{}", closed_view.1.get()).leak())
             .is_some()
     );
 }
@@ -690,6 +690,94 @@ fn optimistic_workspace_close_keeps_its_host_through_a_lost_ack() {
 }
 
 #[gpui::test]
+fn a_committed_original_keeps_resolving_without_a_workspace_window(cx: &mut TestAppContext) {
+    let server = DelayedServer::new();
+    let (source, mut model) = model(&server);
+    let workspace = server.inventory().workspaces[0].id;
+    let approval = model
+        .close_approval(spaceterm_server::hierarchy::CloseTarget::Workspace { workspace })
+        .unwrap();
+    model.close(
+        approval,
+        crate::close_confirmation::CloseTarget::Workspace(first_workspace_id()),
+    );
+    server.finish(false, true);
+    model.poll();
+    cx.update(|cx| source.retain_until_settled(cx));
+    let retained = Rc::downgrade(&server);
+    drop(model);
+    drop(source);
+    drop(server);
+    cx.run_until_parked();
+    let original = retained
+        .upgrade()
+        .expect("the unacknowledged Original Operation stays owned");
+    assert_eq!(original.dispatched().len(), 1);
+    original.finish(true, true);
+    drop(original);
+    cx.background_executor
+        .advance_clock(crate::ui::shared_workspaces::POLL_INTERVAL * 3);
+    cx.run_until_parked();
+    assert!(
+        retained.upgrade().is_none(),
+        "settlement releases the background owner"
+    );
+}
+
+#[gpui::test]
+fn successive_refused_tab_closes_restore_the_original_order(cx: &mut TestAppContext) {
+    let (harness, cx) = window_harness(cx);
+    for _ in 0..3 {
+        click("create-tab-button", cx);
+        harness.server.finish(true, true);
+        project_window(&harness, cx);
+    }
+    let original = harness
+        .manager
+        .read_with(cx, |manager, _| manager.tab_ids());
+    let inventory = harness.server.inventory();
+    let workspace = &inventory.workspaces[0];
+    for index in [1, 2] {
+        let approval = harness
+            .model
+            .borrow()
+            .close_approval(spaceterm_server::hierarchy::CloseTarget::Tab {
+                workspace: workspace.id,
+                tab: workspace.tabs[index].id,
+            })
+            .unwrap();
+        assert_eq!(
+            harness.model.borrow_mut().close(
+                approval,
+                crate::close_confirmation::CloseTarget::Tab {
+                    workspace_id: first_workspace_id(),
+                    tab_id: original[index],
+                },
+            ),
+            SharedSubmission::Submitted
+        );
+        project_window(&harness, cx);
+    }
+    for _ in 0..2 {
+        harness.server.0.borrow_mut().server.inventory.close = Some(CloseInventory {
+            boot: [99; 32],
+            sessions: vec![],
+        });
+        assert_eq!(
+            harness.server.finish(true, true).outcome,
+            Outcome::StaleConfirmation
+        );
+        project_window(&harness, cx);
+    }
+    assert_eq!(
+        harness
+            .manager
+            .read_with(cx, |manager, _| manager.tab_ids()),
+        original
+    );
+}
+
+#[gpui::test]
 fn optimistic_tab_close_ack_keeps_later_find_focus(cx: &mut TestAppContext) {
     let (harness, cx) = window_harness(cx);
     click("create-tab-button", cx);
@@ -723,7 +811,7 @@ fn optimistic_tab_close_ack_keeps_later_find_focus(cx: &mut TestAppContext) {
         1
     );
     assert!(
-        cx.debug_bounds(&format!("tab-identity-{}", closed.0.get()))
+        cx.debug_bounds(format!("tab-identity-{}", closed.0.get()).leak())
             .is_none()
     );
 

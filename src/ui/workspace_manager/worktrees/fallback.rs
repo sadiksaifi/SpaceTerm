@@ -2,7 +2,6 @@
 
 use std::path::Path;
 
-use gpui::AppContext as _;
 use spaceterm_server::hierarchy::{CloseTarget as ServerCloseTarget, Mutation, Outcome};
 use spaceterm_server::repository::{WorktreeHead, WorktreeInventory};
 use spaceterm_server::worktree::Operation;

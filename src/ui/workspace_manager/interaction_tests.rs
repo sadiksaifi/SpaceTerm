@@ -5,12 +5,22 @@ fn disconnect_drops_a_parked_remote_presentation_without_closing_other_servers(
     cx: &mut TestAppContext,
 ) {
     let (harness, cx) = MachineGroupsHarness::new(cx);
-    let (remote, _) = harness.present_ssh("penguin", &[("Far", 1)], cx);
+    let (remote, edits) = harness.present_ssh("penguin", &[("Far", 1)], cx);
+    let mut inventory = machine_inventory(900, &[("Far", 1)]);
+    inventory.close = Some(spaceterm_server::hierarchy::CloseInventory {
+        boot: [1; 32],
+        sessions: vec![spaceterm_server::hierarchy::ConfirmedPane {
+            id: [101; 32],
+            session: None,
+        }],
+    });
+    edits.set_inventory(inventory);
     let far = harness.named("Far", cx);
     cx.update(|window, cx| {
         harness.manager.update(cx, |manager, cx| {
+            manager.sync_shared_workspaces(remote, window, cx);
             manager.request_shared_close(
-                crate::close_confirmation::CloseTarget::Workspace { workspace_id: far },
+                crate::close_confirmation::CloseTarget::Workspace(far),
                 window,
                 cx,
             );
@@ -115,8 +125,8 @@ fn close_frames_hide_retired_pane_status_and_completion_preserves_sidebar_editin
 }
 
 #[gpui::test]
-fn final_workspace_close_retains_the_original_owner_until_acknowledgement(cx: &mut TestAppContext) {
-    use spaceterm_server::hierarchy::{Inventory, Outcome};
+fn final_workspace_close_dismisses_on_publication_without_acknowledgement(cx: &mut TestAppContext) {
+    use spaceterm_server::hierarchy::Inventory;
     let (harness, cx) = shared_close_harness(cx);
     cx.update(|window, cx| {
         harness.manager.update(cx, |manager, cx| {
@@ -127,22 +137,12 @@ fn final_workspace_close_retains_the_original_owner_until_acknowledgement(cx: &m
     cx.run_until_parked();
     click("modal-action-shared-close-confirm", cx);
     assert_eq!(harness.shared_rows(cx), 0);
-    harness.publish(
-        Inventory {
-            revision: 2,
-            repositories: None,
-            workspaces: Vec::new(),
-            close: None,
-        },
-        cx,
-    );
-    assert_eq!(
-        cx.windows().len(),
-        1,
-        "lost acknowledgement must retain the Original Operation owner"
-    );
-    harness.edits.answer(Outcome::Accepted {
-        target: SHARED_CLOSE_WORKSPACE,
+    // Publish directly: after this synchronization the Workspace Window must already be gone.
+    harness.edits.set_inventory(Inventory {
+        revision: 2,
+        repositories: None,
+        workspaces: Vec::new(),
+        close: None,
     });
     cx.update(|window, cx| {
         harness.manager.update(cx, |manager, cx| {
@@ -152,7 +152,7 @@ fn final_workspace_close_retains_the_original_owner_until_acknowledgement(cx: &m
     cx.run_until_parked();
     assert!(
         cx.windows().is_empty(),
-        "authoritative final close dismisses the Workspace Window"
+        "authoritative final close dismisses without waiting for acknowledgement"
     );
 }
 

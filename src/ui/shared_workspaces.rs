@@ -18,9 +18,6 @@
 //! show, so inactive Workspaces stay current too. This client adds its own Git Settings and Pull
 //! Requests from its own GitHub CLI, and never reads git for a shared Workspace itself.
 //!
-//! Operations the server path does not support yet stay unavailable here rather than falling back
-//! to the desktop: reading shell content with assistive technology and paste.
-
 #[cfg(test)]
 pub(crate) use development::testing;
 pub(crate) use development::{
@@ -276,6 +273,22 @@ mod development {
 
         pub(crate) fn has_pending(&self) -> bool {
             self.pending.borrow().has_pending()
+        }
+
+        /// A final authoritative close dismisses its window before acknowledgement finishes.
+        /// Keep the original transport alive independently until its durable operation retires.
+        pub(crate) fn retain_until_settled(&self, cx: &mut App) {
+            let source = self.clone();
+            cx.spawn(async move |cx| {
+                loop {
+                    let snapshot = source.snapshot();
+                    if !snapshot.pending && !source.has_pending() {
+                        break;
+                    }
+                    cx.background_executor().timer(POLL_INTERVAL).await;
+                }
+            })
+            .detach();
         }
         pub(crate) fn closing(&self, pane: Id) -> bool {
             self.pending.borrow().closing(pane)
@@ -921,7 +934,7 @@ mod development {
         fn status(&self) -> crate::terminal::server_session::DevelopmentPaneStatus {
             crate::terminal::server_session::DevelopmentPaneStatus::Connecting
         }
-        fn controller(&self) -> Option<crate::ui::server_pane::Controller> {
+        fn controller(&self) -> Option<spaceterm_server::pane::control::Controller> {
             None
         }
         fn connection_generation(&self) -> u64 {
@@ -1351,8 +1364,8 @@ mod development {
                 })
                 .collect()
         }
-        /// The view is hidden by this client's exact approved close. Its owner retains the view
-        /// and edit channel until the Original Operation retires, even after published deletion.
+        /// This client's exact approved close still owns an unresolved Original Operation.
+        /// Published deletion can retire the view; the edit owner outlives its window.
         pub(crate) fn optimistically_closing(&self, local: WorkspaceId) -> bool {
             let Some(facts) = self.facts(local) else {
                 return false;
@@ -1361,9 +1374,8 @@ mod development {
             if self.edits.pending.borrow().closing_workspace(server) {
                 return true;
             }
-            // A validated committed close can precede acknowledgement. Keep its owning host and
-            // parked view until the original transport operation retires, even when the server
-            // inventory already omits the Workspace or the route disconnects.
+            // A validated committed close can precede acknowledgement. Its transport stays
+            // owned even when published deletion has retired the view or the route disconnects.
             let transport = self.edits.edits.snapshot();
             transport.pending
                 && transport

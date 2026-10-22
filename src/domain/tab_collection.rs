@@ -1,4 +1,5 @@
 use crate::close_confirmation::{CloseContinuation, CloseTabOutcome, HierarchyClose};
+use std::collections::BTreeMap;
 use thiserror::Error;
 
 use super::{TabId, WorktreeId};
@@ -22,16 +23,12 @@ struct TabEntry<T> {
 /// A presentation removed after consent while the server still owns its outcome.
 pub(crate) struct ParkedTab<T> {
     entry: TabEntry<T>,
-    position: usize,
     was_root: bool,
 }
 
 impl<T> ParkedTab<T> {
     pub(crate) fn payload(&self) -> &T {
         &self.entry.payload
-    }
-    pub(crate) fn position(&self) -> usize {
-        self.position
     }
 }
 
@@ -49,6 +46,7 @@ pub(crate) enum TabStep {
 /// Workspace itself. Closing the final Tab of the whole collection still closes the Workspace.
 pub(crate) struct TabCollection<T> {
     tabs: Vec<TabEntry<T>>,
+    parked_positions: BTreeMap<TabId, (Option<WorktreeId>, usize)>,
     active_tab_id: TabId,
     root_tab_id: TabId,
     /// Tabs from least to most recently activated.
@@ -65,6 +63,7 @@ impl<T> TabCollection<T> {
                 scope: None,
                 payload: create_initial_payload(initial_tab_id),
             }],
+            parked_positions: BTreeMap::new(),
             active_tab_id: initial_tab_id,
             root_tab_id: initial_tab_id,
             activation_order: vec![initial_tab_id],
@@ -178,6 +177,8 @@ impl<T> TabCollection<T> {
         if self.tabs[index].scope == scope {
             return Ok(());
         }
+        let (previous_scope, position) = self.retained_position(tab_id)?;
+        self.retire_parked_position(previous_scope, position);
         let mut tab = self.tabs.remove(index);
         tab.scope = scope;
         let position = self
@@ -287,6 +288,15 @@ impl<T> TabCollection<T> {
     }
 
     pub(crate) fn close_tab(&mut self, tab_id: TabId) -> Result<CloseTabOutcome<T>, TabError> {
+        let (scope, position) = self.retained_position(tab_id)?;
+        let outcome = self.take_tab(tab_id)?;
+        if matches!(outcome, CloseTabOutcome::TabClosed { .. }) {
+            self.retire_parked_position(scope, position);
+        }
+        Ok(outcome)
+    }
+
+    fn take_tab(&mut self, tab_id: TabId) -> Result<CloseTabOutcome<T>, TabError> {
         let index = self.index_of(tab_id)?;
         if HierarchyClose::Tab.resolve(self.tabs.len()) == CloseContinuation::Parent {
             return Ok(CloseTabOutcome::CloseWorkspace {
@@ -328,29 +338,38 @@ impl<T> TabCollection<T> {
     }
 
     /// Remove a nonfinal Tab from presentation without destroying its payload.
-    pub(crate) fn park_tab(
-        &mut self,
-        id: TabId,
-        position: usize,
-    ) -> Result<Option<ParkedTab<T>>, TabError> {
+    pub(crate) fn park_tab(&mut self, id: TabId) -> Result<Option<ParkedTab<T>>, TabError> {
         let index = self.index_of(id)?;
         let scope = self.tabs[index].scope;
+        let (_, position) = self.retained_position(id)?;
         let was_root = self.root_tab_id == id;
-        match self.close_tab(id)? {
-            CloseTabOutcome::TabClosed { payload, .. } => Ok(Some(ParkedTab {
-                entry: TabEntry { id, scope, payload },
-                position,
-                was_root,
-            })),
+        match self.take_tab(id)? {
+            CloseTabOutcome::TabClosed { payload, .. } => {
+                self.parked_positions.insert(id, (scope, position));
+                Ok(Some(ParkedTab {
+                    entry: TabEntry { id, scope, payload },
+                    was_root,
+                }))
+            }
             CloseTabOutcome::CloseWorkspace { .. } => Ok(None),
         }
     }
 
     /// A refusal restores only this Tab. Later selection and rearrangement stay where they are.
     pub(crate) fn restore_parked_tab(&mut self, parked: ParkedTab<T>) {
+        let (scope, retained) = self
+            .parked_positions
+            .remove(&parked.entry.id)
+            .expect("a parked Tab retains its position");
+        let before = self
+            .parked_positions
+            .values()
+            .filter(|(other, position)| *other == scope && *position < retained)
+            .count();
+        let visible = retained.saturating_sub(before);
         let siblings = self.indices_in(parked.entry.scope);
         let position = siblings
-            .get(parked.position)
+            .get(visible)
             .copied()
             .or_else(|| siblings.last().map(|index| index + 1))
             .unwrap_or(self.tabs.len());
@@ -359,6 +378,42 @@ impl<T> TabCollection<T> {
         }
         self.activation_order.insert(0, parked.entry.id);
         self.tabs.insert(position, parked.entry);
+    }
+
+    pub(crate) fn discard_parked_tab(&mut self, parked: ParkedTab<T>) -> T {
+        if let Some((scope, position)) = self.parked_positions.remove(&parked.entry.id) {
+            self.retire_parked_position(scope, position);
+        }
+        parked.entry.payload
+    }
+
+    fn retained_position(&self, id: TabId) -> Result<(Option<WorktreeId>, usize), TabError> {
+        let index = self.index_of(id)?;
+        let scope = self.tabs[index].scope;
+        let mut position = self.tabs[..index]
+            .iter()
+            .filter(|tab| tab.scope == scope)
+            .count();
+        let mut parked: Vec<_> = self
+            .parked_positions
+            .values()
+            .filter_map(|(other, position)| (*other == scope).then_some(*position))
+            .collect();
+        parked.sort_unstable();
+        for other in parked {
+            if other <= position {
+                position += 1;
+            }
+        }
+        Ok((scope, position))
+    }
+
+    fn retire_parked_position(&mut self, scope: Option<WorktreeId>, position: usize) {
+        for (other, retained) in self.parked_positions.values_mut() {
+            if *other == scope && *retained > position {
+                *retained -= 1;
+            }
+        }
     }
 
     fn next_tab_id(&self) -> Result<(TabId, u64), TabError> {
@@ -374,6 +429,25 @@ mod tests {
     use std::rc::Rc;
 
     use super::*;
+
+    #[test]
+    fn a_refused_close_keeps_order_after_other_tabs_are_permanently_removed() {
+        let mut tabs = TabCollection::new(|id| id);
+        let first = tabs.root_tab_id();
+        let second = tabs.create_tab(|id| id).unwrap();
+        let third = tabs.create_tab(|id| id).unwrap();
+        let fourth = tabs.create_tab(|id| id).unwrap();
+        let accepted = tabs.park_tab(second).unwrap().unwrap();
+        let refused = tabs.park_tab(third).unwrap().unwrap();
+        tabs.close_tab(first).unwrap();
+        tabs.discard_parked_tab(accepted);
+        tabs.restore_parked_tab(refused);
+        assert_eq!(
+            tabs.iter().map(|(id, _)| id).collect::<Vec<_>>(),
+            [third, fourth]
+        );
+        assert_eq!(tabs.active_tab_id(), fourth);
+    }
 
     #[test]
     fn root_tab_should_ignore_focus_and_reordering_and_promote_on_close() {

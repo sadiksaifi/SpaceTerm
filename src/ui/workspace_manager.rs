@@ -3100,6 +3100,9 @@ impl WorkspaceManager {
             && self.workspaces.active_workspace_id().is_none()
             && self.workspaces.parked_ids().next().is_none()
         {
+            for (_, shared) in self.shared.iter() {
+                shared.edits().retain_until_settled(cx);
+            }
             if cx.windows().len() == 1 {
                 crate::status_menu::show_in_dock(cx, false);
             }
@@ -4300,15 +4303,15 @@ impl WorkspaceManager {
             let Some(shared) = self.shared.get(key) else {
                 continue;
             };
-            if shared.optimistically_closing(id) {
-                continue;
-            }
             let Some(inventory) = shared.latest_inventory() else {
                 continue;
             };
             let exists = shared
                 .facts(id)
                 .is_some_and(|facts| inventory.workspaces.iter().any(|w| w.id == facts.server));
+            if exists && shared.optimistically_closing(id) {
+                continue;
+            }
             if exists {
                 let was_empty = self.workspaces.active_workspace_id().is_none();
                 let restore_keyboard = was_empty && self.empty_focus.is_focused(window);

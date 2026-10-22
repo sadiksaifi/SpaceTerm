@@ -366,8 +366,8 @@ struct DraggedTab {
 type SharedTabBinding = super::shared_workspaces::SharedTabs;
 
 /// What a shared server Workspace's Tab strip offers. Creating a Tab, splitting a Pane, and
-/// closing a Tab ask the server, so they wait while this client is offline or an earlier edit is
-/// unanswered.
+/// closing a Tab ask the server. They are unavailable offline or when the bounded connected
+/// queue is full.
 #[derive(Clone, Copy)]
 struct SharedStripControls {
     edits: bool,
@@ -2699,7 +2699,7 @@ impl TabManager {
         // Every Tab the server published joins before any Tab it removed leaves, so one poll
         // carrying both never closes this Workspace through membership it has not applied yet.
         let mut changed = false;
-        let mut restoring = self
+        let restoring = self
             .parked_shared_tabs
             .keys()
             .copied()
@@ -2710,7 +2710,6 @@ impl TabManager {
                     .is_some_and(|server| workspace.tabs.iter().any(|tab| tab.id == server))
             })
             .collect::<Vec<_>>();
-        restoring.sort_by_key(|id| self.parked_shared_tabs[id].position());
         for id in restoring {
             if let Some(parked) = self.parked_shared_tabs.remove(&id) {
                 self.tabs.restore_parked_tab(parked);
@@ -2750,7 +2749,9 @@ impl TabManager {
             .collect::<Vec<_>>();
         for id in retired {
             if let Some(parked) = self.parked_shared_tabs.remove(&id) {
-                parked.payload().update(cx, |view, cx| view.close_all(cx));
+                self.tabs
+                    .discard_parked_tab(parked)
+                    .update(cx, |view, cx| view.close_all(cx));
                 self.forget_shared_tab(id);
             }
         }
@@ -2786,7 +2787,7 @@ impl TabManager {
         let Some(shared) = self.shared.as_ref() else {
             return false;
         };
-        let absent: Vec<(TabId, usize)> = self
+        let absent: Vec<TabId> = self
             .tabs
             .iter()
             .map(|(tab_id, _)| tab_id)
@@ -2795,18 +2796,9 @@ impl TabManager {
                     .server_tab(tab_id)
                     .is_some_and(|server| !workspace.tabs.iter().any(|tab| tab.id == server))
             })
-            .map(|id| {
-                let scope = self.tabs.scope_of(id).unwrap_or_default();
-                let position = self
-                    .tabs
-                    .tabs_in(scope)
-                    .position(|(candidate, _)| candidate == id)
-                    .unwrap_or_default();
-                (id, position)
-            })
             .collect();
         let mut removed = false;
-        for (tab_id, position) in absent {
+        for tab_id in absent {
             let optimistic = self
                 .shared
                 .as_ref()
@@ -2818,7 +2810,7 @@ impl TabManager {
                 .is_some_and(|view| view.read(cx).holds_keyboard(window, cx));
             if optimistic {
                 let was_active = self.tabs.active_tab_id() == tab_id;
-                if let Ok(Some(parked)) = self.tabs.park_tab(tab_id, position) {
+                if let Ok(Some(parked)) = self.tabs.park_tab(tab_id) {
                     parked.payload().update(cx, |view, cx| view.deactivate(cx));
                     self.parked_shared_tabs.insert(tab_id, parked);
                     if was_active && self.active {
