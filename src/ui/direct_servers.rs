@@ -328,10 +328,11 @@ pub(crate) fn present_unpair(pending: &PendingUnpair) -> (String, &'static [Unpa
     };
     let (next, actions): (&str, &'static [UnpairAction]) = match pending.state {
         UnpairState::Retrying => ("SpaceTerm keeps trying quietly.", &[UnpairAction::Dismiss]),
+        // Only Resume continues it, so it can't be dismissed out of reach.
         UnpairState::NeedsInteraction => (
             "To continue, SpaceTerm needs your permission to use the key the request was made \
              with. Choose Resume.",
-            &[UnpairAction::Resume, UnpairAction::Dismiss],
+            &[UnpairAction::Resume],
         ),
         UnpairState::Unconfirmed if pending.server_confirmed => (
             "Choose Retry to try again.",
@@ -411,16 +412,17 @@ mod tests {
     }
 
     #[test]
-    fn only_an_explicit_resume_continues_an_unpair_that_needs_the_person() {
-        for state in [UnpairState::NeedsInteraction, UnpairState::Unconfirmed] {
-            let (_, actions) = present_unpair(&pending(state));
+    fn an_unpair_that_needs_the_person_offers_only_resume() {
+        let (_, actions) = present_unpair(&pending(UnpairState::NeedsInteraction));
 
-            assert_eq!(
-                actions,
-                &[UnpairAction::Resume, UnpairAction::Dismiss],
-                "{state:?}"
-            );
-        }
+        assert_eq!(actions, &[UnpairAction::Resume]);
+    }
+
+    #[test]
+    fn an_unconfirmed_unpair_still_retrying_quietly_offers_retry_and_dismiss() {
+        let (_, actions) = present_unpair(&pending(UnpairState::Unconfirmed));
+
+        assert_eq!(actions, &[UnpairAction::Resume, UnpairAction::Dismiss]);
     }
 
     #[test]

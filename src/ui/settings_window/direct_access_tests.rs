@@ -15,7 +15,7 @@ use super::super::servers::testing::connected;
 use super::super::servers::{LocalServerControl, OfferedServer, ServerConnection};
 use super::{ADDRESS_CANCEL_SELECTOR, ADDRESS_CONFIRM_SELECTOR, PAIR_SELECTOR, TURN_ON_SELECTOR};
 use crate::appearance::Appearance;
-use crate::direct_connections::{DirectConnections, DirectRouteStatus};
+use crate::direct_connections::{DirectConnections, DirectRouteStatus, UnpairState};
 use crate::local_server::ServerError;
 use crate::local_server::direct::{ClaimId, NetworkPolicy, PairingClaim};
 use crate::platform::appearance::testing::RecordingAppearancePlatform;
@@ -30,7 +30,7 @@ use crate::ui::direct_access::{
 use crate::ui::direct_pairing::{APPROVE_SELECTOR, COPY_SELECTOR, DONE_SELECTOR};
 use crate::ui::settings_window::SettingsWindow;
 use crate::ui::settings_window::direct_routes::{
-    UNPAIR_SELF_CONFIRM_SELECTOR, UNPAIR_SELF_SELECTOR,
+    PENDING_SELECTOR, UNPAIR_SELF_CONFIRM_SELECTOR, UNPAIR_SELF_SELECTOR,
 };
 
 /// The direct route's place in the server list, after the local server.
@@ -238,6 +238,22 @@ fn retype(text: &str, cx: &mut VisualTestContext) {
     cx.run_until_parked();
 }
 
+/// Repaints until `done` holds, while the registry's worker runs on its own threads.
+fn settle(cx: &mut VisualTestContext, mut done: impl FnMut(&mut VisualTestContext) -> bool) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        cx.run_until_parked();
+        if done(cx) {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the registry reaches the expected state"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
 /// Whether any Label the window publishes contains `text`.
 fn says(text: &str, cx: &mut VisualTestContext) -> bool {
     A11yTree::read(cx).with_role("Label").iter().any(|node| {
@@ -419,4 +435,60 @@ fn connect_on_a_disconnected_direct_route_reaches_only_that_route(cx: &mut TestA
         Some(DirectRouteStatus::Disconnected),
         "Connect asks the direct registry to reach the selected route"
     );
+}
+
+#[gpui::test]
+fn a_dismissed_unpair_returns_with_resume_once_only_the_person_can_continue_it(
+    cx: &mut TestAppContext,
+) {
+    // The registry's worker tries the offline server on its own thread and wakes the window from
+    // there.
+    cx.executor().allow_parking();
+    let access = ScriptedAccess::new(Listener::Off);
+    let (direct, _, credentials) = crate::direct_connections::tests::offline_with_lock("studio");
+    let (_, cx) = open_servers_with(&access, Some(direct.clone()), cx);
+    let notice = format!("{PENDING_SELECTOR}-0");
+    let dismiss = format!("{PENDING_SELECTOR}-0-dismiss");
+    let resume = format!("{PENDING_SELECTOR}-0-resume");
+    let state = |direct: &DirectConnections| {
+        direct
+            .pending_unpairs()
+            .first()
+            .map(|pending| pending.state)
+    };
+
+    click(DIRECT_ROUTE_ITEM, cx);
+    click(UNPAIR_SELF_SELECTOR, cx);
+    click(&modal_action(UNPAIR_SELF_CONFIRM_SELECTOR), cx);
+    // The offline server never confirms, and SpaceTerm keeps trying quietly.
+    settle(cx, |cx| {
+        state(&direct) == Some(UnpairState::Unconfirmed) && open(&dismiss, cx)
+    });
+    click(&dismiss, cx);
+    assert!(
+        !open(&notice, cx),
+        "Dismiss hides a request SpaceTerm can still finish"
+    );
+
+    // The key the request was made with now needs the person's permission.
+    credentials.set_locked(true);
+    settle(cx, |_| {
+        state(&direct) == Some(UnpairState::NeedsInteraction)
+    });
+
+    assert!(
+        open(&resume, cx),
+        "a dismissed request that only the person can continue shows again with Resume"
+    );
+    assert!(
+        !open(&dismiss, cx),
+        "a request that needs the person can't be dismissed out of reach"
+    );
+
+    credentials.set_locked(false);
+    click(&resume, cx);
+    settle(cx, |_| {
+        state(&direct) != Some(UnpairState::NeedsInteraction)
+    });
+    settle(cx, |cx| !open(&notice, cx));
 }

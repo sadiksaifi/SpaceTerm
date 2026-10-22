@@ -423,14 +423,16 @@ impl SettingsWindow {
         }
     }
 
-    /// The unpair requests still to show: not dismissed, from the registry's snapshot.
+    /// The unpair requests to show, from the registry's snapshot. Dismissing hides a request
+    /// only while SpaceTerm can still finish it quietly: one that needs the person's permission
+    /// shows again, because nothing else continues it.
     fn visible_pending_unpairs(&self) -> Vec<PendingUnpair> {
         self.direct_routes
             .as_ref()
             .map(|rows| rows.connections.pending_unpairs())
             .unwrap_or_default()
             .into_iter()
-            .filter(|pending| !pending.dismissed)
+            .filter(|pending| !pending.dismissed || pending.state == UnpairState::NeedsInteraction)
             .collect()
     }
 

@@ -191,6 +191,20 @@ fn fixture(
 
 /// A real retained registry with unavailable network I/O for UI journey tests.
 pub(crate) fn offline(label: &str) -> (DirectConnections, DirectRouteId) {
+    let (connections, id, _) = offline_with_lock(label);
+    (connections, id)
+}
+
+pub(crate) struct CredentialLock(Arc<Credentials>);
+
+impl CredentialLock {
+    pub(crate) fn set_locked(&self, locked: bool) {
+        self.0.locked.store(locked, Ordering::Release);
+    }
+}
+
+/// The offline fixture with control over its own in-memory credential boundary.
+pub(crate) fn offline_with_lock(label: &str) -> (DirectConnections, DirectRouteId, CredentialLock) {
     struct OfflineNetwork;
     impl DirectNetwork for OfflineNetwork {
         fn connect(
@@ -238,11 +252,11 @@ pub(crate) fn offline(label: &str) -> (DirectConnections, DirectRouteId) {
     let connections = DirectConnections::new(
         "spaceterm-development",
         records,
-        credentials,
+        credentials.clone(),
         Arc::new(OfflineNetwork),
     );
     connections.resume_retained();
-    (connections, id)
+    (connections, id, CredentialLock(credentials))
 }
 
 fn await_condition(mut condition: impl FnMut() -> bool) {
