@@ -1,6 +1,9 @@
 //! Acquire Pane control and start only explicitly requested retained shells.
 use super::*;
 
+#[cfg(test)]
+mod process_tests;
+
 pub(super) struct ClaimWorker<'a> {
     pub state: &'a DevelopmentPaneState,
     pub pane_id: spaceterm_server::hierarchy::Id,
