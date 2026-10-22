@@ -1942,6 +1942,64 @@ fn short_progress_dialog_follows_content_below_its_height_cap(cx: &mut TestAppCo
     );
 }
 
+/// A Dialog body taller than its viewport shows the overlay scrollbar briefly before anyone
+/// scrolls, so the person can tell there is more below.
+#[gpui::test]
+fn an_overflowing_dialog_body_shows_its_scrollbar_before_scrolling(cx: &mut TestAppContext) {
+    install_test_catalogs(cx);
+    cx.set_global(test_modal_theme(ModalMetrics::new(
+        px(360.0),
+        px(480.0),
+        px(640.0),
+    )));
+    let window = cx.update(|cx| {
+        cx.open_window(
+            WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(Bounds::new(
+                    point(px(0.0), px(0.0)),
+                    size(px(480.0), px(320.0)),
+                ))),
+                ..WindowOptions::default()
+            },
+            |_, cx| {
+                let body = cx.new(|_| DialogGeometryBody { tall: true });
+                cx.new(|_| DialogGeometryFixture {
+                    body,
+                    title: "Review".into(),
+                    description: "Everything below needs a look.".into(),
+                    actions: vec![ModalAction::new(
+                        "cancel",
+                        "Done",
+                        ModalActionRole::Cancel,
+                        "overflowing-dialog-done",
+                    )],
+                    size: DialogSize::Compact,
+                    presentation: None,
+                })
+            },
+        )
+        .unwrap_or_else(|error| panic!("overflowing Dialog window failed: {error}"))
+    });
+    let root = window
+        .root(cx)
+        .expect("overflowing Dialog root should exist");
+    let mut cx = VisualTestContext::from_window(window.into(), cx);
+    cx.update(|window, cx| root.update(cx, |root, cx| root.present(window, cx)));
+    cx.run_until_parked();
+
+    let body = cx
+        .debug_bounds("modal-body-viewport")
+        .expect("Dialog body should render");
+    let end = cx
+        .debug_bounds("geometry-dialog-body-end")
+        .expect("body end should render");
+    assert!(end.bottom() > body.bottom(), "the body overflows");
+    let thumb = cx
+        .debug_bounds("modal-body-scrollbar-thumb")
+        .expect("an overflowing body shows its scrollbar without scrolling");
+    assert!(bounds_contains(body, thumb));
+}
+
 #[gpui::test]
 fn constrained_scaled_dialog_reaches_long_header_body_and_every_action_vertically(
     cx: &mut TestAppContext,

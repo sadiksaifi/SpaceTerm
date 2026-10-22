@@ -369,6 +369,30 @@ fn approve_pairs_exactly_the_claim_the_person_saw(cx: &mut TestAppContext) {
     );
 }
 
+/// A pending request in Pair Device is in view with its answers, even when the
+/// window is too short for the whole dialog.
+#[gpui::test]
+fn a_pairing_request_is_in_view_without_scrolling(cx: &mut TestAppContext) {
+    let access = ScriptedAccess::listening();
+    access.claim(3, "MacBook");
+    let (_, cx) = open_servers(&access, cx);
+
+    click(PAIR_SELECTOR, cx);
+    cx.simulate_resize(gpui::size(gpui::px(720.0), gpui::px(320.0)));
+    cx.run_until_parked();
+
+    let viewport = cx
+        .debug_bounds("modal-body-viewport")
+        .expect("Pair Device shows its body");
+    let approve = cx
+        .debug_bounds(Box::leak(format!("{APPROVE_SELECTOR}-0").into_boxed_str()))
+        .expect("the request offers Approve");
+    assert!(
+        viewport.top() <= approve.top() && approve.bottom() <= viewport.bottom(),
+        "Approve is inside the dialog's visible body: {approve:?} within {viewport:?}"
+    );
+}
+
 #[gpui::test]
 fn closing_pair_device_withdraws_its_invitation(cx: &mut TestAppContext) {
     let access = ScriptedAccess::listening();

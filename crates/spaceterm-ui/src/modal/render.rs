@@ -759,9 +759,16 @@ fn render_body(
     cx: &mut App,
 ) -> AnyElement {
     // The body scrolls like every other scrolling region: the shared overlay scrollbar shows its
-    // extent while it moves, without reserving a gutter.
+    // extent while it moves, without reserving a gutter. Content that starts to run past the
+    // body shows the scrollbar briefly too, so the person can tell there is more below.
     let scroll_metrics = body_scroll_metrics(&body_scroll);
-    body_scrollbar.update(cx, |scrollbar, cx| scrollbar.sync(scroll_metrics, cx));
+    body_scrollbar.update(cx, |scrollbar, cx| {
+        if scroll_metrics.is_some() && !scrollbar.overflows() {
+            scrollbar.reveal(scroll_metrics, cx);
+        } else {
+            scrollbar.sync(scroll_metrics, cx);
+        }
+    });
     let content = match &snapshot.semantics {
         PreparedModalSemantics::Alert {
             message,

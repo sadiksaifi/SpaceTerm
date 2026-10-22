@@ -398,6 +398,11 @@ impl<O: ScrollOffset> OverlayScrollbar<O> {
         self
     }
 
+    /// Whether the content runs past its viewport, as last synchronized.
+    pub fn overflows(&self) -> bool {
+        self.metrics.is_some()
+    }
+
     /// Synchronizes the scroll range without changing transient visibility.
     pub fn sync(&mut self, metrics: Option<ScrollMetrics<O>>, cx: &mut Context<Self>) {
         self.set_metrics(metrics, cx);
