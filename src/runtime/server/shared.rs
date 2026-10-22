@@ -292,15 +292,18 @@ impl SharedWorkspaceHost {
             return self.select(device, connection, id, false, size, style);
         }
         let (_, _, pane) = self.state.pane(id).ok_or(Refusal::Missing)?;
-        let controller = self
-            .panes
-            .get(&id)
-            .and_then(|host| host.dormant)
-            .map_or(pane.creator, |dormant| dormant.device);
+        let host = self.panes.get(&id).ok_or(Refusal::Missing)?;
+        let controller = host.dormant.map_or(pane.creator, |dormant| dormant.device);
         if controller.is_some_and(|controller| controller != device) {
             return self.select(device, connection, id, false, size, style);
         }
-        if target.original != super::repositories::pane_directory(pane) {
+        if target.original
+            != host
+                .organization
+                .as_ref()
+                .ok_or(Refusal::Missing)?
+                .startup_directory()
+        {
             return Err(Refusal::Stale);
         }
         let directory = local_filesystem()
