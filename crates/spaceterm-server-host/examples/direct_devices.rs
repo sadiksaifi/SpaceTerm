@@ -1,6 +1,6 @@
-//! Two real hosts, one existing Development service, and only scoped test-owned work.
+//! Two real hosts, one existing Development server, and only scoped test-owned work.
 //! The default prints the scope without connecting. The parent prepares/signs both native
-//! examples and the approved service before explicitly authorizing the mutation pass.
+//! examples and starts the foreground server before explicitly authorizing the mutation pass.
 
 #[cfg(feature = "client")]
 #[expect(
@@ -12,6 +12,10 @@ mod support;
 #[cfg(feature = "client")]
 #[path = "support/terminal_semantics.rs"]
 mod terminal_semantics;
+
+#[cfg(feature = "client")]
+#[path = "support/presentation.rs"]
+mod presentation;
 
 #[cfg(feature = "client")]
 mod exercise {
@@ -711,6 +715,20 @@ mod exercise {
                     Ok(())
                 },
             )?;
+            require(
+                response["presentation_hidden"] == true,
+                "hidden presentation phase missing",
+            )?;
+            let observer_name = format!("p612-observer-{}", &hex(&random()?)[..6]);
+            let observer = api(LocalServer::for_development_client(&observer_name, 1))?;
+            let mut observer = api(observer.connect_pane())?;
+            super::presentation::observe_hidden_inventory(&mut observer, pane).map_err(
+                |failure| {
+                    eprintln!("WSS inventory observer: {failure}");
+                    "independent inventory observer did not see hidden metadata"
+                },
+            )?;
+            let response = peer.message(json!({"presentation_observed": true}))?;
             println!(
                 "PASS delayed WSS consumer: Scrollback checked={}, copied rows={}, accessible rows={}, graphics supported={}, graphics bytes={}",
                 response["reading_checked"]
@@ -970,12 +988,29 @@ mod exercise {
                     eprintln!("WSS fixture exercise failed: {failure}");
                     "WSS semantic protocol exercise failed"
                 })?;
+        let witness = super::presentation::begin(&mut connection, lease, super::support::command)
+            .map_err(|failure| {
+            eprintln!("WSS presentation begin: {failure}");
+            "WSS presentation exercise failed"
+        })?;
+        send_json(&mut output_pipe, json!({"presentation_hidden": true}))?;
+        require(
+            receive_json(&mut input)?["presentation_observed"] == true,
+            "owner did not observe hidden metadata",
+        )?;
+        let previous = lease;
         drop(connection);
         let mut connection = api(server.connect_pane())?;
         let lease = attached(select(&mut connection, pane, false)?)?;
         require(
             lease.session == session,
             "WSS reconnect lost the running Session",
+        )?;
+        super::presentation::finish(&mut connection, lease, previous, witness).map_err(
+            |failure| {
+                eprintln!("WSS presentation finish: {failure}");
+                "WSS presentation reconnect or clear exercise failed"
+            },
         )?;
         command(&mut connection, lease, "printf 'DIRECT-RECONNECTED\\n'")?;
         output(&mut connection, lease, "DIRECT-RECONNECTED")?;
@@ -1139,7 +1174,7 @@ mod exercise {
         if !confirmed || help {
             println!("DRY RUN: no storage, service, desktop, SSH or WSS access performed.");
             println!(
-                "Requires parent-prepared signed Development service and native examples on macOS and Penguin."
+                "Requires a parent-prepared foreground Development server and signed native examples on macOS and Penguin."
             );
             println!("Use --bind IP:PORT --expect-server SERVER_HEX --confirm-idle-development.");
             println!(

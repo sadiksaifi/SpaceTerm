@@ -236,7 +236,8 @@ run = "cargo test --all-targets --all-features --locked {{usage.filter | quote}}
 
 [tasks."test:portable"]
 description = "Run shared tests without native features"
-run = "cargo test --package spaceterm --package spaceterm-directories --package spaceterm-server --package spaceterm-server-host --all-targets --no-default-features --locked"
+usage = 'arg "[filter]" help="Run only tests whose names contain this filter"'
+run = "cargo test --package spaceterm --package spaceterm-directories --package spaceterm-server --package spaceterm-server-host --all-targets --no-default-features --locked {{usage.filter | quote}}"
 
 [tasks."test:rustdoc"]
 description = "Compile and test Rust documentation examples"
@@ -662,3 +663,30 @@ run = "cargo test --package spaceterm --lib --all-features --locked -- direct_co
 [tasks."server:direct:control:test"]
 description = "Verify revocation releases only the retired device's Pane control and preserves terminal work"
 run = "cargo test --package spaceterm --lib --no-default-features --locked -- runtime::server::tests::revoking_a_device_releases_control_without_ending_its_terminal_session --exact"
+
+[tasks."server:clear:test"]
+description = "Test server-owned clear operations and exact Pane leases"
+run = "cargo test --package spaceterm --no-default-features --locked --lib runtime::server::clear_tests"
+
+[tasks."server:presentation:test"]
+description = "Test presentation fixture scope guards and WSS driver framing without native access"
+run = "cargo test --package spaceterm-server-host --features client --locked --example terminal_presentation --example direct_devices"
+
+[tasks."server:presentation:check"]
+description = "Check the real-transport presentation fixtures without building native applications"
+run = "cargo check --package spaceterm-server-host --features client --locked --example terminal_presentation --example direct_devices"
+
+[tasks."server:presentation:build"]
+description = "Build presentation fixtures before parent-owned native signing"
+run = "cargo build --package spaceterm-server-host --features client --locked --example terminal_presentation --example direct_devices"
+
+[tasks."server:presentation:run"]
+description = "Verify presentation on an explicitly selected existing foreground Development server"
+usage = '''
+arg "<server>" help="Expected Development server identity in hexadecimal"
+flag "--boot <boot>" help="Expected running server boot in hexadecimal"
+flag "--ssh <destination>" help="Use the existing SSH account bridge"
+flag "--remote-server <binary>" help="Absolute path of the prepared remote candidate server binary"
+flag "--account <uid>" help="Remote non-root account UID"
+'''
+run = '"${CARGO_TARGET_DIR:-target}/debug/examples/terminal_presentation" --run --expect-server {{usage.server | quote}} {% if usage.boot %}--expect-boot {{usage.boot | quote}}{% endif %} {% if usage.ssh %}--ssh {{usage.ssh | quote}}{% endif %} {% if usage.remote_server %}--remote-server {{usage.remote_server | quote}}{% endif %} {% if usage.account %}--account {{usage.account | quote}}{% endif %}'

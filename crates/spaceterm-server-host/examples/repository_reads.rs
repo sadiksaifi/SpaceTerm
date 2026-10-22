@@ -106,9 +106,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     await_facts(&mut first, &repository.0, listed)?;
     await_facts(&mut second, &repository.0, listed)?;
     let changes = |f: &DirectoryFacts| {
-        f.repository
-            .as_ref()
-            .is_some_and(|r| r.changes.total == ChangeTotal::Exact(1))
+        f.repository.as_ref().is_some_and(|r| {
+            r.changes
+                .as_ref()
+                .is_ok_and(|changes| changes.total == ChangeTotal::Exact(1))
+        })
     };
     await_facts(&mut first, &linked, changes)?;
     await_facts(&mut second, &linked, changes)?;
