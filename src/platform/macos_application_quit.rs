@@ -11,10 +11,15 @@ use objc2_foundation::{NSInteger, NSObject, NSObjectProtocol};
 
 use super::application_quit::{
     ApplicationQuitAdapter, ApplicationQuitDecision, ApplicationQuitError, ApplicationQuitHandler,
+    ApplicationQuitRequest,
 };
 
 const NS_TERMINATE_CANCEL: NSInteger = 0;
 const NS_TERMINATE_NOW: NSInteger = 1;
+/// `kCoreEventClass`, `kAEQuitApplication`, and `keyAEQuitReason` from the Apple Event Manager.
+const CORE_EVENT_CLASS: u32 = u32::from_be_bytes(*b"aevt");
+const QUIT_APPLICATION_EVENT: u32 = u32::from_be_bytes(*b"quit");
+const QUIT_REASON_KEYWORD: u32 = u32::from_be_bytes(*b"why?");
 static QUIT_STATE_ASSOCIATION: u8 = 0;
 const OBJC_ASSOCIATION_RETAIN_NONATOMIC: usize = 1;
 
@@ -203,18 +208,52 @@ unsafe extern "C-unwind" fn should_terminate(
         return NS_TERMINATE_NOW;
     }
     let decision = catch_unwind(AssertUnwindSafe(|| {
+        let request = termination_request();
         state
             .handler
             .borrow()
             .as_ref()
             .map_or(ApplicationQuitDecision::Proceed, |handler| {
-                handler.handle_native()
+                handler.handle_native(request)
             })
     }))
     .unwrap_or(ApplicationQuitDecision::Cancel);
     match decision {
         ApplicationQuitDecision::Proceed => NS_TERMINATE_NOW,
         ApplicationQuitDecision::Cancel => NS_TERMINATE_CANCEL,
+    }
+}
+
+/// A Quit Apple Event without a reason comes from the person, such as the Dock's Quit. One with a
+/// reason means the session is logging out, restarting, or shutting down. A termination outside
+/// any Apple Event comes from the client itself, such as an installed update relaunching it.
+fn termination_request() -> ApplicationQuitRequest {
+    let Some(manager_class) = AnyClass::get(c"NSAppleEventManager") else {
+        return ApplicationQuitRequest::Exit;
+    };
+    // SAFETY: These Foundation selectors take no arguments or one FourCharCode, return
+    // autoreleased objects or FourCharCodes, and run on the main thread inside AppKit's callback.
+    unsafe {
+        let manager: *mut AnyObject = msg_send![manager_class, sharedAppleEventManager];
+        let Some(manager) = manager.as_ref() else {
+            return ApplicationQuitRequest::Exit;
+        };
+        let event: *mut AnyObject = msg_send![manager, currentAppleEvent];
+        let Some(event) = event.as_ref() else {
+            return ApplicationQuitRequest::Exit;
+        };
+        let class: u32 = msg_send![event, eventClass];
+        let id: u32 = msg_send![event, eventID];
+        if class != CORE_EVENT_CLASS || id != QUIT_APPLICATION_EVENT {
+            return ApplicationQuitRequest::Exit;
+        }
+        let reason: *mut AnyObject =
+            msg_send![event, attributeDescriptorForKeyword: QUIT_REASON_KEYWORD];
+        if reason.is_null() {
+            ApplicationQuitRequest::Dismissal
+        } else {
+            ApplicationQuitRequest::Exit
+        }
     }
 }
 
@@ -244,7 +283,9 @@ pub(in crate::platform) mod tests {
         let handler = cx.update(|cx| {
             ApplicationQuitHandler::new(
                 cx,
-                Rc::new(move |_| {
+                Rc::new(move |_, request| {
+                    // A termination outside any Apple Event is the client's own exit.
+                    assert_eq!(request, ApplicationQuitRequest::Exit);
                     recorded_requests.set(recorded_requests.get() + 1);
                     ApplicationQuitDecision::Cancel
                 }),

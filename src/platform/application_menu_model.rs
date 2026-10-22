@@ -4,8 +4,8 @@ use spaceterm_ui::{EditCopy, EditCut, EditPaste, EditRedo, EditSelectAll, EditUn
 
 use crate::app::{
     BringAllWindowsToFront, CloseAllWindows, HideApplication, HideOtherApplications,
-    MinimizeWindow, OpenApplicationHelp, ShowAboutApplication, ShowAllApplications,
-    ZoomActiveWindow,
+    MinimizeWindow, OpenApplicationHelp, QuitApplication, ShowAboutApplication,
+    ShowAllApplications, ZoomActiveWindow,
 };
 use crate::ui::updates::{
     CHECK_FOR_UPDATES_TITLE, CheckForUpdates, OpenReleaseNotes, RELEASE_NOTES_TITLE,
@@ -54,9 +54,10 @@ pub(crate) fn application_menu(application_name: &str) -> Menu {
             MenuItem::action("Hide Others", HideOtherApplications),
             MenuItem::action("Show All", ShowAllApplications),
             MenuItem::separator(),
-            // Command-Q dismisses the windows and keeps the client in the menu bar. The status
-            // menu's Quit exits the client.
+            // Command-Q asks which of these two the person wants. Each item here is that choice
+            // already made, so neither asks it again.
             MenuItem::action("Close All Windows", CloseAllWindows),
+            MenuItem::action(format!("Quit {application_name}"), QuitApplication),
         ],
     }
 }
@@ -258,6 +259,21 @@ mod tests {
                 "{menu} > {title} should dispatch {command:?}"
             );
         }
+    }
+
+    #[test]
+    fn application_menu_items_are_dismissal_choices_already_made() {
+        let menus = menus("SpaceTerm");
+        assert!(
+            menu_action(&menus, "SpaceTerm", "Close All Windows")
+                .as_any()
+                .is::<CloseAllWindows>()
+        );
+        assert!(
+            menu_action(&menus, "SpaceTerm", "Quit SpaceTerm")
+                .as_any()
+                .is::<QuitApplication>()
+        );
     }
 
     #[test]

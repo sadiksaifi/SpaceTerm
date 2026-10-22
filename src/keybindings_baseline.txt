@@ -223,7 +223,7 @@ cmd-c	Some(Identifier("TerminalPane"))	spaceterm_text_input::Copy
 cmd-v	Some(Identifier("TerminalPane"))	spaceterm_text_input::Paste
 ctrl-cmd-space	Some(Identifier("TerminalPane"))	spaceterm_text_input::ShowCharacterPalette
 cmd-,	None	spaceterm::OpenSettings
-cmd-q	None	spaceterm::CloseAllWindows
+cmd-q	None	spaceterm::DismissApplication
 cmd-h	None	spaceterm::HideApplication
 alt-cmd-h	None	spaceterm::HideOtherApplications
 cmd-m	None	spaceterm::MinimizeWindow

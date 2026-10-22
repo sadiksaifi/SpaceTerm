@@ -5,6 +5,7 @@ use gpui::App;
 
 use super::application_quit::{
     ApplicationQuitAdapter, ApplicationQuitDecision, ApplicationQuitError, ApplicationQuitHandler,
+    ApplicationQuitRequest, StatusAreaName,
 };
 
 pub(super) struct LinuxApplicationQuitAdapter {
@@ -26,6 +27,10 @@ impl ApplicationQuitAdapter for LinuxApplicationQuitAdapter {
         super::application_quit::LastWindowPolicy::Quit
     }
 
+    fn status_area_name(&self) -> StatusAreaName {
+        StatusAreaName::StatusArea
+    }
+
     fn install(&self, handler: ApplicationQuitHandler) -> Result<(), ApplicationQuitError> {
         let mut installed = self.handler.borrow_mut();
         if installed.is_some() {
@@ -38,7 +43,7 @@ impl ApplicationQuitAdapter for LinuxApplicationQuitAdapter {
     fn request_quit(&self, cx: &mut App) {
         let handler = self.handler.borrow().clone();
         let decision = handler.map_or(ApplicationQuitDecision::Proceed, |handler| {
-            handler.handle(cx)
+            handler.handle(ApplicationQuitRequest::Exit, cx)
         });
         if decision == ApplicationQuitDecision::Proceed {
             (self.quit)(cx);
@@ -75,7 +80,7 @@ mod tests {
             adapter
                 .install(ApplicationQuitHandler::new(
                     cx,
-                    Rc::new(move |_| {
+                    Rc::new(move |_, _| {
                         counted.set(counted.get() + 1);
                         ApplicationQuitDecision::Cancel
                     }),
@@ -85,7 +90,7 @@ mod tests {
             assert_eq!(
                 adapter.install(ApplicationQuitHandler::new(
                     cx,
-                    Rc::new(|_| ApplicationQuitDecision::Proceed)
+                    Rc::new(|_, _| ApplicationQuitDecision::Proceed)
                 )),
                 Err(ApplicationQuitError::AlreadyInstalled)
             );
@@ -103,7 +108,7 @@ mod tests {
             adapter
                 .install(ApplicationQuitHandler::new(
                     cx,
-                    Rc::new(move |_| {
+                    Rc::new(move |_, _| {
                         counted.set(counted.get() + 1);
                         ApplicationQuitDecision::Proceed
                     }),
@@ -124,7 +129,7 @@ mod tests {
             adapter
                 .install(ApplicationQuitHandler::new(
                     cx,
-                    Rc::new(move |_| {
+                    Rc::new(move |_, _| {
                         counted.set(counted.get() + 1);
                         ApplicationQuitDecision::Cancel
                     }),
