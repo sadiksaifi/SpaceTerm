@@ -10606,7 +10606,7 @@ fn shared_close_mutation(
 
 /// Kill Workspace on a shared Workspace asks its server. Its confirmation starts on
 /// Cancel, and confirming asks the server to end every Pane and Session it showed; the Workspace
-/// leaves this window only when the server publishes its removal.
+/// leaves this window immediately while its server decides the exact operation.
 #[gpui::test]
 fn shared_kill_workspace_should_confirm_then_end_exactly_what_it_showed_for_every_client(
     cx: &mut TestAppContext,
@@ -10627,6 +10627,7 @@ fn shared_kill_workspace_should_confirm_then_end_exactly_what_it_showed_for_ever
         harness.closes().is_empty(),
         "nothing ends before confirmation"
     );
+    assert_eq!(harness.shared_rows(cx), 1);
 
     click("modal-action-shared-close-confirm", cx);
     redraw(cx);
@@ -10646,9 +10647,18 @@ fn shared_kill_workspace_should_confirm_then_end_exactly_what_it_showed_for_ever
     );
     assert_eq!(
         harness.shared_rows(cx),
-        1,
-        "the Workspace stays until the server publishes its removal"
+        0,
+        "the approved Workspace close hides it before the server answers"
     );
+    harness.manager.read_with(cx, |manager, _| {
+        assert_eq!(
+            manager.shared.local().unwrap().latest_inventory(),
+            Some(&shared_close_published()),
+            "hiding the Workspace changes no authoritative membership or Session facts"
+        );
+        assert_eq!(manager.workspaces.len(), 1);
+    });
+    assert!(shared_close_terminal_is_focused(&harness, cx));
 
     harness.edits.answer(Outcome::Accepted {
         target: SHARED_CLOSE_WORKSPACE,
@@ -11103,8 +11113,8 @@ fn shared_close_pane_shortcut_should_confirm_and_escape_should_cancel(cx: &mut T
     );
 }
 
-/// Closing a Tab changes this window only when the server publishes it. The surviving Tab takes
-/// the keyboard, and closing the final Tab removes the Workspace once the server removes it.
+/// An approved Tab close hides its exact membership and focuses the surviving Tab immediately.
+/// The final Tab's close hides the Workspace while the server decides the operation.
 #[gpui::test]
 fn shared_tab_closes_should_reconcile_through_publication_down_to_the_final_tab(
     cx: &mut TestAppContext,
@@ -11116,13 +11126,36 @@ fn shared_tab_closes_should_reconcile_through_publication_down_to_the_final_tab(
     settle_shared_panes(cx);
     cx.dispatch_action(crate::ui::CloseTab);
     redraw(cx);
+    assert_eq!(shared_close_counts(&harness, cx), (2, 3));
+    assert!(harness.closes().is_empty());
     click("modal-action-shared-close-confirm", cx);
     redraw(cx);
     assert_eq!(
-        shared_close_counts(&harness, cx),
-        (2, 3),
-        "nothing closes before the server publishes"
+        harness.closes(),
+        [shared_close_mutation(
+            ServerCloseTarget::Tab {
+                workspace: SHARED_CLOSE_WORKSPACE,
+                tab: SHARED_CLOSE_ROOT_TAB,
+            },
+            &[
+                (SHARED_CLOSE_ROOT_PANE, Some([31; 32])),
+                (SHARED_CLOSE_SPLIT_PANE, Some([32; 32])),
+            ],
+            SharedCloseRemoves::Tab,
+        )]
     );
+    assert_eq!(
+        shared_close_counts(&harness, cx),
+        (1, 1),
+        "the approved Tab close hides its Panes before the server answers"
+    );
+    harness.manager.read_with(cx, |manager, _| {
+        assert_eq!(
+            manager.shared.local().unwrap().latest_inventory(),
+            Some(&shared_close_published())
+        );
+    });
+    assert!(shared_close_terminal_is_focused(&harness, cx));
 
     harness.edits.answer(Outcome::Accepted {
         target: SHARED_CLOSE_ROOT_TAB,
@@ -11158,6 +11191,8 @@ fn shared_tab_closes_should_reconcile_through_publication_down_to_the_final_tab(
             SharedCloseRemoves::Workspace,
         ))
     );
+    assert_eq!(harness.shared_rows(cx), 0);
+    assert!(shared_close_terminal_is_focused(&harness, cx));
     harness.edits.answer(Outcome::Accepted {
         target: SHARED_CLOSE_SECOND_TAB,
     });
@@ -12900,9 +12935,16 @@ mod shared_repositories {
                 .worktrees
                 .unwrap()
                 .rows()
-                .any(|row| row.worktree_id == feature && row.has_tabs),
-            "publication owns removal"
+                .any(|row| row.worktree_id == feature && !row.has_tabs),
+            "the approved close hides the Tabs and keeps their Git Worktree row"
         );
+        harness.manager.read_with(cx, |manager, _| {
+            assert_eq!(
+                manager.shared.local().unwrap().latest_inventory(),
+                Some(&initial),
+                "optimistic presentation changes no server membership"
+            );
+        });
         harness
             .edits
             .answer(Outcome::Accepted { target: WORKSPACE });
