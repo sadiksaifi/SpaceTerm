@@ -145,6 +145,84 @@ fn a_reviewed_workspace_close_moves_the_keyboard_to_the_rendered_survivor(cx: &m
     assert!(shared_close_terminal_is_focused(&harness, cx));
 }
 
+#[gpui::test]
+fn a_reviewed_close_keeps_a_newer_rename_through_confirmation_and_acceptance(
+    cx: &mut TestAppContext,
+) {
+    use spaceterm_server::hierarchy::{Inventory, Mutation, Outcome};
+
+    let (harness, cx) = shared_close_harness(cx);
+    cx.dispatch_action(crate::ui::CloseWorkspace);
+    cx.run_until_parked();
+    click("modal-action-shared-close-confirm", cx);
+    right_click("workspace-row-1-active", cx);
+    click("workspace-menu-row-rename", cx);
+    cx.simulate_keystrokes("d r a f t");
+    cx.run_until_parked();
+    let input = harness.manager.read_with(cx, |manager, cx| {
+        manager
+            .sidebar
+            .read(cx)
+            .rename_input()
+            .expect("the newer draft")
+    });
+    harness.edits.answer(Outcome::StaleConfirmation);
+    harness.sync(cx);
+    click("modal-action-shared-close-review", cx);
+    redraw(cx);
+    assert!(
+        cx.debug_bounds("modal-action-shared-close-confirm")
+            .is_some()
+    );
+    assert_eq!(
+        input.read_with(cx, |input, _| input.value().to_owned()),
+        "draft"
+    );
+    assert!(
+        harness
+            .manager
+            .read_with(cx, |manager, cx| manager.sidebar.read(cx).is_renaming()),
+        "the fresh confirmation retains the draft after the notice releases its hold"
+    );
+    click("modal-action-shared-close-confirm", cx);
+    assert_eq!(harness.shared_rows(cx), 0);
+    assert!(shared_close_rename_is_focused(&harness, cx));
+    assert_eq!(
+        input.read_with(cx, |input, _| input.value().to_owned()),
+        "draft"
+    );
+    assert_eq!(
+        harness.closes().len(),
+        2,
+        "only explicit fresh consent submits a second close"
+    );
+    assert!(
+        harness
+            .edits
+            .submitted()
+            .iter()
+            .all(|mutation| matches!(mutation, Mutation::Close { .. })),
+        "the newer draft is never submitted as a blur"
+    );
+    harness.edits.answer(Outcome::Accepted {
+        target: SHARED_CLOSE_WORKSPACE,
+    });
+    harness.publish(
+        Inventory {
+            revision: 2,
+            repositories: None,
+            close: None,
+            workspaces: Vec::new(),
+        },
+        cx,
+    );
+    assert!(shared_close_rename_is_focused(&harness, cx));
+    assert_eq!(
+        input.read_with(cx, |input, _| input.value().to_owned()),
+        "draft"
+    );
+}
+
 /// A disconnect discards an edit still queued behind one the server has not answered. Its notice
 /// arrives while a person types a newer rename, which an offline server would refuse, so the
 /// draft stays open and unsent beneath the notice and takes the keyboard back after it.
