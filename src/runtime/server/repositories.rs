@@ -653,10 +653,17 @@ impl ReadSupervisor {
     }
     fn schedule(&mut self) -> bool {
         let now = Instant::now();
-        for (directory, read) in &mut self.directories {
-            if read.active.is_some() || now < read.next_read {
-                continue;
-            }
+        // Keep waiting work ahead of recurring refreshes, including after a bounded queue
+        // fills. A completed read receives a new due time; unscheduled work keeps its place.
+        let mut directories: Vec<_> = self
+            .directories
+            .iter()
+            .filter(|(_, read)| read.active.is_none() && now >= read.next_read)
+            .map(|(directory, read)| (read.next_read, directory.clone()))
+            .collect();
+        directories.sort_unstable();
+        for (_, directory) in directories {
+            let read = self.directories.get_mut(&directory).unwrap();
             self.next_id = self.next_id.saturating_add(1);
             let cancellation =
                 SshCancellationToken::linked(&self.cancellation, &SshCancellationToken::default());
@@ -680,7 +687,14 @@ impl ReadSupervisor {
         }
         let mut progress = Vec::new();
         let mut count_capacity = true;
-        for (root, read) in &mut self.counts {
+        let mut roots: Vec<_> = self
+            .counts
+            .iter()
+            .map(|(root, read)| (read.next_read, root.clone()))
+            .collect();
+        roots.sort_unstable();
+        for (_, root) in roots {
+            let read = self.counts.get_mut(&root).unwrap();
             if read.active.is_none() && now >= read.next_read {
                 if read.counting.is_none() {
                     read.counting = Some(ChangeCounting::Pending);

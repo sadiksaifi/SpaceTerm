@@ -538,3 +538,214 @@ fn cancellation_releases_count_workers_with_a_full_publication_queue() {
     drop(reading);
     assert!(stopping.elapsed() < Duration::from_secs(1));
 }
+
+#[derive(Clone, Copy)]
+enum SaturatedRead {
+    Count,
+    Discovery,
+}
+impl SaturatedRead {
+    fn workers(self) -> usize {
+        match self {
+            Self::Count => COUNT_WORKERS,
+            Self::Discovery => DISCOVERY_WORKERS,
+        }
+    }
+    fn matches(self, request: &ProgramRequest) -> bool {
+        let arguments: &[&str] = match self {
+            Self::Count => &policy::local_read::COUNT_ARGUMENTS,
+            // Headers run once per discovery, unlike rev-parse which also belongs to listing.
+            Self::Discovery => &policy::local_read::HEADER_ARGUMENTS,
+        };
+        let suffix: Vec<std::ffi::OsString> = arguments.iter().map(Into::into).collect();
+        request.arguments.ends_with(&suffix)
+    }
+}
+
+/// Hold slow processes at the existing runner boundary until the test releases one read.
+/// Repeated reads block again, so recurring work keeps the pool saturated throughout the test.
+struct SaturatedReads {
+    stage: SaturatedRead,
+    slow: Sources,
+    calls: Mutex<BTreeMap<PathBuf, usize>>,
+    permits: Mutex<BTreeMap<PathBuf, usize>>,
+}
+impl SaturatedReads {
+    fn started(&self) -> Sources {
+        self.calls.lock().unwrap().keys().cloned().collect()
+    }
+    fn release(&self, roots: &Sources) {
+        let mut permits = self.permits.lock().unwrap();
+        for root in roots {
+            *permits.entry(root.clone()).or_default() += 1;
+        }
+    }
+    fn recurring(&self) -> bool {
+        self.calls.lock().unwrap().values().any(|count| *count > 1)
+    }
+}
+impl RepositoryProgramRunner for SaturatedReads {
+    fn run(
+        &self,
+        request: &ProgramRequest,
+        stdout: &mut dyn FnMut(&[u8]),
+        cancellation: &SshCancellationToken,
+    ) -> Result<ProgramExit, ProgramError> {
+        if self.stage.matches(request) && self.slow.contains(&request.directory) {
+            *self
+                .calls
+                .lock()
+                .unwrap()
+                .entry(request.directory.clone())
+                .or_default() += 1;
+            let until = Instant::now() + Duration::from_secs(30);
+            loop {
+                if cancellation.is_cancelled() {
+                    return Err(ProgramError::Cancelled);
+                }
+                if Instant::now() >= until {
+                    return Err(ProgramError::TimedOut);
+                }
+                let permitted = self
+                    .permits
+                    .lock()
+                    .unwrap()
+                    .get_mut(&request.directory)
+                    .is_some_and(|count| {
+                        if *count == 0 {
+                            return false;
+                        }
+                        *count -= 1;
+                        true
+                    });
+                if permitted {
+                    break;
+                }
+                std::thread::sleep(POLL);
+            }
+        }
+        DeadlineRunner.run(request, stdout, cancellation)
+    }
+}
+
+fn saturation_snapshot(reading: &mut Reading, predicate: impl Fn(&Snapshot) -> bool) -> Snapshot {
+    let until = Instant::now() + Duration::from_secs(4);
+    loop {
+        let snapshot = reading.poll();
+        if predicate(&snapshot) {
+            return snapshot;
+        }
+        assert!(
+            Instant::now() < until,
+            "waiting sources must progress through a saturated reader"
+        );
+        std::thread::sleep(POLL);
+    }
+}
+
+fn assert_late_source_progresses_while_earlier_sources_refresh(stage: SaturatedRead) {
+    let workers = stage.workers();
+    // Three cohorts fill the workers, queue, and waiting set. All slow roots sort before
+    // the late fast root, so lexical dispatch can repeatedly refresh them ahead of it.
+    let mut fixtures: Vec<_> = (0..3 * workers + 1).map(|_| GitFixture::new()).collect();
+    fixtures.sort_by_key(|fixture| fixture.0.clone());
+    let fast = fixtures.last().unwrap();
+    std::fs::write(fast.0.join("fast-change"), "untracked").unwrap();
+    let slow: Sources = fixtures[..3 * workers]
+        .iter()
+        .map(|fixture| fixture.0.clone())
+        .collect();
+    let runner = Arc::new(SaturatedReads {
+        stage,
+        slow: slow.clone(),
+        calls: Mutex::default(),
+        permits: Mutex::default(),
+    });
+    let mut reading = Reading::start(slow.clone(), runner.clone(), fast.0.join("unused-home"));
+    saturation_snapshot(&mut reading, |snapshot| {
+        runner.started().len() == workers
+            && (matches!(stage, SaturatedRead::Discovery)
+                || slow.iter().all(|root| {
+                    snapshot
+                        .directories
+                        .iter()
+                        .any(|facts| facts.directory == *root && facts.worktrees.is_some())
+                }))
+    });
+    let first = runner.started();
+    let mut late = State::empty();
+    late.ensure_first_workspace([1; 32], &fast.0).unwrap();
+    reading
+        .state
+        .inventory
+        .workspaces
+        .extend(late.inventory.workspaces);
+    reading.poll();
+    runner.release(&first);
+    saturation_snapshot(&mut reading, |snapshot| {
+        runner.started().len() == 2 * workers
+            && first.iter().all(|root| {
+                snapshot.directories.iter().any(|facts| {
+                    facts.directory == *root
+                        && facts.worktrees.is_some()
+                        && facts
+                            .repository
+                            .as_ref()
+                            .is_some_and(|repository| repository.counting.is_none())
+                })
+            })
+    });
+    let second: Sources = runner.started().difference(&first).cloned().collect();
+    // Let the completed first cohort become due again while the second cohort occupies
+    // the workers and the third occupies the queue. Its refresh must not overtake the late root.
+    let due = Instant::now() + REFRESH + Duration::from_millis(100);
+    while Instant::now() < due {
+        reading.poll();
+        std::thread::sleep(POLL);
+    }
+    runner.release(&second);
+    saturation_snapshot(&mut reading, |_| runner.started().len() == 3 * workers);
+    let third: Sources = slow
+        .difference(&first)
+        .filter(|root| !second.contains(*root))
+        .cloned()
+        .collect();
+    runner.release(&third);
+    let snapshot = saturation_snapshot(&mut reading, |snapshot| {
+        runner.recurring()
+            && snapshot.directories.iter().any(|facts| {
+                facts.directory == fast.0
+                    && facts.failure.is_none()
+                    && facts.worktrees.is_some()
+                    && facts.repository.as_ref().is_some_and(|repository| {
+                        repository.counting.is_none()
+                            && repository
+                                .changes
+                                .as_ref()
+                                .is_ok_and(|changes| changes.total == ChangeTotal::Exact(1))
+                    })
+            })
+    });
+    assert_eq!(
+        snapshot
+            .directories
+            .iter()
+            .find(|facts| facts.directory == fast.0)
+            .unwrap()
+            .repository
+            .as_ref()
+            .unwrap()
+            .head,
+        RepositoryHead::Branch("main".into())
+    );
+}
+
+#[test]
+fn a_late_fast_source_finishes_counting_while_earlier_slow_roots_refresh() {
+    assert_late_source_progresses_while_earlier_sources_refresh(SaturatedRead::Count);
+}
+
+#[test]
+fn a_late_fast_source_is_discovered_while_earlier_slow_sources_refresh() {
+    assert_late_source_progresses_while_earlier_sources_refresh(SaturatedRead::Discovery);
+}
