@@ -2591,8 +2591,13 @@ fn server_find_reports_an_oversized_query_and_recovers_after_edit(cx: &mut TestA
         spaceterm_ui::a11y_testing::A11yTree::read(cx).node("Terminal Find results")["aria"]["value"],
         "Query exceeds 4,096 bytes"
     );
+    cx.dispatch_action(spaceterm_ui::EditSelectAll);
     replace_terminal_find_input(&input, "short", cx);
     cx.run_until_parked();
+    assert_eq!(
+        input.read_with(cx, |input, _| input.value().to_owned()),
+        "short"
+    );
     assert_eq!(
         spaceterm_ui::a11y_testing::A11yTree::read(cx).node("Terminal Find results")["aria"]["value"],
         "Searching…"
