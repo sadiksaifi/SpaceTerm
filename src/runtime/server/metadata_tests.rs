@@ -1,192 +1,7 @@
-use super::tests::{attach, command, host, size};
+use super::tests::{command, host, size};
 use super::*;
 use crate::terminal::{metadata::*, server_metadata};
 use std::time::Instant;
-
-fn exchange(host: &mut DevelopmentPaneHost, lease: Lease, request: Request) -> Reply {
-    // Exercise the serialized server/client boundary rather than injecting client metadata.
-    let request = serde_json::from_slice(&serde_json::to_vec(&request).unwrap()).unwrap();
-    let reply = host.request([1; 32], lease.connection, request);
-    serde_json::from_slice(&serde_json::to_vec(&reply).unwrap()).unwrap()
-}
-fn await_metadata(
-    host: &mut DevelopmentPaneHost,
-    lease: Lease,
-    title: &str,
-) -> Arc<TerminalMetadataSnapshot> {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        match exchange(
-            host,
-            lease,
-            Request::Metadata {
-                lease,
-                revision: None,
-            },
-        ) {
-            Reply::Metadata(wire) => {
-                let metadata = server_metadata::decode(*wire, None, None).unwrap();
-                if metadata.title.value.as_ref() == title {
-                    return metadata;
-                }
-            }
-            Reply::Unchanged => {}
-            reply => panic!("metadata exchange refused: {reply:?}"),
-        }
-        assert!(Instant::now() < deadline, "metadata title did not arrive");
-        std::thread::sleep(Duration::from_millis(5));
-    }
-}
-#[test]
-fn metadata_only_changes_reach_hidden_panes_and_reconnect_without_a_screen() {
-    let mut host = host();
-    let lease = attach(&mut host, 1, true);
-    command(
-        &mut host,
-        1,
-        lease,
-        "stty -echo; printf '\\033]2;cargo test · api\\007'",
-    );
-    let first = await_metadata(&mut host, lease, "cargo test · api");
-    assert!(matches!(
-        exchange(
-            &mut host,
-            lease,
-            Request::Metadata {
-                lease,
-                revision: Some(first.revision)
-            }
-        ),
-        Reply::Unchanged
-    ));
-    assert!(matches!(
-        exchange(
-            &mut host,
-            lease,
-            Request::PresentationDemand {
-                lease,
-                visible: false
-            }
-        ),
-        Reply::Unchanged
-    ));
-    command(
-        &mut host,
-        1,
-        lease,
-        "printf '\\033]2;hidden-title\\007\\033]7;file://localhost/tmp/api\\007\\033]9;4;1;42\\007'",
-    );
-    let hidden = await_metadata(&mut host, lease, "hidden-title");
-    assert!(hidden.revision > first.revision);
-    assert_eq!(hidden.directory.path.as_ref(), "/tmp/api");
-    assert_eq!(hidden.progress, ProgressMetadata::Normal(42));
-    assert!(hidden.confirmed_directory.is_none());
-    assert_eq!(
-        hidden.context.local_file_capabilities(),
-        TerminalLocalFileCapabilities::Disabled
-    );
-    assert!(matches!(
-        exchange(&mut host, lease, Request::Poll { lease }),
-        Reply::Unchanged
-    ));
-    host.disconnected(lease.connection);
-    let Reply::Attached { lease: replacement } = host.request(
-        [1; 32],
-        [2; 32],
-        Request::Select {
-            create: false,
-            size: size(),
-            resume: Some(lease.into()),
-            style: None,
-        },
-    ) else {
-        panic!("reconnect refused")
-    };
-    // A new connection requests current metadata even though its revision did not change.
-    let current = await_metadata(&mut host, replacement, "hidden-title");
-    assert_eq!(current.directory, hidden.directory);
-    assert_eq!(current.progress, hidden.progress);
-    assert!(matches!(
-        exchange(
-            &mut host,
-            lease,
-            Request::Metadata {
-                lease,
-                revision: None
-            }
-        ),
-        Reply::Refused(Refusal::Stale)
-    ));
-    host.shutdown().unwrap();
-}
-
-#[test]
-fn presentation_roundtrip_keeps_command_identity_glyph_and_activity_without_authority() {
-    use crate::terminal::title::TitleGlyph;
-    let epoch = Instant::now();
-    let secret = "prompt-owner-private-fixture";
-    let context = TerminalMetadataContext::local(
-        LocalPathSemantics::Posix,
-        "/srv/api",
-        LocalMachine::new(Some("alice"), Some("build.test"), Some("/home/alice")),
-    )
-    .with_prompt_owner(PromptOwner::fixture(secret));
-    let mut tracker = MetadataTracker::new_with_context(context, "shell", epoch);
-    tracker.apply_semantic_prompt("C;cmdline=cargo%20test", epoch);
-    tracker.set_reported_title("✳ cargo test · api", epoch);
-    tracker.set_reported_title("⠋ cargo test · api", epoch + Duration::from_millis(10));
-    tracker.set_reported_title("⠙ cargo test · api", epoch + Duration::from_millis(250));
-    tracker.set_reported_directory("file://localhost/srv/api");
-    tracker.apply_semantic_prompt(&format!("A;spaceterm={secret}"), epoch);
-    // Running state is independent of a reported terminal title.
-    tracker.apply_semantic_prompt("C;cmdline=cargo%20test", epoch + Duration::from_millis(251));
-    tracker.set_reported_title("✳ cargo test · api", epoch + Duration::from_millis(260));
-    tracker.set_reported_title("⠋ cargo test · api", epoch + Duration::from_millis(270));
-    tracker.set_reported_title("⠙ cargo test · api", epoch + Duration::from_millis(510));
-    let snapshot = tracker.snapshot();
-    assert!(snapshot.title_activity);
-    let encoded = metadata::encode(&snapshot);
-    let bytes = serde_json::to_vec(&Reply::Metadata(Box::new(encoded))).unwrap();
-    let json = std::str::from_utf8(&bytes).unwrap();
-    assert!(!json.contains(secret));
-    assert!(!json.contains("confirmed_directory"));
-    assert!(!json.contains("prompt_owner"));
-    assert!(!json.contains("local_file"));
-    let Reply::Metadata(wire) = serde_json::from_slice(&bytes).unwrap() else {
-        unreachable!()
-    };
-    let decoded = server_metadata::decode(*wire, None, None).unwrap();
-    assert_eq!(
-        decoded.command.as_ref().unwrap().line.as_ref(),
-        "cargo test"
-    );
-    assert_eq!(
-        decoded.command.as_ref().unwrap().state,
-        CommandState::Running
-    );
-    assert_eq!(
-        decoded.context.origin(),
-        TerminalOrigin::Remote {
-            user: Some("alice"),
-            host: "build.test"
-        }
-    );
-    assert_eq!(decoded.context.home(), Some("/home/alice"));
-    assert!(decoded.title_activity);
-    assert_eq!(decoded.title_glyph, TitleGlyph::Retained(Some("✳".into())));
-    assert!(decoded.confirmed_directory.is_none());
-    assert!(decoded.context.local_paths().is_none());
-    assert_eq!(
-        decoded.context.local_file_capabilities(),
-        TerminalLocalFileCapabilities::Disabled
-    );
-    tracker.apply_semantic_prompt("D;7", epoch + Duration::from_secs(1));
-    let decoded =
-        server_metadata::decode(metadata::encode(&tracker.snapshot()), None, None).unwrap();
-    assert!(
-        matches!(decoded.command.as_ref().unwrap().state, CommandState::Finished { exit_status: Some(7), duration } if duration == Duration::from_millis(749))
-    );
-}
 
 #[test]
 fn encoder_sanitizes_bounds_and_client_rejects_malformed_presentation() {
@@ -263,7 +78,25 @@ fn inventory_observers_receive_unpainted_pane_metadata_without_claiming_control(
             std::thread::sleep(Duration::from_millis(5));
         }
     }
-    let mut host = SharedWorkspaceHost::new(host());
+    let mut prototype = host();
+    prototype.factory = NativeTerminalSessionFactory::new(
+        native_pty_factory(),
+        ShellLaunchPlanner::new(
+            "/bin/sh".into(),
+            std::path::PathBuf::new(),
+            ShellIntegrationMode::Disabled,
+            ShellEnvironment::default(),
+            ShellIntegrationPolicy {
+                supported: true,
+                path_list_separator: ':',
+                fallback_xdg_data_dirs: "/usr/local/share:/usr/share".into(),
+            },
+            &[],
+        ),
+        local_filesystem(),
+        LocalMachine::new(Some("alice"), Some("build.test"), Some("/home/alice")),
+    );
+    let mut host = SharedWorkspaceHost::new(prototype);
     host.prepare_initial_organization().unwrap();
     let dormant = inventory(&mut host, 20);
     let pane = dormant.workspaces[0].tabs[0].root_pane;
@@ -303,14 +136,30 @@ fn inventory_observers_receive_unpainted_pane_metadata_without_claiming_control(
         ),
         Reply::Unchanged
     ));
-    // Neither owner nor observer requests a Screen or a metadata lease exchange.
+    // Neither client requests a Screen. Only the owner sends input; the observer reads Inventory.
     command(
         &mut host,
         1,
         lease,
-        "stty -echo; printf '\\033]2;unpainted-title\\007\\033]7;file://localhost/tmp/api\\007\\033]9;4;1;42\\007'",
+        "stty -echo; printf '\\033]133;C;cmdline=cargo%%20test\\007\\033]2;✳ cargo test · api\\007\\033]7;file://localhost/tmp/api\\007\\033]9;4;1;42\\007'",
     );
-    let first = wait(&mut host, 20, "unpainted-title");
+    wait(&mut host, 20, "✳ cargo test · api");
+    command(
+        &mut host,
+        1,
+        lease,
+        "printf '\\033]2;⠋ cargo test · api\\007'",
+    );
+    wait(&mut host, 20, "⠋ cargo test · api");
+    // Observe each frame before advancing so a delayed PTY reader cannot merge their times.
+    std::thread::sleep(Duration::from_millis(250));
+    command(
+        &mut host,
+        1,
+        lease,
+        "printf '\\033]2;⠙ cargo test · api\\007'",
+    );
+    let first = wait(&mut host, 20, "⠙ cargo test · api");
     let snapshot = first.workspaces[0].tabs[0].panes[0]
         .presentation
         .as_ref()
@@ -318,15 +167,61 @@ fn inventory_observers_receive_unpainted_pane_metadata_without_claiming_control(
     let decoded = server_metadata::decode((**snapshot).clone(), None, None).unwrap();
     assert_eq!(decoded.directory.path.as_ref(), "/tmp/api");
     assert_eq!(decoded.progress, ProgressMetadata::Normal(42));
+    assert_eq!(
+        decoded.command.as_ref().unwrap().line.as_ref(),
+        "cargo test"
+    );
+    assert_eq!(
+        decoded.command.as_ref().unwrap().state,
+        CommandState::Running
+    );
+    assert!(decoded.title_activity);
+    assert_eq!(
+        decoded.title_glyph,
+        crate::terminal::title::TitleGlyph::Retained(Some("✳".into()))
+    );
+    assert_eq!(
+        decoded.context.origin(),
+        TerminalOrigin::Remote {
+            user: Some("alice"),
+            host: "build.test"
+        }
+    );
+    assert_eq!(decoded.context.home(), Some("/home/alice"));
+    assert!(decoded.context.local_paths().is_none());
+    assert_eq!(
+        decoded.context.local_file_capabilities(),
+        TerminalLocalFileCapabilities::Disabled
+    );
     assert!(decoded.confirmed_directory.is_none());
     command(
         &mut host,
         1,
         lease,
-        "printf '\\033]2;metadata-only-update\\007'",
+        "printf '\\033]133;D;7\\007\\033]2;metadata-only-update\\007'",
     );
     let changed = wait(&mut host, 20, "metadata-only-update");
-    assert!(changed.revision > first.revision);
+    assert_eq!(
+        changed.revision, first.revision,
+        "presentation must not reconcile or save hierarchy"
+    );
+    assert_ne!(
+        changed, first,
+        "the inventory worker detects presentation by full content"
+    );
+    let finished = server_metadata::decode(
+        (**changed.workspaces[0].tabs[0].panes[0]
+            .presentation
+            .as_ref()
+            .unwrap())
+        .clone(),
+        None,
+        None,
+    )
+    .unwrap();
+    assert!(
+        matches!(finished.command.as_ref().unwrap().state, CommandState::Finished { exit_status: Some(7), duration } if duration >= Duration::from_millis(250))
+    );
     host.disconnected([20; 32]);
     let reconnected = wait(&mut host, 21, "metadata-only-update");
     assert_eq!(
@@ -446,4 +341,36 @@ fn ssh_presentation_preserves_destination_alias_and_spelled_account() {
             TerminalLocalFileCapabilities::Disabled
         );
     }
+}
+
+#[test]
+fn encoded_snapshot_excludes_owning_shell_secrets_and_authority() {
+    let epoch = Instant::now();
+    let secret = "prompt-owner-private-fixture";
+    let context = TerminalMetadataContext::local(
+        LocalPathSemantics::Posix,
+        "/srv/api",
+        LocalMachine::default(),
+    )
+    .with_prompt_owner(PromptOwner::fixture(secret));
+    let mut tracker = MetadataTracker::new_with_context(context, "shell", epoch);
+    tracker.set_reported_directory("file://localhost/srv/api");
+    tracker.apply_semantic_prompt(&format!("A;spaceterm={secret}"), epoch);
+    assert_eq!(
+        tracker.snapshot().confirmed_directory.as_deref(),
+        Some("/srv/api")
+    );
+    let snapshot = metadata::encode(&tracker.snapshot());
+    let json = serde_json::to_string(&snapshot).unwrap();
+    for forbidden in [secret, "confirmed_directory", "prompt_owner", "local_file"] {
+        assert!(!json.contains(forbidden));
+    }
+    let snapshot = serde_json::from_str(&json).unwrap();
+    let decoded = server_metadata::decode(snapshot, None, None).unwrap();
+    assert!(decoded.confirmed_directory.is_none());
+    assert!(decoded.context.local_paths().is_none());
+    assert_eq!(
+        decoded.context.local_file_capabilities(),
+        TerminalLocalFileCapabilities::Disabled
+    );
 }

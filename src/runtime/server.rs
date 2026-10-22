@@ -554,8 +554,7 @@ impl DevelopmentPaneHost {
             | Request::ReadingStatus { lease }
             | Request::GraphicsChunk { lease, .. }
             | Request::SelectionChunk { lease, .. } => lease,
-            Request::Metadata { lease, .. }
-            | Request::Poll { lease }
+            Request::Poll { lease }
             | Request::PresentationDemand { lease, .. }
             | Request::NativeEffects { lease, .. }
             | Request::CompleteClipboard { lease, .. }
@@ -583,14 +582,6 @@ impl DevelopmentPaneHost {
             return Err(Refusal::DirectoryUnavailable);
         }
         match request {
-            Request::Metadata { revision, .. } => {
-                if let Some(snapshot) = pane.runtime.metadata_snapshot()
-                    && revision != Some(snapshot.revision)
-                {
-                    return Ok(Reply::Metadata(Box::new(metadata::encode(&snapshot))));
-                }
-                Ok(Reply::Unchanged)
-            }
             Request::PresentationDemand { visible, .. } => {
                 if pane.presentable != visible {
                     pane.presentable = visible;

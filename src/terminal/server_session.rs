@@ -62,8 +62,6 @@ pub(crate) struct DevelopmentPaneState {
     accessibility_demand: AtomicBool,
     client_effects: Mutex<std::collections::VecDeque<ClientEffectRequest>>,
     presentable: AtomicBool,
-    metadata: TerminalSessionMetadataState,
-    metadata_queued: Arc<AtomicBool>,
     /// Whether the server's route reported a deliberate stop since this Pane last connected.
     /// The Pane then waits for an explicit retry instead of reconnecting on its own.
     server_stopped: AtomicBool,
@@ -94,8 +92,6 @@ impl DevelopmentPaneState {
             accessibility_demand: AtomicBool::new(false),
             client_effects: Mutex::new(std::collections::VecDeque::new()),
             presentable: AtomicBool::new(true),
-            metadata: TerminalSessionMetadataState::default(),
-            metadata_queued: Arc::default(),
             server_stopped: AtomicBool::new(false),
             wake: schedule::Wake::default(),
             effect_authority: {
@@ -257,11 +253,6 @@ impl DevelopmentPaneState {
         }
     }
     fn invalidate(&self) -> u64 {
-        if let Some(metadata) = self.metadata.snapshot() {
-            let mut metadata = (*metadata).clone();
-            metadata.freshness = super::metadata::MetadataFreshness::Stale;
-            self.metadata.publish(Arc::new(metadata));
-        }
         self.reading
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -1440,10 +1431,7 @@ fn present(
             let mut reader = reading::Reader::default();
             let mut graphics = graphics::Graphics::default();
             let mut semantic = accessibility::Fetcher::new(lease);
-            let mut latest_screen: Option<(Arc<ScreenSnapshot>, ScreenMapping)> = None;
-            // A fresh lease always receives current metadata, even if the server revision matches
-            // the last connection. Screen demand does not gate this exchange.
-            let mut metadata_revision = None;
+            let mut latest_screen = None;
             let changes = connection.supports_presentation_changes();
             let batches = connection.supports_key_input_batches();
             // Row changes apply only to this exact lease's own previous screen.
@@ -1492,44 +1480,6 @@ fn present(
                 }
                 let polled = cadence.poll_due(now);
                 if polled {
-                    let reply = send(
-                        &presenter,
-                        &alive,
-                        &attachment,
-                        &mut connection,
-                        &Request::Metadata {
-                            lease,
-                            revision: metadata_revision,
-                        },
-                    )?;
-                    if !presenter.current() {
-                        return Err(ServerError::NotRunning);
-                    }
-                    if state.epoch.load(Ordering::Acquire) != epoch {
-                        return Err(ServerError::Protocol);
-                    }
-                    match reply {
-                        Reply::Metadata(wire) => {
-                            let metadata = super::server_metadata::decode(
-                                *wire,
-                                local_files.as_ref(),
-                                remote_metadata.as_ref(),
-                            )?;
-                            metadata_revision = Some(metadata.revision);
-                            state.metadata.publish(Arc::clone(&metadata));
-                            if let Some((screen, _)) = &mut latest_screen {
-                                Arc::make_mut(screen).metadata = metadata;
-                            }
-                            if !state.metadata_queued.swap(true, Ordering::AcqRel) {
-                                let wakeup =
-                                    MetadataWakeup::new(Arc::clone(&state.metadata_queued));
-                                let _ =
-                                    events.try_send(TerminalSessionEvent::MetadataChanged(wakeup));
-                            }
-                        }
-                        Reply::Unchanged => {}
-                        _ => return Err(ServerError::Protocol),
-                    }
                     let reply = if changes {
                         let base = decoder.baseline();
                         let reply = send(
@@ -1596,9 +1546,7 @@ fn present(
                                 &appearance.lock().unwrap_or_else(|e| e.into_inner()),
                                 local_files.as_ref(),
                             )?;
-                            if let Some(metadata) = state.metadata.snapshot() {
-                                Arc::make_mut(&mut screen).metadata = metadata;
-                            } else if let Some(metadata) = &remote_metadata {
+                            if let Some(metadata) = &remote_metadata {
                                 Arc::make_mut(&mut Arc::make_mut(&mut screen).metadata).context =
                                     super::metadata::TerminalMetadataContext::Remote(
                                         metadata.clone(),
@@ -1862,10 +1810,6 @@ fn encode_key(k: KeyInput) -> pane::Key {
     }
 }
 impl TerminalSessionHandle for PresentationHandle {
-    fn metadata_snapshot(&self) -> Option<Arc<super::metadata::TerminalMetadataSnapshot>> {
-        self.state.metadata.snapshot()
-    }
-
     fn accessibility_selection_sender(&self) -> Option<super::AccessibilitySelectionSender> {
         let state = Arc::clone(&self.state);
         let input = self.input.clone();

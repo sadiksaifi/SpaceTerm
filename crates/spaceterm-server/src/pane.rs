@@ -318,10 +318,6 @@ pub enum Request {
     Release {
         lease: Lease,
     },
-    Metadata {
-        lease: Lease,
-        revision: Option<u64>,
-    },
     Poll {
         lease: Lease,
     },
@@ -446,7 +442,6 @@ pub enum Reply {
     Attached {
         lease: Lease,
     },
-    Metadata(Box<metadata::Snapshot>),
     Screen(Box<Screen>),
     ScreenChanges(Box<presentation::RowChanges>),
     Unchanged,
@@ -768,7 +763,6 @@ impl PaneConnection {
             wire.write(request)?;
             let reply: Reply = wire.read()?;
             match &reply {
-                Reply::Metadata(snapshot) => snapshot.validate()?,
                 Reply::Inventory { inventory, .. } => {
                     let panes: Vec<_> = inventory
                         .workspaces

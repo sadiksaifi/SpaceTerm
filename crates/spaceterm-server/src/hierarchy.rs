@@ -946,10 +946,7 @@ impl State {
         for workspace in &mut self.inventory.workspaces {
             for tab in &mut workspace.tabs {
                 if let Some(pane) = tab.panes.iter_mut().find(|pane| pane.id == id) {
-                    if pane.presentation != snapshot {
-                        pane.presentation = snapshot;
-                        self.inventory.revision = self.inventory.revision.saturating_add(1);
-                    }
+                    pane.presentation = snapshot;
                     return;
                 }
             }

@@ -680,7 +680,6 @@ impl SharedWorkspaceHost {
                     | Request::Read { lease, .. }
                     | Request::GraphicsChunk { lease, .. }
                     | Request::SelectionChunk { lease, .. }
-                    | Request::Metadata { lease, .. }
                     | Request::Poll { lease }
                     | Request::PollChanges { lease, .. }
                     | Request::PresentationDemand { lease, .. }
