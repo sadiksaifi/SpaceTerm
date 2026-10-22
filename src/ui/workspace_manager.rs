@@ -3639,7 +3639,7 @@ impl WorkspaceManager {
                 return true;
             }
         };
-        let requires_confirmation = approval.requires_confirmation(|pane, live_session| {
+        let direct = approval.direct_close(|pane, live_session| {
             self.workspaces
                 .workspace(workspace_id)
                 .is_some_and(|entry| {
@@ -3649,7 +3649,7 @@ impl WorkspaceManager {
                         .shared_pane_closes_directly(pane, live_session, cx)
                 })
         });
-        if !requires_confirmation {
+        if let Some(approval) = direct {
             let key = self.shared.owner(workspace_id);
             if let Some(shared) = self.shared.owning_mut(workspace_id)
                 && let super::shared_workspaces::SharedSubmission::Refused(reason) =

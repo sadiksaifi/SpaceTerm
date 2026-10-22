@@ -1,6 +1,7 @@
 //! Deterministic delivery around the production server mutation engine and shared desktop path.
 //! The double delays transport delivery; State::apply owns validation, identities and membership.
 use super::*;
+use crate::domain::{PaneId, TabId};
 use crate::terminal::shared_workspace::SharedWorkspaceSnapshot;
 use spaceterm_server::hierarchy::{RetainedOutcome, State};
 use std::cell::RefCell;
@@ -117,7 +118,9 @@ impl DelayedServer {
 
 fn live_inventory(server: &State) -> Inventory {
     let mut inventory = server.inventory.clone();
+    let previous = inventory.close.take();
     inventory.close = Some(CloseInventory {
+        controls: previous.as_ref().and_then(|live| live.controls.clone()),
         boot: BOOT,
         sessions: inventory
             .workspaces
@@ -126,7 +129,10 @@ fn live_inventory(server: &State) -> Inventory {
             .flat_map(|t| &t.panes)
             .map(|pane| ConfirmedPane {
                 id: pane.id,
-                session: None,
+                session: previous
+                    .as_ref()
+                    .and_then(|live| live.sessions.iter().find(|known| known.id == pane.id))
+                    .and_then(|known| known.session),
             })
             .collect(),
     });
@@ -188,6 +194,132 @@ fn model(server: &Rc<DelayedServer>) -> (SharedEditSource, SharedWorkspaces) {
         SharedWorkspaceFacts::from_server(&inventory.workspaces[0]),
     );
     (source, model)
+}
+
+#[test]
+fn a_queued_direct_close_keeps_its_original_control_fence_and_requires_review_after_takeover() {
+    use spaceterm_server::hierarchy::{CloseTarget, ConfirmedControl};
+    for close_tab in [false, true] {
+        let server = DelayedServer::new();
+        let (source, mut model) = model(&server);
+        let inventory = server.inventory();
+        let workspace = inventory.workspaces[0].id;
+        let tab = inventory.workspaces[0].root_tab;
+        let pane = inventory.workspaces[0].tabs[0].root_pane;
+        source.submit(Mutation::CreateTab {
+            workspace,
+            source: None,
+        });
+        server.finish(true, true);
+        model.poll();
+        let control = ConfirmedControl {
+            pane,
+            session: Some([30; 32]),
+            owner: DEVICE,
+            epoch: 1,
+        };
+        {
+            let mut delivery = server.0.borrow_mut();
+            let live = delivery.server.inventory.close.as_mut().unwrap();
+            live.sessions
+                .iter_mut()
+                .find(|known| known.id == pane)
+                .unwrap()
+                .session = control.session;
+            live.controls = Some(vec![control.clone()]);
+            delivery.snapshot.inventory = Some(live_inventory(&delivery.server));
+        }
+        model.poll();
+        assert_eq!(
+            source.submit(Mutation::RenameWorkspace {
+                workspace,
+                version: 0,
+                name: "Later".into()
+            }),
+            SharedSubmission::Submitted
+        );
+        let target = if close_tab {
+            CloseTarget::Tab { workspace, tab }
+        } else {
+            CloseTarget::Pane {
+                workspace,
+                tab,
+                pane,
+            }
+        };
+        let local = if close_tab {
+            crate::close_confirmation::CloseTarget::Tab {
+                workspace_id: first_workspace_id(),
+                tab_id: TabId::new(1),
+            }
+        } else {
+            crate::close_confirmation::CloseTarget::Pane {
+                workspace_id: first_workspace_id(),
+                tab_id: TabId::new(1),
+                pane_id: PaneId::new(1),
+            }
+        };
+        let approval = model
+            .close_approval(target)
+            .unwrap()
+            .direct_close(|_, _| true)
+            .unwrap();
+        assert_eq!(model.close(approval, local), SharedSubmission::Submitted);
+        assert_eq!(
+            server.dispatched().len(),
+            2,
+            "the close waits behind the rename"
+        );
+        assert_eq!(
+            model.poll().inventory.unwrap().workspaces[0].tabs.len(),
+            1,
+            "the queued close already has an optimistic frame"
+        );
+        {
+            // A server publication reports Take Over without changing the Terminal Session.
+            let mut delivery = server.0.borrow_mut();
+            delivery.server.inventory.close.as_mut().unwrap().controls =
+                Some(vec![ConfirmedControl {
+                    owner: OTHER_DEVICE,
+                    epoch: 2,
+                    ..control.clone()
+                }]);
+            delivery.snapshot.inventory = Some(live_inventory(&delivery.server));
+        }
+        model.poll();
+        assert_eq!(
+            server.finish(true, true).outcome,
+            Outcome::Accepted { target: workspace }
+        );
+        model.poll();
+        assert!(
+            matches!(server.dispatched().last(), Some(Mutation::Close { confirmation, .. })
+            if confirmation.own_controls.as_deref() == Some(&[control][..]))
+        );
+        assert_eq!(
+            server.finish(true, true).outcome,
+            Outcome::StaleConfirmation
+        );
+        let restored = model.poll().inventory.unwrap();
+        assert_eq!(restored.workspaces[0].tabs.len(), 2);
+        assert_eq!(restored.close.unwrap().sessions[0].session, Some([30; 32]));
+        assert_eq!(model.take_stale_close(), Some((target, Some(local))));
+        assert_eq!(
+            server.dispatched().len(),
+            3,
+            "stale consent never submits a replacement"
+        );
+        let explicit = model.close_approval(target).unwrap();
+        assert_eq!(model.close(explicit, local), SharedSubmission::Submitted);
+        assert!(
+            matches!(server.dispatched().last(), Some(Mutation::Close { confirmation, .. })
+            if confirmation.own_controls.is_none())
+        );
+        assert!(matches!(
+            server.finish(true, true).outcome,
+            Outcome::Accepted { .. }
+        ));
+    }
 }
 
 #[test]
@@ -629,6 +761,7 @@ fn optimistic_close_hides_before_a_doomed_pane_status_and_restores_the_same_view
     assert!(cx.debug_bounds("shared-pane-notice-2").is_none());
     // A changed server confirmation definitely refuses the original close.
     harness.server.0.borrow_mut().server.inventory.close = Some(CloseInventory {
+        controls: None,
         boot: [99; 32],
         sessions: vec![],
     });
@@ -760,6 +893,7 @@ fn successive_refused_tab_closes_restore_the_original_order(cx: &mut TestAppCont
     }
     for _ in 0..2 {
         harness.server.0.borrow_mut().server.inventory.close = Some(CloseInventory {
+            controls: None,
             boot: [99; 32],
             sessions: vec![],
         });

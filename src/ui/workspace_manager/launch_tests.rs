@@ -1712,6 +1712,7 @@ fn with_hidden_tab(
         }],
     });
     inventory.close = Some(CloseInventory {
+        controls: None,
         boot: BOOT,
         sessions: vec![
             ConfirmedPane {
@@ -1929,6 +1930,7 @@ fn with_root_progress(revision: u64, metadata_revision: u64, percent: u8) -> Inv
     presentation.progress = spaceterm_server::pane::metadata::Progress::Normal(percent);
     inventory.workspaces[0].tabs[0].panes[0].presentation = Some(Box::new(presentation));
     inventory.close = Some(CloseInventory {
+        controls: None,
         boot: BOOT,
         sessions: vec![ConfirmedPane {
             id: PANE,

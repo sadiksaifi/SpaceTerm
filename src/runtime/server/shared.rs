@@ -1,8 +1,13 @@
 //! Shared hierarchy ownership composed with the existing fenced Pane runtime.
 use super::*;
-use spaceterm_server::hierarchy::{CloseInventory, ConfirmedPane, Id, Inventory, State};
+use spaceterm_server::hierarchy::{
+    CloseInventory, ConfirmedControl, ConfirmedPane, Id, Inventory, State,
+};
 use std::collections::BTreeMap;
 
+#[cfg(test)]
+#[path = "shared/close_control_tests.rs"]
+mod close_control_tests;
 #[cfg(test)]
 #[path = "shared/session_end_tests.rs"]
 mod session_end_tests;
@@ -199,6 +204,31 @@ impl SharedWorkspaceHost {
         inventory.close = Some(CloseInventory {
             boot: self.prototype.boot,
             sessions,
+            controls: Some(
+                inventory
+                    .workspaces
+                    .iter()
+                    .flat_map(|w| &w.tabs)
+                    .flat_map(|t| &t.panes)
+                    .filter_map(|pane| {
+                        let host = self.panes.get(&pane.id);
+                        let (owner, epoch, session) =
+                            if let Some(live) = host.and_then(|h| h.pane.as_ref()) {
+                                (live.device, live.control_epoch, Some(live.lease.session))
+                            } else if let Some(dormant) = host.and_then(|h| h.dormant) {
+                                (dormant.device, dormant.control_epoch, None)
+                            } else {
+                                (pane.creator, 0, None)
+                            };
+                        Some(ConfirmedControl {
+                            pane: pane.id,
+                            session,
+                            owner: owner?,
+                            epoch,
+                        })
+                    })
+                    .collect(),
+            ),
         });
         inventory
     }

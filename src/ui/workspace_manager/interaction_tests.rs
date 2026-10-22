@@ -8,6 +8,7 @@ fn disconnect_drops_a_parked_remote_presentation_without_closing_other_servers(
     let (remote, edits) = harness.present_ssh("penguin", &[("Far", 1)], cx);
     let mut inventory = machine_inventory(900, &[("Far", 1)]);
     inventory.close = Some(spaceterm_server::hierarchy::CloseInventory {
+        controls: None,
         boot: [1; 32],
         sessions: vec![spaceterm_server::hierarchy::ConfirmedPane {
             id: [101; 32],
@@ -319,6 +320,15 @@ fn unavailable_commands_on_a_replacement_screen_terminate_without_redispatch(
 #[gpui::test]
 fn closing_an_idle_own_tab_submits_without_repetitive_confirmation(cx: &mut TestAppContext) {
     let (harness, cx) = shared_close_harness(cx);
+    let mut inventory = shared_close_published();
+    let control = spaceterm_server::hierarchy::ConfirmedControl {
+        pane: SHARED_CLOSE_SECOND_PANE,
+        session: None,
+        owner: [1; 32],
+        epoch: 7,
+    };
+    inventory.close.as_mut().unwrap().controls = Some(vec![control.clone()]);
+    harness.publish(inventory, cx);
     harness.panes.pane(SHARED_CLOSE_SECOND_PANE).reconnect();
     settle_shared_panes(cx);
     cx.dispatch_action(crate::ui::ActivateTab2);
@@ -326,8 +336,33 @@ fn closing_an_idle_own_tab_submits_without_repetitive_confirmation(cx: &mut Test
     cx.dispatch_action(crate::ui::CloseTab);
     cx.run_until_parked();
     assert_eq!(harness.closes().len(), 1, "idle own Tab closes directly");
+    assert!(matches!(harness.closes().as_slice(),
+        [spaceterm_server::hierarchy::Mutation::Close { confirmation, .. }]
+            if confirmation.own_controls.as_deref() == Some(&[control][..])
+    ));
     assert!(
         cx.debug_bounds("modal-action-shared-close-confirm")
             .is_none()
     );
+}
+
+#[gpui::test]
+fn an_idle_own_tab_on_an_older_server_requires_explicit_confirmation(cx: &mut TestAppContext) {
+    let (harness, cx) = shared_close_harness(cx);
+    harness.panes.pane(SHARED_CLOSE_SECOND_PANE).reconnect();
+    settle_shared_panes(cx);
+    cx.dispatch_action(crate::ui::ActivateTab2);
+    cx.run_until_parked();
+    cx.dispatch_action(crate::ui::CloseTab);
+    cx.run_until_parked();
+    assert!(harness.closes().is_empty());
+    assert!(
+        cx.debug_bounds("modal-action-shared-close-confirm")
+            .is_some()
+    );
+    click("modal-action-shared-close-confirm", cx);
+    assert!(matches!(harness.closes().as_slice(),
+        [spaceterm_server::hierarchy::Mutation::Close { confirmation, .. }]
+            if confirmation.own_controls.is_none()
+    ));
 }

@@ -50,8 +50,9 @@ mod development {
 
     use gpui::{App, SharedString};
     use spaceterm_server::hierarchy::{
-        Axis, CloseConfirmation as ServerCloseConfirmation, CloseTarget as ServerCloseTarget, Id,
-        Inventory, Mutation, Outcome, RetainedOutcome, Workspace as ServerWorkspace,
+        Axis, CloseConfirmation as ServerCloseConfirmation, CloseTarget as ServerCloseTarget,
+        ConfirmedControl, Id, Inventory, Mutation, Outcome, RetainedOutcome,
+        Workspace as ServerWorkspace,
     };
 
     use crate::close_confirmation::CloseTarget;
@@ -1685,6 +1686,10 @@ mod development {
                     })
                     .count(),
                 confirmation,
+                controls: inventory
+                    .close
+                    .as_ref()
+                    .and_then(|live| live.controls.clone()),
             })
         }
 
@@ -2178,6 +2183,7 @@ mod development {
     pub(crate) struct SharedCloseApproval {
         target: ServerCloseTarget,
         confirmation: ServerCloseConfirmation,
+        controls: Option<Vec<ConfirmedControl>>,
         scope: SharedCloseScope,
         tabs: usize,
         /// The Workspace's name as the server published it.
@@ -2194,18 +2200,33 @@ mod development {
     }
 
     impl SharedCloseApproval {
-        /// Workspace removal always needs review; smaller closes use each Pane's current
-        /// control and busy-work facts without changing the exact server-side approval.
-        pub(crate) fn requires_confirmation(
+        /// A direct close binds every reviewed Pane to its exact control grant. Older servers
+        /// cannot report these facts, so they always require explicit confirmation.
+        pub(crate) fn direct_close(
             &self,
             directly_closable: impl Fn(Id, bool) -> bool,
-        ) -> bool {
-            self.scope == SharedCloseScope::Workspace
-                || self
-                    .confirmation
-                    .panes
-                    .iter()
-                    .any(|pane| !directly_closable(pane.id, pane.session.is_some()))
+        ) -> Option<Self> {
+            if self.scope == SharedCloseScope::Workspace {
+                return None;
+            }
+            let controls = self.controls.as_ref()?;
+            let own_controls = self
+                .confirmation
+                .panes
+                .iter()
+                .map(|pane| {
+                    if !directly_closable(pane.id, pane.session.is_some()) {
+                        return None;
+                    }
+                    controls
+                        .iter()
+                        .find(|control| control.pane == pane.id && control.session == pane.session)
+                        .cloned()
+                })
+                .collect::<Option<Vec<_>>>()?;
+            let mut approval = self.clone();
+            approval.confirmation.own_controls = Some(own_controls);
+            Some(approval)
         }
 
         /// The live Terminal Sessions the close ends. A retained Pane whose shell has not

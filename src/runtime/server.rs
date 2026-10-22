@@ -72,10 +72,13 @@ pub struct DevelopmentPaneHost {
 struct DormantPane {
     device: Option<[u8; 32]>,
     attachment_generation: Option<u64>,
+    control_epoch: u64,
 }
 struct OwnedPane {
     device: Option<[u8; 32]>,
     attachment_generation: Option<u64>,
+    /// Public grant generation. Unlike lease.control, this grants no terminal authority.
+    control_epoch: u64,
     lease: Lease,
     connected: bool,
     runtime: TerminalRuntime,
@@ -302,6 +305,7 @@ impl DevelopmentPaneHost {
         self.pane = Some(OwnedPane {
             device: Some(device),
             attachment_generation: None,
+            control_epoch: 1,
             lease,
             connected: true,
             runtime,
@@ -806,6 +810,7 @@ impl DevelopmentPaneHost {
                 self.dormant = Some(DormantPane {
                     device: pane.device,
                     attachment_generation: pane.attachment_generation,
+                    control_epoch: pane.control_epoch,
                 });
             }
             self.pane = None;
@@ -829,6 +834,7 @@ impl DevelopmentPaneHost {
         self.dormant = Some(DormantPane {
             device: pane.device,
             attachment_generation: pane.attachment_generation,
+            control_epoch: pane.control_epoch,
         });
         // Use ordinary shutdown to invalidate input/effects and wait for native cleanup, but
         // retain organization and its control grant rather than retiring an ordinary exit.
@@ -843,9 +849,17 @@ impl DevelopmentPaneHost {
             return Err(Refusal::Stale);
         }
         let reply = self.restored()?;
+        let control_epoch = self
+            .dormant
+            .as_ref()
+            .ok_or(Refusal::Stale)?
+            .control_epoch
+            .checked_add(1)
+            .ok_or(Refusal::Capacity)?;
         self.dormant = Some(DormantPane {
             device: Some(device),
             attachment_generation,
+            control_epoch,
         });
         Ok(reply)
     }
@@ -1238,6 +1252,11 @@ impl OwnedPane {
         } else {
             self.lease.control
         };
+        let control_epoch = if transfer {
+            self.control_epoch.checked_add(1).ok_or(Refusal::Capacity)?
+        } else {
+            self.control_epoch
+        };
         let appearance = if style.is_some() {
             Some(appearance(style, self.appearance_generation + 1).map_err(|_| Refusal::Failed)?)
         } else {
@@ -1255,6 +1274,7 @@ impl OwnedPane {
             self.focus_generation = 0;
         }
         self.device = Some(device);
+        self.control_epoch = control_epoch;
         self.lease.control = control;
         self.lease.connection = connection;
         self.connected = true;

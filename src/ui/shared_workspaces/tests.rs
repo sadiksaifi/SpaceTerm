@@ -87,6 +87,7 @@ fn inventory(revision: u64, tabs: Vec<Tab>) -> Inventory {
         repositories: None,
         revision,
         close: Some(CloseInventory {
+            controls: None,
             boot: BOOT,
             sessions,
         }),
@@ -2071,6 +2072,7 @@ mod close {
             vec![Mutation::Close {
                 target: ROOT_TAB_TARGET,
                 confirmation: CloseConfirmation {
+                    own_controls: None,
                     boot: BOOT,
                     panes: vec![
                         ConfirmedPane {
@@ -2224,6 +2226,7 @@ mod close {
         edits.submit_for_recovery(Mutation::Close {
             target: ROOT_TAB_TARGET,
             confirmation: CloseConfirmation {
+                own_controls: None,
                 boot: BOOT,
                 panes: Vec::new(),
                 removes_tab: true,

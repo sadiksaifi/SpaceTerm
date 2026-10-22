@@ -10449,6 +10449,7 @@ fn shared_close_inventory(
         repositories: None,
         revision,
         close: Some(CloseInventory {
+            controls: None,
             boot: SHARED_CLOSE_BOOT,
             sessions: tabs
                 .iter()
@@ -10590,6 +10591,7 @@ fn shared_close_mutation(
     Mutation::Close {
         target,
         confirmation: CloseConfirmation {
+            own_controls: None,
             boot: SHARED_CLOSE_BOOT,
             panes: panes
                 .iter()
@@ -12880,6 +12882,7 @@ mod shared_repositories {
         second.panes[0].id = second.root_pane;
         initial.workspaces[0].tabs.push(second);
         initial.close = Some(CloseInventory {
+            controls: None,
             boot: [9; 32],
             sessions: initial.workspaces[0]
                 .tabs

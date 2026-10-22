@@ -49,10 +49,23 @@ pub struct ConfirmedPane {
     pub session: Option<Id>,
 }
 
+/// A public description of one control grant, never an input capability.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConfirmedControl {
+    pub pane: Id,
+    pub session: Option<Id>,
+    pub owner: Id,
+    /// Scoped to this Pane and Terminal Session. A transfer changes it even if ownership returns.
+    pub epoch: u64,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CloseInventory {
     pub boot: Id,
     pub sessions: Vec<ConfirmedPane>,
+    /// Missing on older peers, which cannot fence confirmation-free closes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub controls: Option<Vec<ConfirmedControl>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -61,6 +74,18 @@ pub struct CloseConfirmation {
     pub panes: Vec<ConfirmedPane>,
     pub removes_tab: bool,
     pub removes_workspace: bool,
+    /// Only a confirmation-free own close binds control in addition to exact membership.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub own_controls: Option<Vec<ConfirmedControl>>,
+}
+
+impl CloseConfirmation {
+    fn same_targets(&self, other: &Self) -> bool {
+        self.boot == other.boot
+            && self.panes == other.panes
+            && self.removes_tab == other.removes_tab
+            && self.removes_workspace == other.removes_workspace
+    }
 }
 
 impl Inventory {
@@ -90,6 +115,7 @@ impl Inventory {
             .map(|id| live.sessions.iter().find(|p| p.id == id).cloned())
             .collect::<Option<Vec<_>>>()?;
         Some(CloseConfirmation {
+            own_controls: None,
             boot: live.boot,
             panes,
             removes_tab,
@@ -248,10 +274,21 @@ pub enum Mutation {
 impl Mutation {
     pub fn is_bounded(&self) -> bool {
         match self {
-            Self::EndAllSessions { confirmation } => confirmation.sessions.len() <= MAX_PANES,
+            Self::EndAllSessions { confirmation } => {
+                confirmation.sessions.len() <= MAX_PANES
+                    && confirmation
+                        .controls
+                        .as_ref()
+                        .is_none_or(|c| c.len() <= MAX_PANES)
+            }
             Self::Worktree(operation) => operation.is_bounded(),
             Self::Close { confirmation, .. } => {
-                !confirmation.panes.is_empty() && confirmation.panes.len() <= MAX_PANES
+                !confirmation.panes.is_empty()
+                    && confirmation.panes.len() <= MAX_PANES
+                    && confirmation
+                        .own_controls
+                        .as_ref()
+                        .is_none_or(|c| c.len() <= MAX_PANES)
             }
             Self::CreateWorkspace { name, directory } => {
                 name.len() <= 256 && directory.as_deref().is_none_or(valid_path)
@@ -622,7 +659,9 @@ impl State {
                 let Some(live) = &self.inventory.close else {
                     return Ok(Outcome::StaleConfirmation);
                 };
-                if live != confirmation {
+                // Control changes do not broaden an explicit End All Sessions approval.
+                // Older clients omit controls; both forms still compare the exact Sessions.
+                if live.boot != confirmation.boot || live.sessions != confirmation.sessions {
                     return Ok(Outcome::StaleConfirmation);
                 }
                 self.session_ends = Some(confirmation.clone());
@@ -636,8 +675,35 @@ impl State {
                 let Some(ids) = self.inventory.close_panes(*target) else {
                     return Ok(Outcome::Missing);
                 };
-                if self.inventory.close_confirmation(*target).as_ref() != Some(confirmation) {
+                if self
+                    .inventory
+                    .close_confirmation(*target)
+                    .is_none_or(|current| !current.same_targets(confirmation))
+                {
                     return Ok(Outcome::StaleConfirmation);
+                }
+                if let Some(reviewed) = &confirmation.own_controls {
+                    let current = self
+                        .inventory
+                        .close
+                        .as_ref()
+                        .and_then(|live| live.controls.as_ref());
+                    if reviewed.len() != confirmation.panes.len()
+                        || confirmation.panes.iter().any(|pane| {
+                            reviewed
+                                .iter()
+                                .filter(|control| {
+                                    control.pane == pane.id
+                                        && control.session == pane.session
+                                        && control.owner == device
+                                        && current.is_some_and(|current| current.contains(control))
+                                })
+                                .count()
+                                != 1
+                        })
+                    {
+                        return Ok(Outcome::StaleConfirmation);
+                    }
                 }
                 // Close Tabs keeps an existing Tab outside the Worktree; it never starts one.
                 if matches!(target, CloseTarget::Worktree { .. }) && confirmation.removes_workspace
@@ -1067,6 +1133,10 @@ impl State {
             let ids: std::collections::BTreeSet<_> = ends.sessions.iter().map(|p| p.id).collect();
             if Some(ends.boot) != self.creator_boot
                 || ends.sessions.len() > MAX_PANES
+                || ends
+                    .controls
+                    .as_ref()
+                    .is_some_and(|controls| controls.len() > MAX_PANES)
                 || ids.len() != ends.sessions.len()
                 || ends
                     .sessions
@@ -1289,6 +1359,121 @@ mod tests {
     use super::*;
 
     #[test]
+    fn direct_close_checks_requesting_owner_grant_and_complete_control_coverage() {
+        let mut original = State::empty();
+        original
+            .ensure_first_workspace([1; 32], "/tmp".as_ref())
+            .unwrap();
+        let workspace = original.inventory.workspaces[0].id;
+        let tab = original.inventory.workspaces[0].root_tab;
+        let pane = original.inventory.workspaces[0].tabs[0].root_pane;
+        let control = ConfirmedControl {
+            pane,
+            session: Some([7; 32]),
+            owner: [1; 32],
+            epoch: 3,
+        };
+        original.inventory.close = Some(CloseInventory {
+            boot: [9; 32],
+            sessions: vec![ConfirmedPane {
+                id: pane,
+                session: control.session,
+            }],
+            controls: Some(vec![control.clone()]),
+        });
+        let target = CloseTarget::Tab { workspace, tab };
+        let explicit = original.inventory.close_confirmation(target).unwrap();
+        let mut direct = explicit.clone();
+        direct.own_controls = Some(vec![control.clone()]);
+        for (device, fence, accepted) in [
+            ([1; 32], direct.clone(), true),
+            ([2; 32], direct.clone(), false),
+            ([2; 32], explicit, true),
+            (
+                [1; 32],
+                CloseConfirmation {
+                    own_controls: Some(vec![]),
+                    ..direct.clone()
+                },
+                false,
+            ),
+            (
+                [1; 32],
+                CloseConfirmation {
+                    own_controls: Some(vec![control.clone(), control.clone()]),
+                    ..direct.clone()
+                },
+                false,
+            ),
+            (
+                [1; 32],
+                CloseConfirmation {
+                    own_controls: Some(vec![ConfirmedControl {
+                        epoch: 2,
+                        ..control.clone()
+                    }]),
+                    ..direct.clone()
+                },
+                false,
+            ),
+            (
+                [1; 32],
+                CloseConfirmation {
+                    own_controls: Some(vec![ConfirmedControl {
+                        session: None,
+                        ..control.clone()
+                    }]),
+                    ..direct.clone()
+                },
+                false,
+            ),
+            (
+                [1; 32],
+                CloseConfirmation {
+                    removes_workspace: false,
+                    ..direct
+                },
+                false,
+            ),
+        ] {
+            let mut state = original.clone();
+            let outcome = state
+                .apply(
+                    device,
+                    state.next_sequence(device),
+                    Mutation::Close {
+                        target,
+                        confirmation: fence,
+                    },
+                    "/tmp".as_ref(),
+                    |_| true,
+                )
+                .unwrap();
+            assert_eq!(
+                outcome,
+                if accepted {
+                    Outcome::Accepted { target: tab }
+                } else {
+                    Outcome::StaleConfirmation
+                }
+            );
+            assert_eq!(state.inventory.workspaces.is_empty(), accepted);
+        }
+    }
+
+    #[test]
+    fn close_control_fields_read_old_wire_forms_and_omit_absent_fences() {
+        let old = serde_json::json!({ "boot": vec![9u8; 32], "sessions": [] });
+        let inventory: CloseInventory = serde_json::from_value(old.clone()).unwrap();
+        assert!(inventory.controls.is_none());
+        assert_eq!(serde_json::to_value(inventory).unwrap(), old);
+        let old = serde_json::json!({ "boot": vec![9u8; 32], "panes": [], "removes_tab": true, "removes_workspace": false });
+        let confirmation: CloseConfirmation = serde_json::from_value(old.clone()).unwrap();
+        assert!(confirmation.own_controls.is_none());
+        assert_eq!(serde_json::to_value(confirmation).unwrap(), old);
+    }
+
+    #[test]
     fn end_all_sessions_retains_exact_originals_across_acknowledgement_recovery_and_boots() {
         let mut state = State::empty();
         state.begin_boot([9; 32]);
@@ -1306,6 +1491,7 @@ mod tests {
             .unwrap();
         let pane = state.inventory.workspaces[0].tabs[0].root_pane;
         let original = CloseInventory {
+            controls: None,
             boot: [9; 32],
             sessions: vec![ConfirmedPane {
                 id: pane,
@@ -1421,6 +1607,7 @@ mod tests {
             )
             .unwrap();
         state.inventory.close = Some(CloseInventory {
+            controls: None,
             boot: [9; 32],
             sessions: state
                 .inventory
@@ -1504,6 +1691,7 @@ mod tests {
             .unwrap();
         state.remove_pane(outside_pane);
         state.inventory.close = Some(CloseInventory {
+            controls: None,
             boot: [9; 32],
             sessions: state
                 .inventory
@@ -1866,6 +2054,7 @@ mod tests {
         let survivor = state.inventory.workspaces[0].tabs[1].id;
         let pane = state.inventory.workspaces[0].tabs[0].root_pane;
         state.inventory.close = Some(CloseInventory {
+            controls: None,
             boot: [9; 32],
             sessions: vec![ConfirmedPane {
                 id: pane,
@@ -1875,6 +2064,7 @@ mod tests {
         let close = Mutation::Close {
             target: CloseTarget::Tab { workspace, tab },
             confirmation: CloseConfirmation {
+                own_controls: None,
                 boot: [9; 32],
                 removes_tab: true,
                 removes_workspace: false,
