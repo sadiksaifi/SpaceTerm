@@ -13,9 +13,9 @@ impl Records for MemoryRecords {
     fn load(&self) -> Result<Document, ()> {
         Ok(self.0.lock().unwrap().clone())
     }
-    fn save(&self, document: &Document) -> Result<(), ()> {
+    fn save(&self, document: &Document) -> Result<Durability, SaveError> {
         *self.0.lock().unwrap() = document.clone();
-        Ok(())
+        Ok(Durability::Synchronized)
     }
 }
 

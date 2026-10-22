@@ -252,12 +252,35 @@ fn validate_route(saved: &SavedRoute) -> Result<(), ()> {
 
 pub(super) trait Records: Send + Sync {
     fn load(&self) -> Result<Document, ()>;
-    fn save(&self, document: &Document) -> Result<(), ()>;
+    fn save(&self, document: &Document) -> Result<Durability, SaveError>;
+}
+
+/// Publication succeeded in either case. Uncertain synchronization is not a rollback.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum Durability {
+    Synchronized,
+    Uncertain,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum SaveError {
+    /// Failure before commit, or an identity conflict that published no candidate.
+    NotPublished,
+    /// Commit or rollback failed; further writes require an explicitly loaded snapshot.
+    PublicationIndeterminate,
+}
+
+#[derive(Default)]
+struct WriteAuthority {
+    identity: Option<SecureEntryIdentity>,
+    /// A commit error may follow publication or a failed rollback. Only an explicit
+    /// load can establish a new observed snapshot; retries must not guess its identity.
+    blocked: bool,
 }
 
 pub(super) struct PrivateRecords {
     paths: Arc<AppPaths>,
-    expected: Mutex<Option<SecureEntryIdentity>>,
+    expected: Mutex<WriteAuthority>,
 }
 
 impl PrivateRecords {
@@ -277,6 +300,7 @@ impl Records for PrivateRecords {
             .open_secure_root(AppDirectoryRoot::Data)
             .map_err(|_| ())?
         else {
+            *expected = WriteAuthority::default();
             return Ok(Document::default());
         };
         let snapshot = self
@@ -285,44 +309,114 @@ impl Records for PrivateRecords {
             .read_private_file(&directory, OsStr::new(FILE), MAX_BYTES)
             .map_err(|_| ())?;
         let Some(snapshot) = snapshot else {
+            *expected = WriteAuthority::default();
             return Ok(Document::default());
         };
         let document: Document = serde_json::from_slice(&snapshot.bytes).map_err(|_| ())?;
         document.validate()?;
-        *expected = Some(snapshot.identity);
+        *expected = WriteAuthority {
+            identity: Some(snapshot.identity),
+            blocked: false,
+        };
         Ok(document)
     }
 
-    fn save(&self, document: &Document) -> Result<(), ()> {
-        document.validate()?;
-        let bytes = serde_json::to_vec(document).map_err(|_| ())?;
+    fn save(&self, document: &Document) -> Result<Durability, SaveError> {
+        document.validate().map_err(|_| SaveError::NotPublished)?;
+        let bytes = serde_json::to_vec(document).map_err(|_| SaveError::NotPublished)?;
         if bytes.len() > MAX_BYTES {
-            return Err(());
+            return Err(SaveError::NotPublished);
         }
-        let mut expected = self.expected.lock().map_err(|_| ())?;
+        let mut expected = self.expected.lock().map_err(|_| SaveError::NotPublished)?;
+        if expected.blocked {
+            return Err(SaveError::PublicationIndeterminate);
+        }
         let directory = self
             .paths
             .ensure_secure_root(AppDirectoryRoot::Data)
-            .map_err(|_| ())?;
+            .map_err(|_| SaveError::NotPublished)?;
         let mut nonce = [0; 16];
-        getrandom::fill(&mut nonce).map_err(|_| ())?;
+        getrandom::fill(&mut nonce).map_err(|_| SaveError::NotPublished)?;
         let prepared = self
             .paths
             .filesystem()
             .prepare_private_file(&directory, OsStr::new(FILE), &bytes, nonce)
-            .map_err(|_| ())?;
-        let result = self
+            .map_err(|_| SaveError::NotPublished)?;
+        let result = match self
             .paths
             .filesystem()
-            .commit_private_file(prepared, expected.as_ref())
-            .map_err(|_| ())?;
-        if result.outcome != SecureCommitOutcome::Conflict {
-            *expected = result.published_identity;
+            .commit_private_file(prepared, expected.identity.as_ref())
+        {
+            Ok(result) => result,
+            Err(_) => {
+                expected.blocked = true;
+                return Err(SaveError::PublicationIndeterminate);
+            }
+        };
+        let durability = match result.outcome {
+            SecureCommitOutcome::Conflict => return Err(SaveError::NotPublished),
+            SecureCommitOutcome::Committed => Durability::Synchronized,
+            SecureCommitOutcome::CommittedButUnsynced => Durability::Uncertain,
+        };
+        expected.blocked = result.published_identity.is_none();
+        expected.identity = result.published_identity;
+        Ok(durability)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::platform::app_directories::AppDirectoryEnvironment;
+    use crate::platform::testing::{RecordingFilesystem, resolve_app_paths};
+
+    fn storage() -> (PrivateRecords, Arc<RecordingFilesystem>) {
+        let filesystem = Arc::new(RecordingFilesystem::default());
+        let paths = resolve_app_paths(
+            &AppDirectoryEnvironment {
+                home: Some("/home/test".into()),
+                ..Default::default()
+            },
+            Some("/runtime".into()),
+            200,
+            filesystem.clone(),
+        )
+        .unwrap();
+        (PrivateRecords::new(Arc::new(paths)), filesystem)
+    }
+
+    #[test]
+    fn an_uncertain_publication_retains_its_identity_for_the_next_synchronized_write() {
+        let (records, filesystem) = storage();
+        let mut document = Document::default();
+        assert_eq!(records.save(&document), Ok(Durability::Synchronized));
+        document.routes.push(super::super::tests::saved(1, 5));
+        filesystem.files.lock().unwrap().commit_outcome =
+            Some(SecureCommitOutcome::CommittedButUnsynced);
+
+        assert_eq!(records.save(&document), Ok(Durability::Uncertain));
+
+        filesystem.files.lock().unwrap().commit_outcome = None;
+        document.routes[0].route.label = "Saved again".to_owned();
+        assert_eq!(records.save(&document), Ok(Durability::Synchronized));
+        assert_eq!(records.load().unwrap().routes[0].route.label, "Saved again");
+    }
+
+    #[test]
+    fn an_uncertain_publication_never_captures_a_competing_successors_identity() {
+        let (records, filesystem) = storage();
+        let mut document = Document::default();
+        document.routes.push(super::super::tests::saved(1, 5));
+        {
+            let mut files = filesystem.files.lock().unwrap();
+            files.commit_outcome = Some(SecureCommitOutcome::CommittedButUnsynced);
+            files.successor_after_commit = Some(serde_json::to_vec(&document).unwrap());
         }
-        if result.outcome == SecureCommitOutcome::Committed {
-            Ok(())
-        } else {
-            Err(())
-        }
+        assert_eq!(records.save(&document), Ok(Durability::Uncertain));
+        filesystem.files.lock().unwrap().commit_outcome = None;
+        document.routes[0].route.label = "Must not replace the successor".to_owned();
+
+        assert_eq!(records.save(&document), Err(SaveError::NotPublished));
+        assert_eq!(records.load().unwrap().routes[0].route.label, "Server 1");
     }
 }

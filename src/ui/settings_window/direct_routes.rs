@@ -36,6 +36,12 @@ pub(super) const UNPAIR_SELF_SELECTOR: &str = "settings-direct-server-unpair";
 pub(super) const UNPAIR_SELF_CONFIRM_SELECTOR: &str = "settings-direct-server-unpair-confirm";
 pub(super) const UNPAIR_SELF_CANCEL_SELECTOR: &str = "settings-direct-server-unpair-cancel";
 pub(super) const PENDING_SELECTOR: &str = "settings-pending-unpairs";
+/// What a direct route says while SpaceTerm can't confirm its latest changes to direct
+/// connections are saved. The record covers every connection, so this speaks of recent changes
+/// rather than of any one connection.
+pub(super) const UNSAVED_CHANGES: &str = "SpaceTerm couldn\u{2019}t confirm its latest changes to \
+     direct connections are saved on this computer, so recent changes, such as a new pairing, may \
+     be missing after SpaceTerm reopens.";
 /// Why unpair requests appear after their connections are gone.
 pub(super) const PENDING_GUIDANCE: &str = "SpaceTerm removed these connections on this computer. \
      It keeps finishing what each one still needs quietly, and asks for your permission only when \
@@ -53,6 +59,8 @@ pub(super) struct DirectRouteRows {
     pub(super) join_failure: Option<crate::local_server::direct::DirectError>,
     /// Whether the person cancelled the latest join, which the registry reports as refused.
     pub(super) join_cancelled: bool,
+    /// Why SpaceTerm couldn't save the person's cancellation or withdrawal of the latest join.
+    pub(super) join_withdraw_failure: Option<crate::local_server::direct::DirectError>,
     /// Whether the Servers list already selected the latest join's new route.
     pub(super) join_selected: bool,
     /// Repaints a waiting join's countdown.
@@ -120,6 +128,7 @@ impl DirectRouteRows {
             join: None,
             join_failure: None,
             join_cancelled: false,
+            join_withdraw_failure: None,
             join_selected: false,
             join_tick: None,
             problem: None,
@@ -401,6 +410,22 @@ impl SettingsWindow {
                     return Some((failure.explanation(&name).into(), CaptionTone::Error));
                 }
                 let presentation = present(status, &name);
+                // While SpaceTerm can't confirm its latest changes are saved, every route says so
+                // here, wherever the person reached it from, until a save succeeds.
+                let unsaved = self
+                    .direct_routes
+                    .as_ref()
+                    .is_some_and(|rows| rows.connections.persistence_error());
+                if unsaved {
+                    let tone = match presentation.tone {
+                        CaptionTone::Error => CaptionTone::Error,
+                        _ => CaptionTone::Warning,
+                    };
+                    return Some((
+                        format!("{} {UNSAVED_CHANGES}", presentation.explanation).into(),
+                        tone,
+                    ));
+                }
                 Some((presentation.explanation.into(), presentation.tone))
             }
             SettingsRowId::UnpairThisDevice => Some((
@@ -448,8 +473,9 @@ impl SettingsWindow {
         if persistence {
             return Some((
                 SharedString::new_static(
-                    "SpaceTerm couldn\u{2019}t save its direct connections on this computer, so \
-                     these requests may not continue after SpaceTerm reopens.",
+                    "SpaceTerm couldn\u{2019}t confirm its latest changes to direct connections are \
+                     saved on this computer, so these requests may not continue after SpaceTerm \
+                     reopens.",
                 ),
                 CaptionTone::Warning,
             ));

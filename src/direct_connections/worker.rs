@@ -125,6 +125,8 @@ impl DirectConnections {
                         matches!(
                             j.status,
                             JoinStatus::Approved(_)
+                                | JoinStatus::ApprovedUncertain(_)
+                                | JoinStatus::PublicationUnconfirmed
                                 | JoinStatus::Rejected
                                 | JoinStatus::Expired
                                 | JoinStatus::Failed(_)
@@ -735,8 +737,8 @@ fn complete_enrollment(owner: &DirectConnections, id: JoinId, saved: SavedRoute)
     let original = state.document.clone();
     state.document.pending.retain(|p| p.operation != id);
     state.document.routes.push(saved);
-    let committed = owner.0.save(&mut state);
-    if committed {
+    let publication = owner.0.publish(&mut state);
+    if publication.is_ok() {
         state.pending.remove(&id);
         state.routes.insert(
             id,
@@ -748,80 +750,342 @@ fn complete_enrollment(owner: &DirectConnections, id: JoinId, saved: SavedRoute)
             },
         );
     } else {
-        // Ordinary connections and presentation require a durable route. The
-        // original enrollment keeps its key and resolves only cancellation.
+        // An unconfirmed publication must not claim either failure or withdrawal.
+        // A definite non-publication keeps the original for restricted cancellation.
         state.document = original;
-        if let Some(pending) = state
-            .document
-            .pending
-            .iter_mut()
-            .find(|p| p.operation == id)
+        if publication == Err(SaveError::NotPublished)
+            && let Some(pending) = state
+                .document
+                .pending
+                .iter_mut()
+                .find(|p| p.operation == id)
         {
             pending.cancel_requested = true;
         }
     }
     if let Some(join) = state.joins.get_mut(&id) {
-        join.status = if committed {
-            JoinStatus::Approved(id)
-        } else {
-            JoinStatus::Failed(DirectError::StorageUnavailable)
+        join.status = match publication {
+            Ok(Durability::Synchronized) => JoinStatus::Approved(id),
+            Ok(Durability::Uncertain) => JoinStatus::ApprovedUncertain(id),
+            Err(SaveError::NotPublished) => JoinStatus::Failed(DirectError::StorageUnavailable),
+            Err(SaveError::PublicationIndeterminate) => JoinStatus::PublicationUnconfirmed,
         };
     }
 }
 
 #[cfg(test)]
-mod enrollment_tests {
+pub(super) mod enrollment_tests {
+    use super::super::tests::{Answer, Credentials, Network};
     use super::*;
+    use crate::platform::app_directories::AppDirectoryEnvironment;
+    use crate::platform::app_paths::AppPaths;
+    use crate::platform::secure_filesystem::SecureCommitOutcome;
+    use crate::platform::testing::{RecordingFilesystem, resolve_app_paths};
+
+    struct EnrollmentFixture {
+        owner: DirectConnections,
+        paths: Arc<AppPaths>,
+        filesystem: Arc<RecordingFilesystem>,
+        credentials: Arc<Credentials>,
+        network: Arc<Network>,
+        saved: SavedRoute,
+    }
+
+    impl EnrollmentFixture {
+        fn new(label: &str) -> Self {
+            let filesystem = Arc::new(RecordingFilesystem::default());
+            let paths = Arc::new(
+                resolve_app_paths(
+                    &AppDirectoryEnvironment {
+                        home: Some("/home/test".into()),
+                        ..Default::default()
+                    },
+                    Some("/runtime".into()),
+                    200,
+                    filesystem.clone(),
+                )
+                .unwrap(),
+            );
+            let credentials = Arc::new(Credentials::default());
+            let network = Network::new(Answer::Lost);
+            let mut saved = super::super::tests::saved(1, 5);
+            saved.active = true;
+            saved.route.label = label.to_owned();
+            let credential = DeviceCredential::generate().unwrap();
+            credentials
+                .insert(&saved.credential, credential.expose_bytes())
+                .unwrap();
+            // Relaunch can inspect the retained route without starting network I/O.
+            credentials.locked.store(true, Ordering::Release);
+            let owner = DirectConnections::new(
+                "spaceterm-development",
+                Arc::new(PrivateRecords::new(paths.clone())),
+                credentials.clone(),
+                network.clone(),
+            );
+            {
+                let mut state = owner.0.state.lock().unwrap();
+                state.document.pending.push(PendingRecord::enrollment(
+                    saved.route.id,
+                    saved.route.label.clone(),
+                    saved.route.endpoint.clone(),
+                    saved.route.paired.pin.clone(),
+                    [8; 32],
+                    saved.credential,
+                    false,
+                ));
+                state
+                    .pending
+                    .insert(saved.route.id, Retry::new(Interaction::Quiet));
+                state.joins.insert(
+                    saved.route.id,
+                    JoinState {
+                        status: JoinStatus::Validating,
+                        cancelled: false,
+                    },
+                );
+                owner.0.records.save(&state.document).unwrap();
+            }
+            Self {
+                owner,
+                paths,
+                filesystem,
+                credentials,
+                network,
+                saved,
+            }
+        }
+
+        fn relaunch(&self) -> DirectConnections {
+            let owner = DirectConnections::new(
+                "spaceterm-development",
+                Arc::new(PrivateRecords::new(self.paths.clone())),
+                self.credentials.clone(),
+                self.network.clone(),
+            );
+            owner.resume_retained();
+            owner
+        }
+    }
+
+    pub(crate) fn uncertain_join(label: &str) -> (DirectConnections, JoinId, DirectRouteId) {
+        let fixture = EnrollmentFixture::new(label);
+        fixture.filesystem.files.lock().unwrap().commit_outcome =
+            Some(SecureCommitOutcome::CommittedButUnsynced);
+        let id = fixture.saved.route.id;
+        complete_enrollment(&fixture.owner, id, fixture.saved);
+        fixture.owner.start_worker();
+        (fixture.owner, id, id)
+    }
+
+    pub(crate) fn unconfirmed_join(label: &str) -> (DirectConnections, JoinId) {
+        let fixture = EnrollmentFixture::new(label);
+        fixture.filesystem.files.lock().unwrap().commit_error =
+            Some(crate::platform::secure_filesystem::SecureFilesystemError::Unavailable);
+        let id = fixture.saved.route.id;
+        complete_enrollment(&fixture.owner, id, fixture.saved);
+        fixture.owner.start_worker();
+        (fixture.owner, id)
+    }
 
     #[test]
-    fn a_failed_pairing_save_keeps_restricted_cleanup_and_never_presents_a_route() {
-        struct UnavailableRecords;
-        impl Records for UnavailableRecords {
-            fn load(&self) -> Result<Document, ()> {
-                Ok(Document::default())
-            }
-            fn save(&self, _: &Document) -> Result<(), ()> {
-                Err(())
-            }
-        }
-        let saved = super::super::tests::saved(1, 5);
-        let id = saved.route.id;
-        let owner = DirectConnections::new(
-            "spaceterm-development",
-            Arc::new(UnavailableRecords),
-            credentials::native("spaceterm-development"),
-            Arc::new(NativeNetwork),
+    fn published_enrollment_with_uncertain_sync_is_never_reported_as_failed() {
+        let fixture = EnrollmentFixture::new("Server 1");
+        fixture.filesystem.files.lock().unwrap().commit_outcome =
+            Some(SecureCommitOutcome::CommittedButUnsynced);
+        let id = fixture.saved.route.id;
+
+        complete_enrollment(&fixture.owner, id, fixture.saved.clone());
+        let relaunched = fixture.relaunch();
+
+        assert!(
+            relaunched.route(&id).is_some(),
+            "the filesystem really published the route"
         );
+        assert!(
+            matches!(fixture.owner.join_status(id), Some(JoinStatus::ApprovedUncertain(route)) if route == id)
+        );
+        assert!(fixture.owner.route(&id).is_some());
+        assert!(fixture.owner.persistence_error());
+        assert!(fixture.owner.pending_unpairs().is_empty());
+        assert!(relaunched.pending_unpairs().is_empty());
+        assert!(fixture.network.cancellations.lock().unwrap().is_empty());
+        assert!(
+            fixture
+                .credentials
+                .values
+                .lock()
+                .unwrap()
+                .contains_key(&fixture.saved.credential)
+        );
+        fixture.filesystem.files.lock().unwrap().commit_outcome = None;
         {
-            let mut state = owner.0.state.lock().unwrap();
-            state.document.pending.push(PendingRecord::enrollment(
-                id,
-                saved.route.label.clone(),
-                saved.route.endpoint.clone(),
-                saved.route.paired.pin.clone(),
-                [8; 32],
-                saved.credential,
-                false,
-            ));
-            state.pending.insert(id, Retry::new(Interaction::Quiet));
-            state.joins.insert(
-                id,
-                JoinState {
-                    status: JoinStatus::Validating,
-                    cancelled: false,
-                },
-            );
+            let mut state = fixture.owner.0.state.lock().unwrap();
+            assert!(fixture.owner.0.save(&mut state));
         }
-        complete_enrollment(&owner, id, saved);
-        assert!(owner.route(&id).is_none());
-        assert!(owner.server(&id).is_none());
+        assert!(
+            matches!(fixture.owner.join_status(id), Some(JoinStatus::Approved(route)) if route == id)
+        );
+        assert!(!fixture.owner.persistence_error());
+    }
+
+    #[test]
+    fn a_failed_pairing_save_keeps_restricted_cleanup_across_relaunch() {
+        let fixture = EnrollmentFixture::new("Server 1");
+        fixture.filesystem.files.lock().unwrap().prepare_error =
+            Some(crate::platform::secure_filesystem::SecureFilesystemError::Unavailable);
+        let id = fixture.saved.route.id;
+
+        complete_enrollment(&fixture.owner, id, fixture.saved.clone());
+        let relaunched = fixture.relaunch();
+
         assert!(matches!(
-            owner.join_status(id),
+            fixture.owner.join_status(id),
             Some(JoinStatus::Failed(DirectError::StorageUnavailable))
         ));
-        let pending = owner.pending_unpairs();
+        for owner in [&fixture.owner, &relaunched] {
+            assert!(owner.route(&id).is_none());
+            assert!(owner.server(&id).is_none());
+            let state = owner.0.state.lock().unwrap();
+            let pending = &state.document.pending[0];
+            assert!(pending.cancel_requested);
+            assert!(!pending.confirmed);
+            assert!(matches!(&pending.authority,
+                Authority::Enrollment { claim, credential, .. }
+                    if *claim == [8; 32] && *credential == fixture.saved.credential));
+        }
+        assert!(
+            fixture
+                .credentials
+                .values
+                .lock()
+                .unwrap()
+                .contains_key(&fixture.saved.credential)
+        );
+        assert!(fixture.network.cancellations.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn indeterminate_publication_does_not_claim_failure_or_automatically_withdraw() {
+        let fixture = EnrollmentFixture::new("Server 1");
+        fixture.filesystem.files.lock().unwrap().commit_error =
+            Some(crate::platform::secure_filesystem::SecureFilesystemError::Unavailable);
+        let id = fixture.saved.route.id;
+
+        complete_enrollment(&fixture.owner, id, fixture.saved.clone());
+        work(&fixture.owner.0);
+
+        assert!(matches!(
+            fixture.owner.join_status(id),
+            Some(JoinStatus::PublicationUnconfirmed)
+        ));
+        assert!(fixture.owner.route(&id).is_none());
+        assert!(fixture.owner.pending_unpairs().is_empty());
+        assert!(fixture.network.cancellations.lock().unwrap().is_empty());
+        assert!(
+            fixture
+                .credentials
+                .values
+                .lock()
+                .unwrap()
+                .contains_key(&fixture.saved.credential)
+        );
+
+        // Removing the transient error cannot grant write authority over an unknown publication.
+        fixture.filesystem.files.lock().unwrap().commit_error = None;
+        fixture.credentials.locked.store(false, Ordering::Release);
+        assert_eq!(
+            fixture.owner.cancel_join(id),
+            Err(DirectError::StorageUnavailable)
+        );
+        let pending = fixture.owner.pending_unpairs();
         assert_eq!(pending.len(), 1);
         assert!(pending[0].enrollment_cleanup);
-        assert!(!pending[0].server_confirmed);
+        assert!(fixture.owner.persistence_error());
+        let (pending, due) = {
+            let state = fixture.owner.0.state.lock().unwrap();
+            (state.document.pending[0].clone(), state.pending[&id].due)
+        };
+        recover(&fixture.owner.0, pending, Interaction::Quiet, due);
+        assert!(fixture.network.cancellations.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn uncertain_request_retention_cannot_authorize_a_network_effect() {
+        let fixture = EnrollmentFixture::new("Server 1");
+        fixture.credentials.locked.store(false, Ordering::Release);
+        fixture.filesystem.files.lock().unwrap().commit_outcome =
+            Some(SecureCommitOutcome::CommittedButUnsynced);
+        let (pending, due) = {
+            let mut state = fixture.owner.0.state.lock().unwrap();
+            state.document.pending[0].cancel_requested = true;
+            assert!(!fixture.owner.0.save(&mut state));
+            (
+                state.document.pending[0].clone(),
+                state.pending[&fixture.saved.route.id].due,
+            )
+        };
+
+        recover(&fixture.owner.0, pending, Interaction::Quiet, due);
+
+        assert!(fixture.network.cancellations.lock().unwrap().is_empty());
+        assert!(
+            fixture
+                .credentials
+                .values
+                .lock()
+                .unwrap()
+                .contains_key(&fixture.saved.credential)
+        );
+    }
+
+    #[test]
+    fn uncertain_receipt_retention_cannot_retire_the_native_credential() {
+        let fixture = EnrollmentFixture::new("Server 1");
+        fixture.credentials.locked.store(false, Ordering::Release);
+        let (pending, due) = {
+            let mut state = fixture.owner.0.state.lock().unwrap();
+            state.document.pending[0].cancel_requested = true;
+            assert!(fixture.owner.0.save(&mut state));
+            (
+                state.document.pending[0].clone(),
+                state.pending[&fixture.saved.route.id].due,
+            )
+        };
+        fixture.filesystem.files.lock().unwrap().commit_outcome =
+            Some(SecureCommitOutcome::CommittedButUnsynced);
+
+        recover(&fixture.owner.0, pending, Interaction::Quiet, due);
+
+        assert_eq!(fixture.network.cancellations.lock().unwrap().len(), 1);
+        assert!(
+            fixture
+                .credentials
+                .values
+                .lock()
+                .unwrap()
+                .contains_key(&fixture.saved.credential)
+        );
+        let (pending, due) = {
+            let state = fixture.owner.0.state.lock().unwrap();
+            assert!(state.document.pending[0].confirmed);
+            (
+                state.document.pending[0].clone(),
+                state.pending[&fixture.saved.route.id].due,
+            )
+        };
+        fixture.filesystem.files.lock().unwrap().commit_outcome = None;
+        recover(&fixture.owner.0, pending, Interaction::Quiet, due);
+
+        assert_eq!(fixture.network.cancellations.lock().unwrap().len(), 1);
+        assert!(
+            !fixture
+                .credentials
+                .values
+                .lock()
+                .unwrap()
+                .contains_key(&fixture.saved.credential)
+        );
+        assert!(fixture.owner.pending_unpairs().is_empty());
     }
 }

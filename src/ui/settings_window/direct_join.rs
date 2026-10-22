@@ -29,6 +29,15 @@ pub(super) const INVITATION_SELECTOR: &str = "settings-join-invitation";
 pub(super) const JOIN_SELECTOR: &str = "settings-join-invitation-join";
 pub(super) const JOIN_CANCEL_SELECTOR: &str = "settings-join-invitation-cancel";
 pub(super) const JOIN_STATUS_SELECTOR: &str = "settings-join-invitation-status";
+pub(super) const WITHDRAW_SELECTOR: &str = "settings-join-invitation-withdraw";
+pub(super) const WITHDRAW_CONFIRM_SELECTOR: &str = "settings-join-invitation-withdraw-confirm";
+pub(super) const WITHDRAW_CANCEL_SELECTOR: &str = "settings-join-invitation-withdraw-cancel";
+pub(super) const WITHDRAW_FAILURE_SELECTOR: &str = "settings-join-invitation-withdraw-failure";
+/// What a stop SpaceTerm couldn't save says. It states the rule rather than the server's state,
+/// since a later quiet save may already have sent it, and it stays only until a save succeeds.
+const WITHDRAW_UNSAVED: &str = "SpaceTerm couldn\u{2019}t save this request on this computer yet. \
+     It asks the server only after the request is saved, and the request may be gone if SpaceTerm \
+     reopens first.";
 /// How often a waiting join repaints its countdown.
 const TICK: Duration = Duration::from_secs(1);
 
@@ -101,6 +110,7 @@ impl SettingsWindow {
         }
         rows.join_failure = None;
         rows.join_cancelled = false;
+        rows.join_withdraw_failure = None;
         rows.join_selected = false;
         let connections = rows.connections.clone();
         // The name this device gives the server, as every other client connection gives it. It
@@ -139,6 +149,12 @@ impl SettingsWindow {
             rows.join_tick = None;
             return;
         };
+        // A stop SpaceTerm couldn't save is saved once the registry saves again, so the alert
+        // follows that recovery rather than outliving it.
+        if rows.join_withdraw_failure.is_some() && !rows.connections.persistence_error() {
+            rows.join_withdraw_failure = None;
+            cx.notify();
+        }
         match rows.connections.join_status(join) {
             Some(JoinStatus::AwaitingApproval { .. } | JoinStatus::Validating) => {
                 if rows.join_tick.is_none() {
@@ -152,7 +168,9 @@ impl SettingsWindow {
                     }));
                 }
             }
-            Some(JoinStatus::Approved(route)) => {
+            // A route SpaceTerm published is in use whether or not its save was confirmed; the
+            // route's own detail keeps saying when it wasn't.
+            Some(JoinStatus::Approved(route) | JoinStatus::ApprovedUncertain(route)) => {
                 rows.join_tick = None;
                 // The person just paired with this server, so it is the one they want to see.
                 if !rows.join_selected {
@@ -164,15 +182,80 @@ impl SettingsWindow {
         }
     }
 
+    /// Asks before withdrawing a pairing whose save SpaceTerm couldn't confirm. Withdrawing is
+    /// the person's explicit request; without it SpaceTerm withdraws nothing.
+    fn confirm_withdraw_join(&mut self, window: &mut gpui::Window, cx: &mut Context<Self>) {
+        let owner = cx.weak_entity();
+        let title = "Withdraw this pairing?";
+        let result = spaceterm_ui::Alert::new(
+            spaceterm_ui::ModalId::new("settings-join-invitation-withdraw"),
+            title,
+            title,
+            "SpaceTerm records the request on this computer, asks the server to remove this \
+             device\u{2019}s pairing, and shows the request under Unpair requests.",
+            vec![
+                spaceterm_ui::ModalAction::new(
+                    true,
+                    "Withdraw",
+                    spaceterm_ui::ModalActionRole::Affirmative,
+                    WITHDRAW_CONFIRM_SELECTOR,
+                )
+                .with_intent(spaceterm_ui::ModalActionIntent::Destructive)
+                .with_emphasis(spaceterm_ui::ModalActionEmphasis::Prominent),
+                spaceterm_ui::ModalAction::new(
+                    false,
+                    "Cancel",
+                    spaceterm_ui::ModalActionRole::Cancel,
+                    WITHDRAW_CANCEL_SELECTOR,
+                ),
+            ],
+        )
+        .intent(spaceterm_ui::AlertIntent::Critical)
+        .detail("To connect to that server again, this device needs a new invitation.")
+        .present(window, cx, move |outcome, cx| {
+            if matches!(
+                outcome,
+                spaceterm_ui::AlertOutcome::Activated {
+                    action_id: true,
+                    ..
+                }
+            ) {
+                let _ = owner.update(cx, |settings, cx| settings.cancel_join(cx));
+            }
+        });
+        if result.is_err() {
+            eprintln!("failed to present the withdraw pairing confirmation");
+        }
+    }
+
+    /// Records the person's cancellation or withdrawal of the latest join. Saving it touches this
+    /// computer's storage, so it runs off the window's thread, and a save that fails says so.
     fn cancel_join(&mut self, cx: &mut Context<Self>) {
         let Some(rows) = self.direct_routes.as_mut() else {
             return;
         };
-        if let Some(join) = rows.join {
-            rows.join_cancelled = true;
-            rows.connections.cancel_join(join);
-        }
         rows.join_tick = None;
+        let Some(join) = rows.join else {
+            cx.notify();
+            return;
+        };
+        rows.join_cancelled = true;
+        rows.join_withdraw_failure = None;
+        let connections = rows.connections.clone();
+        rows._work = Some(cx.spawn(async move |settings, cx| {
+            let cancelled = cx
+                .background_executor()
+                .spawn(async move { connections.cancel_join(join) })
+                .await;
+            let _ = settings.update(cx, |settings, cx| {
+                if let Some(rows) = settings.direct_routes.as_mut()
+                    && rows.join == Some(join)
+                {
+                    rows.join_withdraw_failure = cancelled.err();
+                }
+                cx.notify();
+            });
+        }));
         cx.notify();
     }
 
@@ -376,17 +459,76 @@ impl SettingsWindow {
                     ))
                     .into_any_element(),
             ),
+            (Some(JoinStatus::ApprovedUncertain(_)), None) => Some(
+                div()
+                    .id(JOIN_STATUS_SELECTOR)
+                    .debug_selector(|| JOIN_STATUS_SELECTOR.to_owned())
+                    .role(accesskit::Role::Status)
+                    .child(secondary(
+                        "Paired. SpaceTerm is using the connection, which is selected below, but \
+                         couldn\u{2019}t confirm it\u{2019}s saved on this computer."
+                            .into(),
+                        colors.warning,
+                    ))
+                    .into_any_element(),
+            ),
+            // SpaceTerm can't tell whether the connection was saved, so it uses none and claims
+            // neither success nor withdrawal. Reopening shows a connection that was saved, and
+            // only the person's Withdraw asks the server to remove the pairing.
+            (Some(JoinStatus::PublicationUnconfirmed), None) => {
+                let withdraw = {
+                    let owner = owner.clone();
+                    Button::new(WITHDRAW_SELECTOR, "Withdraw Pairing\u{2026}")
+                        .variant(ButtonVariant::Outline)
+                        .size(ButtonSize::Regular)
+                        .tab_stop(true)
+                        .debug_selector(WITHDRAW_SELECTOR)
+                        .accessibility_description(
+                            "Ask the server to remove this device\u{2019}s pairing",
+                        )
+                        .on_activate(move |_, window, cx| {
+                            let _ = owner.update(cx, |settings, cx| {
+                                settings.confirm_withdraw_join(window, cx);
+                            });
+                        })
+                };
+                Some(
+                    div()
+                        .id(JOIN_STATUS_SELECTOR)
+                        .debug_selector(|| JOIN_STATUS_SELECTOR.to_owned())
+                        .role(accesskit::Role::Alert)
+                        .flex()
+                        .flex_row()
+                        .items_start()
+                        .gap(appearance.spacing(8.0))
+                        .child(
+                            div().flex_1().min_w_0().child(secondary(
+                                "The server approved this device, but SpaceTerm couldn\u{2019}t \
+                             confirm whether it saved the connection on this computer, so it \
+                             isn\u{2019}t using it now. If it was saved, it appears when \
+                             SpaceTerm reopens."
+                                    .into(),
+                                colors.warning,
+                            )),
+                        )
+                        .when(!rows.join_cancelled, |status| status.child(withdraw))
+                        .into_any_element(),
+                )
+            }
             (Some(JoinStatus::Rejected), None) => Some(
                 div()
                     .id(JOIN_STATUS_SELECTOR)
                     .debug_selector(|| JOIN_STATUS_SELECTOR.to_owned())
                     .role(accesskit::Role::Status)
                     .child(secondary(
-                        // A request the server already received is withdrawn in the background and
-                        // listed under Unpair requests until it is.
-                        if rows.join_cancelled {
-                            "You cancelled the request. SpaceTerm withdraws anything the server \
+                        // A stop SpaceTerm saved is withdrawn from the server in the background and
+                        // listed under Unpair requests until it is. One it couldn't save says so
+                        // below, and Unpair requests offers its next step.
+                        if rows.join_cancelled && rows.join_withdraw_failure.is_none() {
+                            "You stopped this pairing. SpaceTerm withdraws anything the server \
                              already received."
+                        } else if rows.join_cancelled {
+                            "You stopped this pairing."
                         } else {
                             DECLINED
                         }
@@ -438,6 +580,15 @@ impl SettingsWindow {
                 colors.text_muted,
             ))
             .children(report)
+            .when_some(rows.join_withdraw_failure, |row, _| {
+                row.child(
+                    div()
+                        .id(WITHDRAW_FAILURE_SELECTOR)
+                        .debug_selector(|| WITHDRAW_FAILURE_SELECTOR.to_owned())
+                        .role(accesskit::Role::Alert)
+                        .child(secondary(WITHDRAW_UNSAVED.into(), colors.error)),
+                )
+            })
             .into_any_element()
     }
 }

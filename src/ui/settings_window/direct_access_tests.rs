@@ -29,9 +29,13 @@ use crate::ui::direct_access::{
 };
 use crate::ui::direct_pairing::{APPROVE_SELECTOR, COPY_SELECTOR, DONE_SELECTOR};
 use crate::ui::settings_window::SettingsWindow;
-use crate::ui::settings_window::direct_routes::{
-    PENDING_SELECTOR, UNPAIR_SELF_CONFIRM_SELECTOR, UNPAIR_SELF_SELECTOR,
+use crate::ui::settings_window::direct_join::{
+    WITHDRAW_CONFIRM_SELECTOR, WITHDRAW_FAILURE_SELECTOR, WITHDRAW_SELECTOR,
 };
+use crate::ui::settings_window::direct_routes::{
+    PENDING_SELECTOR, UNPAIR_SELF_CONFIRM_SELECTOR, UNPAIR_SELF_SELECTOR, UNSAVED_CHANGES,
+};
+use crate::ui::settings_window::server_list::ServerChoice;
 
 /// The direct route's place in the server list, after the local server.
 const DIRECT_ROUTE_ITEM: &str = "settings-server-list-1";
@@ -239,6 +243,7 @@ fn retype(text: &str, cx: &mut VisualTestContext) {
 }
 
 /// Repaints until `done` holds, while the registry's worker runs on its own threads.
+#[track_caller]
 fn settle(cx: &mut VisualTestContext, mut done: impl FnMut(&mut VisualTestContext) -> bool) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
@@ -491,4 +496,126 @@ fn a_dismissed_unpair_returns_with_resume_once_only_the_person_can_continue_it(
         state(&direct) != Some(UnpairState::NeedsInteraction)
     });
     settle(cx, |cx| !open(&notice, cx));
+}
+
+/// Shows `join` in the Join row, as if this window had started it, and follows it.
+fn follow(
+    window: &Entity<SettingsWindow>,
+    join: crate::direct_connections::JoinId,
+    cx: &mut VisualTestContext,
+) {
+    window.update(cx, |settings, cx| {
+        if let Some(rows) = settings.direct_routes.as_mut() {
+            rows.join = Some(join);
+        }
+        settings.follow_join(cx);
+        // Starting a join repaints the window, as Join does.
+        cx.notify();
+    });
+    cx.run_until_parked();
+}
+
+#[gpui::test]
+fn a_pairing_saved_without_confirmation_is_selected_and_its_detail_keeps_the_warning(
+    cx: &mut TestAppContext,
+) {
+    // The registry's worker reaches the new route on its own thread.
+    cx.executor().allow_parking();
+    let access = ScriptedAccess::new(Listener::Off);
+    let (direct, join, route) = crate::direct_connections::tests::uncertain_join("studio");
+    let (window, cx) = open_servers_with(&access, Some(direct.clone()), cx);
+
+    follow(&window, join, cx);
+    // The window follows the join as the registry reports it, wherever that report comes from.
+    settle(cx, |cx| {
+        window.read_with(cx, |settings, _| settings.selected_server())
+            == Some(ServerChoice::Direct(route))
+    });
+
+    // The Join row moves on, and the route's own detail still says its save is unconfirmed.
+    window.update(cx, |settings, cx| {
+        if let Some(rows) = settings.direct_routes.as_mut() {
+            rows.join = None;
+        }
+        cx.notify();
+    });
+    cx.run_until_parked();
+    assert!(
+        says(UNSAVED_CHANGES, cx),
+        "the selected route keeps its durability warning"
+    );
+}
+
+/// The fixture's storage can't confirm any further save after an unknown publication, so the
+/// person's withdrawal is requested but not retained, and the window says exactly that.
+#[gpui::test]
+fn a_pairing_whose_save_is_unknown_uses_no_route_and_reports_an_unsaved_withdrawal(
+    cx: &mut TestAppContext,
+) {
+    cx.executor().allow_parking();
+    let access = ScriptedAccess::new(Listener::Off);
+    let (direct, join) = crate::direct_connections::tests::unconfirmed_join("studio");
+    let (window, cx) = open_servers_with(&access, Some(direct.clone()), cx);
+
+    follow(&window, join, cx);
+    settle(cx, |cx| open(WITHDRAW_SELECTOR, cx));
+
+    assert!(
+        direct.routes().is_empty(),
+        "SpaceTerm uses no connection it may not have saved"
+    );
+    assert!(!open(DIRECT_ROUTE_ITEM, cx));
+    assert!(
+        direct.pending_unpairs().is_empty(),
+        "nothing is withdrawn until the person asks"
+    );
+
+    click(WITHDRAW_SELECTOR, cx);
+    click(&modal_action(WITHDRAW_CONFIRM_SELECTOR), cx);
+
+    settle(cx, |cx| open(WITHDRAW_FAILURE_SELECTOR, cx));
+
+    assert!(
+        says("couldn\u{2019}t save this request on this computer yet", cx),
+        "a withdrawal SpaceTerm couldn't save says so rather than promising to continue"
+    );
+    assert!(
+        open(&format!("{PENDING_SELECTOR}-0"), cx),
+        "the requested withdrawal is listed with its next step"
+    );
+    assert!(
+        !says("withdraws anything the server already received", cx),
+        "nothing promises a withdrawal SpaceTerm couldn't save"
+    );
+    assert!(
+        direct.routes().is_empty(),
+        "withdrawing presents no connection"
+    );
+}
+
+/// A stop that couldn't be saved stops saying so once the registry saves again, so the alert
+/// follows recovery instead of outliving it.
+#[gpui::test]
+fn an_unsaved_stop_alert_clears_once_the_registry_saves_again(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let access = ScriptedAccess::new(Listener::Off);
+    let (direct, route) = crate::direct_connections::tests::offline("studio");
+    let (window, cx) = open_servers_with(&access, Some(direct.clone()), cx);
+    window.update(cx, |settings, cx| {
+        if let Some(rows) = settings.direct_routes.as_mut() {
+            rows.join = Some(route);
+            rows.join_cancelled = true;
+            rows.join_withdraw_failure =
+                Some(crate::local_server::direct::DirectError::StorageUnavailable);
+        }
+        cx.notify();
+    });
+    cx.run_until_parked();
+    assert!(open(WITHDRAW_FAILURE_SELECTOR, cx));
+
+    // A change the registry saves and announces, as a quiet retry's save would.
+    direct.disconnect(&route);
+    assert!(!direct.persistence_error(), "the registry saved its change");
+
+    settle(cx, |cx| !open(WITHDRAW_FAILURE_SELECTOR, cx));
 }

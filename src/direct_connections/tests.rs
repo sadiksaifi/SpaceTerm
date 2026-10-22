@@ -5,23 +5,31 @@ use super::credentials::CredentialError;
 use super::worker::DirectNetwork;
 use super::*;
 
+pub(crate) fn uncertain_join(label: &str) -> (DirectConnections, JoinId, DirectRouteId) {
+    super::worker::enrollment_tests::uncertain_join(label)
+}
+
+pub(crate) fn unconfirmed_join(label: &str) -> (DirectConnections, JoinId) {
+    super::worker::enrollment_tests::unconfirmed_join(label)
+}
+
 #[derive(Default)]
 struct MemoryRecords(Mutex<Document>);
 impl Records for MemoryRecords {
     fn load(&self) -> Result<Document, ()> {
         Ok(self.0.lock().unwrap().clone())
     }
-    fn save(&self, document: &Document) -> Result<(), ()> {
+    fn save(&self, document: &Document) -> Result<Durability, SaveError> {
         *self.0.lock().unwrap() = document.clone();
-        Ok(())
+        Ok(Durability::Synchronized)
     }
 }
 
 #[derive(Default)]
-struct Credentials {
-    values: Mutex<BTreeMap<[u8; 32], Zeroizing<Vec<u8>>>>,
+pub(super) struct Credentials {
+    pub(super) values: Mutex<BTreeMap<[u8; 32], Zeroizing<Vec<u8>>>>,
     reads: Mutex<Vec<Interaction>>,
-    locked: AtomicBool,
+    pub(super) locked: AtomicBool,
 }
 impl CredentialStore for Credentials {
     fn read(
@@ -56,20 +64,20 @@ struct Call {
     operation: UnpairKey,
     target: PairingId,
 }
-enum Answer {
+pub(super) enum Answer {
     Lost,
     Exact,
     WrongTarget,
     LoseOther,
 }
-struct Network {
+pub(super) struct Network {
     answer: Answer,
     calls: Mutex<Vec<Call>>,
-    cancellations: Mutex<Vec<(String, direct::ServerPin, [u8; 32])>>,
+    pub(super) cancellations: Mutex<Vec<(String, direct::ServerPin, [u8; 32])>>,
     other_ready: AtomicBool,
 }
 impl Network {
-    fn new(answer: Answer) -> Arc<Self> {
+    pub(super) fn new(answer: Answer) -> Arc<Self> {
         Arc::new(Self {
             answer,
             calls: Mutex::default(),

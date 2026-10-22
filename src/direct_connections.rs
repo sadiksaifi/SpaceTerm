@@ -18,7 +18,9 @@ use spaceterm_server::pane::control::ClientName;
 use zeroize::Zeroizing;
 
 use credentials::{CredentialStore, Interaction};
-use records::{Document, PendingRecord, PrivateRecords, Records, SavedRoute};
+use records::{
+    Document, Durability, PendingRecord, PrivateRecords, Records, SaveError, SavedRoute,
+};
 
 pub(crate) type DirectRouteId = [u8; 32];
 pub(crate) type JoinId = [u8; 32];
@@ -69,6 +71,10 @@ pub(crate) enum JoinStatus {
         expires_at: u64,
     },
     Approved(DirectRouteId),
+    /// The route was published and is usable; synchronization remains unconfirmed.
+    ApprovedUncertain(DirectRouteId),
+    /// The save may have published. Neither ordinary use nor withdrawal is presumed.
+    PublicationUnconfirmed,
     Rejected,
     Expired,
     Failed(DirectError),
@@ -365,24 +371,33 @@ impl DirectConnections {
             .map(|j| j.status.clone())
     }
 
-    pub(crate) fn cancel_join(&self, id: JoinId) {
+    /// Requests cancellation, reporting a failure to synchronize retained cleanup.
+    /// Failed retention leaves the request in memory and authorizes no network effect.
+    pub(crate) fn cancel_join(&self, id: JoinId) -> Result<(), DirectError> {
         let mut state = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(join) = state.joins.get_mut(&id) {
             join.cancelled = true;
             join.status = JoinStatus::Rejected;
         }
-        if let Some(pending) = state
+        let saved = if let Some(pending) = state
             .document
             .pending
             .iter_mut()
             .find(|p| p.operation == id)
         {
             pending.cancel_requested = true;
-            self.0.save(&mut state);
-        }
+            self.0.save(&mut state)
+        } else {
+            true
+        };
         drop(state);
         self.start_worker();
         self.0.notify();
+        if saved {
+            Ok(())
+        } else {
+            Err(DirectError::StorageUnavailable)
+        }
     }
 
     pub(crate) fn pending_unpairs(&self) -> Vec<PendingUnpair> {
@@ -516,9 +531,22 @@ impl Inner {
     }
 
     fn save(&self, state: &mut State) -> bool {
-        let saved = self.records.save(&state.document).is_ok();
-        state.persistence_error = !saved;
-        saved
+        // Claim submission and credential retirement require synchronized retention,
+        // even when an unsynchronized publication is a truthful successful join.
+        self.publish(state) == Ok(Durability::Synchronized)
+    }
+
+    fn publish(&self, state: &mut State) -> Result<Durability, SaveError> {
+        let result = self.records.save(&state.document);
+        state.persistence_error = result != Ok(Durability::Synchronized);
+        if result == Ok(Durability::Synchronized) {
+            for join in state.joins.values_mut() {
+                if let JoinStatus::ApprovedUncertain(id) = join.status {
+                    join.status = JoinStatus::Approved(id);
+                }
+            }
+        }
+        result
     }
 }
 
