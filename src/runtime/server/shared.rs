@@ -476,6 +476,7 @@ impl SharedWorkspaceHost {
                 development_pane: true,
                 pane_takeover: true,
                 interactive_input: true,
+                key_input_batches: true,
                 native_effects: true,
                 reading: true,
                 graphics: true,
@@ -661,6 +662,7 @@ impl SharedWorkspaceHost {
                     | Request::CompleteClipboard { lease, .. }
                     | Request::Focus { lease, .. }
                     | Request::Input { lease, .. }
+                    | Request::Keys { lease, .. }
                     | Request::Key { lease, .. }
                     | Request::Resize { lease, .. }
                     | Request::Style { lease, .. }

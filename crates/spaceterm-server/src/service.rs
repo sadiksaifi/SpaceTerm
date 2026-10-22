@@ -1229,6 +1229,7 @@ mod tests {
                         development_pane: true,
                         pane_takeover: false,
                         interactive_input: false,
+                        key_input_batches: false,
                         native_effects: false,
                         reading: false,
                         graphics: false,

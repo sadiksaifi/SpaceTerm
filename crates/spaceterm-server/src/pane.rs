@@ -13,6 +13,8 @@ use serde::{Deserialize, Serialize};
 
 pub const MAX_COLUMNS: u16 = 240;
 pub const MAX_ROWS: u16 = 100;
+/// Maximum number of ordered key events accepted by one focused batch.
+pub const MAX_KEY_BATCH: usize = 32;
 pub const MAX_TERMINAL_FRAME: usize = 16 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -252,6 +254,13 @@ pub enum Request {
         generation: u64,
         input: InteractiveInput,
     },
+    /// Ordered key events accepted under one exact lease and focus generation.
+    /// A lost reply never permits replay. Acceptance does not imply PTY execution.
+    Keys {
+        lease: Lease,
+        generation: u64,
+        keys: Vec<Key>,
+    },
     ClaimPane {
         attachment: crate::attachments::Attachment,
         pane: crate::hierarchy::Id,
@@ -380,6 +389,8 @@ pub enum Reply {
         pane_takeover: bool,
         #[serde(default)]
         interactive_input: bool,
+        #[serde(default)]
+        key_input_batches: bool,
         #[serde(default)]
         native_effects: bool,
         #[serde(default)]
@@ -553,6 +564,7 @@ struct PaneTransport {
     stream: std::sync::Mutex<Option<Box<dyn crate::transport::Transport>>>,
     takeover: bool,
     interactive_input: bool,
+    key_input_batches: bool,
     native_effects: bool,
     reading: bool,
     graphics: bool,
@@ -611,6 +623,7 @@ impl PaneConnection {
                 development_pane: true,
                 pane_takeover,
                 interactive_input,
+                key_input_batches,
                 native_effects,
                 reading,
                 graphics,
@@ -635,6 +648,9 @@ impl PaneConnection {
                 std::sync::Arc::get_mut(&mut connection.transport)
                     .ok_or(ServerError::Protocol)?
                     .interactive_input = interactive_input;
+                std::sync::Arc::get_mut(&mut connection.transport)
+                    .ok_or(ServerError::Protocol)?
+                    .key_input_batches = key_input_batches;
                 std::sync::Arc::get_mut(&mut connection.transport)
                     .ok_or(ServerError::Protocol)?
                     .native_effects = native_effects;
@@ -672,6 +688,7 @@ impl PaneConnection {
                 stream: std::sync::Mutex::new(Some(Box::new(stream))),
                 takeover,
                 interactive_input: false,
+                key_input_batches: false,
                 native_effects: false,
                 reading: false,
                 graphics: false,
@@ -707,6 +724,9 @@ impl PaneConnection {
     }
     pub fn supports_takeover(&self) -> bool {
         self.transport.takeover
+    }
+    pub fn supports_key_input_batches(&self) -> bool {
+        self.transport.key_input_batches
     }
     pub fn supports_interactive_input(&self) -> bool {
         self.transport.interactive_input
@@ -792,10 +812,39 @@ mod transport_tests {
         let connection = PaneConnection::negotiate(client).unwrap();
         assert!(!connection.supports_graphics());
         assert!(!connection.supports_interactive_input());
+        assert!(!connection.supports_key_input_batches());
         assert!(!connection.supports_reading());
         assert!(!connection.supports_end_all_sessions());
         assert!(!connection.supports_directory_creation());
         peer.join().unwrap();
+    }
+
+    #[test]
+    fn key_batches_require_an_explicit_optional_capability() {
+        for supported in [None, Some(false), Some(true)] {
+            let (client, mut server) = UnixStream::pair().unwrap();
+            let peer = std::thread::spawn(move || {
+                let mut wire = crate::protocol::Wire::terminal(&mut server).unwrap();
+                assert!(matches!(
+                    wire.read::<Request>().unwrap(),
+                    Request::Capabilities
+                ));
+                let mut reply = serde_json::json!({
+                    "Capabilities": { "development_pane": true, "workspace_policy": true,
+                        "interactive_input": true }
+                });
+                if let Some(supported) = supported {
+                    reply["Capabilities"]["key_input_batches"] = supported.into();
+                }
+                wire.write(&reply).unwrap();
+            });
+            let connection = PaneConnection::negotiate(client).unwrap();
+            assert_eq!(
+                connection.supports_key_input_batches(),
+                supported == Some(true)
+            );
+            peer.join().unwrap();
+        }
     }
 
     #[test]

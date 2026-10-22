@@ -417,6 +417,7 @@ impl DevelopmentPaneHost {
                 development_pane: true,
                 pane_takeover: true,
                 interactive_input: true,
+                key_input_batches: true,
                 native_effects: true,
                 reading: true,
                 graphics: true,
@@ -528,6 +529,16 @@ impl DevelopmentPaneHost {
         {
             return Err(Refusal::DirectoryUnavailable);
         }
+        // The wire reader enforces this bound too. Check direct PaneService callers before
+        // decoding or dispatching any key, including malformed later events in a batch.
+        if let Request::Keys { keys, .. } = &request
+            && (keys.is_empty()
+                || keys.len() > MAX_KEY_BATCH
+                || serde_json::to_vec(&request)
+                    .map_or(true, |frame| frame.len() > MAX_TERMINAL_FRAME))
+        {
+            return Err(Refusal::Unsupported);
+        }
         let pane = self.pane.as_mut().ok_or(Refusal::Missing)?;
         let lease = match &request {
             Request::Accessibility { lease, .. }
@@ -543,6 +554,7 @@ impl DevelopmentPaneHost {
             | Request::CompleteClipboard { lease, .. }
             | Request::Focus { lease, .. }
             | Request::Input { lease, .. }
+            | Request::Keys { lease, .. }
             | Request::Key { lease, .. }
             | Request::Resize { lease, .. }
             | Request::Close { lease }
@@ -710,6 +722,15 @@ impl DevelopmentPaneHost {
                 generation, input, ..
             } => {
                 let reply = pane.input(generation, input);
+                if matches!(reply, Err(Refusal::Failed)) {
+                    pane.invalidate_input();
+                }
+                reply
+            }
+            Request::Keys {
+                generation, keys, ..
+            } => {
+                let reply = pane.keys(generation, keys);
                 if matches!(reply, Err(Refusal::Failed)) {
                     pane.invalidate_input();
                 }
@@ -943,6 +964,39 @@ impl OwnedPane {
         Ok(Reply::Unchanged)
     }
 
+    fn require_key_focus(&self, key: &KeyInput) -> Result<(), Refusal> {
+        if self.focus == FocusTarget::Terminal
+            || self.focus == FocusTarget::FocusedPane && key.is_input_method_commit()
+        {
+            Ok(())
+        } else {
+            Err(Refusal::Stale)
+        }
+    }
+
+    fn keys(&mut self, generation: u64, keys: Vec<Key>) -> Result<Reply, Refusal> {
+        if self.ended || self.failed {
+            return Err(Refusal::Missing);
+        }
+        if generation == 0 || generation != self.focus_generation {
+            return Err(Refusal::Stale);
+        }
+        // Collect only after validating the entire batch. No malformed or ineligible
+        // later event may leave an accepted prefix, including a focused-Pane IME commit.
+        let keys = keys
+            .into_iter()
+            .map(|key| {
+                let key = decode_key(key).ok_or(Refusal::Unsupported)?;
+                self.require_key_focus(&key)?;
+                Ok(key)
+            })
+            .collect::<Result<Vec<_>, Refusal>>()?;
+        for key in keys {
+            self.runtime.key(key);
+        }
+        Ok(Reply::Unchanged)
+    }
+
     fn input(&mut self, generation: u64, input: InteractiveInput) -> Result<Reply, Refusal> {
         if self.ended || self.failed {
             return Err(Refusal::Missing);
@@ -962,11 +1016,7 @@ impl OwnedPane {
             }
             InteractiveInput::Key(key) => {
                 let key = decode_key(key).ok_or(Refusal::Unsupported)?;
-                if self.focus != FocusTarget::Terminal
-                    && !(self.focus == FocusTarget::FocusedPane && key.is_input_method_commit())
-                {
-                    return Err(Refusal::Stale);
-                }
+                self.require_key_focus(&key)?;
                 self.runtime.key(key);
                 Ok(Reply::Unchanged)
             }
@@ -1967,7 +2017,7 @@ mod tests {
             1,
             lease,
             &format!(
-                "set +m; stty raw -echo; printf '{modes}\\033[2J\\033[HREADY\\r\\n'; dd bs=1 count={bytes} 2>/dev/null | od -An -tx1 | tr -d ' \\n'; printf '\\r\\n'"
+                "set +m; stty raw -echo; printf '{modes}\\033[2J\\033[HREADY\\r\\n'; dd bs=1 count={bytes} 2>/dev/null | od -v -An -tx1 | tr -d ' \\n'; printf '\\r\\n'"
             ),
         );
         await_text(host, 1, lease, "READY");
@@ -1983,6 +2033,156 @@ mod tests {
             assert!(Instant::now() < deadline, "screen did not arrive");
             std::thread::sleep(Duration::from_millis(5));
         }
+    }
+
+    fn batch_key(text: &str, ime: bool) -> Key {
+        let InteractiveInput::Key(key) = text_key(text, ime) else {
+            unreachable!()
+        };
+        key
+    }
+
+    fn key_batch(
+        host: &mut impl PaneService,
+        lease: Lease,
+        generation: u64,
+        keys: Vec<Key>,
+    ) -> Reply {
+        host.request(
+            [1; 32],
+            lease.connection,
+            Request::Keys {
+                lease,
+                generation,
+                keys,
+            },
+        )
+    }
+
+    #[test]
+    fn key_batches_reject_invalid_bounds_keys_and_authority_without_a_prefix() {
+        let mut host = host();
+        let lease = attach(&mut host, 1, true);
+        capture(&mut host, lease, 33, "");
+        focus(&mut host, lease, 1, FocusTarget::Terminal);
+        let key = batch_key("A", false);
+        let mut malformed = key.clone();
+        malformed.action = 3;
+        let mut overlong = key.clone();
+        overlong.text = Some("a".repeat(4097));
+        let mut overframe = key.clone();
+        overframe.text = Some("a".repeat(MAX_TERMINAL_FRAME));
+        for keys in [
+            vec![],
+            vec![key.clone(); MAX_KEY_BATCH + 1],
+            vec![key.clone(), malformed],
+            vec![key.clone(), overlong],
+            vec![key.clone(), overframe],
+        ] {
+            assert!(matches!(
+                key_batch(&mut host, lease, 1, keys),
+                Reply::Refused(Refusal::Unsupported)
+            ));
+        }
+        for generation in [0, 2] {
+            assert!(matches!(
+                key_batch(&mut host, lease, generation, vec![key.clone()]),
+                Reply::Refused(Refusal::Stale)
+            ));
+        }
+        let mut stale = lease;
+        stale.control = [9; 32];
+        assert!(matches!(
+            key_batch(&mut host, stale, 1, vec![key.clone()]),
+            Reply::Refused(Refusal::Stale)
+        ));
+        for (device, connection) in [([2; 32], lease.connection), ([1; 32], [2; 32])] {
+            assert!(matches!(
+                host.request(
+                    device,
+                    connection,
+                    Request::Keys {
+                        lease,
+                        generation: 1,
+                        keys: vec![key.clone()]
+                    }
+                ),
+                Reply::Refused(Refusal::Stale)
+            ));
+        }
+        focus(&mut host, lease, 2, FocusTarget::Unfocused);
+        assert!(matches!(
+            key_batch(&mut host, lease, 2, vec![key.clone()]),
+            Reply::Refused(Refusal::Stale)
+        ));
+        focus(&mut host, lease, 3, FocusTarget::Terminal);
+        assert!(matches!(
+            key_batch(&mut host, lease, 3, vec![key; MAX_KEY_BATCH]),
+            Reply::Unchanged
+        ));
+        assert!(matches!(
+            key_batch(&mut host, lease, 3, vec![batch_key("Z", false)]),
+            Reply::Unchanged
+        ));
+        // The first 33 actual PTY bytes must be exactly these accepted events. Any prefix
+        // from an earlier refused request makes this independent byte witness impossible.
+        await_text(&mut host, 1, lease, &format!("{}5a", "41".repeat(32)));
+        host.shutdown().unwrap();
+    }
+
+    #[test]
+    fn key_batches_preserve_kitty_press_repeat_release_order_at_the_pty() {
+        let mut host = host();
+        let lease = attach(&mut host, 1, true);
+        capture(&mut host, lease, 23, "\\033[>11u");
+        focus(&mut host, lease, 1, FocusTarget::Terminal);
+        let keys = (0..=2)
+            .map(|action| Key {
+                physical: PhysicalKey::A as u32,
+                action,
+                logical: "a".into(),
+                text: Some("a".into()),
+                unshifted: Some('a'),
+                modifiers: 0,
+                consumed: 0,
+                option_as_alt: false,
+            })
+            .collect();
+        assert!(matches!(
+            key_batch(&mut host, lease, 1, keys),
+            Reply::Unchanged
+        ));
+        // Kitty flag 11 reports every key, including repeat (2) and release (3).
+        await_text(
+            &mut host,
+            1,
+            lease,
+            "1b5b3937751b5b39373b313a32751b5b39373b313a3375",
+        );
+        host.shutdown().unwrap();
+    }
+
+    #[test]
+    fn key_batches_prevalidate_focused_pane_ime_eligibility_before_any_commit() {
+        let mut host = host();
+        let lease = attach(&mut host, 1, true);
+        capture(&mut host, lease, 3, "");
+        focus(&mut host, lease, 1, FocusTarget::FocusedPane);
+        assert!(matches!(
+            key_batch(
+                &mut host,
+                lease,
+                1,
+                vec![batch_key("X", true), batch_key("A", false)]
+            ),
+            Reply::Refused(Refusal::Stale)
+        ));
+        assert!(matches!(
+            key_batch(&mut host, lease, 1, vec![batch_key("界", true)]),
+            Reply::Unchanged
+        ));
+        await_text(&mut host, 1, lease, "e7958c");
+        host.shutdown().unwrap();
     }
 
     #[test]
