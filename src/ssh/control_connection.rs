@@ -10,18 +10,16 @@ use thiserror::Error;
 
 use super::cancellation::SshCancellationToken;
 use super::command::{
-    OpenSshExecutable, PreparedSshTerminalSessionChannelCommand, SshCommandContext,
+    OpenSshExecutable, SshCommandContext,
     SshCommandContextError, SshCommandSpec, ValidatedRemoteShellCommand,
 };
 use super::live_connection::{
-    ControlConnectionObserver, LiveConnectionAuthority, LiveConnectionBinding, LiveConnectionState,
+    LiveConnectionAuthority, LiveConnectionState,
 };
 use super::process::{
     ProcessCleanupCallback, ProcessExit, ProcessRunError, ProcessSignal, SshProcessBackend,
     SshProcessCleanup, SshProcessMechanismError, TransientSshErrorOutput,
 };
-#[cfg(feature = "desktop")]
-use super::remote_utility::PreparedSshRemoteUtilityCommand;
 use crate::domain::SshDestination;
 use crate::platform::app_paths::{
     AppPaths, AppPathsError, CONTROL_RUNTIME_OWNER_KIND, CONTROL_RUNTIME_SOCKET_NAME,
@@ -234,15 +232,6 @@ impl ControlRuntimeCleanup {
 }
 
 impl<B: SshProcessBackend> OpenSshControlConnection<B> {
-    /// Creates a content-free observer for the first terminal `Failed` or `Closed` transition.
-    pub(crate) fn lifecycle_observer(
-        &self,
-    ) -> Result<ControlConnectionObserver, ControlConnectionError> {
-        self.authority
-            .as_ref()
-            .map(|authority| authority.observe_lifecycle())
-            .ok_or(ControlConnectionError::Ownership)
-    }
 
     /// Launches and supervises a fresh master using a bounded private control socket.
     ///
@@ -397,28 +386,6 @@ impl<B: SshProcessBackend> OpenSshControlConnection<B> {
         &self.control_path
     }
 
-    /// Prepares a no-TTY utility command bound to the current live authority.
-    #[cfg(feature = "desktop")]
-    pub(crate) fn remote_utility_command(
-        &self,
-    ) -> Result<PreparedSshRemoteUtilityCommand, ControlConnectionError> {
-        if self.state() != ControlConnectionState::Ready {
-            return Err(ControlConnectionError::NotReady);
-        }
-        let capability = self
-            .authority
-            .as_ref()
-            .ok_or(ControlConnectionError::Ownership)?
-            .capability();
-        capability
-            .authorize()
-            .map_err(|_| ControlConnectionError::NotReady)?;
-        Ok(PreparedSshRemoteUtilityCommand::new_live(
-            self.commands.remote_utility(),
-            capability,
-        ))
-    }
-
     /// Binds a non-PTY server command to this exact already-authenticated master.
     pub(crate) fn server_command(
         &self,
@@ -442,44 +409,6 @@ impl<B: SshProcessBackend> OpenSshControlConnection<B> {
             .authorize()
             .map_err(|_| ControlConnectionError::NotReady)?;
         Ok((self.commands.server_channel(command), capability))
-    }
-
-    /// Prepares a pane command bound to the current live authority and sanitized environment.
-    pub(crate) fn prepare_terminal_session_channel(
-        &self,
-        command: ValidatedRemoteShellCommand,
-    ) -> Result<PreparedSshTerminalSessionChannelCommand, ControlConnectionError> {
-        if self.state() != ControlConnectionState::Ready {
-            return Err(ControlConnectionError::NotReady);
-        }
-        let capability = self
-            .authority
-            .as_ref()
-            .ok_or(ControlConnectionError::Ownership)?
-            .capability();
-        capability
-            .authorize()
-            .map_err(|_| ControlConnectionError::NotReady)?;
-        Ok(PreparedSshTerminalSessionChannelCommand::new(
-            self.commands.terminal_session_channel(command),
-            capability,
-            self.backend.environment().clone(),
-        ))
-    }
-
-    /// Returns the opaque connection-instance and generation binding currently authorized.
-    pub(crate) fn live_binding(&self) -> Result<LiveConnectionBinding, ControlConnectionError> {
-        if self.state() != ControlConnectionState::Ready {
-            return Err(ControlConnectionError::NotReady);
-        }
-        let capability = self
-            .authority
-            .as_ref()
-            .ok_or(ControlConnectionError::Ownership)?
-            .capability();
-        capability
-            .binding()
-            .map_err(|_| ControlConnectionError::NotReady)
     }
 
     /// Shuts down exactly once, with bounded graceful, terminate, and kill phases.
@@ -1156,13 +1085,12 @@ mod tests {
         let directory = TestDirectory::new();
         let observed = ObservedConnection::new(&directory, cx);
         let checks = observed.backend.state.lock().unwrap().status_checks;
-        let pane = observed
+        let (_, capability) = observed
             .connection
-            .prepare_terminal_session_channel(
-                ValidatedRemoteShellCommand::new("exec /bin/zsh -l".to_owned()).unwrap(),
+            .server_command(
+                ValidatedRemoteShellCommand::server_script("exec spaceterm-server").unwrap(),
             )
             .unwrap();
-        let utility = observed.connection.remote_utility_command().unwrap();
         observed
             .backend
             .state
@@ -1181,15 +1109,8 @@ mod tests {
             checks + 1
         );
         assert_eq!(observed.backend.reap_count(), 1);
-        assert!(matches!(
-            pane.take(),
-            Err(crate::ssh::command::PreparedSshTerminalSessionChannelError::Unavailable)
-        ));
-        assert!(
-            utility
-                .connection_cancellation()
-                .is_some_and(|cancellation| cancellation.is_cancelled())
-        );
+        assert!(capability.authorize().is_err());
+        assert!(capability.cancellation().is_cancelled());
     }
 
     #[gpui::test]
@@ -1260,17 +1181,16 @@ mod tests {
     fn dropping_observed_connection_should_interrupt_before_cleanup_join(cx: &mut TestAppContext) {
         let directory = TestDirectory::new();
         let observed = ObservedConnection::new(&directory, cx);
-        let lifecycle = observed.connection.lifecycle_observer().unwrap();
+        let (_, capability) = observed.connection.server_command(
+            ValidatedRemoteShellCommand::server_script("exec server").unwrap(),
+        ).unwrap();
         drop(observed.connection);
         observed
             .cleanup
             .recv_timeout(Duration::from_secs(2))
             .unwrap();
         assert_eq!(observed.backend.reap_count(), 1);
-        assert_eq!(
-            cx.foreground_executor().block_test(lifecycle.terminal()),
-            crate::ssh::live_connection::ControlConnectionTerminalState::Closed
-        );
+        assert!(capability.cancellation().is_cancelled());
     }
 
     impl SshProcessBackend for FakeBackend {
@@ -1478,7 +1398,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn separate_ready_connections_should_have_distinct_initial_bindings(cx: &mut TestAppContext) {
+    fn closing_one_connection_does_not_revoke_another_connections_server_authority(cx: &mut TestAppContext) {
         let directory = TestDirectory::new();
         let paths = directory.paths();
         let cancellation = SshCancellationToken::default();
@@ -1513,7 +1433,12 @@ mod tests {
             ))
             .unwrap();
 
-        assert!(first.live_binding().unwrap() != second.live_binding().unwrap());
+        let command = || ValidatedRemoteShellCommand::server_script("exec server").unwrap();
+        let (_, first_capability) = first.server_command(command()).unwrap();
+        let (_, second_capability) = second.server_command(command()).unwrap();
+        drop(first);
+        assert!(first_capability.authorize().is_err());
+        assert!(second_capability.authorize().is_ok());
     }
 
     #[gpui::test]
@@ -1538,13 +1463,12 @@ mod tests {
             ))
             .unwrap();
 
-        assert!(connection.remote_utility_command().is_ok());
-        let pane = connection
-            .prepare_terminal_session_channel(
-                ValidatedRemoteShellCommand::new("exec /bin/zsh -l".to_owned()).unwrap(),
+        let (_, capability) = connection
+            .server_command(
+                ValidatedRemoteShellCommand::server_script("exec spaceterm-server").unwrap(),
             )
             .unwrap();
-        assert!(pane.take().is_ok());
+        assert!(capability.authorize().is_ok());
 
         connection
             .authority
@@ -1552,71 +1476,11 @@ mod tests {
             .unwrap()
             .transition(LiveConnectionState::ShuttingDown);
         assert!(matches!(
-            connection.remote_utility_command(),
-            Err(ControlConnectionError::NotReady)
-        ));
-        assert!(matches!(
-            connection.prepare_terminal_session_channel(
-                ValidatedRemoteShellCommand::new("exec /bin/zsh -l".to_owned()).unwrap()
+            connection.server_command(
+                ValidatedRemoteShellCommand::server_script("exec spaceterm-server").unwrap()
             ),
             Err(ControlConnectionError::NotReady)
         ));
-    }
-
-    #[gpui::test]
-    fn shell_launch_should_preserve_prepared_environment_and_reject_revoked_terminal_session_channel(
-        cx: &mut TestAppContext,
-    ) {
-        use crate::platform::shell_launch::{PreparedShellLaunch, ShellLaunchFailure};
-        let directory = TestDirectory::new();
-        let paths = directory.paths();
-        let backend = Arc::new(FakeBackend::with_readiness(
-            directory.1.clone(),
-            [ProcessExit::successful()],
-        ));
-        let connection = cx
-            .foreground_executor()
-            .block_test(OpenSshControlConnection::connect(
-                &paths,
-                OpenSshExecutable::for_test(),
-                &RecordingControlSocketProbe(directory.1.clone()),
-                destination(),
-                backend,
-                &SshCancellationToken::default(),
-                timing(),
-            ))
-            .unwrap();
-        let prepare = || {
-            connection
-                .prepare_terminal_session_channel(
-                    ValidatedRemoteShellCommand::new("exec /bin/zsh -l".to_owned()).unwrap(),
-                )
-                .unwrap()
-        };
-        let channel = prepare();
-        let launch =
-            PreparedShellLaunch::remote(Path::new("/tmp"), channel.take().unwrap()).unwrap();
-        assert!(!launch.inherit_environment());
-        assert_eq!(launch.working_directory(), Path::new("/private/tmp"));
-        assert!(launch.environment_removals().is_empty());
-        assert_eq!(
-            launch.environment(),
-            &[
-                (OsString::from("HOME"), OsString::from("/private/tmp")),
-                (OsString::from("PATH"), OsString::from("/fixture/bin")),
-                (OsString::from("TERM"), OsString::from("xterm-256color")),
-            ]
-        );
-        assert!(channel.take().is_err());
-        let command = prepare().take().unwrap();
-        connection
-            .authority
-            .as_ref()
-            .unwrap()
-            .transition(LiveConnectionState::ShuttingDown);
-        let error = PreparedShellLaunch::remote(Path::new("/tmp"), command).unwrap_err();
-        assert_eq!(error, ShellLaunchFailure::TerminalSessionChannelUnavailable);
-        assert!(!format!("{launch:?} {error:?} {error}").contains("/private/tmp"));
     }
 
     #[gpui::test]
@@ -1914,7 +1778,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn master_death_should_invalidate_stale_pane_and_utility_commands(cx: &mut TestAppContext) {
+    fn master_death_should_invalidate_server_command_authority(cx: &mut TestAppContext) {
         let directory = TestDirectory::new();
         let paths = directory.paths();
         let backend = Arc::new(FakeBackend::with_readiness(
@@ -1933,13 +1797,11 @@ mod tests {
                 timing(),
             ))
             .unwrap();
-        let pane = connection
-            .prepare_terminal_session_channel(
-                ValidatedRemoteShellCommand::new("exec /bin/zsh -l".to_owned()).unwrap(),
+        let (_, capability) = connection
+            .server_command(
+                ValidatedRemoteShellCommand::server_script("exec spaceterm-server").unwrap(),
             )
             .unwrap();
-        let utility = connection.remote_utility_command().unwrap();
-        let lifecycle = connection.lifecycle_observer().unwrap();
         backend
             .state
             .lock()
@@ -1955,23 +1817,13 @@ mod tests {
         }
 
         assert_eq!(connection.state(), ControlConnectionState::Failed);
-        assert_eq!(
-            cx.foreground_executor().block_test(lifecycle.terminal()),
-            crate::ssh::live_connection::ControlConnectionTerminalState::Failed
-        );
-        assert!(matches!(
-            pane.take(),
-            Err(crate::ssh::command::PreparedSshTerminalSessionChannelError::Unavailable)
-        ));
-        assert!(
-            utility
-                .connection_cancellation()
-                .is_some_and(|cancellation| cancellation.is_cancelled())
-        );
+        assert!(capability.cancellation().is_cancelled());
+        assert!(capability.authorize().is_err());
+
     }
 
     #[gpui::test]
-    fn dropping_a_ready_connection_should_publish_closed_once(cx: &mut TestAppContext) {
+    fn dropping_a_ready_connection_revokes_server_command_authority(cx: &mut TestAppContext) {
         let directory = TestDirectory::new();
         let paths = directory.paths();
         let backend = Arc::new(FakeBackend::with_readiness(
@@ -1990,14 +1842,13 @@ mod tests {
                 timing(),
             ))
             .unwrap();
-        let lifecycle = connection.lifecycle_observer().unwrap();
+        let (_, capability) = connection.server_command(
+            ValidatedRemoteShellCommand::server_script("exec server").unwrap(),
+        ).unwrap();
 
         drop(connection);
 
-        assert_eq!(
-            cx.foreground_executor().block_test(lifecycle.terminal()),
-            crate::ssh::live_connection::ControlConnectionTerminalState::Closed
-        );
+        assert!(capability.cancellation().is_cancelled());
     }
 
     #[gpui::test]
@@ -2020,12 +1871,11 @@ mod tests {
                 timing(),
             ))
             .unwrap();
-        let pane = connection
-            .prepare_terminal_session_channel(
-                ValidatedRemoteShellCommand::new("exec /bin/zsh -l".to_owned()).unwrap(),
+        let (_, capability) = connection
+            .server_command(
+                ValidatedRemoteShellCommand::server_script("exec spaceterm-server").unwrap(),
             )
             .unwrap();
-        let command = pane.take().unwrap();
         let socket_path = connection.control_path().to_path_buf();
         connection
             .child
@@ -2038,10 +1888,7 @@ mod tests {
         directory.1.delete_socket(&socket_path);
         directory.1.create_socket(&socket_path);
 
-        assert!(matches!(
-            command.into_pane_launch_parts(),
-            Err(crate::ssh::command::PreparedSshTerminalSessionChannelError::Unavailable)
-        ));
+        assert!(capability.authorize().is_err());
         drop(connection);
         assert!(directory.1.has_socket(&socket_path));
 

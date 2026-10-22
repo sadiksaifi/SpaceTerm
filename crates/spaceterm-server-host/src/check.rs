@@ -65,7 +65,7 @@ pub fn run() -> Result<(), ServerError> {
     let mut runtime = factory
         .start_runtime(
             geometry,
-            TerminalLaunchPlan::Local(LocalTerminalLaunchPlan::new(directory)),
+            LocalTerminalLaunchPlan::new(directory),
             TerminalAppearanceUpdate::builtin().map_err(|_| ServerError::StartupFailed)?,
         )
         .map_err(|_| ServerError::StartupFailed)?;

@@ -1140,7 +1140,7 @@ impl TerminalSessionFactory for DevelopmentServerSessionFactory {
     fn start(
         &self,
         geometry: TerminalGeometry,
-        _: TerminalLaunchPlan,
+        _: LocalTerminalLaunchPlan,
         appearance: TerminalAppearanceUpdate,
     ) -> Result<StartedTerminalSession, TerminalSessionError> {
         let (input, receiver) = mpsc::sync_channel(512);

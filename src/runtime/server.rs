@@ -284,9 +284,7 @@ impl DevelopmentPaneHost {
             .factory
             .start_runtime(
                 geometry(size),
-                TerminalLaunchPlan::Local(
-                    LocalTerminalLaunchPlan::new(directory).without_client_effects(),
-                ),
+                LocalTerminalLaunchPlan::new(directory).without_client_effects(),
                 appearance(style, 1).map_err(|_| Refusal::Failed)?,
             )
             .map_err(|_| Refusal::Failed)?;

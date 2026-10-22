@@ -126,18 +126,17 @@ pub(crate) use selection::SelectionCopy;
 pub(crate) use session::TerminalSessionFailure;
 pub(crate) use session::{AccessibilityDemandSender, AccessibilitySelectionSender};
 pub(crate) use session::{
-    InteractiveInput, NativeTerminalSessionFactory, SelectionCopyError, StartedTerminalSession,
+    InteractiveInput, SelectionCopyError, StartedTerminalSession,
     TerminalAppearanceUpdate, TerminalSessionEvent, TerminalSessionFactory, TerminalSessionHandle,
 };
 #[cfg(test)]
 pub(crate) use session::{
-    LocalTerminalLaunchPlan, RemoteTerminalLaunchPlan, TerminalLaunchPlan, TerminalSessionError,
+    LocalTerminalLaunchPlan, TerminalSessionError,
     TerminalSessionExit, test_terminal_appearance_update,
 };
 #[cfg(feature = "desktop")]
 pub(crate) use workspace_terminal_session_factory::{
-    PreparedWorkspaceTerminalLaunch, TerminalSessionChannelProvider,
-    TerminalSessionChannelRevalidationError, WorkspaceTerminalSessionFactory,
+    PreparedWorkspaceTerminalLaunch, WorkspaceTerminalSessionFactory,
 };
 
 pub(crate) use pointer_input::{

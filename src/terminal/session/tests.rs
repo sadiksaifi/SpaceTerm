@@ -5,11 +5,8 @@ use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use super::*;
-use crate::domain::{LocalDirectoryIdentity, RemoteDirectory, SshDestination};
+use crate::domain::{LocalDirectoryIdentity};
 use crate::platform::native_pty::{NativePtyAdapter, NativePtyAdapterParts, NativePtyTermination};
-use crate::ssh::command::{
-    RemotePaneShellCommandBuilder, ValidatedRemoteLoginShell, ValidatedRemoteShellCommand,
-};
 
 #[cfg(feature = "desktop")]
 pub(in crate::terminal) fn metadata_changed() -> TerminalSessionEvent {
@@ -27,64 +24,11 @@ fn native_terminal_session_factory() -> NativeTerminalSessionFactory {
     )
 }
 
-fn remote_pane_command(directory: &RemoteDirectory) -> ValidatedRemoteShellCommand {
-    let shell = ValidatedRemoteLoginShell::new("/bin/zsh".to_owned()).unwrap();
-    RemotePaneShellCommandBuilder::new(directory, &shell)
-        .build()
-        .unwrap()
-}
-
-#[test]
-fn remote_launch_plan_should_preserve_typed_context_and_reject_reused_channels() {
-    let local_home = crate::domain::ValidatedLocalDirectory::new(
-        PathBuf::from("/Users/local"),
-        LocalDirectoryIdentity::for_test(7011),
-    );
-    let destination = SshDestination::new("user@remote".to_owned()).unwrap();
-    let remote_directory = RemoteDirectory::new("~/project".to_owned()).unwrap();
-    let connection = crate::ssh::testing::SshConnectionFixture::new(destination.clone());
-    let prepared =
-        connection.prepare_terminal_session_channel(remote_pane_command(&remote_directory));
-    let plan = RemoteTerminalLaunchPlan::new(
-        local_home.clone(),
-        RemoteTerminalMetadataContext::new(destination.clone(), remote_directory.clone()),
-        "project on remote".to_owned(),
-        prepared.clone(),
-    );
-
-    assert_eq!(plan.local_home(), &local_home);
-    assert_eq!(plan.destination(), &destination);
-    assert_eq!(plan.remote_directory(), &remote_directory);
-    assert_eq!(plan.fallback_title(), "project on remote");
-    assert_eq!(plan.metadata_context().destination(), &destination);
-    let debug = format!("{:?}", TerminalLaunchPlan::Remote(Box::new(plan.clone())));
-    assert_eq!(debug, "Remote(RemoteTerminalLaunchPlan { .. })");
-    assert!(!debug.contains("user@remote"));
-    assert!(!debug.contains("~/project"));
-    assert!(!debug.contains("/Users/local"));
-    let _consumed = prepared.take().unwrap();
-
-    let error = native_terminal_session_factory()
-        .start(
-            test_geometry(),
-            TerminalLaunchPlan::Remote(Box::new(plan)),
-            test_terminal_appearance_update(),
-        )
-        .err();
-
-    assert!(matches!(
-        error,
-        Some(TerminalSessionError::PreparedSshTerminalSessionChannel(
-            crate::ssh::command::PreparedSshTerminalSessionChannelError::AlreadyConsumed
-        ))
-    ));
-}
-
 #[test]
 fn native_factory_routes_local_launches_through_injected_factory() {
     let (factory, constructions) = recording_native_terminal_session_factory();
     let working_directory = std::env::temp_dir().join(".");
-    let plan = TerminalLaunchPlan::Local(LocalTerminalLaunchPlan::new(
+    let plan = LocalTerminalLaunchPlan::new(
         crate::domain::ValidatedLocalDirectory::new(
             working_directory.clone(),
             LocalFilesystemAuthority::testing()
@@ -93,7 +37,7 @@ fn native_factory_routes_local_launches_through_injected_factory() {
                 .identity()
                 .clone(),
         ),
-    ));
+    );
 
     let started = factory
         .start(test_geometry(), plan, test_terminal_appearance_update())
@@ -131,110 +75,6 @@ fn native_factory_routes_local_launches_through_injected_factory() {
         .expect("a local shell should receive its Prompt Owner");
     assert_eq!(prompt_owner.len(), 32);
     assert!(prompt_owner.bytes().all(|byte| byte.is_ascii_hexdigit()));
-}
-
-#[test]
-fn native_factory_routes_remote_launches_through_injected_factory() {
-    let (factory, constructions) = recording_native_terminal_session_factory();
-    let resources = crate::terminal::testing::ShellResourcesFixture::new();
-    let captured_home = resources.path().to_path_buf();
-    let local_home = std::env::temp_dir();
-    let destination = SshDestination::new("user@remote".to_owned()).unwrap();
-    let remote_directory = RemoteDirectory::new("~/project".to_owned()).unwrap();
-    let startup = crate::ssh::startup_environment::StartupSshEnvironment::from_environment(
-        |key| match key.to_str().unwrap() {
-            "PATH" => Some("/captured/bin".into()),
-            "LANG" => Some("en_US.UTF-8".into()),
-            "SSH_AUTH_SOCK" => Some("/captured/agent.sock".into()),
-            "SSH_ASKPASS" | "SPACETERM_SHELL_INTEGRATION_VERSION" => {
-                Some("must-not-be-inherited".into())
-            }
-            _ => None,
-        },
-        "/fallback/bin".into(),
-    )
-    .unwrap();
-    let context = crate::ssh::testing::SshConnectionFixture::with_environment(
-        destination.clone(),
-        captured_home.clone(),
-        crate::ssh::command::OpenSshExecutable::for_test(),
-        &startup,
-    );
-    let expected_command = context
-        .prepare_terminal_session_channel(remote_pane_command(&remote_directory))
-        .take()
-        .unwrap();
-    let expected_executable = expected_command.executable().to_owned();
-    let expected_arguments = expected_command.arguments().to_vec();
-    let plan = TerminalLaunchPlan::Remote(Box::new(RemoteTerminalLaunchPlan::new(
-        crate::domain::ValidatedLocalDirectory::new(
-            local_home.clone(),
-            LocalDirectoryIdentity::for_test(7011),
-        ),
-        RemoteTerminalMetadataContext::new(destination, remote_directory.clone()),
-        "project on remote".to_owned(),
-        context.prepare_terminal_session_channel(remote_pane_command(&remote_directory)),
-    )));
-
-    let TerminalLaunchPlan::Remote(remote) = &plan else {
-        unreachable!()
-    };
-    assert_eq!(
-        TerminalMetadataContext::Remote(remote.metadata_context().clone())
-            .local_file_capabilities(),
-        crate::terminal::metadata::TerminalLocalFileCapabilities::Disabled
-    );
-    let expected_metadata = TerminalMetadataContext::Remote(remote.metadata_context().clone());
-    let started = factory
-        .start(test_geometry(), plan, test_terminal_appearance_update())
-        .unwrap();
-    let construction = constructions
-        .recv_timeout(Duration::from_secs(1))
-        .expect("Remote construction should reach the injected factory");
-    let TerminalSessionEvent::Screen(screen) = receive_event(
-        &started.events,
-        "the actual Remote Terminal Session Screen",
-        |event| matches!(event, TerminalSessionEvent::Screen(_)),
-    ) else {
-        unreachable!()
-    };
-    assert_eq!(screen.metadata.context, expected_metadata);
-    assert_eq!(
-        screen.metadata.context.local_file_capabilities(),
-        crate::terminal::metadata::TerminalLocalFileCapabilities::Disabled
-    );
-    drop(started.handle);
-
-    assert_eq!(construction.working_directory, captured_home);
-    assert_eq!(construction.executable, expected_executable);
-    assert_eq!(construction.arguments, expected_arguments);
-    assert_eq!(
-        construction.size,
-        NativePtySize {
-            rows: 24,
-            columns: 80,
-            pixel_width: 640,
-            pixel_height: 480,
-        }
-    );
-    assert!(!construction.inherit_environment);
-    assert!(construction.environment_removals.is_empty());
-    assert!(
-        construction
-            .environment
-            .iter()
-            .all(|(name, _)| !name.to_string_lossy().contains("ASKPASS"))
-    );
-    assert_eq!(
-        construction.environment,
-        vec![
-            ("HOME".into(), captured_home.into_os_string()),
-            ("PATH".into(), "/captured/bin".into()),
-            ("LANG".into(), "en_US.UTF-8".into()),
-            ("SSH_AUTH_SOCK".into(), "/captured/agent.sock".into()),
-            ("TERM".into(), "xterm-256color".into())
-        ]
-    );
 }
 
 use crate::terminal::geometry::{BackingScale, CellGridSize, LogicalCellSize};
@@ -1294,12 +1134,12 @@ fn native_factory_reports_local_launch_directory_failure_through_terminal_sessio
     } = native_terminal_session_factory()
         .start(
             test_geometry(),
-            TerminalLaunchPlan::Local(LocalTerminalLaunchPlan::new(
+            LocalTerminalLaunchPlan::new(
                 crate::domain::ValidatedLocalDirectory::new(
                     resources.path().join("missing-session-workspace"),
                     crate::domain::LocalDirectoryIdentity::for_test(0),
                 ),
-            )),
+            ),
             test_terminal_appearance_update(),
         )
         .unwrap();
@@ -1322,62 +1162,6 @@ fn native_factory_reports_local_launch_directory_failure_through_terminal_sessio
         message,
         "Shell launch directory is unavailable; select an existing directory and retry"
     );
-    drop(session);
-}
-
-#[test]
-fn remote_factory_rejects_missing_local_home_before_adapter_construction() {
-    let resources = crate::terminal::testing::ShellResourcesFixture::new();
-    let (factory, constructions) = recording_native_terminal_session_factory();
-    let destination = SshDestination::new("user@remote".to_owned()).unwrap();
-    let remote_directory = RemoteDirectory::new("~/project".to_owned()).unwrap();
-    let connection = crate::ssh::testing::SshConnectionFixture::new(destination.clone());
-    let prepared =
-        connection.prepare_terminal_session_channel(remote_pane_command(&remote_directory));
-    let plan = RemoteTerminalLaunchPlan::new(
-        crate::domain::ValidatedLocalDirectory::new(
-            resources.path().join("missing-local-home"),
-            LocalDirectoryIdentity::for_test(0),
-        ),
-        RemoteTerminalMetadataContext::new(destination, remote_directory),
-        "project on remote".to_owned(),
-        prepared,
-    );
-    let StartedTerminalSession {
-        handle: session,
-        events,
-        accessibility: _,
-        clipboard: _,
-    } = factory
-        .start(
-            test_geometry(),
-            TerminalLaunchPlan::Remote(Box::new(plan)),
-            test_terminal_appearance_update(),
-        )
-        .unwrap();
-
-    let event = receive_event(&events, "the remote local HOME failure", |event| {
-        matches!(
-            event,
-            TerminalSessionEvent::Failed(TerminalSessionFailure::Startup {
-                stage: TerminalSessionStartupStage::Directory,
-                ..
-            })
-        )
-    });
-
-    let TerminalSessionEvent::Failed(TerminalSessionFailure::Startup { message, .. }) = event
-    else {
-        unreachable!("the event predicate accepts only typed PTY startup failures")
-    };
-    assert_eq!(
-        message,
-        "Shell launch directory is unavailable; select an existing directory and retry"
-    );
-    assert!(matches!(
-        constructions.try_recv(),
-        Err(mpsc::TryRecvError::Empty)
-    ));
     drop(session);
 }
 

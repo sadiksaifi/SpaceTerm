@@ -22,7 +22,6 @@ pub use crate::platform::shell_integration::*;
 pub use crate::platform::shell_launch::{
     PreparedShellLaunch, ShellLaunchFailure, ShellLaunchPlanner,
 };
-pub use crate::ssh::command::PreparedSshTerminalSessionChannelError;
 pub use crate::terminal::accessibility::{
     AccessibilityCellRef, AccessibilityCellView, AccessibilityGeometry, AccessibilityRowId,
     AccessibilityRowView, AccessibilityScreen, AccessibilitySelectionRequest,
@@ -64,8 +63,8 @@ pub use crate::terminal::permission_request::PermissionRequest;
 pub use crate::terminal::pointer_input::*;
 pub use crate::terminal::session::{
     AccessibilityDemandSender, AccessibilitySelectionSender, ClipboardCompletion, ClipboardRequest,
-    LocalTerminalLaunchPlan, NativeTerminalSessionFactory, RemoteTerminalLaunchPlan,
-    SelectionCopyError, StartedTerminalSession, TerminalAppearanceUpdate, TerminalLaunchPlan,
+    LocalTerminalLaunchPlan, NativeTerminalSessionFactory,
+    SelectionCopyError, StartedTerminalSession, TerminalAppearanceUpdate,
     TerminalRuntime, TerminalSessionError, TerminalSessionEvent, TerminalSessionExit,
     TerminalSessionFactory, TerminalSessionFailure, TerminalSessionHandle, TerminalSubscription,
 };

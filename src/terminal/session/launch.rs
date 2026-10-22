@@ -1,47 +1,31 @@
 //! Owns launch authority and the complete process-plan to worker handoff.
 use super::*;
 
-enum TerminalSessionProcess {
-    Local {
-        planner: ShellLaunchPlanner,
-        directory: std::path::PathBuf,
-        prompt_owner: Option<crate::terminal::metadata::PromptOwner>,
-        directory_guard: Option<(
-            crate::domain::ValidatedLocalDirectory,
-            LocalFilesystemAuthority,
-        )>,
-    },
-    Remote {
-        home: std::path::PathBuf,
-        command: crate::ssh::command::SshCommandSpec,
-    },
+struct TerminalSessionProcess {
+    planner: ShellLaunchPlanner,
+    directory: std::path::PathBuf,
+    prompt_owner: Option<crate::terminal::metadata::PromptOwner>,
+    directory_guard: Option<(
+        crate::domain::ValidatedLocalDirectory,
+        LocalFilesystemAuthority,
+    )>,
 }
 
 impl TerminalSessionProcess {
     fn prepare(self) -> Result<PreparedShellLaunch, NativePtyStartupFailure> {
-        match self {
-            Self::Local {
-                planner,
-                directory,
-                prompt_owner,
-                directory_guard,
-            } => {
-                if let Some((expected, filesystem)) = directory_guard {
-                    filesystem.revalidate_directory(&expected).map_err(|_| {
-                        crate::platform::shell_launch::ShellLaunchFailure::DirectoryUnavailable
-                    })?;
-                }
-                let launch = planner.local(&directory)?;
-                Ok(match prompt_owner {
-                    Some(owner) => launch.with_environment_value(
-                        crate::terminal::metadata::PromptOwner::ENVIRONMENT,
-                        owner.value(),
-                    ),
-                    None => launch,
-                })
-            }
-            Self::Remote { home, command } => Ok(PreparedShellLaunch::remote(&home, command)?),
+        if let Some((expected, filesystem)) = self.directory_guard {
+            filesystem.revalidate_directory(&expected).map_err(|_| {
+                crate::platform::shell_launch::ShellLaunchFailure::DirectoryUnavailable
+            })?;
         }
+        let launch = self.planner.local(&self.directory)?;
+        Ok(match self.prompt_owner {
+            Some(owner) => launch.with_environment_value(
+                crate::terminal::metadata::PromptOwner::ENVIRONMENT,
+                owner.value(),
+            ),
+            None => launch,
+        })
     }
 }
 
@@ -72,7 +56,7 @@ impl TerminalSessionLaunch {
                 None => metadata,
             },
             fallback_title: planner.fallback_title(),
-            process: TerminalSessionProcess::Local {
+            process: TerminalSessionProcess {
                 planner,
                 directory: directory.to_owned(),
                 prompt_owner,
@@ -81,18 +65,6 @@ impl TerminalSessionLaunch {
         }
     }
 
-    fn remote(remote: RemoteTerminalLaunchPlan) -> Result<Self, TerminalSessionError> {
-        let command = remote.terminal_session_channel.take()?;
-        Ok(Self {
-            restricted: false,
-            metadata: TerminalMetadataContext::Remote(remote.metadata_context),
-            fallback_title: remote.fallback_title,
-            process: TerminalSessionProcess::Remote {
-                home: remote.local_home.path().to_owned(),
-                command,
-            },
-        })
-    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -103,77 +75,6 @@ impl TerminalSessionLaunch {
 pub struct LocalTerminalLaunchPlan {
     working_directory: crate::domain::ValidatedLocalDirectory,
     restricted: bool,
-}
-
-#[derive(Clone, Eq, PartialEq)]
-/// A Remote Terminal Session launch bound to one prepared Terminal Session Channel.
-///
-/// `local_home` is used only as the local SSH process working directory. Destination and Remote
-/// Starting Directory remain typed remote metadata and must never enter `PathBuf`, local `chdir`,
-/// or local filesystem validation. The prepared channel is single-use and sensitive Debug output
-/// is deliberately redacted.
-pub struct RemoteTerminalLaunchPlan {
-    local_home: crate::domain::ValidatedLocalDirectory,
-    metadata_context: RemoteTerminalMetadataContext,
-    fallback_title: String,
-    terminal_session_channel: crate::ssh::command::PreparedSshTerminalSessionChannelCommand,
-}
-
-impl fmt::Debug for RemoteTerminalLaunchPlan {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("RemoteTerminalLaunchPlan")
-            .finish_non_exhaustive()
-    }
-}
-
-impl RemoteTerminalLaunchPlan {
-    #[cfg(any(feature = "desktop", test))]
-    pub(crate) const fn new(
-        local_home: crate::domain::ValidatedLocalDirectory,
-        metadata_context: RemoteTerminalMetadataContext,
-        fallback_title: String,
-        terminal_session_channel: crate::ssh::command::PreparedSshTerminalSessionChannelCommand,
-    ) -> Self {
-        Self {
-            local_home,
-            metadata_context,
-            fallback_title,
-            terminal_session_channel,
-        }
-    }
-
-    #[cfg(test)]
-    pub const fn local_home(&self) -> &crate::domain::ValidatedLocalDirectory {
-        &self.local_home
-    }
-
-    #[cfg(test)]
-    pub const fn destination(&self) -> &crate::domain::SshDestination {
-        self.metadata_context.destination()
-    }
-
-    pub const fn remote_directory(&self) -> &crate::domain::RemoteDirectory {
-        self.metadata_context.initial_directory()
-    }
-
-    pub fn fallback_title(&self) -> &str {
-        &self.fallback_title
-    }
-
-    pub const fn metadata_context(&self) -> &RemoteTerminalMetadataContext {
-        &self.metadata_context
-    }
-
-    #[cfg(all(test, feature = "desktop"))]
-    pub(crate) fn take_terminal_session_channel(
-        &self,
-    ) -> Result<
-        crate::ssh::command::SshCommandSpec,
-        crate::ssh::command::PreparedSshTerminalSessionChannelError,
-    > {
-        self.terminal_session_channel.take()
-    }
 }
 
 impl LocalTerminalLaunchPlan {
@@ -192,16 +93,6 @@ impl LocalTerminalLaunchPlan {
     pub const fn working_directory(&self) -> &crate::domain::ValidatedLocalDirectory {
         &self.working_directory
     }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-/// The exhaustive Local or Remote launch authority consumed by a Terminal Session factory.
-///
-/// Matching this enum is the boundary at which local path capabilities and Terminal Session Channel
-/// ownership diverge; callers must not reconstruct one variant from the other's directory data.
-pub enum TerminalLaunchPlan {
-    Local(LocalTerminalLaunchPlan),
-    Remote(Box<RemoteTerminalLaunchPlan>),
 }
 
 #[derive(Clone)]
@@ -231,11 +122,11 @@ impl NativeTerminalSessionFactory {
     pub fn start_runtime(
         &self,
         geometry: TerminalGeometry,
-        launch_plan: TerminalLaunchPlan,
+        local: LocalTerminalLaunchPlan,
         initial_appearance: TerminalAppearanceUpdate,
     ) -> Result<TerminalRuntime, TerminalSessionError> {
         let (runtime, subscription) =
-            self.start_subscribed(geometry, launch_plan, initial_appearance)?;
+            self.start_subscribed(geometry, local, initial_appearance)?;
         drop(subscription);
         Ok(runtime)
     }
@@ -243,31 +134,20 @@ impl NativeTerminalSessionFactory {
     fn start_subscribed(
         &self,
         geometry: TerminalGeometry,
-        launch_plan: TerminalLaunchPlan,
+        local: LocalTerminalLaunchPlan,
         initial_appearance: TerminalAppearanceUpdate,
     ) -> Result<(TerminalRuntime, TerminalSubscription), TerminalSessionError> {
-        let launch = match launch_plan {
-            TerminalLaunchPlan::Local(local) => {
-                let mut launch = TerminalSessionLaunch::local(
-                    self.launch_planner.clone(),
-                    local.working_directory().path(),
-                    self.local_machine.clone(),
-                    &self.local_filesystem,
-                );
-                if let TerminalSessionProcess::Local {
-                    directory_guard, ..
-                } = &mut launch.process
-                {
-                    *directory_guard = Some((
-                        local.working_directory().clone(),
-                        self.local_filesystem.clone(),
-                    ));
-                }
-                launch.restricted = local.restricted;
-                launch
-            }
-            TerminalLaunchPlan::Remote(remote) => TerminalSessionLaunch::remote(*remote)?,
-        };
+        let mut launch = TerminalSessionLaunch::local(
+            self.launch_planner.clone(),
+            local.working_directory().path(),
+            self.local_machine.clone(),
+            &self.local_filesystem,
+        );
+        launch.process.directory_guard = Some((
+            local.working_directory().clone(),
+            self.local_filesystem.clone(),
+        ));
+        launch.restricted = local.restricted;
         TerminalRuntime::start_launch(
             Arc::clone(&self.native_pty_adapter_factory),
             geometry,
@@ -278,15 +158,16 @@ impl NativeTerminalSessionFactory {
     }
 }
 
+#[cfg(test)]
 impl TerminalSessionFactory for NativeTerminalSessionFactory {
     fn start(
         &self,
         geometry: TerminalGeometry,
-        launch_plan: TerminalLaunchPlan,
+        local: LocalTerminalLaunchPlan,
         initial_appearance: TerminalAppearanceUpdate,
     ) -> Result<StartedTerminalSession, TerminalSessionError> {
         let (session, subscription) =
-            self.start_subscribed(geometry, launch_plan, initial_appearance)?;
+            self.start_subscribed(geometry, local, initial_appearance)?;
         Ok(StartedTerminalSession {
             clipboard: subscription.clipboard,
             handle: Box::new(session),
@@ -506,7 +387,7 @@ mod directory_tests {
         std::fs::create_dir(&root).unwrap();
         let filesystem = crate::runtime::local_filesystem();
         let directory = filesystem.validate_directory(&root).unwrap();
-        let launch = TerminalSessionProcess::Local {
+        let launch = TerminalSessionProcess {
             planner: test_launch_planner(),
             directory: root.clone(),
             prompt_owner: None,

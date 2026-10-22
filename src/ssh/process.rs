@@ -615,19 +615,6 @@ impl SshProcessEnvironment {
         (self.home.clone(), entries, askpass_capability)
     }
 
-    /// Builds the environment for an already-authorized Terminal Session Channel.
-    ///
-    /// Pane commands must use their live control connection and never receive AskPass transport
-    /// state. If that connection is unavailable, OpenSSH must fail instead of re-authenticating.
-    pub(crate) fn into_pane_launch_environment(self) -> (PathBuf, Vec<(OsString, OsString)>) {
-        let mut entries = vec![(OsString::from("HOME"), self.home.as_os_str().to_owned())];
-        entries.extend(
-            self.startup
-                .entries()
-                .map(|(name, value)| (name.into(), value.to_owned())),
-        );
-        (self.home, entries)
-    }
 }
 
 impl SshProbeEnvironment {
@@ -1651,44 +1638,6 @@ mod tests {
             error,
             Some(SshProcessEnvironmentError::UnsafeHome)
         ));
-    }
-
-    #[test]
-    fn pane_environment_uses_captured_home_and_startup_entries() {
-        let home = PathBuf::from("/private/tmp");
-        let environment = SshProcessEnvironment::new_without_authentication(
-            home.clone(),
-            Some(OsString::from("/private/tmp/agent.sock")),
-        )
-        .unwrap();
-        let (directory, entries) = environment.into_pane_launch_environment();
-        let entries: std::collections::HashMap<_, _> = entries.into_iter().collect();
-        assert_eq!(directory, home);
-        assert_eq!(
-            entries.get(std::ffi::OsStr::new("HOME")),
-            Some(&OsString::from("/private/tmp"))
-        );
-        assert_eq!(
-            entries.get(std::ffi::OsStr::new("PATH")),
-            Some(&OsString::from("/fixture/bin"))
-        );
-        assert_eq!(
-            entries.get(std::ffi::OsStr::new("SSH_AUTH_SOCK")),
-            Some(&OsString::from("/private/tmp/agent.sock"))
-        );
-        assert!(!entries.contains_key(std::ffi::OsStr::new("SPACETERM_UNKNOWN")));
-    }
-
-    #[test]
-    fn authenticated_pane_environment_should_exclude_askpass_transport() {
-        let (directory, entries) = authenticated_test_environment().into_pane_launch_environment();
-
-        assert_eq!(directory, Path::new("/captured/home"));
-        assert!(entries.iter().all(|(name, _)| {
-            !ASKPASS_OVERLAY_NAMES
-                .iter()
-                .any(|candidate| name == candidate)
-        }));
     }
 
     use super::testing::*;

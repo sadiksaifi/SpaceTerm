@@ -10,7 +10,7 @@ use crate::terminal::{
     FindDirection, FindQueryGeneration, KeyInput, PasteConfirmationId, PasteDecision,
     PasteRequestOutcome, PasteResolution, PointerInput, PresentationGeneration, ScrollbackMovement,
     SelectionCopy, SelectionCopyError, StartedTerminalSession, TerminalAccessibilityModel,
-    TerminalAppearanceUpdate, TerminalLaunchPlan, TerminalSessionError, TerminalSessionEvent,
+    TerminalAppearanceUpdate, LocalTerminalLaunchPlan, TerminalSessionError, TerminalSessionEvent,
     TerminalSessionFactory, TerminalSessionHandle, WheelInput,
 };
 
@@ -109,7 +109,7 @@ pub(crate) fn test_terminal_key_input_adapter() -> Box<dyn crate::terminal::Term
 pub(crate) struct RecordedStart {
     pub(crate) session_id: usize,
     pub(crate) geometry: TerminalGeometry,
-    launch_plan: TerminalLaunchPlan,
+    launch_plan: LocalTerminalLaunchPlan,
     pub(crate) initial_appearance: TerminalAppearanceUpdate,
 }
 
@@ -117,19 +117,7 @@ impl RecordedStart {
     pub(crate) const fn local_launch_plan(
         &self,
     ) -> Option<&crate::terminal::LocalTerminalLaunchPlan> {
-        match &self.launch_plan {
-            TerminalLaunchPlan::Local(plan) => Some(plan),
-            TerminalLaunchPlan::Remote(_) => None,
-        }
-    }
-
-    pub(crate) const fn remote_launch_plan(
-        &self,
-    ) -> Option<&crate::terminal::RemoteTerminalLaunchPlan> {
-        match &self.launch_plan {
-            TerminalLaunchPlan::Local(_) => None,
-            TerminalLaunchPlan::Remote(plan) => Some(plan),
-        }
+        Some(&self.launch_plan)
     }
 
     pub(crate) fn local_working_directory(&self) -> Option<&ValidatedLocalDirectory> {
@@ -512,7 +500,7 @@ impl TerminalSessionFactory for TestTerminalSessionFactory {
     fn start(
         &self,
         geometry: TerminalGeometry,
-        launch_plan: TerminalLaunchPlan,
+        launch_plan: LocalTerminalLaunchPlan,
         initial_appearance: TerminalAppearanceUpdate,
     ) -> Result<StartedTerminalSession, TerminalSessionError> {
         let session_id = self.next_session_id.get();
