@@ -10,34 +10,19 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
-from unittest.mock import patch
 
-from spaceterm_tasks import ROOT, TaskError, macos_signing, release, server_package
+from spaceterm_tasks import ROOT, TaskError, release, server_package
 from spaceterm_tasks.package_linux import write_archive
 from spaceterm_tasks.server_catalog import stage_catalog, verify_catalog
 
-from tests.macos_signing_fixture import certificate
-from tests.server_artifact_fixture import SEED, archive_tree
+from tests.server_artifact_fixture import archive_tree
 
 
 class ServerCatalogTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        if sys.platform == "darwin":
-            temporary = tempfile.TemporaryDirectory()
-            cls.addClassCleanup(temporary.cleanup)
-            cls.fingerprint, cls.credentials = certificate(Path(temporary.name))
-            signer = patch.object(server_package, "signer", return_value=cls.fingerprint)
-            signer.start()
-            cls.addClassCleanup(signer.stop)
-
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
-        trust = patch.object(release, "public_key", return_value=release.derived_public_key(SEED))
-        trust.start()
-        self.addCleanup(trust.stop)
         self.identity = "spaceterm-preflight"
         self.target = server_package.host_target()
 
@@ -92,24 +77,20 @@ int main(int argc, char **argv) {{
             )
             if sys.platform == "darwin":
                 identifier = f"io.github.sadiksaifi.{info['identity']}.server"
-                requirement = f'=designated => identifier "{identifier}" and {macos_signing.certificate_requirement(self.fingerprint)}'
-                with macos_signing.release_keychain(self.fingerprint, self.credentials):
-                    subprocess.run(
-                        [
-                            "codesign",
-                            "--force",
-                            "--sign",
-                            self.fingerprint,
-                            "--identifier",
-                            identifier,
-                            "--requirements",
-                            requirement,
-                            "--timestamp=none",
-                            str(executable),
-                        ],
-                        check=True,
-                        capture_output=True,
-                    )
+                subprocess.run(
+                    [
+                        "codesign",
+                        "--force",
+                        "--sign",
+                        "-",
+                        "--identifier",
+                        identifier,
+                        "--timestamp=none",
+                        str(executable),
+                    ],
+                    check=True,
+                    capture_output=True,
+                )
         else:
             executable.write_bytes(header)
             executable.chmod(0o755)
@@ -175,7 +156,9 @@ int main(int argc, char **argv) {{
             json.dumps({**info, "commit": "c" * 40, "version": "dev.cccccccccccc"})
         )
         write_archive(tree, archive)
-        release.sign_ed25519(SEED, archive, signature)
+        release.sign_ed25519(
+            server_package.artifact_signing_seed(self.identity), archive, signature
+        )
         target = source / self.target
         shutil.copyfile(archive, target / "artifact.tar.gz")
         shutil.copyfile(signature, target / "artifact.sig")
@@ -201,7 +184,9 @@ int main(int argc, char **argv) {{
         for truncated in (False, True):
             terminfo.write_bytes(data[:-1] if truncated else data)
             write_archive(tree, archive)
-            release.sign_ed25519(SEED, archive, signature)
+            release.sign_ed25519(
+                server_package.artifact_signing_seed(self.identity), archive, signature
+            )
             shutil.copyfile(archive, source / target / "artifact.tar.gz")
             shutil.copyfile(signature, source / target / "artifact.sig")
             (source / target / "artifact.sha256").write_text(release.sha256(archive) + "\n")
@@ -241,7 +226,9 @@ int main(int argc, char **argv) {{
                 else:
                     (tree / "share/spaceterm/shell-integration/zsh/.zshenv").unlink()
                 write_archive(tree, archive)
-                release.sign_ed25519(SEED, archive, signature)
+                release.sign_ed25519(
+                    server_package.artifact_signing_seed(self.identity), archive, signature
+                )
                 with self.assertRaises(TaskError):
                     stage_catalog(archive, signature, self.root / "refused", self.identity)
                 self.assertFalse((self.root / "refused").exists())

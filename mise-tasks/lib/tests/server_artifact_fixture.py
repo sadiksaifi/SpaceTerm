@@ -6,7 +6,7 @@ import shutil
 import subprocess
 import sys
 
-from spaceterm_tasks import macos_signing, release
+from spaceterm_tasks import macos_signing, release, server_package
 from spaceterm_tasks.package_linux import write_archive
 
 SEED = bytes(range(32))
@@ -67,21 +67,39 @@ int main(int argc, char **argv) {{
         check=True,
     )
     if sys.platform == "darwin":
-        if fingerprint is None or credentials is None:
-            raise ValueError("the native package fixture requires its disposable signing identity")
         identifier = f"io.github.sadiksaifi.{expected['identity']}.server"
-        requirement = f'=designated => identifier "{identifier}" and {macos_signing.certificate_requirement(fingerprint)}'
-        with macos_signing.release_keychain(fingerprint, credentials):
+        if release_tag:
+            if fingerprint is None or credentials is None:
+                raise ValueError(
+                    "the native package fixture requires its disposable signing identity"
+                )
+            requirement = f'=designated => identifier "{identifier}" and {macos_signing.certificate_requirement(fingerprint)}'
+            with macos_signing.release_keychain(fingerprint, credentials):
+                subprocess.run(
+                    [
+                        "codesign",
+                        "--force",
+                        "--sign",
+                        fingerprint,
+                        "--identifier",
+                        identifier,
+                        "--requirements",
+                        requirement,
+                        "--timestamp=none",
+                        str(executable),
+                    ],
+                    check=True,
+                    capture_output=True,
+                )
+        else:
             subprocess.run(
                 [
                     "codesign",
                     "--force",
                     "--sign",
-                    fingerprint,
+                    "-",
                     "--identifier",
                     identifier,
-                    "--requirements",
-                    requirement,
                     "--timestamp=none",
                     str(executable),
                 ],
@@ -140,5 +158,10 @@ def archive_tree(root, tree, expected):
     archive = tree.parent / "artifact.tar.gz"
     signature = tree.parent / "artifact.sig"
     write_archive(tree, archive)
-    release.sign_ed25519(SEED, archive, signature)
+    seed = (
+        SEED
+        if expected["identity"] == "spaceterm"
+        else server_package.artifact_signing_seed(expected["identity"])
+    )
+    release.sign_ed25519(seed, archive, signature)
     return archive, signature

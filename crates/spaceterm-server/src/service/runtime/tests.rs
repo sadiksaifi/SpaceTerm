@@ -3,6 +3,67 @@ use std::os::unix::fs::PermissionsExt;
 use test_support::{COMMIT, VERSION, target, with_artifact};
 
 #[test]
+fn nonproduction_signatures_never_authorize_release_even_when_the_manifest_claims_release() {
+    let root = temporary();
+    let trust: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../../../packaging/server-nonproduction-trust.json"
+    ))
+    .unwrap();
+    let seed = base64::engine::general_purpose::STANDARD
+        .decode(trust["seed"].as_str().unwrap())
+        .unwrap();
+    let pair = ring::signature::Ed25519KeyPair::from_seed_unchecked(&seed).unwrap();
+    for identity in ["spaceterm-preflight", "spaceterm-development", "spaceterm"] {
+        let (archive, signature) =
+            with_artifact(&root.join(identity), identity, |archive, signature| {
+                std::fs::write(
+                    signature,
+                    pair.sign(&std::fs::read(archive).unwrap()).as_ref(),
+                )
+                .unwrap();
+                (archive.to_owned(), signature.to_owned())
+            });
+        // Outside fixture trust: use the compiled trust selected by the receiving Service.
+        let service = Service::for_identity(identity).unwrap();
+        let pin = digest(&std::fs::read(&archive).unwrap());
+        let inspect =
+            || service.inspect_candidate(&archive, &signature, &pin, 1, &["workspace_policy"]);
+        if identity == "spaceterm" {
+            assert_eq!(inspect(), Err(ServerError::RuntimeUnavailable));
+            let parent = root.join("release-installations");
+            assert_eq!(
+                provision_candidate(
+                    &parent,
+                    identity,
+                    &archive,
+                    &signature,
+                    &pin,
+                    1,
+                    &["workspace_policy"]
+                ),
+                Err(ServerError::RuntimeUnavailable)
+            );
+            assert!(!parent.exists());
+        } else {
+            assert_eq!(inspect().unwrap().version, VERSION);
+            let other = Service::for_identity(if identity == "spaceterm-preflight" {
+                "spaceterm-development"
+            } else {
+                "spaceterm-preflight"
+            })
+            .unwrap();
+            assert_eq!(
+                other.inspect_candidate(&archive, &signature, &pin, 1, &["workspace_policy"]),
+                Err(ServerError::RuntimeUnavailable)
+            );
+            std::fs::write(&signature, [0; 64]).unwrap();
+            assert_eq!(inspect(), Err(ServerError::RuntimeUnavailable));
+        }
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn remote_candidate_inspection_verifies_the_selected_target_without_executing_it() {
     let root = temporary();
     let remote_target = if target() == "aarch64-apple-darwin" {

@@ -12,10 +12,44 @@ from spaceterm_tasks import TaskError
 from spaceterm_tasks.macos_signing import (
     release_keychain,
     signing_environment,
+    verify_adhoc_signature,
     verify_release_signature,
 )
 
 from tests.macos_signing_fixture import certificate
+
+
+@unittest.skipUnless(sys.platform == "darwin", "requires macOS codesign")
+class AdhocSigningTests(unittest.TestCase):
+    def test_nonproduction_native_signature_checks_identity_and_tampering_without_credentials(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            executable = Path(temporary) / "server"
+            clean = signing_environment(os.environ)
+            subprocess.run(
+                ["xcrun", "clang", "-x", "c", "-", "-o", str(executable)],
+                input=b"int main(){return 0;}",
+                env=clean,
+                check=True,
+                capture_output=True,
+            )
+            identifier = "io.github.sadiksaifi.spaceterm-preflight.server"
+            subprocess.run(
+                ["codesign", "--force", "--sign", "-", "--identifier", identifier, str(executable)],
+                env=clean,
+                check=True,
+                capture_output=True,
+            )
+            verify_adhoc_signature(executable, identifier, "server")
+            with self.assertRaises(TaskError):
+                verify_adhoc_signature(
+                    executable, "io.github.sadiksaifi.spaceterm.server", "server"
+                )
+            with self.assertRaises(TaskError):
+                verify_release_signature(executable, "0" * 40, identifier, "server")
+            with executable.open("r+b") as output:
+                output.write(b"tampered")
+            with self.assertRaises(TaskError):
+                verify_adhoc_signature(executable, identifier, "server")
 
 
 @unittest.skipUnless(sys.platform == "darwin", "requires macOS Keychain and codesign")

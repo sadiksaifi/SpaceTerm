@@ -168,3 +168,15 @@ def verify_release_signature(app, fingerprint, identifier, label):
                 ["codesign", "--verify", "--strict", "-R", f"={requirement}", str(path)],
                 f"{label} bundled executable does not match the pinned certificate",
             )
+
+
+def verify_adhoc_signature(path, identifier, label):
+    checked(
+        ["codesign", "--verify", "--strict", "-R", f'=identifier "{identifier}"', str(path)],
+        f"{label} ad hoc signature or identifier is invalid",
+    )
+    result = subprocess.run(
+        ["codesign", "--display", "--verbose=4", str(path)], capture_output=True, text=True
+    )
+    if result.returncode or "Signature=adhoc" not in result.stderr.splitlines():
+        raise TaskError(f"{label} is not ad hoc signed")
