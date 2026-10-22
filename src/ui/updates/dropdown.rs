@@ -8,8 +8,8 @@ use gpui::{
     Window, div,
 };
 use spaceterm_ui::{
-    DeterminateProgress, Icon, IconName, Menu, MenuAlignment, MenuEntry, MenuPlacement,
-    MenuPlacementConfig, MenuSize, ProgressRing, ProgressSize, ProgressState,
+    DeterminateProgress, Icon, IconName, Menu, MenuAlignment, MenuEntry, MenuLifecycleEvent,
+    MenuPlacement, MenuPlacementConfig, MenuSize, ProgressRing, ProgressSize, ProgressState,
 };
 
 use super::server_rows::{ServerUpdateAction, ServerUpdateRow, ServerUpdates};
@@ -146,8 +146,9 @@ fn client_section(
     MenuEntry::section(format!("SpaceTerm {CURRENT_VERSION}"), entries)
 }
 
-/// One section per actual server, named by its machine and account. A row without an action
-/// reports the server's status truthfully and cannot be chosen.
+/// One section per actual server, named by its machine and account. The status reads as a
+/// disabled row, and the action that reaches the server's Settings journey follows it under its
+/// own name.
 fn server_sections(rows: Vec<ServerUpdateRow>) -> Vec<MenuEntry<UpdatesMenuAction>> {
     if rows.is_empty() {
         return vec![MenuEntry::section(
@@ -158,14 +159,14 @@ fn server_sections(rows: Vec<ServerUpdateRow>) -> Vec<MenuEntry<UpdatesMenuActio
     rows.into_iter()
         .enumerate()
         .map(|(index, row)| {
-            let entry = match row.action {
-                Some(action) => MenuEntry::action(row.detail, UpdatesMenuAction::Server(action)),
-                None => status_row(row.detail),
-            };
-            MenuEntry::section(
-                row.label,
-                vec![entry.debug_selector(format!("update-server-{index}"))],
-            )
+            let mut entries = vec![
+                status_row(row.detail).debug_selector(format!("update-server-{index}-status")),
+            ];
+            entries.extend(row.action.map(|action| {
+                MenuEntry::action(action.label(), UpdatesMenuAction::Server(action))
+                    .debug_selector(format!("update-server-{index}-action"))
+            }));
+            MenuEntry::section(row.label, entries)
         })
         .collect()
 }
@@ -238,6 +239,7 @@ impl Render for UpdateControl {
         let appearance = chrome(cx);
         let glyph_size = appearance.icons.metrics(IconRole::Caption).glyph_size;
         let handle = window.window_handle();
+        let servers = self.servers.downgrade();
         let menu = Menu::new("update-control", "Updates", entries)
             .size(MenuSize::Wide)
             .placement(MenuPlacementConfig::new(
@@ -253,6 +255,16 @@ impl Render for UpdateControl {
                 ))
             })
             .debug_selector("update-control")
+            .on_lifecycle(move |event, cx| {
+                if *event != MenuLifecycleEvent::Opened {
+                    return;
+                }
+                let servers = servers.clone();
+                // Lifecycle delivery can occur while the window is borrowed.
+                cx.defer(move |cx| {
+                    let _ = servers.update(cx, |servers, cx| servers.refresh(cx));
+                });
+            })
             .on_activate(move |activation, _, cx| {
                 UpdateControl::activate(activation.action().clone(), handle, cx)
             });
