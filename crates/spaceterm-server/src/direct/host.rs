@@ -155,10 +155,10 @@ impl State {
         stream: &UnixStream,
         generation: [u8; 32],
     ) -> Result<(), DirectError> {
+        self.authorized(paired)?;
         if generation != self.generation {
             return Err(DirectError::Disabled);
         }
-        self.authorized(paired)?;
         if self.connections.len() >= 64 {
             return Err(DirectError::Capacity);
         }
@@ -736,6 +736,35 @@ pub(crate) fn serve(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn uncertain_storage_recovery_fences_registration_from_the_prior_exposure_generation() {
+        let fixture = super::super::tests::Fixture::new();
+        fixture.enable();
+        let credential = DeviceCredential::generate().unwrap();
+        let invitation = fixture.invite();
+        let claim = fixture.claim(&invitation, &credential);
+        let ManagementReply::Approved(device) =
+            fixture.management(Management::Approve(claim)).unwrap()
+        else {
+            panic!()
+        };
+        let mut state = fixture.state.lock().unwrap();
+        let paired = PairedDevice {
+            pin: state.pin.clone(),
+            pairing: device.pairing,
+            client: device.client,
+        };
+        let generation = state.generation;
+        // A failed atomic save leaves its durable outcome uncertain. Its next authority
+        // check reloads the document and rotates exposure before registering a stream.
+        state.uncertain = true;
+        let (stream, _peer) = UnixStream::pair().unwrap();
+        let registered = state.register(&paired, &stream, generation);
+        let empty = state.connections.is_empty();
+        drop(state);
+        assert_eq!(registered, Err(DirectError::Disabled));
+        assert!(empty);
+    }
     #[test]
     fn invitation_and_claim_expiry_refuse_enrollment_and_confirm_no_retained_pairing_on_cancel() {
         let fixture = super::super::tests::Fixture::new();
