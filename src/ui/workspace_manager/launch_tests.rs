@@ -1682,3 +1682,112 @@ fn a_new_server_session_replaces_the_former_sessions_metadata(cx: &mut TestAppCo
         ("Terminal".to_owned(), String::new())
     );
 }
+
+const OTHER_WORKSPACE: [u8; 32] = [37; 32];
+const OTHER_TAB: [u8; 32] = [38; 32];
+const OTHER_PANE: [u8; 32] = [39; 32];
+const OTHER_HIDDEN_TAB: [u8; 32] = [40; 32];
+const OTHER_HIDDEN_PANE: [u8; 32] = [43; 32];
+
+/// The server's first Workspace, and a second one a new client does not attach, whose second Tab
+/// runs `cargo test` in `/srv/api`.
+fn with_detached_workspace() -> Inventory {
+    use spaceterm_server::hierarchy::ConfirmedPane;
+    let pane = |id, presentation: Option<spaceterm_server::pane::metadata::Snapshot>| Pane {
+        id,
+        source: None,
+        axis: Axis::Right,
+        starting_directory: PathBuf::from("/server/home"),
+        current_directory: None,
+        presentation: presentation.map(Box::new),
+        confirmed_directory: None,
+        creator: None,
+    };
+    let tab = |id, root_pane, pane| Tab {
+        worktree: None,
+        worktree_membership_fixed: false,
+        worktree_repository: None,
+        id,
+        root_pane,
+        panes: vec![pane],
+    };
+    let mut inventory = with_hidden_tab(2, None, None);
+    inventory.workspaces.push(Workspace {
+        id: OTHER_WORKSPACE,
+        name: "Other".to_owned(),
+        name_version: 0,
+        pin_version: 0,
+        pinned_directory: None,
+        root_tab: OTHER_TAB,
+        tabs: vec![
+            tab(OTHER_TAB, OTHER_PANE, pane(OTHER_PANE, None)),
+            tab(
+                OTHER_HIDDEN_TAB,
+                OTHER_HIDDEN_PANE,
+                pane(
+                    OTHER_HIDDEN_PANE,
+                    Some(running(5, "cargo test", "/srv/api")),
+                ),
+            ),
+        ],
+    });
+    let close = inventory.close.as_mut().expect("close facts");
+    close.sessions.push(ConfirmedPane {
+        id: OTHER_PANE,
+        session: None,
+    });
+    close.sessions.push(ConfirmedPane {
+        id: OTHER_HIDDEN_PANE,
+        session: Some([44; 32]),
+    });
+    inventory
+}
+
+#[gpui::test]
+fn a_reattached_workspace_names_what_its_hidden_tab_runs_from_an_unchanged_inventory(
+    cx: &mut TestAppContext,
+) {
+    let (harness, cx) = launch_harness(vec![ready()], cx);
+    cx.run_until_parked();
+    harness.edits.set_inventory(with_detached_workspace());
+    sync(&harness, cx);
+    let attach = |cx: &mut VisualTestContext| {
+        cx.update(|window, cx| {
+            harness.manager.update(cx, |manager, cx| {
+                manager.attach_detached_workspace(ServerKey::LOCAL, OTHER_WORKSPACE, window, cx);
+            });
+        });
+        cx.run_until_parked();
+    };
+    attach(cx);
+    let other = harness.manager.read_with(cx, |manager, _| {
+        manager
+            .shared
+            .get(ServerKey::LOCAL)
+            .and_then(|shared| shared.local(OTHER_WORKSPACE))
+            .expect("the attached Workspace is presented")
+    });
+    cx.update(|window, cx| {
+        harness.manager.update(cx, |manager, cx| {
+            manager.detach_shared_workspace(other, window, cx);
+        });
+    });
+    cx.run_until_parked();
+
+    attach(cx);
+    // The server publishes nothing new, so each poll reports the same inventory.
+    sync(&harness, cx);
+
+    assert_eq!(
+        tab_identities(cx),
+        [
+            ("Terminal".to_owned(), String::new()),
+            ("cargo test".to_owned(), "api".to_owned()),
+        ]
+    );
+    assert_eq!(
+        harness.panes.pane(OTHER_HIDDEN_PANE).selections(),
+        0,
+        "presenting the hidden Tab neither selects nor claims its Pane"
+    );
+}

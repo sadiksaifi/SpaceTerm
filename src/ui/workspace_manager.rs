@@ -3051,23 +3051,24 @@ impl WorkspaceManager {
         // Workspaces nobody is looking at.
         if poll.changed {
             self.present_shared_repositories(cx);
-            self.present_shared_metadata(key, cx);
+            // Metadata alone can change without a membership revision.
+            if let Some(inventory) = self.shared.get(key).and_then(|s| s.latest_inventory()) {
+                self.present_shared_metadata(key, inventory, cx);
+            }
         }
     }
 
-    /// Presents the Terminal Metadata one server published for every Pane of its Workspaces this
-    /// window shows, active or not, painted or not. The inventory names each Pane's Session run,
-    /// so metadata from a run that ended never replaces the current one's.
-    fn present_shared_metadata(&self, key: ServerKey, cx: &mut Context<Self>) {
+    /// Presents the Terminal Metadata `inventory` publishes for every Pane of its server's
+    /// Workspaces this window shows, active or not, painted or not. The inventory names each
+    /// Pane's Session run, so metadata from a run that ended never replaces the current one's.
+    fn present_shared_metadata(
+        &self,
+        key: ServerKey,
+        inventory: &spaceterm_server::hierarchy::Inventory,
+        cx: &mut Context<Self>,
+    ) {
         use crate::ui::terminal_pane::ServerSessionRun;
 
-        let Some(inventory) = self
-            .shared
-            .get(key)
-            .and_then(super::shared_workspaces::SharedWorkspaces::latest_inventory)
-        else {
-            return;
-        };
         let runs = inventory.close.as_ref().map(|close| {
             close
                 .sessions
@@ -3199,6 +3200,9 @@ impl WorkspaceManager {
                 }
             }
         }
+        // Views this inventory just created, including a reattached Workspace's, present its
+        // metadata now. A later poll may carry the same inventory and report no change.
+        self.present_shared_metadata(key, inventory, cx);
         self.synchronize_tab_manager_layouts(window, cx);
         cx.notify();
     }
