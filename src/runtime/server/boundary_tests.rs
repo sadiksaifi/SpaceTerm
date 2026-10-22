@@ -82,7 +82,7 @@ fn the_maximum_grid_with_maximal_cells_and_metadata_fits_one_terminal_frame() {
     // strings the emulator would normally sanitize before exposing a rendered cell.
     for row in Arc::make_mut(&mut screen.rows) {
         for cell in Arc::make_mut(row) {
-            cell.text = "\0".repeat(64).into();
+            cell.text = "\0".repeat(64);
             cell.foreground_source =
                 TerminalColor::Rgb(crate::appearance::color::Color::rgb(0xffffff));
             cell.background_source = cell.foreground_source;

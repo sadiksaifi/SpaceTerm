@@ -92,6 +92,52 @@ fn accept(listener: &UnixListener) -> UnixStream {
     }
 }
 
+fn prove_shell_started(host: &mut crate::runtime::SharedWorkspaceHost, lease: Lease) {
+    // Attached can precede the worker's PTY startup. Execute a shell command and observe its
+    // output before dropping that acknowledgement, so the test proves a successful shell start.
+    for key in [
+        KeyInput::text_input("stty -echo; printf '\\033[2J\\033[HST-START-SUCCEEDED\\n'"),
+        KeyInput {
+            physical_key: PhysicalKey::Enter,
+            logical_key: "enter".into(),
+            text: None,
+            ..KeyInput::text_input("")
+        },
+    ] {
+        assert!(matches!(
+            host.request(
+                [1; 32],
+                lease.connection,
+                Request::Key {
+                    lease,
+                    key: encode_key(key)
+                }
+            ),
+            Reply::Unchanged
+        ));
+    }
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Reply::Screen(screen) =
+            host.request([1; 32], lease.connection, Request::Poll { lease })
+            && screen.rows.iter().any(|row| {
+                row.iter()
+                    .map(|cell| cell.text.as_str())
+                    .collect::<String>()
+                    .trim_end()
+                    == "ST-START-SUCCEEDED"
+            })
+        {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the original shell did not execute its command"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
 #[test]
 fn a_fresh_client_process_observes_a_successful_start_after_its_reply_is_lost() {
     for start_by_takeover in [false, true] {
@@ -137,6 +183,7 @@ fn a_fresh_client_process_observes_a_successful_start_after_its_reply_is_lost() 
                 };
                 assert_eq!(takeover_request, start_by_takeover);
                 starts += 1;
+                prove_shell_started(&mut host, lease);
                 original = Some(lease);
                 // The PTY exists. Its successful acknowledgement never reaches the client.
                 break;
@@ -215,7 +262,7 @@ fn client_process() {
     let mut stream =
         UnixStream::connect(std::env::var_os(SOCKET).expect("fixture socket missing")).unwrap();
     stream
-        .set_read_timeout(Some(Duration::from_secs(10)))
+        .set_read_timeout(Some(Duration::from_secs(30)))
         .unwrap();
     write(&mut stream, &Request::Inventory);
     let Some(Reply::Inventory { inventory, .. }) = read(&mut stream) else {

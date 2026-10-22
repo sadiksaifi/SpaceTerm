@@ -967,7 +967,7 @@ impl ActiveInput {
         generation: u64,
         text: &str,
         exchange: &mut impl FnMut(&Request) -> Result<Reply, ServerError>,
-    ) -> Result<(), ServerError> {
+    ) -> Result<InputMethodOutcome, ServerError> {
         let mut remaining = text;
         while !remaining.is_empty() {
             {
@@ -980,7 +980,9 @@ impl ActiveInput {
                         pane::FocusTarget::Terminal | pane::FocusTarget::FocusedPane
                     )
                 {
-                    return Err(ServerError::StaleControl);
+                    // New local focus retires the remaining input without turning a healthy
+                    // transport into a connection failure or taking focus back.
+                    return Ok(InputMethodOutcome::Interrupted);
                 }
             }
             let mut end = remaining.len().min(pane::MAX_KEY_TEXT_BYTES);
@@ -1007,7 +1009,7 @@ impl ActiveInput {
                 }
             }
         }
-        Ok(())
+        Ok(InputMethodOutcome::Written)
     }
 
     fn process(
@@ -1053,12 +1055,11 @@ impl ActiveInput {
         let (request, paste_reply) = match submitted.command {
             Input::InputMethod(text, reply) => {
                 let result = self.write_input_method(state, generation, &text, exchange);
-                let _ = reply.try_send(if result.is_ok() {
-                    InputMethodOutcome::Written
-                } else {
-                    InputMethodOutcome::Interrupted
+                let _ = reply.try_send(match &result {
+                    Ok(outcome) => *outcome,
+                    Err(_) => InputMethodOutcome::Interrupted,
                 });
-                return result;
+                return result.map(|_| ());
             }
             Input::ClearScreenAndScrollback => (
                 Request::ClearScreenAndScrollback { lease: self.lease },
@@ -3371,7 +3372,7 @@ mod tests {
         ) else {
             panic!("fixture Pane did not start")
         };
-        let text = "界🙂a".repeat(1800) + "尾";
+        let text = "界🙂".repeat(2200) + "尾";
         let expected = text.clone() + "!";
         let command = format!(
             r#"stty raw -echo; python3 -c 'import sys,hashlib; sys.stdout.write("READY\r\n"); sys.stdout.flush(); b=sys.stdin.buffer.read({}); sys.stdout.write(hashlib.sha256(b).hexdigest()+"\r\n"); sys.stdout.flush()'"#,
@@ -3477,6 +3478,44 @@ mod tests {
                 adapter.drain_rounds(2, true, |_| panic!("an uncertain commit must never replay"));
             assert_eq!(chunks.len(), lost_chunk);
         }
+    }
+
+    #[test]
+    fn focus_moving_during_a_commit_drops_its_suffix_without_reconnecting() {
+        let mut adapter = Adapter::new();
+        let outcome = adapter
+            .handle
+            .commit_input_method(&"界🙂".repeat(2500))
+            .unwrap();
+        let epoch = adapter.active.epoch;
+        let state = Arc::clone(&adapter.handle.state);
+        let mut chunks = 0;
+        adapter
+            .drain_rounds(1, true, |request| {
+                if matches!(
+                    request,
+                    Request::Input {
+                        input: pane::InteractiveInput::Key(_),
+                        ..
+                    }
+                ) {
+                    chunks += 1;
+                    state
+                        .interaction
+                        .lock()
+                        .unwrap()
+                        .focus(pane::FocusTarget::Unfocused);
+                }
+                Ok(Reply::Unchanged)
+            })
+            .unwrap();
+        assert_eq!(chunks, 1);
+        assert_eq!(outcome.try_recv().unwrap(), InputMethodOutcome::Interrupted);
+        assert_eq!(adapter.handle.state.epoch.load(Ordering::Acquire), epoch);
+        assert_eq!(
+            adapter.handle.state.status(),
+            DevelopmentPaneStatus::Connected
+        );
     }
 
     #[test]
