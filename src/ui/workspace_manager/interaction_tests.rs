@@ -170,7 +170,11 @@ fn a_reviewed_close_keeps_a_newer_rename_through_confirmation_and_acceptance(
     harness.edits.answer(Outcome::StaleConfirmation);
     harness.sync(cx);
     click("modal-action-shared-close-review", cx);
-    redraw(cx);
+    // Let the old notice finish its deferred focus and rename-hold cleanup while the new
+    // confirmation remains open.
+    for _ in 0..3 {
+        redraw(cx);
+    }
     assert!(
         cx.debug_bounds("modal-action-shared-close-confirm")
             .is_some()
