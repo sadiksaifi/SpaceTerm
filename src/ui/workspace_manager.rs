@@ -110,6 +110,8 @@ pub(crate) struct WorkspaceManagerAdapters {
     pub(crate) window_drag: Rc<dyn OperatingSystemWindowDragPlatform>,
     /// The account-local server this window launches and presents. It owns local Workspaces.
     pub(crate) local_server: launch::LocalServerAdapters,
+    /// Each presented server's directory channel, which answers questions about its own paths.
+    pub(crate) server_directories: super::directory_picker::ServerDirectories,
 }
 
 /// Owns directory selection, its target, and the field version its draft began at.
@@ -188,12 +190,39 @@ enum SwitcherChoice {
     Detached(DetachedWorkspace),
 }
 
+/// One question to the owning server about the directory a person chose in Open Remote
+/// Directory: which attached Workspace there, if any, is already pinned to it.
+struct RemoteDirectoryMatch {
+    directory: PathBuf,
+    /// The Workspaces asked about, with their pins, in sidebar order.
+    pins: Vec<(WorkspaceId, PathBuf)>,
+    server: crate::local_server::LocalServer,
+    /// The position in `pins` the server matched, once it answers.
+    answer: Option<Result<Option<usize>, super::directory_picker::DirectorySourceError>>,
+    _task: Task<()>,
+}
+
+impl RemoteDirectoryMatch {
+    fn asks(
+        &self,
+        directory: &PathBuf,
+        pins: &[(WorkspaceId, PathBuf)],
+        server: &crate::local_server::LocalServer,
+    ) -> bool {
+        self.directory == *directory && self.pins == pins && self.server.same_handle(server)
+    }
+}
+
 pub(crate) struct WorkspaceManager {
     window_appearance: super::appearance_runtime::WindowAppearanceOwner,
     window_traffic_lights: super::appearance_runtime::WindowTrafficLightOwner,
     transient: WorkspaceTransientUi,
     workspace_switcher: ComboBoxHandle<SwitcherChoice, WorkspaceCreation>,
     remote_workspace_name: Option<String>,
+    /// The owning server's answer to whether a Workspace there already uses the directory the
+    /// person chose to open.
+    remote_directory_match: Option<RemoteDirectoryMatch>,
+    server_directories: super::directory_picker::ServerDirectories,
     sidebar: Entity<WorkspaceSidebar>,
     local_filesystem: LocalFilesystemAuthority,
     workspaces: WorkspaceCollection<Entity<TabManager>>,
@@ -265,6 +294,7 @@ impl WorkspaceManager {
             directory_selection,
             window_drag: operating_system_window_drag_platform,
             local_server,
+            server_directories,
         } = adapters;
         let pane_construction = PaneConstruction::new(
             key_input_adapter_factory,
@@ -320,6 +350,8 @@ impl WorkspaceManager {
             },
             workspace_switcher: ComboBoxHandle::default(),
             remote_workspace_name: None,
+            remote_directory_match: None,
+            server_directories,
             sidebar,
             workspaces,
             local_filesystem,
@@ -1103,6 +1135,7 @@ impl WorkspaceManager {
                 self.remote_workspace_focus_restore_pending = !window.is_window_active();
                 self.remote_workspace_flow = None;
                 self.remote_workspace_name = None;
+                self.remote_directory_match = None;
             }
             // The flow keeps showing that the Workspace is opening until its server takes it.
             RemoteWorkspaceFlowEvent::Ready => {
@@ -1134,6 +1167,7 @@ impl WorkspaceManager {
         else {
             return;
         };
+        let destination_name = destination.as_str().to_owned();
         // The flow reports a replaced or lost connection itself; nothing reaches another one.
         let current = crate::ui::ssh_servers::installed(cx)
             .and_then(|connections| connections.server(&destination))
@@ -1152,15 +1186,56 @@ impl WorkspaceManager {
         {
             return;
         }
-        // A server path compares only with that server's own pins.
-        let existing = directory.as_ref().and_then(|directory| {
-            let shared = self.shared.get(key)?;
-            self.workspaces.iter().map(|entry| entry.id()).find(|id| {
-                shared
-                    .server_workspace(*id)
-                    .is_some_and(|workspace| workspace.pinned_directory.as_ref() == Some(directory))
+        // A server path compares only with that server's own pins, and only that server can
+        // tell whether two of its paths name one directory, such as through a symbolic link.
+        let pins: Vec<(WorkspaceId, PathBuf)> = self
+            .shared
+            .get(key)
+            .map(|shared| {
+                self.workspaces
+                    .iter()
+                    .filter_map(|entry| {
+                        let pin = shared
+                            .server_workspace(entry.id())?
+                            .pinned_directory
+                            .clone()?;
+                        Some((entry.id(), pin))
+                    })
+                    .collect()
             })
-        });
+            .unwrap_or_default();
+        let existing = match directory.as_ref() {
+            Some(directory) if !pins.is_empty() => {
+                match self.match_remote_directory(directory, &pins, &server, window, cx) {
+                    None => return,
+                    Some(Ok(matched)) => matched.or_else(|| {
+                        pins.iter()
+                            .find(|(_, pin)| pin == directory)
+                            .map(|(workspace_id, _)| *workspace_id)
+                    }),
+                    Some(Err(())) => {
+                        self.remote_workspace_flow = None;
+                        self.remote_workspace_name = None;
+                        self.remote_directory_match = None;
+                        flow.update(cx, |flow, cx| flow.opened(window, cx));
+                        Self::show_shared_unavailable(
+                            &format!(
+                                "SpaceTerm couldn\u{2019}t check whether a Workspace on \
+                                 \u{201C}{}\u{201D} already uses this directory, so it didn\u{2019}t \
+                                 open one. Try again.",
+                                destination_name
+                            ),
+                            window,
+                            cx,
+                        );
+                        self.sync_terminal_focus_blocker(window, cx);
+                        cx.notify();
+                        return;
+                    }
+                }
+            }
+            _ => None,
+        };
         let name = self.remote_workspace_name.clone().unwrap_or_default();
         let refusal = match existing {
             Some(workspace_id) => {
@@ -1185,12 +1260,83 @@ impl WorkspaceManager {
         };
         self.remote_workspace_flow = None;
         self.remote_workspace_name = None;
+        self.remote_directory_match = None;
         flow.update(cx, |flow, cx| flow.opened(window, cx));
         if let Some(reason) = refusal {
             Self::show_shared_refusal("create a Workspace", reason, window, cx);
         }
         self.sync_terminal_focus_blocker(window, cx);
         cx.notify();
+    }
+
+    /// The owning server's answer to which of `pins` names `directory`, or `None` while it is
+    /// asked. A new question replaces an answer to a different one; the question is always the
+    /// current choice and the current pins, so a changed list is asked again.
+    fn match_remote_directory(
+        &mut self,
+        directory: &PathBuf,
+        pins: &[(WorkspaceId, PathBuf)],
+        server: &crate::local_server::LocalServer,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Result<Option<WorkspaceId>, ()>> {
+        if let Some(pending) = self
+            .remote_directory_match
+            .as_ref()
+            .filter(|pending| pending.asks(directory, pins, server))
+        {
+            return pending.answer.as_ref().map(|answer| {
+                answer
+                    .as_ref()
+                    .map(|index| index.and_then(|index| pins.get(index)).map(|(id, _)| *id))
+                    .map_err(|_| ())
+            });
+        }
+        // The question goes to this exact presented server and stops once it's replaced.
+        let presented = server.clone();
+        let destination = self.remote_workspace_flow.as_ref().and_then(|flow| {
+            flow.read(cx)
+                .opening()
+                .map(|choice| choice.destination.clone())
+        });
+        let connections = crate::ui::ssh_servers::installed(cx);
+        let available: Rc<dyn Fn() -> bool> = Rc::new(move || {
+            destination
+                .as_ref()
+                .zip(connections.as_ref())
+                .and_then(|(destination, connections)| connections.server(destination))
+                .is_some_and(|current| current.same_handle(&presented))
+        });
+        let source = ServerDirectorySource::browsing_through(
+            (self.server_directories)(server),
+            None,
+            available,
+        );
+        let question = source.match_directory(
+            directory.clone(),
+            pins.iter().map(|(_, pin)| pin.clone()).collect(),
+        );
+        let asked = (directory.clone(), pins.to_vec(), server.clone());
+        let task = cx.spawn_in(window, async move |manager, cx| {
+            let answer = question.await;
+            drop(source);
+            let _ = manager.update_in(cx, |manager, window, cx| {
+                if let Some(pending) = manager.remote_directory_match.as_mut()
+                    && pending.asks(&asked.0, &asked.1, &asked.2)
+                {
+                    pending.answer = Some(answer);
+                    manager.open_pending_remote_workspace(window, cx);
+                }
+            });
+        });
+        self.remote_directory_match = Some(RemoteDirectoryMatch {
+            directory: directory.clone(),
+            pins: pins.to_vec(),
+            server: server.clone(),
+            answer: None,
+            _task: task,
+        });
+        None
     }
 
     /// Opens Open Local Directory, which creates a Local Workspace named `name` unless blank.

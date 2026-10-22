@@ -483,6 +483,7 @@ impl SharedWorkspaceHost {
                 accessibility: true,
                 directory_recovery: true,
                 directory_creation: true,
+                directory_matching: true,
                 worktree_writes: true,
                 end_all_sessions: true,
                 workspace_policy: true,

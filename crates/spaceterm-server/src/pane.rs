@@ -404,6 +404,8 @@ pub enum Reply {
         #[serde(default)]
         directory_creation: bool,
         #[serde(default)]
+        directory_matching: bool,
+        #[serde(default)]
         worktree_writes: bool,
         #[serde(default)]
         end_all_sessions: bool,
@@ -571,6 +573,7 @@ struct PaneTransport {
     accessibility: bool,
     directory_recovery: bool,
     directory_creation: bool,
+    directory_matching: bool,
     worktree_writes: bool,
     end_all_sessions: bool,
 }
@@ -630,6 +633,7 @@ impl PaneConnection {
                 accessibility,
                 directory_recovery,
                 directory_creation,
+                directory_matching,
                 worktree_writes,
                 end_all_sessions,
                 workspace_policy: true,
@@ -668,6 +672,9 @@ impl PaneConnection {
                     .directory_creation = directory_creation;
                 std::sync::Arc::get_mut(&mut connection.transport)
                     .ok_or(ServerError::Protocol)?
+                    .directory_matching = directory_matching;
+                std::sync::Arc::get_mut(&mut connection.transport)
+                    .ok_or(ServerError::Protocol)?
                     .presentation_changes = presentation_changes;
                 Ok(connection)
             }
@@ -695,11 +702,15 @@ impl PaneConnection {
                 accessibility: false,
                 directory_recovery: false,
                 directory_creation: false,
+                directory_matching: false,
                 worktree_writes: false,
                 end_all_sessions: false,
             }),
             last_exchange: None,
         }
+    }
+    pub fn supports_directory_matching(&self) -> bool {
+        self.transport.directory_matching
     }
     pub fn supports_directory_creation(&self) -> bool {
         self.transport.directory_creation
@@ -816,6 +827,7 @@ mod transport_tests {
         assert!(!connection.supports_reading());
         assert!(!connection.supports_end_all_sessions());
         assert!(!connection.supports_directory_creation());
+        assert!(!connection.supports_directory_matching());
         peer.join().unwrap();
     }
 
@@ -841,6 +853,33 @@ mod transport_tests {
             let connection = PaneConnection::negotiate(client).unwrap();
             assert_eq!(
                 connection.supports_key_input_batches(),
+                supported == Some(true)
+            );
+            peer.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn directory_matching_requires_an_explicit_optional_capability() {
+        for supported in [None, Some(false), Some(true)] {
+            let (client, mut server) = UnixStream::pair().unwrap();
+            let peer = std::thread::spawn(move || {
+                let mut wire = crate::protocol::Wire::terminal(&mut server).unwrap();
+                assert!(matches!(
+                    wire.read::<Request>().unwrap(),
+                    Request::Capabilities
+                ));
+                let mut reply = serde_json::json!({
+                    "Capabilities": { "development_pane": true, "workspace_policy": true }
+                });
+                if let Some(supported) = supported {
+                    reply["Capabilities"]["directory_matching"] = supported.into();
+                }
+                wire.write(&reply).unwrap();
+            });
+            let connection = PaneConnection::negotiate(client).unwrap();
+            assert_eq!(
+                connection.supports_directory_matching(),
                 supported == Some(true)
             );
             peer.join().unwrap();

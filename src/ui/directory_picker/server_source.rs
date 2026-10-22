@@ -18,6 +18,10 @@ pub(crate) trait DirectoryConnection: Send {
     fn reads_directories(&self) -> bool;
     /// Whether the server creates directories for this client.
     fn creates_directories(&self) -> bool;
+    /// Whether the server says if a directory is the same one another path names.
+    fn matches_directories(&self) -> bool {
+        false
+    }
     fn exchange(&mut self, request: &PaneRequest) -> Result<Reply, ()>;
 }
 
@@ -33,6 +37,9 @@ impl DirectoryConnection for spaceterm_server::pane::PaneConnection {
     fn creates_directories(&self) -> bool {
         self.supports_directory_creation()
     }
+    fn matches_directories(&self) -> bool {
+        self.supports_directory_matching()
+    }
     fn exchange(&mut self, request: &PaneRequest) -> Result<Reply, ()> {
         Self::exchange(self, request).map_err(|_| ())
     }
@@ -42,6 +49,14 @@ impl DirectoryConnector for LocalServer {
     fn connect(&self) -> Result<Box<dyn DirectoryConnection>, ()> {
         Ok(Box::new(self.connect_pane().map_err(|_| ())?))
     }
+}
+
+/// Reaches a presented server's directory channel. Production reaches the server itself.
+pub(crate) type ServerDirectories = Rc<dyn Fn(&LocalServer) -> Arc<dyn DirectoryConnector>>;
+
+/// The directory channel of each presented server, over its own admitted route.
+pub(crate) fn owning_server_directories() -> ServerDirectories {
+    Rc::new(|server| Arc::new(server.clone()))
 }
 
 /// Which reads a newer one makes pointless. The picker shows only its latest listing and its
@@ -102,7 +117,7 @@ impl ServerDirectorySource {
     ) -> Self {
         Self::browsing_through(Arc::new(server), machine, available)
     }
-    pub(super) fn browsing_through(
+    pub(crate) fn browsing_through(
         connector: Arc<dyn DirectoryConnector>,
         machine: Option<String>,
         available: Rc<dyn Fn() -> bool>,
@@ -156,6 +171,22 @@ impl ServerDirectorySource {
                 creates.set(server_creates);
             }
             Ok(value)
+        })
+    }
+    /// Asks the server which of `candidates` names the same directory as `path`, by the
+    /// directories' identity on that server, returning the first match's position. A server
+    /// that can't compare directories reports none.
+    pub(crate) fn match_directory(
+        &self,
+        path: PathBuf,
+        candidates: Vec<PathBuf>,
+    ) -> SourceFuture<Option<usize>> {
+        let read = self.run(Job::Read(Operation::Match { path, candidates }));
+        Box::pin(async move {
+            match read.await? {
+                Value::Match { index } => Ok(index.map(usize::from)),
+                _ => Err(DirectorySourceError::Other),
+            }
         })
     }
     fn path(&self, directory: PickerPath) -> Result<PathBuf, DirectorySourceError> {
@@ -411,6 +442,11 @@ fn exchange(
     }) {
         return Err(Exchange::Answered(DirectorySourceError::Other));
     }
+    // A server that can't compare directories is never asked to; it reports no match, as
+    // comparing only the paths' spellings would.
+    if matches!(job, Job::Read(Operation::Match { .. })) && !connection.matches_directories() {
+        return Ok(Value::Match { index: None });
+    }
     let begin = match job {
         Job::Read(operation) => PaneRequest::DirectoryRead(Request::Begin { id, operation }),
         Job::Create(path) => PaneRequest::DirectoryCreate(CreationRequest::Begin { id, path }),
@@ -563,5 +599,95 @@ fn source_error(error: Error) -> DirectorySourceError {
         Error::NotDirectory => DirectorySourceError::NotDirectory,
         Error::PermissionDenied => DirectorySourceError::PermissionDenied,
         _ => DirectorySourceError::Other,
+    }
+}
+
+/// Owning servers that answer in process, through the same request handler and bounded
+/// directory workers a real server runs.
+#[cfg(test)]
+pub(crate) mod testing {
+    use super::{DirectoryConnection, DirectoryConnector, ServerDirectories};
+    use spaceterm_server::pane::{Reply, Request as PaneRequest};
+    use std::rc::Rc;
+    use std::sync::{Arc, Mutex};
+
+    pub(crate) type ServerHandler = Arc<Mutex<Box<dyn FnMut(&PaneRequest) -> Reply + Send>>>;
+
+    pub(crate) struct InProcessServer(pub(crate) ServerHandler);
+
+    struct InProcessConnection {
+        server: ServerHandler,
+        reads: bool,
+        creates: bool,
+        matches: bool,
+    }
+
+    impl DirectoryConnector for InProcessServer {
+        fn connect(&self) -> Result<Box<dyn DirectoryConnection>, ()> {
+            let reply = (self.0.lock().unwrap())(&PaneRequest::Capabilities);
+            let Reply::Capabilities {
+                directory_recovery,
+                directory_creation,
+                directory_matching,
+                ..
+            } = reply
+            else {
+                return Err(());
+            };
+            Ok(Box::new(InProcessConnection {
+                server: Arc::clone(&self.0),
+                reads: directory_recovery,
+                creates: directory_creation,
+                matches: directory_matching,
+            }))
+        }
+    }
+
+    impl DirectoryConnection for InProcessConnection {
+        fn reads_directories(&self) -> bool {
+            self.reads
+        }
+        fn creates_directories(&self) -> bool {
+            self.creates
+        }
+        fn matches_directories(&self) -> bool {
+            self.matches
+        }
+        fn exchange(&mut self, request: &PaneRequest) -> Result<Reply, ()> {
+            Ok((self.server.lock().unwrap())(request))
+        }
+    }
+
+    /// Every presented server answers through the server runtime's own directory handler, on
+    /// this computer's filesystem.
+    pub(crate) fn in_process() -> ServerDirectories {
+        let handler: Box<dyn FnMut(&PaneRequest) -> Reply + Send> =
+            Box::new(crate::runtime::directory_testing::directory_host());
+        let server = Arc::new(InProcessServer(Arc::new(Mutex::new(handler))));
+        Rc::new(move |_| Arc::clone(&server) as Arc<dyn DirectoryConnector>)
+    }
+
+    /// A server from before directories could be compared: it reads directories and answers
+    /// nothing else.
+    pub(crate) fn older() -> ServerDirectories {
+        struct Older;
+        struct OlderConnection;
+        impl DirectoryConnector for Older {
+            fn connect(&self) -> Result<Box<dyn DirectoryConnection>, ()> {
+                Ok(Box::new(OlderConnection))
+            }
+        }
+        impl DirectoryConnection for OlderConnection {
+            fn reads_directories(&self) -> bool {
+                true
+            }
+            fn creates_directories(&self) -> bool {
+                false
+            }
+            fn exchange(&mut self, _: &PaneRequest) -> Result<Reply, ()> {
+                Err(())
+            }
+        }
+        Rc::new(|_| Arc::new(Older) as Arc<dyn DirectoryConnector>)
     }
 }

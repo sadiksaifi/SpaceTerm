@@ -430,6 +430,8 @@ fn workspace_adapters() -> WorkspaceManagerAdapters {
         directory_selection: Rc::new(GpuiDirectorySelection),
         window_drag: Rc::new(RecordingOperatingSystemWindowDragPlatform::default()),
         local_server: crate::ui::launch_testing::unanswered(),
+        // A presented server here predates comparing directories, unless a test says otherwise.
+        server_directories: crate::ui::directory_picker::server_directory_testing::older(),
     }
 }
 
@@ -553,6 +555,18 @@ fn workspace_manager_without_ssh(
     TestTerminalSessionRecords,
     &mut VisualTestContext,
 ) {
+    workspace_manager_without_ssh_using(workspace_adapters(), cx)
+}
+
+/// A Workspace Window as [`workspace_manager_without_ssh`] opens it, over `adapters`.
+fn workspace_manager_without_ssh_using(
+    adapters: WorkspaceManagerAdapters,
+    cx: &mut TestAppContext,
+) -> (
+    Entity<WorkspaceManager>,
+    TestTerminalSessionRecords,
+    &mut VisualTestContext,
+) {
     cx.update(crate::ui::init)
         .expect("UI initialization should succeed");
     let records = TestTerminalSessionRecords::default();
@@ -562,7 +576,7 @@ fn workspace_manager_without_ssh(
         new_desktop_manager(
             session_factory,
             std::env::temp_dir(),
-            workspace_adapters(),
+            adapters,
             SidebarState::Expanded,
             window,
             cx,
@@ -8743,11 +8757,19 @@ struct MachineGroupsHarness {
 
 impl MachineGroupsHarness {
     fn new(cx: &mut TestAppContext) -> (Self, &mut VisualTestContext) {
+        Self::using(workspace_adapters(), cx)
+    }
+
+    /// The harness over `adapters`.
+    fn using(
+        adapters: WorkspaceManagerAdapters,
+        cx: &mut TestAppContext,
+    ) -> (Self, &mut VisualTestContext) {
         use crate::ui::shared_workspaces::testing::{ScriptedEdits, ScriptedPanes};
         use crate::ui::shared_workspaces::{SharedEditSource, SharedPaneSessions};
 
         // A test installs the SSH registry its machines need.
-        let (manager, _records, cx) = workspace_manager_without_ssh(cx);
+        let (manager, _records, cx) = workspace_manager_without_ssh_using(adapters, cx);
         let local = Rc::new(ScriptedEdits::new(Some(machine_inventory(1, &[]))));
         cx.update(|window, cx| {
             manager.update(cx, |manager, cx| {

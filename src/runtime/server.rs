@@ -424,6 +424,7 @@ impl DevelopmentPaneHost {
                 accessibility: true,
                 directory_recovery: true,
                 directory_creation: true,
+                directory_matching: true,
                 worktree_writes: false,
                 end_all_sessions: false,
                 workspace_policy: false,

@@ -35,9 +35,21 @@ impl std::fmt::Debug for CreationRequest {
 #[derive(Clone, Serialize, Deserialize)]
 pub enum Operation {
     Home,
-    Ancestor { path: PathBuf },
-    List { path: PathBuf },
-    Validate { path: PathBuf },
+    Ancestor {
+        path: PathBuf,
+    },
+    List {
+        path: PathBuf,
+    },
+    Validate {
+        path: PathBuf,
+    },
+    /// The first candidate identifying the chosen directory on the owning server.
+    /// Paths carry no client-local authority, and no filesystem identity leaves the server.
+    Match {
+        path: PathBuf,
+        candidates: Vec<PathBuf>,
+    },
 }
 impl std::fmt::Debug for Operation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -47,6 +59,7 @@ impl std::fmt::Debug for Operation {
 #[derive(Clone, Serialize, Deserialize)]
 pub enum Value {
     Directory(PathBuf),
+    Match { index: Option<u16> },
     Listing { names: Vec<String>, truncated: bool },
 }
 impl std::fmt::Debug for Value {

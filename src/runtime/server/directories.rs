@@ -228,6 +228,37 @@ fn read(operation: Operation, cancelled: &AtomicBool) -> Result<Value, Error> {
             // Values stay server paths, never a client-side ValidatedLocalDirectory.
             Ok(Value::Directory(path))
         }
+        Operation::Match { path, candidates } => {
+            if candidates.len() > spaceterm_server::hierarchy::MAX_WORKSPACES {
+                return Err(Error::Capacity);
+            }
+            checked_path(&path)?;
+            for candidate in &candidates {
+                checked_path(candidate)?;
+            }
+            let chosen = filesystem.validate_directory(&path).map_err(classify)?;
+            checkpoint()?;
+            for (index, candidate) in candidates.iter().enumerate() {
+                checkpoint()?;
+                let candidate = match filesystem.validate_directory(candidate) {
+                    Ok(candidate) => candidate,
+                    Err(
+                        LocalFilesystemError::Missing
+                        | LocalFilesystemError::NotDirectory
+                        | LocalFilesystemError::PermissionDenied,
+                    ) => continue,
+                    Err(error) => return Err(classify(error)),
+                };
+                checkpoint()?;
+                if candidate.identity() == chosen.identity() {
+                    return Ok(Value::Match {
+                        index: Some(u16::try_from(index).map_err(|_| Error::Capacity)?),
+                    });
+                }
+                // Each candidate's retained identity is released before opening the next.
+            }
+            Ok(Value::Match { index: None })
+        }
         Operation::List { path } => {
             checked_path(&path)?;
             let listing = filesystem
@@ -280,6 +311,142 @@ fn classify(error: LocalFilesystemError) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn directory_match(operation: Operation) -> Result<Value, Error> {
+        let mut operations = DirectoryOperations::default();
+        assert!(matches!(
+            operations.request([1; 32], Request::Begin { id: 1, operation }),
+            Ok(Progress::Pending)
+        ));
+        let until = Instant::now() + Duration::from_secs(3);
+        loop {
+            match operations.request([1; 32], Request::Poll { id: 1 }) {
+                Ok(Progress::Ready(value)) => return Ok(value),
+                Err(error) => return Err(error),
+                Ok(Progress::Pending) => {
+                    assert!(Instant::now() < until, "directory matching did not finish");
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                _ => panic!("unexpected directory matching progress"),
+            }
+        }
+    }
+
+    #[test]
+    fn directory_matching_resolves_real_symlink_identity_in_candidate_order() {
+        let root = std::env::temp_dir().join(format!(
+            "spaceterm-directory-match-{:x}",
+            u64::from_ne_bytes(super::super::nonce().unwrap()[..8].try_into().unwrap())
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let chosen = root.join("real");
+        let unrelated = root.join("other/real");
+        let alias = root.join("alias");
+        std::fs::create_dir(&chosen).unwrap();
+        std::fs::create_dir_all(&unrelated).unwrap();
+        std::os::unix::fs::symlink(&chosen, &alias).unwrap();
+        let file = root.join("file");
+        std::fs::write(&file, b"fixture").unwrap();
+        let result = directory_match(Operation::Match {
+            path: chosen.clone(),
+            candidates: vec![
+                root.join("missing"),
+                file,
+                unrelated.clone(),
+                alias.clone(),
+                chosen.clone(),
+            ],
+        });
+        assert!(matches!(result, Ok(Value::Match { index: Some(3) })));
+        // The chosen spelling can itself be the symlink; the first physical match wins.
+        assert!(matches!(
+            directory_match(Operation::Match {
+                path: alias.clone(),
+                candidates: vec![chosen.clone(), alias.clone()],
+            }),
+            Ok(Value::Match { index: Some(0) })
+        ));
+        assert!(matches!(
+            directory_match(Operation::Match {
+                path: alias.clone(),
+                candidates: vec![unrelated],
+            }),
+            Ok(Value::Match { index: None })
+        ));
+        assert!(std::fs::symlink_metadata(&alias).unwrap().is_symlink());
+        assert!(chosen.is_dir());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn directory_matching_rejects_bounds_invalid_paths_and_unavailable_chosen_directories() {
+        let root = std::env::temp_dir().join(format!(
+            "spaceterm-directory-match-invalid-{:x}",
+            u64::from_ne_bytes(super::super::nonce().unwrap()[..8].try_into().unwrap())
+        ));
+        std::fs::create_dir(&root).unwrap();
+        assert!(matches!(
+            directory_match(Operation::Match {
+                path: root.clone(),
+                candidates: vec![root.clone(); spaceterm_server::hierarchy::MAX_WORKSPACES + 1],
+            }),
+            Err(Error::Capacity)
+        ));
+        for bad in [
+            std::path::PathBuf::from("relative"),
+            root.join("bad\npath"),
+            root.join("x".repeat(MAX_PATH_BYTES)),
+        ] {
+            assert!(matches!(
+                directory_match(Operation::Match {
+                    path: root.clone(),
+                    candidates: vec![bad.clone()],
+                }),
+                Err(Error::Unavailable)
+            ));
+            assert!(matches!(
+                directory_match(Operation::Match {
+                    path: bad,
+                    candidates: vec![],
+                }),
+                Err(Error::Unavailable)
+            ));
+        }
+        assert!(matches!(
+            directory_match(Operation::Match {
+                path: root.join("missing"),
+                candidates: vec![root.clone()],
+            }),
+            Err(Error::Missing)
+        ));
+        let file = root.join("file");
+        std::fs::write(&file, b"fixture").unwrap();
+        assert!(matches!(
+            directory_match(Operation::Match {
+                path: file,
+                candidates: vec![root.clone()],
+            }),
+            Err(Error::NotDirectory)
+        ));
+        assert!(matches!(
+            read(
+                Operation::Match {
+                    path: root.clone(),
+                    candidates: vec![root.clone()]
+                },
+                &AtomicBool::new(true)
+            ),
+            Err(Error::Cancelled)
+        ));
+        assert!(matches!(
+            directory_match(Operation::Match {
+                path: root.clone(),
+                candidates: vec![root.clone(); spaceterm_server::hierarchy::MAX_WORKSPACES],
+            }),
+            Ok(Value::Match { index: Some(0) })
+        ));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn creation_rejects_invalid_paths_and_files_without_creating_children() {
         let root = std::env::temp_dir().join(format!(

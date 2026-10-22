@@ -744,6 +744,7 @@ pub(crate) fn open(
         directory_selection: Rc::new(crate::directory_selection::GpuiDirectorySelection),
         window_drag: host.window_movement.create(),
         local_server: host.adapters.local_server.clone(),
+        server_directories: crate::ui::directory_picker::owning_server_directories(),
     };
     let home_directory = host.home_directory.clone();
     let default_sidebar = cx

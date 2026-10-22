@@ -33,7 +33,11 @@ mod local_source;
 #[cfg(test)]
 mod scripted_source;
 mod server_source;
-pub(crate) use server_source::ServerDirectorySource;
+#[cfg(test)]
+pub(crate) use server_source::testing as server_directory_testing;
+pub(crate) use server_source::{
+    ServerDirectories, ServerDirectorySource, owning_server_directories,
+};
 
 pub(crate) use local_source::LocalDirectorySource;
 
@@ -2705,48 +2709,7 @@ mod tests {
         );
     }
 
-    /// The owning server answering in process, through the same request handler and bounded
-    /// directory workers a real server runs.
-    type ServerHandler = Arc<Mutex<Box<dyn FnMut(&PaneRequest) -> Reply + Send>>>;
-
-    struct InProcessServer(ServerHandler);
-
-    struct InProcessConnection {
-        server: ServerHandler,
-        reads: bool,
-        creates: bool,
-    }
-
-    impl DirectoryConnector for InProcessServer {
-        fn connect(&self) -> Result<Box<dyn DirectoryConnection>, ()> {
-            let reply = (self.0.lock().unwrap())(&PaneRequest::Capabilities);
-            let Reply::Capabilities {
-                directory_recovery,
-                directory_creation,
-                ..
-            } = reply
-            else {
-                return Err(());
-            };
-            Ok(Box::new(InProcessConnection {
-                server: Arc::clone(&self.0),
-                reads: directory_recovery,
-                creates: directory_creation,
-            }))
-        }
-    }
-
-    impl DirectoryConnection for InProcessConnection {
-        fn reads_directories(&self) -> bool {
-            self.reads
-        }
-        fn creates_directories(&self) -> bool {
-            self.creates
-        }
-        fn exchange(&mut self, request: &PaneRequest) -> Result<Reply, ()> {
-            Ok((self.server.lock().unwrap())(request))
-        }
-    }
+    use super::server_source::testing::InProcessServer;
 
     /// The owning server reached over a route that, like an SSH server's session limit, refuses
     /// a channel beyond the first two it opened.
