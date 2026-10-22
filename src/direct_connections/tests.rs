@@ -13,13 +13,18 @@ pub(crate) fn unconfirmed_join(label: &str) -> (DirectConnections, JoinId) {
     super::worker::enrollment_tests::unconfirmed_join(label)
 }
 
+/// Records kept in memory. While `failing`, a save publishes nothing, as a full or locked
+/// disk does.
 #[derive(Default)]
-struct MemoryRecords(Mutex<Document>);
+struct MemoryRecords(Mutex<Document>, AtomicBool);
 impl Records for MemoryRecords {
     fn load(&self) -> Result<Document, ()> {
         Ok(self.0.lock().unwrap().clone())
     }
     fn save(&self, document: &Document) -> Result<Durability, SaveError> {
+        if self.1.load(Ordering::Acquire) {
+            return Err(SaveError::NotPublished);
+        }
         *self.0.lock().unwrap() = document.clone();
         Ok(Durability::Synchronized)
     }
@@ -211,8 +216,37 @@ impl CredentialLock {
     }
 }
 
+/// Whether the offline fixture's records can be saved.
+pub(crate) struct RecordsStorage(Arc<MemoryRecords>);
+
+impl RecordsStorage {
+    pub(crate) fn set_failing(&self, failing: bool) {
+        self.0.1.store(failing, Ordering::Release);
+    }
+}
+
+/// The offline fixture with control over whether its records save.
+pub(crate) fn offline_with_storage(
+    label: &str,
+) -> (DirectConnections, DirectRouteId, RecordsStorage) {
+    let (connections, id, _, records) = offline_fixture(label);
+    (connections, id, RecordsStorage(records))
+}
+
 /// The offline fixture with control over its own in-memory credential boundary.
 pub(crate) fn offline_with_lock(label: &str) -> (DirectConnections, DirectRouteId, CredentialLock) {
+    let (connections, id, lock, _) = offline_fixture(label);
+    (connections, id, lock)
+}
+
+fn offline_fixture(
+    label: &str,
+) -> (
+    DirectConnections,
+    DirectRouteId,
+    CredentialLock,
+    Arc<MemoryRecords>,
+) {
     struct OfflineNetwork;
     impl DirectNetwork for OfflineNetwork {
         fn connect(
@@ -259,12 +293,12 @@ pub(crate) fn offline_with_lock(label: &str) -> (DirectConnections, DirectRouteI
         .unwrap();
     let connections = DirectConnections::new(
         "spaceterm-development",
-        records,
+        records.clone(),
         credentials.clone(),
         Arc::new(OfflineNetwork),
     );
     connections.resume_retained();
-    (connections, id, CredentialLock(credentials))
+    (connections, id, CredentialLock(credentials), records)
 }
 
 fn await_condition(mut condition: impl FnMut() -> bool) {

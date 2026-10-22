@@ -593,14 +593,18 @@ fn a_pairing_whose_save_is_unknown_uses_no_route_and_reports_an_unsaved_withdraw
     );
 }
 
-/// A stop that couldn't be saved stops saying so once the registry saves again, so the alert
-/// follows recovery instead of outliving it.
+/// A stop that couldn't be saved keeps saying so through the registry's unrelated changes, and
+/// stops once the registry saves again, so the alert follows recovery instead of outliving it.
 #[gpui::test]
 fn an_unsaved_stop_alert_clears_once_the_registry_saves_again(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
     let access = ScriptedAccess::new(Listener::Off);
-    let (direct, route) = crate::direct_connections::tests::offline("studio");
+    let (direct, route, storage) = crate::direct_connections::tests::offline_with_storage("studio");
     let (window, cx) = open_servers_with(&access, Some(direct.clone()), cx);
+    // This computer can't save the registry, as when the stop itself failed to save.
+    storage.set_failing(true);
+    direct.disconnect(&route);
+    assert!(direct.persistence_error(), "the registry couldn't save");
     window.update(cx, |settings, cx| {
         if let Some(rows) = settings.direct_routes.as_mut() {
             rows.join = Some(route);
@@ -613,7 +617,15 @@ fn an_unsaved_stop_alert_clears_once_the_registry_saves_again(cx: &mut TestAppCo
     cx.run_until_parked();
     assert!(open(WITHDRAW_FAILURE_SELECTOR, cx));
 
+    // Changes the registry announces but can't save leave the stop unsaved, so the alert stays.
+    direct.connect(&route);
+    direct.disconnect(&route);
+    cx.run_until_parked();
+    assert!(direct.persistence_error());
+    assert!(open(WITHDRAW_FAILURE_SELECTOR, cx));
+
     // A change the registry saves and announces, as a quiet retry's save would.
+    storage.set_failing(false);
     direct.disconnect(&route);
     assert!(!direct.persistence_error(), "the registry saved its change");
 
