@@ -3,7 +3,7 @@
 
 mod dropdown;
 mod launch;
-mod server_rows;
+pub(crate) mod server_rows;
 
 pub(super) use dropdown::UpdateControl;
 pub(crate) use launch::{request_window_close as request_launch_window_close, show_launch};
@@ -1232,6 +1232,46 @@ mod tests {
         adapter.emit(UpdateEvent::Available(version()));
         cx.run_until_parked();
         assert_eq!(node_id(A11yTree::read(cx).node("Updates")), id);
+    }
+
+    #[gpui::test]
+    fn choosing_the_client_row_downloads_once_after_the_updates_menu_closes(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::settings::storage::testing::MemoryStorage;
+        use crate::updates::UpdateEvent;
+        use crate::updates::testing::RecordingAdapter;
+
+        let adapter = std::rc::Rc::new(RecordingAdapter::available());
+        cx.update(|cx| ApplicationUpdates::install(adapter.clone(), cx));
+        cx.update(crate::ui::init)
+            .expect("UI initialization should succeed");
+        let updates = cx.update(|cx| service(cx).unwrap());
+        let mut document = crate::settings::SettingsDocument::default();
+        document.updates.automatic_downloads = false;
+        let settings = crate::settings::Settings::load(MemoryStorage::with_document(&document));
+        updates.update(cx, |updates, _| updates.attach_settings(settings));
+        updates.update(cx, |updates, cx| updates.check(false, cx));
+        adapter.emit(UpdateEvent::Available(version()));
+        cx.run_until_parked();
+        let (_, visual) = cx.add_window_view(|_, cx| UpdateControl::new(cx));
+        visual.update(|window, _| window.activate_window());
+        visual.run_until_parked();
+        let trigger = visual.debug_bounds("update-control").unwrap().center();
+        visual.simulate_click(trigger, gpui::Modifiers::none());
+        visual.run_until_parked();
+        assert_eq!(adapter.downloads.get(), 0, "opening admits no download");
+        let row = visual
+            .debug_bounds("update-client-command")
+            .unwrap()
+            .center();
+        visual.simulate_click(row, gpui::Modifiers::none());
+        visual.run_until_parked();
+        assert!(visual.debug_bounds("update-client-command").is_none());
+        assert_eq!(adapter.downloads.get(), 1);
+        updates.read_with(visual, |updates, _| {
+            assert!(matches!(updates.state(), UpdateState::Downloading { .. }));
+        });
     }
 
     #[test]
