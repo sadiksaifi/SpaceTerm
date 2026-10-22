@@ -178,6 +178,9 @@ pub struct Pane {
     /// Live terminal directory presentation. Never retained as restoration authority.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub current_directory: Option<PathBuf>,
+    /// Protected Repository Source Directory from the owning Terminal Session, never retained.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository_directory: Option<PathBuf>,
     /// Current presentation for every authorized client, independent of Pane control or visibility.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub presentation: Option<Box<crate::pane::metadata::Snapshot>>,
@@ -186,6 +189,13 @@ pub struct Pane {
     pub creator: Option<Id>,
 }
 impl Pane {
+    pub fn repository_directory(&self) -> &Path {
+        self.repository_directory
+            .as_deref()
+            .or(self.confirmed_directory.as_deref())
+            .unwrap_or(&self.starting_directory)
+    }
+
     pub fn presented_directory(&self) -> &Path {
         self.current_directory
             .as_deref()
@@ -322,6 +332,7 @@ impl State {
                     for p in &mut t.panes {
                         p.creator = None;
                         p.current_directory = None;
+                        p.repository_directory = None;
                         p.presentation = None;
                     }
                 }
@@ -377,6 +388,7 @@ impl State {
                             axis: Axis::Right,
                             starting_directory: org.starting_directory.clone(),
                             current_directory: None,
+                            repository_directory: None,
                             presentation: None,
                             confirmed_directory: org.confirmed_directory.clone(),
                             creator: None,
@@ -426,6 +438,7 @@ impl State {
             .flat_map(|tab| &mut tab.panes)
         {
             pane.current_directory = None;
+            pane.repository_directory = None;
             pane.presentation = None;
         }
         org.shared = Some(Box::new(retained));
@@ -513,6 +526,7 @@ impl State {
                 axis: Axis::Right,
                 starting_directory,
                 current_directory: None,
+                repository_directory: None,
                 presentation: None,
                 confirmed_directory: None,
                 creator: Some(device),
@@ -682,6 +696,7 @@ impl State {
                             axis: Axis::Right,
                             starting_directory: pin.clone().unwrap_or_else(|| directory.to_owned()),
                             current_directory: None,
+                            repository_directory: None,
                             presentation: None,
                             confirmed_directory: None,
                             creator: Some(device),
@@ -737,6 +752,7 @@ impl State {
                         axis: Axis::Right,
                         starting_directory: start,
                         current_directory: None,
+                        repository_directory: None,
                         presentation: None,
                         confirmed_directory: None,
                         creator: Some(device),
@@ -788,6 +804,7 @@ impl State {
                     axis: *axis,
                     starting_directory: start,
                     current_directory: None,
+                    repository_directory: None,
                     presentation: None,
                     confirmed_directory: None,
                     creator: Some(device),
@@ -960,6 +977,21 @@ impl State {
                     if pane.presented_directory() != path {
                         pane.current_directory = Some(path);
                         self.recalculate_names();
+                        self.inventory.revision += 1;
+                    }
+                    return;
+                }
+            }
+        }
+    }
+    /// Publish the Terminal Session's protected Repository Source Directory independently of
+    /// live OSC 7 display and confirmed restoration authority.
+    pub fn present_repository_directory(&mut self, id: Id, path: PathBuf) {
+        for workspace in &mut self.inventory.workspaces {
+            for tab in &mut workspace.tabs {
+                if let Some(pane) = tab.panes.iter_mut().find(|pane| pane.id == id) {
+                    if pane.repository_directory() != path {
+                        pane.repository_directory = Some(path);
                         self.inventory.revision += 1;
                     }
                     return;

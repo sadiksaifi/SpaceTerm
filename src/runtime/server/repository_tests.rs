@@ -66,7 +66,7 @@ pub(super) fn git_facts(
 }
 
 #[test]
-fn osc7_without_owned_prompts_updates_repository_worktrees_and_workspace_without_restoration() {
+fn repository_sources_follow_owning_prompts_while_osc7_keeps_live_directory_display() {
     use spaceterm_server::hierarchy::State;
     let git = GitFixture::new();
     let tree = git.0.join("live-worktree");
@@ -147,11 +147,9 @@ fn osc7_without_owned_prompts_updates_repository_worktrees_and_workspace_without
             .presentation
             .is_none()
     );
-    assert!(
-        !String::from_utf8(serde_json::to_vec(&retained).unwrap())
-            .unwrap()
-            .contains("current_directory")
-    );
+    let retained_json = String::from_utf8(serde_json::to_vec(&retained).unwrap()).unwrap();
+    assert!(!retained_json.contains("current_directory"));
+    assert!(!retained_json.contains("repository_directory"));
     let restored = State::from_legacy(
         &serde_json::from_slice(&serde_json::to_vec(&retained).unwrap()).unwrap(),
     );
@@ -167,8 +165,7 @@ fn osc7_without_owned_prompts_updates_repository_worktrees_and_workspace_without
                 .as_path()
         )
     );
-    // Once an owned prompt has confirmed this directory, a later plain OSC 7 still moves
-    // live facts. The earlier owning-shell confirmation remains the restoration target.
+    // An owning prompt establishes the protected Repository Source Directory.
     command(
         &mut host,
         1,
@@ -182,30 +179,63 @@ fn osc7_without_owned_prompts_updates_repository_worktrees_and_workspace_without
             .as_ref(),
         Some(&tree)
     );
+    for (marker, report) in [
+        ("COMMAND-OSC7", "\\033]7;file://localhost%s\\007"),
+        (
+            "NESTED-SSH",
+            "\\033]7;file://localhost%s\\007\\033]133;A;spaceterm=nested-ssh\\007",
+        ),
+        (
+            "NESTED-CONTAINER",
+            "\\033]133;C\\007\\033]7;file://localhost%s\\007\\033]133;D;0\\007\\033]133;A;spaceterm=container\\007",
+        ),
+    ] {
+        command(
+            &mut host,
+            1,
+            lease,
+            &format!(
+                "cd '{}'; printf '{report}' \"$PWD\"; printf '\\033[2J\\033[H{marker}\\n'",
+                git.0.display()
+            ),
+        );
+        await_text(&mut host, 1, lease, marker);
+        let current = shared_inventory(&mut host);
+        let workspace = &current.workspaces[0];
+        assert_eq!(
+            workspace.tabs[0].panes[0].presented_directory(),
+            git.0.as_path(),
+            "ordinary directory display follows {marker}"
+        );
+        assert_eq!(
+            super::repositories::workspace_directory(workspace),
+            Some(tree.as_path()),
+            "{marker} must not move the Repository Source Directory"
+        );
+        assert_eq!(workspace.tabs[0].worktree.as_ref(), Some(&tree));
+        assert_eq!(
+            workspace.tabs[0].panes[0].confirmed_directory.as_ref(),
+            Some(&tree)
+        );
+    }
+    // Only the genuine owning-shell prompt moves repository discovery and Root Tab grouping.
     command(
         &mut host,
         1,
         lease,
-        &format!(
-            "cd '{}'; printf '\\033]7;file://localhost%s\\007' \"$PWD\"; printf '\\033[2J\\033[HOSC7-AFTER-OWNER\\n'",
-            git.0.display()
-        ),
+        "printf '\\033]7;file://localhost%s\\007\\033]133;A;spaceterm=%s\\007' \"$PWD\" \"$SPACETERM_PROMPT_OWNER\"; printf '\\033[2J\\033[HOWNER-MOVED\\n'",
     );
-    await_text(&mut host, 1, lease, "OSC7-AFTER-OWNER");
-    let after_owner = git_facts(&mut host, &git.0, |facts| facts.worktrees.is_some());
+    await_text(&mut host, 1, lease, "OWNER-MOVED");
+    let moved = git_facts(&mut host, &git.0, |facts| facts.worktrees.is_some());
+    let workspace = &moved.workspaces[0];
     assert_eq!(
-        super::repositories::workspace_directory(&after_owner.workspaces[0]),
+        super::repositories::workspace_directory(workspace),
         Some(git.0.as_path())
     );
+    assert_eq!(workspace.tabs[0].worktree.as_ref(), Some(&git.0));
     assert_eq!(
-        after_owner.workspaces[0].tabs[0].worktree.as_ref(),
+        workspace.tabs[0].panes[0].confirmed_directory.as_ref(),
         Some(&git.0)
-    );
-    assert_eq!(
-        after_owner.workspaces[0].tabs[0].panes[0]
-            .confirmed_directory
-            .as_ref(),
-        Some(&tree)
     );
     host.shutdown().unwrap();
 }

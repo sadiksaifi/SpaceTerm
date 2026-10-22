@@ -216,9 +216,9 @@ fn pull_request_key(
     })
 }
 
-/// The live directory a server Pane presents, independent of restoration authority.
+/// The protected Repository Source Directory a server Pane reports.
 pub(crate) fn pane_directory(pane: &Pane) -> &Path {
-    pane.presented_directory()
+    pane.repository_directory()
 }
 
 /// The directory a server Workspace's row reads: its Pinned Directory, else its Root Pane's.
@@ -614,6 +614,7 @@ mod tests {
                 axis: Axis::Right,
                 starting_directory: worktree.into(),
                 current_directory: None,
+                repository_directory: None,
                 presentation: None,
                 confirmed_directory: None,
                 creator: None,
@@ -631,6 +632,65 @@ mod tests {
                 tab(2, "/srv/other-feature", "/srv/other"),
             ],
         }
+    }
+
+    #[test]
+    fn server_repository_views_follow_the_protected_source_independently_of_live_display() {
+        let mut workspace = workspace_in_removed_worktree();
+        let pane = &mut workspace.tabs[0].panes[0];
+        pane.current_directory = Some("/srv/nested".into());
+        pane.repository_directory = Some("/srv/app/src".into());
+        pane.confirmed_directory = Some("/srv/restore".into());
+        // Consume the hierarchy as an observer receives it over SpaceTerm Protocol.
+        let mut workspace: Workspace =
+            serde_json::from_slice(&serde_json::to_vec(&workspace).unwrap()).unwrap();
+        let mut repositories = SharedRepositories::default();
+        let mut source = listing("/srv/app/src", "/srv/app", &["/srv/app", "/srv/feature"]);
+        source.repository = Some(repository("owner"));
+        let mut nested = listing("/srv/nested", "/srv/nested", &["/srv/nested"]);
+        nested.repository = Some(repository("nested"));
+        repositories.accept(Some(&snapshot(1, vec![source, nested])), Instant::now());
+        let presentation = LocalPresentation {
+            preferences: RepositoryStatusPreferences::default(),
+            connected: true,
+            pull_request: &|_| None,
+        };
+        let view = repositories.view(pane_directory(&workspace.tabs[0].panes[0]), &presentation);
+        assert_eq!(status(&view).head, RepositoryHead::Branch("owner".into()));
+        assert_eq!(
+            repositories
+                .workspace_worktrees(&workspace)
+                .unwrap()
+                .main_root,
+            Path::new("/srv/app")
+        );
+        assert_eq!(
+            workspace.tabs[0].panes[0].presented_directory(),
+            Path::new("/srv/nested")
+        );
+        assert_eq!(
+            workspace.tabs[0].panes[0].confirmed_directory.as_deref(),
+            Some(Path::new("/srv/restore"))
+        );
+        // The owning server's next protected source update moves both repository views.
+        workspace.tabs[0].panes[0].repository_directory = Some("/srv/nested".into());
+        let view = repositories.view(pane_directory(&workspace.tabs[0].panes[0]), &presentation);
+        assert_eq!(status(&view).head, RepositoryHead::Branch("nested".into()));
+        assert_eq!(
+            repositories
+                .workspace_worktrees(&workspace)
+                .unwrap()
+                .main_root,
+            Path::new("/srv/nested")
+        );
+        workspace.pinned_directory = Some("/srv/app/src".into());
+        assert_eq!(
+            repositories
+                .workspace_worktrees(&workspace)
+                .unwrap()
+                .main_root,
+            Path::new("/srv/app")
+        );
     }
 
     fn workspace_listing(repositories: &SharedRepositories) -> Option<Vec<PathBuf>> {

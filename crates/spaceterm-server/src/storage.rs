@@ -548,6 +548,7 @@ mod tests {
                         axis: Axis::Right,
                         starting_directory: "/tmp".into(),
                         current_directory: None,
+                        repository_directory: None,
                         presentation: None,
                         confirmed_directory: None,
                         creator: None,
