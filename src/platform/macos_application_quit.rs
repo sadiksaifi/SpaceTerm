@@ -16,7 +16,7 @@ use super::application_quit::{
 
 const NS_TERMINATE_CANCEL: NSInteger = 0;
 const NS_TERMINATE_NOW: NSInteger = 1;
-/// `kCoreEventClass`, `kAEQuitApplication`, and `keyAEQuitReason` from the Apple Event Manager.
+/// `kCoreEventClass`, `kAEQuitApplication`, and `kAEQuitReason` from the Apple Event Manager.
 const CORE_EVENT_CLASS: u32 = u32::from_be_bytes(*b"aevt");
 const QUIT_APPLICATION_EVENT: u32 = u32::from_be_bytes(*b"quit");
 const QUIT_REASON_KEYWORD: u32 = u32::from_be_bytes(*b"why?");
@@ -242,13 +242,20 @@ fn termination_request() -> ApplicationQuitRequest {
         let Some(event) = event.as_ref() else {
             return ApplicationQuitRequest::Exit;
         };
+        request_from_event(event)
+    }
+}
+
+fn request_from_event(event: &AnyObject) -> ApplicationQuitRequest {
+    // SAFETY: The caller supplies a live NSAppleEventDescriptor from the event manager.
+    unsafe {
         let class: u32 = msg_send![event, eventClass];
         let id: u32 = msg_send![event, eventID];
         if class != CORE_EVENT_CLASS || id != QUIT_APPLICATION_EVENT {
             return ApplicationQuitRequest::Exit;
         }
         let reason: *mut AnyObject =
-            msg_send![event, attributeDescriptorForKeyword: QUIT_REASON_KEYWORD];
+            msg_send![event, paramDescriptorForKeyword: QUIT_REASON_KEYWORD];
         if reason.is_null() {
             ApplicationQuitRequest::Dismissal
         } else {
@@ -264,6 +271,35 @@ pub(in crate::platform) mod tests {
     use objc2::ClassType;
 
     use super::*;
+
+    #[test]
+    fn quit_event_reasons_distinguish_personal_dismissal_from_session_exit() {
+        objc2::rc::autoreleasepool(|_| {
+            let class = AnyClass::get(c"NSAppleEventDescriptor").unwrap();
+            // SAFETY: Foundation constructs a local descriptor; this sends no Apple Event.
+            let event: Retained<AnyObject> = unsafe {
+                msg_send![class,
+                    appleEventWithEventClass: CORE_EVENT_CLASS,
+                    eventID: QUIT_APPLICATION_EVENT,
+                    targetDescriptor: std::ptr::null_mut::<AnyObject>(),
+                    returnID: -1_i16,
+                    transactionID: 0_i32
+                ]
+            };
+            assert_eq!(
+                request_from_event(&event),
+                ApplicationQuitRequest::Dismissal
+            );
+            // The SDK defines kAEQuitReason as a parameter, not an Apple Event attribute.
+            // SAFETY: Both selectors use the documented FourCharCode and object signatures.
+            unsafe {
+                let reason: Retained<AnyObject> =
+                    msg_send![class, descriptorWithTypeCode: u32::from_be_bytes(*b"logo")];
+                let _: () = msg_send![&*event, setParamDescriptor: &*reason, forKeyword: QUIT_REASON_KEYWORD];
+            }
+            assert_eq!(request_from_event(&event), ApplicationQuitRequest::Exit);
+        });
+    }
 
     define_class!(
         // SAFETY: NSObject has no subclassing requirements, and this test class has no ivars.
