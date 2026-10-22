@@ -30,6 +30,29 @@ connection.connect(os.environ["SPACETERM_DEVELOPMENT_OWNER_SOCKET"])
 connection.recv(1)
 (root / "client-stopped").touch()
 """
+# Advance only explicit process-wait deadlines. Children, pipes, signals and unbounded
+# waits remain real, so a gated cleanup can cross any launcher deadline without a long sleep.
+FAST_DEADLINES = """import subprocess
+RealProcess = subprocess.Popen
+class Process(RealProcess):
+    def wait(self, timeout=None):
+        return super().wait(timeout=None if timeout is None else min(timeout, 0.01))
+subprocess.Popen = Process
+"""
+GATED_SERVER = """import pathlib, signal, sys, time
+root = pathlib.Path(sys.argv[1])
+def forced_stop(*_):
+    (root / "forced-stop").touch()
+    raise SystemExit(3)
+signal.signal(signal.SIGTERM, forced_stop)
+(root / "server-started").touch()
+print("spaceterm-development-ready-v1", flush=True)
+sys.stdin.buffer.read()
+(root / "cleanup-started").touch()
+while not (root / "release-cleanup").exists():
+    time.sleep(0.01)
+(root / "server-stopped").touch()
+"""
 DRIVER = """import os, sys
 from spaceterm_tasks.development_supervision import supervise
 supervise([sys.executable, sys.argv[1], sys.argv[3]],
@@ -47,9 +70,10 @@ class DevelopmentSupervisionTests(unittest.TestCase):
         self.client = self.root / "client.py"
         self.client.write_text(CLIENT)
 
-    def start(self):
+    def start(self, fast_deadlines=False):
+        driver = (FAST_DEADLINES if fast_deadlines else "") + DRIVER
         process = subprocess.Popen(
-            [sys.executable, "-c", DRIVER, str(self.server), str(self.client), str(self.root)],
+            [sys.executable, "-c", driver, str(self.server), str(self.client), str(self.root)],
             env={**os.environ, "PYTHONPATH": str(LIBRARY)},
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -144,3 +168,39 @@ class DevelopmentSupervisionTests(unittest.TestCase):
                     self.fail("a second owner acquired the account lock")
         with development_run(self.root):
             pass
+
+    def test_interrupt_waits_for_gated_cleanup_beyond_process_wait_deadlines(self):
+        self.server.write_text(GATED_SERVER)
+        process = self.start(fast_deadlines=True)
+        try:
+            self.await_file("client-started", process)
+            process.send_signal(signal.SIGINT)
+            self.await_file("cleanup-started", process)
+            with self.assertRaises(subprocess.TimeoutExpired):
+                process.wait(timeout=0.25)
+            self.assertFalse((self.root / "forced-stop").exists())
+        finally:
+            (self.root / "release-cleanup").touch()
+        process.communicate(timeout=10)
+        self.assertTrue((self.root / "server-stopped").exists())
+
+    def test_unconsumed_readiness_does_not_authorize_forced_server_cleanup(self):
+        self.server.write_text(
+            GATED_SERVER.replace(
+                'print("spaceterm-development-ready-v1", flush=True)',
+                'sys.stdout.write("s"); sys.stdout.flush()',
+            )
+        )
+        process = self.start(fast_deadlines=True)
+        try:
+            self.await_file("server-started", process)
+            process.send_signal(signal.SIGINT)
+            self.await_file("cleanup-started", process)
+            with self.assertRaises(subprocess.TimeoutExpired):
+                process.wait(timeout=0.25)
+            self.assertFalse((self.root / "forced-stop").exists())
+            self.assertFalse((self.root / "client-started").exists())
+        finally:
+            (self.root / "release-cleanup").touch()
+        process.communicate(timeout=10)
+        self.assertTrue((self.root / "server-stopped").exists())

@@ -92,10 +92,9 @@ def _finish(server):
     assert server.stdin is not None
     server.stdin.close()
     try:
-        server.wait(timeout=10)
-    except subprocess.TimeoutExpired:
-        stop_group(server)
-        raise TaskError("Development Server cleanup did not finish") from None
+        # Admitted Git writes have no deadline. The Server reconciles them before ending
+        # Terminal Sessions, so only its completed exit proves cleanup has finished.
+        server.wait()
     finally:
         assert server.stdout is not None
         server.stdout.close()
@@ -135,10 +134,8 @@ def supervise(server_command, client_command, environment):
             )
             client = None
             connection = None
-            ready = False
             try:
                 _ready(server)
-                ready = True
                 client = subprocess.Popen(
                     client_command, env=client_environment, start_new_session=OWN_GROUP
                 )
@@ -179,10 +176,6 @@ def supervise(server_command, client_command, environment):
                                 pass
                             stop_group(client)
                     finally:
-                        if ready:
-                            _finish(server)
-                        else:
-                            # A refused startup grants no authority over an existing Server.
-                            server.stdin.close()
-                            stop_group(server)
-                            server.stdout.close()
+                        # Readiness may already be published even if _ready was interrupted.
+                        # Close only this child's owner pipe and let its shutdown finish.
+                        _finish(server)
