@@ -2,8 +2,9 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use futures_lite::{StreamExt, future};
+use zbus::proxy::CacheProperties;
 use zbus::zvariant::{OwnedObjectPath, OwnedValue, Value};
-use zbus::{CacheProperties, Connection, Proxy};
+use zbus::{Connection, Proxy};
 use zeroize::Zeroizing;
 
 use super::{CredentialError, CredentialStore, Interaction, account};
