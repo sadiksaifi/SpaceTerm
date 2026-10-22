@@ -13,6 +13,13 @@ pub(crate) enum ApplicationQuitDecision {
 pub(crate) enum ApplicationQuitRequest {
     /// The person asked to quit, such as from the Dock. They choose whether the client stays in
     /// its menu bar or status area, quits, or keeps its windows.
+    #[cfg_attr(
+        not(target_os = "macos"),
+        allow(
+            dead_code,
+            reason = "Linux commands invoke dismissal directly; only macOS reports Dock requests"
+        )
+    )]
     Dismissal,
     /// The client chose to exit, such as from Quit SpaceTerm or an installed update, or the
     /// person's session is ending. The quit policy runs without asking about the status area.
