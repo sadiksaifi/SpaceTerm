@@ -18,7 +18,11 @@ fn previous_production_signatures_authorize_retained_nonproduction_runtimes_only
             )
             .unwrap();
             test_support::sign_with_previous_production_trust(archive, signature);
-            std::fs::copy(signature, installed.directory.join("artifact.sig")).unwrap();
+            std::fs::write(
+                installed.directory.join("artifact.sig"),
+                std::fs::read(signature).unwrap(),
+            )
+            .unwrap();
             assert_eq!(
                 describe(&installed.directory, identity).unwrap(),
                 (VERSION.to_owned(), COMMIT.to_owned())
@@ -130,16 +134,26 @@ fn nonproduction_signatures_never_authorize_release_even_when_the_manifest_claim
             assert!(!parent.exists());
             // A retained-looking installation cannot turn the public nonproduction key
             // into Release authority, even when its signed manifest claims Release.
-            let retained = root.join("retained-release");
-            std::fs::create_dir(&retained).unwrap();
             let bytes = std::fs::read(&archive).unwrap();
-            tar::Archive::new(flate2::read::GzDecoder::new(bytes.as_slice()))
-                .unpack(&retained)
-                .unwrap();
-            let installation = retained.join(&pin);
-            std::fs::rename(retained.join("server"), &installation).unwrap();
-            std::fs::copy(&archive, installation.join("artifact.tar.gz")).unwrap();
-            std::fs::copy(&signature, installation.join("artifact.sig")).unwrap();
+            let installation = root.join("retained-release").join(&pin);
+            let directory = files::store(&installation).unwrap();
+            contents(&bytes, identity, |path, is_directory, mode, data| {
+                if is_directory {
+                    files::create_directories(&directory, path)?;
+                } else {
+                    files::create_file(&directory, path, data, mode)?;
+                }
+                Ok(())
+            })
+            .unwrap();
+            files::create_file(&directory, Path::new("artifact.tar.gz"), &bytes, 0o644).unwrap();
+            files::create_file(
+                &directory,
+                Path::new("artifact.sig"),
+                &std::fs::read(&signature).unwrap(),
+                0o644,
+            )
+            .unwrap();
             assert_eq!(
                 verify(&installation, identity),
                 Err(ServerError::RuntimeUnavailable)
