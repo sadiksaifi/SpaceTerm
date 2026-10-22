@@ -179,6 +179,7 @@ fn slow_count_publishes_branch_worktrees_other_sources_and_progress_before_compl
         tree.clone(),
     ]
     .into();
+    let requested_at = Instant::now();
     let mut reading = Reading::start(sources, runner.clone(), other.0.join("unused-home"));
     let until = Instant::now() + Duration::from_secs(6);
     let mut published = BTreeMap::new();
@@ -240,13 +241,16 @@ fn slow_count_publishes_branch_worktrees_other_sources_and_progress_before_compl
         "partial facts must reach the snapshot before the delayed count finishes"
     );
     assert!(initial_pending);
-    let elapsed = progress_at
-        .expect("useful counting progress before completion")
-        .duration_since(pending_at.expect("an initial pending count"));
+    let progress_at = progress_at.expect("useful counting progress before completion");
+    // Delivery can lag behind the server queuing Pending. Measure the lower bound from
+    // the read request so that publication backpressure cannot shorten the observed delay.
+    let since_request = progress_at.duration_since(requested_at);
+    let since_pending = progress_at.duration_since(pending_at.expect("an initial pending count"));
     assert!(
-        elapsed >= Duration::from_millis(900) && elapsed < Duration::from_secs(3),
-        "{elapsed:?}"
+        since_request >= Duration::from_millis(900),
+        "{since_request:?}"
     );
+    assert!(since_pending < Duration::from_secs(3), "{since_pending:?}");
     assert!(
         published[&git.0]
             .worktrees
