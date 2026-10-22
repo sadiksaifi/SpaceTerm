@@ -18,16 +18,23 @@ fn write<T: serde::Serialize>(stream: &mut UnixStream, value: &T) -> std::io::Re
     stream.write_all(&(bytes.len() as u32).to_be_bytes())?;
     stream.write_all(&bytes)
 }
-fn read<T: serde::de::DeserializeOwned>(stream: &mut UnixStream) -> Option<T> {
+fn read<T: serde::de::DeserializeOwned>(stream: &mut UnixStream) -> std::io::Result<Option<T>> {
     let mut length = [0; 4];
-    if stream.read_exact(&mut length).is_err() {
-        return None;
+    // EOF before a frame is the intentional lost acknowledgement. A timeout, partial frame
+    // or other transport failure must fail the fixture instead of masquerading as that EOF.
+    match stream.read_exact(&mut length[..1]) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
+        Err(error) => return Err(error),
     }
+    stream.read_exact(&mut length[1..])?;
     let length = u32::from_be_bytes(length) as usize;
     assert!(length <= pane::MAX_TERMINAL_FRAME);
     let mut bytes = vec![0; length];
-    stream.read_exact(&mut bytes).unwrap();
-    Some(serde_json::from_slice(&bytes).unwrap())
+    stream.read_exact(&mut bytes)?;
+    serde_json::from_slice(&bytes)
+        .map(Some)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
 }
 struct Process(Child);
 impl Process {
@@ -71,6 +78,9 @@ fn accept(listener: &UnixListener) -> UnixStream {
     loop {
         match listener.accept() {
             Ok((stream, _)) => {
+                // Darwin inherits the listener's nonblocking mode. Only accept is polled;
+                // framed exchanges must block until bytes arrive or their timeout expires.
+                stream.set_nonblocking(false).unwrap();
                 stream
                     .set_read_timeout(Some(Duration::from_secs(10)))
                     .unwrap();
@@ -168,10 +178,13 @@ fn a_fresh_client_process_observes_a_successful_start_after_its_reply_is_lost() 
         let mut stream = accept(&listener);
         let mut original = None;
         let mut starts = 0;
-        while let Some(request) = read::<Request>(&mut stream) {
+        while let Some(request) = read::<Request>(&mut stream).unwrap() {
             let produces_start = matches!(
                 request,
-                Request::StartRestored { .. } | Request::TakeOver { .. }
+                Request::StartRestored { .. }
+                    | Request::RepairDirectory { .. }
+                    | Request::SelectPane { explicit: true, .. }
+                    | Request::TakeOver { .. }
             );
             let takeover_request = matches!(request, Request::TakeOver { .. });
             let reply = host.request([1; 32], [3; 32], request);
@@ -203,9 +216,10 @@ fn a_fresh_client_process_observes_a_successful_start_after_its_reply_is_lost() 
         let mut reopened = Process::start(&socket.0, "reopen");
         let mut stream = accept(&listener);
         let mut observed = false;
+        let mut session_observed = false;
         let mut attached = false;
         let mut takeover = false;
-        while let Some(request) = read::<Request>(&mut stream) {
+        while let Some(request) = read::<Request>(&mut stream).unwrap() {
             if !matches!(request, Request::Inventory) && !observed {
                 assert!(
                     matches!(
@@ -220,10 +234,19 @@ fn a_fresh_client_process_observes_a_successful_start_after_its_reply_is_lost() 
                 observed = true;
             }
             assert!(
-                !matches!(request, Request::StartRestored { .. }),
+                !matches!(
+                    request,
+                    Request::StartRestored { .. }
+                        | Request::RepairDirectory { .. }
+                        | Request::SelectPane { explicit: true, .. }
+                ),
                 "reopening must not submit a replacement start"
             );
             if let Request::TakeOver { target, .. } = &request {
+                assert!(
+                    session_observed,
+                    "Take Over must follow observation of the existing Terminal Session"
+                );
                 assert_eq!(
                     target.session, original.session,
                     "Take Over must name the existing Terminal Session"
@@ -231,10 +254,22 @@ fn a_fresh_client_process_observes_a_successful_start_after_its_reply_is_lost() 
                 takeover = true;
             }
             let reply = host.request([1; 32], [5; 32], request);
-            if let Reply::Attached { lease } = &reply {
-                assert_eq!(lease.server, original.server);
-                assert_eq!(lease.session, original.session);
-                attached = true;
+            match &reply {
+                Reply::Attached { lease } => {
+                    assert_eq!(lease.server, original.server);
+                    assert_eq!(lease.session, original.session);
+                    session_observed = true;
+                    attached = true;
+                }
+                Reply::Takeover { target, .. } => {
+                    assert_eq!(target.server, original.server);
+                    assert_eq!(target.session, original.session);
+                    session_observed = true;
+                }
+                Reply::Restored { .. } => {
+                    panic!("reopening must observe the original live Terminal Session")
+                }
+                _ => {}
             }
             write(&mut stream, &reply).unwrap();
         }
@@ -263,7 +298,7 @@ fn client_process() {
         .set_read_timeout(Some(Duration::from_secs(30)))
         .unwrap();
     write(&mut stream, &Request::Inventory).unwrap();
-    let Some(Reply::Inventory { inventory, .. }) = read(&mut stream) else {
+    let Some(Reply::Inventory { inventory, .. }) = read(&mut stream).unwrap() else {
         panic!("inventory missing")
     };
     let pane = inventory.workspaces[0].tabs[0].panes[0].id;
@@ -273,7 +308,7 @@ fn client_process() {
     let presenter = control.reserve().activate(&AtomicBool::new(true));
     let mut state = DevelopmentPaneState::new();
     state.connection_recovery = Arc::clone(&control.recovery);
-    state.select();
+    let losing_start = std::env::var("SPACETERM_START_TEST_PHASE").unwrap() == "lose-start";
     let result = ClaimWorker {
         state: &state,
         pane_id: pane,
@@ -293,13 +328,19 @@ fn client_process() {
     }
     .run(
         |request| {
+            // Model the person's action only after ClaimWorker has offered the screen.
+            // Acting inside the reply callback runs before that offer and can be ignored.
+            match state.status() {
+                DevelopmentPaneStatus::Restored if losing_start => state.start_restored(),
+                DevelopmentPaneStatus::Takeover => state.take_over(),
+                _ => {}
+            }
             presenter.send(request, |request| {
                 exchange(&state, pane, request, |request| {
                     write(&mut stream, request).map_err(|_| ServerError::Protocol)?;
-                    let reply = read::<Reply>(&mut stream).ok_or(ServerError::Protocol)?;
-                    if matches!(reply, Reply::Takeover { .. }) {
-                        state.take_over();
-                    }
+                    let reply = read::<Reply>(&mut stream)
+                        .map_err(|_| ServerError::Protocol)?
+                        .ok_or(ServerError::Protocol)?;
                     match reply {
                         Reply::Refused(refusal) => Err(refusal.into()),
                         reply => Ok(reply),
@@ -309,7 +350,7 @@ fn client_process() {
         },
         || {},
     );
-    if std::env::var("SPACETERM_START_TEST_PHASE").unwrap() == "lose-start" {
+    if losing_start {
         assert!(matches!(result, Err(ServerError::Protocol)));
         assert!(state.start_unconfirmed());
     } else {
