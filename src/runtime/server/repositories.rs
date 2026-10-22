@@ -11,13 +11,17 @@ use spaceterm_server::{
     repository::*,
 };
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
-    sync::{Arc, mpsc},
+    sync::{Arc, Mutex, mpsc},
     thread::JoinHandle,
     time::{Duration, Instant},
 };
 
+const DISCOVERY_WORKERS: usize = 4;
+const COUNT_WORKERS: usize = 2;
+const COUNTING_DELAY: Duration = Duration::from_secs(1);
+const POLL: Duration = Duration::from_millis(10);
 const REFRESH: Duration = Duration::from_secs(2);
 const MAX_DIRECTORIES: usize = 512;
 const MAX_WORKTREES: usize = 256;
@@ -144,12 +148,29 @@ impl ServerRepositories {
                     .directories
                     .iter()
                     .position(|old| old.directory == facts.directory);
+                if let Some(old) = old {
+                    let previous = &self.snapshot.directories[old];
+                    if let (Some(current), Some(previous_repository)) =
+                        (&mut facts.repository, &previous.repository)
+                        && current.root == previous_repository.root
+                    {
+                        if current.counting.is_some() && previous_repository.changes.is_ok() {
+                            current.changes.clone_from(&previous_repository.changes);
+                        }
+                        if facts.worktrees.is_none() {
+                            facts.worktrees.clone_from(&previous.worktrees);
+                        }
+                    }
+                }
                 if facts.failure.is_some()
                     && let Some(old) = old
                 {
                     let previous = &self.snapshot.directories[old];
                     if facts.repository.is_none() {
                         facts.repository.clone_from(&previous.repository);
+                        if let Some(repository) = &mut facts.repository {
+                            repository.counting = None;
+                        }
                     }
                     if facts.worktrees.is_none() {
                         facts.worktrees.clone_from(&previous.worktrees);
@@ -367,77 +388,324 @@ fn read(
         )),
         _ => None,
     };
-    for directory in sources {
-        if cancellation.is_cancelled() {
-            return;
+    read_sources(sources, readers, status, cancellation, sender);
+}
+
+type Readers = (
+    policy::local_read::LocalRepositoryReader,
+    crate::worktrees::git::LocalWorktreeGit,
+);
+type Changes = Result<ChangeSummary, RepositoryReadError>;
+
+enum ReadEvent {
+    Facts {
+        facts: Box<DirectoryFacts>,
+        fsmonitor: FsmonitorPolicy,
+        discovered: bool,
+    },
+    CountStarted(PathBuf, Instant),
+    CountFinished(PathBuf, Changes),
+}
+struct CountRead {
+    directories: BTreeSet<PathBuf>,
+    started: Option<Instant>,
+    counting: Option<ChangeCounting>,
+    changes: Changes,
+}
+impl CountRead {
+    fn apply(&self, facts: &mut DirectoryFacts) {
+        if let Some(repository) = &mut facts.repository {
+            repository.counting = self.counting;
+            repository.changes.clone_from(&self.changes);
         }
-        let mut facts = DirectoryFacts {
-            directory,
-            repository: None,
-            worktrees: None,
-            failure: None,
-        };
-        let result = (|| {
-            let (repository, worktrees) =
-                readers.as_ref().ok_or(RepositoryReadError::ToolMissing)?;
-            let validated = super::local_filesystem()
-                .validate_directory(&facts.directory)
-                .map_err(|_| RepositoryReadError::Unavailable)?;
-            let directory = validated.path();
-            if let ProbeOutcome::Repository(probe) = repository.probe(directory, &cancellation)? {
-                let RepositoryRoot::Local(root) = &probe.root else {
-                    return Err(RepositoryReadError::InvalidResponse);
-                };
-                let changes = repository
-                    .count(root, probe.config.fsmonitor, &cancellation)
-                    .map(|summary| summary.changes);
-                facts.repository = Some(Repository {
-                    root: root.clone(),
-                    pull_request: policy::pull_request::pull_request_query(
-                        &probe.config,
-                        &probe.head,
-                    ),
-                    head: probe.head,
-                    commit: probe.commit,
-                    upstream: probe.upstream,
-                    operation: probe.operation,
-                    changes,
-                });
-                // Every Pane needs its actual membership from Git, including inactive Tabs.
-                if let Some(mut list) = worktrees.list(directory, &cancellation)? {
-                    if list.worktrees.len() > MAX_WORKTREES {
-                        return Err(RepositoryReadError::OutputTooLarge);
-                    }
-                    for record in &mut list.worktrees {
-                        record.missing |= matches!(
-                            super::local_filesystem().validate_directory(&record.root),
-                            Err(super::LocalFilesystemError::Missing
-                                | super::LocalFilesystemError::NotDirectory)
-                        );
-                    }
-                    facts.worktrees = Some(WorktreeInventory {
-                        main_root: list.repository.main_root().to_owned(),
-                        current: list.current,
-                        worktrees: list.worktrees,
-                    });
-                }
-            }
-            Ok(())
-        })();
-        facts.failure = result.err();
-        let mut publication = (status, facts);
-        loop {
-            if cancellation.is_cancelled() {
+    }
+}
+
+/// Discovery and counting have separate bounded pools: a filter walking one Worktree cannot
+/// occupy discovery workers or postpone another source's branch and Worktree publication.
+/// Readers are composed above, at the process and filesystem boundaries.
+fn read_sources(
+    sources: Sources,
+    readers: Option<Readers>,
+    status: GitToolStatus,
+    cancellation: SshCancellationToken,
+    sender: mpsc::SyncSender<(GitToolStatus, DirectoryFacts)>,
+) {
+    let Some((repository, worktrees)) = readers else {
+        for directory in sources {
+            if !send(
+                &sender,
+                (
+                    status,
+                    DirectoryFacts {
+                        directory,
+                        repository: None,
+                        worktrees: None,
+                        failure: Some(RepositoryReadError::ToolMissing),
+                    },
+                ),
+                &cancellation,
+            ) {
                 return;
             }
-            match sender.try_send(publication) {
-                Ok(()) => break,
-                Err(mpsc::TrySendError::Disconnected(_)) => return,
-                Err(mpsc::TrySendError::Full(pending)) => {
-                    publication = pending;
-                    std::thread::sleep(Duration::from_millis(10));
+        }
+        return;
+    };
+    let total = sources.len();
+    let sources = Mutex::new(sources.into_iter());
+    let (events, receiver) = mpsc::sync_channel(8);
+    let (counts, count_receiver) =
+        mpsc::sync_channel::<(PathBuf, FsmonitorPolicy)>(MAX_DIRECTORIES);
+    let count_receiver = Mutex::new(count_receiver);
+    std::thread::scope(|scope| {
+        for _ in 0..DISCOVERY_WORKERS.min(total) {
+            let sources = &sources;
+            let events = &events;
+            let cancellation = &cancellation;
+            let repository = &repository;
+            let worktrees = &worktrees;
+            scope.spawn(move || {
+                loop {
+                    if cancellation.is_cancelled() {
+                        return;
+                    }
+                    let Some(directory) = sources.lock().unwrap().next() else {
+                        return;
+                    };
+                    discover(directory, repository, worktrees, events, cancellation);
                 }
+            });
+        }
+        for _ in 0..COUNT_WORKERS.min(total) {
+            let receiver = &count_receiver;
+            let events = &events;
+            let repository = &repository;
+            let cancellation = &cancellation;
+            scope.spawn(move || {
+                loop {
+                    if cancellation.is_cancelled() {
+                        return;
+                    }
+                    let job = receiver.lock().unwrap().recv_timeout(POLL);
+                    let (root, fsmonitor) = match job {
+                        Ok(job) => job,
+                        Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                        Err(mpsc::RecvTimeoutError::Disconnected) => return,
+                    };
+                    if !send(
+                        events,
+                        ReadEvent::CountStarted(root.clone(), Instant::now()),
+                        cancellation,
+                    ) {
+                        return;
+                    }
+                    let changes = repository
+                        .count(&root, fsmonitor, cancellation)
+                        .map(|summary| summary.changes);
+                    if !send(
+                        events,
+                        ReadEvent::CountFinished(root, changes),
+                        cancellation,
+                    ) {
+                        return;
+                    }
+                }
+            });
+        }
+        let mut directories = BTreeMap::<PathBuf, DirectoryFacts>::new();
+        let mut counting = BTreeMap::<PathBuf, CountRead>::new();
+        let mut discovered = 0;
+        let mut completed = 0;
+        'reading: while !cancellation.is_cancelled()
+            && (discovered < total || completed < counting.len())
+        {
+            match receiver.recv_timeout(POLL) {
+                Ok(ReadEvent::Facts {
+                    facts,
+                    fsmonitor,
+                    discovered: done,
+                }) => {
+                    let mut facts = *facts;
+                    discovered += usize::from(done);
+                    if let Some(repository) = &facts.repository {
+                        let root = repository.root.clone();
+                        if let std::collections::btree_map::Entry::Vacant(entry) =
+                            counting.entry(root.clone())
+                        {
+                            entry.insert(CountRead {
+                                directories: BTreeSet::new(),
+                                started: None,
+                                counting: Some(ChangeCounting::Pending),
+                                changes: Err(RepositoryReadError::Unavailable),
+                            });
+                            // At most MAX_DIRECTORIES distinct physical roots are admitted.
+                            if !send(&counts, (root.clone(), fsmonitor), &cancellation) {
+                                break;
+                            }
+                        }
+                        let count = counting.get_mut(&root).unwrap();
+                        count.directories.insert(facts.directory.clone());
+                        count.apply(&mut facts);
+                    }
+                    directories.insert(facts.directory.clone(), facts.clone());
+                    if !send(&sender, (status, facts), &cancellation) {
+                        break;
+                    }
+                }
+                Ok(ReadEvent::CountStarted(root, started)) => {
+                    counting.get_mut(&root).unwrap().started = Some(started);
+                }
+                Ok(ReadEvent::CountFinished(root, changes)) => {
+                    let count = counting.get_mut(&root).unwrap();
+                    count.counting = None;
+                    count.changes = changes;
+                    completed += 1;
+                    if !publish_count(count, &mut directories, status, &sender, &cancellation) {
+                        break;
+                    }
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+            for count in counting.values_mut() {
+                if count.counting == Some(ChangeCounting::Pending)
+                    && count
+                        .started
+                        .is_some_and(|started| started.elapsed() >= COUNTING_DELAY)
+                {
+                    count.counting = Some(ChangeCounting::Counting);
+                    if !publish_count(count, &mut directories, status, &sender, &cancellation) {
+                        break 'reading;
+                    }
+                }
+            }
+        }
+        // Disconnect idle count workers before scope joins. Every in-flight runner honors the
+        // same cancellation token and per-process deadline as discovery.
+        if discovered < total || completed < counting.len() {
+            cancellation.cancel();
+        }
+        drop(counts);
+    });
+}
+
+fn publish_count(
+    count: &CountRead,
+    directories: &mut BTreeMap<PathBuf, DirectoryFacts>,
+    status: GitToolStatus,
+    sender: &mpsc::SyncSender<(GitToolStatus, DirectoryFacts)>,
+    cancellation: &SshCancellationToken,
+) -> bool {
+    for directory in &count.directories {
+        let facts = directories.get_mut(directory).unwrap();
+        count.apply(facts);
+        if !send(sender, (status, facts.clone()), cancellation) {
+            return false;
+        }
+    }
+    true
+}
+
+fn discover(
+    directory: PathBuf,
+    repository: &policy::local_read::LocalRepositoryReader,
+    worktrees: &crate::worktrees::git::LocalWorktreeGit,
+    events: &mpsc::SyncSender<ReadEvent>,
+    cancellation: &SshCancellationToken,
+) {
+    let mut facts = DirectoryFacts {
+        directory,
+        repository: None,
+        worktrees: None,
+        failure: None,
+    };
+    let mut fsmonitor = FsmonitorPolicy::Disabled;
+    let result = (|| {
+        let validated = super::local_filesystem()
+            .validate_directory(&facts.directory)
+            .map_err(|_| RepositoryReadError::Unavailable)?;
+        let directory = validated.path();
+        if let ProbeOutcome::Repository(probe) = repository.probe(directory, cancellation)? {
+            let RepositoryRoot::Local(root) = &probe.root else {
+                return Err(RepositoryReadError::InvalidResponse);
+            };
+            // Git can preserve an alias spelling. Full scans share the physical Worktree root.
+            let root = std::fs::canonicalize(root).map_err(|_| RepositoryReadError::Unavailable)?;
+            fsmonitor = probe.config.fsmonitor;
+            facts.repository = Some(Repository {
+                root,
+                pull_request: policy::pull_request::pull_request_query(&probe.config, &probe.head),
+                head: probe.head,
+                commit: probe.commit,
+                upstream: probe.upstream,
+                operation: probe.operation,
+                changes: Err(RepositoryReadError::Unavailable),
+                counting: Some(ChangeCounting::Pending),
+            });
+            if !send(
+                events,
+                ReadEvent::Facts {
+                    facts: Box::new(facts.clone()),
+                    fsmonitor,
+                    discovered: false,
+                },
+                cancellation,
+            ) {
+                return Err(RepositoryReadError::Cancelled);
+            }
+            // Every Pane needs its actual membership from Git, including inactive Tabs.
+            if let Some(mut list) = worktrees.list(directory, cancellation)? {
+                if list.worktrees.len() > MAX_WORKTREES {
+                    return Err(RepositoryReadError::OutputTooLarge);
+                }
+                for record in &mut list.worktrees {
+                    record.missing |= matches!(
+                        super::local_filesystem().validate_directory(&record.root),
+                        Err(super::LocalFilesystemError::Missing
+                            | super::LocalFilesystemError::NotDirectory)
+                    );
+                }
+                facts.worktrees = Some(WorktreeInventory {
+                    main_root: list.repository.main_root().to_owned(),
+                    current: list.current,
+                    worktrees: list.worktrees,
+                });
+            }
+        }
+        Ok(())
+    })();
+    facts.failure = result.err();
+    send(
+        events,
+        ReadEvent::Facts {
+            facts: Box::new(facts),
+            fsmonitor,
+            discovered: true,
+        },
+        cancellation,
+    );
+}
+
+/// Bounded backpressure must remain cancellable when a subscriber stops draining publications.
+fn send<T>(
+    sender: &mpsc::SyncSender<T>,
+    mut value: T,
+    cancellation: &SshCancellationToken,
+) -> bool {
+    loop {
+        if cancellation.is_cancelled() {
+            return false;
+        }
+        match sender.try_send(value) {
+            Ok(()) => return true,
+            Err(mpsc::TrySendError::Disconnected(_)) => return false,
+            Err(mpsc::TrySendError::Full(pending)) => {
+                value = pending;
+                std::thread::sleep(POLL);
             }
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

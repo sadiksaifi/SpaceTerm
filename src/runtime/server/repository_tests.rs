@@ -278,7 +278,12 @@ fn assert_count_failure_keeps_facts(timeout: bool) {
     prototype.directory = git.0.clone();
     let mut host = SharedWorkspaceHost::new(prototype);
     create_shared(&mut host, 1);
-    git_facts(&mut host, &git.0, |facts| facts.repository.is_some());
+    git_facts(&mut host, &git.0, |facts| {
+        facts
+            .repository
+            .as_ref()
+            .is_some_and(|repository| repository.counting.is_none() && repository.changes.is_ok())
+    });
     // Fail only the expensive change read after a successful earlier publication.
     let filter = if timeout {
         std::fs::write(
@@ -295,10 +300,13 @@ fn assert_count_failure_keeps_facts(timeout: bool) {
     git.git(&["branch", "-m", "feature"]);
     std::fs::write(git.0.join("tracked.txt"), "after!\n").unwrap();
     let current = git_facts(&mut host, &git.0, |facts| {
-        facts
-            .repository
-            .as_ref()
-            .is_some_and(|repository| repository.head == RepositoryHead::Branch("feature".into()))
+        facts.repository.as_ref().is_some_and(|repository| {
+            repository.head == RepositoryHead::Branch("feature".into())
+                && repository.counting.is_none()
+        }) && facts.worktrees.as_ref().is_some_and(|list| {
+            list.worktrees[0].head
+                == spaceterm_server::repository::WorktreeHead::Branch("feature".into())
+        })
     });
     let facts = current
         .repositories
@@ -350,10 +358,9 @@ fn shared_git_reads_publish_external_changes_to_two_clients_and_retain_worktree_
     let mut host = SharedWorkspaceHost::new(prototype);
     let workspace = create_shared(&mut host, 1);
     let first = git_facts(&mut host, &tree, |facts| {
-        facts
-            .repository
-            .as_ref()
-            .is_some_and(|repo| repo.head == RepositoryHead::Branch("feature".into()))
+        facts.repository.as_ref().is_some_and(|repo| {
+            repo.head == RepositoryHead::Branch("feature".into()) && repo.counting.is_none()
+        }) && facts.worktrees.is_some()
     });
     let tab = &first.workspaces[0].tabs[0];
     assert_eq!(tab.worktree.as_ref(), Some(&tree));

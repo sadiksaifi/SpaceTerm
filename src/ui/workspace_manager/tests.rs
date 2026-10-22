@@ -11793,6 +11793,7 @@ mod shared_repositories {
                 commit: Some("abc1234".into()),
                 upstream: None,
                 operation: None,
+                counting: None,
                 changes: Ok(ChangeSummary {
                     total: ChangeTotal::Exact(1),
                     modified: 1,

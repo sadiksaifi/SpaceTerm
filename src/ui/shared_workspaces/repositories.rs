@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use spaceterm_server::hierarchy::{Pane, Workspace};
-use spaceterm_server::repository::{DirectoryFacts, Snapshot, WorktreeInventory};
+use spaceterm_server::repository::{ChangeCounting, DirectoryFacts, Snapshot, WorktreeInventory};
 
 use crate::repository_status::{
     ChangeState, Freshness, PullRequest, RemoteMachineKey, RepositoryKey, RepositoryMachine,
@@ -185,6 +185,12 @@ impl SharedRepositories {
             operation: repository.operation,
             changes: match &repository.changes {
                 Ok(changes) => ChangeState::Known(changes.clone()),
+                Err(_) if repository.counting == Some(ChangeCounting::Pending) => {
+                    ChangeState::NotCounted
+                }
+                Err(_) if repository.counting == Some(ChangeCounting::Counting) => {
+                    ChangeState::Counting
+                }
                 Err(error) => ChangeState::Unavailable(*error),
             },
             freshness,
@@ -253,6 +259,7 @@ mod tests {
             commit: Some("abc1234".into()),
             upstream: None,
             operation: None,
+            counting: None,
             changes: Ok(ChangeSummary {
                 total: ChangeTotal::Exact(2),
                 modified: 2,
@@ -480,6 +487,58 @@ mod tests {
                     .head,
                 WorktreeHead::Branch("feature".into())
             );
+        }
+    }
+
+    #[test]
+    fn decoded_count_progress_keeps_branch_and_last_known_changes_visible() {
+        let mut repositories = SharedRepositories::default();
+        let now = Instant::now();
+        for (revision, counting, changes, expected) in [
+            (
+                1,
+                Some(ChangeCounting::Pending),
+                Err(RepositoryReadError::Unavailable),
+                ChangeState::NotCounted,
+            ),
+            (
+                2,
+                Some(ChangeCounting::Counting),
+                Err(RepositoryReadError::Unavailable),
+                ChangeState::Counting,
+            ),
+            (
+                3,
+                None,
+                Ok(ChangeSummary::default()),
+                ChangeState::Known(ChangeSummary::default()),
+            ),
+            (
+                4,
+                Some(ChangeCounting::Pending),
+                Ok(ChangeSummary::default()),
+                ChangeState::Known(ChangeSummary::default()),
+            ),
+            (
+                5,
+                Some(ChangeCounting::Counting),
+                Ok(ChangeSummary::default()),
+                ChangeState::Known(ChangeSummary::default()),
+            ),
+        ] {
+            let mut current = repository("feature");
+            current.counting = counting;
+            current.changes = changes;
+            let decoded: Snapshot = serde_json::from_slice(
+                &serde_json::to_vec(&snapshot(revision, vec![facts(Some(current), None)])).unwrap(),
+            )
+            .unwrap();
+            repositories.accept(Some(&decoded), now);
+            let view = present(&repositories, RepositoryStatusPreferences::default(), true);
+            assert_eq!(status(&view).head, RepositoryHead::Branch("feature".into()));
+            assert_eq!(status(&view).changes, expected);
+            assert_eq!(status(&view).read_failure, None);
+            assert_eq!(status(&view).freshness, Freshness::Current);
         }
     }
 
