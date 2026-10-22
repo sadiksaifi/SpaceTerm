@@ -269,6 +269,17 @@ pub(crate) trait SshConnectBackend: Send + Sync {
     ) -> Result<SshServerObservation, SshConnectFailure>;
 }
 
+/// Authority to withdraw only the unpresented connection intent a flow created.
+pub(crate) struct SshFlowConnectionIntent {
+    destination: SshDestination,
+    owner: u64,
+}
+
+struct FlowConnectionOwner {
+    id: u64,
+    consumers: usize,
+}
+
 struct Entry {
     status: RemoteConnectionStatus,
     continuity: Option<SshServerContinuity>,
@@ -278,6 +289,7 @@ struct Entry {
     running: bool,
     /// Whether the running worker only observes. Its end leaves the saved intent unchanged.
     checking: bool,
+    flow_owner: Option<FlowConnectionOwner>,
     /// Whether the person wants this connection kept up, which relaunch continues.
     active: bool,
     offer: Option<(u64, Arc<dyn SshInstallation>)>,
@@ -294,6 +306,7 @@ impl Default for Entry {
             generation: 0,
             running: false,
             checking: false,
+            flow_owner: None,
             active: false,
             offer: None,
             last_facts: None,
@@ -501,31 +514,51 @@ impl SshServerConnections {
         receiver
     }
     pub(crate) fn connect(&self, destination: SshDestination) {
-        self.begin(destination, ConnectMode::Requested, None);
+        let _ = self.begin(destination, ConnectMode::Requested, None, false);
+    }
+    /// Reuses an existing intent without taking authority to disconnect its consumers.
+    pub(crate) fn connect_for_flow(
+        &self,
+        destination: SshDestination,
+    ) -> Option<SshFlowConnectionIntent> {
+        self.begin(destination, ConnectMode::Requested, None, true)
+    }
+    pub(crate) fn cancel_flow_connection(&self, intent: SshFlowConnectionIntent) {
+        self.end(&intent.destination, true, Some(intent.owner));
     }
     pub(crate) fn install(&self, destination: &SshDestination, offer_id: u64) {
+        self.approve_installation(destination, offer_id, false);
+    }
+    pub(crate) fn install_for_flow(&self, destination: &SshDestination, offer_id: u64) {
+        self.approve_installation(destination, offer_id, true);
+    }
+    fn approve_installation(&self, destination: &SshDestination, offer_id: u64, for_flow: bool) {
         let installation = self.inner.state.lock().ok().and_then(|mut state| {
             let entry = state.entries.get_mut(destination.as_str())?;
             if entry.running || entry.offer.as_ref()?.0 != offer_id {
                 return None;
             }
+            if !for_flow {
+                entry.flow_owner = None;
+            }
             entry.offer.take().map(|(_, offer)| offer)
         });
         if let Some(installation) = installation {
-            self.begin(
+            let _ = self.begin(
                 destination.clone(),
                 ConnectMode::Requested,
                 Some(installation),
+                false,
             );
         }
     }
     pub(crate) fn cancel(&self, destination: &SshDestination) {
-        self.end(destination, true);
+        self.end(destination, true, None);
     }
     /// Ends the connection and its reconnect intent and keeps it saved. Its server and Terminal
     /// Sessions keep running.
     pub(crate) fn disconnect(&self, destination: &SshDestination) {
-        self.end(destination, false);
+        self.end(destination, false, None);
     }
     /// Forgets a saved connection at once: its presentation, its reconnect intent and anything
     /// it observed. Late results from its work find nothing to update, so they never recreate it.
@@ -584,6 +617,7 @@ impl SshServerConnections {
             entry.cancellation = SshCancellationToken::default();
             entry.running = true;
             entry.checking = true;
+            entry.flow_owner = None;
             entry.offer = None;
             entry.status = RemoteConnectionStatus::Working {
                 phase: ConnectPhase::Authenticating,
@@ -652,7 +686,7 @@ impl SshServerConnections {
             });
         }
     }
-    fn end(&self, destination: &SshDestination, cancelling: bool) {
+    fn end(&self, destination: &SshDestination, cancelling: bool, flow_owner: Option<u64>) {
         let Ok(mut state) = self.inner.state.lock() else {
             return;
         };
@@ -660,6 +694,19 @@ impl SshServerConnections {
         let Some(entry) = state.entries.get_mut(destination.as_str()) else {
             return;
         };
+        if let Some(owner) = flow_owner {
+            let Some(owned) = entry.flow_owner.as_mut().filter(|owned| owned.id == owner) else {
+                return;
+            };
+            if entry.presented.is_some() {
+                return;
+            }
+            owned.consumers -= 1;
+            if owned.consumers != 0 {
+                return;
+            }
+        }
+        entry.flow_owner = None;
         entry.cancellation.cancel();
         entry.offer = None;
         entry.presented = None;
@@ -712,23 +759,51 @@ impl SshServerConnections {
         destination: SshDestination,
         mode: ConnectMode,
         installation: Option<Arc<dyn SshInstallation>>,
-    ) {
-        let (generation, cancellation, expected) = {
+        for_flow: bool,
+    ) -> Option<SshFlowConnectionIntent> {
+        let (generation, cancellation, expected, flow_owner) = {
             let Ok(mut state) = self.inner.state.lock() else {
-                return;
+                return None;
             };
-            if state
-                .entries
-                .get(destination.as_str())
-                .is_some_and(|entry| entry.running)
+            if let Some(entry) = state.entries.get_mut(destination.as_str())
+                && entry.running
             {
-                return;
+                if for_flow {
+                    return entry.flow_owner.as_mut().map(|owner| {
+                        owner.consumers += 1;
+                        SshFlowConnectionIntent {
+                            destination,
+                            owner: owner.id,
+                        }
+                    });
+                }
+                entry.flow_owner = None;
+                return None;
             }
             let generation = next_generation(&mut state);
             let entry = state
                 .entries
                 .entry(destination.as_str().to_owned())
                 .or_default();
+            let owner = if for_flow {
+                if let Some(owner) = &mut entry.flow_owner {
+                    owner.consumers += 1;
+                    Some(owner.id)
+                } else if !entry.active && entry.presented.is_none() {
+                    entry.flow_owner = Some(FlowConnectionOwner {
+                        id: generation,
+                        consumers: 1,
+                    });
+                    Some(generation)
+                } else {
+                    None
+                }
+            } else {
+                if installation.is_none() {
+                    entry.flow_owner = None;
+                }
+                None
+            };
             entry.generation = generation;
             entry.cancellation = SshCancellationToken::default();
             entry.running = true;
@@ -747,6 +822,7 @@ impl SshServerConnections {
                 entry.generation,
                 entry.cancellation.clone(),
                 entry.continuity.clone(),
+                owner,
             );
             let _ = self
                 .inner
@@ -759,6 +835,7 @@ impl SshServerConnections {
         let weak = Arc::downgrade(&self.inner);
         let backend = self.inner.backend.clone();
         let key = destination.clone();
+        let intent_destination = destination.clone();
         if std::thread::Builder::new()
             .name("spaceterm-ssh-server".into())
             .spawn(move || {
@@ -782,6 +859,10 @@ impl SshServerConnections {
                 };
             });
         }
+        flow_owner.map(|owner| SshFlowConnectionIntent {
+            destination: intent_destination,
+            owner,
+        })
     }
 }
 fn next_generation(state: &mut State) -> u64 {
@@ -905,6 +986,7 @@ fn run_worker(
                     return;
                 };
                 entry.continuity = expected.clone();
+                entry.flow_owner = None;
                 entry.presented = Some(connected.server.clone());
                 entry.last_facts = Some(connected.facts.clone());
                 entry.status = RemoteConnectionStatus::Connected {
@@ -1145,10 +1227,15 @@ fn load(owner: &Arc<Inner>) -> Result<(), SshIntentStoreError> {
         notify(&mut state);
         drop(state);
         if retained.active {
-            SshServerConnections {
+            let _ = SshServerConnections {
                 inner: owner.clone(),
             }
-            .begin(retained.destination, ConnectMode::QuietContinuation, None);
+            .begin(
+                retained.destination,
+                ConnectMode::QuietContinuation,
+                None,
+                false,
+            );
         }
     }
     Ok(())
@@ -1371,6 +1458,91 @@ mod tests {
             );
             std::thread::sleep(Duration::from_millis(2));
         }
+    }
+
+    #[test]
+    fn a_flow_withdraws_its_own_attempt_before_the_network_worker_returns() {
+        let (registry, backend, intents, entered, release) = setup(false);
+        let intent = registry.connect_for_flow(destination()).unwrap();
+        entered.recv_blocking().unwrap();
+
+        registry.cancel_flow_connection(intent);
+        assert!(!registry.intends(&destination()));
+        assert_eq!(backend.disconnects.load(Ordering::SeqCst), 1);
+        assert!(registry.server(&destination()).is_none());
+
+        release.send_blocking(()).unwrap();
+        eventually(|| {
+            matches!(
+                registry.status(&destination()),
+                RemoteConnectionStatus::Inactive
+            )
+        });
+        eventually(|| intents.active(&destination()) == Some(false));
+        assert!(registry.server(&destination()).is_none());
+    }
+
+    #[test]
+    fn an_explicit_connection_takes_ownership_from_the_flow() {
+        let (registry, backend, _, entered, release) = setup(false);
+        let intent = registry.connect_for_flow(destination()).unwrap();
+        entered.recv_blocking().unwrap();
+        registry.connect(destination());
+        registry.cancel_flow_connection(intent);
+        assert!(registry.intends(&destination()));
+        assert_eq!(backend.disconnects.load(Ordering::SeqCst), 0);
+        assert_eq!(backend.calls.load(Ordering::SeqCst), 1);
+
+        release.send_blocking(()).unwrap();
+        eventually(|| registry.server(&destination()).is_some());
+        registry.disconnect(&destination());
+    }
+
+    #[test]
+    fn flow_consumers_release_only_the_intent_the_last_one_withdraws() {
+        let (registry, backend, _, entered, release) = setup(false);
+        let first = registry.connect_for_flow(destination()).unwrap();
+        entered.recv_blocking().unwrap();
+        let second = registry.connect_for_flow(destination()).unwrap();
+        registry.cancel_flow_connection(first);
+        assert!(registry.intends(&destination()));
+        assert_eq!(backend.disconnects.load(Ordering::SeqCst), 0);
+
+        registry.cancel_flow_connection(second);
+        assert!(!registry.intends(&destination()));
+        assert_eq!(backend.disconnects.load(Ordering::SeqCst), 1);
+        release.send_blocking(()).unwrap();
+        eventually(|| {
+            matches!(
+                registry.status(&destination()),
+                RemoteConnectionStatus::Inactive
+            )
+        });
+        assert!(registry.server(&destination()).is_none());
+    }
+
+    #[test]
+    fn an_old_flow_cannot_cancel_a_new_attempt_to_the_same_destination() {
+        let (registry, _, _, entered, release) = setup(false);
+        let old = registry.connect_for_flow(destination()).unwrap();
+        entered.recv_blocking().unwrap();
+        registry.disconnect(&destination());
+        let current = registry.connect_for_flow(destination()).unwrap();
+        entered.recv_blocking().unwrap();
+
+        registry.cancel_flow_connection(old);
+        assert!(registry.intends(&destination()));
+        registry.cancel_flow_connection(current);
+        assert!(!registry.intends(&destination()));
+        release.send_blocking(()).unwrap();
+        release.send_blocking(()).unwrap();
+        eventually(|| {
+            matches!(
+                registry.status(&destination()),
+                RemoteConnectionStatus::Inactive
+            )
+        });
+        assert!(registry.server(&destination()).is_none());
     }
 
     #[test]

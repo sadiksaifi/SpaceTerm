@@ -49,6 +49,7 @@ impl AskPassModalHandle {
 struct ActiveAskPassPresentation {
     owner: u64,
     generation: u64,
+    window: gpui::WindowId,
     handle: AskPassModalHandle,
     body: Option<Entity<AskPassSecretBody>>,
     result: Option<AskPassResult>,
@@ -64,6 +65,7 @@ impl Drop for ActiveAskPassPresentation {
 }
 
 struct AskPassSettlement {
+    window: gpui::WindowId,
     body: Option<Entity<AskPassSecretBody>>,
     result: AskPassResult,
     completion: AskPassCompletion,
@@ -71,6 +73,11 @@ struct AskPassSettlement {
 
 impl AskPassSettlement {
     fn deliver(self, cx: &mut App) {
+        super::ssh_servers::prompt_settled(
+            self.window,
+            matches!(self.result, AskPassResult::Cancelled),
+            cx,
+        );
         if let Some(body) = self.body {
             body.update(cx, |body, cx| body.clear(cx));
         }
@@ -86,6 +93,18 @@ pub(crate) struct GpuiAskPassPresenter {
 }
 
 impl GpuiAskPassPresenter {
+    pub(crate) fn new(cx: &mut Context<Self>) -> Self {
+        cx.on_release(|presenter, cx| {
+            if let Some(generation) = presenter.active.as_ref().map(|active| active.generation)
+                && let Some(settlement) = presenter.settle(generation)
+            {
+                settlement.deliver(cx);
+            }
+        })
+        .detach();
+        Self::default()
+    }
+
     pub(crate) fn present(
         &mut self,
         owner: u64,
@@ -169,11 +188,13 @@ impl GpuiAskPassPresenter {
         self.active = Some(ActiveAskPassPresentation {
             owner,
             generation,
+            window: window.window_handle().window_id(),
             handle: AskPassModalHandle::Confirmation(alert),
             body: None,
             result: None,
             completion: Some(completion),
         });
+        super::ssh_servers::prompt_requested(window, cx);
         Ok(())
     }
 
@@ -263,11 +284,13 @@ impl GpuiAskPassPresenter {
         self.active = Some(ActiveAskPassPresentation {
             owner,
             generation,
+            window: window.window_handle().window_id(),
             handle: AskPassModalHandle::Secret(dialog),
             body: Some(body),
             result: None,
             completion: Some(completion),
         });
+        super::ssh_servers::prompt_requested(window, cx);
         Ok(())
     }
 
@@ -290,6 +313,7 @@ impl GpuiAskPassPresenter {
         }
         let mut active = self.active.take()?;
         Some(AskPassSettlement {
+            window: active.window,
             body: active.body.take(),
             result: active.result.take().unwrap_or(AskPassResult::Cancelled),
             completion: active.completion.take()?,
@@ -561,7 +585,7 @@ mod tests {
             .expect("UI initialization should succeed");
         let results = Rc::new(RefCell::new(Vec::new()));
         let (harness, cx) = cx.add_window_view(|_, cx| {
-            let presenter = cx.new(|_| GpuiAskPassPresenter::default());
+            let presenter = cx.new(GpuiAskPassPresenter::new);
             AskPassHarness {
                 presenter,
                 blocker: None,

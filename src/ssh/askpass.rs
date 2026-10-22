@@ -614,17 +614,15 @@ enum AskPassUiCommand {
 }
 
 #[cfg(feature = "desktop")]
-pub(super) struct GpuiAskPassBridge {
+pub(crate) struct GpuiAskPassBridge {
     commands: async_channel::Sender<AskPassUiCommand>,
     next_owner: Arc<AtomicU64>,
 }
 
 #[cfg(feature = "desktop")]
 impl GpuiAskPassBridge {
-    pub(super) fn new(window: &Window, cx: &mut App) -> Self {
-        let presenter = Rc::new(RefCell::new(Some(
-            cx.new(|_| GpuiAskPassPresenter::default()),
-        )));
+    pub(crate) fn new(window: &Window, cx: &mut App) -> Self {
+        let presenter = Rc::new(RefCell::new(Some(cx.new(GpuiAskPassPresenter::new))));
         let shutdown_presenter = Rc::clone(&presenter);
         let window_handle = window.window_handle();
         let (commands, receiver) = async_channel::bounded(2);
@@ -696,7 +694,7 @@ impl GpuiAskPassBridge {
         }
     }
 
-    pub(super) fn presenter(&self) -> Arc<dyn AskPassPresenter> {
+    pub(crate) fn presenter(&self) -> Arc<dyn AskPassPresenter> {
         let owner = self
             .next_owner
             .fetch_add(1, Ordering::Relaxed)

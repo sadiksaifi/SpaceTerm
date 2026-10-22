@@ -37,7 +37,9 @@ use super::ssh_servers::{
 use crate::domain::SshDestination;
 use crate::ssh::host_config::HostDiscovery;
 use crate::ssh::managed_hosts::ManagedSshHost;
-use crate::ssh::server_connection::{ConnectPhase, RemoteConnectionStatus, SshServerConnections};
+use crate::ssh::server_connection::{
+    RemoteConnectionStatus, SshFlowConnectionIntent, SshServerConnections,
+};
 
 const CONNECTION_PROGRESS_ID: &str = "remote-workspace-connection-progress";
 const CONNECTION_ERROR_ID: &str = "remote-workspace-connection-error";
@@ -218,6 +220,8 @@ pub(crate) struct RemoteWorkspaceFlow {
     /// Invalidates results that belong to an earlier step of this flow.
     action_generation: u64,
     cancelled_emitted: bool,
+    connection_intent: Option<SshFlowConnectionIntent>,
+    prompts: Entity<super::ssh_servers::SshPromptActivity>,
 }
 
 impl EventEmitter<RemoteWorkspaceFlowEvent> for RemoteWorkspaceFlow {}
@@ -240,6 +244,21 @@ impl RemoteWorkspaceFlow {
             },
         )
         .detach();
+        let prompts = super::ssh_servers::prompt_activity(window, cx);
+        cx.subscribe_in(&prompts, window, |flow, _, event, window, cx| {
+            if flow.stage() != RemoteWorkspaceFlowStage::Connecting {
+                return;
+            }
+            if matches!(
+                event,
+                super::ssh_servers::SshPromptEvent::Settled { cancelled: true }
+            ) {
+                flow.cancel_flow(window, cx);
+            } else {
+                flow.observe_connection(flow.action_generation, window, cx);
+            }
+        })
+        .detach();
         Self {
             connections,
             hosts,
@@ -249,6 +268,8 @@ impl RemoteWorkspaceFlow {
             state: FlowState::Idle,
             action_generation: 0,
             cancelled_emitted: false,
+            connection_intent: None,
+            prompts,
         }
     }
 
@@ -393,11 +414,18 @@ impl RemoteWorkspaceFlow {
         let generation = self.advance();
         // The person asked in this window, so a sign-in or host approval appears here.
         super::ssh_servers::present_prompts_in(window, cx);
-        if !matches!(
-            self.connections.status(&destination),
-            RemoteConnectionStatus::Connected { .. }
-        ) {
-            self.connections.connect(destination.clone());
+        let status = self.connections.status(&destination);
+        if !matches!(status, RemoteConnectionStatus::Connected { .. })
+            && !(self.connection_intent.is_some()
+                && matches!(
+                    status,
+                    RemoteConnectionStatus::Working { .. }
+                        | RemoteConnectionStatus::Reconnecting { .. }
+                        | RemoteConnectionStatus::Cancelling
+                ))
+        {
+            self.cancel_connection_intent();
+            self.connection_intent = self.connections.connect_for_flow(destination.clone());
         }
         let changes = self.connections.subscribe();
         let follow = cx.spawn_in(window, async move |flow, cx| {
@@ -448,28 +476,24 @@ impl RemoteWorkspaceFlow {
                 if let Some(progress) = progress.take() {
                     let _ = progress.dismiss(window, cx);
                 }
+                self.connection_intent.take();
                 self.connected(destination, window, cx);
                 false
-            }
-            RemoteConnectionStatus::Working {
-                phase: ConnectPhase::Authenticating,
-                ..
-            } => {
-                // SSH's own prompt appears now, in this window. It replaces the progress until
-                // signing in ends, so two dialogs never compete for the keyboard.
-                if let Some(progress) = progress.take() {
-                    let _ = progress.dismiss(window, cx);
-                }
-                cx.notify();
-                true
             }
             RemoteConnectionStatus::Working { .. }
             | RemoteConnectionStatus::Reconnecting { .. }
             | RemoteConnectionStatus::Cancelling => {
+                if self.prompts.read(cx).active {
+                    if let Some(progress) = progress.take() {
+                        let _ = progress.dismiss(window, cx);
+                    }
+                    cx.notify();
+                    return true;
+                }
                 let presentation = present(&status);
                 let update = ProgressDialogUpdate::new()
                     .status(presentation.explanation.clone())
-                    .cancellation_enabled(presentation.actions.contains(&SshServerAction::Cancel));
+                    .cancellation_enabled(true);
                 match progress {
                     Some(handle) => {
                         let _ = handle.update(update, window, cx);
@@ -558,7 +582,11 @@ impl RemoteWorkspaceFlow {
             window,
             cx,
             move |_, _, cx| {
-                let _ = cancelled.update(cx, |flow, _| flow.cancel_connection(generation));
+                let _ = cancelled.update(cx, |flow, _| {
+                    if flow.action_generation == generation {
+                        flow.cancel_connection_intent();
+                    }
+                });
                 ProgressCancelDecision::Allow
             },
             move |outcome, cx| {
@@ -572,14 +600,9 @@ impl RemoteWorkspaceFlow {
         .ok()
     }
 
-    /// Stops the connection attempt this flow started. Work the server already accepted may
-    /// still take effect, as Settings says while it cancels.
-    fn cancel_connection(&mut self, generation: u64) {
-        if self.action_generation != generation {
-            return;
-        }
-        if let FlowState::Connecting { destination, .. } = &self.state {
-            self.connections.cancel(destination);
+    fn cancel_connection_intent(&mut self) {
+        if let Some(intent) = self.connection_intent.take() {
+            self.connections.cancel_flow_connection(intent);
         }
     }
 
@@ -591,6 +614,11 @@ impl RemoteWorkspaceFlow {
         cx: &mut Context<Self>,
     ) {
         if self.action_generation != generation {
+            return;
+        }
+        // A suspended progress dialog may finish closing after the prompt has already
+        // settled and a new progress dialog has taken its place.
+        if matches!(outcome, ProgressDialogOutcome::ProgrammaticDismissal) {
             return;
         }
         if let FlowState::Connecting { progress, .. } | FlowState::Opening { progress, .. } =
@@ -607,7 +635,6 @@ impl RemoteWorkspaceFlow {
             ProgressDialogOutcome::DeadlineExpired
             | ProgressDialogOutcome::OwnerRemoved
             | ProgressDialogOutcome::Replaced => {
-                self.cancel_connection(generation);
                 self.cancel_flow(window, cx);
             }
         }
@@ -691,17 +718,15 @@ impl RemoteWorkspaceFlow {
                 action_id: InstallationAction::Install,
                 ..
             } => {
-                self.connections.install(&destination, offer_id);
+                self.connections.install_for_flow(&destination, offer_id);
                 cx.defer_in(window, move |flow, window, cx| {
                     if flow.action_generation == generation {
                         flow.connect(destination, window, cx);
                     }
                 });
             }
-            // Declining keeps the connection saved and ends the intent to keep it up, so
-            // nothing waits on an installation the person turned down.
+            // Declining withdraws this flow's intent. Other consumers keep their connection.
             _ => {
-                self.connections.disconnect(&destination);
                 self.cancel_flow(window, cx);
             }
         }
@@ -1082,6 +1107,7 @@ impl RemoteWorkspaceFlow {
             return;
         }
         self.advance();
+        self.cancel_connection_intent();
         let mut previous = std::mem::replace(&mut self.state, FlowState::Cancelled);
         previous.dismiss(window, cx);
         self.host_picker
@@ -1096,6 +1122,7 @@ impl RemoteWorkspaceFlow {
 
     fn return_to_hosts(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.advance();
+        self.cancel_connection_intent();
         let mut previous = std::mem::replace(&mut self.state, FlowState::HostSelection);
         previous.dismiss(window, cx);
         if !self
@@ -1132,5 +1159,346 @@ impl Render for RemoteWorkspaceFlow {
             .track_focus(&self.focus_scope)
             .child(self.host_picker.clone())
             .children(directory_picker)
+    }
+}
+
+impl Drop for RemoteWorkspaceFlow {
+    fn drop(&mut self) {
+        self.cancel_connection_intent();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ssh::cancellation::SshCancellationToken;
+    use crate::ssh::server_connection::*;
+    use gpui::{TestAppContext, VisualTestContext};
+    use spaceterm_ui::ModalLayer;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::time::{Duration, Instant};
+
+    struct Hosts;
+    impl SshHostSource for Hosts {
+        fn discover(&self) -> HostDiscovery {
+            HostDiscovery::default()
+        }
+        fn add_managed_host(&self, _: ManagedSshHost) -> Result<(), ManagedHostFormBackendError> {
+            Ok(())
+        }
+    }
+    struct Intents;
+    impl SshConnectionIntentStore for Intents {
+        fn load(&self) -> Result<Vec<RetainedSshConnection>, SshIntentStoreError> {
+            Ok(Vec::new())
+        }
+        fn retain(&self, _: RetainedSshConnection) -> Result<(), SshIntentStoreError> {
+            Ok(())
+        }
+        fn remove(&self, _: &SshDestination) -> Result<(), SshIntentStoreError> {
+            Ok(())
+        }
+    }
+    struct Harness(Entity<RemoteWorkspaceFlow>);
+    impl Render for Harness {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            ModalLayer::new(div().size_full().child(self.0.clone()))
+        }
+    }
+    fn window(
+        registry: SshServerConnections,
+        cx: &mut TestAppContext,
+    ) -> (Entity<RemoteWorkspaceFlow>, &mut VisualTestContext) {
+        cx.update(crate::ui::init).unwrap();
+        let (harness, cx) = cx.add_window_view(|window, cx| {
+            Harness(cx.new(|cx| RemoteWorkspaceFlow::new(registry, Arc::new(Hosts), window, cx)))
+        });
+        let flow = harness.read_with(cx, |harness, _| harness.0.clone());
+        cx.update(|window, _| window.activate_window());
+        (flow, cx)
+    }
+    fn redraw(cx: &mut VisualTestContext) {
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+    }
+    fn until(
+        mut condition: impl FnMut(&mut VisualTestContext) -> bool,
+        cx: &mut VisualTestContext,
+    ) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !condition(cx) {
+            assert!(Instant::now() < deadline, "production flow did not settle");
+            std::thread::sleep(Duration::from_millis(5));
+            redraw(cx);
+        }
+    }
+    fn click(selector: &'static str, cx: &mut VisualTestContext) {
+        let position = cx
+            .debug_bounds(selector)
+            .unwrap_or_else(|| panic!("missing {selector}"))
+            .center();
+        cx.simulate_mouse_move(position, None, gpui::Modifiers::none());
+        cx.simulate_click(position, gpui::Modifiers::none());
+        cx.run_until_parked();
+    }
+    fn destination() -> SshDestination {
+        SshDestination::new("fixture-host".into()).unwrap()
+    }
+    fn connect(flow: &Entity<RemoteWorkspaceFlow>, cx: &mut VisualTestContext) {
+        cx.update(|window, cx| flow.update(cx, |flow, cx| flow.connect(destination(), window, cx)));
+        redraw(cx);
+    }
+
+    struct Lease(Arc<AtomicBool>);
+    impl SshServerLease for Lease {
+        fn is_alive(&self) -> bool {
+            self.0.load(Ordering::SeqCst)
+        }
+    }
+    struct SlowNetwork {
+        calls: AtomicUsize,
+        disconnects: AtomicUsize,
+        initially_connected: bool,
+        alive: Arc<AtomicBool>,
+        release: async_channel::Receiver<()>,
+    }
+    impl SshConnectBackend for SlowNetwork {
+        fn disconnect(&self, _: &SshDestination) {
+            self.disconnects.fetch_add(1, Ordering::SeqCst);
+        }
+        fn connect(
+            &self,
+            _: &SshDestination,
+            mode: ConnectMode,
+            _: Option<&SshServerContinuity>,
+            _: &SshCancellationToken,
+            progress: &ConnectProgress<'_>,
+        ) -> Result<ConnectedSshServer, SshConnectFailure> {
+            let first = self.calls.fetch_add(1, Ordering::SeqCst) == 0;
+            if first && self.initially_connected {
+                return Ok(ConnectedSshServer {
+                    server: spaceterm_server::LocalServer::for_identity("spaceterm-development")
+                        .unwrap(),
+                    continuity: SshServerContinuity {
+                        route: [1; 32],
+                        account: 501,
+                        build: "fixture".into(),
+                        server: [2; 32],
+                    },
+                    lease: Arc::new(Lease(self.alive.clone())),
+                    protocol_major: 1,
+                    facts: SshServerFacts {
+                        platform: ("linux".into(), "x86_64".into()),
+                        version: None,
+                        starts_automatically: true,
+                    },
+                });
+            }
+            assert_eq!(
+                mode,
+                if self.initially_connected {
+                    ConnectMode::QuietContinuation
+                } else {
+                    ConnectMode::Requested
+                }
+            );
+            progress(ConnectPhase::Authenticating);
+            // Deliberately ignores cancellation until the network returns. UI cancellation must
+            // release input without waiting for this boundary.
+            let _ = self.release.recv_blocking();
+            Err(SshConnectFailure::Unavailable(UnavailableKind::Network))
+        }
+        fn observe(
+            &self,
+            _: &SshDestination,
+            _: Option<&SshServerContinuity>,
+            _: &SshCancellationToken,
+            _: &ConnectProgress<'_>,
+        ) -> Result<SshServerObservation, SshConnectFailure> {
+            unreachable!()
+        }
+    }
+    fn network(
+        initially_connected: bool,
+    ) -> (
+        SshServerConnections,
+        Arc<SlowNetwork>,
+        async_channel::Sender<()>,
+    ) {
+        let (release, released) = async_channel::unbounded();
+        let backend = Arc::new(SlowNetwork {
+            calls: AtomicUsize::new(0),
+            disconnects: AtomicUsize::new(0),
+            initially_connected,
+            alive: Arc::new(AtomicBool::new(true)),
+            release: released,
+        });
+        (
+            SshServerConnections::new(backend.clone(), Arc::new(Intents)),
+            backend,
+            release,
+        )
+    }
+
+    #[gpui::test]
+    fn slow_authentication_without_a_prompt_keeps_progress_and_escape_releases_input(
+        cx: &mut TestAppContext,
+    ) {
+        let (registry, backend, release) = network(false);
+        let (flow, cx) = window(registry.clone(), cx);
+        connect(&flow, cx);
+        until(|_| backend.calls.load(Ordering::SeqCst) == 1, cx);
+        redraw(cx);
+        assert!(
+            cx.debug_bounds("modal-action-remote-workspace-connect-cancel")
+                .is_some()
+        );
+        assert!(flow.read_with(cx, |flow, _| flow.blocks_terminal_input()));
+
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert!(!flow.read_with(cx, |flow, _| flow.blocks_terminal_input()));
+        assert!(!registry.intends(&destination()));
+        assert_eq!(backend.calls.load(Ordering::SeqCst), 1);
+        release.send_blocking(()).unwrap();
+    }
+
+    #[gpui::test]
+    fn joining_ordinary_network_reconnect_allows_cancel_without_disconnecting_its_consumers(
+        cx: &mut TestAppContext,
+    ) {
+        let (registry, backend, release) = network(true);
+        let (flow, cx) = window(registry.clone(), cx);
+        registry.connect(destination());
+        until(|_| registry.server(&destination()).is_some(), cx);
+        backend.alive.store(false, Ordering::SeqCst);
+        until(|_| backend.calls.load(Ordering::SeqCst) == 2, cx);
+        assert!(matches!(
+            registry.status(&destination()),
+            RemoteConnectionStatus::Reconnecting { .. }
+        ));
+
+        for escape in [false, true] {
+            connect(&flow, cx);
+            assert!(
+                cx.debug_bounds("modal-action-remote-workspace-connect-cancel")
+                    .is_some()
+            );
+            if escape {
+                cx.simulate_keystrokes("escape");
+                cx.run_until_parked();
+            } else {
+                click("modal-action-remote-workspace-connect-cancel", cx);
+            }
+            assert!(!flow.read_with(cx, |flow, _| flow.blocks_terminal_input()));
+            assert!(registry.intends(&destination()));
+            assert_eq!(backend.disconnects.load(Ordering::SeqCst), 0);
+            assert_eq!(backend.calls.load(Ordering::SeqCst), 2);
+            assert!(matches!(
+                registry.status(&destination()),
+                RemoteConnectionStatus::Reconnecting { .. }
+            ));
+        }
+        registry.disconnect(&destination());
+        release.send_blocking(()).unwrap();
+    }
+
+    #[gpui::test]
+    fn native_installer_authorization_takes_the_progress_slot_and_can_cancel_then_retry(
+        cx: &mut TestAppContext,
+    ) {
+        // The initializer needs a window for the actual bridge before choosing the backend.
+        let (unused, _, _) = network(false);
+        let (flow, cx) = window(unused, cx);
+        let presenter = cx.update(|window, cx| {
+            crate::ssh::askpass::GpuiAskPassBridge::new(window, cx).presenter()
+        });
+        let (backend, account, complete) =
+            crate::ssh::server_process::testing::authorization_installation_backend(
+                cx.background_executor.clone(),
+                presenter,
+            );
+        let registry = SshServerConnections::new(backend, Arc::new(Intents));
+        flow.update(cx, |flow, _| flow.connections = registry.clone());
+
+        for cancel in [true, false] {
+            connect(&flow, cx);
+            until(
+                |cx| {
+                    cx.debug_bounds("modal-action-remote-workspace-install")
+                        .is_some()
+                },
+                cx,
+            );
+            click("modal-action-remote-workspace-install", cx);
+            until(
+                |cx| cx.debug_bounds("modal-action-ssh-askpass-submit").is_some(),
+                cx,
+            );
+            assert!(
+                cx.debug_bounds("modal-action-remote-workspace-connect-cancel")
+                    .is_none()
+            );
+            assert!(flow.read_with(cx, |flow, _| flow.blocks_terminal_input()));
+            assert_eq!(account.ran("ssh-install"), if cancel { 1 } else { 2 });
+            if cancel {
+                cx.simulate_keystrokes("escape");
+                cx.run_until_parked();
+                assert!(!flow.read_with(cx, |flow, _| flow.blocks_terminal_input()));
+                until(
+                    |_| {
+                        matches!(
+                            registry.status(&destination()),
+                            RemoteConnectionStatus::Inactive
+                        )
+                    },
+                    cx,
+                );
+            } else {
+                cx.simulate_input("fixture-password");
+                cx.simulate_keystrokes("enter");
+                cx.run_until_parked();
+                until(
+                    |cx| {
+                        cx.debug_bounds("modal-action-remote-workspace-connect-cancel")
+                            .is_some()
+                    },
+                    cx,
+                );
+                assert!(flow.read_with(cx, |flow, _| flow.blocks_terminal_input()));
+                complete.send_blocking(()).unwrap();
+                until(|_| account.ran("ssh-install") == 3, cx);
+                until(
+                    |_| {
+                        matches!(
+                            registry.status(&destination()),
+                            RemoteConnectionStatus::Stopped
+                        )
+                    },
+                    cx,
+                );
+                until(
+                    |cx| {
+                        flow.read_with(cx, |flow, _| flow.stage())
+                            == RemoteWorkspaceFlowStage::ConnectionError
+                    },
+                    cx,
+                );
+                assert_eq!(
+                    account.sent("ssh-install"),
+                    [
+                        b"verified-archive".to_vec(),
+                        b"verified-archive".to_vec(),
+                        b"fixture-password\nverified-archive".to_vec(),
+                    ]
+                );
+            }
+        }
+        flow.update(cx, |flow, cx| {
+            // The completed installer reports its observed stopped server through the flow.
+            assert_eq!(flow.stage(), RemoteWorkspaceFlowStage::ConnectionError);
+            cx.notify();
+        });
     }
 }
