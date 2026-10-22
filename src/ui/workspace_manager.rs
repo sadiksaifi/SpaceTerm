@@ -1104,42 +1104,54 @@ impl WorkspaceManager {
                 self.remote_workspace_flow = None;
                 self.remote_workspace_name = None;
             }
-            RemoteWorkspaceFlowEvent::Completed(choice) => {
-                self.remote_workspace_flow = None;
-                let name = self.remote_workspace_name.take().unwrap_or_default();
-                self.create_remote_workspace(choice.clone(), name, window, cx);
+            // The flow keeps showing that the Workspace is opening until its server takes it.
+            RemoteWorkspaceFlowEvent::Ready => {
+                // The flow saw the server presented; this window may not have bound it yet.
+                // Binding it also tries the request once the server's edits are ready.
+                self.sync_ssh_servers(window, cx);
+                self.open_pending_remote_workspace(window, cx);
             }
         }
         self.sync_terminal_focus_blocker(window, cx);
         cx.notify();
     }
 
-    /// Creates the Workspace a completed Remote Workspace flow chose on that SSH server, or
-    /// activates the one already pinned to the chosen directory there.
-    fn create_remote_workspace(
-        &mut self,
-        choice: RemoteWorkspaceChoice,
-        name: String,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    /// Asks the SSH server the Remote Workspace flow connected to for its Workspace, once that
+    /// exact connection's edits are ready, or activates the Workspace already pinned to the chosen
+    /// directory there. Until then the request waits in the flow, which shows that it is
+    /// opening; a server still finishing its first reading never drops it.
+    fn open_pending_remote_workspace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         use super::shared_workspaces::{SharedRefusalReason, SharedSubmission};
 
-        // The flow saw the server presented; this window may not have bound it yet.
-        self.sync_ssh_servers(window, cx);
-        let RemoteWorkspaceChoice {
-            destination,
-            directory,
-        } = choice;
-        let Some(key) = self.shared.key_of(&ServerOrigin::Ssh(destination)) else {
-            Self::show_shared_refusal(
-                "create a Workspace",
-                SharedRefusalReason::Offline,
-                window,
-                cx,
-            );
+        let Some(flow) = self.remote_workspace_flow.clone() else {
             return;
         };
+        let Some(RemoteWorkspaceChoice {
+            destination,
+            directory,
+            server,
+        }) = flow.read(cx).opening().cloned()
+        else {
+            return;
+        };
+        // The flow reports a replaced or lost connection itself; nothing reaches another one.
+        let current = crate::ui::ssh_servers::installed(cx)
+            .and_then(|connections| connections.server(&destination))
+            .is_some_and(|presented| presented.same_handle(&server));
+        let Some(key) = self
+            .shared
+            .key_of(&ServerOrigin::Ssh(destination))
+            .filter(|_| current)
+        else {
+            return;
+        };
+        if !self
+            .shared
+            .get(key)
+            .is_some_and(|shared| shared.accepts_edits())
+        {
+            return;
+        }
         // A server path compares only with that server's own pins.
         let existing = directory.as_ref().and_then(|directory| {
             let shared = self.shared.get(key)?;
@@ -1149,19 +1161,36 @@ impl WorkspaceManager {
                     .is_some_and(|workspace| workspace.pinned_directory.as_ref() == Some(directory))
             })
         });
-        if let Some(workspace_id) = existing {
-            if self.activate_workspace(workspace_id, window, cx) {
-                self.focus(window, cx);
-                self.scroll_active_workspace_into_view(cx);
+        let name = self.remote_workspace_name.clone().unwrap_or_default();
+        let refusal = match existing {
+            Some(workspace_id) => {
+                if self.activate_workspace(workspace_id, window, cx) {
+                    self.focus(window, cx);
+                    self.scroll_active_workspace_into_view(cx);
+                }
+                None
             }
-            return;
-        }
-        let Some(shared) = self.shared.get_mut(key) else {
-            return;
+            None => match self.shared.get_mut(key) {
+                Some(shared) => match shared.create_workspace(name, directory) {
+                    SharedSubmission::Submitted => None,
+                    // Readiness was just checked, so only a publication arriving between the
+                    // check and the submission refuses it this way; the next reading retries.
+                    SharedSubmission::Refused(
+                        SharedRefusalReason::Offline | SharedRefusalReason::Pending,
+                    ) => return,
+                    SharedSubmission::Refused(reason) => Some(reason),
+                },
+                None => return,
+            },
         };
-        if let SharedSubmission::Refused(reason) = shared.create_workspace(name, directory) {
+        self.remote_workspace_flow = None;
+        self.remote_workspace_name = None;
+        flow.update(cx, |flow, cx| flow.opened(window, cx));
+        if let Some(reason) = refusal {
             Self::show_shared_refusal("create a Workspace", reason, window, cx);
         }
+        self.sync_terminal_focus_blocker(window, cx);
+        cx.notify();
     }
 
     /// Opens Open Local Directory, which creates a Local Workspace named `name` unless blank.
@@ -2846,11 +2875,12 @@ impl WorkspaceManager {
             self.present_stale_shared_close(server_target, local, window, cx);
         }
         self.revalidate_shared_close(key, window, cx);
-        // Worktree writes reach only the account-local server.
-        if key == ServerKey::LOCAL {
-            self.open_created_server_worktree(window, cx);
-            self.revalidate_server_removal(window, cx);
-        }
+        // Each server's reading may present the Worktree it created or change the one under
+        // review; both look up their own Workspace's server.
+        self.open_created_server_worktree(window, cx);
+        self.revalidate_server_removal(window, cx);
+        // A Remote Workspace waiting for this server's edits may be asked for now.
+        self.open_pending_remote_workspace(window, cx);
         if let Some((operation, error)) = self
             .shared
             .get_mut(key)

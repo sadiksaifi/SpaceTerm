@@ -100,6 +100,8 @@ impl WorkspaceManager {
                 self.present_ssh_server(destination, server, window, cx);
             }
         }
+        // A Remote Workspace waiting for a server this sync bound may be asked for now.
+        self.open_pending_remote_workspace(window, cx);
         // Machine headings show each connection's state, which changes without a new binding.
         cx.notify();
     }

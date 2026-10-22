@@ -13031,6 +13031,270 @@ fn a_presented_server_stopped_after_connecting_should_offer_disconnect(cx: &mut 
     );
 }
 
+/// An account with no SpaceTerm server, which SpaceTerm can install a verified one for. It counts
+/// every installation it actually runs.
+struct OffersInstallation {
+    installs: Arc<AtomicUsize>,
+}
+
+struct CountedInstallation(Arc<AtomicUsize>);
+
+impl crate::ssh::server_connection::SshInstallation for CountedInstallation {
+    fn install(
+        &self,
+        _: &crate::ssh::cancellation::SshCancellationToken,
+        _: &crate::ssh::server_connection::ConnectProgress<'_>,
+    ) -> Result<
+        crate::ssh::server_connection::ConnectedSshServer,
+        crate::ssh::server_connection::SshConnectFailure,
+    > {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Err(crate::ssh::server_connection::SshConnectFailure::Cancelled)
+    }
+}
+
+impl crate::ssh::server_connection::SshConnectBackend for OffersInstallation {
+    fn connect(
+        &self,
+        _: &crate::domain::SshDestination,
+        _: crate::ssh::server_connection::ConnectMode,
+        _: Option<&crate::ssh::server_connection::SshServerContinuity>,
+        _: &crate::ssh::cancellation::SshCancellationToken,
+        _: &crate::ssh::server_connection::ConnectProgress<'_>,
+    ) -> Result<
+        crate::ssh::server_connection::ConnectedSshServer,
+        crate::ssh::server_connection::SshConnectFailure,
+    > {
+        Err(
+            crate::ssh::server_connection::SshConnectFailure::InstallationOffered(
+                crate::ssh::server_connection::SshInstallationOffer {
+                    version: "1.0.0".into(),
+                    platform: ("linux".into(), "x86_64".into()),
+                    installation: Arc::new(CountedInstallation(Arc::clone(&self.installs))),
+                },
+            ),
+        )
+    }
+    fn observe(
+        &self,
+        _: &crate::domain::SshDestination,
+        _: Option<&crate::ssh::server_connection::SshServerContinuity>,
+        _: &crate::ssh::cancellation::SshCancellationToken,
+        _: &crate::ssh::server_connection::ConnectProgress<'_>,
+    ) -> Result<
+        crate::ssh::server_connection::SshServerObservation,
+        crate::ssh::server_connection::SshConnectFailure,
+    > {
+        Err(crate::ssh::server_connection::SshConnectFailure::Cancelled)
+    }
+}
+
+/// Choosing a host whose account has no server installs nothing by itself: the flow asks first,
+/// declining installs nothing and ends the connection, and only Install runs the installation.
+#[gpui::test]
+fn choosing_a_host_without_a_server_should_install_only_after_the_person_approves(
+    cx: &mut TestAppContext,
+) {
+    let (_manager, _records, cx) = workspace_manager(cx);
+    let installs = Arc::new(AtomicUsize::new(0));
+    let connections = crate::ssh::server_connection::SshServerConnections::new(
+        Arc::new(OffersInstallation {
+            installs: Arc::clone(&installs),
+        }),
+        Arc::new(RememberedConnections::default()),
+    );
+    let installed = connections.clone();
+    cx.update(|_, cx| install_ssh_servers(installed, vec!["penguin"], cx));
+    let penguin = crate::domain::SshDestination::new("penguin".to_owned()).unwrap();
+    let choose_penguin = |cx: &mut VisualTestContext| {
+        cx.simulate_keystrokes("cmd-shift-n");
+        cx.run_until_parked();
+        cx.simulate_input("penguin");
+        cx.simulate_keystrokes("enter");
+        let deadline = Instant::now() + std::time::Duration::from_secs(5);
+        while cx
+            .debug_bounds("modal-action-remote-workspace-install")
+            .is_none()
+        {
+            assert!(Instant::now() < deadline, "the flow asks before installing");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            redraw(cx);
+        }
+    };
+
+    choose_penguin(cx);
+    assert_eq!(
+        installs.load(Ordering::SeqCst),
+        0,
+        "the offer alone installs nothing"
+    );
+    click("modal-action-remote-workspace-install-cancel", cx);
+    wait_until(|| !connections.intends(&penguin), cx);
+    assert_eq!(
+        installs.load(Ordering::SeqCst),
+        0,
+        "declining installs nothing"
+    );
+
+    choose_penguin(cx);
+    click("modal-action-remote-workspace-install", cx);
+    wait_until(|| installs.load(Ordering::SeqCst) == 1, cx);
+}
+
+/// Completes Open Remote Directory as choosing `directory` in the server's Directory Picker does,
+/// after the flow connected to `destination`.
+fn choose_remote_directory(
+    flow: &Entity<RemoteWorkspaceFlow>,
+    connections: &crate::ssh::server_connection::SshServerConnections,
+    destination: &crate::domain::SshDestination,
+    directory: &str,
+    cx: &mut VisualTestContext,
+) {
+    assert!(
+        connections.server(destination).is_some(),
+        "the flow connected to the server first"
+    );
+    let destination = destination.clone();
+    let directory = PathBuf::from(directory);
+    cx.update(|window, cx| {
+        flow.update(cx, |flow, cx| {
+            flow.choose_server_directory(destination, directory, window, cx);
+        });
+    });
+    cx.run_until_parked();
+}
+
+/// penguin's server bound to edits that are still connecting and haven't read an inventory, as
+/// a first connection's separate edit channel is.
+fn present_unready_penguin(
+    harness: &MachineGroupsHarness,
+    cx: &mut VisualTestContext,
+) -> (
+    ServerKey,
+    Rc<crate::ui::shared_workspaces::testing::ScriptedEdits>,
+) {
+    use crate::ui::shared_workspaces::testing::{ScriptedEdits, ScriptedPanes};
+    use crate::ui::shared_workspaces::{SharedEditSource, SharedPaneSessions};
+
+    let edits = Rc::new(ScriptedEdits::new(None));
+    edits.set_connected(false);
+    let key = cx.update(|window, cx| {
+        harness.manager.update(cx, |manager, cx| {
+            let key = manager.present_server_workspaces(
+                ServerOrigin::Ssh(crate::domain::SshDestination::new("penguin".into()).unwrap()),
+                SharedEditSource::new(Rc::clone(&edits) as Rc<_>),
+                SharedPaneSessions::with_opener(
+                    ScriptedPanes::new(MachineGroupsHarness::session_factory()) as Rc<_>,
+                    &PaneConstruction::testing(),
+                ),
+                window,
+                cx,
+            );
+            manager.sync_shared_workspaces(key, window, cx);
+            key
+        })
+    });
+    cx.run_until_parked();
+    (key, edits)
+}
+
+/// The first New Remote Workspace for a host waits while its server's edit channel connects
+/// and reads its first inventory, showing that the Workspace is opening, then creates it.
+#[gpui::test]
+fn new_remote_workspace_should_wait_for_the_servers_edits_on_first_connect(
+    cx: &mut TestAppContext,
+) {
+    use spaceterm_server::hierarchy::Mutation;
+
+    let (harness, cx) = MachineGroupsHarness::new(cx);
+    let (connections, _backend, penguin) = connecting_penguin(cx);
+    let (key, edits) = present_unready_penguin(&harness, cx);
+
+    cx.simulate_keystrokes("cmd-shift-n");
+    cx.run_until_parked();
+    cx.simulate_input("penguin");
+    cx.simulate_keystrokes("enter");
+    wait_until(|| connections.server(&penguin).is_some(), cx);
+    let stage = |cx: &mut VisualTestContext| {
+        harness.manager.read_with(cx, |manager, cx| {
+            manager
+                .remote_workspace_flow
+                .as_ref()
+                .map(|flow| flow.read(cx).stage())
+        })
+    };
+    assert_eq!(stage(cx), Some(RemoteWorkspaceFlowStage::Opening));
+    assert!(
+        cx.debug_bounds("modal-action-remote-workspace-connect-cancel")
+            .is_some()
+    );
+    assert_eq!(
+        edits.submitted(),
+        Vec::new(),
+        "nothing is asked of an unready server"
+    );
+
+    edits.set_connected(true);
+    edits.set_inventory(machine_inventory(harness.next_revision(), &[]));
+    cx.update(|window, cx| {
+        harness.manager.update(cx, |manager, cx| {
+            manager.sync_shared_workspaces(key, window, cx)
+        })
+    });
+    cx.run_until_parked();
+
+    assert_eq!(
+        edits.submitted(),
+        vec![Mutation::CreateWorkspace {
+            name: String::new(),
+            directory: None,
+        }]
+    );
+    assert_eq!(
+        stage(cx),
+        None,
+        "the flow ends once the server takes the request"
+    );
+    assert_eq!(harness.local.submitted(), Vec::new());
+}
+
+/// Cancelling while the Workspace is opening withdraws the request: a server that becomes
+/// ready later is asked for nothing, and the connection stays up.
+#[gpui::test]
+fn cancelling_an_opening_remote_workspace_should_ask_the_server_for_nothing(
+    cx: &mut TestAppContext,
+) {
+    let (harness, cx) = MachineGroupsHarness::new(cx);
+    let (connections, _backend, penguin) = connecting_penguin(cx);
+    let (key, edits) = present_unready_penguin(&harness, cx);
+
+    cx.simulate_keystrokes("cmd-shift-n");
+    cx.run_until_parked();
+    cx.simulate_input("penguin");
+    cx.simulate_keystrokes("enter");
+    wait_until(|| connections.server(&penguin).is_some(), cx);
+    click("modal-action-remote-workspace-connect-cancel", cx);
+    edits.set_connected(true);
+    edits.set_inventory(machine_inventory(harness.next_revision(), &[]));
+    cx.update(|window, cx| {
+        harness.manager.update(cx, |manager, cx| {
+            manager.sync_shared_workspaces(key, window, cx)
+        })
+    });
+    cx.run_until_parked();
+
+    assert_eq!(edits.submitted(), Vec::new());
+    assert!(
+        harness
+            .manager
+            .read_with(cx, |manager, _| manager.remote_workspace_flow.is_none())
+    );
+    assert!(
+        connections.server(&penguin).is_some(),
+        "the connection stays up"
+    );
+}
+
 /// An SSH registry whose "penguin" connects on the first request, and the counts it keeps.
 fn connecting_penguin(
     cx: &mut VisualTestContext,
@@ -13129,7 +13393,6 @@ fn new_remote_workspace_should_reuse_a_connected_server_without_connecting_again
 fn open_remote_directory_should_pin_on_its_server_and_reuse_a_workspace_pinned_there(
     cx: &mut TestAppContext,
 ) {
-    use crate::ui::remote_workspace_flow::{RemoteWorkspaceChoice, RemoteWorkspaceFlowEvent};
     use spaceterm_server::hierarchy::Mutation;
 
     let (harness, cx) = MachineGroupsHarness::new(cx);
@@ -13147,16 +13410,7 @@ fn open_remote_directory_should_pin_on_its_server_and_reuse_a_workspace_pinned_t
             .manager
             .read_with(cx, |manager, _| manager.remote_workspace_flow.clone())
             .expect("Open Remote Directory opens the flow");
-        let choice = RemoteWorkspaceChoice {
-            destination: penguin.clone(),
-            directory: Some(PathBuf::from(directory)),
-        };
-        cx.update(|_, cx| {
-            flow.update(cx, |_, cx| {
-                cx.emit(RemoteWorkspaceFlowEvent::Completed(choice))
-            });
-        });
-        cx.run_until_parked();
+        choose_remote_directory(&flow, &connections, &penguin, directory, cx);
     };
     cx.update(|window, cx| {
         harness.manager.update(cx, |manager, cx| {

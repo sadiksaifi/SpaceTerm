@@ -1443,6 +1443,15 @@ mod development {
             self.edits.editability()
         }
 
+        /// Whether a new edit can go to the server now: its connection is up, its first
+        /// inventory is read and reconciled, and this client's retained views are applied, so an
+        /// accepted creation is attached to a view that a later reading won't replace.
+        pub(crate) fn accepts_edits(&self) -> bool {
+            self.editability().available()
+                && self.latest.is_some()
+                && (self.saved_views.is_some() || self.retained_views.is_none())
+        }
+
         /// Captures what closing `target` ends, as the server reported it last. The capture is
         /// what a person reviews and what a confirmed close submits; nothing rebuilds it later.
         pub(crate) fn close_approval(

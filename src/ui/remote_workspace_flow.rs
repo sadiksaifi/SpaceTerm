@@ -52,12 +52,14 @@ pub(crate) enum RemoteWorkspaceStart {
     ChosenDirectory,
 }
 
-/// The server and directory a completed flow chose. The directory is a path on the server's
-/// computer, which grants no authority on this one.
-#[derive(Clone, Eq, PartialEq)]
+/// The server and directory a flow chose. The directory is a path on the server's computer,
+/// which grants no authority on this one. `server` is the exact connection the flow reached,
+/// so a request never lands on a later connection to the same destination.
+#[derive(Clone)]
 pub(crate) struct RemoteWorkspaceChoice {
     pub(crate) destination: SshDestination,
     pub(crate) directory: Option<PathBuf>,
+    pub(crate) server: crate::local_server::LocalServer,
 }
 
 impl std::fmt::Debug for RemoteWorkspaceChoice {
@@ -69,8 +71,11 @@ impl std::fmt::Debug for RemoteWorkspaceChoice {
 #[derive(Clone, Debug)]
 pub(crate) enum RemoteWorkspaceFlowEvent {
     StateChanged,
-    /// The chosen server is connected; the Workspace belongs on it.
-    Completed(RemoteWorkspaceChoice),
+    /// The chosen server is connected and the Workspace belongs on it, as
+    /// [`RemoteWorkspaceFlow::opening`] describes. The flow keeps showing that it is opening
+    /// until [`RemoteWorkspaceFlow::opened`] reports the server took the request, so a server
+    /// still finishing its first reading never drops it.
+    Ready,
     Cancelled,
 }
 
@@ -83,8 +88,18 @@ pub(crate) enum RemoteWorkspaceFlowStage {
     ReviewingInstallation,
     ConnectionError,
     ChoosingDirectory,
+    Opening,
     Completed,
     Cancelled,
+}
+
+/// Why the flow can't continue, as its alert says it.
+struct ConnectionProblem {
+    title: String,
+    state: &'static str,
+    explanation: gpui::SharedString,
+    /// Whether Try Again can help.
+    retry: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -123,6 +138,12 @@ enum FlowState {
     ChoosingDirectory {
         picker: Entity<DirectoryPicker>,
     },
+    /// The Workspace waits for the server's edits to be ready.
+    Opening {
+        choice: Box<RemoteWorkspaceChoice>,
+        progress: Option<ProgressDialogHandle>,
+        _follow: Task<()>,
+    },
     Completed,
     Cancelled,
 }
@@ -137,6 +158,7 @@ impl FlowState {
             Self::ReviewingInstallation { .. } => RemoteWorkspaceFlowStage::ReviewingInstallation,
             Self::ConnectionError { .. } => RemoteWorkspaceFlowStage::ConnectionError,
             Self::ChoosingDirectory { .. } => RemoteWorkspaceFlowStage::ChoosingDirectory,
+            Self::Opening { .. } => RemoteWorkspaceFlowStage::Opening,
             Self::Completed => RemoteWorkspaceFlowStage::Completed,
             Self::Cancelled => RemoteWorkspaceFlowStage::Cancelled,
         }
@@ -145,7 +167,7 @@ impl FlowState {
     /// Closes whatever this state presents. Cancelling a connection is the caller's decision.
     fn dismiss(&mut self, window: &mut Window, cx: &mut App) {
         match self {
-            Self::Connecting { progress, .. } => {
+            Self::Connecting { progress, .. } | Self::Opening { progress, .. } => {
                 if let Some(progress) = progress.take() {
                     let _ = progress.dismiss(window, cx);
                 }
@@ -455,7 +477,7 @@ impl RemoteWorkspaceFlow {
                     None => {
                         let handle = self.present_progress(
                             generation,
-                            &destination,
+                            format!("Connecting to \u{201C}{}\u{201D}", destination.as_str()),
                             presentation.explanation.clone(),
                             window,
                             cx,
@@ -511,7 +533,7 @@ impl RemoteWorkspaceFlow {
     fn present_progress(
         &mut self,
         generation: u64,
-        destination: &SshDestination,
+        title: String,
         status: gpui::SharedString,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -522,7 +544,7 @@ impl RemoteWorkspaceFlow {
         ProgressDialog::new(
             ModalId::new(CONNECTION_PROGRESS_ID),
             "Connection progress",
-            format!("Connecting to \u{201C}{}\u{201D}", destination.as_str()),
+            title,
             status,
             ProgressState::Indeterminate,
             ProgressCancellation::Cancellable(ModalAction::new(
@@ -571,7 +593,9 @@ impl RemoteWorkspaceFlow {
         if self.action_generation != generation {
             return;
         }
-        if let FlowState::Connecting { progress, .. } = &mut self.state {
+        if let FlowState::Connecting { progress, .. } | FlowState::Opening { progress, .. } =
+            &mut self.state
+        {
             progress.take();
         }
         match outcome {
@@ -690,12 +714,51 @@ impl RemoteWorkspaceFlow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let generation = self.advance();
         let presentation = present(status);
+        let retry = presentation.actions.contains(&SshServerAction::Connect);
+        let title = match self.state {
+            FlowState::Opening { .. } => format!(
+                "Couldn\u{2019}t Open a Workspace on \u{201C}{}\u{201D}",
+                destination.as_str()
+            ),
+            _ => format!(
+                "Couldn\u{2019}t Connect to \u{201C}{}\u{201D}",
+                destination.as_str()
+            ),
+        };
+        self.present_connection_problem(
+            destination,
+            ConnectionProblem {
+                title,
+                state: presentation.state,
+                explanation: presentation.explanation,
+                retry,
+            },
+            window,
+            cx,
+        );
+    }
+
+    /// Reports why the flow can't continue on `destination`, offering Try Again when Connect can
+    /// help, another host, or Cancel.
+    fn present_connection_problem(
+        &mut self,
+        destination: SshDestination,
+        problem: ConnectionProblem,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let ConnectionProblem {
+            title,
+            state,
+            explanation,
+            retry,
+        } = problem;
+        let generation = self.advance();
         let flow = cx.weak_entity();
         let window_handle = window.window_handle();
         let mut actions = Vec::with_capacity(3);
-        if presentation.actions.contains(&SshServerAction::Connect) {
+        if retry {
             actions.push(
                 ModalAction::new(
                     ConnectionErrorAction::Retry,
@@ -718,15 +781,11 @@ impl RemoteWorkspaceFlow {
             ModalActionRole::Cancel,
             "remote-workspace-error-cancel",
         ));
-        let title = format!(
-            "Couldn\u{2019}t Connect to \u{201C}{}\u{201D}",
-            destination.as_str()
-        );
         let alert = Alert::new(
             ModalId::new(CONNECTION_ERROR_ID),
-            presentation.state,
+            state,
             title,
-            presentation.explanation,
+            explanation,
             actions,
         )
         .intent(AlertIntent::Warning)
@@ -798,7 +857,7 @@ impl RemoteWorkspaceFlow {
     ) {
         self.advance();
         match self.start {
-            RemoteWorkspaceStart::Home => self.complete(destination, None, cx),
+            RemoteWorkspaceStart::Home => self.open_on_server(destination, None, window, cx),
             RemoteWorkspaceStart::ChosenDirectory => {
                 self.choose_directory(destination, window, cx);
             }
@@ -872,7 +931,7 @@ impl RemoteWorkspaceFlow {
                 // The Workspace that opens takes the keyboard; the picker must not restore its
                 // own focus.
                 picker.update(cx, |picker, cx| picker.complete_activation(window, cx));
-                self.complete(destination.clone(), Some(directory.clone()), cx);
+                self.open_on_server(destination.clone(), Some(directory.clone()), window, cx);
             }
             // A server's picker never pins a directory of this computer.
             DirectoryPickerEvent::Confirmed(DirectorySelection::Pin(_)) => {
@@ -885,18 +944,137 @@ impl RemoteWorkspaceFlow {
         }
     }
 
-    fn complete(
+    /// Asks for the Workspace on the connected server and shows that it is opening until the
+    /// server's edits take it. The request is fenced to this exact connection: if it ends or is
+    /// replaced first, nothing is created and the person can try again.
+    fn open_on_server(
         &mut self,
         destination: SshDestination,
         directory: Option<PathBuf>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.advance();
-        self.state = FlowState::Completed;
-        cx.emit(RemoteWorkspaceFlowEvent::Completed(RemoteWorkspaceChoice {
-            destination,
+        let Some(server) = self.connections.server(&destination) else {
+            self.cancel_flow(window, cx);
+            return;
+        };
+        let generation = self.advance();
+        let choice = RemoteWorkspaceChoice {
+            destination: destination.clone(),
             directory,
-        }));
+            server,
+        };
+        let progress = self.present_progress(
+            generation,
+            format!(
+                "Opening a Workspace on \u{201C}{}\u{201D}",
+                destination.as_str()
+            ),
+            "Waiting for the SpaceTerm server to accept the Workspace\u{2026}".into(),
+            window,
+            cx,
+        );
+        let changes = self.connections.subscribe();
+        let follow = cx.spawn_in(window, async move |flow, cx| {
+            while changes.recv().await.is_ok() {
+                let following = flow.update_in(cx, |flow, window, cx| {
+                    flow.observe_opening(generation, window, cx)
+                });
+                if !matches!(following, Ok(true)) {
+                    break;
+                }
+            }
+        });
+        self.state = FlowState::Opening {
+            choice: Box::new(choice),
+            progress,
+            _follow: follow,
+        };
+        cx.emit(RemoteWorkspaceFlowEvent::Ready);
+        self.publish(cx);
+    }
+
+    /// Follows the connection the opening Workspace waits on. Returns whether it still waits.
+    fn observe_opening(
+        &mut self,
+        generation: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.action_generation != generation {
+            return false;
+        }
+        let FlowState::Opening { choice, .. } = &self.state else {
+            return false;
+        };
+        let destination = choice.destination.clone();
+        let same_connection = self
+            .connections
+            .server(&destination)
+            .is_some_and(|presented| presented.same_handle(&choice.server));
+        let status = self.connections.status(&destination);
+        if same_connection && matches!(status, RemoteConnectionStatus::Connected { .. }) {
+            return true;
+        }
+        if let FlowState::Opening { progress, .. } = &mut self.state
+            && let Some(progress) = progress.take()
+        {
+            let _ = progress.dismiss(window, cx);
+        }
+        if matches!(status, RemoteConnectionStatus::Connected { .. }) {
+            // A newer connection to the destination replaced the one the request was for.
+            let problem = ConnectionProblem {
+                title: format!(
+                    "Couldn\u{2019}t Open a Workspace on \u{201C}{}\u{201D}",
+                    destination.as_str()
+                ),
+                state: "Connection replaced",
+                explanation: "The connection was replaced before the Workspace opened, so \
+                              nothing was asked of the server. Try again to open it on the \
+                              current connection."
+                    .into(),
+                retry: true,
+            };
+            self.present_connection_problem(destination, problem, window, cx);
+        } else {
+            self.present_connection_error(destination, &status, window, cx);
+        }
+        false
+    }
+
+    /// Continues as confirming `directory` in the server's Directory Picker does, for a test
+    /// without a server filesystem to browse.
+    #[cfg(test)]
+    pub(crate) fn choose_server_directory(
+        &mut self,
+        destination: SshDestination,
+        directory: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_on_server(destination, Some(directory), window, cx);
+        // A person chose the host before the directory, which closed host selection.
+        self.host_picker
+            .update(cx, |picker, cx| picker.dismiss(window, cx));
+    }
+
+    /// The opening Workspace's request, while the flow waits for the server to take it.
+    pub(crate) fn opening(&self) -> Option<&RemoteWorkspaceChoice> {
+        match &self.state {
+            FlowState::Opening { choice, .. } => Some(choice.as_ref()),
+            _ => None,
+        }
+    }
+
+    /// Ends the flow once the server took its request, or the window presented the Workspace
+    /// it asked for.
+    pub(crate) fn opened(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !matches!(self.state, FlowState::Opening { .. }) {
+            return;
+        }
+        self.advance();
+        let mut previous = std::mem::replace(&mut self.state, FlowState::Completed);
+        previous.dismiss(window, cx);
         self.publish(cx);
     }
 
