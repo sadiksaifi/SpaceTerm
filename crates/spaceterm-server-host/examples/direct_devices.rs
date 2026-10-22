@@ -47,6 +47,17 @@ mod exercise {
         if condition { Ok(()) } else { Err(failure) }
     }
 
+    fn reply_classification(reply: &std::result::Result<Reply, ServerError>) -> &'static str {
+        match reply {
+            Ok(_) => "unexpected-reply",
+            Err(ServerError::Protocol) => "protocol",
+            Err(ServerError::NotRunning) => "not-running",
+            Err(ServerError::SessionUnavailable) => "session-unavailable",
+            Err(ServerError::StaleControl) => "stale-control",
+            Err(_) => "server-refusal",
+        }
+    }
+
     fn random() -> Result<[u8; 32]> {
         let mut bytes = [0; 32];
         // SAFETY: getentropy writes exactly 32 bytes to this live writable array.
@@ -247,8 +258,11 @@ mod exercise {
         reader: &mut R,
         mut bytes: &mut [u8],
         until: Instant,
+        progress: &mut impl FnMut() -> Result<()>,
     ) -> Result<()> {
         while !bytes.is_empty() {
+            require(Instant::now() < until, "pipe phase deadline elapsed")?;
+            progress()?;
             let left = until.saturating_duration_since(Instant::now());
             require(!left.is_zero(), "pipe phase deadline elapsed")?;
             let mut poll = libc::pollfd {
@@ -256,7 +270,7 @@ mod exercise {
                 events: libc::POLLIN,
                 revents: 0,
             };
-            let millis = left.as_millis().min(i32::MAX as u128) as i32;
+            let millis = left.as_millis().clamp(1, 1_000) as i32;
             // SAFETY: poll borrows one initialized pollfd for at most the bounded deadline.
             let ready = unsafe { libc::poll(&mut poll, 1, millis) };
             if ready < 0
@@ -264,7 +278,10 @@ mod exercise {
             {
                 continue;
             }
-            require(ready > 0, "pipe phase unavailable or timed out")?;
+            require(ready >= 0, "pipe phase unavailable")?;
+            if ready == 0 {
+                continue;
+            }
             let read = api(reader.read(bytes))?;
             require(read != 0, "peer pipe closed before completing its phase")?;
             bytes = &mut bytes[read..];
@@ -273,17 +290,24 @@ mod exercise {
     }
 
     fn receive<R: Read + AsRawFd>(reader: &mut R) -> Result<Vec<u8>> {
+        receive_while(reader, &mut || Ok(()))
+    }
+
+    fn receive_while<R: Read + AsRawFd>(
+        reader: &mut R,
+        progress: &mut impl FnMut() -> Result<()>,
+    ) -> Result<Vec<u8>> {
         pipe_only(reader.as_raw_fd())?;
         let until = Instant::now() + PIPE_DEADLINE;
         let mut length = [0; 4];
-        read_exact(reader, &mut length, until)?;
+        read_exact(reader, &mut length, until, progress)?;
         let length = u32::from_be_bytes(length) as usize;
         require(
             length != 0 && length <= MAX_PIPE_FRAME,
             "pipe frame bound refused",
         )?;
         let mut bytes = vec![0; length];
-        if let Err(error) = read_exact(reader, &mut bytes, until) {
+        if let Err(error) = read_exact(reader, &mut bytes, until, progress) {
             wipe(&mut bytes);
             return Err(error);
         }
@@ -317,7 +341,14 @@ mod exercise {
     }
 
     fn receive_json<R: Read + AsRawFd>(reader: &mut R) -> Result<Value> {
-        let mut bytes = receive(reader)?;
+        receive_json_while(reader, &mut || Ok(()))
+    }
+
+    fn receive_json_while<R: Read + AsRawFd>(
+        reader: &mut R,
+        progress: &mut impl FnMut() -> Result<()>,
+    ) -> Result<Value> {
+        let mut bytes = receive_while(reader, progress)?;
         let result = serde_json::from_slice(&bytes).map_err(|_| "peer phase response malformed");
         wipe(&mut bytes);
         result
@@ -357,8 +388,16 @@ mod exercise {
         }
 
         fn message(&mut self, value: Value) -> Result<Value> {
+            self.message_while(value, || Ok(()))
+        }
+
+        fn message_while(
+            &mut self,
+            value: Value,
+            mut progress: impl FnMut() -> Result<()>,
+        ) -> Result<Value> {
             send_json(&mut self.input, value)?;
-            receive_json(&mut self.output)
+            receive_json_while(&mut self.output, &mut progress)
         }
 
         fn finish(&mut self) -> Result<()> {
@@ -623,8 +662,31 @@ mod exercise {
                 "stty -echo; printf '\\033[2J\\033[HDIRECT-LOCAL\\n'",
             )?;
             output(&mut connection, first, "DIRECT-LOCAL")?;
-            let response =
-                peer.message(json!({"pane": pane, "owner": name, "session": first.session}))?;
+            let started = Instant::now();
+            let mut next_health = started;
+            let mut heartbeats = 0_u64;
+            let response = peer.message_while(
+                json!({"pane": pane, "owner": name, "session": first.session}),
+                || {
+                    if Instant::now() < next_health {
+                        return Ok(());
+                    }
+                    // Keep this exact connection alive while the peer reads retained history.
+                    // Capabilities observes the transport without acquiring Pane control.
+                    let reply = connection.exchange(&Request::Capabilities);
+                    if !matches!(reply, Ok(Reply::Capabilities { .. })) {
+                        eprintln!(
+                            "WSS fixture failure: stage=owner-keepalive, class={}, elapsed_ms={}, heartbeats={heartbeats}",
+                            reply_classification(&reply),
+                            started.elapsed().as_millis(),
+                        );
+                        return Err("original owner connection keepalive failed");
+                    }
+                    heartbeats += 1;
+                    next_health = Instant::now() + Duration::from_secs(1);
+                    Ok(())
+                },
+            )?;
             println!(
                 "PASS delayed WSS consumer: Scrollback checked={}, copied rows={}, accessible rows={}, graphics supported={}, graphics bytes={}",
                 response["reading_checked"]
@@ -644,14 +706,26 @@ mod exercise {
                     .ok_or("graphics capability report missing")?
             );
             let remote: Lease = api(serde_json::from_value(response["lease"].clone()))?;
-            require(
-                remote.session == first.session
-                    && matches!(
-                        connection.exchange(&Request::Poll { lease: first }),
-                        Err(ServerError::StaleControl)
-                    ),
-                "WSS takeover changed the Session or retained stale local control",
-            )?;
+            if remote.session != first.session {
+                eprintln!(
+                    "WSS fixture failure: stage=takeover-session, class=session-changed, elapsed_ms={}, heartbeats={heartbeats}",
+                    started.elapsed().as_millis(),
+                );
+                return Err("WSS takeover changed the Session");
+            }
+            let stale = connection.exchange(&Request::Poll { lease: first });
+            if !matches!(stale, Err(ServerError::StaleControl)) {
+                eprintln!(
+                    "WSS fixture failure: stage=takeover-old-control, class={}, elapsed_ms={}, heartbeats={heartbeats}",
+                    reply_classification(&stale),
+                    started.elapsed().as_millis(),
+                );
+                return Err("original owner connection did not refuse stale control");
+            }
+            println!(
+                "PASS original owner connection refused stale control: elapsed_ms={}, heartbeats={heartbeats}",
+                started.elapsed().as_millis(),
+            );
             let returned = take(&mut connection, pane, DEVICE_NAME)?;
             require(
                 returned.session == first.session,
@@ -1067,6 +1141,61 @@ mod exercise {
             expected.ok_or("--expect-server is required")?,
             restart,
         )
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use std::os::unix::net::UnixStream;
+
+        use super::*;
+
+        #[test]
+        fn frame_receive_pumps_progress_through_idle_header_and_fragmented_body() {
+            let (mut reader, mut writer) = UnixStream::pair().unwrap();
+            let mut calls = 0;
+            let received = receive_while(&mut reader, &mut || {
+                calls += 1;
+                match calls {
+                    1 => {} // No bytes yet: progress must resume after the bounded poll wait.
+                    2 => writer.write_all(&[0, 0]).unwrap(),
+                    3 => writer.write_all(&[0, 4]).unwrap(),
+                    4 => writer.write_all(b"ab").unwrap(),
+                    5 => writer.write_all(b"cd").unwrap(),
+                    _ => panic!("frame should already be complete"),
+                }
+                Ok(())
+            })
+            .unwrap();
+            assert_eq!((received.as_slice(), calls), (b"abcd".as_slice(), 5));
+        }
+
+        #[test]
+        fn frame_receive_propagates_body_progress_failure() {
+            let (mut reader, mut writer) = UnixStream::pair().unwrap();
+            writer.write_all(&4_u32.to_be_bytes()).unwrap();
+            let mut calls = 0;
+            let received = receive_while(&mut reader, &mut || {
+                calls += 1;
+                if calls == 2 {
+                    Err("fixture progress refused")
+                } else {
+                    Ok(())
+                }
+            });
+            assert_eq!(received, Err("fixture progress refused"));
+        }
+
+        #[test]
+        fn expired_frame_deadline_does_not_run_progress() {
+            let (mut reader, _writer) = UnixStream::pair().unwrap();
+            let mut byte = [0];
+            assert_eq!(
+                read_exact(&mut reader, &mut byte, Instant::now(), &mut || {
+                    panic!("expired frame must not run progress")
+                }),
+                Err("pipe phase deadline elapsed"),
+            );
+        }
     }
 }
 
