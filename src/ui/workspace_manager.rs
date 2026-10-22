@@ -237,6 +237,7 @@ pub(crate) struct WorkspaceManager {
     window_drag_status: WindowDragRegionStatus,
     update_control: Entity<super::updates::UpdateControl>,
     pending_final_tab_closes: BTreeSet<WorkspaceId>,
+    close_empty_after_shared_removal: bool,
     close_confirmation: CloseConfirmation,
     sidebar_repositories: repository::SidebarRepositories,
     sidebar_worktrees: worktrees::SidebarWorktrees,
@@ -366,6 +367,7 @@ impl WorkspaceManager {
             window_drag_status: WindowDragRegionStatus::new(),
             update_control: cx.new(super::updates::UpdateControl::new),
             pending_final_tab_closes: BTreeSet::new(),
+            close_empty_after_shared_removal: false,
             close_confirmation: CloseConfirmation::default(),
             sidebar_repositories: repository::SidebarRepositories::default(),
             sidebar_worktrees: worktrees::SidebarWorktrees::default(),
@@ -1264,6 +1266,8 @@ impl WorkspaceManager {
         flow.update(cx, |flow, cx| flow.opened(window, cx));
         if let Some(reason) = refusal {
             Self::show_shared_refusal("create a Workspace", reason, window, cx);
+        } else if existing.is_none() {
+            self.sync_shared_workspaces(key, window, cx);
         }
         self.sync_terminal_focus_blocker(window, cx);
         cx.notify();
@@ -2994,6 +2998,7 @@ impl WorkspaceManager {
         else {
             return;
         };
+        self.reconcile_parked_shared_workspaces(key, window, cx);
         // The removal that answers this client's own close takes the keyboard to what remains.
         let removal = if poll.accepted.as_ref().is_some_and(|accepted| {
             matches!(
@@ -3079,6 +3084,15 @@ impl WorkspaceManager {
             if let Some(inventory) = self.shared.get(key).and_then(|s| s.latest_inventory()) {
                 self.present_shared_metadata(key, inventory, cx);
             }
+        }
+        if std::mem::take(&mut self.close_empty_after_shared_removal)
+            && self.workspaces.active_workspace_id().is_none()
+            && self.workspaces.parked_ids().next().is_none()
+        {
+            if cx.windows().len() == 1 {
+                crate::status_menu::show_in_dock(cx, false);
+            }
+            window.remove_window();
         }
     }
 
@@ -3400,6 +3414,8 @@ impl WorkspaceManager {
         let submission = shared.create_workspace(name, directory);
         if let SharedSubmission::Refused(reason) = submission {
             Self::show_shared_refusal("create a Workspace", reason, window, cx);
+        } else {
+            self.sync_shared_workspaces(ServerKey::LOCAL, window, cx);
         }
         cx.notify();
         submission == SharedSubmission::Submitted
@@ -3419,10 +3435,11 @@ impl WorkspaceManager {
         let Some(shared) = self.shared.owning_mut(workspace_id) else {
             return false;
         };
-        if let SharedSubmission::Refused(reason) =
-            shared.rename(workspace_id, name.to_owned(), observed_version)
-        {
+        let submission = shared.rename(workspace_id, name.to_owned(), observed_version);
+        if let SharedSubmission::Refused(reason) = submission {
             Self::show_shared_refusal("rename the Workspace", reason, window, cx);
+        } else if let Some(key) = self.shared.owner(workspace_id) {
+            self.sync_shared_workspaces(key, window, cx);
         }
         cx.notify();
         true
@@ -3464,6 +3481,8 @@ impl WorkspaceManager {
         let submission = shared.pin(workspace_id, directory, observed_version);
         if let SharedSubmission::Refused(reason) = submission {
             Self::show_shared_refusal("change the pinned directory", reason, window, cx);
+        } else {
+            self.sync_shared_workspaces(owner, window, cx);
         }
         cx.notify();
         Some(submission == SharedSubmission::Submitted)
@@ -3496,6 +3515,8 @@ impl WorkspaceManager {
         let submission = shared.pin(workspace_id, Some(directory), observed_version);
         if let SharedSubmission::Refused(reason) = submission {
             Self::show_shared_refusal("change the pinned directory", reason, window, cx);
+        } else {
+            self.sync_shared_workspaces(owner, window, cx);
         }
         self.sync_terminal_focus_blocker(window, cx);
         cx.notify();
@@ -4187,8 +4208,8 @@ impl WorkspaceManager {
     /// Removes a Workspace the server no longer has.
     ///
     /// The server already removed it, so this needs no confirmation here. It ends nothing on the
-    /// server: closing the local Panes drops their subscriptions. A final Workspace leaves the
-    /// empty view.
+    /// server. An optimistic removal parks its presentation and keeps the edit owner alive until
+    /// the Original Operation settles, so a refused close can restore the same views.
     fn remove_shared_workspace(
         &mut self,
         workspace_id: WorkspaceId,
@@ -4196,6 +4217,41 @@ impl WorkspaceManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self
+            .shared
+            .owning(workspace_id)
+            .is_some_and(|shared| shared.optimistically_closing(workspace_id))
+        {
+            if self.workspaces.parked_ids().any(|id| id == workspace_id) {
+                return;
+            }
+            let held_keyboard = self
+                .workspaces
+                .workspace(workspace_id)
+                .is_some_and(|entry| entry.payload().read(cx).holds_keyboard(window, cx));
+            if let Some(entry) = self.workspaces.workspace(workspace_id) {
+                entry
+                    .payload()
+                    .update(cx, |manager, cx| manager.deactivate(cx));
+            }
+            if self.workspaces.park_workspace(workspace_id).is_err() {
+                return;
+            }
+            if let Some(manager) = self.active_tab_manager() {
+                manager.update(cx, |manager, cx| {
+                    if held_keyboard {
+                        manager.activate_in_place(window, cx);
+                    } else {
+                        manager.activate_without_focus(cx);
+                    }
+                });
+            } else if held_keyboard {
+                self.empty_focus.focus(window, cx);
+            }
+            self.sync_terminal_focus_blocker(window, cx);
+            cx.notify();
+            return;
+        }
         if let Some(shared) = self.shared.owning_mut(workspace_id) {
             shared.forget(workspace_id);
         }
@@ -4209,11 +4265,60 @@ impl WorkspaceManager {
         // client's publication is nobody's request for a Pane; this client's own Kill Workspace
         // is, as a local close is.
         self.close_workspace_activating(workspace_id, own, window, cx);
+        self.close_empty_after_shared_removal = true;
         // The keyboard that was in the removed Workspace rests in the Workspace that takes its
         // place, without asking the server for a Pane there. Typing anywhere else, such as in
         // the sidebar, stays where it is.
         if !own && held_keyboard {
             self.focus(window, cx);
+        }
+    }
+
+    fn reconcile_parked_shared_workspaces(
+        &mut self,
+        key: ServerKey,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let parked: Vec<_> = self
+            .workspaces
+            .parked_ids()
+            .filter(|id| self.shared.owner(*id) == Some(key))
+            .collect();
+        for id in parked {
+            let Some(shared) = self.shared.get(key) else {
+                continue;
+            };
+            if shared.optimistically_closing(id) {
+                continue;
+            }
+            let Some(inventory) = shared.latest_inventory() else {
+                continue;
+            };
+            let exists = shared
+                .facts(id)
+                .is_some_and(|facts| inventory.workspaces.iter().any(|w| w.id == facts.server));
+            if exists {
+                let was_empty = self.workspaces.active_workspace_id().is_none();
+                let restore_keyboard = was_empty && self.empty_focus.is_focused(window);
+                if self.workspaces.restore_workspace(id).is_ok() && was_empty {
+                    if let Some(manager) = self.active_tab_manager() {
+                        manager.update(cx, |manager, cx| manager.activate_without_focus(cx));
+                    }
+                    if restore_keyboard {
+                        self.focus(window, cx);
+                    }
+                }
+            } else {
+                if let Ok(manager) = self.workspaces.discard_parked_workspace(id) {
+                    manager.update(cx, |manager, cx| manager.close_all(cx));
+                }
+                if let Some(shared) = self.shared.get_mut(key) {
+                    shared.forget(id);
+                }
+                self.pending_final_tab_closes.remove(&id);
+                self.close_empty_after_shared_removal = true;
+            }
         }
     }
 

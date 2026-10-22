@@ -2271,13 +2271,13 @@ mod close {
 
         assert_eq!(
             only.title(),
-            "Close Pane?",
-            "Close Pane keeps its own meaning"
+            "Kill Workspace \u{201C}Build\u{201D}?",
+            "the final Pane requires Workspace-level review"
         );
+        assert_eq!(only.confirm_label(), "Kill Workspace");
         assert_eq!(
             only.message(),
-            "This is the only Pane in \u{201C}Build\u{201D}, so the Workspace is permanently \
-             removed for every client. This ends 1 Terminal Session for every client, including \
+            "Its Tabs and Panes are permanently removed for every client. This ends 1 Terminal Session for every client, including \
              on a client that controls its Pane, and stops its running commands."
         );
         assert!(only.detail().is_some());

@@ -74,8 +74,9 @@ fn a_shared_split_checks_the_restored_allocation_before_submitting(cx: &mut Test
     publish(&harness, inventory(2, vec![tab(ROOT_TAB, panes)]), cx);
     cx.dispatch_action(crate::ui::TogglePaneZoom);
     cx.run_until_parked();
-    cx.dispatch_action(crate::ui::SplitRight);
-    cx.run_until_parked();
+    let source = harness.panes.pane(ROOT_PANE);
+    let selections = source.selections();
+    click("pane-split-right-1", cx);
     assert!(
         harness.edits.submitted().is_empty(),
         "an initiating split must fit before requesting membership"
@@ -84,5 +85,10 @@ fn a_shared_split_checks_the_restored_allocation_before_submitting(cx: &mut Test
         pane_count(&harness, cx),
         16,
         "another client's membership stays authoritative"
+    );
+    assert_eq!(
+        source.selections(),
+        selections,
+        "a refused split starts no source shell"
     );
 }

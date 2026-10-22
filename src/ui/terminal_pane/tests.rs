@@ -10,6 +10,8 @@ use gpui::{
 };
 
 use super::*;
+#[path = "interaction_tests.rs"]
+mod interaction_tests;
 use crate::appearance::{Color, TerminalColors};
 use crate::terminal::native_services::clipboard::{
     ClipboardError, ClipboardRead, SelectionClipboard,

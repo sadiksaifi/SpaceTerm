@@ -1535,9 +1535,9 @@ impl TabView {
         if self.tab.pane(pane_id).is_none() {
             return;
         }
-        // A caption control acts on its own Pane, which selects it. Close only asks for
-        // confirmation, so it starts no retained shell before a person approves.
-        if !matches!(action, PaneCaptionAction::Close) {
+        // Zoom explicitly selects its Pane. Splits validate the restored allocation before
+        // asking for membership or starting a shell; Close captures its exact targets first.
+        if matches!(action, PaneCaptionAction::ToggleZoom) {
             self.select_shared_pane(pane_id);
         }
         self.focus_pane(pane_id, cx);
