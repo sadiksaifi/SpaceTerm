@@ -20,6 +20,52 @@ pub(super) struct Granted {
     pub appearance: Option<crate::appearance::AppearanceGeneration>,
 }
 
+/// Runs in the presenter's send turn, so replacement cannot overtake recovery bookkeeping.
+pub(super) fn exchange(
+    state: &DevelopmentPaneState,
+    pane_id: spaceterm_server::hierarchy::Id,
+    request: &Request,
+    exchange: impl FnOnce(&Request) -> Result<Reply, ServerError>,
+) -> Result<Reply, ServerError> {
+    let start = match request {
+        Request::StartRestored { server, .. } => Some(Some(*server)),
+        Request::RepairDirectory { target, .. } => Some(Some(target.boot)),
+        Request::SelectPane { explicit: true, .. } => Some(None),
+        Request::TakeOver { target, .. } if state.session_dormant() => Some(Some(target.server)),
+        _ => None,
+    };
+    if let Some(boot) = start {
+        state
+            .connection_recovery
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .begin_start(boot)?;
+        state.directory_busy.store(true, Ordering::Release);
+    }
+    let result = exchange(request).and_then(|reply| {
+        if matches!(&reply, Reply::Restored { pane, .. } if *pane != pane_id) {
+            Err(ServerError::Protocol)
+        } else {
+            Ok(reply)
+        }
+    });
+    if start.is_some() {
+        state
+            .connection_recovery
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .started(&result);
+        state.directory_busy.store(false, Ordering::Release);
+    }
+    let reply = result?;
+    state
+        .connection_recovery
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .observed(&reply)?;
+    Ok(reply)
+}
+
 impl ClaimWorker<'_> {
     pub fn run(
         self,
@@ -44,7 +90,9 @@ impl ClaimWorker<'_> {
         let style = Some(encode_style(&grant_update));
         let request = Request::SelectPane {
             pane: pane_id,
-            explicit: state.selected.swap(false, Ordering::AcqRel),
+            // Observe the boot before first-use intent can start a restored shell. The queued
+            // selection is consumed only after that observation, including through Takeover.
+            explicit: false,
             size: grant_size,
             style,
         };
@@ -249,6 +297,199 @@ impl ClaimWorker<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn run_claim(
+        state: &DevelopmentPaneState,
+        mut server: impl FnMut(&Request) -> Result<Reply, ServerError>,
+    ) -> Result<Option<Granted>, ServerError> {
+        ClaimWorker {
+            state,
+            pane_id: [2; 32],
+            alive: &AtomicBool::new(true),
+            attachment: &None,
+            size: &Mutex::new(PaneSize {
+                columns: 80,
+                rows: 24,
+                cell_width: 8,
+                cell_height: 16,
+            }),
+            appearance: &Mutex::new(TerminalAppearanceUpdate::builtin().unwrap()),
+            directory_recovery: true,
+            attached_session: &mut false,
+            takeover: &mut false,
+            paste_unconfirmed: &mut false,
+        }
+        .run(
+            |request| exchange(state, [2; 32], request, &mut server),
+            || {},
+        )
+    }
+
+    fn restored(boot: u8) -> Reply {
+        Reply::Restored {
+            server: [boot; 32],
+            pane: [2; 32],
+            workspace: [3; 32],
+            tab: [4; 32],
+            recovery: None,
+            directory_unavailable: false,
+            session_ended: false,
+        }
+    }
+
+    fn lose_start(state: &DevelopmentPaneState) {
+        let mut starts = 0;
+        let result = run_claim(state, |request| match request {
+            Request::SelectPane {
+                explicit: false, ..
+            } => {
+                // Select once to enter Restored, then request a start on its passive poll.
+                state.start_restored();
+                Ok(restored(1))
+            }
+            Request::StartRestored { .. } => {
+                starts += 1;
+                Err(ServerError::Protocol)
+            }
+            other => panic!("unexpected request {other:?}"),
+        });
+        assert!(matches!(result, Err(ServerError::Protocol)));
+        assert_eq!(starts, 1);
+        state.connection_failed(ServerError::Protocol, false);
+    }
+
+    #[test]
+    fn a_dormant_observation_cannot_replace_a_delayed_start_on_the_old_connection() {
+        let state = DevelopmentPaneState::new();
+        lose_start(&state);
+        // The old request is still queued at the host. The fresh connection overtakes it.
+        let mut observations = 0;
+        let result = run_claim(&state, |request| {
+            assert!(matches!(
+                request,
+                Request::SelectPane {
+                    explicit: false,
+                    ..
+                }
+            ));
+            observations += 1;
+            assert_eq!(
+                observations, 1,
+                "a dormant observation must retain uncertainty"
+            );
+            state.start_restored();
+            state.select();
+            Ok(restored(1))
+        });
+        assert!(matches!(result, Err(ServerError::Protocol)));
+        assert!(state.start_unconfirmed());
+        // Even an explicit action reaching the backend cannot produce another shell start.
+        state.set(DevelopmentPaneStatus::SessionEnded);
+        state.start_restored();
+        state.select();
+        assert!(!state.start_restored.load(Ordering::Acquire));
+        assert!(!state.selected.load(Ordering::Acquire));
+        state.offered_take_over(pane::control::Controller::Nobody, true);
+        state.take_over();
+        assert!(!state.take_over.load(Ordering::Acquire));
+        let target = pane::directories::Target {
+            boot: [1; 32],
+            pane: [2; 32],
+            original: "/original".into(),
+        };
+        *state.recovery.lock().unwrap() = Some(target.clone());
+        state.set(DevelopmentPaneStatus::Failed(
+            ServerError::DirectoryUnavailable,
+        ));
+        state.repair_directory(target, "/replacement".into());
+        assert!(state.repair.lock().unwrap().is_none());
+        // The delayed original finally runs. Observing its live grant settles it without replay.
+        let lease = Lease {
+            server: [1; 32],
+            session: [5; 32],
+            control: [6; 32],
+            connection: [7; 32],
+        };
+        let grant = run_claim(&state, |request| {
+            assert!(matches!(
+                request,
+                Request::SelectPane {
+                    explicit: false,
+                    ..
+                }
+            ));
+            Ok(Reply::Attached { lease })
+        })
+        .unwrap()
+        .unwrap();
+        assert_eq!(grant.lease, lease);
+        assert!(!state.start_unconfirmed());
+    }
+
+    #[test]
+    fn a_new_server_boot_settles_the_old_start_before_a_fresh_start() {
+        let state = DevelopmentPaneState::new();
+        state.select();
+        lose_start(&state);
+        let mut starts = 0;
+        let result = run_claim(&state, |request| match request {
+            Request::SelectPane {
+                explicit: false, ..
+            } => {
+                state.start_restored();
+                Ok(restored(8))
+            }
+            Request::StartRestored { server, .. } => {
+                starts += 1;
+                assert_eq!(*server, [8; 32]);
+                Err(ServerError::Unsupported)
+            }
+            other => panic!("unexpected request {other:?}"),
+        });
+        assert!(matches!(result, Err(ServerError::Unsupported)));
+        assert_eq!(starts, 1);
+        assert!(
+            !state.start_unconfirmed(),
+            "a typed refusal settles the fresh request"
+        );
+    }
+
+    #[test]
+    fn a_reopened_presentation_retains_its_unconfirmed_start_without_blocking_other_panes() {
+        let controls = PaneControls::default();
+        let server = LocalServer::for_identity("spaceterm-development").unwrap();
+        let open = |controls: &PaneControls, pane| {
+            DevelopmentServerSessionFactory::for_origin(server.clone(), controls, None, None, pane)
+        };
+        let (old, state) = open(&controls, [2; 32]);
+        lose_start(&state);
+        drop(old);
+        drop(state);
+        let (_, reopened) = open(&controls, [2; 32]);
+        assert!(
+            reopened.start_unconfirmed(),
+            "closing a window cannot settle its start"
+        );
+        reopened.select();
+        let result = run_claim(&reopened, |request| {
+            assert!(matches!(
+                request,
+                Request::SelectPane {
+                    explicit: false,
+                    ..
+                }
+            ));
+            Ok(restored(1))
+        });
+        assert!(matches!(result, Err(ServerError::Protocol)));
+        assert!(reopened.start_unconfirmed());
+        assert!(!open(&controls, [9; 32]).1.start_unconfirmed());
+        assert!(
+            !open(&PaneControls::default(), [2; 32])
+                .1
+                .start_unconfirmed()
+        );
+    }
 
     #[test]
     fn takeover_of_an_ended_pane_retires_earlier_selection_and_preserves_later_selection() {

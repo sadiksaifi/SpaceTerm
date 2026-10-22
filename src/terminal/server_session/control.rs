@@ -55,6 +55,8 @@ const LAST: u64 = (u64::MAX - 1) / 2;
 
 #[derive(Default)]
 pub(super) struct PaneControl {
+    /// An interrupted start belongs to the retained Pane, including across window replacement.
+    pub(super) recovery: Arc<Mutex<super::recovery::Recovery>>,
     /// Held across each request, so a successor's claim waits for an in-flight request.
     /// Guards the highest focus generation sent for this Pane.
     turn: Mutex<u64>,
