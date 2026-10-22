@@ -172,14 +172,20 @@ pub(super) enum SettingsRowId {
     SshServerCompatibility,
     /// Whether the selected SSH server's computer starts the server on its own.
     SshServerStartup,
+    /// The selected direct network server's state and the steps it allows.
+    DirectServerStatus,
     /// Ends every live Terminal Session on the selected server, keeping its organization.
     EndAllSessions,
     /// How SpaceTerm reaches the selected server, and whose authority admits it.
     ServerConnection,
+    /// Whether the selected server listens for direct network connections, and where.
+    DirectNetworkAccess,
     /// The devices paired with the selected server for direct network connections.
     DirectNetworkPairing,
     /// Forgets the selected saved SSH connection.
     RemoveServer,
+    /// Unpairs this device from the selected direct network server and removes its connection.
+    UnpairThisDevice,
     /// The selected server's New Worktree Location, a Server Setting.
     ServerWorktreeLocation,
     /// What SpaceTerm still has to tell the person about servers whose saved connection they
@@ -187,6 +193,10 @@ pub(super) enum SettingsRowId {
     RemovedServerOperations,
     /// Connects to a computer by its SSH host name or alias, or one SSH configuration names.
     SshConnect,
+    /// Pairs this device with another computer's server using an invitation from it.
+    JoinInvitation,
+    /// Unpair requests a server hasn't confirmed yet, and the cleanup they leave.
+    PendingUnpairs,
     /// The installed version, the latest check, and the next step the update service offers.
     UpdateStatus,
     AutomaticUpdateDownloads,
@@ -258,7 +268,12 @@ impl SettingsRowId {
             | Self::SshServerStartup
             | Self::EndAllSessions
             | Self::ServerConnection
+            | Self::DirectNetworkAccess
             | Self::DirectNetworkPairing
+            | Self::DirectServerStatus
+            | Self::UnpairThisDevice
+            | Self::JoinInvitation
+            | Self::PendingUnpairs
             | Self::RemoveServer
             | Self::SshConnect
             | Self::UpdateStatus
@@ -737,6 +752,25 @@ const PREFERENCE_ROWS: &[SettingsRowDescriptor] = &[
         selector: "settings-row-ssh-connect",
     },
     SettingsRowDescriptor {
+        id: SettingsRowId::JoinInvitation,
+        section: SettingsSectionId::Servers,
+        // The field carries its own name, as the SSH connect field does.
+        group: "",
+        label: "Join with invitation",
+        keywords: &[
+            "join",
+            "invitation",
+            "invite",
+            "pair",
+            "pairing",
+            "paste",
+            "direct network",
+            "network",
+            "connect",
+        ],
+        selector: "settings-row-join-invitation",
+    },
+    SettingsRowDescriptor {
         id: SettingsRowId::RemovedServerOperations,
         section: SettingsSectionId::Servers,
         // The list carries its own name, as the server list above it does.
@@ -755,6 +789,25 @@ const PREFERENCE_ROWS: &[SettingsRowDescriptor] = &[
             "update server",
         ],
         selector: "settings-row-removed-server-operations",
+    },
+    SettingsRowDescriptor {
+        id: SettingsRowId::PendingUnpairs,
+        section: SettingsSectionId::Servers,
+        // The notices carry their own names, as the removed connections do.
+        group: "",
+        label: "Unpair requests",
+        keywords: &[
+            "unpair",
+            "unpaired",
+            "revoke",
+            "revocation",
+            "pending",
+            "unconfirmed",
+            "resume",
+            "retry",
+            "direct network",
+        ],
+        selector: "settings-row-pending-unpairs",
     },
     SettingsRowDescriptor {
         id: SettingsRowId::LocalServer,
@@ -939,6 +992,24 @@ const PREFERENCE_ROWS: &[SettingsRowDescriptor] = &[
         selector: "settings-row-ssh-server-startup",
     },
     SettingsRowDescriptor {
+        id: SettingsRowId::DirectServerStatus,
+        section: SettingsSectionId::Servers,
+        group: super::server_list::SERVER_GROUP,
+        label: "Status",
+        keywords: &[
+            "direct network",
+            "paired",
+            "status",
+            "connect",
+            "disconnect",
+            "reconnect",
+            "resume",
+            "keychain",
+            "credential",
+        ],
+        selector: "settings-row-direct-server-status",
+    },
+    SettingsRowDescriptor {
         id: SettingsRowId::EndAllSessions,
         section: SettingsSectionId::Servers,
         group: super::server_list::SERVER_GROUP,
@@ -973,18 +1044,44 @@ const PREFERENCE_ROWS: &[SettingsRowDescriptor] = &[
         selector: "settings-row-server-connection",
     },
     SettingsRowDescriptor {
+        id: SettingsRowId::DirectNetworkAccess,
+        section: SettingsSectionId::Servers,
+        group: super::server_list::CONNECTION_GROUP,
+        label: "Direct network access",
+        keywords: &[
+            "direct network",
+            "network",
+            "network access",
+            "listen",
+            "listening",
+            "address",
+            "port",
+            "ip",
+            "wss",
+            "lan",
+            "turn on",
+            "turn off",
+        ],
+        selector: "settings-row-direct-network-access",
+    },
+    SettingsRowDescriptor {
         id: SettingsRowId::DirectNetworkPairing,
         section: SettingsSectionId::Servers,
         group: super::server_list::CONNECTION_GROUP,
-        label: "Direct network pairing",
+        label: "Paired devices",
         keywords: &[
             "pairing",
             "paired",
             "paired devices",
             "pair",
+            "pair device",
             "unpair",
+            "unpair device",
+            "invitation",
+            "invite",
+            "fingerprint",
+            "approve",
             "direct network",
-            "network",
             "device",
             "devices",
         ],
@@ -997,6 +1094,22 @@ const PREFERENCE_ROWS: &[SettingsRowDescriptor] = &[
         label: "Saved connection",
         keywords: &["remove", "remove connection", "forget", "delete", "saved"],
         selector: "settings-row-remove-server",
+    },
+    SettingsRowDescriptor {
+        id: SettingsRowId::UnpairThisDevice,
+        section: SettingsSectionId::Servers,
+        group: super::server_list::CONNECTION_GROUP,
+        label: "Pairing",
+        keywords: &[
+            "unpair",
+            "unpair device",
+            "unpair this device",
+            "remove",
+            "forget",
+            "revoke",
+            "direct network",
+        ],
+        selector: "settings-row-unpair-this-device",
     },
     SettingsRowDescriptor {
         id: SettingsRowId::ServerWorktreeLocation,
@@ -1272,7 +1385,7 @@ mod tests {
     }
 
     /// The complete preference row identity set, so the catalog cannot silently omit one.
-    const EVERY_PREFERENCE_ROW: [SettingsRowId; 51] = [
+    const EVERY_PREFERENCE_ROW: [SettingsRowId; 56] = [
         SettingsRowId::AppearanceMode,
         SettingsRowId::Opacity,
         SettingsRowId::Blur,
@@ -1300,7 +1413,9 @@ mod tests {
         SettingsRowId::WorktreeLocation,
         SettingsRowId::ServerList,
         SettingsRowId::SshConnect,
+        SettingsRowId::JoinInvitation,
         SettingsRowId::RemovedServerOperations,
+        SettingsRowId::PendingUnpairs,
         SettingsRowId::LocalServer,
         SettingsRowId::ServerService,
         SettingsRowId::ServerUpdate,
@@ -1311,10 +1426,13 @@ mod tests {
         SettingsRowId::SshServerPlatform,
         SettingsRowId::SshServerCompatibility,
         SettingsRowId::SshServerStartup,
+        SettingsRowId::DirectServerStatus,
         SettingsRowId::EndAllSessions,
         SettingsRowId::ServerConnection,
+        SettingsRowId::DirectNetworkAccess,
         SettingsRowId::DirectNetworkPairing,
         SettingsRowId::RemoveServer,
+        SettingsRowId::UnpairThisDevice,
         SettingsRowId::ServerWorktreeLocation,
         SettingsRowId::UpdateStatus,
         SettingsRowId::AutomaticUpdateDownloads,
@@ -1632,7 +1750,12 @@ mod tests {
                     | SettingsRowId::SshServerStartup
                     | SettingsRowId::EndAllSessions
                     | SettingsRowId::ServerConnection
+                    | SettingsRowId::DirectNetworkAccess
                     | SettingsRowId::DirectNetworkPairing
+                    | SettingsRowId::DirectServerStatus
+                    | SettingsRowId::UnpairThisDevice
+                    | SettingsRowId::JoinInvitation
+                    | SettingsRowId::PendingUnpairs
                     | SettingsRowId::RemoveServer
                     | SettingsRowId::SshConnect
                     | SettingsRowId::UpdateStatus

@@ -125,6 +125,15 @@ impl<A: SshProcessAdapter> StartupDependencies<A> {
         })
     }
 
+    /// The desktop's direct network connections. Construction has no effects: nothing reads
+    /// saved routes, asks for a credential, or connects until the first Workspace Window opens.
+    pub(crate) fn direct_servers(&self) -> crate::direct_connections::DirectConnections {
+        crate::direct_connections::DirectConnections::native(
+            crate::application_identity::ApplicationIdentity::current().directory_name(),
+            Arc::clone(&self.paths),
+        )
+    }
+
     /// The desktop's SSH server connections. Construction has no effects: nothing connects,
     /// reads retained intent, or discovers hosts until the first Workspace Window opens.
     pub(crate) fn ssh_servers_factory(
@@ -248,6 +257,23 @@ where
                 )),
             ),
         );
+        // A direct network unpair made over this computer's account or an SSH account resumes
+        // through the exact route it was made on, which this backend authenticates.
+        if let Some(direct) = crate::ui::direct_servers::installed(cx) {
+            let identity = crate::application_identity::ApplicationIdentity::current();
+            if let Ok(local) =
+                crate::local_server::LocalServer::for_identity(identity.directory_name())
+            {
+                direct.set_account_resolver(Arc::new(
+                    crate::direct_connections::account::NativeAccountRevocationResolver::new(
+                        identity.directory_name(),
+                        local,
+                        connections.clone(),
+                        Arc::clone(&backend),
+                    ),
+                ));
+            }
+        }
         let operations = crate::ssh::server_operations::SshServerOperations::new(
             backend,
             Arc::new(
@@ -743,10 +769,20 @@ pub(crate) fn open(
         .map(|runtime| runtime.settings.snapshot().candidate.sidebar.default_state)
         .unwrap_or_default();
     let ssh_servers = host.adapters.ssh_servers.clone();
+    let direct_servers = host.adapters.direct_servers.clone();
     let result = cx.open_window(workspace_window_options(host, cx), |window, cx| {
+        // The direct registry comes first, so the SSH backend can give it the account routes
+        // its unpair requests resume through.
+        if let Some(direct) = direct_servers.clone() {
+            crate::ui::direct_servers::install(direct, cx);
+        }
         // The first Workspace Window can present SSH's prompts, so the registry begins here.
         if let Some(factory) = ssh_servers.clone() {
             crate::ui::ssh_servers::ensure(factory, window, cx);
+        }
+        // Resuming is quiet: a route or unpair that needs a credential prompt waits for Resume.
+        if let Some(direct) = crate::ui::direct_servers::installed(cx) {
+            direct.resume_retained();
         }
         let workspace_manager = cx.new(|cx| {
             WorkspaceManager::new_with_adapters(
@@ -1038,6 +1074,9 @@ pub(crate) struct ApplicationCapabilities {
     /// Creates the desktop's SSH server connections from its first Workspace Window. `None`
     /// offers no SSH servers.
     pub(crate) ssh_servers: Option<Rc<dyn crate::ui::ssh_servers::SshServersFactory>>,
+    /// The desktop's direct network connections, installed by its first Workspace Window.
+    /// `None` offers no direct network connections.
+    pub(crate) direct_servers: Option<crate::direct_connections::DirectConnections>,
 }
 
 /// The startup-supplied file opener available to explicit local file selections.
@@ -1710,6 +1749,7 @@ mod runtime_tests {
                 background_images: None,
                 local_server: crate::ui::launch_testing::presenting(session_factory),
                 ssh_servers: None,
+                direct_servers: None,
             },
             services: Some(services),
             window_movement: movement,

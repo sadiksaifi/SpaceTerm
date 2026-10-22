@@ -1,6 +1,6 @@
 //! The SpaceTerm Servers whose Workspaces one Workspace Window presents.
 //!
-//! The account-local server and each connected SSH server publish their own inventory, answers,
+//! The account-local server and each connected SSH or direct network server publish their own inventory, answers,
 //! and attachments. Each one keeps its own binding, so a shared Workspace's edits, closes, and
 //! Pane connections always reach the server that owns it, and losing one server leaves the
 //! others' Workspaces untouched.
@@ -20,11 +20,24 @@ impl ServerKey {
     pub(crate) const LOCAL: Self = Self(0);
 }
 
-/// Where a presented server runs.
+/// Where a presented server runs, and the route this client reaches it by.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum ServerOrigin {
     Local,
     Ssh(SshDestination),
+    /// A server reached over a direct network route, with the name it gave.
+    Direct(crate::ui::shared_workspaces::DirectServer),
+}
+
+impl ServerOrigin {
+    /// The name another computer's server reads by, or `None` for this computer's.
+    pub(crate) fn remote_name(&self) -> Option<String> {
+        match self {
+            Self::Local => None,
+            Self::Ssh(destination) => Some(destination.as_str().to_owned()),
+            Self::Direct(direct) => Some(direct.name.to_string()),
+        }
+    }
 }
 
 struct Binding {

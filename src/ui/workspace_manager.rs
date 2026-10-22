@@ -334,6 +334,8 @@ pub(crate) struct WorkspaceManager {
     shared: ServerBindings,
     /// Follows the desktop's SSH server connections while the window lives.
     _ssh_servers: Option<Task<()>>,
+    /// Follows the desktop's direct network connections while the window lives.
+    _direct_servers: Option<Task<()>>,
     /// Follows the submitted remote maintenance operations, so each machine heading offers what
     /// its server's state allows.
     _remote_maintenance: Option<Task<()>>,
@@ -479,12 +481,14 @@ impl WorkspaceManager {
             shared_repositories: shared_repositories::SharedWorkspaceRepositories::default(),
             shared: ServerBindings::default(),
             _ssh_servers: None,
+            _direct_servers: None,
             _remote_maintenance: None,
             empty_focus: cx.focus_handle(),
             launch: launch::LocalLaunchState::new(local_server),
         };
         manager.run_local_launch(None, window, cx);
         manager.follow_ssh_servers(window, cx);
+        manager.follow_direct_servers(window, cx);
         manager.follow_remote_maintenance(window, cx);
         manager
     }
@@ -2869,10 +2873,9 @@ impl WorkspaceManager {
                     self.request_worktree_removal(workspace_id, worktree_id, window, cx);
                 }
             },
-            SidebarEvent::Machine {
-                destination,
-                command,
-            } => self.perform_machine_command(destination, command, window, cx),
+            SidebarEvent::Machine { target, command } => {
+                self.perform_machine_command(target, command, window, cx)
+            }
             SidebarEvent::LayoutChanged => self.synchronize_tab_manager_layouts(window, cx),
             SidebarEvent::FocusPane => self.focus(window, cx),
             SidebarEvent::FocusChanged => {}
@@ -3567,14 +3570,11 @@ impl WorkspaceManager {
                 let mut repository = match &shared {
                     // Another computer's directory is shown as that computer reports it: this
                     // computer's home directory says nothing about it.
-                    Some(shared) if shared.destination.is_some() => {
+                    Some(shared) if shared.machine.is_some() => {
                         path = shared.directory.display().to_string().into();
                         tooltip = format!(
                             "{SERVER_WORKSPACE_BADGE} on {}: {}",
-                            shared
-                                .destination
-                                .as_ref()
-                                .map_or("", crate::domain::SshDestination::as_str),
+                            shared.machine.as_deref().unwrap_or_default(),
                             shared.directory.display()
                         );
                         self.shared_sidebar_badge(workspace.id(), cx)
@@ -3618,12 +3618,9 @@ impl WorkspaceManager {
                     if let Some(pinned) = pinned {
                         tooltip.push_str(&format!("\nPinned Directory: {}", pinned.display()));
                     }
-                    match shared.as_ref().map(|shared| shared.destination.as_ref()) {
-                        Some(Some(destination)) => {
-                            tooltip = format!(
-                                "{SERVER_WORKSPACE_BADGE} on {}\n{tooltip}",
-                                destination.as_str()
-                            );
+                    match shared.as_ref().map(|shared| shared.machine.as_ref()) {
+                        Some(Some(machine)) => {
+                            tooltip = format!("{SERVER_WORKSPACE_BADGE} on {machine}\n{tooltip}");
                         }
                         Some(None) => {
                             tooltip = format!("{SERVER_WORKSPACE_BADGE}\n{tooltip}");
@@ -3640,8 +3637,8 @@ impl WorkspaceManager {
                         // Workspace does.
                         WorkspaceLocation::Local => shared
                             .as_ref()
-                            .and_then(|shared| shared.destination.as_ref())
-                            .map(|destination| destination.as_str().to_owned().into()),
+                            .and_then(|shared| shared.machine.clone())
+                            .map(Into::into),
                         WorkspaceLocation::Remote { key, .. } => {
                             Some(key.destination().host().to_owned().into())
                         }
@@ -3672,8 +3669,8 @@ struct SharedRowFacts {
     /// only ever displays it.
     directory: PathBuf,
     pinned: bool,
-    /// The SSH destination of another computer's server, or `None` for the account-local one.
-    destination: Option<crate::domain::SshDestination>,
+    /// The name of another computer's server, or `None` for the account-local one.
+    machine: Option<String>,
 }
 
 /// Shared server Workspaces: adopting them, presenting what the server publishes, submitting the
@@ -4935,10 +4932,7 @@ impl WorkspaceManager {
             },
             directory: directory.to_owned(),
             pinned: facts.pinned(),
-            destination: match self.shared.origin(key) {
-                Some(ServerOrigin::Ssh(destination)) => Some(destination.clone()),
-                _ => None,
-            },
+            machine: self.shared.origin(key).and_then(ServerOrigin::remote_name),
         })
     }
 
@@ -4970,10 +4964,7 @@ impl WorkspaceManager {
         shared: &super::shared_workspaces::SharedWorkspaces,
     ) -> Vec<ComboBoxItem<SwitcherChoice>> {
         let changeable = shared.attachments_changeable();
-        let destination = match self.shared.origin(key) {
-            Some(ServerOrigin::Ssh(destination)) => Some(destination.as_str().to_owned()),
-            _ => None,
-        };
+        let destination = self.shared.origin(key).and_then(ServerOrigin::remote_name);
         shared
             .available_workspaces()
             .into_iter()
@@ -5698,6 +5689,7 @@ mod repository;
 mod server_bindings;
 use server_bindings::ServerBindings;
 pub(crate) use server_bindings::{ServerKey, ServerOrigin};
+mod direct_servers;
 mod shared_repositories;
 mod ssh_servers;
 mod worktrees;

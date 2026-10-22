@@ -2,26 +2,37 @@
 //!
 //! The account-local server's Workspaces and this computer's own form the local group. Every other
 //! machine is named by its SSH Destination, so an SSH server's Workspaces and the Remote Workspaces
-//! opened at the same destination share one group. Workspace order keeps each group together, the
-//! local one first and then the others by name, so the sidebar, the position shortcuts, and the
-//! Workspace Switcher present one order.
+//! opened at the same destination share one group. A server reached over a direct network route
+//! forms its own group under the name it gave, apart from any SSH route to the same computer,
+//! because the two routes carry separate authority. Workspace order keeps each group together,
+//! the local one first, then the SSH machines and then the direct network servers by name, so the
+//! sidebar, the position shortcuts, and the Workspace Switcher present one order.
 
 use std::cmp::Ordering;
 
 use gpui::{App, Context, Window};
 
 use super::{ServerBindings, ServerOrigin, WorkspaceManager};
+use crate::direct_connections::{DirectRouteId, DirectRouteStatus};
 use crate::domain::{SshDestination, WorkspaceEntry, WorkspaceId, WorkspaceLocation};
 use crate::ssh::server_connection::RemoteConnectionStatus;
 use crate::ssh::server_operations::RemoteOperationState;
 use crate::ui::remote_maintenance::{menu_actions_for, observed_menu_actions, working_state};
-use crate::ui::workspace_sidebar::{MachineMenuCommand, MachineSection};
+use crate::ui::workspace_sidebar::{MachineMenuCommand, MachineSection, MachineTarget};
+
+/// What a direct network server's heading says beside its name.
+const DIRECT_ROUTE: &str = "Direct network";
 
 /// The machine whose group a Workspace joins.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum Machine {
     Local,
     Ssh(SshDestination),
+    /// A server reached over a direct network route, ordered by the name it gave.
+    Direct {
+        name: String,
+        route: DirectRouteId,
+    },
 }
 
 impl Machine {
@@ -30,10 +41,7 @@ impl Machine {
             .owner(workspace.id())
             .and_then(|key| servers.origin(key))
         {
-            return match origin {
-                ServerOrigin::Local => Self::Local,
-                ServerOrigin::Ssh(destination) => Self::Ssh(destination.clone()),
-            };
+            return Self::from_origin(origin);
         }
         match workspace.location() {
             WorkspaceLocation::Local => Self::Local,
@@ -42,19 +50,51 @@ impl Machine {
     }
 }
 
-/// Group order: the local machine first, then each other machine by its destination, ignoring
-/// case. Spellings that differ only in case stay distinct machines.
+impl Machine {
+    fn from_origin(origin: &ServerOrigin) -> Self {
+        match origin {
+            ServerOrigin::Local => Self::Local,
+            ServerOrigin::Ssh(destination) => Self::Ssh(destination.clone()),
+            ServerOrigin::Direct(direct) => Self::Direct {
+                name: direct.name.to_string(),
+                route: direct.route,
+            },
+        }
+    }
+
+    const fn rank(&self) -> u8 {
+        match self {
+            Self::Local => 0,
+            Self::Ssh(_) => 1,
+            Self::Direct { .. } => 2,
+        }
+    }
+}
+
+/// Orders names ignoring case, so spellings that differ only in case stay distinct but adjacent.
+fn by_name(a: &str, b: &str) -> Ordering {
+    a.to_lowercase()
+        .cmp(&b.to_lowercase())
+        .then_with(|| a.cmp(b))
+}
+
+/// Group order: the local machine first, then each SSH machine by its destination, then each
+/// direct network server by its name, ignoring case.
 impl Ord for Machine {
     fn cmp(&self, other: &Self) -> Ordering {
         match (self, other) {
-            (Self::Local, Self::Local) => Ordering::Equal,
-            (Self::Local, Self::Ssh(_)) => Ordering::Less,
-            (Self::Ssh(_), Self::Local) => Ordering::Greater,
-            (Self::Ssh(a), Self::Ssh(b)) => a
-                .as_str()
-                .to_lowercase()
-                .cmp(&b.as_str().to_lowercase())
-                .then_with(|| a.as_str().cmp(b.as_str())),
+            (Self::Ssh(a), Self::Ssh(b)) => by_name(a.as_str(), b.as_str()),
+            (
+                Self::Direct {
+                    name: a,
+                    route: first,
+                },
+                Self::Direct {
+                    name: b,
+                    route: second,
+                },
+            ) => by_name(a, b).then_with(|| first.cmp(second)),
+            _ => self.rank().cmp(&other.rank()),
         }
     }
 }
@@ -133,17 +173,37 @@ impl WorkspaceManager {
                     .filter(|destination| connections.intends(destination))
             })
             .map(Machine::Ssh);
-        let presented =
-            self.shared
-                .keys()
-                .into_iter()
-                .filter_map(|key| match self.shared.origin(key)? {
-                    ServerOrigin::Local => Some(Machine::Local),
-                    ServerOrigin::Ssh(destination) => Some(Machine::Ssh(destination.clone())),
-                });
+        let presented = self
+            .shared
+            .keys()
+            .into_iter()
+            .filter_map(|key| self.shared.origin(key).map(Machine::from_origin));
+        // A saved direct route keeps its heading while SpaceTerm tries it, waits for the person,
+        // or was refused, so that state stays visible. A route the person disconnected has none.
+        let direct = crate::ui::direct_servers::installed(cx);
+        let direct_intended = direct
+            .iter()
+            .flat_map(|direct| {
+                direct
+                    .routes()
+                    .into_iter()
+                    .filter(|(_, status)| *status != DirectRouteStatus::Disconnected)
+                    .filter_map(|(route, _)| {
+                        Some(Machine::Direct {
+                            name: direct.route(&route)?.label,
+                            route,
+                        })
+                    })
+            })
+            .collect::<Vec<_>>();
         let mut ssh_server = false;
-        for machine in presented.collect::<Vec<_>>().into_iter().chain(intended) {
-            ssh_server |= matches!(machine, Machine::Ssh(_));
+        for machine in presented
+            .collect::<Vec<_>>()
+            .into_iter()
+            .chain(intended)
+            .chain(direct_intended)
+        {
+            ssh_server |= !matches!(machine, Machine::Local);
             if let Err(position) = sections.binary_search_by(|(other, _)| other.cmp(&machine)) {
                 sections.insert(position, (machine, 0));
             }
@@ -159,7 +219,8 @@ impl WorkspaceManager {
             .map(|(machine, workspaces)| match machine {
                 Machine::Local => MachineSection {
                     label: this_computer.into(),
-                    destination: None,
+                    route: None,
+                    target: MachineTarget::Local,
                     status: None,
                     connects: false,
                     disconnects: false,
@@ -215,6 +276,7 @@ impl WorkspaceManager {
                     });
                     MachineSection {
                         label: destination.as_str().to_owned().into(),
+                        route: None,
                         // A Remote Workspace reports its own connection on its row. The heading
                         // reports the SSH server's, and an operation underway on that server
                         // outranks it: it is what is happening to the machine now.
@@ -257,7 +319,48 @@ impl WorkspaceManager {
                         // Settings lists saved SSH connections; native Remote Workspaces alone
                         // name no server there.
                         has_settings: saved,
-                        destination: Some(destination),
+                        target: MachineTarget::Ssh(destination),
+                        workspaces,
+                    }
+                }
+                Machine::Direct { name, route } => {
+                    let presented = self.direct_route_presented(&route);
+                    let status = direct.as_ref().and_then(|direct| direct.status(&route));
+                    let saved = status.is_some();
+                    let intended = status.is_some_and(|status| {
+                        !matches!(
+                            status,
+                            DirectRouteStatus::Disconnected | DirectRouteStatus::Refused(_)
+                        )
+                    });
+                    let presentation =
+                        status.map(|status| crate::ui::direct_servers::present(status, &name));
+                    let connected = status == Some(DirectRouteStatus::Connected);
+                    // Connect from the heading is the person asking, so it may let the system ask
+                    // for this device's key, as Resume does.
+                    let connects = presentation.as_ref().is_some_and(|presentation| {
+                        presentation.actions.iter().any(|action| {
+                            matches!(
+                                action,
+                                crate::ui::direct_servers::DirectServerAction::Connect
+                                    | crate::ui::direct_servers::DirectServerAction::Resume
+                            )
+                        })
+                    });
+                    MachineSection {
+                        label: name.into(),
+                        route: Some(DIRECT_ROUTE),
+                        target: MachineTarget::Direct(route),
+                        status: presentation
+                            .as_ref()
+                            .filter(|_| !connected)
+                            .map(|presentation| presentation.state),
+                        connects,
+                        disconnects: presented || intended,
+                        has_settings: saved,
+                        awaiting_connection: !presented,
+                        // A direct network server's maintenance lives in its Settings detail.
+                        maintenance: Vec::new(),
                         workspaces,
                     }
                 }
@@ -269,14 +372,25 @@ impl WorkspaceManager {
     /// sign-in or host approval it needs appears in this window.
     pub(super) fn perform_machine_command(
         &mut self,
-        destination: Option<SshDestination>,
+        target: MachineTarget,
         command: MachineMenuCommand,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let destination = match target {
+            MachineTarget::Ssh(destination) => Some(destination),
+            MachineTarget::Direct(route) => {
+                self.perform_direct_command(route, command, cx);
+                return;
+            }
+            MachineTarget::Local => None,
+        };
         match (command, destination) {
             (MachineMenuCommand::ServerSettings, destination) => {
-                crate::ui::settings_window::open_server_settings(destination, cx)
+                crate::ui::settings_window::open_server_settings(
+                    destination.map_or(MachineTarget::Local, MachineTarget::Ssh),
+                    cx,
+                )
             }
             (MachineMenuCommand::Connect, Some(destination)) => {
                 if let Some(connections) = crate::ui::ssh_servers::installed(cx) {
@@ -300,6 +414,32 @@ impl WorkspaceManager {
                 | MachineMenuCommand::Maintenance(_),
                 None,
             ) => {}
+        }
+    }
+
+    /// Performs a direct network server heading's command. Connect lets the system ask for this
+    /// device's key because the person asked; nothing here reaches the server over SSH.
+    fn perform_direct_command(
+        &mut self,
+        route: DirectRouteId,
+        command: MachineMenuCommand,
+        cx: &mut Context<Self>,
+    ) {
+        match command {
+            MachineMenuCommand::ServerSettings => {
+                crate::ui::settings_window::open_server_settings(MachineTarget::Direct(route), cx)
+            }
+            MachineMenuCommand::Connect => {
+                if let Some(direct) = crate::ui::direct_servers::installed(cx) {
+                    direct.resume(&route);
+                }
+            }
+            MachineMenuCommand::Disconnect => {
+                if let Some(direct) = crate::ui::direct_servers::installed(cx) {
+                    direct.disconnect(&route);
+                }
+            }
+            MachineMenuCommand::Maintenance(_) => {}
         }
     }
 }

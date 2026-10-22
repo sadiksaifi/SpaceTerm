@@ -13,6 +13,9 @@ mod client_view_state;
 mod control_theme;
 #[cfg(feature = "developer-tools")]
 pub(crate) mod developer_workbench;
+pub(crate) mod direct_access;
+mod direct_pairing;
+pub(crate) mod direct_servers;
 pub(crate) mod directory_picker;
 mod drag_and_drop;
 mod native_remote_workspace_flow_backend;
@@ -90,6 +93,7 @@ pub(crate) use workspace_manager::tests::assert_scroll_shortcuts_from_sidebar_fo
 pub(crate) use workspace_manager::{
     LocalServerAdapters, WorkspaceManager, WorkspaceManagerAdapters, resume_waiting_launches,
 };
+pub(crate) use workspace_sidebar::MachineTarget;
 
 /// Finishes every hover transition in progress, since test windows have no frame loop.
 #[cfg(test)]

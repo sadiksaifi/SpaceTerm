@@ -49,6 +49,11 @@ impl Global for Client {}
 #[derive(Default)]
 struct SshClients(std::collections::HashMap<String, Client>);
 impl Global for SshClients {}
+
+/// The presented direct network servers' writers, by route.
+#[derive(Default)]
+struct DirectClients(std::collections::HashMap<crate::direct_connections::DirectRouteId, Client>);
+impl Global for DirectClients {}
 impl Client {
     pub(crate) fn get(cx: &mut App) -> Option<Self> {
         if let Some(client) = cx.try_global::<Self>() {
@@ -122,6 +127,60 @@ impl Client {
     pub(crate) fn ssh(destination: &crate::domain::SshDestination, cx: &App) -> Option<Self> {
         cx.try_global::<SshClients>()
             .and_then(|clients| clients.0.get(destination.as_str()).cloned())
+    }
+    /// The edit writer for a connected direct network route's server, created once per
+    /// connection as for an SSH server.
+    pub(crate) fn for_direct(
+        route: crate::direct_connections::DirectRouteId,
+        server: LocalServer,
+        cx: &mut App,
+    ) -> Self {
+        if let Some(client) =
+            Self::direct(&route, cx).filter(|client| client.server.same_handle(&server))
+        {
+            return client;
+        }
+        let controls = std::sync::Arc::<crate::terminal::server_session::PaneControls>::default();
+        let edits = Rc::new(SharedWorkspaceClient::remote(
+            server.clone(),
+            std::sync::Arc::clone(&controls),
+        ));
+        let client = Self {
+            reads: Arc::new(server.clone()),
+            server,
+            controls,
+            source: SharedEditSource::new(edits.clone()),
+            edits,
+        };
+        cx.default_global::<DirectClients>()
+            .0
+            .insert(route, client.clone());
+        client
+    }
+    /// The writer for the server the desktop's direct registry presents for `route`, or the last
+    /// one kept for it.
+    pub(crate) fn presented_direct(
+        route: &crate::direct_connections::DirectRouteId,
+        cx: &mut App,
+    ) -> Option<Self> {
+        match crate::ui::direct_servers::installed(cx).and_then(|direct| direct.server(route)) {
+            Some(server) => Some(Self::for_direct(*route, server, cx)),
+            None => Self::direct(route, cx),
+        }
+    }
+    /// The edit writer kept for a direct network route, if any.
+    pub(crate) fn direct(
+        route: &crate::direct_connections::DirectRouteId,
+        cx: &App,
+    ) -> Option<Self> {
+        cx.try_global::<DirectClients>()
+            .and_then(|clients| clients.0.get(route).cloned())
+    }
+    /// Drops a withdrawn direct network server's writer.
+    pub(crate) fn forget_direct(route: &crate::direct_connections::DirectRouteId, cx: &mut App) {
+        if cx.has_global::<DirectClients>() {
+            cx.global_mut::<DirectClients>().0.remove(route);
+        }
     }
     /// Drops a withdrawn SSH server's writer. A later connection starts a new one.
     pub(crate) fn forget_ssh(destination: &crate::domain::SshDestination, cx: &mut App) {

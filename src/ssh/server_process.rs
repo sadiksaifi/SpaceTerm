@@ -347,6 +347,93 @@ impl<A: SshProcessAdapter> NativeSshConnectBackend<A> {
     }
 }
 impl<A: SshProcessAdapter> NativeSshConnectBackend<A> {
+    /// Opens only the original account bridge for restricted work. This never enters Connect's
+    /// installation, service preparation or presentation path, and changes no saved intent.
+    /// Quiet work requires an already authenticated live route and performs no discovery.
+    pub(crate) fn resolve_account(
+        self: &Arc<Self>,
+        destination: &SshDestination,
+        expected: &SshServerContinuity,
+        mode: ConnectMode,
+    ) -> Result<LocalServer, SshConnectFailure> {
+        if expected.build != identity()
+            || expected.route == [0; 32]
+            || expected.account == 0
+            || expected.server == [0; 32]
+        {
+            return Err(SshConnectFailure::Refused(
+                RefusalKind::AuthorizationRefused,
+            ));
+        }
+        let route = if mode == ConnectMode::QuietContinuation {
+            self.routes
+                .lock()
+                .ok()
+                .and_then(|routes| routes.get(destination.as_str()).cloned())
+                .filter(|route| route.is_alive())
+                .ok_or(SshConnectFailure::NeedsPerson(
+                    InteractionReason::CredentialProvider,
+                ))?
+        } else {
+            self.route(destination, mode, &SshCancellationToken::default(), &|_| {})?
+        };
+        let claim = route.claim().ok_or(SshConnectFailure::Cancelled)?;
+        let bridge_identity = AccountBridgeIdentity {
+            account: expected.account,
+            build: expected.build.clone(),
+            server: expected.server,
+        };
+        let connector = Arc::new(RestrictedAccountConnector {
+            connector: NativeConnector {
+                // This slot is private to the original, so a later ordinary Connect cannot
+                // replace its route through the shared client cache.
+                route: Arc::new(Mutex::new(Arc::downgrade(&route))),
+                expected: bridge_identity.clone(),
+            },
+            claim: Some(claim),
+            backend: Arc::downgrade(self),
+            destination: destination.clone(),
+        });
+        if expected.route != route.digest() {
+            return Err(SshConnectFailure::Changed(ContinuityChange::HostChanged));
+        }
+        let mut namespace = Sha256::new();
+        namespace.update(expected.route);
+        namespace.update(expected.server);
+        namespace.update(expected.account.to_be_bytes());
+        let client = LocalServer::remote(
+            identity(),
+            namespace.finalize().into(),
+            bridge_identity,
+            connector,
+        )
+        .map_err(map_server_error)?;
+        // The account bridge verifies the expected account/build/server before protocol use.
+        // Refresh reads running state; it never prepares or starts an absent/stopped server.
+        client.refresh().map_err(map_server_error)?;
+        Ok(client)
+    }
+
+    fn release_account_resolution_route(
+        &self,
+        destination: &SshDestination,
+        expected: &Arc<NativeRoute<A>>,
+    ) {
+        let retired = self.routes.lock().ok().and_then(|mut routes| {
+            let route = routes.get(destination.as_str())?;
+            if !Arc::ptr_eq(route, expected)
+                || route.presented.load(std::sync::atomic::Ordering::Acquire)
+                || route.held()
+            {
+                return None;
+            }
+            routes.remove(destination.as_str())
+        });
+        if let Some(route) = retired {
+            route.retire();
+        }
+    }
+
     /// Acquires the route one maintenance exchange runs on, from the cache Connect shares.
     pub(super) fn maintenance_route(
         &self,
@@ -852,6 +939,33 @@ struct NativeConnector<A: SshProcessAdapter> {
     route: Arc<Mutex<Weak<NativeRoute<A>>>>,
     expected: AccountBridgeIdentity,
 }
+
+/// Keeps a restricted bridge's exact route alive without presenting a saved connection.
+struct RestrictedAccountConnector<A: SshProcessAdapter> {
+    connector: NativeConnector<A>,
+    claim: Option<RouteClaim<A>>,
+    backend: Weak<NativeSshConnectBackend<A>>,
+    destination: SshDestination,
+}
+
+impl<A: SshProcessAdapter> AccountConnector for RestrictedAccountConnector<A> {
+    fn connect(&self) -> Result<AccountBridge, ServerError> {
+        self.connector.connect()
+    }
+}
+
+impl<A: SshProcessAdapter> Drop for RestrictedAccountConnector<A> {
+    fn drop(&mut self) {
+        if let Some(claim) = self.claim.take() {
+            let route = Arc::clone(&claim.0);
+            drop(claim);
+            if let Some(backend) = self.backend.upgrade() {
+                backend.release_account_resolution_route(&self.destination, &route);
+            }
+        }
+    }
+}
+
 impl<A: SshProcessAdapter> AccountConnector for NativeConnector<A> {
     fn connect(&self) -> Result<AccountBridge, ServerError> {
         let route = self
@@ -1398,7 +1512,7 @@ pub(crate) mod testing {
     /// bytes the client sent it.
     pub(crate) struct FakeAccount {
         /// The effective OpenSSH configuration, whose digest is the route an original binds.
-        configuration: Vec<u8>,
+        configuration: Mutex<Vec<u8>>,
         answer: Box<AccountAnswer>,
         commands: Mutex<Vec<(String, Vec<u8>)>>,
     }
@@ -1410,7 +1524,7 @@ pub(crate) mod testing {
             answer: impl Fn(&str, &[u8]) -> (Vec<u8>, i32) + Send + Sync + 'static,
         ) -> Arc<Self> {
             Arc::new(Self {
-                configuration: configuration.as_bytes().to_vec(),
+                configuration: Mutex::new(configuration.as_bytes().to_vec()),
                 answer: Box::new(answer),
                 commands: Mutex::new(Vec::new()),
             })
@@ -1423,6 +1537,9 @@ pub(crate) mod testing {
                 .iter()
                 .map(|(command, _)| command.clone())
                 .collect()
+        }
+        pub(super) fn set_configuration(&self, configuration: &str) {
+            *self.configuration.lock().unwrap() = configuration.as_bytes().to_vec();
         }
         /// What the client wrote to each command naming `action`, in order.
         pub(crate) fn sent(&self, action: &str) -> Vec<Vec<u8>> {
@@ -1513,7 +1630,10 @@ pub(crate) mod testing {
             let reader = |bytes: Vec<u8>| Box::new(Cursor::new(bytes)) as Box<dyn Read + Send>;
             let (stdin, stdout) = if arguments.iter().any(|argument| argument == "-G") {
                 *exit.lock().unwrap() = Some(ProcessExit::successful());
-                (None, Some(reader(self.account.configuration.clone())))
+                (
+                    None,
+                    Some(reader(self.account.configuration.lock().unwrap().clone())),
+                )
             } else if arguments.iter().any(|argument| argument == "-N") {
                 // The master publishes its control socket and stays up until the backend ends it.
                 if let Some(socket) = arguments.windows(2).find(|pair| pair[0] == "-S") {
@@ -1670,6 +1790,196 @@ pub(crate) mod testing {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const ORIGINAL_ROUTE: &str = "hostname original.test\nuser tester\nport 22\n";
+    const CHANGED_ROUTE: &str = "hostname replacement.test\nuser tester\nport 22\n";
+
+    fn account_continuity() -> SshServerContinuity {
+        SshServerContinuity {
+            route: Sha256::digest(ORIGINAL_ROUTE.as_bytes()).into(),
+            account: 501,
+            build: identity().into(),
+            server: [9; 32],
+        }
+    }
+
+    #[gpui::test]
+    fn account_resolution_quiet_never_authenticates_an_unavailable_original(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let account = testing::FakeAccount::new(CHANGED_ROUTE, |_, _| {
+            panic!("restricted resolution must not discover or prepare a server")
+        });
+        let (backend, prompts) = testing::backend(
+            cx.background_executor.clone(),
+            account.clone(),
+            SshServerArtifacts::new(None),
+        );
+        let backend = Arc::new(backend);
+        let destination = SshDestination::new("original-host".into()).unwrap();
+
+        assert!(matches!(
+            backend.resolve_account(
+                &destination,
+                &account_continuity(),
+                ConnectMode::QuietContinuation,
+            ),
+            Err(SshConnectFailure::NeedsPerson(
+                InteractionReason::CredentialProvider
+            ))
+        ));
+        assert_eq!(prompts.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert!(account.commands().is_empty());
+    }
+
+    #[gpui::test]
+    fn account_resolution_quiet_refuses_a_different_live_route_without_authenticating(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let account = testing::FakeAccount::new(CHANGED_ROUTE, |_, _| {
+            panic!("a changed original must send no server command")
+        });
+        let (backend, prompts) = testing::backend(
+            cx.background_executor.clone(),
+            account.clone(),
+            SshServerArtifacts::new(None),
+        );
+        let backend = Arc::new(backend);
+        let destination = SshDestination::new("original-host".into()).unwrap();
+        let _live = backend
+            .maintenance_route(
+                &destination,
+                ConnectMode::Requested,
+                &SshCancellationToken::default(),
+                &|_| {},
+            )
+            .ok()
+            .expect("the fake route must connect");
+        assert_eq!(prompts.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        assert!(matches!(
+            backend.resolve_account(
+                &destination,
+                &account_continuity(),
+                ConnectMode::QuietContinuation,
+            ),
+            Err(SshConnectFailure::Changed(ContinuityChange::HostChanged))
+        ));
+        assert_eq!(prompts.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(account.commands().is_empty());
+    }
+
+    #[derive(Default)]
+    struct AccountIntents {
+        records: Mutex<Vec<RetainedSshConnection>>,
+        writes: std::sync::atomic::AtomicUsize,
+    }
+
+    impl SshConnectionIntentStore for AccountIntents {
+        fn load(&self) -> Result<Vec<RetainedSshConnection>, SshIntentStoreError> {
+            Ok(self.records.lock().unwrap().clone())
+        }
+
+        fn retain(&self, record: RetainedSshConnection) -> Result<(), SshIntentStoreError> {
+            let mut records = self.records.lock().unwrap();
+            records.retain(|other| other.destination != record.destination);
+            records.push(record);
+            self.writes
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn remove(&self, destination: &SshDestination) -> Result<(), SshIntentStoreError> {
+            self.records
+                .lock()
+                .unwrap()
+                .retain(|record| record.destination != *destination);
+            self.writes
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    fn await_account_registry(condition: impl Fn() -> bool) {
+        let until = Instant::now() + Duration::from_secs(2);
+        while !condition() && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(
+            condition(),
+            "account registry did not finish its bounded persistence work"
+        );
+    }
+
+    #[gpui::test]
+    fn account_resolution_preserves_removal_and_refuses_a_later_alias_change(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let account = testing::FakeAccount::new(ORIGINAL_ROUTE, |_, _| {
+            panic!("restricted recovery must not reach a substituted account")
+        });
+        let (backend, prompts) = testing::backend(
+            cx.background_executor.clone(),
+            account.clone(),
+            SshServerArtifacts::new(None),
+        );
+        let backend = Arc::new(backend);
+        let destination = SshDestination::new("original-host".into()).unwrap();
+        let _live = backend
+            .maintenance_route(
+                &destination,
+                ConnectMode::Requested,
+                &SshCancellationToken::default(),
+                &|_| {},
+            )
+            .ok()
+            .expect("the fake route must connect");
+        let original = account_continuity();
+        let intents = Arc::new(AccountIntents {
+            records: Mutex::new(vec![RetainedSshConnection {
+                destination: destination.clone(),
+                continuity: Some(original.clone()),
+                active: false,
+            }]),
+            ..Default::default()
+        });
+        let connections = SshServerConnections::new(backend.clone(), intents.clone());
+        connections.resume_retained();
+        await_account_registry(|| connections.connections().len() == 1);
+        connections.remove(&destination);
+        await_account_registry(|| {
+            intents.records.lock().unwrap().is_empty()
+                && intents.writes.load(std::sync::atomic::Ordering::SeqCst) == 1
+        });
+        account.set_configuration(CHANGED_ROUTE);
+
+        assert!(matches!(
+            backend.resolve_account(&destination, &original, ConnectMode::QuietContinuation),
+            Err(SshConnectFailure::NeedsPerson(
+                InteractionReason::CredentialProvider
+            ))
+        ));
+        assert_eq!(prompts.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(matches!(
+            backend.resolve_account(&destination, &original, ConnectMode::Requested),
+            Err(SshConnectFailure::Changed(ContinuityChange::HostChanged))
+        ));
+        assert_eq!(prompts.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert!(
+            account.commands().is_empty(),
+            "the changed alias carried no account command"
+        );
+        assert!(
+            connections.connections().is_empty(),
+            "restricted work recreated ordinary presentation"
+        );
+        assert!(!connections.intends(&destination));
+        assert!(
+            intents.records.lock().unwrap().is_empty(),
+            "restricted work saved the removed route again"
+        );
+        assert_eq!(intents.writes.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
 
     #[test]
     fn bounded_discovery_refuses_wrong_build_and_unsupported_capability() {

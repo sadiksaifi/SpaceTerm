@@ -759,7 +759,8 @@ impl PaneService for SharedWorkspaceHost {
                 }
             }
         }
-        self.attachment_generations.retain(|(owner, _), _| *owner != client);
+        self.attachment_generations
+            .retain(|(owner, _), _| *owner != client);
     }
     fn shutdown(&mut self) -> Result<(), ServerError> {
         self.stop_worktree_reads();
@@ -991,7 +992,10 @@ mod tests {
             panic!("unclaimed Pane remains available");
         };
         host.revoked([2; 32]);
-        assert!(matches!(host.request([1; 32], [1; 32], Request::Poll { lease }), Reply::Screen(_) | Reply::Unchanged));
+        assert!(matches!(
+            host.request([1; 32], [1; 32], Request::Poll { lease }),
+            Reply::Screen(_) | Reply::Unchanged
+        ));
         host.shutdown().unwrap();
     }
 

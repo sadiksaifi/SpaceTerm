@@ -1,0 +1,1105 @@
+//! Two real hosts, one existing Development service, and only scoped test-owned work.
+//! The default prints the scope without connecting. The parent prepares/signs both native
+//! examples and the approved service before explicitly authorizing the mutation pass.
+
+#[cfg(feature = "client")]
+#[expect(
+    dead_code,
+    reason = "this exercise uses only the terminal command/output helpers"
+)]
+mod support;
+
+#[cfg(feature = "client")]
+mod exercise {
+    use std::io::{Read, Write};
+    use std::net::SocketAddr;
+    use std::os::fd::AsRawFd;
+    use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    use serde_json::{Value, json};
+    use spaceterm_server::direct::{
+        self, DeviceCredential, DirectConnection, DirectConnector, DirectError, Enrollment,
+        Invitation, ListenerState, NetworkPolicy, PairedDevice,
+    };
+    use spaceterm_server::hierarchy::{CloseTarget, Id, Inventory, Mutation, Outcome};
+    use spaceterm_server::pane::control::Controller;
+    use spaceterm_server::pane::{
+        Lease, PaneConnection, PaneSize, Reply, Request, graphics, reading,
+    };
+    use spaceterm_server::{LocalServer, ServerError};
+
+    type Result<T> = std::result::Result<T, &'static str>;
+    const IDENTITY: &str = "spaceterm-development";
+    const DEVICE_NAME: &str = "direct541-penguin";
+    const MAX_PIPE_FRAME: usize = 16 * 1024;
+    const PIPE_DEADLINE: Duration = Duration::from_secs(90);
+
+    fn api<T, E>(result: std::result::Result<T, E>) -> Result<T> {
+        result.map_err(|_| "native API refused or unavailable")
+    }
+
+    fn require(condition: bool, failure: &'static str) -> Result<()> {
+        if condition { Ok(()) } else { Err(failure) }
+    }
+
+    fn random() -> Result<[u8; 32]> {
+        let mut bytes = [0; 32];
+        // SAFETY: getentropy writes exactly 32 bytes to this live writable array.
+        require(
+            unsafe { libc::getentropy(bytes.as_mut_ptr().cast(), bytes.len()) } == 0,
+            "native randomness unavailable",
+        )?;
+        Ok(bytes)
+    }
+
+    fn hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    }
+
+    fn id(text: &str) -> Result<Id> {
+        require(
+            text.len() == 64 && text.is_ascii(),
+            "expected server must be 64 hex digits",
+        )?;
+        let mut bytes = [0; 32];
+        for (index, byte) in bytes.iter_mut().enumerate() {
+            *byte = u8::from_str_radix(&text[index * 2..index * 2 + 2], 16)
+                .map_err(|_| "expected server must be 64 hex digits")?;
+        }
+        require(bytes != [0; 32], "expected server cannot be zero")?;
+        Ok(bytes)
+    }
+
+    fn size() -> PaneSize {
+        PaneSize {
+            columns: 96,
+            rows: 30,
+            cell_width: 8,
+            cell_height: 18,
+        }
+    }
+
+    fn inventory(connection: &mut PaneConnection) -> Result<(Inventory, u64)> {
+        match api(connection.exchange(&Request::Inventory))? {
+            Reply::Inventory {
+                inventory,
+                next_sequence,
+            } => Ok((inventory, next_sequence)),
+            _ => Err("inventory response refused"),
+        }
+    }
+
+    fn idle(inventory: &Inventory) -> Result<()> {
+        require(
+            inventory
+                .close
+                .as_ref()
+                .is_some_and(|close| close.sessions.iter().all(|pane| pane.session.is_none())),
+            "idle guard refused: a Terminal Session exists or session facts are unavailable",
+        )
+    }
+
+    fn mutate(
+        server: &LocalServer,
+        connection: &mut PaneConnection,
+        mutation: Mutation,
+    ) -> Result<Id> {
+        let mut journal = api(server.shared_journal())?;
+        require(
+            journal.pending().is_none(),
+            "resolve this test client's original mutation first",
+        )?;
+        let (_, sequence) = inventory(connection)?;
+        api(journal.submit(sequence, mutation.clone()))?;
+        let mut reply = api(connection.exchange(&Request::Mutate {
+            sequence,
+            mutation: mutation.clone(),
+        }))?;
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while matches!(reply, Reply::MutationPending) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(40));
+            reply = api(connection.exchange(&Request::Resolve { sequence }))?;
+        }
+        let Reply::Outcome(outcome) = reply else {
+            return Err("test mutation remains unconfirmed");
+        };
+        require(
+            outcome.sequence == sequence && outcome.mutation == mutation,
+            "test mutation identity changed",
+        )?;
+        api(journal.complete(outcome.clone()))?;
+        api(connection.exchange(&Request::Acknowledge { sequence }))?;
+        api(journal.retire())?;
+        match outcome.outcome {
+            Outcome::Accepted { target } => Ok(target),
+            _ => Err("test mutation refused"),
+        }
+    }
+
+    fn select(connection: &mut PaneConnection, pane: Id, explicit: bool) -> Result<Reply> {
+        api(connection.exchange(&Request::SelectPane {
+            pane,
+            explicit,
+            size: size(),
+            style: None,
+        }))
+    }
+
+    fn attached(reply: Reply) -> Result<Lease> {
+        match reply {
+            Reply::Attached { lease } => Ok(lease),
+            _ => Err("expected an attached test Pane"),
+        }
+    }
+
+    fn take(connection: &mut PaneConnection, pane: Id, named: &str) -> Result<Lease> {
+        let Reply::Takeover {
+            target,
+            controller:
+                Controller::Client {
+                    name,
+                    this_client: false,
+                },
+            ..
+        } = select(connection, pane, false)?
+        else {
+            return Err("expected another Controlling Client");
+        };
+        require(
+            name.as_str().ends_with(&format!("({named})")),
+            "Controlling Client name did not reconcile",
+        )?;
+        attached(api(connection.exchange(&Request::TakeOver {
+            target,
+            size: size(),
+            style: None,
+        }))?)
+    }
+
+    fn command(connection: &mut PaneConnection, lease: Lease, text: &str) -> Result<()> {
+        api(super::support::command(connection, lease, text))
+    }
+
+    fn output(connection: &mut PaneConnection, lease: Lease, marker: &str) -> Result<()> {
+        api(super::support::await_output(connection, lease, marker)).map(|_| ())
+    }
+
+    fn pipe_only(fd: i32) -> Result<()> {
+        let mut metadata = std::mem::MaybeUninit::<libc::stat>::uninit();
+        // SAFETY: fstat initializes the live output on success; no file contents are read.
+        require(
+            unsafe { libc::fstat(fd, metadata.as_mut_ptr()) } == 0,
+            "pipe metadata unavailable",
+        )?;
+        // SAFETY: the successful fstat call initialized every field.
+        let kind = unsafe { metadata.assume_init() }.st_mode & libc::S_IFMT;
+        require(
+            kind == libc::S_IFIFO || kind == libc::S_IFSOCK,
+            "invitation transport must be an anonymous pipe or SSH stream, never a file or terminal",
+        )
+    }
+
+    fn read_exact<R: Read + AsRawFd>(
+        reader: &mut R,
+        mut bytes: &mut [u8],
+        until: Instant,
+    ) -> Result<()> {
+        while !bytes.is_empty() {
+            let left = until.saturating_duration_since(Instant::now());
+            require(!left.is_zero(), "pipe phase deadline elapsed")?;
+            let mut poll = libc::pollfd {
+                fd: reader.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            let millis = left.as_millis().min(i32::MAX as u128) as i32;
+            // SAFETY: poll borrows one initialized pollfd for at most the bounded deadline.
+            let ready = unsafe { libc::poll(&mut poll, 1, millis) };
+            if ready < 0
+                && std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted
+            {
+                continue;
+            }
+            require(ready > 0, "pipe phase unavailable or timed out")?;
+            let read = api(reader.read(bytes))?;
+            require(read != 0, "peer pipe closed before completing its phase")?;
+            bytes = &mut bytes[read..];
+        }
+        Ok(())
+    }
+
+    fn receive<R: Read + AsRawFd>(reader: &mut R) -> Result<Vec<u8>> {
+        pipe_only(reader.as_raw_fd())?;
+        let until = Instant::now() + PIPE_DEADLINE;
+        let mut length = [0; 4];
+        read_exact(reader, &mut length, until)?;
+        let length = u32::from_be_bytes(length) as usize;
+        require(
+            length != 0 && length <= MAX_PIPE_FRAME,
+            "pipe frame bound refused",
+        )?;
+        let mut bytes = vec![0; length];
+        if let Err(error) = read_exact(reader, &mut bytes, until) {
+            wipe(&mut bytes);
+            return Err(error);
+        }
+        Ok(bytes)
+    }
+
+    fn wipe(bytes: &mut [u8]) {
+        for byte in bytes {
+            // SAFETY: each byte is live and exclusively borrowed. Volatile writes retain the
+            // erasure even when the compiler can prove the receiving frame is about to drop.
+            unsafe {
+                std::ptr::write_volatile(byte, 0);
+            }
+        }
+        std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn send<W: Write + AsRawFd>(writer: &mut W, bytes: &[u8]) -> Result<()> {
+        pipe_only(writer.as_raw_fd())?;
+        require(
+            !bytes.is_empty() && bytes.len() <= MAX_PIPE_FRAME,
+            "pipe frame bound refused",
+        )?;
+        api(writer.write_all(&(bytes.len() as u32).to_be_bytes()))?;
+        api(writer.write_all(bytes))?;
+        api(writer.flush())
+    }
+
+    fn send_json<W: Write + AsRawFd>(writer: &mut W, value: Value) -> Result<()> {
+        send(writer, &api(serde_json::to_vec(&value))?)
+    }
+
+    fn receive_json<R: Read + AsRawFd>(reader: &mut R) -> Result<Value> {
+        let mut bytes = receive(reader)?;
+        let result = serde_json::from_slice(&bytes).map_err(|_| "peer phase response malformed");
+        wipe(&mut bytes);
+        result
+    }
+
+    fn receive_invitation<R: Read + AsRawFd>(reader: &mut R) -> Result<Invitation> {
+        let mut bytes = receive(reader)?;
+        let result = std::str::from_utf8(&bytes)
+            .map_err(|_| "invitation pipe encoding refused")
+            .and_then(|text| api(Invitation::parse(text)));
+        wipe(&mut bytes);
+        result
+    }
+
+    struct Peer {
+        child: Child,
+        input: ChildStdin,
+        output: ChildStdout,
+    }
+
+    impl Peer {
+        fn penguin() -> Result<Self> {
+            let mut child = api(Command::new("ssh").args([
+                "-T", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes",
+                "-o", "UpdateHostKeys=no", "-o", "AddKeysToAgent=no",
+                "-o", "UseKeychain=no", "-o", "LogLevel=ERROR",
+                "-o", "ControlMaster=no", "-o", "ControlPath=none", "penguin",
+                "exec \"$HOME/Projects/SpaceTerm/target/debug/examples/direct_devices\" device-pipe",
+            ]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::inherit()).spawn())?;
+            let input = child.stdin.take().ok_or("SSH input pipe unavailable")?;
+            let output = child.stdout.take().ok_or("SSH output pipe unavailable")?;
+            Ok(Self {
+                child,
+                input,
+                output,
+            })
+        }
+
+        fn message(&mut self, value: Value) -> Result<Value> {
+            send_json(&mut self.input, value)?;
+            receive_json(&mut self.output)
+        }
+
+        fn finish(&mut self) -> Result<()> {
+            send_json(&mut self.input, json!({"done": true}))?;
+            let until = Instant::now() + Duration::from_secs(5);
+            while Instant::now() < until {
+                if let Some(status) = api(self.child.try_wait())? {
+                    return require(status.success(), "Penguin driver failed");
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            Err("Penguin driver did not exit")
+        }
+    }
+
+    impl Drop for Peer {
+        fn drop(&mut self) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+
+    struct Scope {
+        owner: LocalServer,
+        policy: NetworkPolicy,
+        server: Id,
+        baseline: Inventory,
+        workspace: Option<(Id, Id)>,
+        invitations: Vec<Id>,
+        claims: Vec<Id>,
+        keys: Vec<[u8; 32]>,
+    }
+
+    impl Scope {
+        fn cleanup(&mut self) -> Result<()> {
+            require(
+                api(self.owner.direct_status())?.pin.server == self.server,
+                "cleanup server identity changed",
+            )?;
+            for invitation in &self.invitations {
+                api(self.owner.withdraw_invitation(*invitation))?;
+            }
+            for claim in api(self.owner.pairing_claims())? {
+                if self.claims.contains(&claim.id) {
+                    api(self.owner.reject_device(claim.id))?;
+                }
+            }
+            let devices = api(self.owner.paired_devices())?;
+            for device in &devices {
+                if self.keys.contains(&device.public_key) {
+                    api(self.owner.revoke_device(random()?, device.pairing))?;
+                }
+            }
+            let mut connection = api(self.owner.connect_pane())?;
+            if let Some((workspace, pane)) = self.workspace {
+                let current = inventory(&mut connection)?.0;
+                if let Some(owned) = current.workspaces.iter().find(|work| work.id == workspace) {
+                    require(
+                        owned.tabs.len() == 1
+                            && owned.tabs[0].panes.len() == 1
+                            && owned.tabs[0].root_pane == pane,
+                        "cleanup refused: test Workspace membership changed",
+                    )?;
+                    let target = CloseTarget::Workspace { workspace };
+                    let confirmation = current
+                        .close_confirmation(target)
+                        .ok_or("cleanup confirmation unavailable")?;
+                    mutate(
+                        &self.owner,
+                        &mut connection,
+                        Mutation::Close {
+                            target,
+                            confirmation,
+                        },
+                    )?;
+                }
+                self.workspace = None;
+            }
+            require(
+                api(self.owner.paired_devices())?.is_empty(),
+                "cleanup preserved an unrelated pairing; exposure requires owner review",
+            )?;
+            let policy = api(self.owner.direct_status())?.policy;
+            require(
+                policy.as_ref() == Some(&self.policy) || policy.is_none(),
+                "cleanup preserved a changed exposure policy",
+            )?;
+            if policy.is_some() {
+                api(self.owner.set_direct_policy(None))?;
+            }
+            require(
+                inventory(&mut connection)?.0.workspaces == self.baseline.workspaces,
+                "baseline organization changed; it was preserved without rollback",
+            )?;
+            Ok(())
+        }
+
+        fn enroll(&mut self, peer: &mut Peer) -> Result<PairedDevice> {
+            let invitation = api(self.owner.invite_device())?;
+            require(
+                invitation.server_pin().server == self.server,
+                "invitation belongs to another server",
+            )?;
+            self.invitations.push(invitation.id());
+            send(&mut peer.input, invitation.display_text().as_bytes())?;
+            let response = receive_json(&mut peer.output)?;
+            let claim_id: Id = api(serde_json::from_value(response["claim"].clone()))?;
+            let claims = api(self.owner.pairing_claims())?;
+            require(
+                claims.len() == 1 && claims[0].id == claim_id,
+                "exact claim retry created duplicate or concurrent owner claims",
+            )?;
+            let claim = claims
+                .into_iter()
+                .find(|claim| claim.id == claim_id)
+                .ok_or("proved device claim missing")?;
+            self.claims.push(claim.id);
+            self.keys.push(claim.device_public_key);
+            require(
+                claim.device_fingerprint() == response["fingerprint"].as_str().unwrap_or_default()
+                    && claim.device_name.as_str() == DEVICE_NAME,
+                "claim fingerprint or identity substituted",
+            )?;
+            let mut wrong = claim.clone();
+            wrong.server[0] ^= 1;
+            require(
+                matches!(
+                    self.owner.approve_device(&wrong),
+                    Err(DirectError::WrongServer)
+                ),
+                "wrong server binding was accepted",
+            )?;
+            let mut wrong = claim.clone();
+            wrong.device_public_key[0] ^= 1;
+            require(
+                matches!(
+                    self.owner.approve_device(&wrong),
+                    Err(DirectError::Substituted)
+                ),
+                "substituted public claim was accepted",
+            )?;
+            let approved = api(self.owner.approve_device(&claim))?;
+            require(
+                matches!(
+                    self.owner.approve_device(&claim),
+                    Err(DirectError::AlreadyDecided)
+                ),
+                "approval replay was accepted",
+            )?;
+            let response = peer.message(json!({"approved": true}))?;
+            let paired: PairedDevice = api(serde_json::from_value(response["paired"].clone()))?;
+            require(
+                paired.pin == *invitation.server_pin()
+                    && paired.pairing == approved.pairing
+                    && paired.client == approved.client,
+                "approved device/server binding changed",
+            )?;
+            Ok(paired)
+        }
+    }
+
+    fn owner(bind: SocketAddr, expected: Id, restart: bool) -> Result<()> {
+        require(
+            !bind.ip().is_loopback(),
+            "two-host verification requires a reachable native host address",
+        )?;
+        let name = format!("direct541-owner-{}", &hex(&random()?)[..6]);
+        let owner = api(LocalServer::for_development_client(&name, 1))?;
+        require(
+            api(owner.refresh())?.protocol_major == 1,
+            "expected initial protocol major 1",
+        )?;
+        let mut connection = api(owner.connect_pane())?;
+        let baseline = inventory(&mut connection)?.0;
+        idle(&baseline)?;
+        let initial = api(owner.direct_status())?;
+        require(
+            initial.pin.server == expected && initial.pin.build == IDENTITY,
+            "expected Development server identity changed",
+        )?;
+        require(
+            initial.policy.is_none()
+                && initial.listener == ListenerState::Off
+                && api(owner.paired_devices())?.is_empty()
+                && api(owner.pairing_claims())?.is_empty(),
+            "scope guard refused: exposure, paired devices or pending claims already exist",
+        )?;
+        let policy = api(NetworkPolicy::new(bind))?;
+        let mut scope = Scope {
+            owner,
+            policy,
+            server: expected,
+            baseline,
+            workspace: None,
+            invitations: Vec::new(),
+            claims: Vec::new(),
+            keys: Vec::new(),
+        };
+        println!("SCOPE named Development client {name}");
+        let result = (|| {
+            let status = api(scope.owner.set_direct_policy(Some(scope.policy.clone())))?;
+            require(
+                status.pin == initial.pin
+                    && status.listener == ListenerState::Listening { addr: bind },
+                "explicit exposure did not bind the requested endpoint",
+            )?;
+            if restart {
+                idle(&inventory(&mut connection)?.0)?;
+                drop(connection);
+                api(spaceterm_server::service::Service::for_identity(IDENTITY))?
+                    .restart()
+                    .map_err(|_| "explicit idle service restart failed")?;
+                let until = Instant::now() + Duration::from_secs(15);
+                connection = loop {
+                    match scope.owner.connect_pane() {
+                        Ok(connection) => break connection,
+                        Err(_) if Instant::now() < until => {
+                            std::thread::sleep(Duration::from_millis(50))
+                        }
+                        Err(_) => return Err("server did not return after the explicit restart"),
+                    }
+                };
+                require(
+                    api(scope.owner.direct_status())? == status,
+                    "restart did not retain exact network policy and server identity",
+                )?;
+                idle(&inventory(&mut connection)?.0)?;
+                println!("PASS explicit idle restart retained exposure policy and server identity");
+            }
+            let mut peer = Peer::penguin()?;
+            require(
+                receive_json(&mut peer.output)?["os"].as_str() == Some("linux"),
+                "second native host did not identify as Linux",
+            )?;
+            let paired = scope.enroll(&mut peer)?;
+            println!(
+                "PASS two-host claim proofs, exact retry, substitution refusal, approval and protocol major 1"
+            );
+            let workspace = mutate(
+                &scope.owner,
+                &mut connection,
+                Mutation::CreateWorkspace {
+                    name: format!("Direct devices native {}", &hex(&random()?)[..12]),
+                    directory: None,
+                },
+            )?;
+            println!("SCOPE test Workspace {}", hex(&workspace));
+            // Capture the accepted Workspace immediately, before any later fixture action can fail.
+            scope.workspace = Some((workspace, [0; 32]));
+            let current = inventory(&mut connection)?.0;
+            let work = current
+                .workspaces
+                .iter()
+                .find(|work| work.id == workspace)
+                .ok_or("test Workspace missing")?;
+            let pane = work.tabs.first().ok_or("test root Tab missing")?.root_pane;
+            scope.workspace = Some((workspace, pane));
+            let first = attached(select(&mut connection, pane, true)?)?;
+            command(
+                &mut connection,
+                first,
+                "stty -echo; printf '\\033[2J\\033[HDIRECT-LOCAL\\n'",
+            )?;
+            output(&mut connection, first, "DIRECT-LOCAL")?;
+            let response =
+                peer.message(json!({"pane": pane, "owner": name, "session": first.session}))?;
+            println!(
+                "PASS delayed WSS consumer: Scrollback checked={}, graphics bytes={}",
+                response["reading_checked"]
+                    .as_bool()
+                    .ok_or("reading capability report missing")?,
+                response["graphics_bytes"]
+                    .as_u64()
+                    .ok_or("graphics capability report missing")?
+            );
+            let remote: Lease = api(serde_json::from_value(response["lease"].clone()))?;
+            require(
+                remote.session == first.session
+                    && matches!(
+                        connection.exchange(&Request::Poll { lease: first }),
+                        Err(ServerError::StaleControl)
+                    ),
+                "WSS takeover changed the Session or retained stale local control",
+            )?;
+            let returned = take(&mut connection, pane, DEVICE_NAME)?;
+            require(
+                returned.session == first.session,
+                "local Take Over replaced the Session",
+            )?;
+            let response = peer.message(json!({"owner": name}))?;
+            let remote: Lease = api(serde_json::from_value(response["lease"].clone()))?;
+            require(
+                remote.session == first.session,
+                "second WSS Take Over replaced the Session",
+            )?;
+            api(scope.owner.revoke_device(random()?, paired.pairing))?;
+            let response = peer.message(json!({"revoked": true}))?;
+            require(
+                response["revoked"] == true && response["self_confirmed"] == true,
+                "revoked device did not reject existing connections and fresh authentication",
+            )?;
+            let returned = attached(select(&mut connection, pane, false)?)?;
+            require(
+                returned.session == first.session,
+                "revocation killed or replaced the Terminal Session",
+            )?;
+            println!(
+                "PASS named control, bulk Scrollback/available graphics, reconnect and exact revocation"
+            );
+            let last = scope.enroll(&mut peer)?;
+            require(
+                api(scope.owner.paired_devices())?
+                    .iter()
+                    .map(|device| device.pairing)
+                    .collect::<Vec<_>>()
+                    == vec![last.pairing],
+                "last-device scope changed",
+            )?;
+            require(
+                peer.message(json!({"pane": pane, "owner": name, "session": first.session}))?["ready"]
+                    == true,
+                "last device did not acquire the same Session",
+            )?;
+            require(
+                peer.message(json!({"self_revoke": true}))?["self_retry"] == true,
+                "last-device exact self-revocation retry failed",
+            )?;
+            require(
+                api(scope.owner.paired_devices())?.is_empty(),
+                "last-device revocation was not retained",
+            )?;
+            let returned = attached(select(&mut connection, pane, false)?)?;
+            require(
+                returned.session == first.session,
+                "self-revocation killed or replaced the Terminal Session",
+            )?;
+            command(
+                &mut connection,
+                returned,
+                "printf 'DIRECT-SURVIVED-UNPAIR\\n'",
+            )?;
+            output(&mut connection, returned, "DIRECT-SURVIVED-UNPAIR")?;
+            peer.finish()?;
+            println!(
+                "PASS last-device self-unpair, discarded-receipt exact retry and preserved Terminal Session"
+            );
+            Ok(())
+        })();
+        let cleanup = scope.cleanup();
+        if cleanup.is_ok() {
+            println!(
+                "PASS scoped cleanup: baseline Workspaces retained, test pairings revoked, exposure off"
+            );
+        } else {
+            eprintln!(
+                "direct_devices: scoped cleanup incomplete; inspect the bounded test scope before continuing"
+            );
+        }
+        result.and(cleanup)
+    }
+
+    struct MemoryConnector {
+        endpoint: String,
+        paired: PairedDevice,
+        credential: DeviceCredential,
+    }
+    impl DirectConnector for MemoryConnector {
+        fn connect(&self) -> std::result::Result<DirectConnection, DirectError> {
+            DirectConnection::connect(&self.endpoint, &self.paired, &self.credential)
+        }
+    }
+
+    fn enroll_device<R: Read + AsRawFd, W: Write + AsRawFd>(
+        input: &mut R,
+        output: &mut W,
+    ) -> Result<(LocalServer, Arc<MemoryConnector>)> {
+        let invitation = receive_invitation(input)?;
+        let credential = api(DeviceCredential::generate())?;
+        let mut enrollment = api(Enrollment::claim(
+            &invitation,
+            DEVICE_NAME.into(),
+            &credential,
+        ))?;
+        require(
+            api(enrollment.finish())?.is_none(),
+            "enrollment completed without exact owner approval",
+        )?;
+        let mut retry = api(Enrollment::claim(
+            &invitation,
+            DEVICE_NAME.into(),
+            &credential,
+        ))?;
+        require(
+            retry.claim_id() == enrollment.claim_id() && api(retry.finish())?.is_none(),
+            "exact enrollment retry changed the original claim or bypassed approval",
+        )?;
+        require(
+            matches!(
+                Enrollment::claim(
+                    &invitation,
+                    format!("{DEVICE_NAME}-changed").into(),
+                    &credential
+                ),
+                Err(DirectError::Substituted)
+            ),
+            "claim retry accepted a substituted device name",
+        )?;
+        let wrong_key = api(DeviceCredential::generate())?;
+        require(
+            matches!(
+                Enrollment::claim(&invitation, DEVICE_NAME.into(), &wrong_key),
+                Err(DirectError::AlreadyDecided)
+            ),
+            "single-use invitation accepted another device key",
+        )?;
+        send_json(
+            output,
+            json!({"claim": enrollment.claim_id(), "fingerprint": credential.fingerprint()}),
+        )?;
+        require(
+            receive_json(input)?["approved"] == true,
+            "owner approval phase refused",
+        )?;
+        let paired = api(enrollment.finish())?.ok_or("approved claim remained pending")?;
+        let endpoint = invitation.endpoint().to_owned();
+        require(
+            matches!(
+                DirectConnection::connect(&endpoint, &paired, &wrong_key),
+                Err(DirectError::AuthenticationRefused)
+            ),
+            "invalid device proof was accepted",
+        )?;
+        let mut wrong = paired.clone();
+        wrong.pin.certificate[0] ^= 1;
+        require(
+            matches!(
+                DirectConnection::connect(&endpoint, &wrong, &credential),
+                Err(DirectError::PinMismatch)
+            ),
+            "substituted TLS certificate pin was not refused",
+        )?;
+        let mut wrong = paired.clone();
+        wrong.pin.server[0] ^= 1;
+        require(
+            matches!(
+                DirectConnection::connect(&endpoint, &wrong, &credential),
+                Err(DirectError::WrongServer)
+            ),
+            "wrong server identity was not refused",
+        )?;
+        let connector = Arc::new(MemoryConnector {
+            endpoint,
+            paired: paired.clone(),
+            credential,
+        });
+        let server = api(LocalServer::direct(
+            IDENTITY,
+            paired.client,
+            paired.clone(),
+            connector.clone(),
+        ))?;
+        require(
+            api(server.refresh())?.protocol_major == 1,
+            "WSS did not negotiate initial major 1",
+        )?;
+        send_json(output, json!({"paired": paired}))?;
+        Ok((server, connector))
+    }
+
+    fn bulk(connection: &mut PaneConnection, lease: Lease) -> Result<(bool, usize)> {
+        let reading = connection.supports_reading();
+        let graphics = connection.supports_graphics();
+        let script = if graphics {
+            "python3 -c 'import base64,sys; w=sys.stdout.write; w(\"\\033[2J\\033[H\"); [w(\"DIRECT-BULK-%05d\\n\"%i) for i in range(5000)]; d=base64.b64encode(bytes([255,0,0,255])*320*240).decode(); [w(\"\\033_G\"+(\"a=T,f=32,s=320,v=240,i=541,q=2,\" if i==0 else \"\")+\"m=%d;\"%int(i+4096<len(d))+d[i:i+4096]+\"\\033\\\\\") for i in range(0,len(d),4096)]; w(\"\\nDIRECT-BULK-DONE\\n\"); sys.stdout.flush()'"
+        } else {
+            "printf '\\033[2J\\033[H'; i=0; while [ \"$i\" -lt 5000 ]; do printf 'DIRECT-BULK-%05d\\n' \"$i\"; i=$((i+1)); done; printf 'DIRECT-BULK-DONE\\n'"
+        };
+        command(connection, lease, script)?;
+        // Delay a real WSS consumer while the scoped terminal produces bulk output.
+        std::thread::sleep(Duration::from_millis(300));
+        output(connection, lease, "DIRECT-BULK-DONE")?;
+        let Reply::Screen(screen) = api(connection.exchange(&Request::Poll { lease }))? else {
+            return Err("bulk terminal snapshot missing");
+        };
+        if reading {
+            require(
+                screen
+                    .reading
+                    .as_ref()
+                    .is_some_and(|state| state.total_rows >= 5000),
+                "bulk Scrollback did not retain its rows",
+            )?;
+        }
+        if graphics {
+            let snapshot = screen
+                .graphics
+                .as_ref()
+                .and_then(|result| result.as_ref().ok())
+                .ok_or("negotiated graphics manifest missing")?;
+            api(snapshot.validate())?;
+            let image = snapshot
+                .images
+                .iter()
+                .find(|image| image.width == 320 && image.height == 240)
+                .ok_or("bulk graphics resource missing")?;
+            let mut offset = 0;
+            while offset < 320 * 240 * 4 {
+                let Reply::GraphicsChunk(Ok(chunk)) =
+                    api(connection.exchange(&Request::GraphicsChunk {
+                        lease,
+                        image: image.key,
+                        offset,
+                    }))?
+                else {
+                    return Err("bulk graphics chunk missing");
+                };
+                let (pixels, remainder) = chunk.bytes.as_chunks::<4>();
+                require(
+                    chunk.image == image.key
+                        && chunk.offset == offset
+                        && !chunk.bytes.is_empty()
+                        && chunk.bytes.len() <= graphics::CHUNK_BYTES
+                        && remainder.is_empty()
+                        && pixels.iter().all(|pixel| *pixel == [255, 0, 0, 255]),
+                    "bulk graphics chunk binding or pixels changed",
+                )?;
+                offset += chunk.bytes.len();
+            }
+            require(
+                offset == 320 * 240 * 4,
+                "bulk graphics transfer length changed",
+            )?;
+        }
+        if reading {
+            api(connection.exchange(&Request::Read {
+                lease,
+                operation: reading::Operation::Scroll(reading::Scroll::Top),
+            }))?;
+            output(connection, lease, "DIRECT-BULK-00000")?;
+            api(connection.exchange(&Request::Read {
+                lease,
+                operation: reading::Operation::Scroll(reading::Scroll::Bottom),
+            }))?;
+        }
+        Ok((reading, if graphics { 320 * 240 * 4 } else { 0 }))
+    }
+
+    fn device() -> Result<()> {
+        require(
+            std::env::consts::OS == "linux",
+            "device role requires the native Penguin host",
+        )?;
+        pipe_only(libc::STDIN_FILENO)?;
+        pipe_only(libc::STDOUT_FILENO)?;
+        // SAFETY: this runs at single-threaded entry, before any WSS/native worker starts.
+        unsafe {
+            std::env::set_var("SPACETERM_DEVELOPMENT_CLIENT", DEVICE_NAME);
+        }
+        let mut input = std::io::stdin().lock();
+        let mut output_pipe = std::io::stdout().lock();
+        send_json(&mut output_pipe, json!({"os": std::env::consts::OS}))?;
+        let (server, connector) = enroll_device(&mut input, &mut output_pipe)?;
+        let scope = receive_json(&mut input)?;
+        let pane: Id = api(serde_json::from_value(scope["pane"].clone()))?;
+        let session: Id = api(serde_json::from_value(scope["session"].clone()))?;
+        let owner = scope["owner"].as_str().ok_or("owner identity missing")?;
+        let mut connection = api(server.connect_pane())?;
+        let lease = take(&mut connection, pane, owner)?;
+        require(
+            lease.session == session,
+            "WSS Take Over changed the Session",
+        )?;
+        let (reading_checked, graphics_bytes) = bulk(&mut connection, lease)?;
+        drop(connection);
+        let mut connection = api(server.connect_pane())?;
+        let lease = attached(select(&mut connection, pane, false)?)?;
+        require(
+            lease.session == session,
+            "WSS reconnect lost the running Session",
+        )?;
+        command(&mut connection, lease, "printf 'DIRECT-RECONNECTED\\n'")?;
+        output(&mut connection, lease, "DIRECT-RECONNECTED")?;
+        send_json(
+            &mut output_pipe,
+            json!({"lease": lease, "reading_checked": reading_checked,
+            "graphics_bytes": graphics_bytes}),
+        )?;
+        require(
+            receive_json(&mut input)?["owner"].as_str() == Some(owner),
+            "owner continuation changed",
+        )?;
+        let lease = take(&mut connection, pane, owner)?;
+        let mut second = api(server.connect_pane())?;
+        send_json(&mut output_pipe, json!({"lease": lease}))?;
+        require(
+            receive_json(&mut input)?["revoked"] == true,
+            "revocation phase missing",
+        )?;
+        require(
+            connection.exchange(&Request::Inventory).is_err()
+                && second.exchange(&Request::Inventory).is_err(),
+            "revocation retained an existing WSS connection",
+        )?;
+        require(
+            matches!(connector.connect(), Err(DirectError::Revoked)),
+            "revoked direct reconnect was accepted",
+        )?;
+        let other_pairing = connector.paired.pairing;
+        let confirmation_operation = random()?;
+        let confirmation = api(direct::revoke(
+            &connector.endpoint,
+            &connector.paired,
+            &connector.credential,
+            confirmation_operation,
+            other_pairing,
+        ))?;
+        require(
+            confirmation.server == connector.paired.pin.server
+                && confirmation.operation == confirmation_operation
+                && confirmation.target == other_pairing,
+            "owner-revokes-first self-confirmation changed its binding",
+        )?;
+        drop(connection);
+        drop(second);
+        drop(server);
+        drop(connector);
+        send_json(
+            &mut output_pipe,
+            json!({"revoked": true, "self_confirmed": true}),
+        )?;
+        let (server, connector) = enroll_device(&mut input, &mut output_pipe)?;
+        let scope = receive_json(&mut input)?;
+        require(
+            api(serde_json::from_value::<Id>(scope["pane"].clone()))? == pane
+                && api(serde_json::from_value::<Id>(scope["session"].clone()))? == session,
+            "last-device fixture scope changed",
+        )?;
+        let mut connection = api(server.connect_pane())?;
+        require(
+            take(&mut connection, pane, owner)?.session == session,
+            "last device replaced the Session",
+        )?;
+        send_json(&mut output_pipe, json!({"ready": true}))?;
+        require(
+            receive_json(&mut input)?["self_revoke"] == true,
+            "self-revocation phase missing",
+        )?;
+        let operation = random()?;
+        let _ = api(direct::revoke(
+            &connector.endpoint,
+            &connector.paired,
+            &connector.credential,
+            operation,
+            connector.paired.pairing,
+        ))?;
+        // Discard the first result as a client with a lost acknowledgement would, then resolve
+        // only that exact original using its retired device authority.
+        let retry = api(direct::revoke(
+            &connector.endpoint,
+            &connector.paired,
+            &connector.credential,
+            operation,
+            connector.paired.pairing,
+        ))?;
+        require(
+            retry.server == connector.paired.pin.server
+                && retry.operation == operation
+                && retry.target == connector.paired.pairing,
+            "self-revocation original receipt changed",
+        )?;
+        // An owner may have revoked this device before its self-unpair reached the server.
+        // Retired authority can confirm that same self pairing without submitting new effects.
+        let confirmation_operation = random()?;
+        let confirmation = api(direct::revoke(
+            &connector.endpoint,
+            &connector.paired,
+            &connector.credential,
+            confirmation_operation,
+            connector.paired.pairing,
+        ))?;
+        require(
+            confirmation.server == connector.paired.pin.server
+                && confirmation.operation == confirmation_operation
+                && confirmation.target == connector.paired.pairing,
+            "retired self-confirmation changed its server, operation or target",
+        )?;
+        require(
+            other_pairing != connector.paired.pairing,
+            "two enrollment identities collided",
+        )?;
+        require(
+            matches!(
+                direct::revoke(
+                    &connector.endpoint,
+                    &connector.paired,
+                    &connector.credential,
+                    random()?,
+                    other_pairing
+                ),
+                Err(DirectError::Revoked)
+            ) && matches!(connector.connect(), Err(DirectError::Revoked)),
+            "retired authority accepted another target or ordinary reconnect",
+        )?;
+        send_json(&mut output_pipe, json!({"self_retry": true}))?;
+        require(
+            receive_json(&mut input)?["done"] == true,
+            "owner completion missing",
+        )
+    }
+
+    pub(super) fn run() -> Result<()> {
+        let args: Vec<String> = std::env::args().skip(1).collect();
+        if args.as_slice() == ["device-pipe"] {
+            return device();
+        }
+        let mut bind = None;
+        let mut expected = None;
+        let mut confirmed = false;
+        let mut restart = false;
+        let mut help = false;
+        let mut args = args.iter();
+        while let Some(argument) = args.next() {
+            match argument.as_str() {
+                "--bind" => {
+                    bind = Some(api(args
+                        .next()
+                        .ok_or("missing bind address")?
+                        .parse::<SocketAddr>())?)
+                }
+                "--expect-server" => {
+                    expected = Some(id(args.next().ok_or("missing server identity")?)?)
+                }
+                "--confirm-idle-development" => confirmed = true,
+                "--restart-idle-service" => restart = true,
+                "--help" => help = true,
+                _ => return Err("unknown argument; use --help"),
+            }
+        }
+        if !confirmed || help {
+            println!("DRY RUN: no storage, service, desktop, SSH or WSS access performed.");
+            println!(
+                "Requires parent-prepared signed Development service and native examples on macOS and Penguin."
+            );
+            println!("Use --bind IP:PORT --expect-server SERVER_HEX --confirm-idle-development.");
+            println!(
+                "Confirms no user Terminal Sessions, paired devices, pending claims or outstanding invitations."
+            );
+            println!(
+                "Touches one test-created Workspace, two temporary pairings and its own exposure policy; restores exposure off."
+            );
+            println!(
+                "Optional --restart-idle-service authorizes restart before any fixture Terminal Session exists."
+            );
+            println!(
+                "Invitations cross anonymous stdin/stdout pipes only; native device credentials remain in memory."
+            );
+            return Ok(());
+        }
+        require(
+            std::env::consts::OS == "macos",
+            "owner role requires the native macOS host",
+        )?;
+        owner(
+            bind.ok_or("--bind is required")?,
+            expected.ok_or("--expect-server is required")?,
+            restart,
+        )
+    }
+}
+
+#[cfg(feature = "client")]
+fn main() -> std::process::ExitCode {
+    match exercise::run() {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(classification) => {
+            eprintln!("direct_devices: {classification}");
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+#[cfg(not(feature = "client"))]
+fn main() {
+    eprintln!("direct_devices requires the client feature");
+    std::process::exit(2);
+}

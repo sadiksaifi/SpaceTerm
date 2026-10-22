@@ -214,7 +214,7 @@ impl SettingsWindow {
             }
             SshServerAction::CheckStatus => connections.check(&destination),
             SshServerAction::Remove => {
-                let next = self.server_after_removing(&destination);
+                let next = self.server_after_removing(&ServerChoice::Ssh(destination.clone()));
                 connections.remove(&destination);
                 self.selected_server = next;
                 self.sync_server_location(cx);

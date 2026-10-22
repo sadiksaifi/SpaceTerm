@@ -20,6 +20,7 @@ use crate::local_server::service::{
 };
 use crate::local_server::{AuthenticatedStatus, LocalServer, ServerError};
 use crate::ui::appearance::ChromeAppearance;
+use crate::ui::direct_access::DirectAccessControl;
 use crate::ui::sidebar_window::form::{CaptionTone, action_button, badge};
 
 pub(super) const CONTROL_SELECTOR: &str = "settings-local-server-control";
@@ -32,6 +33,10 @@ pub(super) trait LocalServerControl: Send + Sync {
     fn worktree_server(&self) -> Option<LocalServer> {
         None
     }
+    /// The server's direct network access, managed with this account's authority.
+    fn direct_access(&self) -> Option<Arc<dyn DirectAccessControl>> {
+        None
+    }
     /// Connects using owning-account authority. Never creates an identity or starts a server.
     fn refresh(&self) -> Result<ServerConnection, ServerError>;
 }
@@ -39,6 +44,9 @@ pub(super) trait LocalServerControl: Send + Sync {
 impl LocalServerControl for LocalServer {
     fn worktree_server(&self) -> Option<LocalServer> {
         Some(self.clone())
+    }
+    fn direct_access(&self) -> Option<Arc<dyn DirectAccessControl>> {
+        Some(Arc::new(self.clone()))
     }
     fn refresh(&self) -> Result<ServerConnection, ServerError> {
         LocalServer::refresh(self).map(ServerConnection::from)
@@ -200,6 +208,9 @@ pub(super) struct LocalServerRow {
 impl LocalServerRow {
     pub(super) fn worktree_server(&self) -> Option<LocalServer> {
         self.control.as_ref().ok()?.worktree_server()
+    }
+    pub(super) fn direct_access(&self) -> Option<Arc<dyn DirectAccessControl>> {
+        self.control.as_ref().ok()?.direct_access()
     }
     pub(super) fn new(control: Result<Arc<dyn LocalServerControl>, ServerError>) -> Self {
         Self {
@@ -424,6 +435,9 @@ fn failure(error: ServerError) -> (&'static str, &'static str, bool) {
         // Another surface changed the service after a confirmation was prepared. A check reads
         // its current state before the person asks again.
         ServerError::Changed => ("Changed", "settings-local-server-state-changed", true),
+        // A direct network refusal reaches this row only through a check, which another check
+        // answers afresh.
+        ServerError::Direct(_) => ("Refused", "settings-local-server-state-direct", true),
         // An update the person confirmed has not resolved, so the server admits no connection
         // until Finish Update resolves it. A check reports whether it has since.
         ServerError::ActivationUnresolved => (
