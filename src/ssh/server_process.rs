@@ -196,7 +196,7 @@ impl<A: SshProcessAdapter> NativeSshConnectBackend<A> {
                 .ok()
                 .and_then(|proofs| proofs.get(destination.as_str()).cloned())
                 .ok_or(SshConnectFailure::NeedsPerson(
-                    InteractionReason::CredentialProvider,
+                    InteractionReason::FirstSignIn,
                 ))?;
             if !quiet.1.unchanged() {
                 return Err(SshConnectFailure::Changed(ContinuityChange::HostChanged));
@@ -372,7 +372,7 @@ impl<A: SshProcessAdapter> NativeSshConnectBackend<A> {
                 .and_then(|routes| routes.get(destination.as_str()).cloned())
                 .filter(|route| route.is_alive())
                 .ok_or(SshConnectFailure::NeedsPerson(
-                    InteractionReason::CredentialProvider,
+                    InteractionReason::FirstSignIn,
                 ))?
         } else {
             self.route(destination, mode, &SshCancellationToken::default(), &|_| {})?
@@ -1825,7 +1825,7 @@ mod tests {
                 ConnectMode::QuietContinuation,
             ),
             Err(SshConnectFailure::NeedsPerson(
-                InteractionReason::CredentialProvider
+                InteractionReason::FirstSignIn
             ))
         ));
         assert_eq!(prompts.load(std::sync::atomic::Ordering::SeqCst), 0);
@@ -1956,7 +1956,7 @@ mod tests {
         assert!(matches!(
             backend.resolve_account(&destination, &original, ConnectMode::QuietContinuation),
             Err(SshConnectFailure::NeedsPerson(
-                InteractionReason::CredentialProvider
+                InteractionReason::FirstSignIn
             ))
         ));
         assert_eq!(prompts.load(std::sync::atomic::Ordering::SeqCst), 1);

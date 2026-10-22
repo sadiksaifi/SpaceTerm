@@ -521,6 +521,11 @@ const fn interaction_detail(reason: InteractionReason) -> &'static str {
             "Your SSH key or credential provider needs your approval. Choose Connect to approve \
              it; SpaceTerm doesn\u{2019}t ask in the background."
         }
+        // Nothing has asked yet, so this names no prompt; SSH may or may not show one.
+        InteractionReason::FirstSignIn => {
+            "SpaceTerm hasn\u{2019}t signed in to this computer since it opened. Choose Connect \
+             to sign in; SpaceTerm doesn\u{2019}t connect in the background."
+        }
     }
 }
 

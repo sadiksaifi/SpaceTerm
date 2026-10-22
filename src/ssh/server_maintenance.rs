@@ -738,7 +738,7 @@ mod tests {
         assert!(matches!(
             quiet,
             Err(SshMaintenanceFailure::NeedsPerson(
-                InteractionReason::CredentialProvider
+                InteractionReason::FirstSignIn
             ))
         ));
         assert_eq!(prompts.load(std::sync::atomic::Ordering::SeqCst), 0);

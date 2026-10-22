@@ -64,12 +64,18 @@ impl SshConnectBackend for Computers {
     fn connect(
         &self,
         destination: &SshDestination,
-        _: ConnectMode,
+        mode: ConnectMode,
         _: Option<&SshServerContinuity>,
         _: &SshCancellationToken,
         _: &ConnectProgress<'_>,
     ) -> Result<ConnectedSshServer, SshConnectFailure> {
         self.connects.fetch_add(1, Ordering::SeqCst);
+        // As after a relaunch, nothing proves a route signs in without a prompt.
+        if mode == ConnectMode::QuietContinuation {
+            return Err(SshConnectFailure::NeedsPerson(
+                crate::ssh::server_connection::InteractionReason::FirstSignIn,
+            ));
+        }
         if self
             .unreachable
             .lock()
@@ -172,6 +178,17 @@ struct Servers<'a> {
 /// Opens Settings on Servers with the local server when `local` is set and each `saved` SSH
 /// connection listed as it is after a relaunch: saved, inactive, and never reached.
 fn open_servers<'a>(local: bool, saved: &[&str], cx: &'a mut TestAppContext) -> Servers<'a> {
+    open_servers_saved(local, saved, false, cx)
+}
+
+/// Opens Settings on Servers as [`open_servers`] does, with each `saved` connection set to
+/// reconnect when `active`.
+fn open_servers_saved<'a>(
+    local: bool,
+    saved: &[&str],
+    active: bool,
+    cx: &'a mut TestAppContext,
+) -> Servers<'a> {
     let computers = Arc::new(Computers::default());
     let records = Arc::new(SavedConnections::default());
     *records.records.lock().unwrap() = saved
@@ -179,7 +196,7 @@ fn open_servers<'a>(local: bool, saved: &[&str], cx: &'a mut TestAppContext) -> 
         .map(|name| RetainedSshConnection {
             destination: destination(name),
             continuity: None,
-            active: false,
+            active,
         })
         .collect();
     let connections = SshServerConnections::new(computers.clone(), records.clone());
@@ -747,7 +764,7 @@ fn a_setting_named_by_the_query_ranks_before_a_host_with_that_name(cx: &mut Test
     });
 }
 
-/// A host whose requested Connect failed is still tried quietly when SpaceTerm reopens, so its
+/// A host whose requested Connect failed stays saved to connect when SpaceTerm reopens, so its
 /// detail offers ending that without removing the saved connection.
 #[gpui::test]
 fn a_failed_connection_offers_to_stop_reconnecting_and_stays_saved(cx: &mut TestAppContext) {
@@ -786,6 +803,58 @@ fn a_failed_connection_offers_to_stop_reconnecting_and_stays_saved(cx: &mut Test
         servers.cx
     ));
     assert_eq!(listed(servers.cx)[1].0, "nohost");
+}
+
+/// A saved connection that reopens waiting for the person says why without naming a prompt
+/// nothing asked for, and promises no quiet retry SpaceTerm won't make.
+#[gpui::test]
+fn a_reopened_connection_waits_for_connect_without_claiming_a_prompt(cx: &mut TestAppContext) {
+    let mut servers = open_servers_saved(true, &["penguin"], true, cx);
+    let connections = servers.connections.clone();
+    settle(servers.cx, |_| {
+        matches!(
+            connections.status(&destination("penguin")),
+            RemoteConnectionStatus::NeedsPerson { .. }
+        )
+    });
+    select("penguin", servers.cx);
+    let caption = |servers: &mut Servers<'_>| {
+        servers.window.read_with(servers.cx, |settings, _| {
+            settings
+                .ssh_server_caption(super::super::SettingsRowId::SshServerStatus)
+                .map(|(caption, _)| caption.to_string())
+                .unwrap_or_default()
+        })
+    };
+
+    let waiting = caption(&mut servers);
+    assert!(
+        waiting.contains("hasn\u{2019}t signed in to this computer since it opened"),
+        "got {waiting:?}"
+    );
+    assert!(!waiting.contains("credential provider"), "got {waiting:?}");
+    assert!(!waiting.contains("quietly"), "got {waiting:?}");
+
+    // A Connect that fails keeps the connection saved, for the person to connect after reopening.
+    servers
+        .computers
+        .unreachable
+        .lock()
+        .unwrap()
+        .push("penguin".to_owned());
+    click("settings-ssh-server-connect", servers.cx);
+    settle(servers.cx, |_| {
+        matches!(
+            connections.status(&destination("penguin")),
+            RemoteConnectionStatus::Unavailable { .. }
+        )
+    });
+    let failed = caption(&mut servers);
+    assert!(
+        failed.contains("When SpaceTerm reopens, it waits for you to choose Connect."),
+        "got {failed:?}"
+    );
+    assert!(!failed.contains("quietly"), "got {failed:?}");
 }
 
 /// A removal SpaceTerm couldn't save would bring the connection back at relaunch, so Settings
