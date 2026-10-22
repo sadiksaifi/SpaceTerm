@@ -1830,7 +1830,7 @@ mod development {
                 // A new client's first view presents the server's first Workspace. Retained
                 // choices, including a deliberately empty view, always win.
                 let initial = inventory.workspaces.first().map(|workspace| workspace.id);
-                match self.attachments.initialize(&inventory, initial) {
+                match self.attachments.initialize(inventory, initial) {
                     Ok(true) => poll.initial = initial,
                     Ok(false) => {}
                     Err(error) => {

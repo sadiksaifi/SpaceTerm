@@ -501,7 +501,7 @@ enum Input {
     ClearScreenAndScrollback,
     Read(pane::reading::Operation),
     Key(KeyInput),
-    InputMethod(String, async_channel::Sender<InputMethodOutcome>),
+    Commit(String, async_channel::Sender<InputMethodOutcome>),
     CopyOrForward(InputModifiers),
     Pointer(u64, pane::Pointer),
     Wheel(u64, pane::Wheel),
@@ -522,7 +522,7 @@ impl Input {
     fn eligible(&self, target: pane::FocusTarget) -> bool {
         match self {
             Self::Read(_) | Self::ClearScreenAndScrollback => true,
-            Self::InputMethod(..) => matches!(
+            Self::Commit(..) => matches!(
                 target,
                 pane::FocusTarget::Terminal | pane::FocusTarget::FocusedPane
             ),
@@ -803,7 +803,7 @@ fn submit_input(
 }
 fn discard_input(state: &DevelopmentPaneState, epoch: u64, input: Input) {
     match input {
-        Input::InputMethod(_, reply) => {
+        Input::Commit(_, reply) => {
             let _ = reply.try_send(InputMethodOutcome::Interrupted);
         }
         Input::Paste(_, reply) => {
@@ -1053,7 +1053,7 @@ impl ActiveInput {
             input,
         };
         let (request, paste_reply) = match submitted.command {
-            Input::InputMethod(text, reply) => {
+            Input::Commit(text, reply) => {
                 let result = self.write_input_method(state, generation, &text, exchange);
                 let _ = reply.try_send(match &result {
                     Ok(outcome) => *outcome,
@@ -2027,7 +2027,7 @@ impl TerminalSessionHandle for PresentationHandle {
         if submit_input(
             &self.state,
             &self.input,
-            Input::InputMethod(text.to_owned(), reply),
+            Input::Commit(text.to_owned(), reply),
         ) {
             Ok(receiver)
         } else {
