@@ -1192,8 +1192,10 @@ fn optimistic_field_presentation_never_renews_an_unseen_conflicting_version() {
     assert_eq!(server.finish(true, true).outcome, Outcome::Conflict);
     model.poll();
     assert_eq!(server.inventory().workspaces[0].name, "Their name");
-    assert_eq!(
-        model.take_conflict().unwrap().draft,
-        SharedWorkspaceDraft::Name("Later draft".into())
-    );
+    for draft in ["First draft", "Later draft"] {
+        let conflict = model.take_conflict().unwrap();
+        assert_eq!(conflict.draft, SharedWorkspaceDraft::Name(draft.into()));
+        assert_eq!(conflict.authoritative.as_ref(), "Their name");
+    }
+    assert!(model.take_conflict().is_none());
 }

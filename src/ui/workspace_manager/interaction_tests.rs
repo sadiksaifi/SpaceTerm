@@ -174,10 +174,13 @@ fn batched_conflict_notices_are_reviewed_one_at_a_time_beyond_the_modal_queue_li
                 .iter()
                 .any(|node| node["aria"].to_string().contains(&expected))
         );
-        click("shared-workspace-conflict-keep", cx);
+        click("modal-action-shared-workspace-conflict-keep", cx);
     }
     harness.sync(cx);
-    assert!(cx.debug_bounds("shared-workspace-conflict-keep").is_none());
+    assert!(
+        cx.debug_bounds("modal-action-shared-workspace-conflict-keep")
+            .is_none()
+    );
     assert_eq!(
         harness.edits.submitted().len(),
         12,
