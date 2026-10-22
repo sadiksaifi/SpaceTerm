@@ -620,7 +620,7 @@ impl<T> Tab<T> {
         Ok(minimum_ratio..=maximum_ratio)
     }
 
-    fn validate_split(
+    pub(crate) fn validate_split(
         &self,
         target_pane_id: PaneId,
         axis: SplitAxis,

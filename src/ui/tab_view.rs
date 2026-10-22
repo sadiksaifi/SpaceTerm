@@ -968,9 +968,7 @@ impl TabView {
             tab_id: self.tab.id(),
         });
         cx.notify();
-        if let Some(terminal) = self.tab.pane(pane_id) {
-            terminal.update(cx, |terminal, cx| terminal.focus(window, cx));
-        }
+        self.focus(window, cx);
     }
 
     pub(crate) fn split_focused(
@@ -996,16 +994,26 @@ impl TabView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // A shared Pane Layout belongs to the server. Splitting asks the server, and the new Pane
-        // arrives with the published membership rather than appearing here first.
-        if self.shared.is_some() {
-            self.split_shared(target_pane_id, axis, window, cx);
-            return;
-        }
         let Some(target_size) = self.split_target_size(target_pane_id, pane_gap(cx)) else {
             eprintln!("cannot split Pane {target_pane_id} without valid measured bounds");
             return;
         };
+        if self.shared.is_some() {
+            // This client owns its layout. Validate the restored allocation before asking the
+            // server for membership; another client's published membership has no such limit.
+            if self
+                .tab
+                .validate_split(target_pane_id, axis, target_size, pane_gap(cx))
+                .is_err()
+            {
+                return;
+            }
+            if matches!(self.tab.zoom_state(), ZoomState::Zoomed(_)) {
+                self.toggle_zoom(window, cx);
+            }
+            self.split_shared(target_pane_id, axis, window, cx);
+            return;
+        }
         self.split_pane_measured(target_pane_id, axis, target_size, window, cx);
     }
 
@@ -1193,9 +1201,7 @@ impl TabView {
                 cx.emit(TabViewEvent::PresentationChanged {
                     tab_id: self.tab.id(),
                 });
-                if let Some(terminal) = self.tab.pane(drag.pane_id) {
-                    terminal.update(cx, |terminal, cx| terminal.focus(window, cx));
-                }
+                self.focus(window, cx);
             }
             Ok(false) => {}
             Err(error) => eprintln!("failed to move Pane: {error}"),
@@ -1321,11 +1327,7 @@ impl TabView {
                 self.sync_terminal_focus(cx);
                 cx.emit(TabViewEvent::CloseTabRequested { tab_id });
             }
-            Ok(ClosePaneOutcome::PaneClosed {
-                focused_pane_id,
-                closed_pane,
-                ..
-            }) => {
+            Ok(ClosePaneOutcome::PaneClosed { closed_pane, .. }) => {
                 self.advance_native_service_hierarchy_generation(cx);
                 self.pane_layout_revision += 1;
                 self.pane_motion.expect_change();
@@ -1346,11 +1348,8 @@ impl TabView {
                     tab_id: self.tab.id(),
                 });
                 cx.notify();
-                if self.active
-                    && focus_remaining
-                    && let Some(terminal) = self.tab.pane(focused_pane_id)
-                {
-                    terminal.update(cx, |terminal, cx| terminal.focus(window, cx));
+                if self.active && focus_remaining {
+                    self.focus(window, cx);
                 }
             }
             Err(error) => eprintln!("failed to close Pane: {error}"),
@@ -2394,9 +2393,7 @@ impl TabView {
         };
         self.select_shared_pane(pane_id);
         self.focus_pane(pane_id, cx);
-        if let Some(terminal) = self.tab.pane(pane_id) {
-            terminal.update(cx, |terminal, cx| terminal.focus(window, cx));
-        }
+        self.focus(window, cx);
     }
 
     /// The bookkeeping a Pane needs once it joins the layout, without taking focus or zoom from

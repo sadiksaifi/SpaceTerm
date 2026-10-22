@@ -4,6 +4,9 @@
 //! Caption, the Pane itself, and the server inventory the window reads. None of them reaches into
 //! presentation state, so each one keeps holding as the implementation changes.
 
+#[path = "interaction_tests.rs"]
+mod interaction_tests;
+
 use std::path::PathBuf;
 use std::rc::Rc;
 
