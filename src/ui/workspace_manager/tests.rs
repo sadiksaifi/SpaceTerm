@@ -13654,8 +13654,8 @@ fn a_saved_connection_connecting_from_its_heading_should_not_claim_it_has_no_wor
             .is_some()
     );
 
-    right_click("machine-heading-penguin", cx);
-    click("machine-menu-connect", cx);
+    // The heading offers Connect in view, not only in its menu.
+    click("machine-connect-penguin", cx);
     wait_until(
         || {
             matches!(

@@ -1170,6 +1170,31 @@ impl WorkspaceSidebar {
         };
         let target = section.target.clone();
         let grow_sidebar = sidebar.clone();
+        // A connection waiting for the person offers Connect in view, not only in its menu.
+        let connect = (section.awaiting_connection && section.connects).then(|| {
+            let target = target.clone();
+            let sidebar = sidebar.clone();
+            spaceterm_ui::Button::new(
+                SharedString::from(format!("machine-connect-{label}")),
+                "Connect",
+            )
+            .variant(spaceterm_ui::ButtonVariant::Link)
+            .size(spaceterm_ui::ButtonSize::Compact)
+            .tab_stop(true)
+            .debug_selector(format!("machine-connect-{label}"))
+            .accessibility_description(SharedString::from(format!(
+                "Connect to {label} to show its Workspaces"
+            )))
+            .on_activate(move |_, _, cx| {
+                let target = target.clone();
+                let _ = sidebar.update(cx, |_, cx| {
+                    cx.emit(SidebarEvent::Machine {
+                        target,
+                        command: MachineMenuCommand::Connect,
+                    });
+                });
+            })
+        });
         let entries = machine_menu_entries(section);
         // A machine without a server SpaceTerm can act on has no menu, only its name.
         let heading = if entries.is_empty() {
@@ -1200,16 +1225,20 @@ impl WorkspaceSidebar {
         };
         // A connection that isn't presented yet has no Workspaces to show until it connects, and
         // SpaceTerm hasn't read them, so it never claims there are none.
-        let empty_note = match (section.awaiting_connection, section.connects) {
-            (true, true) => "Connect to show its Workspaces.",
-            (true, false) => "Workspaces appear once connected.",
-            (false, _) => "No Workspaces",
+        let (empty_note, empty_label) = match (section.awaiting_connection, section.connects) {
+            // The Connect button before it starts the sentence.
+            (true, true) => ("to show its Workspaces.", "Connect to show its Workspaces."),
+            (true, false) => (
+                "Workspaces appear once connected.",
+                "Workspaces appear once connected.",
+            ),
+            (false, _) => ("No Workspaces", "No Workspaces"),
         };
         let empty = (section.workspaces == 0).then(|| {
             div()
                 .id(SharedString::from(format!("machine-empty-{label}")))
                 .role(accesskit::Role::Label)
-                .aria_value(empty_note)
+                .aria_value(empty_label)
                 .debug_selector({
                     let label = label.clone();
                     move || format!("machine-empty-{label}")
@@ -1221,10 +1250,11 @@ impl WorkspaceSidebar {
                 .items_center()
                 .pl(leading + appearance.spacing(ICON_COLUMN_WIDTH + ROW_CONTENT_GAP))
                 .pr(trailing)
-                .truncate()
+                .gap(appearance.spacing(4.0))
                 .chrome_text(appearance.typography.style(TextRole::Secondary))
                 .text_color(gpui_color(colors.row_secondary))
-                .child(empty_note)
+                .children(connect)
+                .child(div().min_w_0().truncate().child(empty_note))
         });
         let motion = self.workspace_reorder.motion(item, cx);
         motion
