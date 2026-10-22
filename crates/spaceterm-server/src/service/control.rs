@@ -233,11 +233,12 @@ impl UpdateWording {
         } = self;
         let kept = "Workspaces and each client\u{2019}s attachments and views are kept, and each \
                     Pane starts a new shell when you next use it.";
-        match self.change {
+        let others = "Other servers aren\u{2019}t affected.";
+        let detail = match self.change {
             UpdateChange::Update if self.running => format!(
-                "The server changes from version {previous} to version {candidate}. Terminal \
-                 Sessions end for every client using this server, and programs running in them \
-                 stop. {kept}"
+                "The server changes from version {previous} to version {candidate}. All Terminal \
+                 Sessions on this server end, including those other clients use, and programs \
+                 running in them stop. {kept}"
             ),
             UpdateChange::Update if self.stopped => format!(
                 "The server changes from version {previous} to version {candidate}. No Terminal \
@@ -254,7 +255,8 @@ impl UpdateWording {
                  Workspaces are unchanged. The server stays stopped until you choose Start \
                  Server. Terminal Sessions that ended don\u{2019}t return."
             ),
-        }
+        };
+        format!("{detail} {others}")
     }
 }
 
@@ -436,10 +438,10 @@ mod tests {
             "Update the penguin server to version 0.7.0 (commit 0123456) and end all of its \
              Terminal Sessions?"
         );
-        assert!(
-            wording
-                .detail()
-                .contains("from version 0.6.8 (commit 0123456)")
-        );
+        let detail = wording.detail();
+        assert!(detail.contains("from version 0.6.8 (commit 0123456)"));
+        assert!(detail.contains("including those other clients use"));
+        assert!(detail.contains("Workspaces and each client\u{2019}s attachments"));
+        assert!(detail.ends_with("Other servers aren\u{2019}t affected."));
     }
 }

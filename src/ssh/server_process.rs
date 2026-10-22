@@ -34,7 +34,7 @@ const OBSERVATION: Duration = Duration::from_secs(15);
 const MAX_DISCOVERY: usize = 16 * 1024;
 const MAX_ARTIFACT: u64 = 256 * 1024 * 1024;
 
-/// Captured source directory; no candidate is inspected until an authenticated account is missing.
+/// Captured artifact directory shared by Connect, explicit Update and passive update inventory.
 #[derive(Clone)]
 pub(crate) struct SshServerArtifacts {
     root: Option<PathBuf>,
@@ -459,6 +459,22 @@ impl<A: SshProcessAdapter> NativeSshConnectBackend<A> {
     }
 }
 impl<A: SshProcessAdapter> SshConnectBackend for NativeSshConnectBackend<A> {
+    fn verified_candidate(&self, platform: &(String, String)) -> Option<ServerCandidate> {
+        let target = match (platform.0.as_str(), platform.1.as_str()) {
+            ("macOS", "arm64") => "aarch64-apple-darwin",
+            ("linux", "x86_64") => "x86_64-unknown-linux-gnu",
+            _ => return None,
+        };
+        let candidate = self
+            .config
+            .artifacts
+            .candidate(self.config.filesystem.as_ref(), target)
+            .ok()?;
+        Some(ServerCandidate {
+            version: candidate.version,
+            digest: candidate.digest,
+        })
+    }
     fn disconnect(&self, destination: &SshDestination) {
         let route = self
             .routes
@@ -1797,6 +1813,133 @@ pub(crate) mod testing {
             artifacts,
         });
         (backend, prompts)
+    }
+
+    /// The real first-install policy over an SSH process boundary that requires authorization.
+    /// The helper process boundary forwards to the real AskPass bridge and modal presenter.
+    pub(crate) fn authorization_installation_backend(
+        executor: BackgroundExecutor,
+        presenter: Arc<dyn super::super::askpass::AskPassPresenter>,
+    ) -> (
+        Arc<dyn SshConnectBackend>,
+        Arc<FakeAccount>,
+        async_channel::Sender<()>,
+    ) {
+        use super::super::askpass::{
+            AskPassProtocolReply,
+            prompt::{AskPassPromptKind, AskPassRequest, REMOTE_LINGER_PROMPT},
+        };
+        let (complete, completion) = async_channel::bounded::<()>(1);
+        let installed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let account_installed = installed.clone();
+        let account = FakeAccount::new(
+            "hostname installer.test\nuser tester\nport 22\n",
+            move |command, sent| {
+                if command == REMOTE_LINGER_PROMPT {
+                    let request =
+                        AskPassRequest::new(REMOTE_LINGER_PROMPT.into(), AskPassPromptKind::Secret)
+                            .unwrap();
+                    return match presenter
+                        .present(request, &std::sync::atomic::AtomicBool::new(false))
+                    {
+                        Ok(AskPassProtocolReply::Secret(secret)) => {
+                            let mut bytes = secret.as_bytes().to_vec();
+                            bytes.push(b'\n');
+                            (bytes, 0)
+                        }
+                        _ => (Vec::new(), 130),
+                    };
+                }
+                if command.contains("ssh-install") {
+                    if sent == b"fixture-password\nverified-archive" {
+                        let _ = completion.recv_blocking();
+                        account_installed.store(true, Ordering::SeqCst);
+                        return (Vec::new(), 0);
+                    }
+                    assert_eq!(sent, b"verified-archive");
+                    return (Vec::new(), 77);
+                }
+                if command.contains("ssh-discover") {
+                    if account_installed.load(Ordering::SeqCst) {
+                        let mut state = discovery([9; 32]);
+                        state.stopped = true;
+                        state.running = false;
+                        return (serde_json::to_vec(&state).unwrap(), 0);
+                    }
+                    return (
+                        b"SPACETERM_MISSING 501 x86_64-unknown-linux-gnu\n".to_vec(),
+                        0,
+                    );
+                }
+                (Vec::new(), 1)
+            },
+        );
+        struct HelperLease;
+        impl AskPassLease for HelperLease {
+            fn entries(&self) -> Vec<(&'static str, &std::ffi::OsStr)> {
+                vec![("SSH_ASKPASS", std::ffi::OsStr::new("/fixture/helper"))]
+            }
+            fn cancel(&self) {}
+            fn capability(&self) -> &[u8] {
+                b"fixture"
+            }
+        }
+        struct HelperFactory;
+        impl AskPassAttemptFactory for HelperFactory {
+            fn start_attempt(&self, _: &AppPaths) -> Result<AskPassAttempt, AskPassUnavailable> {
+                Ok(AskPassAttempt {
+                    lease: AskPassBrokerLease::new(Arc::new(HelperLease)),
+                    observation: AskPassAttemptObservation::default(),
+                })
+            }
+        }
+        struct InstallerBackend(NativeSshConnectBackend<FakeAdapter>);
+        impl SshConnectBackend for InstallerBackend {
+            fn disconnect(&self, destination: &SshDestination) {
+                self.0.disconnect(destination);
+            }
+            fn connect(
+                &self,
+                destination: &SshDestination,
+                mode: ConnectMode,
+                _: Option<&SshServerContinuity>,
+                cancellation: &SshCancellationToken,
+                progress: &ConnectProgress<'_>,
+            ) -> Result<ConnectedSshServer, SshConnectFailure> {
+                let route = self.0.route(destination, mode, cancellation, progress)?;
+                Err(SshConnectFailure::InstallationOffered(
+                    SshInstallationOffer {
+                        version: "1.0.0".into(),
+                        platform: ("linux".into(), "x86_64".into()),
+                        installation: Arc::new(NativeInstallation {
+                            route,
+                            artifact: VerifiedArtifact {
+                                bytes: b"verified-archive".to_vec(),
+                                signature: vec![1; 64],
+                                digest: "a".repeat(64),
+                                version: "1.0.0".into(),
+                                platform: ("linux".into(), "x86_64".into()),
+                            },
+                            account: 501,
+                            target: "x86_64-unknown-linux-gnu".into(),
+                        }),
+                    },
+                ))
+            }
+            fn observe(
+                &self,
+                destination: &SshDestination,
+                expected: Option<&SshServerContinuity>,
+                cancellation: &SshCancellationToken,
+                progress: &ConnectProgress<'_>,
+            ) -> Result<SshServerObservation, SshConnectFailure> {
+                self.0
+                    .observe(destination, expected, cancellation, progress)
+            }
+        }
+        let (mut backend, _) = backend(executor, account.clone(), SshServerArtifacts::new(None));
+        Arc::get_mut(&mut backend.config).unwrap().askpass = Arc::new(HelperFactory);
+        (Arc::new(InstallerBackend(backend)), account, complete)
     }
 
     /// The discovery one installed, running server reports.

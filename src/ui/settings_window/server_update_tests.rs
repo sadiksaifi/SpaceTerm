@@ -138,6 +138,25 @@ fn presented(facts: UpdateFacts) -> UpdatePresentation {
 }
 
 #[gpui::test]
+fn dropdown_local_update_opens_the_existing_confirmation_without_activation(
+    cx: &mut TestAppContext,
+) {
+    let harness = open(available(), cx);
+    harness.cx.update(|window, cx| {
+        cx.set_global(super::super::OpenSettingsWindow(
+            window.window_handle().downcast::<SettingsWindow>().unwrap(),
+        ));
+        crate::ui::updates::server_rows::ServerUpdateAction::Local.activate(cx);
+    });
+    harness.cx.run_until_parked();
+    assert_eq!(harness.update.changes(), [UpdateCall::PrepareUpdate]);
+    assert!(alert_open(UPDATE_CONFIRM_SELECTOR, harness.cx));
+    click_modal(UPDATE_CANCEL_SELECTOR, harness.cx);
+    assert_eq!(harness.update.changes(), [UpdateCall::PrepareUpdate]);
+    assert!(harness.service.changes().is_empty());
+}
+
+#[gpui::test]
 fn a_confirmed_update_replaces_the_running_server_once(cx: &mut TestAppContext) {
     let mut harness = open(available(), cx);
     let presentation = harness.presentation();
@@ -202,7 +221,19 @@ fn the_confirmation_names_both_builds_and_every_clients_sessions() {
     assert!(live.message.contains("version 1.5.0 (commit bbbbbbb)"));
     assert!(live.message.contains("end all of its Terminal Sessions"));
     assert!(live.detail.contains("from version 1.4.0 (commit aaaaaaa)"));
-    assert!(live.detail.contains("every client"));
+    assert!(
+        live.detail.starts_with(&format!(
+            "This is the {} server for this account on this computer. ",
+            crate::application_identity::ApplicationIdentity::current().display_name()
+        )),
+        "{}",
+        live.detail
+    );
+    assert!(live.detail.contains("including those other clients use"));
+    assert!(
+        live.detail
+            .ends_with("Other servers aren\u{2019}t affected.")
+    );
 
     let parked = super::UpdateConfirmation::of(&prepared(false, true));
     assert!(parked.message.contains("stopped"), "{}", parked.message);
@@ -508,4 +539,140 @@ fn progress_names_whether_sessions_end() {
             .explanation
             .contains("Terminal Sessions")
     );
+}
+
+/// Runs the real preparation and confirmation path, then replaces Settings before completion.
+fn confirmed_update_after_reopening(
+    facts: UpdateFacts,
+    outcome: Outcome,
+    cx: &mut TestAppContext,
+) -> (UpdatePresentation, Option<ServerError>, Vec<UpdateCall>) {
+    let (update, service, server) = {
+        let harness = open(facts, cx);
+        harness.update.answer(outcome);
+        click(UPDATE_SELECTOR, harness.cx);
+        let position = harness
+            .cx
+            .debug_bounds(modal_action(UPDATE_CONFIRM_SELECTOR))
+            .unwrap()
+            .center();
+        // Dispatch without parking the executor, so Settings closes before completion runs.
+        harness.cx.update(|window, cx| {
+            window.dispatch_event(
+                gpui::PlatformInput::MouseDown(gpui::MouseDownEvent {
+                    position,
+                    modifiers: Modifiers::none(),
+                    button: gpui::MouseButton::Left,
+                    click_count: 1,
+                    first_mouse: false,
+                }),
+                cx,
+            );
+            window.dispatch_event(
+                gpui::PlatformInput::MouseUp(gpui::MouseUpEvent {
+                    position,
+                    modifiers: Modifiers::none(),
+                    button: gpui::MouseButton::Left,
+                    click_count: 1,
+                }),
+                cx,
+            );
+        });
+        let released = harness.window.downgrade();
+        drop(harness.window);
+        harness.cx.update(|window, _| window.remove_window());
+        assert!(
+            released.upgrade().is_none(),
+            "admitted completion must not retain Settings"
+        );
+        (harness.update, harness.service, harness.server)
+    };
+    let offered = OfferedServer {
+        connection: Ok(server as Arc<dyn LocalServerControl>),
+        service: Some(Ok(service as Arc<dyn ServerServiceControl>)),
+        update: Some(Arc::clone(&update) as Arc<dyn ServerUpdateControl>),
+    };
+    let (settings, visual) = cx.add_window_view(|window, cx| {
+        let mut settings = SettingsWindow::new_with_capabilities(
+            Rc::new(RecordingOperatingSystemWindowDragPlatform::default()),
+            Default::default(),
+            None,
+            Some(offered),
+            window,
+            cx,
+        );
+        assert!(
+            settings
+                .server_update
+                .as_ref()
+                .unwrap()
+                .state
+                .working
+                .is_some(),
+            "reopened Settings must retain admitted progress"
+        );
+        // Reopening and a second request cannot prepare or dispatch another activation.
+        settings.request_update_action(UpdateAction::Update, cx);
+        settings
+    });
+    visual.run_until_parked();
+    settings.read_with(visual, |settings, _| {
+        let row = settings.server_update.as_ref().unwrap();
+        (row.presentation(), row.state.failure, update.changes())
+    })
+}
+
+#[gpui::test]
+fn a_confirmed_update_finishes_after_settings_reopens(cx: &mut TestAppContext) {
+    let (presentation, failure, calls) =
+        confirmed_update_after_reopening(available(), Outcome::Ready, cx);
+    assert_eq!(presentation.state, "Up to Date");
+    assert_eq!(failure, None);
+    assert_eq!(calls, [UpdateCall::PrepareUpdate, UpdateCall::Activate]);
+}
+
+#[gpui::test]
+fn a_confirmed_update_keeps_its_error_after_settings_reopens(cx: &mut TestAppContext) {
+    let (_, failure, calls) = confirmed_update_after_reopening(available(), Outcome::Changed, cx);
+    assert_eq!(failure, Some(ServerError::Changed));
+    assert_eq!(calls, [UpdateCall::PrepareUpdate, UpdateCall::Activate]);
+}
+
+#[gpui::test]
+fn a_successful_update_does_not_keep_a_transient_followup_read_failure(cx: &mut TestAppContext) {
+    let mut harness = open(available(), cx);
+    click(UPDATE_SELECTOR, harness.cx);
+    harness
+        .update
+        .refuse_next_read(ServerError::StorageUnavailable);
+    click_modal(UPDATE_CONFIRM_SELECTOR, harness.cx);
+    assert_eq!(harness.presentation().state, "Unknown");
+    harness.window.update(harness.cx, |settings, cx| {
+        settings.check_server_update(cx);
+    });
+    harness.cx.run_until_parked();
+    assert_eq!(harness.presentation().state, "Up to Date");
+    assert_eq!(
+        harness.window.read_with(harness.cx, |settings, _| {
+            settings.server_update.as_ref().unwrap().state.failure
+        }),
+        None,
+        "a successful reread must not claim the confirmed update failed"
+    );
+    assert_eq!(
+        harness.update.changes(),
+        [UpdateCall::PrepareUpdate, UpdateCall::Activate]
+    );
+}
+
+#[gpui::test]
+fn updating_a_stopped_server_after_settings_reopens_keeps_it_stopped(cx: &mut TestAppContext) {
+    let mut facts = available();
+    facts.status = Ok(stopped());
+    let (presentation, failure, calls) =
+        confirmed_update_after_reopening(facts, Outcome::Ready, cx);
+    assert_eq!(presentation.state, "Up to Date");
+    assert!(presentation.explanation.contains("stopped"));
+    assert_eq!(failure, None);
+    assert_eq!(calls, [UpdateCall::PrepareUpdate, UpdateCall::Activate]);
 }

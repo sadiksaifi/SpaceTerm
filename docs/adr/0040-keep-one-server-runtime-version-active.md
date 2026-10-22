@@ -4,6 +4,8 @@ Each operating-system account and application identity has one active SpaceTerm 
 
 Signed server candidates may be verified and staged alongside the approved installation without becoming active. Client launches, reconnects, Workspace creation, and protocol incompatibility do not activate a staged candidate or launch a second server. Settings distinguishes the approved or running server version from the candidate included with that client.
 
+The Updates dropdown follows the selected-server journey in [ADR 0034](0034-confirm-server-update-restarts-and-explain-incompatibility.md).
+
 Activation requires the explicit server-update confirmation in [ADR 0034](0034-confirm-server-update-restarts-and-explain-incompatibility.md) and replaces the running version after ending its Terminal Sessions. Boot, crash recovery, and Start Server select the durably approved installation rather than the newest staged release. Updating a deliberately stopped server leaves it stopped under [ADR 0030](0030-start-servers-at-boot-independently-of-clients.md).
 
 Client installation and update lifecycles preserve the approved server's executable and resources independently of the client installation. Service registration resolves that server installation even when a different desktop or headless installation discovers it.

@@ -154,6 +154,30 @@ impl Service {
         };
         self.snapshot(&state)
     }
+    /// Observe service policy and the supervisor without continuing an admitted activation.
+    /// This never provisions, starts, stops, stages or recovers a server.
+    /// An unresolved or failed activation returns ActivationUnresolved for review by its owner.
+    pub fn passive_status(&self) -> Result<ServiceStatus, ServerError> {
+        let Some((_, state)) = self.read()? else {
+            return Ok(ServiceStatus::default());
+        };
+        if state
+            .activation
+            .as_ref()
+            .is_some_and(|operation| !operation.settled())
+        {
+            return Err(ServerError::ActivationUnresolved);
+        }
+        self.snapshot(&state)
+    }
+    /// Read only an existing account server identity. Absence never creates server state.
+    pub fn passive_server_id(&self) -> Result<Option<[u8; 32]>, ServerError> {
+        match Directory::open(&self.paths.data, false).and_then(|data| data.read()) {
+            Ok(record) => Ok(Some(record.server)),
+            Err(ServerError::NotSetUp) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
     /// Discover verified retained builds without selecting, registering, or starting any of them.
     pub fn retained_installations(&self) -> Result<Vec<RetainedInstallation>, ServerError> {
         let retained = self.read()?;

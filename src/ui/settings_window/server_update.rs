@@ -12,6 +12,7 @@ use spaceterm_ui::{
 };
 
 use super::SettingsWindow;
+use super::local_operations::UpdateCompletion;
 use crate::application_identity::ApplicationIdentity;
 use crate::local_server::ServerError;
 use crate::local_server::service::activation::{
@@ -89,37 +90,7 @@ pub(super) trait ServerUpdateControl: Send + Sync {
 
 impl ServerUpdateControl for Service {
     fn read(&self) -> Result<UpdateFacts, ServerError> {
-        // The recorded update is read first: a status read resumes it and refuses while it stays
-        // unresolved, which is exactly when the row must still offer Finish Update or Return.
-        let activation = self.activation_status()?;
-        let status = match (self.status(), &activation) {
-            (Ok(status), _) => Ok(status),
-            (Err(error), Some(_)) => Err(error),
-            (Err(error), None) => return Err(error),
-        };
-        // An installed service lists only its approved build.
-        let approved = match status {
-            Ok(status) if status.installed => self.retained_installations()?.into_iter().next(),
-            _ => None,
-        };
-        let included = crate::local_startup::discover_candidate().map(|candidate| IncludedServer {
-            version: candidate.version().to_owned(),
-            commit: candidate.commit().to_owned(),
-            package: candidate.digest().to_owned(),
-            approved: approved
-                .as_ref()
-                .is_some_and(|approved| candidate.is_approved(approved)),
-            // The service's own policy, so the row never offers what activation refuses.
-            earlier: approved.as_ref().is_some_and(|approved| {
-                is_released_downgrade(candidate.version(), &approved.version)
-            }),
-        });
-        Ok(UpdateFacts {
-            status,
-            approved,
-            included,
-            activation,
-        })
+        read_facts(self, self.activation_status()?, Service::status)
     }
 
     fn prepare_update(&self) -> Result<Option<PreparedChange>, ServerError> {
@@ -155,6 +126,60 @@ impl ServerUpdateControl for Service {
     fn finish(&self) -> Result<Option<ActivationStatus>, ServerError> {
         self.recover_activation()
     }
+}
+
+/// The dropdown observes the same facts and policy as Settings without resuming an activation.
+/// Blocking local reads and signature verification only; it retains no candidate. It returns the
+/// row's state badge, because the explanation refers to the Settings layout around it.
+pub(crate) fn passive_update(service: &Service) -> Result<(SharedString, bool), ServerError> {
+    // activation_status can prove recovery eligibility and clean a stale endpoint while doing
+    // so. A passive read instead refuses unresolved originals and leaves their review to Settings.
+    let facts = read_facts(service, None, Service::passive_status)?;
+    let presentation = present_update(&UpdateState {
+        facts: Some(facts),
+        ..UpdateState::default()
+    });
+    Ok((
+        presentation.state.into(),
+        presentation.actions.contains(&UpdateAction::Update),
+    ))
+}
+
+fn read_facts(
+    service: &Service,
+    activation: Option<ActivationStatus>,
+    status: fn(&Service) -> Result<ServiceStatus, ServerError>,
+) -> Result<UpdateFacts, ServerError> {
+    // Keep the recorded original visible even when the status read refuses an unresolved update.
+    // Settings may recover that original; the dropdown supplies the passive status reader.
+    let status = match (status(service), &activation) {
+        (Ok(status), _) => Ok(status),
+        (Err(error), Some(_)) => Err(error),
+        (Err(error), None) => return Err(error),
+    };
+    // An installed service lists only its approved build.
+    let approved = match status {
+        Ok(status) if status.installed => service.retained_installations()?.into_iter().next(),
+        _ => None,
+    };
+    let included = crate::local_startup::discover_candidate().map(|candidate| IncludedServer {
+        version: candidate.version().to_owned(),
+        commit: candidate.commit().to_owned(),
+        package: candidate.digest().to_owned(),
+        approved: approved
+            .as_ref()
+            .is_some_and(|approved| candidate.is_approved(approved)),
+        // The service's own policy, so the row never offers what activation refuses.
+        earlier: approved
+            .as_ref()
+            .is_some_and(|approved| is_released_downgrade(candidate.version(), &approved.version)),
+    });
+    Ok(UpdateFacts {
+        status,
+        approved,
+        included,
+        activation,
+    })
 }
 
 /// Whether the Server version row offers Update Server for `service`, for a surface that opens
@@ -272,7 +297,7 @@ impl UpdateStep {
 pub(super) struct UpdateState {
     /// The last read. `None` until the first read succeeds.
     pub(super) facts: Option<UpdateFacts>,
-    /// Why the last read or operation failed, until the next one.
+    /// The read failure, or the admitted failure retained until the next change.
     pub(super) failure: Option<ServerError>,
     pub(super) working: Option<UpdateStep>,
 }
@@ -563,9 +588,11 @@ pub(super) struct UpdateConfirmation {
 }
 
 impl UpdateConfirmation {
+    /// The local server has no machine name to show, so the detail first says whose server it is.
     pub(super) fn of(prepared: &PreparedChange) -> Self {
+        let identity = ApplicationIdentity::current();
         let wording = UpdateWording::new(
-            ApplicationIdentity::current().directory_name(),
+            identity.directory_name(),
             prepared.change,
             &prepared.previous,
             &prepared.candidate,
@@ -575,13 +602,18 @@ impl UpdateConfirmation {
         Self {
             title: wording.title(),
             message: wording.message().into(),
-            detail: wording.detail().into(),
+            detail: format!(
+                "This is the {} server for this account on this computer. {}",
+                identity.display_name(),
+                wording.detail()
+            )
+            .into(),
             confirm: wording.confirm_label(),
         }
     }
 }
 
-/// Owns the offered update control, its last state, and the pending operation.
+/// Presents update state and owns preparation, confirmation, and passive reads.
 pub(super) struct ServerUpdateRow {
     control: Arc<dyn ServerUpdateControl>,
     pub(super) state: UpdateState,
@@ -652,7 +684,7 @@ impl SettingsWindow {
 
     /// Starts a requested update once a fresh read offers it. A read that no longer offers it
     /// drops the request, and the row says why.
-    fn continue_requested_update(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn continue_requested_update(&mut self, cx: &mut Context<Self>) {
         let Some(row) = &self.server_update else {
             return;
         };
@@ -699,21 +731,38 @@ impl SettingsWindow {
         if !self.server_update_ready(step) {
             return;
         }
+        if step == UpdateStep::Finish {
+            let Some(control) = self
+                .server_update
+                .as_ref()
+                .map(|row| Arc::clone(&row.control))
+            else {
+                return;
+            };
+            self.run_admitted_update(step, move || control.finish(), cx);
+            return;
+        }
         let Some(row) = &mut self.server_update else {
             return;
         };
         let control = Arc::clone(&row.control);
         row.state.working = Some(step);
+        let prior_failure = if step == UpdateStep::Check {
+            self.local_operations.read(cx).update_failure
+        } else {
+            self.local_operations
+                .update(cx, |owner, _| owner.update_failure = None);
+            None
+        };
         row.state.failure = None;
         let result = cx.background_spawn(async move {
             let outcome = match step {
                 UpdateStep::Prepare => control.prepare_update(),
                 UpdateStep::PrepareReturn => control.prepare_return().map(Some),
-                UpdateStep::Finish => control.finish().map(|_| None),
                 _ => Ok(None),
             };
             let (prepared, failure) = match outcome {
-                Ok(prepared) => (prepared, None),
+                Ok(prepared) => (prepared, prior_failure),
                 Err(error) => (None, Some(error)),
             };
             let read = control.read();
@@ -722,7 +771,7 @@ impl SettingsWindow {
         row._operation = Some(cx.spawn(async move |settings, cx| {
             let (prepared, failure, read) = result.await;
             let _ = settings.update(cx, |settings, cx| {
-                settings.update_step_finished(step, prepared, failure, read, cx);
+                settings.update_step_finished(prepared, failure, read, cx);
             });
         }));
         cx.notify();
@@ -730,7 +779,6 @@ impl SettingsWindow {
 
     fn update_step_finished(
         &mut self,
-        step: UpdateStep,
         prepared: Option<PreparedChange>,
         failure: Option<ServerError>,
         read: Result<UpdateFacts, ServerError>,
@@ -750,10 +798,11 @@ impl SettingsWindow {
                 row.state.failure = failure.or(Some(error));
             }
         }
+        let state = row.state.clone();
+        self.local_operations
+            .update(cx, |owner, _| owner.update = Some(state));
         if let Some(prepared) = prepared {
             self.confirm_change(prepared, cx);
-        } else if step.changes_service() {
-            self.server_changed(cx);
         }
         self.continue_requested_update(cx);
         cx.notify();
@@ -860,39 +909,42 @@ impl SettingsWindow {
         if !self.server_update_ready(step) {
             return;
         }
+        self.run_admitted_update(step, move || (prepared.commit)().map(Some), cx);
+    }
+
+    fn run_admitted_update(
+        &mut self,
+        step: UpdateStep,
+        change: impl FnOnce() -> Result<Option<ActivationStatus>, ServerError> + Send + 'static,
+        cx: &mut Context<Self>,
+    ) {
         let Some(row) = &mut self.server_update else {
             return;
         };
         let control = Arc::clone(&row.control);
         row.state.working = Some(step);
         row.state.failure = None;
+        let state = row.state.clone();
         let result = cx.background_spawn(async move {
-            let failure = (prepared.commit)().err();
-            (failure, control.read())
+            let outcome = change();
+            let failure = outcome.as_ref().err().copied();
+            let state = match control.read() {
+                Ok(facts) => UpdateState {
+                    facts: Some(facts),
+                    failure,
+                    working: None,
+                },
+                Err(error) => UpdateState {
+                    facts: None,
+                    failure: failure.or(Some(error)),
+                    working: None,
+                },
+            };
+            UpdateCompletion { state, outcome }
         });
-        row._operation = Some(cx.spawn(async move |settings, cx| {
-            let (failure, read) = result.await;
-            let _ = settings.update(cx, |settings, cx| {
-                settings.update_step_finished(step, None, failure, read, cx);
-            });
-        }));
+        self.local_operations
+            .update(cx, |owner, cx| owner.run_update(state, result, cx));
         cx.notify();
-    }
-
-    /// A step that may have replaced or restarted the server. The other rows read it afresh, and
-    /// a Workspace Window waiting on it opens its Workspaces once it runs.
-    fn server_changed(&mut self, cx: &mut Context<Self>) {
-        self.check_server_service(cx);
-        self.check_local_server(cx);
-        let running = self
-            .server_update
-            .as_ref()
-            .and_then(|row| row.state.facts.as_ref())
-            .and_then(|facts| facts.status.ok())
-            .is_some_and(|status| status.running && !status.stopped);
-        if running {
-            crate::ui::workspace_manager::resume_waiting_launches(cx);
-        }
     }
 
     /// The version badge, or progress while a step runs, and the row's steps.
@@ -1091,6 +1143,7 @@ pub(super) mod testing {
         shared: Arc<Mutex<Shared>>,
         /// The refusal the next preparation returns.
         refusal: Mutex<Option<ServerError>>,
+        read_failure: Mutex<Option<ServerError>>,
     }
 
     impl ScriptedUpdate {
@@ -1101,6 +1154,7 @@ pub(super) mod testing {
                     ..Shared::default()
                 })),
                 refusal: Mutex::new(None),
+                read_failure: Mutex::new(None),
             })
         }
 
@@ -1115,6 +1169,10 @@ pub(super) mod testing {
 
         pub(in crate::ui::settings_window) fn refuse_next(&self, error: ServerError) {
             *self.refusal.lock().expect("refusal") = Some(error);
+        }
+
+        pub(in crate::ui::settings_window) fn refuse_next_read(&self, error: ServerError) {
+            *self.read_failure.lock().expect("read failure") = Some(error);
         }
 
         pub(in crate::ui::settings_window) fn answer(&self, outcome: Outcome) {
@@ -1136,6 +1194,9 @@ pub(super) mod testing {
         fn read(&self) -> Result<UpdateFacts, ServerError> {
             let mut shared = self.shared();
             shared.calls.push(UpdateCall::Read);
+            if let Some(error) = self.read_failure.lock().expect("read failure").take() {
+                return Err(error);
+            }
             Ok(shared.facts().clone())
         }
 

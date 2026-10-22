@@ -921,7 +921,7 @@ pub(super) struct ServiceState {
     pub(super) startup: ServiceStartup,
     /// The last status read. `None` until the first read succeeds, or after a read failed.
     pub(super) status: Option<ServiceStatus>,
-    /// Why the last read or operation failed, until the next action.
+    /// The read failure, or the admitted failure retained until the next change.
     pub(super) failure: Option<ServerError>,
     /// The verified builds found with the last status read that showed no installed service.
     pub(super) installations: Vec<RetainedInstallation>,
@@ -1166,11 +1166,11 @@ fn authorization_caption(
     )
 }
 
-/// Owns the offered service, its last state, and the pending operation.
+/// Presents the offered service and owns passive reads.
 pub(super) struct ServerServiceRow {
     control: Result<Arc<dyn ServerServiceControl>, ServerError>,
-    state: ServiceState,
-    /// Returns the background result to GPUI. Dropping the window drops it.
+    pub(super) state: ServiceState,
+    /// The window owns passive reads; admitted changes belong to LocalServerOperations.
     _operation: Option<Task<()>>,
 }
 
@@ -1210,6 +1210,87 @@ impl ServerServiceRow {
             .working
             .is_some_and(ServiceAction::changes_service)
     }
+}
+
+fn perform_service_operation(
+    control: &dyn ServerServiceControl,
+    action: ServiceAction,
+    installation: Option<PathBuf>,
+    startup: ServiceStartup,
+) -> ServiceState {
+    use ServiceAction as Action;
+    let authorizing = matches!(action, Action::AuthorizeInstall | Action::AuthorizeStart);
+    let retry = installation.clone();
+    let outcome = match (action, installation.as_deref()) {
+        (Action::Install, Some(installation)) => control.install(installation),
+        (Action::Install, None) => Err(ServerError::RuntimeUnavailable),
+        (Action::Check, _) => control.status(),
+        (Action::Start, _) => control.start(),
+        (Action::Stop, _) => control.stop(),
+        (Action::Restart, _) => control.restart(),
+        (Action::Uninstall, _) => control.uninstall(),
+        (Action::AuthorizeInstall | Action::AuthorizeStart, _) => {
+            control.authorize_startup().and_then(|()| control.status())
+        }
+    };
+    let authorized = authorizing && outcome.is_ok();
+    let (status, failure) = match outcome {
+        Ok(status) => (Some(status), None),
+        Err(error) if action == Action::Check => (None, Some(error)),
+        Err(error) => (control.status().ok(), Some(error)),
+    };
+    // Listing verifies each build and never installs or starts one. An installed service
+    // offers no Install, so it lists nothing.
+    let (installations, failure) = match status {
+        Some(status) if !status.installed => match control.retained_installations() {
+            Ok(installations) => (installations, failure),
+            Err(error) => (Vec::new(), failure.or(Some(error))),
+        },
+        _ => (Vec::new(), failure),
+    };
+    // A request that would start the server waits for authorization. A Restart refused
+    // after stopping continues as Start, which is what the person asked for.
+    let request = match (failure, action) {
+        (Some(ServerError::AuthorizationRequired), Action::Install | Action::AuthorizeInstall) => {
+            installation.map(AuthorizedRequest::Install)
+        }
+        (
+            Some(ServerError::AuthorizationRequired),
+            Action::Start | Action::Restart | Action::AuthorizeStart,
+        ) => Some(AuthorizedRequest::Start),
+        _ => None,
+    };
+    let state = ServiceState {
+        startup,
+        status,
+        failure,
+        installations,
+        working: None,
+        authorization: request.map(|request| PendingAuthorization {
+            request,
+            declined: authorizing,
+        }),
+    };
+    if authorized {
+        // Authorization continues only the request the person approved, including its exact build.
+        if let Some(installation) = retry {
+            if state
+                .installations
+                .iter()
+                .any(|listed| listed.directory == installation)
+            {
+                return perform_service_operation(
+                    control,
+                    Action::Install,
+                    Some(installation),
+                    startup,
+                );
+            }
+        } else {
+            return perform_service_operation(control, Action::Start, None, startup);
+        }
+    }
+    state
 }
 
 impl SettingsWindow {
@@ -1418,8 +1499,6 @@ impl SettingsWindow {
         installation: Option<PathBuf>,
         cx: &mut Context<Self>,
     ) {
-        use ServiceAction as Action;
-
         if !self.server_service_ready(action) {
             return;
         }
@@ -1433,96 +1512,33 @@ impl SettingsWindow {
         let startup = row.state.startup;
         row.state.working = Some(action);
         row.state.failure = None;
-        let authorizing = matches!(action, Action::AuthorizeInstall | Action::AuthorizeStart);
-        let retry = installation.clone();
+        let prior_failure = self.local_operations.read(cx).service_failure;
         let result = cx.background_spawn(async move {
-            let outcome = match (action, installation.as_deref()) {
-                (Action::Install, Some(installation)) => control.install(installation),
-                (Action::Install, None) => Err(ServerError::RuntimeUnavailable),
-                (Action::Check, _) => control.status(),
-                (Action::Start, _) => control.start(),
-                (Action::Stop, _) => control.stop(),
-                (Action::Restart, _) => control.restart(),
-                (Action::Uninstall, _) => control.uninstall(),
-                (Action::AuthorizeInstall | Action::AuthorizeStart, _) => {
-                    control.authorize_startup().and_then(|()| control.status())
-                }
-            };
-            let authorized = authorizing && outcome.is_ok();
-            let (status, failure) = match outcome {
-                Ok(status) => (Some(status), None),
-                Err(error) if action == Action::Check => (None, Some(error)),
-                Err(error) => (control.status().ok(), Some(error)),
-            };
-            // Listing verifies each build and never installs or starts one. An installed service
-            // offers no Install, so it lists nothing.
-            let (installations, failure) = match status {
-                Some(status) if !status.installed => match control.retained_installations() {
-                    Ok(installations) => (installations, failure),
-                    Err(error) => (Vec::new(), failure.or(Some(error))),
-                },
-                _ => (Vec::new(), failure),
-            };
-            // A request that would start the server waits for authorization. A Restart refused
-            // after stopping continues as Start, which is what the person asked for.
-            let request = match (failure, action) {
-                (
-                    Some(ServerError::AuthorizationRequired),
-                    Action::Install | Action::AuthorizeInstall,
-                ) => installation.map(AuthorizedRequest::Install),
-                (
-                    Some(ServerError::AuthorizationRequired),
-                    Action::Start | Action::Restart | Action::AuthorizeStart,
-                ) => Some(AuthorizedRequest::Start),
-                _ => None,
-            };
-            let state = ServiceState {
-                startup,
-                status,
-                failure,
-                installations,
-                working: None,
-                authorization: request.map(|request| PendingAuthorization {
-                    request,
-                    declined: authorizing,
-                }),
-            };
-            (state, authorized)
+            let mut state =
+                perform_service_operation(control.as_ref(), action, installation, startup);
+            if action == ServiceAction::Check {
+                state.failure = prior_failure.or(state.failure);
+            }
+            state
         });
-        row._operation = Some(cx.spawn(async move |settings, cx| {
-            let (state, authorized) = result.await;
-            let _ = settings.update(cx, |settings, cx| {
-                if let Some(row) = &mut settings.server_service {
-                    row.state = state;
-                }
-                // The authorization the person confirmed continues with the request it was asked
-                // for. Install still installs only a build the last read listed.
-                if authorized {
-                    match retry {
-                        Some(installation) => settings.install_server_service(installation, cx),
-                        None => settings.run_server_service(Action::Start, cx),
+        if action.changes_service() {
+            let state = row.state.clone();
+            self.local_operations
+                .update(cx, |owner, cx| owner.run_service(state, result, cx));
+        } else {
+            row._operation = Some(cx.spawn(async move |settings, cx| {
+                let state = result.await;
+                let _ = settings.update(cx, |settings, cx| {
+                    settings
+                        .local_operations
+                        .update(cx, |owner, _| owner.service = Some(state.clone()));
+                    if let Some(row) = &mut settings.server_service {
+                        row.state = state;
                     }
-                }
-                // A change starts, stops, or replaces the server the connection row authenticates
-                // with, so the connection is checked afresh. A retry checks it when it finishes.
-                if action.changes_service() {
-                    settings.check_local_server(cx);
-                    settings.check_server_update(cx);
-                }
-                // A Workspace Window waiting on a stopped or missing server opens its Workspaces
-                // once the person starts it here.
-                if action.changes_service()
-                    && settings
-                        .server_service
-                        .as_ref()
-                        .and_then(|row| row.state.status)
-                        .is_some_and(|status| status.running && !status.stopped)
-                {
-                    crate::ui::workspace_manager::resume_waiting_launches(cx);
-                }
-                cx.notify();
-            });
-        }));
+                    cx.notify();
+                });
+            }));
+        }
         cx.notify();
     }
 

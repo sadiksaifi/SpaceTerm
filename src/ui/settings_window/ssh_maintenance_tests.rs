@@ -640,6 +640,34 @@ fn announces(text: &str, cx: &mut VisualTestContext) -> bool {
     })
 }
 
+#[gpui::test]
+fn dropdown_ssh_update_describes_only_the_selected_servers_existing_journey(
+    cx: &mut TestAppContext,
+) {
+    let servers = open_maintenance(cx);
+    let destination = SshDestination::new("penguin".to_owned()).unwrap();
+    servers.operations.refresh(&destination);
+    servers.cx.run_until_parked();
+    servers.cx.update(|window, cx| {
+        cx.set_global(super::super::OpenSettingsWindow(
+            window.window_handle().downcast::<SettingsWindow>().unwrap(),
+        ));
+        crate::ui::updates::server_rows::ServerUpdateAction::Ssh(destination.clone()).activate(cx);
+    });
+    servers.cx.run_until_parked();
+    assert_eq!(
+        servers.operations.described("penguin"),
+        Some(RemoteMaintenanceRequest::Update)
+    );
+    assert_eq!(
+        servers.operations.calls(),
+        [
+            Call::Refresh,
+            Call::Describe(RemoteMaintenanceRequest::Update)
+        ]
+    );
+}
+
 /// Opening the section reads nothing from the other computer, and the rows say so.
 #[gpui::test]
 fn opening_the_section_reaches_no_computer(cx: &mut TestAppContext) {

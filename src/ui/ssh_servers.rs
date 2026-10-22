@@ -5,10 +5,11 @@
 //! Servers Settings Section offers Connect and reports each connection. Reading a status performs
 //! no remote work, so rendering stays free of discovery.
 
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
-use gpui::{App, Global, SharedString, Window, WindowId};
+use gpui::{App, AppContext, Entity, EventEmitter, Global, SharedString, Window, WindowId};
 
 use crate::domain::SshDestination;
 use crate::platform::app_paths::AppPaths;
@@ -23,6 +24,62 @@ use crate::ssh::server_connection::{
 use crate::ssh::server_operations::RemoteServerOperations;
 use crate::ui::sidebar_window::form::CaptionTone;
 use crate::ui::ssh_host_form::ManagedHostFormBackendError;
+
+/// Only an admitted AskPass request yields the connection progress slot.
+#[derive(Clone, Copy)]
+pub(crate) enum SshPromptEvent {
+    Requested,
+    Settled { cancelled: bool },
+}
+
+#[derive(Default)]
+pub(crate) struct SshPromptActivity {
+    pub(crate) active: bool,
+}
+impl EventEmitter<SshPromptEvent> for SshPromptActivity {}
+
+#[derive(Default)]
+struct WindowPrompts(HashMap<WindowId, Entity<SshPromptActivity>>);
+impl Global for WindowPrompts {}
+
+pub(crate) fn prompt_activity(window: &Window, cx: &mut App) -> Entity<SshPromptActivity> {
+    if cx.try_global::<WindowPrompts>().is_none() {
+        cx.set_global(WindowPrompts::default());
+        cx.on_window_closed(|cx, id| {
+            cx.global_mut::<WindowPrompts>().0.remove(&id);
+        })
+        .detach();
+    }
+    let id = window.window_handle().window_id();
+    if let Some(activity) = cx.global::<WindowPrompts>().0.get(&id) {
+        return activity.clone();
+    }
+    let activity = cx.new(|_| SshPromptActivity::default());
+    cx.global_mut::<WindowPrompts>()
+        .0
+        .insert(id, activity.clone());
+    activity
+}
+
+pub(crate) fn prompt_requested(window: &Window, cx: &mut App) {
+    prompt_activity(window, cx).update(cx, |activity, cx| {
+        activity.active = true;
+        cx.emit(SshPromptEvent::Requested);
+    });
+}
+
+pub(crate) fn prompt_settled(window: WindowId, cancelled: bool, cx: &mut App) {
+    let activity = cx
+        .try_global::<WindowPrompts>()
+        .and_then(|prompts| prompts.0.get(&window))
+        .cloned();
+    if let Some(activity) = activity {
+        activity.update(cx, |activity, cx| {
+            activity.active = false;
+            cx.emit(SshPromptEvent::Settled { cancelled });
+        });
+    }
+}
 
 struct InstalledSshServers {
     connections: SshServerConnections,

@@ -1497,3 +1497,107 @@ fn assistive_technology_hears_the_authorization_step_and_escape_leaves_it_unaske
         vec![ServiceAction::AuthorizeStart, ServiceAction::Uninstall]
     );
 }
+
+#[gpui::test]
+fn an_admitted_start_finishes_after_settings_closes(cx: &mut TestAppContext) {
+    let server = ScriptedServer::new(Ok(connected(1)));
+    let service = ScriptedService::new(Ok(stopped()));
+    let offered = offered_with_service(&server, &service);
+    {
+        let (settings, visual) = open_settings(offered.clone(), cx);
+        settings.update(visual, |settings, cx| {
+            settings.run_server_service(ServiceAction::Start, cx)
+        });
+        let released = settings.downgrade();
+        drop(settings);
+        visual.update(|window, _| window.remove_window());
+        visual.run_until_parked();
+        assert!(
+            released.upgrade().is_none(),
+            "completion must not retain Settings"
+        );
+    }
+    assert_eq!(service.changes(), [ServiceCall::Start]);
+    let (settings, visual) = open_settings(offered, cx);
+    let presentation = service_presentation(&settings, visual);
+    assert_eq!(presentation.state, "Running");
+    assert_eq!(service.changes(), [ServiceCall::Start]);
+}
+
+#[gpui::test]
+fn a_failed_admitted_start_survives_settings_reopening(cx: &mut TestAppContext) {
+    let server = ScriptedServer::new(Ok(connected(1)));
+    let service = ScriptedService::new(Ok(stopped()));
+    service.refuse_next(ServerError::StartupFailed);
+    let offered = offered_with_service(&server, &service);
+    {
+        let (settings, visual) = open_settings(offered.clone(), cx);
+        settings.update(visual, |settings, cx| {
+            settings.run_server_service(ServiceAction::Start, cx)
+        });
+        drop(settings);
+        visual.update(|window, _| window.remove_window());
+        visual.run_until_parked();
+    }
+    let (settings, visual) = open_settings(offered, cx);
+    click(NAVIGATION_SELECTOR, visual);
+    assert_eq!(
+        settings.read_with(visual, |settings, _| settings
+            .server_service
+            .as_ref()
+            .unwrap()
+            .state
+            .failure),
+        Some(ServerError::StartupFailed)
+    );
+    assert_eq!(service.changes(), [ServiceCall::Start]);
+}
+
+#[gpui::test]
+fn an_admitted_start_notifies_a_waiting_workspace_after_settings_closes(cx: &mut TestAppContext) {
+    use crate::ui::workspace_manager::{
+        WorkspaceManager, WorkspaceManagerAdapters, launch_testing,
+    };
+
+    let server = ScriptedServer::new(Ok(connected(1)));
+    let service = ScriptedService::new(Ok(stopped()));
+    let (settings, visual) = open_settings(offered_with_service(&server, &service), cx);
+    let launch = Arc::new(launch_testing::ScriptedLaunch::default());
+    launch.answer(Err(ServerError::Stopped));
+    // The second observation verifies notification without opening a server connection.
+    launch.answer(Err(ServerError::ServiceUnavailable));
+    let mut local_server = launch_testing::unanswered();
+    local_server.launch = launch.clone();
+    let (_workspace, _) = visual.cx.add_window_view(|window, cx| {
+        WorkspaceManager::new_with_adapters(
+            std::env::temp_dir(),
+            WorkspaceManagerAdapters {
+                local_filesystem: crate::platform::local_filesystem::LocalFilesystemAuthority::testing(),
+                key_input: Rc::new(crate::terminal::GpuiTerminalKeyInputAdapterFactory::default()),
+                accessibility: Rc::new(crate::platform::terminal_accessibility::testing::RecordingAccessibilityFactory::default()),
+                native_services: crate::terminal::native_services::testing::adapters(),
+                lifecycle: crate::ui::pane_lifecycle::PaneLifecycleDependencies::testing(),
+                directory_selection: Rc::new(crate::directory_selection::GpuiDirectorySelection),
+                window_drag: Rc::new(RecordingOperatingSystemWindowDragPlatform::default()),
+                local_server,
+                server_directories: crate::ui::directory_picker::server_directory_testing::older(),
+            },
+            crate::settings::sidebar::SidebarState::Expanded,
+            window,
+            cx,
+        )
+    });
+    assert_eq!(launch.steps(), ["run"]);
+    settings.update(visual, |settings, cx| {
+        settings.run_server_service(ServiceAction::Start, cx)
+    });
+    drop(settings);
+    visual.update(|window, _| window.remove_window());
+    visual.run_until_parked();
+    assert_eq!(service.changes(), [ServiceCall::Start]);
+    assert_eq!(
+        launch.steps(),
+        ["run", "run"],
+        "completion wakes the existing launch and never issues another Start"
+    );
+}

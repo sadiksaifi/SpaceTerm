@@ -1,24 +1,23 @@
-//! Update presentation: the title bar control, menu commands, prompts, and launch view.
+//! Update presentation: the title bar Updates menu, menu commands, prompts, and launch view.
 //! [`crate::updates`] owns update policy and state.
 
+mod dropdown;
 mod launch;
+pub(crate) mod server_rows;
 
+pub(super) use dropdown::UpdateControl;
 pub(crate) use launch::{request_window_close as request_launch_window_close, show_launch};
 
-use gpui::prelude::*;
 use gpui::{
-    AnyWindowHandle, App, Context, Entity, Global, SharedString, Subscription, Window,
-    WindowHandle, actions, div,
+    AnyWindowHandle, App, BorrowAppContext, Context, Entity, Global, SharedString, Subscription,
+    Window, WindowHandle, actions,
 };
 use spaceterm_ui::{
-    Alert, AlertIntent, AlertOutcome, Button, ButtonPaint, ButtonShape, ButtonSize, ButtonVariant,
-    ButtonVariantStyle, DeterminateProgress, Icon, IconName, ModalAction, ModalActionEmphasis,
-    ModalActionIntent, ModalActionRole, ModalId, ProgressRing, ProgressSize, ProgressState,
-    Tooltip,
+    Alert, AlertIntent, AlertOutcome, ModalAction, ModalActionEmphasis, ModalActionIntent,
+    ModalActionRole, ModalId,
 };
 
 use super::WorkspaceManager;
-use super::appearance::gpui_color;
 use super::settings_window::SettingsWindow;
 use crate::desktop_profile::{DesktopPresentation, DesktopWording};
 use crate::updates::policy::UpdateStage;
@@ -26,13 +25,6 @@ use crate::updates::{ApplicationUpdates, UpdateError, UpdateNotice, UpdateServic
 
 actions!(spaceterm, [CheckForUpdates, OpenReleaseNotes]);
 
-#[cfg_attr(
-    not(target_os = "macos"),
-    allow(
-        dead_code,
-        reason = "only a native application menu shows the update command"
-    )
-)]
 pub(crate) const CHECK_FOR_UPDATES_TITLE: &str = "Check for Updates…";
 pub(crate) const RELEASE_NOTES_TITLE: &str = "Release Notes";
 const RELEASE_NOTES_URL: &str = "https://github.com/sadiksaifi/SpaceTerm/releases/latest";
@@ -68,7 +60,7 @@ struct UpdatePrompts {
 /// Where the user asked to install, which is where the confirmation belongs.
 #[derive(Clone, Copy, Debug)]
 enum InstallRequest {
-    /// The application menu or a title bar control, answered in the front Workspace window.
+    /// The application menu or the Updates menu, answered in the front Workspace window.
     FrontWorkspace,
     /// A window that hosts update prompts itself, such as Settings.
     Window(AnyWindowHandle),
@@ -234,7 +226,7 @@ fn receive_notice(notice: UpdateNotice, cx: &mut App) {
         UpdateNotice::ReadyToInstall => {
             let request = take_install_request(cx);
             // An unrequested confirmation waits for the button rather than stacking behind
-            // another decision. The ready control stays prominent until the user acts.
+            // another decision. The Updates menu keeps the ready step prominent until the user acts.
             let requested = request.is_some();
             if let Some(InstallRequest::Window(handle)) = request
                 && let Some(settings) = handle.downcast::<SettingsWindow>()
@@ -418,7 +410,7 @@ fn present_available<T: 'static>(version: &str, window: &mut Window, cx: &mut Co
 }
 
 /// Choosing Later quiets the reminder until it comes due again. The update stays pending and the
-/// title bar control stays in place.
+/// Updates menu keeps offering it.
 fn put_off(cx: &mut App) {
     if let Some(updates) = service(cx) {
         updates.update(cx, |updates, cx| updates.dismiss_reminder(cx));
@@ -618,7 +610,7 @@ fn retry_install(cx: &mut App) {
     }
 }
 
-/// The glyph that leads the title bar control.
+/// The glyph that leads the Updates menu trigger while the client has a step in progress.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum ControlGlyph {
     Download,
@@ -628,16 +620,16 @@ enum ControlGlyph {
     Warning,
 }
 
-/// How far the control reaches for attention after the user has put an update off.
+/// How far the trigger reaches for attention after the user has put an update off.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ControlReminder {
-    /// The control takes the accent paint even where it would otherwise stay quiet.
+    /// The glyph takes the accent paint even where it would otherwise stay quiet.
     Gentle,
-    /// The control also takes the warning paint and glyph.
+    /// The glyph takes the warning paint and the status says the update is overdue.
     Overdue,
 }
 
-/// What activating the title bar control does.
+/// What activating the client's command row does.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ControlCommand {
     Download,
@@ -647,12 +639,14 @@ enum ControlCommand {
     RetryInstall,
 }
 
-/// One frame of the title bar control. It has no dismiss affordance and stays while an update is
-/// pending.
+/// One frame of the client's pending update in the Updates menu. It has no dismiss affordance and
+/// stays while an update is pending.
 #[derive(Clone, Debug, PartialEq)]
 struct ControlPresentation {
+    /// Progress or a problem, shown as a status row above the command.
+    status: Option<SharedString>,
+    /// The command row's title, or the state itself while no command applies.
     label: SharedString,
-    tooltip: SharedString,
     glyph: ControlGlyph,
     prominent: bool,
     command: Option<ControlCommand>,
@@ -661,29 +655,28 @@ struct ControlPresentation {
 
 impl ControlPresentation {
     /// `pending_version` is the release the service still knows about while its state has moved
-    /// on to a check, a failure, or idle. Without one there is nothing to show.
+    /// on to a check, a failure, or idle. Without one there is nothing pending to show.
     fn resolve(
         state: &UpdateState,
         pending_version: Option<&str>,
         cancelling: bool,
         wording: DesktopWording,
     ) -> Option<Self> {
-        let control =
-            |step: &str, version: &str, tooltip: String, glyph, prominent, command| Self {
-                label: format!("{step} {version}").into(),
-                tooltip: tooltip.into(),
-                glyph,
-                prominent,
-                command,
-                reminder: None,
-            };
+        let control = |status: Option<String>, label: String, glyph, prominent, command| Self {
+            status: status.map(SharedString::from),
+            label: label.into(),
+            glyph,
+            prominent,
+            command,
+            reminder: None,
+        };
+        const STOP: &str = "Stop Download…";
         let presentation = match state {
             UpdateState::Unavailable | UpdateState::UpToDate => return None,
             UpdateState::Idle => {
                 let version = pending_version?;
                 control(
-                    "Download",
-                    version,
+                    None,
                     format!("Download SpaceTerm {version}"),
                     ControlGlyph::Download,
                     false,
@@ -693,8 +686,7 @@ impl ControlPresentation {
             UpdateState::Checking => {
                 let version = pending_version?;
                 control(
-                    "Checking",
-                    version,
+                    None,
                     format!("Checking for SpaceTerm {version}"),
                     ControlGlyph::Activity,
                     false,
@@ -704,17 +696,15 @@ impl ControlPresentation {
             UpdateState::Failed { error } => {
                 let version = pending_version?;
                 control(
-                    "Retry",
-                    version,
-                    failure_message(*error, wording),
+                    Some(failure_message(*error, wording)),
+                    format!("Try Downloading SpaceTerm {version} Again"),
                     ControlGlyph::Warning,
                     false,
                     Some(ControlCommand::RetryDownload),
                 )
             }
             UpdateState::Available { version } => control(
-                "Download",
-                version,
+                None,
                 format!("Download SpaceTerm {version}"),
                 ControlGlyph::Download,
                 true,
@@ -724,8 +714,7 @@ impl ControlPresentation {
                 if cancelling =>
             {
                 control(
-                    "Stopping",
-                    version,
+                    None,
                     format!("Stopping the Download of SpaceTerm {version}"),
                     ControlGlyph::Activity,
                     false,
@@ -739,45 +728,41 @@ impl ControlPresentation {
             } if *total > 0 => {
                 let fraction = (*received as f64 / *total as f64).clamp(0.0, 1.0);
                 control(
-                    "Downloading",
-                    version,
-                    format!(
+                    Some(format!(
                         "Downloading SpaceTerm {version}, {}%",
                         (fraction * 100.0).floor()
-                    ),
+                    )),
+                    STOP.to_owned(),
                     ControlGlyph::Progress(fraction as f32),
                     false,
                     Some(ControlCommand::OfferStop),
                 )
             }
             UpdateState::Downloading { version, .. } => control(
-                "Downloading",
-                version,
-                format!("Downloading SpaceTerm {version}"),
+                Some(format!("Downloading SpaceTerm {version}")),
+                STOP.to_owned(),
                 ControlGlyph::Activity,
                 false,
                 Some(ControlCommand::OfferStop),
             ),
             UpdateState::Verifying { version } => control(
-                "Preparing",
-                version,
-                format!("Verifying SpaceTerm {version}"),
+                Some(format!("Verifying SpaceTerm {version}")),
+                STOP.to_owned(),
                 ControlGlyph::Activity,
                 false,
                 Some(ControlCommand::OfferStop),
             ),
+            // The confirmation follows, so the title ends in an ellipsis.
             UpdateState::Ready { version } => control(
-                "Install",
-                version,
-                format!("Restart to Install SpaceTerm {version}"),
+                None,
+                format!("Restart to Install SpaceTerm {version}…"),
                 ControlGlyph::Restart,
                 true,
                 Some(ControlCommand::RequestInstall),
             ),
             // The install was confirmed. Reaching this state visibly means the quit was cancelled.
             UpdateState::Installing { version } => control(
-                "Installing",
-                version,
+                None,
                 format!("Restart to Finish Installing SpaceTerm {version}"),
                 ControlGlyph::Restart,
                 true,
@@ -801,162 +786,13 @@ impl ControlPresentation {
         self.prominent = true;
         if reminder == ControlReminder::Overdue {
             self.glyph = ControlGlyph::Warning;
-            self.tooltip = format!("This update is overdue. {}", self.tooltip).into();
+            self.status = Some(match self.status {
+                Some(status) => format!("This update is overdue. {status}").into(),
+                None => "This update is overdue.".into(),
+            });
         }
         self.reminder = Some(reminder);
         self
-    }
-}
-
-/// The update control at the trailing end of one window's title bar.
-pub(super) struct UpdateControl {
-    _subscription: Option<Subscription>,
-}
-
-impl UpdateControl {
-    pub(super) fn new(cx: &mut Context<Self>) -> Self {
-        Self {
-            _subscription: service(cx).map(|updates| cx.observe(&updates, |_, _, cx| cx.notify())),
-        }
-    }
-
-    fn activate(command: ControlCommand, window: &mut Window, cx: &mut App) {
-        let Some(updates) = service(cx) else { return };
-        match command {
-            ControlCommand::Download => updates.update(cx, |updates, cx| updates.download(cx)),
-            ControlCommand::RetryDownload => {
-                updates.update(cx, |updates, cx| updates.retry_download(cx))
-            }
-            ControlCommand::OfferStop => {
-                let (state, cancelling) = {
-                    let updates = updates.read(cx);
-                    (updates.state().clone(), updates.is_cancelling())
-                };
-                let (UpdateState::Downloading { version, .. } | UpdateState::Verifying { version }) =
-                    state
-                else {
-                    return;
-                };
-                if cancelling {
-                    return;
-                }
-                let Some(handle) = window.window_handle().downcast::<WorkspaceManager>() else {
-                    return;
-                };
-                cx.defer(move |cx| {
-                    let _ = handle.update(cx, |_, window, cx| {
-                        present_stop_download(&version, window, cx)
-                    });
-                });
-            }
-            ControlCommand::RequestInstall => {
-                request_install(&updates, InstallRequest::FrontWorkspace, cx)
-            }
-            ControlCommand::RetryInstall => retry_install(cx),
-        }
-    }
-}
-
-impl Render for UpdateControl {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let Some(updates) = service(cx) else {
-            return div().into_any_element();
-        };
-        let updates = updates.read(cx);
-        let Some(presentation) = ControlPresentation::resolve(
-            updates.state(),
-            updates.pending_version(),
-            updates.is_cancelling(),
-            DesktopPresentation::get(cx).wording(),
-        )
-        .map(|presentation| presentation.remind(updates.reminder())) else {
-            return div().into_any_element();
-        };
-        let appearance = super::appearance::chrome(cx);
-        let glyph_size = appearance
-            .icons
-            .metrics(super::chrome_icons::IconRole::Caption)
-            .glyph_size;
-        let glyph = presentation.glyph;
-        let tooltip = presentation.tooltip.clone();
-        let command = presentation.command;
-        let reminder = presentation.reminder;
-        let button = Button::new("update-control", presentation.label)
-            .accessibility_description(tooltip.clone())
-            .variant(if presentation.prominent {
-                ButtonVariant::Primary
-            } else {
-                ButtonVariant::Secondary
-            })
-            .size(ButtonSize::Small)
-            .shape(ButtonShape::Capsule)
-            .disabled(command.is_none())
-            .debug_selector("update-control")
-            .leading(move |foreground| match glyph {
-                ControlGlyph::Download => {
-                    Icon::new(IconName::Download, glyph_size, foreground).into_any_element()
-                }
-                ControlGlyph::Restart => {
-                    Icon::new(IconName::RotateCw, glyph_size, foreground).into_any_element()
-                }
-                ControlGlyph::Warning => {
-                    Icon::new(IconName::CircleAlert, glyph_size, foreground).into_any_element()
-                }
-                // The ring keeps the installed accent because the disabled foreground of Checking
-                // and Stopping is too faint for a fading trail.
-                ControlGlyph::Progress(fraction) => {
-                    let state = DeterminateProgress::new(f64::from(fraction))
-                        .map_or(ProgressState::Indeterminate, ProgressState::Determinate);
-                    ProgressRing::new("update-control-progress", "Update", state)
-                        .size(ProgressSize::Compact)
-                        .into_any_element()
-                }
-                ControlGlyph::Activity => ProgressRing::new(
-                    "update-control-progress",
-                    "Update",
-                    ProgressState::Indeterminate,
-                )
-                .size(ProgressSize::Compact)
-                .into_any_element(),
-            })
-            .tooltip(
-                Tooltip::new("update-control-tooltip", tooltip)
-                    .debug_selector("update-control-tooltip"),
-            )
-            .when(reminder == Some(ControlReminder::Overdue), |button| {
-                let pair = appearance.semantic_text_pairs.warning_status;
-                let paint = |amount| {
-                    ButtonPaint::new(
-                        gpui_color(pair.background.mix(pair.primary, amount)),
-                        gpui_color(pair.primary),
-                        gpui::rgba(0),
-                    )
-                };
-                button.contextual_style(
-                    ButtonVariantStyle::new(paint(0.0), paint(0.12), paint(0.2), paint(0.0)),
-                    gpui_color(pair.primary),
-                )
-            })
-            .when_some(command, |button, command| {
-                button.on_activate(move |_, window, cx| Self::activate(command, window, cx))
-            });
-        // The control owns its clicks inside the title bar's drag region. Its trailing edge
-        // stops where the Pane beneath it stops, and it keeps one frame gap from the Tabs.
-        let frame = super::workspace_frame::WorkspaceFrame::for_appearance(appearance, cx);
-        div()
-            .debug_selector(|| "update-control-area".to_owned())
-            .flex_none()
-            .pl(frame.space())
-            .pr(frame.window_edge_inset())
-            .child(
-                div()
-                    .block_mouse_except_scroll()
-                    .flex()
-                    .items_center()
-                    .gap(frame.space() / 2.0)
-                    .child(button),
-            )
-            .into_any_element()
     }
 }
 
@@ -1030,7 +866,7 @@ mod tests {
         let cases = [
             (
                 UpdateState::Available { version: version() },
-                "Download 0.4.2",
+                "Download SpaceTerm 0.4.2",
                 ControlGlyph::Download,
                 true,
                 Some(ControlCommand::Download),
@@ -1041,7 +877,7 @@ mod tests {
                     received: 1,
                     total: 4,
                 },
-                "Downloading 0.4.2",
+                "Stop Download…",
                 ControlGlyph::Progress(0.25),
                 false,
                 Some(ControlCommand::OfferStop),
@@ -1052,28 +888,28 @@ mod tests {
                     received: 0,
                     total: 0,
                 },
-                "Downloading 0.4.2",
+                "Stop Download…",
                 ControlGlyph::Activity,
                 false,
                 Some(ControlCommand::OfferStop),
             ),
             (
                 UpdateState::Verifying { version: version() },
-                "Preparing 0.4.2",
+                "Stop Download…",
                 ControlGlyph::Activity,
                 false,
                 Some(ControlCommand::OfferStop),
             ),
             (
                 UpdateState::Ready { version: version() },
-                "Install 0.4.2",
+                "Restart to Install SpaceTerm 0.4.2…",
                 ControlGlyph::Restart,
                 true,
                 Some(ControlCommand::RequestInstall),
             ),
             (
                 UpdateState::Installing { version: version() },
-                "Installing 0.4.2",
+                "Restart to Finish Installing SpaceTerm 0.4.2",
                 ControlGlyph::Restart,
                 true,
                 Some(ControlCommand::RetryInstall),
@@ -1081,14 +917,14 @@ mod tests {
             // A known pending update outlives a stopped download, a recheck, and a failure.
             (
                 UpdateState::Idle,
-                "Download 0.4.2",
+                "Download SpaceTerm 0.4.2",
                 ControlGlyph::Download,
                 false,
                 Some(ControlCommand::RetryDownload),
             ),
             (
                 UpdateState::Checking,
-                "Checking 0.4.2",
+                "Checking for SpaceTerm 0.4.2",
                 ControlGlyph::Activity,
                 false,
                 None,
@@ -1097,7 +933,7 @@ mod tests {
                 UpdateState::Failed {
                     error: UpdateError::Check,
                 },
-                "Retry 0.4.2",
+                "Try Downloading SpaceTerm 0.4.2 Again",
                 ControlGlyph::Warning,
                 false,
                 Some(ControlCommand::RetryDownload),
@@ -1106,7 +942,7 @@ mod tests {
                 UpdateState::Failed {
                     error: UpdateError::Installation,
                 },
-                "Retry 0.4.2",
+                "Try Downloading SpaceTerm 0.4.2 Again",
                 ControlGlyph::Warning,
                 false,
                 Some(ControlCommand::RetryDownload),
@@ -1134,7 +970,10 @@ mod tests {
             let presentation =
                 ControlPresentation::resolve(&state, PENDING, true, testing_wording())
                     .expect("a stopping update stays visible until the service settles");
-            assert_eq!(presentation.label.as_ref(), "Stopping 0.4.2");
+            assert_eq!(
+                presentation.label.as_ref(),
+                "Stopping the Download of SpaceTerm 0.4.2"
+            );
             assert_eq!(presentation.command, None);
             assert_eq!(presentation.glyph, ControlGlyph::Activity);
         }
@@ -1264,7 +1103,7 @@ mod tests {
         assert_eq!(optional, quiet);
 
         let gentle = remind(UpdateState::Idle, Some(UpdateStage::Warning));
-        assert_eq!(gentle.label.as_ref(), "Download 0.4.2");
+        assert_eq!(gentle.label.as_ref(), "Download SpaceTerm 0.4.2");
         assert_eq!(gentle.reminder, Some(ControlReminder::Gentle));
         assert!(gentle.prominent);
         assert_eq!(gentle.glyph, ControlGlyph::Download);
@@ -1274,8 +1113,14 @@ mod tests {
             Some(UpdateStage::Overdue),
         );
         assert!(overdue.prominent);
-        assert!(overdue.tooltip.starts_with("This update is overdue. "));
-        assert_eq!(overdue.label.as_ref(), "Install 0.4.2");
+        assert_eq!(
+            overdue.status.as_ref().map(AsRef::as_ref),
+            Some("This update is overdue.")
+        );
+        assert_eq!(
+            overdue.label.as_ref(),
+            "Restart to Install SpaceTerm 0.4.2…"
+        );
         assert_eq!(overdue.reminder, Some(ControlReminder::Overdue));
         assert_eq!(overdue.glyph, ControlGlyph::Warning);
         assert_eq!(overdue.command, Some(ControlCommand::RequestInstall));
@@ -1348,7 +1193,7 @@ mod tests {
     }
 
     #[test]
-    fn download_tooltip_should_report_whole_percent() {
+    fn download_status_should_report_whole_percent() {
         let presentation = resolve(UpdateState::Downloading {
             version: "0.4.2".to_owned(),
             received: 2,
@@ -1356,18 +1201,20 @@ mod tests {
         })
         .expect("download shows the control");
         assert_eq!(
-            presentation.tooltip.as_ref(),
-            "Downloading SpaceTerm 0.4.2, 66%"
+            presentation.status.as_ref().map(AsRef::as_ref),
+            Some("Downloading SpaceTerm 0.4.2, 66%")
         );
     }
 
+    /// The menu stays reachable without a client update, so each server's row stays reachable.
     #[gpui::test]
-    fn update_control_publishes_its_status_description(cx: &mut gpui::TestAppContext) {
+    fn updates_menu_should_stay_one_trigger_with_or_without_a_client_update(
+        cx: &mut gpui::TestAppContext,
+    ) {
         use crate::settings::storage::testing::MemoryStorage;
         use crate::updates::UpdateEvent;
         use crate::updates::testing::RecordingAdapter;
-        use gpui::accesskit::Action;
-        use spaceterm_ui::a11y_testing::{A11yTree, node_id, perform};
+        use spaceterm_ui::a11y_testing::{A11yTree, node_id};
 
         let adapter = std::rc::Rc::new(RecordingAdapter::available());
         cx.update(|cx| ApplicationUpdates::install(adapter.clone(), cx));
@@ -1378,44 +1225,53 @@ mod tests {
         document.updates.automatic_downloads = false;
         let settings = crate::settings::Settings::load(MemoryStorage::with_document(&document));
         updates.update(cx, |updates, _| updates.attach_settings(settings));
+        let (_, cx) = cx.add_window_view(|_, cx| UpdateControl::new(cx));
+        let id = node_id(A11yTree::read(cx).node("Updates"));
+
         updates.update(cx, |updates, cx| updates.check(false, cx));
         adapter.emit(UpdateEvent::Available(version()));
         cx.run_until_parked();
-        let (_, cx) = cx.add_window_view(|_, cx| UpdateControl::new(cx));
-        let tree = A11yTree::read(cx);
-        let button = tree.node("Download 0.4.2");
-        let id = node_id(button);
-        assert_eq!(button["aria"]["role"], "Button");
-        assert_eq!(button["aria"]["description"], "Download SpaceTerm 0.4.2");
-        assert!(cx.debug_bounds("update-control-tooltip").is_none());
+        assert_eq!(node_id(A11yTree::read(cx).node("Updates")), id);
+    }
 
-        perform(cx, button, Action::Click);
-        assert_eq!(adapter.downloads.get(), 1);
-        for (received, percent) in [(37, 37), (66, 66)] {
-            adapter.emit(UpdateEvent::Downloading {
-                received,
-                total: 100,
-            });
-            cx.run_until_parked();
-            let tree = A11yTree::read(cx);
-            let button = tree.node("Downloading 0.4.2");
-            assert_eq!(node_id(button), id);
-            assert_eq!(
-                button["aria"]["description"],
-                format!("Downloading SpaceTerm 0.4.2, {percent}%")
-            );
-            assert!(cx.debug_bounds("update-control-tooltip").is_none());
-        }
+    #[gpui::test]
+    fn choosing_the_client_row_downloads_once_after_the_updates_menu_closes(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::settings::storage::testing::MemoryStorage;
+        use crate::updates::UpdateEvent;
+        use crate::updates::testing::RecordingAdapter;
 
-        adapter.emit(UpdateEvent::Ready);
+        let adapter = std::rc::Rc::new(RecordingAdapter::available());
+        cx.update(|cx| ApplicationUpdates::install(adapter.clone(), cx));
+        cx.update(crate::ui::init)
+            .expect("UI initialization should succeed");
+        let updates = cx.update(|cx| service(cx).unwrap());
+        let mut document = crate::settings::SettingsDocument::default();
+        document.updates.automatic_downloads = false;
+        let settings = crate::settings::Settings::load(MemoryStorage::with_document(&document));
+        updates.update(cx, |updates, _| updates.attach_settings(settings));
+        updates.update(cx, |updates, cx| updates.check(false, cx));
+        adapter.emit(UpdateEvent::Available(version()));
         cx.run_until_parked();
-        let tree = A11yTree::read(cx);
-        let button = tree.node("Install 0.4.2");
-        assert_eq!(node_id(button), id);
-        assert_eq!(
-            button["aria"]["description"],
-            "Restart to Install SpaceTerm 0.4.2"
-        );
+        let (_, visual) = cx.add_window_view(|_, cx| UpdateControl::new(cx));
+        visual.update(|window, _| window.activate_window());
+        visual.run_until_parked();
+        let trigger = visual.debug_bounds("update-control").unwrap().center();
+        visual.simulate_click(trigger, gpui::Modifiers::none());
+        visual.run_until_parked();
+        assert_eq!(adapter.downloads.get(), 0, "opening admits no download");
+        let row = visual
+            .debug_bounds("update-client-command")
+            .unwrap()
+            .center();
+        visual.simulate_click(row, gpui::Modifiers::none());
+        visual.run_until_parked();
+        assert!(visual.debug_bounds("update-client-command").is_none());
+        assert_eq!(adapter.downloads.get(), 1);
+        updates.read_with(visual, |updates, _| {
+            assert!(matches!(updates.state(), UpdateState::Downloading { .. }));
+        });
     }
 
     #[test]
