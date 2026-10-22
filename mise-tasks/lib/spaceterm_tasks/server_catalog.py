@@ -1,7 +1,7 @@
 """Snapshot and authenticate the native server packages a packaged SSH client can offer.
 
-Catalogs never execute foreign code. Native producers verify their own packages before
-signing; catalog verification checks that trust, resources and the declared machine.
+Catalogs never execute foreign code. Matching-host entries receive full native checks;
+foreign entries retain their producer's signed proof and portable resource/machine checks.
 """
 
 import os
@@ -118,7 +118,7 @@ def _verify_target(source, identity, target, temporary):
         identity=identity,
         target=target,
         expected_sha256=digest,
-        native=False,
+        native=target == host_target(),
     )
     from spaceterm_tasks.server_package import document
 
@@ -181,7 +181,7 @@ def stage_catalog(archive, signature, destination, identity, *, source=None, req
 
 
 def verify_catalog(source, identity, *, require_all=False):
-    """Reauthenticate a packaged catalog without executing any catalog executable."""
+    """Reauthenticate a packaged catalog with native checks only on matching-host entries."""
     try:
         with tempfile.TemporaryDirectory(prefix="spaceterm-catalog-verify-") as temporary:
             entries = _verified_catalog(source, identity, Path(temporary), require_all=require_all)

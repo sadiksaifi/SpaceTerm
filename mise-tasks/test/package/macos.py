@@ -211,6 +211,17 @@ int main(int argc, char **argv) {{
             (artifact / "artifact.sig").read_bytes(),
             Path(self.env["SPACETERM_SERVER_SIGNATURE"]).read_bytes(),
         )
+        catalog = artifact.with_name("server-artifacts") / "aarch64-apple-darwin"
+        self.assertEqual(
+            (catalog / "artifact.tar.gz").read_bytes(), (artifact / "artifact.tar.gz").read_bytes()
+        )
+        self.assertEqual(
+            (catalog / "artifact.sig").read_bytes(), (artifact / "artifact.sig").read_bytes()
+        )
+        self.assertEqual(
+            (catalog / "artifact.sha256").read_text(),
+            hashlib.sha256((artifact / "artifact.tar.gz").read_bytes()).hexdigest() + "\n",
+        )
         record = json.loads(self.record.read_text())
         self.assertIn("--message-format=json-render-diagnostics", record["arguments"])
         self.assertEqual(record["packaged"], "1")
@@ -248,6 +259,11 @@ int main(int argc, char **argv) {{
         self.assertEqual(json.loads(self.record.read_text())["release_tag"], "v0.0.1")
         self.assertEqual(json.loads(self.record.read_text())["private_inputs"], [])
         self.assertFalse(json.loads(self.record.read_text())["signing_available"])
+        catalog = bundled.parent.parent / "Resources/server-artifacts"
+        self.assertEqual(
+            set(path.name for path in catalog.iterdir()),
+            {"aarch64-apple-darwin", "x86_64-unknown-linux-gnu"},
+        )
         for value in self.credentials.values():
             self.assertNotIn(value, result.stdout + result.stderr)
         requirement = self.run_command(
@@ -257,6 +273,16 @@ int main(int argc, char **argv) {{
             requirement.strip(),
             f'designated => identifier "io.github.sadiksaifi.spaceterm" and certificate leaf = H"{self.fingerprint.lower()}"',
         )
+
+    def test_verification_rejects_a_tampered_ssh_catalog(self):
+        self.compile_executable(self.artifact, "SpaceTerm Preflight")
+        result = self.package()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        catalog = self.root / "dist/SpaceTerm Preflight.app/Contents/Resources/server-artifacts"
+        (catalog / "aarch64-apple-darwin/artifact.sha256").write_text("0" * 64 + "\n")
+        verified = self.task("preflight/verify/macos.py")
+        self.assertNotEqual(verified.returncode, 0)
+        self.assertIn("compiled candidate pin", verified.stderr)
 
     def test_release_requires_signing_secrets_before_building(self):
         self.compile_executable(self.artifact, "SpaceTerm")

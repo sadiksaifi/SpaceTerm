@@ -51,9 +51,51 @@ jobs:
         timeout-minutes: 60
         run: mise run validate:macos
 
+  server-artifacts:
+    name: Package signed native server (${{ matrix.target }})
+    needs: tag
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-26
+            target: aarch64-apple-darwin
+          - os: ubuntu-26.04
+            target: x86_64-unknown-linux-gnu
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          submodules: recursive
+      - uses: jdx/mise-action@v5
+      - name: Install Linux build packages
+        if: runner.os == 'Linux'
+        timeout-minutes: 10
+        run: mise bootstrap packages apply --yes --update
+      - name: Fetch locked Rust dependencies
+        timeout-minutes: 10
+        run: mise run setup:deps
+      - name: Build and verify signed native server
+        timeout-minutes: 30
+        env:
+          RELEASE_TAG: ${{ needs.tag.outputs.tag }}
+          MACOS_SIGNING_CERTIFICATE_P12: ${{ runner.os == 'macOS' && secrets.MACOS_SIGNING_CERTIFICATE_P12 || '' }}
+          MACOS_SIGNING_CERTIFICATE_PASSWORD: ${{ runner.os == 'macOS' && secrets.MACOS_SIGNING_CERTIFICATE_PASSWORD || '' }}
+          UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
+        run: mise run server:package --identity spaceterm --release-tag "$RELEASE_TAG" --catalog dist/server-artifacts
+      - name: Upload signed native server catalog target
+        uses: actions/upload-artifact@v7
+        with:
+          name: server-catalog-${{ matrix.target }}
+          path: dist/server-artifacts/
+          if-no-files-found: error
+          retention-days: 7
+
   package:
     name: Package and sign Apple Silicon
-    needs: tag
+    needs: [tag, server-artifacts]
     runs-on: macos-26
     timeout-minutes: 45
     steps:
@@ -68,6 +110,12 @@ jobs:
       - name: Fetch locked Rust dependencies
         timeout-minutes: 10
         run: mise run setup:deps
+      - name: Collect both signed native server targets
+        uses: actions/download-artifact@v8
+        with:
+          pattern: server-catalog-*
+          merge-multiple: true
+          path: target/release-server-artifacts
       - name: Build and verify Apple Silicon package
         timeout-minutes: 35
         env:
@@ -75,6 +123,9 @@ jobs:
           MACOS_SIGNING_CERTIFICATE_P12: ${{ secrets.MACOS_SIGNING_CERTIFICATE_P12 }}
           MACOS_SIGNING_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_SIGNING_CERTIFICATE_PASSWORD }}
           UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
+          SPACETERM_SSH_SERVER_ARTIFACTS: ${{ github.workspace }}/target/release-server-artifacts
+          SPACETERM_SERVER_ARCHIVE: ${{ github.workspace }}/target/release-server-artifacts/aarch64-apple-darwin/artifact.tar.gz
+          SPACETERM_SERVER_SIGNATURE: ${{ github.workspace }}/target/release-server-artifacts/aarch64-apple-darwin/artifact.sig
         run: mise run release:package:macos "$RELEASE_TAG"
       - name: Sign and verify update assets
         timeout-minutes: 10
@@ -126,7 +177,7 @@ jobs:
 
   package-linux:
     name: Package and sign x86_64 Linux
-    needs: tag
+    needs: [tag, server-artifacts]
     runs-on: ubuntu-26.04
     # mise pins Zig's glibc target and the Ubuntu 22.04 native-library sysroot.
     timeout-minutes: 75
@@ -142,11 +193,20 @@ jobs:
       - name: Fetch locked Rust dependencies
         timeout-minutes: 10
         run: mise run setup:deps
+      - name: Collect both signed native server targets
+        uses: actions/download-artifact@v8
+        with:
+          pattern: server-catalog-*
+          merge-multiple: true
+          path: target/release-server-artifacts
       - name: Build and verify x86_64 Linux package
         timeout-minutes: 45
         env:
           RELEASE_TAG: ${{ needs.tag.outputs.tag }}
           UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
+          SPACETERM_SSH_SERVER_ARTIFACTS: ${{ github.workspace }}/target/release-server-artifacts
+          SPACETERM_SERVER_ARCHIVE: ${{ github.workspace }}/target/release-server-artifacts/x86_64-unknown-linux-gnu/artifact.tar.gz
+          SPACETERM_SERVER_SIGNATURE: ${{ github.workspace }}/target/release-server-artifacts/x86_64-unknown-linux-gnu/artifact.sig
         run: mise run release:package:linux "$RELEASE_TAG"
       - name: Sign and verify Linux update assets
         timeout-minutes: 10

@@ -1,21 +1,36 @@
 """A packaged SSH catalog retains only authenticated target-specific server bytes."""
 
+import json
 import os
 import shutil
+import struct
+import subprocess
+import sys
 import tempfile
 import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from spaceterm_tasks import ROOT, TaskError, release, server_package
+from spaceterm_tasks import ROOT, TaskError, macos_signing, release, server_package
 from spaceterm_tasks.package_linux import write_archive
 from spaceterm_tasks.server_catalog import stage_catalog, verify_catalog
 
+from tests.macos_signing_fixture import certificate
 from tests.server_artifact_fixture import SEED, archive_tree
 
 
 class ServerCatalogTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        if sys.platform == "darwin":
+            temporary = tempfile.TemporaryDirectory()
+            cls.addClassCleanup(temporary.cleanup)
+            cls.fingerprint, cls.credentials = certificate(Path(temporary.name))
+            signer = patch.object(server_package, "signer", return_value=cls.fingerprint)
+            signer.start()
+            cls.addClassCleanup(signer.stop)
+
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
@@ -37,8 +52,6 @@ class ServerCatalogTests(unittest.TestCase):
             header = bytes.fromhex("cffaedfe0c0000010000000002000000") + bytes(16)
         else:
             header = b"\x7fELF\x02\x01\x01" + bytes(9) + bytes.fromhex("03003e00") + bytes(44)
-        executable.write_bytes(header)
-        executable.chmod(0o755)
         info = dict(
             schema=1,
             identity=self.identity,
@@ -49,6 +62,57 @@ class ServerCatalogTests(unittest.TestCase):
             capabilities=["workspace_policy"],
         )
         info.update(changed)
+        if native_target == self.target:
+            source = f"""
+#include <stdio.h>
+#include <string.h>
+int main(int argc, char **argv) {{
+    if (argc == 2 && strcmp(argv[1], "--build-info") == 0) {{
+        puts({json.dumps(json.dumps(info))});
+        return 0;
+    }}
+    if (argc == 2 && strcmp(argv[1], "--check") == 0) {{
+        puts("Installed server PTY and shell resources verified.");
+        return 0;
+    }}
+    return 1;
+}}
+"""
+            compiler = (
+                ["xcrun", "clang", "-arch", "arm64", "-mmacosx-version-min=26.0"]
+                if sys.platform == "darwin"
+                else ["cc"]
+            )
+            subprocess.run(
+                [*compiler, "-x", "c", "-", "-o", str(executable)],
+                input=source,
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+            if sys.platform == "darwin":
+                identifier = f"io.github.sadiksaifi.{info['identity']}.server"
+                requirement = f'=designated => identifier "{identifier}" and {macos_signing.certificate_requirement(self.fingerprint)}'
+                with macos_signing.release_keychain(self.fingerprint, self.credentials):
+                    subprocess.run(
+                        [
+                            "codesign",
+                            "--force",
+                            "--sign",
+                            self.fingerprint,
+                            "--identifier",
+                            identifier,
+                            "--requirements",
+                            requirement,
+                            "--timestamp=none",
+                            str(executable),
+                        ],
+                        check=True,
+                        capture_output=True,
+                    )
+        else:
+            executable.write_bytes(header)
+            executable.chmod(0o755)
         return (*archive_tree(ROOT, tree, info), info)
 
     def test_default_catalog_retains_the_exact_local_pair_and_complete_digest(self):
@@ -102,6 +166,52 @@ class ServerCatalogTests(unittest.TestCase):
         with self.assertRaisesRegex(TaskError, "every supported native target"):
             stage_catalog(archive, signature, self.root / "missing", self.identity, source=source)
         self.assertFalse((self.root / "missing").exists())
+
+    def test_explicit_native_entry_must_match_its_executable_even_when_local_pin_differs(self):
+        source, originals = self.catalog(commit="b" * 40, version="dev.bbbbbbbbbbbb")
+        archive, signature, info = originals[self.target]
+        tree = archive.parent / "server"
+        (tree / "build.json").write_text(
+            json.dumps({**info, "commit": "c" * 40, "version": "dev.cccccccccccc"})
+        )
+        write_archive(tree, archive)
+        release.sign_ed25519(SEED, archive, signature)
+        target = source / self.target
+        shutil.copyfile(archive, target / "artifact.tar.gz")
+        shutil.copyfile(signature, target / "artifact.sig")
+        (target / "artifact.sha256").write_text(release.sha256(archive) + "\n")
+        local, local_signature, _ = self.artifact(self.target)
+        with self.assertRaisesRegex(TaskError, "executable differs"):
+            stage_catalog(
+                local, local_signature, self.root / "refused", self.identity, source=source
+            )
+        self.assertFalse((self.root / "refused").exists())
+
+    def test_foreign_terminfo_accepts_extended_numbers_and_refuses_truncated_tables(self):
+        source, originals = self.catalog()
+        target = next(value for value in originals if value != self.target)
+        archive, signature, _ = originals[target]
+        tree = archive.parent / "server"
+        names = b"xterm-spaceterm\0"
+        data = (
+            struct.pack("<6h", 0x021E, len(names), 0, 1, 0, 0) + names + struct.pack("<i", 100000)
+        )
+        terminfo = next((tree / "share/spaceterm/terminfo").rglob("xterm-spaceterm"))
+        local, local_signature, _ = self.artifact(self.target)
+        for truncated in (False, True):
+            terminfo.write_bytes(data[:-1] if truncated else data)
+            write_archive(tree, archive)
+            release.sign_ed25519(SEED, archive, signature)
+            shutil.copyfile(archive, source / target / "artifact.tar.gz")
+            shutil.copyfile(signature, source / target / "artifact.sig")
+            (source / target / "artifact.sha256").write_text(release.sha256(archive) + "\n")
+            destination = self.root / ("refused" if truncated else "accepted")
+            if truncated:
+                with self.assertRaisesRegex(TaskError, "terminfo"):
+                    stage_catalog(local, local_signature, destination, self.identity, source=source)
+                self.assertFalse(destination.exists())
+            else:
+                stage_catalog(local, local_signature, destination, self.identity, source=source)
 
     def test_signed_incompatible_identity_target_protocol_or_capability_is_refused(self):
         for changed in [
