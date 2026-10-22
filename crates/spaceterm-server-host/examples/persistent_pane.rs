@@ -25,6 +25,7 @@ use spaceterm_server::{
 };
 use std::{error::Error, time::Duration};
 use support::{await_output, command};
+use terminal_semantics::{Failure, stage};
 
 fn main() -> Result<(), Box<dyn Error>> {
     if !spaceterm_server::service::Service::for_identity("spaceterm-development")?
@@ -57,8 +58,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let Outcome::Accepted { target: workspace } = created.outcome else {
         return Err("fixture Workspace creation refused".into());
     };
-    let exercise = (|| -> Result<_, Box<dyn Error>> {
-        let current = repository::inventory(&mut first)?.0;
+    let exercise = (|| -> Result<_, Failure> {
+        let current = stage("ipc-fixture-inventory", repository::inventory(&mut first))?.0;
         let pane = current
             .workspaces
             .iter()
@@ -77,19 +78,29 @@ fn main() -> Result<(), Box<dyn Error>> {
                 cell_height: 18,
             },
         };
-        let Reply::Attached { lease: original } = first.exchange(&select)? else {
+        let Reply::Attached { lease: original } =
+            stage("ipc-select-fixture-pane", first.exchange(&select))?
+        else {
             return Err("fixture Pane did not start".into());
         };
-        command(
-            &mut first,
-            original,
-            "stty -echo; printf '\\033[2J\\033[HSTARTED\\n'; sleep 2; printf 'CONTINUED\\n'; printf 'PID=%s\\n' \"$$\"",
+        stage(
+            "ipc-reconnect-command",
+            command(
+                &mut first,
+                original,
+                "stty -echo; printf '\\033[2J\\033[HSTARTED\\n'; sleep 2; printf 'CONTINUED\\n'; printf 'PID=%s\\n' \"$$\"",
+            ),
         )?;
-        await_output(&mut first, original, "STARTED")?;
+        stage(
+            "ipc-started-witness",
+            await_output(&mut first, original, "STARTED"),
+        )?;
         drop(first);
         std::thread::sleep(Duration::from_secs(3));
-        let mut second = server.connect_shared_pane()?;
-        let Reply::Attached { lease: resumed } = second.exchange(&select)? else {
+        let mut second = stage("ipc-reconnect-transport", server.connect_shared_pane())?;
+        let Reply::Attached { lease: resumed } =
+            stage("ipc-resume-fixture-pane", second.exchange(&select))?
+        else {
             return Err("fixture Pane did not resume".into());
         };
         if (original.server, original.session, original.control)
@@ -97,7 +108,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         {
             return Err("reconnect changed the running fixture Session".into());
         }
-        let output = await_output(&mut second, resumed, "CONTINUED")?;
+        let output = stage(
+            "ipc-continued-witness",
+            await_output(&mut second, resumed, "CONTINUED"),
+        )?;
         let pid: i32 = output
             .lines()
             .find_map(|line| line.trim().strip_prefix("PID="))
@@ -124,6 +138,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         let report = terminal_semantics::exercise(&mut second, resumed, command)?;
         Ok((second, pid, report))
     })();
+    if let Err(failure) = &exercise {
+        eprintln!("IPC fixture exercise failed: {failure}");
+    }
     // Never erase an unresolved original or close its Workspace while a write may still run.
     if server.shared_journal()?.pending().is_some() {
         return Err("fixture cleanup waits for original-operation recovery".into());
@@ -162,7 +179,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     {
         return Err("baseline terminal work changed during the fixture".into());
     }
-    let (mut second, pid, report) = exercise.map_err(|_| "IPC fixture semantic exercise failed")?;
+    let (mut second, pid, report) = exercise?;
     // SAFETY: signal zero observes only the fixture shell; it never signals a process.
     if unsafe { libc::kill(pid, 0) } != -1
         || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)

@@ -867,7 +867,11 @@ mod exercise {
             "WSS Take Over changed the Session",
         )?;
         let report =
-            super::terminal_semantics::exercise(&mut connection, lease, super::support::command)?;
+            super::terminal_semantics::exercise(&mut connection, lease, super::support::command)
+                .map_err(|failure| {
+                    eprintln!("WSS fixture exercise failed: {failure}");
+                    "WSS semantic protocol exercise failed"
+                })?;
         drop(connection);
         let mut connection = api(server.connect_pane())?;
         let lease = attached(select(&mut connection, pane, false)?)?;
