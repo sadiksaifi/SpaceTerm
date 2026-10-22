@@ -371,13 +371,37 @@ mod exercise {
 
     impl Peer {
         fn penguin() -> Result<Self> {
-            let mut child = api(Command::new("ssh").args([
-                "-T", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes",
-                "-o", "UpdateHostKeys=no", "-o", "AddKeysToAgent=no",
-                "-o", "UseKeychain=no", "-o", "LogLevel=ERROR",
-                "-o", "ControlMaster=no", "-o", "ControlPath=none", "penguin",
-                "exec \"$HOME/Projects/SpaceTerm/target/debug/examples/direct_devices\" device-pipe",
-            ]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::inherit()).spawn())?;
+            let command = if super::terminal_semantics::input_timing_requested() {
+                "SPACETERM_NATIVE_INPUT_TIMING=1 exec \"$HOME/Projects/SpaceTerm/target/debug/examples/direct_devices\" device-pipe"
+            } else {
+                "exec \"$HOME/Projects/SpaceTerm/target/debug/examples/direct_devices\" device-pipe"
+            };
+            let mut child = api(Command::new("ssh")
+                .args([
+                    "-T",
+                    "-o",
+                    "BatchMode=yes",
+                    "-o",
+                    "StrictHostKeyChecking=yes",
+                    "-o",
+                    "UpdateHostKeys=no",
+                    "-o",
+                    "AddKeysToAgent=no",
+                    "-o",
+                    "UseKeychain=no",
+                    "-o",
+                    "LogLevel=ERROR",
+                    "-o",
+                    "ControlMaster=no",
+                    "-o",
+                    "ControlPath=none",
+                    "penguin",
+                    command,
+                ])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::inherit())
+                .spawn())?;
             let input = child.stdin.take().ok_or("SSH input pipe unavailable")?;
             let output = child.stdout.take().ok_or("SSH output pipe unavailable")?;
             Ok(Self {

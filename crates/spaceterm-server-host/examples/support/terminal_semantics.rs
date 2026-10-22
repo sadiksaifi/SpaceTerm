@@ -72,6 +72,152 @@ const ROWS: usize = 5000;
 const DEADLINE: Duration = Duration::from_secs(60);
 const PREFIX: &str = "ST-NATIVE-";
 const DONE: &str = "ST-SEMANTICS-DONE";
+const TIMING_FLAG: &str = "SPACETERM_NATIVE_INPUT_TIMING";
+const TIMING_PRODUCER: &str = r#"import os,select,sys,termios,time
+original = termios.tcgetattr(0)
+settings = termios.tcgetattr(0)
+settings[3] &= ~(termios.ICANON | termios.ECHO)
+settings[6][termios.VMIN] = 1
+settings[6][termios.VTIME] = 0
+complete = False
+try:
+    termios.tcsetattr(0,termios.TCSANOW,settings)
+    print("ST-INPUT-TIMING-READY",flush=True)
+    until = time.monotonic() + 60
+    received = bytearray()
+    while len(received) < 53:
+        left = until - time.monotonic()
+        if left <= 0 or not select.select([0],[],[],left)[0]:
+            break
+        part = os.read(0,53-len(received))
+        if not part:
+            break
+        received.extend(part)
+    complete = received == bytes(97+i%26 for i in range(53))
+finally:
+    termios.tcsetattr(0,termios.TCSANOW,original)
+print("ST-INPUT-TIMING-DONE" if complete else "ST-INPUT-TIMING-REFUSED",flush=True)
+"#;
+
+pub fn input_timing_requested() -> bool {
+    std::env::var(TIMING_FLAG).as_deref() == Ok("1")
+}
+
+#[derive(Default)]
+struct Timings {
+    queue: Vec<u128>,
+    exchange: Vec<u128>,
+}
+impl Timings {
+    fn note(&mut self, connection: &PaneConnection) -> Result<()> {
+        let timing = connection
+            .last_exchange_timing()
+            .ok_or("input timing unavailable")?;
+        self.queue.push(timing.queue_wait.as_micros());
+        self.exchange.push(timing.exchange.as_micros());
+        Ok(())
+    }
+    fn emit(mut self, operation: &'static str, elapsed: Duration) {
+        self.queue.sort_unstable();
+        self.exchange.sort_unstable();
+        let count = self.queue.len();
+        let p95 = (count * 95).div_ceil(100) - 1;
+        // stderr is separate from the WSS driver's invitation and response framing.
+        eprintln!(
+            "DIAGNOSTIC input-timing operation={operation} samples={count} elapsed_us={} queue_total_us={} exchange_total_us={} queue_max_us={} exchange_max_us={} queue_p95_us={} exchange_p95_us={}",
+            elapsed.as_micros(),
+            self.queue.iter().sum::<u128>(),
+            self.exchange.iter().sum::<u128>(),
+            self.queue[count - 1],
+            self.exchange[count - 1],
+            self.queue[p95],
+            self.exchange[p95],
+        );
+    }
+}
+
+fn input_timing(
+    connection: &mut PaneConnection,
+    lease: Lease,
+    command: impl Fn(&mut PaneConnection, Lease, &str) -> std::result::Result<(), ServerError>,
+) -> Result<()> {
+    require(
+        connection.supports_interactive_input(),
+        "input timing capability missing",
+    )?;
+    let script = format!(
+        "python3 -c 'exec({})'",
+        api(serde_json::to_string(TIMING_PRODUCER))?
+    );
+    stage("input-timing-producer", command(connection, lease, &script))?;
+    screen_at("input-timing-ready", connection, lease, |screen| {
+        screen.rows.iter().any(|row| {
+            row.iter()
+                .map(|cell| cell.text.as_str())
+                .collect::<String>()
+                .trim_end()
+                == "ST-INPUT-TIMING-READY"
+        })
+    })?;
+    let deadline = Instant::now() + DEADLINE;
+    let started = Instant::now();
+    let mut capabilities = Timings::default();
+    for _ in 0..8 {
+        require(Instant::now() < deadline, "input timing deadline elapsed")?;
+        require(
+            matches!(
+                stage(
+                    "input-timing-capabilities",
+                    connection.exchange(&Request::Capabilities)
+                )?,
+                Reply::Capabilities { .. }
+            ),
+            "input timing capability response changed",
+        )?;
+        capabilities.note(connection)?;
+    }
+    capabilities.emit("capabilities", started.elapsed());
+    let started = Instant::now();
+    let mut keys = Timings::default();
+    for index in 0..53 {
+        require(Instant::now() < deadline, "input timing deadline elapsed")?;
+        let reply = stage(
+            "input-timing-key",
+            connection.exchange(&Request::Input {
+                lease,
+                generation: 1,
+                input: spaceterm_server::pane::InteractiveInput::Key(spaceterm_server::pane::Key {
+                    // The protocol's physical-key code for Unidentified (libghostty-vt Key).
+                    // This support file also compiles inside the spaceterm crate itself.
+                    physical: 0,
+                    action: 0,
+                    logical: "text-input".into(),
+                    text: Some(char::from(b'a' + index % 26).to_string()),
+                    unshifted: None,
+                    modifiers: 0,
+                    consumed: 0,
+                    option_as_alt: false,
+                }),
+            }),
+        )?;
+        require(
+            matches!(reply, Reply::Unchanged),
+            "input timing key refused",
+        )?;
+        keys.note(connection)?;
+    }
+    keys.emit("key", started.elapsed());
+    screen_at("input-timing-done", connection, lease, |screen| {
+        screen.rows.iter().any(|row| {
+            row.iter()
+                .map(|cell| cell.text.as_str())
+                .collect::<String>()
+                .trim_end()
+                == "ST-INPUT-TIMING-DONE"
+        })
+    })?;
+    Ok(())
+}
 
 pub struct Report {
     pub copied_rows: usize,
@@ -540,6 +686,9 @@ pub fn exercise(
         "accessibility-demand-end",
         connection.exchange(&Request::EndAccessibilityDemand { lease }),
     )?;
+    if input_timing_requested() {
+        input_timing(connection, lease, command)?;
+    }
     Ok(Report {
         copied_rows: ROWS,
         accessible_rows: ROWS,
