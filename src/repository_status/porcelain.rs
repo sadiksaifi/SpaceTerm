@@ -702,10 +702,7 @@ mod tests {
         }
 
         assert!(parser.field.len() <= MAXIMUM_FIELD_BYTES);
-        assert_eq!(
-            parser.finish(),
-            Err(RepositoryReadError::InvalidResponse)
-        );
+        assert_eq!(parser.finish(), Err(RepositoryReadError::InvalidResponse));
     }
 
     #[test]
