@@ -507,6 +507,10 @@ mod tests {
         tests::{create_shared, host, shared_inventory, size},
     };
 
+    mod close_fallback {
+        include!("worktrees/close_fallback_tests.rs");
+    }
+
     #[test]
     fn splitting_a_worktree_pane_keeps_its_scope_when_the_pin_or_cwd_is_outside() {
         use spaceterm_server::hierarchy::Axis;

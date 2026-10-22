@@ -12903,51 +12903,8 @@ mod shared_repositories {
         );
     }
 
-    #[gpui::test]
-    fn closing_every_worktree_tab_refuses_without_a_confirmation_or_mutation(
-        cx: &mut TestAppContext,
-    ) {
-        let mut initial = published(1, "main", true);
-        initial.workspaces[0]
-            .tabs
-            .retain(|tab| tab.id == FEATURE_TAB);
-        initial.workspaces[0].root_tab = FEATURE_TAB;
-        let (harness, cx) = harness(cx, initial);
-        let (_, feature) = worktree_ids(&harness, cx);
-        assert!(
-            !harness
-                .row(cx)
-                .worktrees
-                .unwrap()
-                .rows()
-                .find(|row| row.worktree_id == feature)
-                .unwrap()
-                .closes_tabs
-        );
-        cx.update(|window, cx| {
-            harness.manager.update(cx, |manager, cx| {
-                manager.handle_sidebar_event(
-                    SidebarEvent::WorktreeCommand {
-                        workspace_id: harness.shared,
-                        worktree_id: feature,
-                        command: WorktreeMenuCommand::CloseTabs,
-                    },
-                    window,
-                    cx,
-                );
-            });
-        });
-        redraw(cx);
-        assert!(
-            spaceterm_ui::a11y_testing::A11yTree::read(cx)
-                .find("Tabs Not Closed")
-                .is_some()
-        );
-        assert!(
-            cx.debug_bounds("modal-action-shared-close-confirm")
-                .is_none()
-        );
-        assert!(harness.edits.submitted().is_empty());
+    mod worktree_fallback {
+        include!("worktrees/fallback_tests.rs");
     }
 
     #[gpui::test]

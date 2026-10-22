@@ -3574,38 +3574,12 @@ impl WorkspaceManager {
             // A target this window can no longer name closes nothing.
             return true;
         };
+        if self.request_worktree_close_fallback(target, server_target, window, cx) {
+            return true;
+        }
         let Some(shared) = self.shared.owning(workspace_id) else {
             return true;
         };
-        if let spaceterm_server::hierarchy::CloseTarget::Worktree { workspace, tab } = server_target
-            && let Some(workspace) = shared
-                .latest_inventory()
-                .and_then(|i| i.workspaces.iter().find(|w| w.id == workspace))
-            && let Some(anchor) = workspace.tabs.iter().find(|t| t.id == tab)
-            && workspace.tabs.iter().all(|t| {
-                t.worktree == anchor.worktree && t.worktree_repository == anchor.worktree_repository
-            })
-        {
-            let detail = format!(
-                "Closing them would leave \u{201C}{}\u{201D} without a Tab, so nothing closed. Open a Tab outside this Worktree first, or kill the Workspace.",
-                workspace.name
-            );
-            let _ = Alert::new(
-                ModalId::new("worktree-tabs-not-closed"),
-                "Tabs Not Closed",
-                "Tabs Not Closed",
-                detail,
-                vec![ModalAction::new(
-                    (),
-                    "OK",
-                    ModalActionRole::Cancel,
-                    "worktree-tabs-not-closed-ok",
-                )],
-            )
-            .intent(AlertIntent::Warning)
-            .present(window, cx, |_, _| {});
-            return true;
-        }
         let approval = match shared.close_approval(server_target) {
             Ok(approval) => approval,
             Err(SharedCloseUnavailable::Edits(reason)) => {
@@ -4161,6 +4135,10 @@ impl WorkspaceManager {
         cx: &mut Context<Self>,
     ) {
         use spaceterm_server::hierarchy::Mutation;
+
+        if self.is_worktree_close_fallback(&accepted.mutation) {
+            return;
+        }
 
         match &accepted.mutation {
             Mutation::CreateWorkspace { .. } => {
