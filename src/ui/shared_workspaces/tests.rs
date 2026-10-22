@@ -892,6 +892,54 @@ fn retry_on_an_ssh_servers_pane_should_ask_for_a_requested_connect(cx: &mut Test
     );
 }
 
+/// When another computer's server is stopped, its interrupted Pane says the server stopped and
+/// that it stays stopped, instead of claiming the shell keeps running, and offers no retry that
+/// can't connect. Once that server's route connects again, the Pane connects once, on its own.
+#[gpui::test]
+fn a_stopped_remote_server_says_so_in_its_pane_and_reconnects_when_its_route_returns(
+    cx: &mut TestAppContext,
+) {
+    use spaceterm_ui::a11y_testing::A11yTree;
+
+    let destination = crate::domain::SshDestination::new("penguin".to_owned()).unwrap();
+    let (harness, cx) = shared_tab_manager_on(Some(destination), cx);
+    let pane = harness.panes.pane(ROOT_PANE);
+    pane.set(DevelopmentPaneStatus::Reconnecting);
+    settle(&harness, cx);
+
+    cx.update(|_, cx| {
+        harness
+            .manager
+            .update(cx, |manager, cx| manager.server_stopped(cx))
+    });
+    settle(&harness, cx);
+
+    let description = A11yTree::read(cx).node("Server Stopped")["aria"]["description"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    assert!(
+        description.contains("server on \u{201C}penguin\u{201D} was stopped")
+            && description.contains("stays stopped until it\u{2019}s started on that computer"),
+        "got {description:?}"
+    );
+    assert!(!description.contains("keeps running"));
+    assert!(cx.debug_bounds("shared-pane-retry-1").is_none());
+    assert_eq!(pane.retries(), 0, "nothing reconnects to a stopped server");
+
+    cx.update(|_, cx| {
+        harness
+            .manager
+            .update(cx, |manager, cx| manager.server_started(cx))
+    });
+    settle(&harness, cx);
+    assert_eq!(
+        pane.retries(),
+        1,
+        "the route's return reconnects the Pane once"
+    );
+}
+
 #[gpui::test]
 fn an_interrupted_shared_pane_should_offer_retry_until_its_screen_returns(cx: &mut TestAppContext) {
     let (harness, cx) = shared_tab_manager(cx);

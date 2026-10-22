@@ -62,6 +62,9 @@ pub(crate) struct DevelopmentPaneState {
     accessibility_demand: AtomicBool,
     client_effects: Mutex<std::collections::VecDeque<ClientEffectRequest>>,
     presentable: AtomicBool,
+    /// Whether the server's route reported a deliberate stop since this Pane last connected.
+    /// The Pane then waits for an explicit retry instead of reconnecting on its own.
+    server_stopped: AtomicBool,
     wake: schedule::Wake,
 }
 impl DevelopmentPaneState {
@@ -89,6 +92,7 @@ impl DevelopmentPaneState {
             accessibility_demand: AtomicBool::new(false),
             client_effects: Mutex::new(std::collections::VecDeque::new()),
             presentable: AtomicBool::new(true),
+            server_stopped: AtomicBool::new(false),
             wake: schedule::Wake::default(),
             effect_authority: {
                 let authority = ClipboardAuthority::default();
@@ -155,6 +159,22 @@ impl DevelopmentPaneState {
     pub(crate) fn retry(&self) {
         self.retry.store(true, Ordering::Release);
         self.wake.notify();
+    }
+    /// Records that the person stopped this Pane's server, as its route reported. An
+    /// interrupted Pane says so now, and later failures wait for an explicit retry, because no
+    /// automatic attempt can reach a stopped server.
+    pub(crate) fn report_server_stopped(&self) {
+        self.server_stopped.store(true, Ordering::Release);
+        let mut status = self.status.lock().unwrap_or_else(|e| e.into_inner());
+        *status = match *status {
+            DevelopmentPaneStatus::Reconnecting => {
+                DevelopmentPaneStatus::Failed(ServerError::Stopped)
+            }
+            DevelopmentPaneStatus::TakeoverReconnecting => {
+                DevelopmentPaneStatus::TakeoverFailed(ServerError::Stopped)
+            }
+            current => current,
+        };
     }
     pub(crate) fn start_restored(&self) {
         if matches!(
@@ -274,6 +294,15 @@ impl DevelopmentPaneState {
             .unwrap_or(Err(ServerError::NotRunning))
     }
     fn connection_failed(&self, error: ServerError, has_takeover: bool) -> bool {
+        // A route that reported a deliberate stop can't reach the server, whatever this attempt
+        // failed with.
+        let error = if self.server_stopped.load(Ordering::Acquire)
+            && error != ServerError::DirectoryUnavailable
+        {
+            ServerError::Stopped
+        } else {
+            error
+        };
         // An admitted server update refuses connections only until it resolves, so the Pane
         // keeps reconnecting on its backoff in every client, whoever started the update.
         let retryable = matches!(
@@ -347,6 +376,8 @@ impl DevelopmentPaneState {
             interaction.screen = mapping;
         }
         self.connected_epoch.store(epoch, Ordering::Release);
+        // Reaching the server again ends any stop its route reported.
+        self.server_stopped.store(false, Ordering::Release);
         if paste_unconfirmed {
             self.paste_unconfirmed.store(true, Ordering::Release);
         }
@@ -3175,6 +3206,42 @@ mod tests {
             Ok(Reply::Unchanged)
         });
         assert_eq!(batches, 1, "nothing is replayed");
+    }
+
+    /// A Pane whose route reported the person's stop says the server stopped instead of
+    /// reconnecting, waits for an explicit retry, and reconnects normally once it reaches the
+    /// server again.
+    #[test]
+    fn a_reported_server_stop_ends_automatic_reconnection_until_the_pane_connects() {
+        let adapter = Adapter::new();
+        let state = &adapter.handle.state;
+        state.set(DevelopmentPaneStatus::Reconnecting);
+
+        state.report_server_stopped();
+        assert_eq!(
+            state.status(),
+            DevelopmentPaneStatus::Failed(ServerError::Stopped)
+        );
+        assert!(
+            !state.connection_failed(ServerError::NotRunning, false),
+            "no automatic attempt can reach a stopped server"
+        );
+        assert_eq!(
+            state.status(),
+            DevelopmentPaneStatus::Failed(ServerError::Stopped)
+        );
+        assert!(!state.connection_failed(ServerError::NotRunning, true));
+        assert_eq!(
+            state.status(),
+            DevelopmentPaneStatus::TakeoverFailed(ServerError::Stopped)
+        );
+
+        adapter.tracking_screen(1, 1, false);
+        assert!(
+            state.connection_failed(ServerError::NotRunning, false),
+            "a later interruption reconnects on its own again"
+        );
+        assert_eq!(state.status(), DevelopmentPaneStatus::Reconnecting);
     }
 
     #[test]

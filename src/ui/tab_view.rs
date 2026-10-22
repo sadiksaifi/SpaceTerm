@@ -2918,6 +2918,18 @@ impl TabView {
             self.focus(window, cx);
         }
     }
+    /// Tells each shared Pane that the person stopped its server, as the server's route reported.
+    pub(crate) fn server_stopped(&mut self, cx: &mut Context<Self>) {
+        let Some(shared) = self.shared.as_mut() else {
+            return;
+        };
+        for pane_id in shared.pane_ids() {
+            if let Some(view) = shared.view_mut(pane_id) {
+                view.server_stopped_elsewhere();
+            }
+        }
+        cx.notify();
+    }
     /// Reconnects each shared Pane the person's stop interrupted, once they started the server.
     pub(crate) fn server_started(&mut self, cx: &mut Context<Self>) {
         let Some(shared) = self.shared.as_mut() else {

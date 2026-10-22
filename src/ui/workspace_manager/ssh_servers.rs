@@ -8,6 +8,7 @@ use gpui::{Context, Window};
 
 use super::{ServerOrigin, WorkspaceManager};
 use crate::domain::SshDestination;
+use crate::ssh::server_connection::RemoteConnectionStatus;
 use crate::ui::shared_workspaces::SharedPaneSessions;
 
 impl WorkspaceManager {
@@ -100,10 +101,46 @@ impl WorkspaceManager {
                 self.present_ssh_server(destination, server, window, cx);
             }
         }
+        // A deliberately stopped server keeps its Workspaces presented, but no automatic attempt
+        // reaches it, so its Panes say it stopped. Once the person connects again, the Panes that
+        // stop interrupted connect too. Neither starts the server.
+        for key in self.shared.keys() {
+            let Some(ServerOrigin::Ssh(destination)) = self.shared.origin(key) else {
+                continue;
+            };
+            match connections.status(destination) {
+                RemoteConnectionStatus::Stopped => self.server_panes(key, cx, |manager, cx| {
+                    manager.server_stopped(cx);
+                }),
+                RemoteConnectionStatus::Connected { .. } => {
+                    self.server_panes(key, cx, |manager, cx| manager.server_started(cx));
+                }
+                _ => {}
+            }
+        }
         // A Remote Workspace waiting for a server this sync bound may be asked for now.
         self.open_pending_remote_workspace(window, cx);
         // Machine headings show each connection's state, which changes without a new binding.
         cx.notify();
+    }
+
+    /// Runs `apply` on each presented Workspace that the server at `key` owns.
+    fn server_panes(
+        &self,
+        key: super::ServerKey,
+        cx: &mut Context<Self>,
+        apply: impl Fn(
+            &mut crate::ui::tab_manager::TabManager,
+            &mut Context<crate::ui::tab_manager::TabManager>,
+        ),
+    ) {
+        for workspace in self.workspaces.iter() {
+            if self.shared.owner(workspace.id()) == Some(key) {
+                workspace
+                    .payload()
+                    .update(cx, |manager, cx| apply(manager, cx));
+            }
+        }
     }
 
     /// Presents one SSH server's Workspaces. Its Panes take no local file authority, and its

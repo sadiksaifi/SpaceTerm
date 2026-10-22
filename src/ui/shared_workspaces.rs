@@ -2184,6 +2184,7 @@ mod development {
             take_overs: std::sync::atomic::AtomicUsize,
             restored_starts: std::sync::atomic::AtomicUsize,
             retries: std::sync::atomic::AtomicUsize,
+            stops: std::sync::atomic::AtomicUsize,
         }
 
         impl ScriptedPane {
@@ -2199,6 +2200,7 @@ mod development {
                     take_overs: std::sync::atomic::AtomicUsize::new(0),
                     restored_starts: std::sync::atomic::AtomicUsize::new(0),
                     retries: std::sync::atomic::AtomicUsize::new(0),
+                    stops: std::sync::atomic::AtomicUsize::new(0),
                 })
             }
 
@@ -2258,6 +2260,11 @@ mod development {
             pub(crate) fn retries(&self) -> usize {
                 self.retries.load(std::sync::atomic::Ordering::SeqCst)
             }
+
+            /// How many times the Pane heard that its route reported the server stopped.
+            pub(crate) fn stops(&self) -> usize {
+                self.stops.load(std::sync::atomic::Ordering::SeqCst)
+            }
         }
 
         impl crate::ui::server_pane::ServerPaneConnection for ScriptedPane {
@@ -2286,6 +2293,25 @@ mod development {
             fn retry(&self) {
                 self.retries
                     .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+
+            /// Reports the stop as the real connection does: an interrupted Pane says the server
+            /// stopped.
+            fn report_server_stopped(&self) {
+                use crate::terminal::server_session::DevelopmentPaneStatus;
+                self.stops.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let mut status = self.status.lock().expect("status");
+                *status = match *status {
+                    DevelopmentPaneStatus::Reconnecting => {
+                        DevelopmentPaneStatus::Failed(crate::local_server::ServerError::Stopped)
+                    }
+                    DevelopmentPaneStatus::TakeoverReconnecting => {
+                        DevelopmentPaneStatus::TakeoverFailed(
+                            crate::local_server::ServerError::Stopped,
+                        )
+                    }
+                    current => current,
+                };
             }
 
             fn take_over(&self) {
@@ -2336,6 +2362,16 @@ mod development {
                     panes: Mutex::new(std::collections::BTreeMap::new()),
                     remote: Some(destination),
                 })
+            }
+
+            /// The scripted connections behind every server Pane opened so far.
+            pub(crate) fn opened(&self) -> Vec<std::sync::Arc<ScriptedPane>> {
+                self.panes
+                    .lock()
+                    .expect("panes")
+                    .values()
+                    .cloned()
+                    .collect()
             }
 
             /// The scripted connection behind one server Pane, once it has been opened.

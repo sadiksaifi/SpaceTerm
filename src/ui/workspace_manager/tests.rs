@@ -8793,9 +8793,25 @@ impl MachineGroupsHarness {
         ServerKey,
         Rc<crate::ui::shared_workspaces::testing::ScriptedEdits>,
     ) {
+        let (key, edits, _) = self.present_ssh_panes(destination, workspaces, cx);
+        (key, edits)
+    }
+
+    /// Presents the SSH server as [`Self::present_ssh`] does, with the scripted Panes it opens.
+    fn present_ssh_panes(
+        &self,
+        destination: &str,
+        workspaces: &[(&str, u8)],
+        cx: &mut VisualTestContext,
+    ) -> (
+        ServerKey,
+        Rc<crate::ui::shared_workspaces::testing::ScriptedEdits>,
+        Rc<crate::ui::shared_workspaces::testing::ScriptedPanes>,
+    ) {
         use crate::ui::shared_workspaces::testing::{ScriptedEdits, ScriptedPanes};
         use crate::ui::shared_workspaces::{SharedEditSource, SharedPaneSessions};
 
+        let panes = ScriptedPanes::new(Self::session_factory());
         let edits = Rc::new(ScriptedEdits::new(Some(machine_inventory(
             self.next_revision(),
             workspaces,
@@ -8807,7 +8823,7 @@ impl MachineGroupsHarness {
                     ServerOrigin::Ssh(destination),
                     SharedEditSource::new(Rc::clone(&edits) as Rc<_>),
                     SharedPaneSessions::with_opener(
-                        ScriptedPanes::new(Self::session_factory()) as Rc<_>,
+                        Rc::clone(&panes) as Rc<_>,
                         &PaneConstruction::testing(),
                     ),
                     window,
@@ -8818,7 +8834,7 @@ impl MachineGroupsHarness {
             })
         });
         self.attach(key, workspaces, cx);
-        (key, edits)
+        (key, edits, panes)
     }
 
     /// Publishes `workspaces` from the server at `key` and attaches each one.
@@ -13336,6 +13352,150 @@ fn cancelling_an_opening_remote_workspace_should_ask_the_server_for_nothing(
         connections.server(&penguin).is_some(),
         "the connection stays up"
     );
+}
+
+/// An SSH computer whose server runs while `running` holds and is reported stopped otherwise.
+/// Each connection's route lasts until the test ends it.
+struct StoppableServer {
+    running: Arc<AtomicBool>,
+    route: Arc<AtomicBool>,
+}
+
+impl crate::ssh::server_connection::SshConnectBackend for StoppableServer {
+    fn connect(
+        &self,
+        _: &crate::domain::SshDestination,
+        _: crate::ssh::server_connection::ConnectMode,
+        _: Option<&crate::ssh::server_connection::SshServerContinuity>,
+        _: &crate::ssh::cancellation::SshCancellationToken,
+        _: &crate::ssh::server_connection::ConnectProgress<'_>,
+    ) -> Result<
+        crate::ssh::server_connection::ConnectedSshServer,
+        crate::ssh::server_connection::SshConnectFailure,
+    > {
+        if !self.running.load(Ordering::SeqCst) {
+            return Err(crate::ssh::server_connection::SshConnectFailure::Stopped(
+                None,
+            ));
+        }
+        self.route.store(true, Ordering::SeqCst);
+        Ok(crate::ssh::server_connection::ConnectedSshServer {
+            server: spaceterm_server::LocalServer::for_identity("spaceterm-development").unwrap(),
+            continuity: crate::ssh::server_connection::SshServerContinuity {
+                route: [1; 32],
+                account: 501,
+                build: "spaceterm-development".into(),
+                server: [2; 32],
+            },
+            lease: Arc::new(ScriptedRoute(self.route.clone())),
+            protocol_major: 1,
+            facts: crate::ssh::server_connection::SshServerFacts {
+                platform: ("linux".into(), "x86_64".into()),
+                version: Some("1.0.0".into()),
+                starts_automatically: true,
+            },
+        })
+    }
+    fn observe(
+        &self,
+        _: &crate::domain::SshDestination,
+        _: Option<&crate::ssh::server_connection::SshServerContinuity>,
+        _: &crate::ssh::cancellation::SshCancellationToken,
+        _: &crate::ssh::server_connection::ConnectProgress<'_>,
+    ) -> Result<
+        crate::ssh::server_connection::SshServerObservation,
+        crate::ssh::server_connection::SshConnectFailure,
+    > {
+        Err(crate::ssh::server_connection::SshConnectFailure::Stopped(
+            None,
+        ))
+    }
+}
+
+/// When the person stops another computer's server, the SSH route reports it, and that server's
+/// interrupted Panes say it stopped rather than reconnecting. Starting it there changes nothing
+/// on its own; once the person connects again, those Panes connect once each.
+#[gpui::test]
+fn a_stopped_ssh_server_should_tell_its_panes_and_reconnect_them_after_connect(
+    cx: &mut TestAppContext,
+) {
+    use crate::ssh::server_connection::{RemoteConnectionStatus, SshServerConnections};
+    use crate::terminal::server_session::DevelopmentPaneStatus;
+
+    // The registry reports from its own worker thread.
+    cx.executor().allow_parking();
+    let (harness, cx) = MachineGroupsHarness::new(cx);
+    let running = Arc::new(AtomicBool::new(true));
+    let route = Arc::new(AtomicBool::new(true));
+    let connections = SshServerConnections::new(
+        Arc::new(StoppableServer {
+            running: running.clone(),
+            route: route.clone(),
+        }),
+        Arc::new(RememberedConnections::default()),
+    );
+    let installed = connections.clone();
+    cx.update(|_, cx| crate::ui::ssh_servers::install(installed, None, cx));
+    let penguin = crate::domain::SshDestination::new("penguin".to_owned()).unwrap();
+    connections.connect(penguin.clone());
+    wait_until(|| connections.server(&penguin).is_some(), cx);
+    // The window presents the connected server as its registry binding would, then follows it.
+    let (_, _, panes) = harness.present_ssh_panes("penguin", &[("Far", 1)], cx);
+    cx.update(|window, cx| {
+        harness
+            .manager
+            .update(cx, |manager, cx| manager.follow_ssh_servers(window, cx));
+    });
+    cx.run_until_parked();
+    let opened = panes.opened();
+    assert!(!opened.is_empty(), "the presented Workspace opens its Pane");
+    for pane in &opened {
+        pane.set(DevelopmentPaneStatus::Reconnecting);
+    }
+
+    running.store(false, Ordering::SeqCst);
+    route.store(false, Ordering::SeqCst);
+    wait_until(
+        || {
+            matches!(
+                connections.status(&penguin),
+                RemoteConnectionStatus::Stopped
+            )
+        },
+        cx,
+    );
+    for pane in &opened {
+        assert!(pane.stops() >= 1, "the Pane hears that its server stopped");
+        assert_eq!(
+            crate::ui::server_pane::ServerPaneConnection::status(pane.as_ref()),
+            DevelopmentPaneStatus::Failed(crate::local_server::ServerError::Stopped)
+        );
+        assert_eq!(pane.retries(), 0);
+    }
+
+    running.store(true, Ordering::SeqCst);
+    cx.run_until_parked();
+    assert!(
+        opened.iter().all(|pane| pane.retries() == 0),
+        "starting the server there connects nothing on its own"
+    );
+    connections.connect(penguin.clone());
+    wait_until(
+        || {
+            matches!(
+                connections.status(&penguin),
+                RemoteConnectionStatus::Connected { .. }
+            )
+        },
+        cx,
+    );
+    for pane in &opened {
+        assert_eq!(
+            pane.retries(),
+            1,
+            "the person's Connect reconnects the Pane once"
+        );
+    }
 }
 
 /// An SSH registry whose "penguin" connects on the first request, and the counts it keeps.
