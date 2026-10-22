@@ -361,10 +361,13 @@ pub(crate) fn serve_admitted(
     stream: &mut dyn crate::transport::Transport,
     client: [u8; 32],
     name: crate::pane::control::ClientName,
-    paired: Option<&crate::direct::PairedDevice>,
+    paired: Option<crate::direct::host::Peer<'_>>,
     environment: &Environment,
 ) -> Result<(), ServerError> {
-    let connection = protocol::random()?;
+    let connection = match paired {
+        Some(peer) => peer.connection,
+        None => protocol::random()?,
+    };
     {
         let mut panes = environment.panes.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(paired) = paired {
@@ -374,7 +377,7 @@ pub(crate) fn serve_admitted(
                 .ok_or(ServerError::AuthenticationRefused)?
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .authorized(paired)?;
+                .authorized_peer(&paired)?;
         }
         if let Some(panes) = panes.as_mut() {
             panes.admitted(client, name);
@@ -392,7 +395,11 @@ pub(crate) fn serve_admitted(
             let mut wire = protocol::Wire::terminal(stream)?;
             let request: crate::pane::Request = wire.read()?;
             let shutdown = matches!(request, crate::pane::Request::Shutdown);
-            let (reply, stopped) = {
+            let policy_change = matches!(
+                &request,
+                crate::pane::Request::Direct(crate::direct::Management::SetPolicy(_))
+            );
+            let (reply, stopped, retired) = {
                 let mut panes = environment.panes.lock().unwrap_or_else(|e| e.into_inner());
                 if environment
                     .stopping
@@ -408,7 +415,7 @@ pub(crate) fn serve_admitted(
                         .ok_or(ServerError::AuthenticationRefused)?
                         .lock()
                         .unwrap_or_else(|e| e.into_inner())
-                        .authorized(paired)?;
+                        .authorized_peer(&paired)?;
                 }
                 let reply = if shutdown && paired.is_some() {
                     // A device credential grants protocol authority, never host service authority.
@@ -418,7 +425,7 @@ pub(crate) fn serve_admitted(
                         Some(state) => state
                             .lock()
                             .unwrap_or_else(|e| e.into_inner())
-                            .manage(paired.map(|p| p.pairing), request),
+                            .manage(paired.as_ref(), request),
                         None => Err(crate::direct::DirectError::StorageUnavailable),
                     };
                     crate::pane::Reply::Direct(reply.map(|(reply, retired)| {
@@ -458,10 +465,16 @@ pub(crate) fn serve_admitted(
                         .stopping
                         .store(true, std::sync::atomic::Ordering::Release);
                 }
-                (reply, stopped)
+                let retired = paired.is_some()
+                    && policy_change
+                    && matches!(
+                        &reply,
+                        crate::pane::Reply::Direct(Ok(crate::direct::ManagementReply::Status(_)))
+                    );
+                (reply, stopped, retired)
             };
             wire.write(&reply)?;
-            if stopped {
+            if stopped || retired {
                 break;
             }
         }

@@ -338,8 +338,16 @@ impl LocalServer {
         paired: crate::direct::PairedDevice,
         connector: std::sync::Arc<dyn crate::direct::DirectConnector>,
     ) -> Result<Self, ServerError> {
+        Self::for_identity(identity)?.with_direct(route, paired, connector)
+    }
+    fn with_direct(
+        mut self,
+        route: [u8; 32],
+        paired: crate::direct::PairedDevice,
+        connector: std::sync::Arc<dyn crate::direct::DirectConnector>,
+    ) -> Result<Self, ServerError> {
         if route == [0; 32]
-            || paired.pin.build != identity
+            || paired.pin.build != self.identity
             || paired.pin.server == [0; 32]
             || paired.pin.public_key == [0; 32]
             || paired.pin.certificate == [0; 32]
@@ -348,14 +356,13 @@ impl LocalServer {
         {
             return Err(ServerError::AuthenticationRefused);
         }
-        let mut server = Self::for_identity(identity)?;
-        server.account = format!(
+        self.account = format!(
             "{}-direct-{}",
-            server.account,
+            self.account,
             route.iter().map(|b| format!("{b:02x}")).collect::<String>()
         );
-        server.direct = Some(std::sync::Arc::new(DirectRoute { paired, connector }));
-        Ok(server)
+        self.direct = Some(std::sync::Arc::new(DirectRoute { paired, connector }));
+        Ok(self)
     }
     fn direct_manage(
         &self,
@@ -464,6 +471,95 @@ mod tests {
     use super::*;
     use crate::account_bridge::{AccountBridge, AccountBridgeIdentity, AccountConnector};
     use std::sync::Arc;
+
+    #[test]
+    fn paired_direct_policy_changes_return_the_committed_status_before_disconnect() {
+        use crate::direct::{self, DirectConnection, DirectConnector, Management, ManagementReply};
+        struct Connector {
+            endpoint: String,
+            paired: direct::PairedDevice,
+            credential: direct::DeviceCredential,
+        }
+        impl DirectConnector for Connector {
+            fn connect(&self) -> Result<DirectConnection, direct::DirectError> {
+                DirectConnection::connect(&self.endpoint, &self.paired, &self.credential)
+            }
+        }
+        for change_address in [false, true] {
+            let fixture = direct::tests::Fixture::new();
+            fixture.enable();
+            let credential = direct::DeviceCredential::generate().unwrap();
+            let paired = fixture.enroll(&credential);
+            let endpoint = fixture.endpoint();
+            // The same pairing has another transport, which must close immediately.
+            let other_worker = fixture.serve_next();
+            let mut other = DirectConnection::connect(&endpoint, &paired, &credential).unwrap();
+            protocol::admit_transport(
+                &mut other,
+                (&paired.client, &"Other view".into()),
+                &paired.pin.server,
+                &paired.pin.build,
+                &[protocol::MAJOR],
+            )
+            .unwrap();
+            let policy = change_address.then(|| {
+                let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+                direct::NetworkPolicy::new(listener.local_addr().unwrap()).unwrap()
+            });
+            let local = LocalServer::with_paths(fixture.paths.clone())
+                .unwrap()
+                .with_direct(
+                    [42; 32],
+                    paired.clone(),
+                    Arc::new(Connector {
+                        endpoint,
+                        paired,
+                        credential,
+                    }),
+                )
+                .unwrap();
+            let issuer_worker = fixture.serve_next();
+            let result = local.set_direct_policy(policy.clone());
+            let _ = issuer_worker.join().unwrap();
+            let ManagementReply::Status(committed) =
+                fixture.management(Management::Status).unwrap()
+            else {
+                panic!()
+            };
+            assert_eq!(committed.policy, policy);
+            assert_eq!(
+                result,
+                Ok(committed),
+                "a successful durable policy change must reach its paired caller"
+            );
+            assert!(
+                protocol::Wire::terminal(&mut other)
+                    .unwrap()
+                    .read_frame()
+                    .is_err()
+            );
+            drop(other);
+            let _ = other_worker.join().unwrap();
+            assert!(
+                matches!(fixture.management(Management::Devices), Ok(ManagementReply::Devices(devices)) if devices.len() == 1)
+            );
+            fixture.state.lock().unwrap().stop();
+            let reopened = direct::host::State::open(&fixture.paths).unwrap();
+            let (ManagementReply::Status(restored), _) = reopened
+                .lock()
+                .unwrap()
+                .manage(None, Management::Status)
+                .unwrap()
+            else {
+                panic!()
+            };
+            assert_eq!(
+                restored.policy, policy,
+                "the reply must describe the policy retained across restart"
+            );
+            reopened.lock().unwrap().stop();
+        }
+    }
 
     struct Studio;
     impl crate::computer_name::ComputerName for Studio {

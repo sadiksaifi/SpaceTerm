@@ -19,6 +19,17 @@ fn bind_listener(address: std::net::SocketAddr) -> std::io::Result<TcpListener> 
     Ok(socket.into())
 }
 pub(crate) type Shared = Arc<Mutex<State>>;
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct Peer<'a> {
+    pub(crate) device: &'a PairedDevice,
+    pub(crate) connection: [u8; 32],
+}
+struct Registered {
+    pairing: PairingId,
+    connection: [u8; 32],
+    generation: [u8; 32],
+    stream: UnixStream,
+}
 struct PendingInvitation {
     id: ClaimId,
     token: [u8; 32],
@@ -39,7 +50,7 @@ pub(crate) struct State {
     listener_state: ListenerState,
     invitations: Vec<PendingInvitation>,
     claims: Vec<PendingClaim>,
-    connections: Vec<(PairingId, UnixStream)>,
+    connections: Vec<Registered>,
     uncertain: bool,
     generation: [u8; 32],
     released: std::collections::BTreeSet<[u8; 32]>,
@@ -94,8 +105,8 @@ impl State {
         if let Err(error) = self.store.save(&next) {
             self.uncertain = true;
             // A renamed but unsynced revocation must never leave ordinary authority usable.
-            for (_, stream) in &self.connections {
-                let _ = stream.shutdown(std::net::Shutdown::Both);
+            for registered in &self.connections {
+                let _ = registered.stream.shutdown(std::net::Shutdown::Both);
             }
             self.listener = None;
             self.listener_state = ListenerState::Failed(error);
@@ -105,13 +116,13 @@ impl State {
         Ok(())
     }
     pub(crate) fn accept(&mut self) -> Option<(TcpStream, [u8; 32])> {
-        self.connections.retain(|(_, stream)| {
+        self.connections.retain(|registered| {
             let mut byte = [0];
             // A disconnected private bridge answers EOF; WouldBlock is a live idle bridge.
             // SAFETY: recv only observes this retained socket into one writable byte.
             unsafe {
                 libc::recv(
-                    stream.as_raw_fd(),
+                    registered.stream.as_raw_fd(),
                     byte.as_mut_ptr().cast(),
                     1,
                     libc::MSG_PEEK | libc::MSG_DONTWAIT,
@@ -149,12 +160,23 @@ impl State {
         }
         Ok(())
     }
-    pub(crate) fn register(
+    pub(crate) fn authorized_peer(&mut self, peer: &Peer<'_>) -> Result<(), DirectError> {
+        self.authorized(peer.device)?;
+        if !self.connections.iter().any(|registered| {
+            registered.connection == peer.connection
+                && registered.pairing == peer.device.pairing
+                && registered.generation == self.generation
+        }) {
+            return Err(DirectError::Disabled);
+        }
+        Ok(())
+    }
+    pub(crate) fn register<'a>(
         &mut self,
-        paired: &PairedDevice,
+        paired: &'a PairedDevice,
         stream: &UnixStream,
         generation: [u8; 32],
-    ) -> Result<(), DirectError> {
+    ) -> Result<Peer<'a>, DirectError> {
         self.authorized(paired)?;
         if generation != self.generation {
             return Err(DirectError::Disabled);
@@ -166,8 +188,17 @@ impl State {
         clone
             .set_nonblocking(true)
             .map_err(|_| DirectError::Transport)?;
-        self.connections.push((paired.pairing, clone));
-        Ok(())
+        let connection = crypto::random()?;
+        self.connections.push(Registered {
+            pairing: paired.pairing,
+            connection,
+            generation,
+            stream: clone,
+        });
+        Ok(Peer {
+            device: paired,
+            connection,
+        })
     }
     fn expire(&mut self) -> Result<(), DirectError> {
         let now = wire::now()?;
@@ -197,7 +228,7 @@ impl State {
     }
     pub(crate) fn manage(
         &mut self,
-        actor: Option<PairingId>,
+        actor: Option<&Peer<'_>>,
         request: Management,
     ) -> Result<(ManagementReply, Option<[u8; 32]>), DirectError> {
         self.recover()?;
@@ -213,8 +244,12 @@ impl State {
                 next.policy = policy;
                 self.commit(next)?;
                 self.generation = generation;
-                for (_, stream) in &self.connections {
-                    let _ = stream.shutdown(std::net::Shutdown::Both);
+                // Remove every registration now. Only this exact caller's pump
+                // remains open to deliver its final committed reply.
+                for registered in &self.connections {
+                    if actor.is_none_or(|peer| peer.connection != registered.connection) {
+                        let _ = registered.stream.shutdown(std::net::Shutdown::Both);
+                    }
                 }
                 self.connections.clear();
                 self.invitations.clear();
@@ -324,7 +359,8 @@ impl State {
                     .collect(),
             ),
             Management::Revoke { operation, target } => {
-                let (receipt, client) = self.revoke(actor, operation, target)?;
+                let (receipt, client) =
+                    self.revoke(actor.map(|peer| peer.device.pairing), operation, target)?;
                 return Ok((ManagementReply::Revoked(receipt), Some(client)));
             }
         };
@@ -403,14 +439,15 @@ impl State {
             self.commit(next)?;
             receipt
         };
-        for (_, stream) in self
+        for registered in self
             .connections
             .iter()
-            .filter(|(pairing, _)| *pairing == target)
+            .filter(|registered| registered.pairing == target)
         {
-            let _ = stream.shutdown(std::net::Shutdown::Both);
+            let _ = registered.stream.shutdown(std::net::Shutdown::Both);
         }
-        self.connections.retain(|(pairing, _)| *pairing != target);
+        self.connections
+            .retain(|registered| registered.pairing != target);
         Ok((receipt, client))
     }
     pub(super) fn challenge(&self) -> Result<wire::Challenge, DirectError> {
@@ -650,8 +687,8 @@ impl State {
     pub(crate) fn stop(&mut self) {
         self.listener = None;
         self.listener_state = ListenerState::Off;
-        for (_, stream) in &self.connections {
-            let _ = stream.shutdown(std::net::Shutdown::Both);
+        for registered in &self.connections {
+            let _ = registered.stream.shutdown(std::net::Shutdown::Both);
         }
         self.connections.clear();
         self.invitations.clear();
@@ -721,16 +758,18 @@ pub(crate) fn serve(
     }
     let paired = paired.ok_or(ServerError::AuthenticationRefused)?;
     let mut bridge = wss::Bridge::start(ws)?;
-    {
+    let peer = {
         let _panes = environment.panes.lock().unwrap_or_else(|e| e.into_inner());
         state.lock().unwrap_or_else(|e| e.into_inner()).register(
             &paired,
             bridge.stream(),
             generation,
-        )?;
-    }
+        )?
+    };
     let (_, client, name) = crate::protocol::admit_direct_server(&mut bridge, &paired)?;
-    crate::host::serve_admitted(&mut bridge, client, name, Some(&paired), &environment)
+    crate::host::serve_admitted(&mut bridge, client, name, Some(peer), &environment)?;
+    bridge.finish_reply()?;
+    Ok(())
 }
 
 #[cfg(test)]

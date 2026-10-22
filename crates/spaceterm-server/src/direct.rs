@@ -11,7 +11,7 @@ mod crypto;
 pub(crate) mod host;
 mod storage;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 mod wire;
 mod wss;
 

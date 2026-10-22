@@ -274,7 +274,8 @@ pub(super) struct Bridge {
     stream: UnixStream,
     socket: TcpStream,
     stop: Arc<AtomicBool>,
-    worker: Option<std::thread::JoinHandle<()>>,
+    draining: Arc<AtomicBool>,
+    worker: Option<std::thread::JoinHandle<Result<(), DirectError>>>,
 }
 impl Bridge {
     pub(super) fn start(mut ws: Ws) -> Result<Self, DirectError> {
@@ -293,20 +294,37 @@ impl Bridge {
             .map_err(|_| DirectError::Transport)?;
         let stop = Arc::new(AtomicBool::new(false));
         let cancelled = Arc::clone(&stop);
+        let draining = Arc::new(AtomicBool::new(false));
+        let finish = Arc::clone(&draining);
         let worker = std::thread::spawn(move || {
-            let _ = pump(&mut ws, &mut bridge, &cancelled);
+            let result = pump(&mut ws, &mut bridge, &cancelled, &finish);
             let _ = bridge.shutdown(std::net::Shutdown::Both);
             let _ = ws.get_ref().tcp().shutdown(std::net::Shutdown::Both);
+            result
         });
         Ok(Self {
             stream,
             socket,
             stop,
+            draining,
             worker: Some(worker),
         })
     }
     pub(crate) fn stream(&self) -> &UnixStream {
         &self.stream
+    }
+    /// Retires an exchange after its final reply. EOF reaches the pump only after
+    /// all queued reply bytes, and the pump flushes each WSS message before EOF.
+    pub(super) fn finish_reply(&mut self) -> Result<(), DirectError> {
+        self.draining.store(true, Ordering::Release);
+        self.stream
+            .shutdown(std::net::Shutdown::Write)
+            .map_err(|_| DirectError::Transport)?;
+        self.worker
+            .take()
+            .ok_or(DirectError::Transport)?
+            .join()
+            .map_err(|_| DirectError::Transport)?
     }
 }
 impl Drop for Bridge {
@@ -343,14 +361,24 @@ impl crate::transport::Transport for Bridge {
 fn retryable(error: &tungstenite::Error) -> bool {
     matches!(error, tungstenite::Error::Io(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted))
 }
-fn pump(ws: &mut Ws, bridge: &mut UnixStream, stop: &AtomicBool) -> Result<(), DirectError> {
+fn pump(
+    ws: &mut Ws,
+    bridge: &mut UnixStream,
+    stop: &AtomicBool,
+    draining: &AtomicBool,
+) -> Result<(), DirectError> {
     let mut incoming = Vec::new();
     let mut offset = 0;
     let mut outgoing = false;
     let mut send_stalled = None;
     let mut receive_stalled = None;
     let mut buffer = vec![0; CHUNK];
+    let mut drain_started = None;
     while !stop.load(Ordering::Acquire) {
+        let finishing = draining.load(Ordering::Acquire);
+        if finishing && drain_started.get_or_insert_with(Instant::now).elapsed() > STALL_LIMIT {
+            return Err(DirectError::Transport);
+        }
         let mut progress = false;
         if outgoing {
             match ws.flush() {
@@ -383,7 +411,10 @@ fn pump(ws: &mut Ws, bridge: &mut UnixStream, stop: &AtomicBool) -> Result<(), D
                 Err(_) => return Err(DirectError::Transport),
             }
         }
-        if offset < incoming.len() {
+        if finishing {
+            // Only the final queued reply remains eligible. New input, including
+            // pings, cannot keep the retired exchange alive or starve its EOF.
+        } else if offset < incoming.len() {
             match bridge.write(&incoming[offset..]) {
                 Ok(0) => return Err(DirectError::Transport),
                 Ok(count) => {
@@ -419,7 +450,7 @@ fn pump(ws: &mut Ws, bridge: &mut UnixStream, stop: &AtomicBool) -> Result<(), D
             }
         }
         if send_stalled.is_some_and(|at: Instant| at.elapsed() > STALL_LIMIT)
-            || receive_stalled.is_some_and(|at: Instant| at.elapsed() > STALL_LIMIT)
+            || (!finishing && receive_stalled.is_some_and(|at: Instant| at.elapsed() > STALL_LIMIT))
         {
             return Err(DirectError::Transport);
         }

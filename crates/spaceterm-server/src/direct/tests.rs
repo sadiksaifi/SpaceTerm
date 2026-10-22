@@ -5,13 +5,13 @@ use std::{
     time::{Duration, Instant},
 };
 
-pub(super) struct Fixture {
+pub(crate) struct Fixture {
     root: std::path::PathBuf,
-    paths: crate::host::Paths,
-    pub(super) state: host::Shared,
+    pub(crate) paths: crate::host::Paths,
+    pub(crate) state: host::Shared,
 }
 impl Fixture {
-    pub(super) fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let root = std::env::temp_dir().canonicalize().unwrap().join(format!(
             "st-direct-{}",
             u128::from_be_bytes(crypto::random().unwrap()[..16].try_into().unwrap())
@@ -28,14 +28,14 @@ impl Fixture {
         let state = host::State::open(&paths).unwrap();
         Self { root, paths, state }
     }
-    pub(super) fn management(&self, request: Management) -> Result<ManagementReply, DirectError> {
+    pub(crate) fn management(&self, request: Management) -> Result<ManagementReply, DirectError> {
         self.state
             .lock()
             .unwrap()
             .manage(None, request)
             .map(|v| v.0)
     }
-    pub(super) fn enable(&self) {
+    pub(crate) fn enable(&self) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         drop(listener);
@@ -90,7 +90,7 @@ impl Fixture {
         };
         claims.into_iter().find(|c| c.id == id).unwrap()
     }
-    fn enroll(&self, credential: &DeviceCredential) -> PairedDevice {
+    pub(crate) fn enroll(&self, credential: &DeviceCredential) -> PairedDevice {
         let invitation = self.invite();
         let claim = self.claim(&invitation, credential);
         self.management(Management::Approve(claim.clone())).unwrap();
@@ -108,7 +108,7 @@ impl Fixture {
         };
         paired
     }
-    fn serve_next(&self) -> std::thread::JoinHandle<Result<(), ServerError>> {
+    pub(crate) fn serve_next(&self) -> std::thread::JoinHandle<Result<(), ServerError>> {
         self.serve_next_with(Arc::new(Mutex::new(None)))
     }
     fn serve_next_with(
@@ -134,7 +134,7 @@ impl Fixture {
             }
         })
     }
-    fn endpoint(&self) -> String {
+    pub(crate) fn endpoint(&self) -> String {
         self.invite().endpoint().to_owned()
     }
 }
@@ -707,6 +707,13 @@ fn a_retired_exposure_generation_refuses_inflight_proof_and_late_registration_af
     let credential = DeviceCredential::generate().unwrap();
     let paired = fixture.enroll(&credential);
     let challenge = fixture.state.lock().unwrap().challenge().unwrap();
+    let (registered_stream, _registered_peer) = std::os::unix::net::UnixStream::pair().unwrap();
+    let peer = fixture
+        .state
+        .lock()
+        .unwrap()
+        .register(&paired, &registered_stream, challenge.generation)
+        .unwrap();
     let action = wire::Action::Connect {
         paired: paired.clone(),
     };
@@ -723,6 +730,11 @@ fn a_retired_exposure_generation_refuses_inflight_proof_and_late_registration_af
         .management(Management::SetPolicy(status.policy))
         .unwrap();
     let mut state = fixture.state.lock().unwrap();
+    assert_eq!(
+        state.authorized_peer(&peer),
+        Err(DirectError::Disabled),
+        "an already-read request from the retired peer has no authority under the replacement policy"
+    );
     assert!(matches!(
         state.authenticate(&challenge, &wire::Authentication { action, proof }),
         Err(DirectError::Disabled)
@@ -880,6 +892,56 @@ fn revocation_closes_every_authorized_connection_and_notifies_only_the_target_ru
         Err(DirectError::Revoked)
     ));
     let _ = server.join().unwrap();
+}
+
+#[test]
+fn a_policy_reply_retires_the_direct_issuer_without_processing_its_pipelined_request() {
+    use std::io::{Read, Write};
+    for change_address in [false, true] {
+        let fixture = Fixture::new();
+        fixture.enable();
+        let credential = DeviceCredential::generate().unwrap();
+        let paired = fixture.enroll(&credential);
+        let server = fixture.serve_next();
+        let mut connection =
+            DirectConnection::connect(&fixture.endpoint(), &paired, &credential).unwrap();
+        crate::protocol::admit_transport(
+            &mut connection,
+            (&paired.client, &"Policy owner".into()),
+            &paired.pin.server,
+            &paired.pin.build,
+            &[crate::protocol::MAJOR],
+        )
+        .unwrap();
+        let policy = change_address.then(|| {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            NetworkPolicy::new(listener.local_addr().unwrap()).unwrap()
+        });
+        // Encode both requests before one socket write, so retirement cannot race
+        // the test while it is still trying to enqueue the follow-up frame.
+        let (mut encoded, mut pending) = std::os::unix::net::UnixStream::pair().unwrap();
+        let mut wire = crate::protocol::Wire::terminal(&mut encoded).unwrap();
+        wire.write(&crate::pane::Request::Direct(Management::SetPolicy(
+            policy.clone(),
+        )))
+        .unwrap();
+        wire.write(&crate::pane::Request::Capabilities).unwrap();
+        encoded.shutdown(std::net::Shutdown::Write).unwrap();
+        let mut requests = Vec::new();
+        pending.read_to_end(&mut requests).unwrap();
+        connection.write_all(&requests).unwrap();
+        let mut wire = crate::protocol::Wire::terminal(&mut connection).unwrap();
+        let reply = wire.read::<crate::pane::Reply>().unwrap();
+        assert!(
+            matches!(reply, crate::pane::Reply::Direct(Ok(ManagementReply::Status(status))) if status.policy == policy)
+        );
+        assert!(
+            wire.read_frame().is_err(),
+            "the retired issuer must receive no follow-up reply"
+        );
+        drop(connection);
+        let _ = server.join().unwrap();
+    }
 }
 
 #[test]
