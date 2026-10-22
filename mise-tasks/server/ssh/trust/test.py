@@ -193,7 +193,7 @@ def exercise(root):
         "--lib",
         "--all-features",
         "--locked",
-        "ssh::server_maintenance::tests::previous_policy_executable_update_transition",
+        "ssh::server_maintenance::tests::unix_adapter_tests::previous_policy_executable_update_transition",
         "--",
         "--ignored",
         "--exact",
