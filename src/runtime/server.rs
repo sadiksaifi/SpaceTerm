@@ -850,6 +850,24 @@ impl PaneService for DevelopmentPaneHost {
             pane.connected = false;
         }
     }
+    fn revoked(&mut self, client: [u8; 32]) {
+        if let Some(dormant) = &mut self.dormant
+            && dormant.device == Some(client)
+        {
+            dormant.device = None;
+            dormant.attachment_generation = None;
+        }
+        if let Some(pane) = &mut self.pane
+            && pane.device == Some(client)
+        {
+            self.directories.cancel_connection(pane.lease.connection);
+            pane.invalidate_input();
+            pane.device = None;
+            pane.connected = false;
+            pane.attachment_generation = None;
+            pane.lease.control = [0; 32];
+        }
+    }
     fn shutdown(&mut self) -> Result<(), ServerError> {
         self.directories.stop();
         // Persist final confirmed metadata before ending live work. Refuse uncertain shutdown.
@@ -3832,6 +3850,29 @@ mod tests {
             Reply::Screen(_) | Reply::Unchanged
         ));
         assert_eq!(shared_inventory(&mut host).workspaces.len(), 1);
+        host.shutdown().unwrap();
+    }
+
+    #[test]
+    fn revoking_a_device_releases_control_without_ending_its_terminal_session() {
+        let mut host = host();
+        host.admitted([1; 32], "Revoked desktop".into());
+        let original = attach(&mut host, 2, true);
+        host.revoked([1; 32]);
+        assert!(matches!(
+            host.request([1; 32], [2; 32], Request::Poll { lease: original }),
+            Reply::Refused(Refusal::Stale)
+        ));
+        let Reply::Attached { lease: later } = select(&mut host, 9, 9) else {
+            panic!("revocation must leave the Pane unclaimed");
+        };
+        assert_eq!(later.session, original.session);
+        assert_ne!(later.control, original.control);
+        host.revoked([1; 32]);
+        assert!(matches!(
+            host.request([9; 32], [9; 32], Request::Poll { lease: later }),
+            Reply::Screen(_) | Reply::Unchanged
+        ));
         host.shutdown().unwrap();
     }
 

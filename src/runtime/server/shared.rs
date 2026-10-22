@@ -745,6 +745,22 @@ impl PaneService for SharedWorkspaceHost {
             host.disconnected(connection);
         }
     }
+    fn revoked(&mut self, client: Id) {
+        self.prototype.revoked(client);
+        for host in self.panes.values_mut() {
+            host.revoked(client);
+        }
+        for workspace in &mut self.state.inventory.workspaces {
+            for tab in &mut workspace.tabs {
+                for pane in &mut tab.panes {
+                    if pane.creator == Some(client) {
+                        pane.creator = None;
+                    }
+                }
+            }
+        }
+        self.attachment_generations.retain(|(owner, _), _| *owner != client);
+    }
     fn shutdown(&mut self) -> Result<(), ServerError> {
         self.stop_worktree_reads();
         self.finish_worktrees(true)
@@ -962,6 +978,20 @@ mod tests {
             named("Renamed Laptop"),
             "the client that created a Pane controls it before its shell starts"
         );
+        host.revoked([2; 32]);
+        assert!(matches!(
+            host.request([1; 32], [1; 32], select(created, false)),
+            Reply::Restored { .. }
+        ));
+        assert!(matches!(
+            host.request([1; 32], [1; 32], select(created, true)),
+            Reply::Attached { .. }
+        ));
+        let Reply::Attached { lease } = host.request([1; 32], [1; 32], select(pane, true)) else {
+            panic!("unclaimed Pane remains available");
+        };
+        host.revoked([2; 32]);
+        assert!(matches!(host.request([1; 32], [1; 32], Request::Poll { lease }), Reply::Screen(_) | Reply::Unchanged));
         host.shutdown().unwrap();
     }
 
