@@ -72,7 +72,6 @@ struct FakeChild {
 struct FakeState {
     readiness: VecDeque<ProcessExit>,
     early_exits: VecDeque<Option<ProcessExit>>,
-    records: Vec<Vec<OsString>>,
     delays: Vec<Duration>,
     socket_path: Option<PathBuf>,
     reaps: usize,
@@ -88,7 +87,6 @@ impl Default for FakeState {
         Self {
             readiness: VecDeque::new(),
             early_exits: VecDeque::new(),
-            records: Vec::new(),
             delays: Vec::new(),
             socket_path: None,
             reaps: 0,
@@ -126,10 +124,6 @@ impl FakeBackend {
         }
     }
 
-    fn records(&self) -> Vec<Vec<OsString>> {
-        self.state.lock().unwrap().records.clone()
-    }
-
     fn socket_path(&self) -> PathBuf {
         self.state.lock().unwrap().socket_path.clone().unwrap()
     }
@@ -152,7 +146,6 @@ impl SshProcessBackend for FakeBackend {
         let listener =
             UnixListener::bind(&socket_path).map_err(|_| SshProcessMechanismError::LaunchFailed)?;
         let mut state = self.state.lock().unwrap();
-        state.records.push(arguments);
         state.socket_path = Some(socket_path);
         Ok(FakeChild {
             listener: Some(listener),
@@ -171,8 +164,7 @@ impl SshProcessBackend for FakeBackend {
         let arguments = spec.arguments().to_vec();
         let is_readiness = contains_pair(&arguments, "-O", "check");
         let should_hang = {
-            let mut state = self.state.lock().unwrap();
-            state.records.push(arguments);
+            let state = self.state.lock().unwrap();
             is_readiness && state.hang_readiness
         };
         if should_hang {

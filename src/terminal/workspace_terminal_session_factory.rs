@@ -79,9 +79,4 @@ impl WorkspaceTerminalSessionFactory {
     pub(crate) fn is_server_backed(&self) -> bool {
         self.session_factory.is_server_backed()
     }
-
-    #[cfg(test)]
-    pub(crate) fn local_working_directory(&self) -> Option<&std::path::Path> {
-        Some(self.launch_plan.working_directory().path())
-    }
 }

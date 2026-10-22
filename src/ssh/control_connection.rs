@@ -663,7 +663,6 @@ mod tests {
         cleanup_notification: Option<mpsc::Sender<()>>,
         readiness: VecDeque<ProcessExit>,
         early_exits: VecDeque<Option<ProcessExit>>,
-        records: Vec<Vec<OsString>>,
         delays: Vec<Duration>,
         socket_path: Option<PathBuf>,
         reaps: usize,
@@ -682,7 +681,6 @@ mod tests {
                 cleanup_notification: None,
                 readiness: VecDeque::new(),
                 early_exits: VecDeque::new(),
-                records: Vec::new(),
                 delays: Vec::new(),
                 socket_path: None,
                 reaps: 0,
@@ -714,10 +712,6 @@ mod tests {
                     ..FakeState::default()
                 }),
             }
-        }
-
-        fn records(&self) -> Vec<Vec<OsString>> {
-            self.state.lock().unwrap().records.clone()
         }
 
         fn socket_path(&self) -> PathBuf {
@@ -910,7 +904,6 @@ mod tests {
             let socket_path = argument_after(&arguments, "-S").unwrap();
             self.filesystem.create_socket(&socket_path);
             let mut state = self.state.lock().unwrap();
-            state.records.push(arguments);
             state.socket_path = Some(socket_path);
             Ok(FakeChild {
                 listener: Some(()),
@@ -929,8 +922,7 @@ mod tests {
             let arguments = spec.arguments().to_vec();
             let is_readiness = contains_pair(&arguments, "-O", "check");
             let should_hang = {
-                let mut state = self.state.lock().unwrap();
-                state.records.push(arguments);
+                let state = self.state.lock().unwrap();
                 is_readiness && state.hang_readiness
             };
             if should_hang {

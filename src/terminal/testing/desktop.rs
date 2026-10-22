@@ -291,16 +291,6 @@ impl TestTerminalSessionRecords {
         self.selection_copies.borrow_mut().push_back(copy);
     }
 
-    pub(crate) fn accessibility_selection_requests(
-        &self,
-        session_id: usize,
-    ) -> Vec<crate::terminal::accessibility::AccessibilitySelectionRequest> {
-        self.selection_receivers
-            .borrow()
-            .get(&session_id)
-            .map_or_else(Vec::new, |receiver| receiver.drain())
-    }
-
     pub(crate) fn starts(&self) -> Vec<RecordedStart> {
         self.starts.borrow().clone()
     }
@@ -359,7 +349,6 @@ pub(crate) struct TestTerminalSessionFactory {
     next_session_id: Cell<usize>,
     fallback_title: String,
     start_failure: Option<String>,
-    start_failure_session_id: Option<usize>,
     selection_response: Result<Option<SelectionCopy>, SelectionCopyError>,
     paste_response: Result<PasteRequestOutcome, String>,
     pending_paste_response: Option<async_channel::Receiver<Result<PasteRequestOutcome, String>>>,
@@ -378,7 +367,6 @@ impl TestTerminalSessionFactory {
             next_session_id: Cell::new(1),
             fallback_title: "Terminal".to_owned(),
             start_failure: None,
-            start_failure_session_id: None,
             selection_response: Ok(None),
             paste_response: Ok(PasteRequestOutcome::Written),
             pending_paste_response: None,
@@ -441,17 +429,6 @@ impl TestTerminalSessionFactory {
 
     pub(crate) fn with_start_failure(mut self, message: impl Into<String>) -> Self {
         self.start_failure = Some(message.into());
-        self.start_failure_session_id = None;
-        self
-    }
-
-    pub(crate) fn with_start_failure_at(
-        mut self,
-        session_id: usize,
-        message: impl Into<String>,
-    ) -> Self {
-        self.start_failure = Some(message.into());
-        self.start_failure_session_id = Some(session_id);
         self
     }
 
@@ -512,11 +489,7 @@ impl TerminalSessionFactory for TestTerminalSessionFactory {
             initial_appearance,
         });
 
-        if let Some(message) = &self.start_failure
-            && self
-                .start_failure_session_id
-                .is_none_or(|failure_session_id| failure_session_id == session_id)
-        {
+        if let Some(message) = &self.start_failure {
             return Err(TerminalSessionError::EmulatorStartup(message.clone()));
         }
 

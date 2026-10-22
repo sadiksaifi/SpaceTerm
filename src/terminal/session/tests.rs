@@ -5,7 +5,6 @@ use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use super::*;
-use crate::domain::LocalDirectoryIdentity;
 use crate::platform::native_pty::{NativePtyAdapter, NativePtyAdapterParts, NativePtyTermination};
 
 #[cfg(feature = "desktop")]
