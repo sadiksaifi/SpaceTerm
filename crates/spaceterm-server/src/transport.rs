@@ -7,6 +7,14 @@ pub(crate) trait Transport: Read + Write + Send {
     fn read_fd(&self) -> RawFd;
     fn write_fd(&self) -> RawFd;
 }
+impl<T: Transport + ?Sized> Transport for Box<T> {
+    fn read_fd(&self) -> RawFd {
+        (**self).read_fd()
+    }
+    fn write_fd(&self) -> RawFd {
+        (**self).write_fd()
+    }
+}
 
 impl Transport for UnixStream {
     fn read_fd(&self) -> RawFd {

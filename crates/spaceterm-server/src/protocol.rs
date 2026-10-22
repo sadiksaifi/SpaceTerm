@@ -173,9 +173,35 @@ pub(crate) fn admit_server(
     build: &str,
 ) -> Result<(AuthenticatedStatus, [u8; 32], ClientName), ServerError> {
     crate::host::check_peer(stream)?;
+    admit_server_transport(stream, server, build, None)
+}
+
+/// Only the WSS host calls this after pinned-server and enrolled-device proof validation.
+pub(crate) fn admit_direct_server(
+    stream: &mut dyn Transport,
+    paired: &crate::direct::PairedDevice,
+) -> Result<(AuthenticatedStatus, [u8; 32], ClientName), ServerError> {
+    admit_server_transport(
+        stream,
+        &paired.pin.server,
+        &paired.pin.build,
+        Some(paired.client),
+    )
+}
+
+fn admit_server_transport(
+    stream: &mut dyn Transport,
+    server: &[u8; 32],
+    build: &str,
+    expected_client: Option<[u8; 32]>,
+) -> Result<(AuthenticatedStatus, [u8; 32], ClientName), ServerError> {
     let mut wire = Wire::new(stream)?;
     let hello: Hello = wire.read()?;
-    if hello.build != build || hello.server != *server || hello.client == [0; 32] {
+    if hello.build != build
+        || hello.server != *server
+        || hello.client == [0; 32]
+        || expected_client.is_some_and(|client| hello.client != client)
+    {
         return Err(ServerError::AuthenticationRefused);
     }
     if hello.versions.is_empty() || hello.versions.len() > 16 {

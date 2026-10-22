@@ -15,6 +15,14 @@ use std::{
 };
 
 static STOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+type PaneHost = std::sync::Arc<std::sync::Mutex<Option<Box<dyn crate::pane::PaneService>>>>;
+#[derive(Clone)]
+pub(crate) struct Environment {
+    pub(crate) panes: PaneHost,
+    pub(crate) direct: Option<crate::direct::host::Shared>,
+    pub(crate) paths: Paths,
+    pub(crate) stopping: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
 extern "C" fn stop_signal(_: libc::c_int) {
     STOP.store(true, std::sync::atomic::Ordering::Release);
 }
@@ -249,15 +257,56 @@ pub(crate) fn serve_runtime(
         .set_nonblocking(true)
         .map_err(|_| ServerError::Protocol)?;
     let stopping = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    // A failed direct-network store never prevents owning-account admission.
+    let direct = crate::direct::host::State::open(paths).ok();
+    let environment = Environment {
+        panes: Arc::clone(&panes),
+        direct: direct.clone(),
+        paths: paths.clone(),
+        stopping: Arc::clone(&stopping),
+    };
+    let mut network_connections: Vec<(std::thread::JoinHandle<()>, std::net::TcpStream)> =
+        Vec::new();
+    let network_workers = Arc::new(AtomicUsize::new(0));
     // The fixed admission limit bounds worker allocation; each frame has an absolute deadline.
     for connection in listener.incoming() {
         if stopping.load(Ordering::Acquire) || STOP.load(Ordering::Acquire) {
             break;
         }
+        if network_workers.load(Ordering::Acquire) < 32
+            && let Some(state) = &direct
+        {
+            let accepted = state.lock().unwrap_or_else(|e| e.into_inner()).accept();
+            if let Some((tcp, generation)) = accepted {
+                let cancel = tcp.try_clone().map_err(|_| ServerError::Protocol)?;
+                let state = Arc::clone(state);
+                let environment = environment.clone();
+                let workers = Arc::clone(&network_workers);
+                workers.fetch_add(1, Ordering::AcqRel);
+                network_connections.retain(|(worker, _)| !worker.is_finished());
+                network_connections.push((
+                    std::thread::spawn(move || {
+                        let _ = crate::direct::host::serve(tcp, generation, state, environment);
+                        workers.fetch_sub(1, Ordering::AcqRel);
+                    }),
+                    cancel,
+                ));
+            }
+        }
         let mut stream = match connection {
             Ok(stream) => stream,
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                 if let Some(panes) = panes.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+                    if let Some(state) = &direct
+                        && let Ok(retired) = state
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .pending_releases()
+                    {
+                        for client in retired {
+                            panes.revoked(client);
+                        }
+                    }
                     panes.tick();
                 }
                 std::thread::sleep(std::time::Duration::from_millis(10));
@@ -272,10 +321,9 @@ pub(crate) fn serve_runtime(
             continue;
         }
         let Ok(record) = data.read() else { continue };
-        let panes = Arc::clone(&panes);
         let workers = Arc::clone(&workers);
-        let stopping = Arc::clone(&stopping);
         let service_paths = paths.clone();
+        let environment = environment.clone();
         workers.fetch_add(1, Ordering::AcqRel);
         connections.retain(|(worker, _)| !worker.is_finished());
         let cancellation = stream.try_clone().map_err(|_| ServerError::Protocol)?;
@@ -283,67 +331,7 @@ pub(crate) fn serve_runtime(
             let _ = (|| -> Result<(), ServerError> {
                 let (_, device, name) =
                     protocol::admit_server(&mut stream, &record.server, &service_paths.identity)?;
-                if let Some(panes) = panes.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
-                    panes.admitted(device, name);
-                }
-                let connection = protocol::random()?;
-                let result = (|| {
-                    loop {
-                        if stopping.load(Ordering::Acquire) || STOP.load(Ordering::Acquire) {
-                            break;
-                        }
-                        let mut wire = protocol::Wire::terminal(&mut stream)?;
-                        let request = wire.read()?;
-                        let shutdown = matches!(request, crate::pane::Request::Shutdown);
-                        if shutdown {
-                            crate::service::retain_stop(&service_paths)?;
-                        }
-                        let (reply, stopped) = {
-                            let mut panes = panes.lock().unwrap_or_else(|e| e.into_inner());
-                            // Admission is fenced under the same lock as final cleanup. A worker
-                            // may have been waiting for its frame or this lock when shutdown began.
-                            if stopping.load(Ordering::Acquire) || STOP.load(Ordering::Acquire) {
-                                return Err(ServerError::NotRunning);
-                            }
-                            let reply = match panes.as_mut() {
-                                Some(panes) => panes.request(device, connection, request),
-                                None if matches!(request, crate::pane::Request::Capabilities) => {
-                                    crate::pane::Reply::Capabilities {
-                                        development_pane: false,
-                                        pane_takeover: false,
-                                        interactive_input: false,
-                                        native_effects: false,
-                                        reading: false,
-                                        graphics: false,
-                                        accessibility: false,
-                                        directory_recovery: true,
-                                        worktree_writes: false,
-                                        end_all_sessions: false,
-                                        workspace_policy: false,
-                                        presentation_changes: false,
-                                    }
-                                }
-                                None => {
-                                    crate::pane::Reply::Refused(crate::pane::Refusal::Unsupported)
-                                }
-                            };
-                            let stopped = shutdown && matches!(reply, crate::pane::Reply::Closed);
-                            if stopped {
-                                stopping.store(true, Ordering::Release);
-                            }
-                            (reply, stopped)
-                        };
-                        wire.write(&reply)?;
-                        if stopped {
-                            break;
-                        }
-                    }
-                    Ok::<_, ServerError>(())
-                })();
-                if let Some(panes) = panes.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
-                    panes.disconnected(connection);
-                }
-                result
+                serve_admitted(&mut stream, device, name, None, &environment)
             })();
             workers.fetch_sub(1, Ordering::AcqRel);
         });
@@ -351,6 +339,15 @@ pub(crate) fn serve_runtime(
     }
     stopping.store(true, Ordering::Release);
     drop(listener);
+    if let Some(state) = &direct {
+        state.lock().unwrap_or_else(|e| e.into_inner()).stop();
+    }
+    for (_, tcp) in &network_connections {
+        let _ = tcp.shutdown(std::net::Shutdown::Both);
+    }
+    for (worker, _) in network_connections {
+        let _ = worker.join();
+    }
     finish_connections(connections);
     if let Some(panes) = panes.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
         panes.shutdown()?;
@@ -358,6 +355,127 @@ pub(crate) fn serve_runtime(
     runtime.verify_path(&paths.runtime)?;
     runtime.remove_socket(c"s", socket_identity)?;
     Ok(())
+}
+
+pub(crate) fn serve_admitted(
+    stream: &mut dyn crate::transport::Transport,
+    client: [u8; 32],
+    name: crate::pane::control::ClientName,
+    paired: Option<&crate::direct::PairedDevice>,
+    environment: &Environment,
+) -> Result<(), ServerError> {
+    let connection = protocol::random()?;
+    {
+        let mut panes = environment.panes.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(paired) = paired {
+            environment
+                .direct
+                .as_ref()
+                .ok_or(ServerError::AuthenticationRefused)?
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .authorized(paired)?;
+        }
+        if let Some(panes) = panes.as_mut() {
+            panes.admitted(client, name);
+        }
+    }
+    let result = (|| {
+        loop {
+            if environment
+                .stopping
+                .load(std::sync::atomic::Ordering::Acquire)
+                || STOP.load(std::sync::atomic::Ordering::Acquire)
+            {
+                break;
+            }
+            let mut wire = protocol::Wire::terminal(stream)?;
+            let request: crate::pane::Request = wire.read()?;
+            let shutdown = matches!(request, crate::pane::Request::Shutdown);
+            let (reply, stopped) = {
+                let mut panes = environment.panes.lock().unwrap_or_else(|e| e.into_inner());
+                if environment
+                    .stopping
+                    .load(std::sync::atomic::Ordering::Acquire)
+                    || STOP.load(std::sync::atomic::Ordering::Acquire)
+                {
+                    return Err(ServerError::NotRunning);
+                }
+                if let Some(paired) = paired {
+                    environment
+                        .direct
+                        .as_ref()
+                        .ok_or(ServerError::AuthenticationRefused)?
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .authorized(paired)?;
+                }
+                let reply = if shutdown && paired.is_some() {
+                    // A device credential grants protocol authority, never host service authority.
+                    crate::pane::Reply::Refused(crate::pane::Refusal::Unsupported)
+                } else if let crate::pane::Request::Direct(request) = request {
+                    let reply = match &environment.direct {
+                        Some(state) => state
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .manage(paired.map(|p| p.pairing), request),
+                        None => Err(crate::direct::DirectError::StorageUnavailable),
+                    };
+                    crate::pane::Reply::Direct(reply.map(|(reply, retired)| {
+                        if let (Some(client), Some(panes)) = (retired, panes.as_mut()) {
+                            panes.revoked(client);
+                        }
+                        reply
+                    }))
+                } else {
+                    if shutdown {
+                        crate::service::retain_stop(&environment.paths)?;
+                    }
+                    match panes.as_mut() {
+                        Some(panes) => panes.request(client, connection, request),
+                        None if matches!(request, crate::pane::Request::Capabilities) => {
+                            crate::pane::Reply::Capabilities {
+                                development_pane: false,
+                                pane_takeover: false,
+                                interactive_input: false,
+                                native_effects: false,
+                                reading: false,
+                                graphics: false,
+                                accessibility: false,
+                                directory_recovery: true,
+                                worktree_writes: false,
+                                end_all_sessions: false,
+                                workspace_policy: false,
+                                presentation_changes: false,
+                            }
+                        }
+                        None => crate::pane::Reply::Refused(crate::pane::Refusal::Unsupported),
+                    }
+                };
+                let stopped = shutdown && matches!(reply, crate::pane::Reply::Closed);
+                if stopped {
+                    environment
+                        .stopping
+                        .store(true, std::sync::atomic::Ordering::Release);
+                }
+                (reply, stopped)
+            };
+            wire.write(&reply)?;
+            if stopped {
+                break;
+            }
+        }
+        Ok(())
+    })();
+    if let Some(panes) = environment
+        .panes
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_mut()
+    {
+        panes.disconnected(connection);
+    }
+    result
 }
 
 fn finish_connections(connections: Vec<(std::thread::JoinHandle<()>, UnixStream)>) {
