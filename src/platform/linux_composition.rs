@@ -532,10 +532,9 @@ mod tests {
             crate::terminal::testing::test_local_directory(PathBuf::from("/tmp/linux-keymap-test")),
         );
         use crate::terminal::TerminalKeyInputAdapterFactory;
-        let prepared = factory.prepare_child_launch().unwrap();
         let (pane, cx) = cx.add_window_view(|window, cx| {
-            crate::ui::TerminalPane::new_with_prepared_launch(
-                factory, prepared,
+            crate::ui::TerminalPane::with_adapters(
+                factory,
                 super::super::linux_keyboard::LinuxTerminalKeyInputAdapterFactory::new().create(),
                 &crate::platform::terminal_accessibility::testing::RecordingAccessibilityFactory::default(),
                 crate::terminal::native_services::testing::adapters(),
