@@ -80,6 +80,25 @@ fn installed_resource_root(executable: &Path) -> Option<PathBuf> {
     Some(prefix.join("share").join("spaceterm"))
 }
 
+/// Presentation identity captured once by the owning server's native composition.
+pub(crate) fn terminal_machine(home: &Path) -> crate::terminal::metadata::LocalMachine {
+    let user = ["USER", "LOGNAME"]
+        .into_iter()
+        .find_map(|key| std::env::var(key).ok());
+    let mut buffer = [0_u8; 256];
+    // SAFETY: buffer is initialized, writable storage of the supplied length.
+    let host = if unsafe { libc::gethostname(buffer.as_mut_ptr().cast(), buffer.len()) } == 0 {
+        let length = buffer
+            .iter()
+            .position(|byte| *byte == 0)
+            .unwrap_or(buffer.len());
+        std::str::from_utf8(&buffer[..length]).ok()
+    } else {
+        None
+    };
+    crate::terminal::metadata::LocalMachine::new(user.as_deref(), host, home.to_str())
+}
+
 pub(crate) fn user_shell() -> PathBuf {
     std::env::var_os("SHELL")
         .filter(|value| !value.to_string_lossy().trim().is_empty())

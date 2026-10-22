@@ -108,7 +108,7 @@ pub struct MetadataWakeup {
 }
 
 impl MetadataWakeup {
-    fn new(queued: Arc<AtomicBool>) -> Self {
+    pub(crate) fn new(queued: Arc<AtomicBool>) -> Self {
         Self { queued }
     }
 }
@@ -447,17 +447,17 @@ impl RecordingAccessibilitySelectionReceiver {
 /// Presentation events may evict any earlier queue entry, and a hidden Pane receives no Screens at
 /// all, yet its Pane and Workspace still need current presentation and close-confirmation facts.
 #[derive(Clone, Default)]
-struct TerminalSessionMetadataState(Arc<Mutex<Option<Arc<TerminalMetadataSnapshot>>>>);
+pub(crate) struct TerminalSessionMetadataState(Arc<Mutex<Option<Arc<TerminalMetadataSnapshot>>>>);
 
 impl TerminalSessionMetadataState {
-    fn snapshot(&self) -> Option<Arc<TerminalMetadataSnapshot>> {
+    pub(crate) fn snapshot(&self) -> Option<Arc<TerminalMetadataSnapshot>> {
         self.0
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .clone()
     }
 
-    fn publish(&self, metadata: Arc<TerminalMetadataSnapshot>) {
+    pub(crate) fn publish(&self, metadata: Arc<TerminalMetadataSnapshot>) {
         *self.0.lock().unwrap_or_else(|error| error.into_inner()) = Some(metadata);
     }
 }

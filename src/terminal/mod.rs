@@ -60,6 +60,8 @@ pub(crate) mod metadata;
     )
 )]
 pub(crate) mod native_services;
+#[cfg_attr(not(feature = "desktop"), allow(dead_code))]
+pub(crate) mod server_metadata;
 pub(crate) mod title;
 pub(crate) use native_services::osc52;
 pub(crate) use native_services::paste;
