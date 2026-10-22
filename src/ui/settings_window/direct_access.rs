@@ -124,6 +124,11 @@ impl DirectAccess {
         self.reading.as_ref()?.as_ref().ok()
     }
 
+    /// Whether the server listed its paired devices, which the row then presents as a list.
+    pub(super) fn lists_devices(&self) -> bool {
+        self.devices.is_some()
+    }
+
     fn listening(&self) -> bool {
         self.state()
             .is_some_and(|state| matches!(state.listener, Listener::Listening(_)))

@@ -1391,7 +1391,7 @@ impl SettingsWindow {
             descriptor.label(self.permission_access.naming()),
             control,
         )
-        .layout(row_layout(row))
+        .layout(self.row_layout(row))
         .reset(self.row_reset(row, appearance, cx))
         .matched_indices(matched_indices)
         .highlighted(highlighted);
@@ -2350,14 +2350,25 @@ fn row_layout(row: SettingsRowId) -> FormRowLayout {
         | SettingsRowId::RemovedServerOperations
         | SettingsRowId::PendingUnpairs
         | SettingsRowId::SettingsFile => FormRowLayout::Full,
-        SettingsRowId::WorktreeLocation
-        | SettingsRowId::ServerWorktreeLocation
-        | SettingsRowId::DirectNetworkPairing => FormRowLayout::Above,
+        SettingsRowId::WorktreeLocation | SettingsRowId::ServerWorktreeLocation => {
+            FormRowLayout::Above
+        }
         _ => FormRowLayout::Beside,
     }
 }
 
 impl SettingsWindow {
+    /// How `row` arranges its label and content now. Paired devices drop below their label as a
+    /// list once the server lists them, and otherwise read as a value beside it, as the other
+    /// server facts do.
+    fn row_layout(&self, row: SettingsRowId) -> FormRowLayout {
+        if row == SettingsRowId::DirectNetworkPairing && self.direct_access.lists_devices() {
+            FormRowLayout::Above
+        } else {
+            row_layout(row)
+        }
+    }
+
     /// One line of guidance for the rows that warrant it.
     fn row_description(&self, row: SettingsRowId, cx: &App) -> Option<&'static str> {
         match row {
