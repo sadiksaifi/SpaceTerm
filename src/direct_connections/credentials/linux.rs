@@ -74,15 +74,15 @@ impl SecretService {
         let session = open_session(&service).await?;
         let result = async {
             let item = proxy(&connection, path.as_str(), ITEM_INTERFACE).await?;
-            let (returned_session, parameters, value, content_type): Secret = item
+            let (returned_session, parameters, value, _content_type): Secret = item
                 .call("GetSecret", &(&session,))
                 .await
                 .map_err(classify)?;
             let value = Zeroizing::new(value);
-            if returned_session != session
-                || !parameters.is_empty()
-                || content_type != "application/octet-stream"
-            {
+            // Providers may describe UTF-8 bytes as text/plain even when CreateItem used
+            // application/octet-stream. The consumer validates the opaque credential bytes;
+            // only the requested session and its plain encoding bind this transport.
+            if returned_session != session || !parameters.is_empty() {
                 return Err(CredentialError::Unavailable);
             }
             Ok(Some(value))
