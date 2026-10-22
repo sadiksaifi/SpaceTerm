@@ -323,6 +323,107 @@ fn a_queued_direct_close_keeps_its_original_control_fence_and_requires_review_af
 }
 
 #[test]
+fn combined_pending_tab_closes_retain_the_workspace_until_the_final_close_is_reviewed() {
+    use spaceterm_server::hierarchy::{CloseTarget, ConfirmedControl};
+    let server = DelayedServer::new();
+    let (source, mut model) = model(&server);
+    let workspace = server.inventory().workspaces[0].id;
+    source.submit(Mutation::CreateTab {
+        workspace,
+        source: None,
+    });
+    server.finish(true, true);
+    model.poll();
+    let tabs = server.inventory().workspaces[0].tabs.clone();
+    {
+        let mut delivery = server.0.borrow_mut();
+        delivery.server.inventory.close.as_mut().unwrap().controls = Some(
+            tabs.iter()
+                .map(|tab| ConfirmedControl {
+                    pane: tab.root_pane,
+                    session: None,
+                    owner: DEVICE,
+                    epoch: 0,
+                })
+                .collect(),
+        );
+        delivery.snapshot.inventory = Some(live_inventory(&delivery.server));
+    }
+    model.poll();
+    for (index, tab) in tabs.iter().enumerate() {
+        let approval = model
+            .close_approval(CloseTarget::Tab {
+                workspace,
+                tab: tab.id,
+            })
+            .unwrap()
+            .direct_close(|_, _| true)
+            .unwrap();
+        assert_eq!(
+            model.close(
+                approval,
+                crate::close_confirmation::CloseTarget::Tab {
+                    workspace_id: first_workspace_id(),
+                    tab_id: TabId::new(index as u64 + 1),
+                }
+            ),
+            SharedSubmission::Submitted
+        );
+    }
+    assert!(model.poll().inventory.unwrap().workspaces.is_empty());
+    assert_eq!(server.inventory().workspaces[0].tabs.len(), 2);
+    assert!(
+        model.optimistically_closing(first_workspace_id()),
+        "the Workspace must keep its rollback owner while the two closes are pending"
+    );
+    assert_eq!(
+        server.dispatched().len(),
+        2,
+        "the second close still waits for the first"
+    );
+    assert_eq!(
+        server.finish(true, true).outcome,
+        Outcome::Accepted { target: tabs[0].id }
+    );
+    model.poll();
+    assert!(model.optimistically_closing(first_workspace_id()));
+    assert!(
+        source
+            .presentation_inventory()
+            .unwrap()
+            .workspaces
+            .is_empty()
+    );
+    assert!(
+        matches!(server.dispatched().last(), Some(Mutation::Close { confirmation, .. })
+        if !confirmation.removes_workspace)
+    );
+    assert_eq!(
+        server.finish(true, true).outcome,
+        Outcome::StaleConfirmation
+    );
+    let restored = model.poll().inventory.unwrap();
+    assert_eq!(restored.workspaces[0].tabs[0].id, tabs[1].id);
+    assert!(!model.optimistically_closing(first_workspace_id()));
+    assert_eq!(
+        server.dispatched().len(),
+        3,
+        "a final Tab is never closed with renewed consent"
+    );
+    let review = model
+        .close_approval(CloseTarget::Tab {
+            workspace,
+            tab: tabs[1].id,
+        })
+        .unwrap();
+    assert!(
+        review.direct_close(|_, _| true).is_none(),
+        "the surviving Tab now requires Workspace-level review"
+    );
+    assert!(review.title().starts_with("Kill Workspace"));
+}
+
+#[test]
 fn optimistic_rapid_identical_actions_keep_distinct_server_identities_and_results() {
     let server = DelayedServer::new();
     let (source, mut model) = model(&server);

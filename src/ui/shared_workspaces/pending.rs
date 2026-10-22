@@ -116,10 +116,22 @@ impl PendingEdits {
             .any(|ids| ids.workspace == Some(id) || ids.tab == Some(id) || ids.pane == id)
     }
 
-    pub fn closing_workspace(&self, workspace: Id) -> bool {
-        self.edits
-            .iter()
-            .any(|edit| closes_workspace(&edit.mutation, workspace))
+    pub fn closing_workspace(&self, workspace: Id, inventory: Option<&Inventory>) -> bool {
+        let Some(inventory) =
+            inventory.filter(|inventory| inventory.workspaces.iter().any(|w| w.id == workspace))
+        else {
+            return self
+                .edits
+                .iter()
+                .any(|edit| closes_workspace(&edit.mutation, workspace));
+        };
+        // Separate approvals can hide every Tab without any one approval authorizing the
+        // Workspace's removal. Parking follows that combined presentation, never broader consent.
+        let mut projected = inventory.clone();
+        for edit in &self.edits {
+            project(&mut projected, &edit.mutation, edit.creation);
+        }
+        !projected.workspaces.iter().any(|w| w.id == workspace)
     }
 
     pub fn closing(&self, pane: Id) -> bool {

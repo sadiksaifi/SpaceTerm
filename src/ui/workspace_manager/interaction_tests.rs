@@ -1,6 +1,128 @@
 use super::*;
 
 #[gpui::test]
+fn rapid_idle_tab_closes_park_the_final_workspace_and_restore_the_refused_tab(
+    cx: &mut TestAppContext,
+) {
+    use spaceterm_server::hierarchy::{ConfirmedControl, Mutation, Outcome};
+    let (harness, cx) = shared_close_harness(cx);
+    let mut inventory = shared_close_inventory(
+        2,
+        &[
+            (SHARED_CLOSE_ROOT_TAB, &[(SHARED_CLOSE_ROOT_PANE, None)]),
+            (SHARED_CLOSE_SECOND_TAB, &[(SHARED_CLOSE_SECOND_PANE, None)]),
+        ],
+    );
+    inventory.close.as_mut().unwrap().controls = Some(
+        [SHARED_CLOSE_ROOT_PANE, SHARED_CLOSE_SECOND_PANE]
+            .into_iter()
+            .map(|pane| ConfirmedControl {
+                pane,
+                session: None,
+                owner: [1; 32],
+                epoch: 1,
+            })
+            .collect(),
+    );
+    harness.publish(inventory.clone(), cx);
+    harness.panes.pane(SHARED_CLOSE_SECOND_PANE).reconnect();
+    settle_shared_panes(cx);
+    cx.update(|window, cx| {
+        harness.manager.update(cx, |manager, cx| {
+            manager.close_workspace_activating(WorkspaceId::new(1), false, window, cx);
+        })
+    });
+    let manager = harness.manager.read_with(cx, |manager, _| {
+        manager.workspaces.active().payload().clone()
+    });
+    cx.dispatch_action(crate::ui::CloseTab);
+    redraw(cx);
+    let surviving_view = manager.read_with(cx, |manager, _| manager.active_tab_view().entity_id());
+    let surviving_tab = manager.read_with(cx, |manager, cx| manager.active_terminal_identity(cx).0);
+    cx.dispatch_action(crate::ui::CloseTab);
+    redraw(cx);
+    assert_eq!(
+        cx.windows().len(),
+        1,
+        "combined optimistic removal cannot dismiss the rollback host"
+    );
+    harness.manager.read_with(cx, |workspace, _| {
+        assert_eq!(
+            workspace.workspaces.parked_ids().collect::<Vec<_>>(),
+            [SHARED_WORKSPACE_ROW]
+        );
+    });
+    assert_eq!(harness.shared_rows(cx), 0);
+    assert_eq!(
+        harness.closes().len(),
+        1,
+        "the second direct close waits for the first reply"
+    );
+    assert!(
+        cx.debug_bounds("modal-action-shared-close-confirm")
+            .is_none()
+    );
+
+    harness.edits.answer(Outcome::Accepted {
+        target: SHARED_CLOSE_ROOT_TAB,
+    });
+    inventory.workspaces[0].tabs.remove(0);
+    inventory.workspaces[0].root_tab = SHARED_CLOSE_SECOND_TAB;
+    inventory.revision += 1;
+    inventory
+        .close
+        .as_mut()
+        .unwrap()
+        .sessions
+        .retain(|pane| pane.id == SHARED_CLOSE_SECOND_PANE);
+    inventory
+        .close
+        .as_mut()
+        .unwrap()
+        .controls
+        .as_mut()
+        .unwrap()
+        .retain(|control| control.pane == SHARED_CLOSE_SECOND_PANE);
+    harness.publish(inventory, cx);
+    assert_eq!(cx.windows().len(), 1);
+    assert_eq!(harness.shared_rows(cx), 0);
+    assert_eq!(harness.closes().len(), 2);
+    assert!(harness.closes().iter().all(|mutation| matches!(mutation, Mutation::Close { confirmation, .. } if !confirmation.removes_workspace)));
+
+    harness.edits.answer(Outcome::StaleConfirmation);
+    harness.sync(cx);
+    assert_eq!(harness.shared_rows(cx), 1);
+    assert_eq!(cx.windows().len(), 1);
+    harness.manager.read_with(cx, |workspace, _| {
+        assert!(workspace.workspaces.parked_ids().next().is_none());
+        assert_eq!(
+            workspace.workspaces.active().payload().entity_id(),
+            manager.entity_id()
+        );
+    });
+    assert_eq!(
+        manager.read_with(cx, |manager, _| manager.tab_ids()),
+        [surviving_tab]
+    );
+    assert_eq!(
+        manager.read_with(cx, |manager, _| manager.active_tab_view().entity_id()),
+        surviving_view
+    );
+    assert_eq!(harness.closes().len(), 2);
+    click("modal-action-shared-close-review", cx);
+    assert!(
+        spaceterm_ui::a11y_testing::A11yTree::read(cx)
+            .find("Kill Workspace")
+            .is_some()
+    );
+    assert_eq!(
+        harness.closes().len(),
+        2,
+        "Workspace removal waits for fresh explicit consent"
+    );
+}
+
+#[gpui::test]
 fn disconnect_drops_a_parked_remote_presentation_without_closing_other_servers(
     cx: &mut TestAppContext,
 ) {

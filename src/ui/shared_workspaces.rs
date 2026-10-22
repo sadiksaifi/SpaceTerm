@@ -1376,7 +1376,12 @@ mod development {
                 return false;
             };
             let server = self.edits.canonical(facts.server);
-            if self.edits.pending.borrow().closing_workspace(server) {
+            if self
+                .edits
+                .pending
+                .borrow()
+                .closing_workspace(server, self.latest.as_ref())
+            {
                 return true;
             }
             // A validated committed close can precede acknowledgement. Its transport stays
