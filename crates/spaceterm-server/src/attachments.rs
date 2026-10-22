@@ -390,6 +390,8 @@ mod tests {
                         source: None,
                         axis: Axis::Right,
                         starting_directory: "/tmp".into(),
+                        current_directory: None,
+                        presentation: None,
                         confirmed_directory: None,
                         creator: None,
                     }],

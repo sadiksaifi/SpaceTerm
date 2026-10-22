@@ -155,6 +155,179 @@ fn end_all_sessions_retains_directory_confirmed_between_admission_and_shutdown()
     host.shutdown().unwrap();
 }
 
+#[test]
+fn retry_after_end_all_uses_restoration_directory_instead_of_live_osc7_directory() {
+    for confirmed in [false, true] {
+        ended_directory_recovery(confirmed, false);
+    }
+}
+
+#[test]
+fn choose_after_end_all_uses_restoration_directory_instead_of_live_osc7_directory() {
+    for confirmed in [false, true] {
+        ended_directory_recovery(confirmed, true);
+    }
+}
+
+fn ended_directory_recovery(confirmed: bool, choose: bool) {
+    use crate::runtime::server::repositories;
+    use crate::runtime::server::repository_tests::{GitFixture, git_facts};
+
+    let git = GitFixture::new();
+    let restoration = git.0.join("restoration");
+    let live = git.0.join("live");
+    std::fs::create_dir(&restoration).unwrap();
+    std::fs::create_dir(&live).unwrap();
+    let mut prototype = host();
+    prototype.directory = if confirmed {
+        git.0.clone()
+    } else {
+        restoration.clone()
+    };
+    let mut host = SharedWorkspaceHost::new(prototype);
+    host.prepare_initial_organization().unwrap();
+    let pane = shared_inventory(&mut host).workspaces[0].tabs[0].root_pane;
+    let old = start(&mut host, 1, pane);
+    if confirmed {
+        command(
+            &mut host,
+            1,
+            old,
+            &format!(
+                "stty -echo; cd '{}'; printf '\\033]7;file://localhost%s\\007\\033]133;A;spaceterm=%s\\007' \"$PWD\" \"$SPACETERM_PROMPT_OWNER\"; printf '\\033[2J\\033[HRESTORATION-CONFIRMED\\n'",
+                restoration.display(),
+            ),
+        );
+        await_text(&mut host, 1, old, "RESTORATION-CONFIRMED");
+    }
+    // Automatic shell integration is disabled. This later directory has no owned marker.
+    command(
+        &mut host,
+        1,
+        old,
+        &format!(
+            "stty -echo; cd '{}'; printf '\\033]7;file://localhost%s\\007' \"$PWD\"; printf '\\033[2J\\033[HLIVE-DIRECTORY\\n'",
+            live.display(),
+        ),
+    );
+    await_text(&mut host, 1, old, "LIVE-DIRECTORY");
+    let before = git_facts(&mut host, &live, |facts| facts.worktrees.is_some());
+    let workspace = &before.workspaces[0];
+    let tab = &workspace.tabs[0];
+    assert_eq!(tab.worktree.as_ref(), Some(&git.0));
+    assert_eq!(repositories::pane_directory(&tab.panes[0]), live);
+    assert_eq!(
+        tab.panes[0].confirmed_directory.as_ref(),
+        confirmed.then_some(&restoration)
+    );
+    end_all(&mut host, 1, 1);
+    std::fs::remove_dir(&restoration).unwrap();
+    assert!(matches!(
+        select(&mut host, 1, pane, true),
+        Reply::Refused(Refusal::DirectoryUnavailable)
+    ));
+    let Reply::Restored {
+        recovery: Some(target),
+        directory_unavailable: true,
+        ..
+    } = select(&mut host, 1, pane, false)
+    else {
+        panic!("unavailable restoration directory offers recovery");
+    };
+    assert_eq!(target.original, restoration);
+    assert!(
+        matches!(
+            host.request(
+                [1; 32],
+                [1; 32],
+                Request::RepairDirectory {
+                    target: target.clone(),
+                    replacement: None,
+                    size: size(),
+                    style: None,
+                }
+            ),
+            Reply::Refused(Refusal::DirectoryUnavailable)
+        ),
+        "Retry must revalidate the restoration target rather than reject it as stale"
+    );
+    let mut wrong = target.clone();
+    wrong.original = live.clone();
+    assert!(
+        matches!(
+            host.request(
+                [1; 32],
+                [1; 32],
+                Request::RepairDirectory {
+                    target: wrong,
+                    replacement: Some(live.clone()),
+                    size: size(),
+                    style: None,
+                }
+            ),
+            Reply::Refused(Refusal::Stale)
+        ),
+        "live presentation cannot authorize recovery"
+    );
+    let unavailable = shared_inventory(&mut host);
+    assert_eq!(
+        repositories::pane_directory(&unavailable.workspaces[0].tabs[0].panes[0]),
+        live
+    );
+    assert!(unavailable.close.unwrap().sessions[0].session.is_none());
+    if !choose {
+        std::fs::create_dir(&restoration).unwrap();
+    }
+    let Reply::Attached { lease: fresh } = host.request(
+        [1; 32],
+        [1; 32],
+        Request::RepairDirectory {
+            target,
+            replacement: choose.then(|| live.clone()),
+            size: size(),
+            style: None,
+        },
+    ) else {
+        panic!("recovery should start the same Pane in the validated directory");
+    };
+    assert_ne!(fresh.session, old.session);
+    let directory = if choose { &live } else { &restoration };
+    command(
+        &mut host,
+        1,
+        fresh,
+        &format!(
+            "stty -echo; if [ \"$PWD\" = '{}' ]; then printf '\\033[2J\\033[HRECOVERED-DIRECTORY\\n'; fi",
+            directory.display(),
+        ),
+    );
+    await_text(&mut host, 1, fresh, "RECOVERED-DIRECTORY");
+    let after = shared_inventory(&mut host);
+    assert_eq!(after.workspaces.len(), 1);
+    let recovered = &after.workspaces[0];
+    assert_eq!(recovered.id, workspace.id);
+    assert_eq!(recovered.pinned_directory, workspace.pinned_directory);
+    assert_eq!(recovered.root_tab, workspace.root_tab);
+    assert_eq!(recovered.tabs.len(), 1);
+    assert_eq!(recovered.tabs[0].id, tab.id);
+    assert_eq!(recovered.tabs[0].root_pane, pane);
+    assert_eq!(recovered.tabs[0].panes.len(), 1);
+    assert_eq!(recovered.tabs[0].worktree, tab.worktree);
+    assert_eq!(
+        recovered.tabs[0].worktree_repository,
+        tab.worktree_repository
+    );
+    assert_eq!(
+        recovered.tabs[0].panes[0].confirmed_directory.as_ref(),
+        if choose {
+            Some(&live)
+        } else {
+            confirmed.then_some(&restoration)
+        }
+    );
+    host.shutdown().unwrap();
+}
+
 fn ended_takeover_waits_for_explicit_start(attached: bool) {
     let mut host = SharedWorkspaceHost::new(host());
     host.prepare_initial_organization().unwrap();

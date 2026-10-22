@@ -218,7 +218,8 @@ pub struct Repository {
     pub commit: Option<Arc<str>>,
     pub upstream: Option<Upstream>,
     pub operation: Option<RepositoryOperation>,
-    pub changes: ChangeSummary,
+    /// Change counting can fail independently of branch, upstream, and Worktree discovery.
+    pub changes: Result<ChangeSummary, RepositoryReadError>,
     /// Parsed target only. Raw remote URLs and Git configuration stay on the server.
     pub pull_request: Option<PullRequestQuery>,
 }

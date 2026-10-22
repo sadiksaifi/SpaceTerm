@@ -237,6 +237,8 @@ pub(crate) enum ChangeState {
     /// A first count has run longer than the counting indicator delay.
     Counting,
     Known(ChangeSummary),
+    /// Branch and upstream facts remain current when change counting fails.
+    Unavailable(RepositoryReadError),
 }
 
 /// Whether the presented facts are current or retained from an earlier read.

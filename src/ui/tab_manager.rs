@@ -2970,6 +2970,27 @@ impl TabManager {
         }
     }
 
+    /// Presents the Terminal Metadata the server published for every shared Pane in this strip,
+    /// including Tabs outside the Active Worktree and Tabs this client never opened.
+    pub(crate) fn present_shared_metadata<'p>(
+        &mut self,
+        published: &dyn Fn(
+            spaceterm_server::hierarchy::Id,
+        ) -> Option<(
+            crate::ui::terminal_pane::ServerSessionRun,
+            &'p spaceterm_server::pane::metadata::Snapshot,
+        )>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.shared.is_none() {
+            return;
+        }
+        let tabs: Vec<_> = self.tabs.iter().map(|(_, tab)| tab.clone()).collect();
+        for tab in tabs {
+            tab.update(cx, |tab, cx| tab.present_shared_metadata(published, cx));
+        }
+    }
+
     /// The server identity of one shared Tab this strip presents.
     pub(crate) fn shared_server_tab(
         &self,

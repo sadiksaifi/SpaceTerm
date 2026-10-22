@@ -300,8 +300,11 @@ struct PaneTerminalSessionLifecycle {
     session_start_attempted: bool,
     session_epoch: u64,
     accepted_screen_generation: Option<crate::terminal::PresentationGeneration>,
-    /// The newest Terminal Metadata from Screens or the Terminal Session's retained snapshot.
+    /// The newest Terminal Metadata. A server-backed Pane reads it from the server's inventory,
+    /// and any other Pane from Screens or the Terminal Session's retained snapshot.
     metadata: Option<Arc<crate::terminal::metadata::TerminalMetadataSnapshot>>,
+    /// The server Session run whose published metadata a server-backed Pane presents.
+    server_run: Option<ServerSessionRun>,
     /// The Terminal Session takes no input because its server connection is interrupted.
     connection_interrupted: bool,
     native_service_session_identity: u64,
@@ -322,6 +325,7 @@ impl PaneTerminalSessionLifecycle {
             session_epoch: 0,
             accepted_screen_generation: None,
             metadata: None,
+            server_run: None,
             connection_interrupted: false,
             native_service_session_identity: 0,
             _event_task: None,
@@ -1449,7 +1453,7 @@ impl TerminalPane {
             running: running.is_some(),
             progress: super::terminal_status::TerminalProgress::from_metadata(
                 metadata,
-                self.terminal_session_available(),
+                self.metadata_session_running(),
             ),
             repository: crate::repository_status::presentation::RepositoryCaption::from_view(
                 self.repository_view(),
@@ -1611,8 +1615,9 @@ impl TerminalPane {
 
     /// Forgets everything a server-backed Pane presented, because another client took control of
     /// its Terminal Session. The Terminal Session handle stays, so a later grant presents only
-    /// Screens the server publishes after it. The former screen, title, metadata, accessible text,
-    /// and cached frames are gone, and the next measurement supplies dimensions again.
+    /// Screens the server publishes after it. The former screen, title, accessible text, and
+    /// cached frames are gone, and the next measurement supplies dimensions again. The server
+    /// publishes Terminal Metadata to every client whatever control it holds, so that stays.
     pub(crate) fn clear_server_presentation(&mut self, cx: &mut Context<Self>) {
         if !self.server_backed() {
             return;
@@ -1633,7 +1638,6 @@ impl TerminalPane {
         self.screen_session_epoch = self.terminal_session.session_epoch;
         self.last_valid_screen = Arc::clone(&cleared);
         self.last_valid_screen_session_epoch = self.terminal_session.session_epoch;
-        self.terminal_session.metadata = None;
         self.accessibility = Arc::new(TerminalAccessibilityModel::from_screen(&cleared));
         self.accessibility_floor = Some((self.terminal_session.session_epoch, cleared.generation));
         self.pending_accessibility = None;
@@ -2131,7 +2135,9 @@ impl TerminalPane {
     }
 
     fn sync_metadata(&mut self, session_epoch: u64) -> bool {
-        if self.terminal_session.session_epoch != session_epoch {
+        // A server-backed Pane presents only what the server's inventory publishes, whose
+        // revisions are ordered within one Session run.
+        if self.terminal_session.session_epoch != session_epoch || self.server_backed() {
             return false;
         }
         let Some(snapshot) = self
@@ -2193,6 +2199,66 @@ impl TerminalPane {
         presentation_changed || directory_changed
     }
 
+    /// Whether the Terminal Session these facts describe is running. A server's Session runs
+    /// whether or not this client ever presented it or controls it, as its inventory says.
+    fn metadata_session_running(&self) -> bool {
+        if self.server_backed() {
+            self.terminal_session.server_run.is_some()
+                && !matches!(self.pane_state, PaneTerminalState::Exited(_))
+        } else {
+            self.terminal_session_available()
+        }
+    }
+
+    /// Whether this Pane already presents `revision` of the metadata `run` published.
+    pub(crate) fn presents_server_metadata(&self, run: ServerSessionRun, revision: u64) -> bool {
+        self.terminal_session.server_run == Some(run)
+            && self
+                .terminal_session
+                .metadata
+                .as_ref()
+                .is_some_and(|metadata| metadata.revision == revision)
+    }
+
+    /// Presents the Terminal Metadata the server published for this Pane's running Session, or
+    /// nothing while none runs. This holds for a Pane this client never painted, which has no
+    /// Terminal Session handle. Each Session run numbers its revisions from its own start, so
+    /// another run, including one after the server restarted, replaces what this Pane showed.
+    pub(crate) fn present_server_metadata(
+        &mut self,
+        published: Option<(
+            ServerSessionRun,
+            Arc<crate::terminal::metadata::TerminalMetadataSnapshot>,
+        )>,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.server_backed() {
+            return;
+        }
+        let changed = match published {
+            Some((run, snapshot)) => {
+                let new_run = self.terminal_session.server_run != Some(run);
+                if new_run {
+                    self.terminal_session.server_run = Some(run);
+                    self.terminal_session.metadata = None;
+                }
+                self.accept_metadata(snapshot) || new_run
+            }
+            None => {
+                let had_run = self.terminal_session.server_run.take().is_some();
+                let had_metadata = self.terminal_session.metadata.take().is_some();
+                let had_directory = self.terminal_session.current_directory.take().is_some();
+                had_run || had_metadata || had_directory
+            }
+        };
+        if changed {
+            cx.emit(TerminalPaneEvent::CaptionChanged);
+            if self.render_lifecycle.can_present() {
+                cx.notify();
+            }
+        }
+    }
+
     fn handle_event(&mut self, event: TerminalSessionEvent, cx: &mut Context<Self>) -> bool {
         match event {
             TerminalSessionEvent::MetadataChanged(wakeup) => drop(wakeup),
@@ -2212,7 +2278,8 @@ impl TerminalPane {
                 }
                 let _ = self.render_lifecycle.observe_snapshot(screen.generation);
                 self.terminal_session.accepted_screen_generation = Some(screen.generation);
-                let caption_changed = self.accept_metadata(Arc::clone(&screen.metadata));
+                let caption_changed =
+                    !self.server_backed() && self.accept_metadata(Arc::clone(&screen.metadata));
                 self.screen = screen;
                 self.screen_session_epoch = self.terminal_session.session_epoch;
                 const OPERATION: &str = "receive-terminal-graphics";
@@ -5051,8 +5118,11 @@ impl Render for TerminalPane {
             .on_action(cx.listener(Self::decline_permission_request_action))
             .when(self.terminal_session.session_factory.file_insertion_capabilities() == TerminalLocalFileCapabilities::Enabled && self.interactive_input_available(), |root| root.on_drop(cx.listener(Self::insert_dropped_files)))
             .when(local_operations, |root| {
+                root.on_action(cx.listener(Self::show_repository_status))
+            })
+            // The owning server clears its Terminal Session for the client whose input it takes.
+            .when(local_operations || self.interactive_input_available(), |root| {
                 root.on_action(cx.listener(Self::clear_screen_and_scrollback))
-                    .on_action(cx.listener(Self::show_repository_status))
             })
             .when(self.reading_available(), |root| {
                 root.on_action(cx.listener(Self::copy_selection))
@@ -5456,6 +5526,14 @@ fn ime_candidate_bounds(
         ),
         size(cell_width, line_height),
     )
+}
+
+/// One run of a Terminal Session on a SpaceTerm Server: the server boot and the Session it
+/// started. The server orders published metadata revisions only within one run.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ServerSessionRun {
+    pub(crate) boot: spaceterm_server::hierarchy::Id,
+    pub(crate) session: spaceterm_server::hierarchy::Id,
 }
 
 /// The identity one Pane caption presents: where its Terminal Session runs, where it is, what it

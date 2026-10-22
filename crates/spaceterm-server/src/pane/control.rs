@@ -86,7 +86,7 @@ impl From<ClientName> for String {
 
 /// Format characters that reorder or hide text, which a name never needs. The zero-width
 /// non-joiner and joiner stay, because Persian and Indic words and emoji sequences need them.
-fn invisible(c: char) -> bool {
+pub(super) fn invisible(c: char) -> bool {
     matches!(
         c,
         '\u{00AD}'

@@ -563,11 +563,7 @@ mod development {
                 .iter()
                 .find(|tab| tab.id == workspace.root_tab)
                 .and_then(|tab| tab.panes.iter().find(|pane| pane.id == tab.root_pane))
-                .map_or_else(PathBuf::new, |pane| {
-                    pane.confirmed_directory
-                        .clone()
-                        .unwrap_or_else(|| pane.starting_directory.clone())
-                });
+                .map_or_else(PathBuf::new, |pane| pane.presented_directory().to_owned());
             Self {
                 server: workspace.id,
                 name: workspace.name.clone(),
@@ -854,6 +850,28 @@ mod development {
         /// Subscribes to one server Pane.
         pub(crate) fn open(&self, pane: Id) -> Option<SharedPaneSubscription> {
             self.opener.open(pane)
+        }
+
+        /// Reads the Terminal Metadata the server published for one of its Panes with this
+        /// route's locality, or `None` if the publication is malformed. Only this computer's
+        /// server names local directories. An SSH route names the machine as its destination
+        /// does, and a direct route by the host the server reports.
+        pub(crate) fn metadata(
+            &self,
+            published: &spaceterm_server::pane::metadata::Snapshot,
+        ) -> Option<Arc<crate::terminal::metadata::TerminalMetadataSnapshot>> {
+            let remote = self.remote_destination().map(|destination| {
+                crate::terminal::metadata::RemoteTerminalMetadataContext::new(
+                    destination.clone(),
+                    crate::domain::RemoteDirectory::home(),
+                )
+            });
+            crate::terminal::server_metadata::decode(
+                published.clone(),
+                self.local_filesystem(),
+                remote.as_ref(),
+            )
+            .ok()
         }
     }
 

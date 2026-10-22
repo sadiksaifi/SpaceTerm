@@ -460,6 +460,7 @@ impl DevelopmentServerSessionFactory {
 }
 
 enum Input {
+    ClearScreenAndScrollback,
     Read(pane::reading::Operation),
     Key(KeyInput),
     CopyOrForward(InputModifiers),
@@ -481,7 +482,7 @@ enum Input {
 impl Input {
     fn eligible(&self, target: pane::FocusTarget) -> bool {
         match self {
-            Self::Read(_) => true,
+            Self::Read(_) | Self::ClearScreenAndScrollback => true,
             Self::Key(key) if key.is_input_method_commit() => matches!(
                 target,
                 pane::FocusTarget::Terminal | pane::FocusTarget::FocusedPane
@@ -699,7 +700,10 @@ fn submit_input(
     let available = connected
         && epoch == current_epoch
         && (interaction.interactive
-            || matches!(input, Input::Resize(_) | Input::Style(_))
+            || matches!(
+                input,
+                Input::Resize(_) | Input::Style(_) | Input::ClearScreenAndScrollback
+            )
             || matches!(input, Input::Read(_)) && interaction.reading)
         && eligible;
     if !available {
@@ -928,7 +932,10 @@ impl ActiveInput {
             state.epoch.load(Ordering::Acquire) == self.epoch
                 && (matches!(
                     submitted.command,
-                    Input::Resize(_) | Input::Style(_) | Input::Read(_)
+                    Input::Resize(_)
+                        | Input::Style(_)
+                        | Input::Read(_)
+                        | Input::ClearScreenAndScrollback
                 ) || (interaction.interactive
                     && (submitted.focus_generation == interaction.focus_generation
                         || matches!(&submitted.command, Input::ResolvePaste(pending, ..) if interaction.resolution_is_current(*pending)))
@@ -945,6 +952,10 @@ impl ActiveInput {
             input,
         };
         let (request, paste_reply) = match submitted.command {
+            Input::ClearScreenAndScrollback => (
+                Request::ClearScreenAndScrollback { lease: self.lease },
+                None,
+            ),
             Input::Read(operation) => {
                 state
                     .reading
@@ -1963,7 +1974,9 @@ impl TerminalSessionHandle for PresentationHandle {
         drop(interaction);
         self.state.wake.notify();
     }
-    fn clear_screen_and_scrollback(&self) {}
+    fn clear_screen_and_scrollback(&self) {
+        self.send(Input::ClearScreenAndScrollback);
+    }
     fn pointer(&self, input: PointerInput) {
         use super::pointer_input::{PointerButton, PointerPhase, ShiftSelectionPolicy};
         let continuation = input.phase == PointerPhase::Release
@@ -2498,6 +2511,36 @@ mod tests {
         assert!(
             adapter.input.try_recv().is_ok(),
             "Scroll must reach the server worker"
+        );
+    }
+
+    #[test]
+    fn clear_screen_and_scrollback_uses_the_current_epoch_and_exact_lease_without_focus() {
+        let mut adapter = Adapter::new();
+        adapter.handle.interactive_focus(false, false);
+        adapter.handle.clear_screen_and_scrollback();
+        let mut cleared = Vec::new();
+        adapter
+            .drain(|request| {
+                match request {
+                    Request::ClearScreenAndScrollback { lease } => cleared.push(*lease),
+                    Request::Focus { .. } => {}
+                    _ => panic!("unexpected request: {request:?}"),
+                }
+                Ok(Reply::Unchanged)
+            })
+            .unwrap();
+        assert_eq!(cleared, vec![adapter.active.lease]);
+
+        adapter.handle.clear_screen_and_scrollback();
+        adapter.handle.state.invalidate();
+        adapter
+            .drain(|_| panic!("clear from a retired epoch was replayed"))
+            .unwrap();
+        adapter.handle.clear_screen_and_scrollback();
+        assert!(
+            adapter.input.try_recv().is_err(),
+            "disconnected clear was queued"
         );
     }
 

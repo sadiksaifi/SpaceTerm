@@ -11,6 +11,8 @@ use std::{sync::Arc, time::Duration};
 mod accessibility;
 #[cfg(test)]
 mod accessibility_tests;
+#[cfg(test)]
+mod clear_tests;
 mod directories;
 #[cfg(all(test, feature = "desktop"))]
 pub(crate) mod testing {
@@ -32,6 +34,9 @@ use self::effects::NativeEffects;
 mod graphics;
 #[cfg(test)]
 mod graphics_tests;
+mod metadata;
+#[cfg(test)]
+mod metadata_tests;
 mod reading;
 #[cfg(test)]
 mod reading_tests;
@@ -130,7 +135,7 @@ impl DevelopmentPaneHost {
             pty_factory,
             crate::platform::launch_host::shell_launch_planner(),
             filesystem,
-            LocalMachine::default(),
+            crate::platform::launch_host::terminal_machine(&directory),
         );
         Ok(Self {
             boot: nonce()?,
@@ -558,6 +563,7 @@ impl DevelopmentPaneHost {
             | Request::Keys { lease, .. }
             | Request::Key { lease, .. }
             | Request::Resize { lease, .. }
+            | Request::ClearScreenAndScrollback { lease }
             | Request::Close { lease }
             | Request::Style { lease, .. }
             | Request::Release { lease } => lease,
@@ -744,6 +750,13 @@ impl DevelopmentPaneHost {
                 }
                 pane.runtime.resize(geometry(size));
                 pane.size = size;
+                Ok(Reply::Unchanged)
+            }
+            Request::ClearScreenAndScrollback { .. } => {
+                if pane.ended || pane.failed {
+                    return Err(Refusal::Missing);
+                }
+                pane.runtime.clear_screen_and_scrollback();
                 Ok(Reply::Unchanged)
             }
             Request::Style { style, .. } => {

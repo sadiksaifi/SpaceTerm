@@ -3051,6 +3051,58 @@ impl WorkspaceManager {
         // Workspaces nobody is looking at.
         if poll.changed {
             self.present_shared_repositories(cx);
+            // Metadata alone can change without a membership revision.
+            if let Some(inventory) = self.shared.get(key).and_then(|s| s.latest_inventory()) {
+                self.present_shared_metadata(key, inventory, cx);
+            }
+        }
+    }
+
+    /// Presents the Terminal Metadata `inventory` publishes for every Pane of its server's
+    /// Workspaces this window shows, active or not, painted or not. The inventory names each
+    /// Pane's Session run, so metadata from a run that ended never replaces the current one's.
+    fn present_shared_metadata(
+        &self,
+        key: ServerKey,
+        inventory: &spaceterm_server::hierarchy::Inventory,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::ui::terminal_pane::ServerSessionRun;
+
+        let runs = inventory.close.as_ref().map(|close| {
+            close
+                .sessions
+                .iter()
+                .filter_map(|pane| {
+                    let session = pane.session?;
+                    Some((
+                        pane.id,
+                        ServerSessionRun {
+                            boot: close.boot,
+                            session,
+                        },
+                    ))
+                })
+                .collect::<std::collections::BTreeMap<_, _>>()
+        });
+        let published = inventory
+            .workspaces
+            .iter()
+            .flat_map(|workspace| &workspace.tabs)
+            .flat_map(|tab| &tab.panes)
+            .filter_map(|pane| {
+                let run = *runs.as_ref()?.get(&pane.id)?;
+                Some((pane.id, (run, pane.presentation.as_deref()?)))
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let lookup = |pane| published.get(&pane).copied();
+        for entry in self.workspaces.iter() {
+            if self.shared.owner(entry.id()) != Some(key) {
+                continue;
+            }
+            entry.payload().clone().update(cx, |manager, cx| {
+                manager.present_shared_metadata(&lookup, cx);
+            });
         }
     }
 
@@ -3148,6 +3200,9 @@ impl WorkspaceManager {
                 }
             }
         }
+        // Views this inventory just created, including a reattached Workspace's, present its
+        // metadata now. A later poll may carry the same inventory and report no change.
+        self.present_shared_metadata(key, inventory, cx);
         self.synchronize_tab_manager_layouts(window, cx);
         cx.notify();
     }

@@ -2278,6 +2278,7 @@ impl TabView {
         terminal.update(cx, |terminal, cx| {
             terminal.set_server_connection_interrupted(true, window, cx);
             terminal.clear_server_presentation(cx);
+            terminal.present_server_metadata(None, cx);
         });
         cx.emit(TabViewEvent::PresentationChanged {
             tab_id: self.tab.id(),
@@ -2310,6 +2311,52 @@ impl TabView {
             let presented = view(server);
             terminal.update(cx, |terminal, cx| {
                 terminal.present_server_repository(presented, cx);
+            });
+        }
+    }
+
+    /// Presents the Terminal Metadata the server published for each shared Pane, including Panes
+    /// this client never painted. `published` names the Session run and its latest metadata, or
+    /// `None` while the Pane runs no Session.
+    pub(crate) fn present_shared_metadata<'p>(
+        &mut self,
+        published: &dyn Fn(
+            spaceterm_server::hierarchy::Id,
+        ) -> Option<(
+            crate::ui::terminal_pane::ServerSessionRun,
+            &'p spaceterm_server::pane::metadata::Snapshot,
+        )>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(shared) = self.shared.as_ref() else {
+            return;
+        };
+        let panes: Vec<_> = self
+            .tab
+            .panes_with_ids()
+            .filter_map(|(pane_id, terminal)| {
+                Some((shared.server_pane(pane_id)?, terminal.clone()))
+            })
+            .collect();
+        for (server, terminal) in panes {
+            let presented = match published(server) {
+                Some((run, wire)) => {
+                    if terminal
+                        .read(cx)
+                        .presents_server_metadata(run, wire.revision)
+                    {
+                        continue;
+                    }
+                    // A publication this route cannot decode changes nothing.
+                    let Some(metadata) = shared.sessions().metadata(wire) else {
+                        continue;
+                    };
+                    Some((run, metadata))
+                }
+                None => None,
+            };
+            terminal.update(cx, |terminal, cx| {
+                terminal.present_server_metadata(presented, cx);
             });
         }
     }

@@ -44,6 +44,8 @@ fn inventory() -> Inventory {
                     source: None,
                     axis: Axis::Right,
                     starting_directory: PathBuf::from("/server/home"),
+                    current_directory: None,
+                    presentation: None,
                     confirmed_directory: None,
                     creator: None,
                 }],
@@ -151,10 +153,10 @@ fn launch_harness_with(
     for answer in answers {
         launch.answer(answer);
     }
-    let session_factory = WorkspaceTerminalSessionFactory::new_local(
-        Rc::new(TestTerminalSessionFactory::new(
-            TestTerminalSessionRecords::default(),
-        )),
+    let session_factory = WorkspaceTerminalSessionFactory::new_server(
+        Rc::new(
+            TestTerminalSessionFactory::new(TestTerminalSessionRecords::default()).server_backed(),
+        ),
         crate::terminal::testing::test_local_directory(std::env::temp_dir()),
     );
     let panes = ScriptedPanes::new(session_factory);
@@ -1517,4 +1519,339 @@ fn a_service_start_during_launch_keeps_a_deliberate_stop(cx: &mut TestAppContext
     assert_eq!(harness.launch.steps(), ["run", "run", "run"]);
     assert_eq!(harness.launch_title(cx), Some(launch::STOPPED_TITLE));
     assert_eq!(harness.shared_rows(cx), 0);
+}
+
+const HIDDEN_TAB: [u8; 32] = [34; 32];
+const HIDDEN_PANE: [u8; 32] = [35; 32];
+const BOOT: [u8; 32] = [36; 32];
+
+/// What a server publishes for a shell running `command` in `directory`.
+fn running(
+    revision: u64,
+    command: &str,
+    directory: &str,
+) -> spaceterm_server::pane::metadata::Snapshot {
+    use spaceterm_server::pane::metadata::{
+        Command, CommandState, DirectoryProvenance, Freshness, Progress, PromptZone, Snapshot,
+        TitleGlyph, TitleProvenance,
+    };
+    Snapshot {
+        revision,
+        title: "Terminal".to_owned(),
+        title_provenance: TitleProvenance::Fallback,
+        directory: directory.to_owned(),
+        directory_provenance: DirectoryProvenance::Osc7,
+        user: Some("tester".to_owned()),
+        host: Some("server".to_owned()),
+        home: Some("/home/tester".to_owned()),
+        freshness: Freshness::Live,
+        finished_commands: 0,
+        prompt_zone: PromptZone::CommandOutput,
+        command: Some(Command {
+            line: command.to_owned(),
+            state: CommandState::Running,
+        }),
+        title_activity: false,
+        title_glyph: TitleGlyph::Reported,
+        progress: Progress::None,
+    }
+}
+
+/// The server's Workspace with a second Tab this client never opens, whose Pane runs `session`
+/// and published `presentation`.
+fn with_hidden_tab(
+    revision: u64,
+    session: Option<[u8; 32]>,
+    presentation: Option<spaceterm_server::pane::metadata::Snapshot>,
+) -> Inventory {
+    use spaceterm_server::hierarchy::{CloseInventory, ConfirmedPane};
+    let mut inventory = inventory();
+    inventory.revision = revision;
+    inventory.workspaces[0].tabs.push(Tab {
+        worktree: None,
+        worktree_membership_fixed: false,
+        worktree_repository: None,
+        id: HIDDEN_TAB,
+        root_pane: HIDDEN_PANE,
+        panes: vec![Pane {
+            id: HIDDEN_PANE,
+            source: None,
+            axis: Axis::Right,
+            starting_directory: PathBuf::from("/server/home"),
+            current_directory: None,
+            presentation: presentation.map(Box::new),
+            confirmed_directory: None,
+            creator: None,
+        }],
+    });
+    inventory.close = Some(CloseInventory {
+        boot: BOOT,
+        sessions: vec![
+            ConfirmedPane {
+                id: PANE,
+                session: None,
+            },
+            ConfirmedPane {
+                id: HIDDEN_PANE,
+                session,
+            },
+        ],
+    });
+    inventory
+}
+
+/// Each Tab the strip publishes, as its name and the place it names.
+fn tab_identities(cx: &mut VisualTestContext) -> Vec<(String, String)> {
+    let tree = spaceterm_ui::a11y_testing::A11yTree::read(cx);
+    tree.with_role("Tab")
+        .iter()
+        .map(|tab| {
+            (
+                tab["aria"]["label"].as_str().unwrap_or_default().to_owned(),
+                tab["aria"]["description"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned(),
+            )
+        })
+        .collect()
+}
+
+#[gpui::test]
+fn a_tab_this_client_never_opened_names_what_its_server_shell_runs(cx: &mut TestAppContext) {
+    let (harness, cx) = launch_harness(vec![ready()], cx);
+    cx.run_until_parked();
+    harness.edits.set_inventory(with_hidden_tab(
+        2,
+        Some([41; 32]),
+        Some(running(3, "cargo test", "/srv/api")),
+    ));
+    sync(&harness, cx);
+
+    assert_eq!(
+        tab_identities(cx),
+        [
+            ("Terminal".to_owned(), String::new()),
+            ("cargo test".to_owned(), "api".to_owned()),
+        ]
+    );
+    assert_eq!(
+        harness.panes.pane(HIDDEN_PANE).selections(),
+        0,
+        "presenting the Tab neither selects nor claims its Pane"
+    );
+
+    harness.edits.set_inventory(with_hidden_tab(
+        3,
+        Some([41; 32]),
+        Some(running(4, "cargo build", "/srv/web")),
+    ));
+    sync(&harness, cx);
+    assert_eq!(
+        tab_identities(cx)[1],
+        ("cargo build".to_owned(), "web".to_owned()),
+        "a metadata-only publication reaches the hidden Tab"
+    );
+}
+
+#[gpui::test]
+fn a_new_server_session_replaces_the_former_sessions_metadata(cx: &mut TestAppContext) {
+    let (harness, cx) = launch_harness(vec![ready()], cx);
+    cx.run_until_parked();
+    harness.edits.set_inventory(with_hidden_tab(
+        2,
+        Some([41; 32]),
+        Some(running(9, "cargo test", "/srv/api")),
+    ));
+    sync(&harness, cx);
+
+    // The new Session numbers its metadata from its own start, below the former Session's.
+    harness.edits.set_inventory(with_hidden_tab(
+        3,
+        Some([42; 32]),
+        Some(running(1, "make", "/srv/web")),
+    ));
+    sync(&harness, cx);
+    assert_eq!(tab_identities(cx)[1], ("make".to_owned(), "web".to_owned()));
+
+    // A Pane whose Session ended presents nothing of it.
+    harness.edits.set_inventory(with_hidden_tab(4, None, None));
+    sync(&harness, cx);
+    assert_eq!(
+        tab_identities(cx)[1],
+        ("Terminal".to_owned(), String::new())
+    );
+}
+
+const OTHER_WORKSPACE: [u8; 32] = [37; 32];
+const OTHER_TAB: [u8; 32] = [38; 32];
+const OTHER_PANE: [u8; 32] = [39; 32];
+const OTHER_HIDDEN_TAB: [u8; 32] = [40; 32];
+const OTHER_HIDDEN_PANE: [u8; 32] = [43; 32];
+
+/// The server's first Workspace, and a second one a new client does not attach, whose second Tab
+/// runs `cargo test` in `/srv/api`.
+fn with_detached_workspace() -> Inventory {
+    use spaceterm_server::hierarchy::ConfirmedPane;
+    let pane = |id, presentation: Option<spaceterm_server::pane::metadata::Snapshot>| Pane {
+        id,
+        source: None,
+        axis: Axis::Right,
+        starting_directory: PathBuf::from("/server/home"),
+        current_directory: None,
+        presentation: presentation.map(Box::new),
+        confirmed_directory: None,
+        creator: None,
+    };
+    let tab = |id, root_pane, pane| Tab {
+        worktree: None,
+        worktree_membership_fixed: false,
+        worktree_repository: None,
+        id,
+        root_pane,
+        panes: vec![pane],
+    };
+    let mut inventory = with_hidden_tab(2, None, None);
+    inventory.workspaces.push(Workspace {
+        id: OTHER_WORKSPACE,
+        name: "Other".to_owned(),
+        name_version: 0,
+        pin_version: 0,
+        pinned_directory: None,
+        root_tab: OTHER_TAB,
+        tabs: vec![
+            tab(OTHER_TAB, OTHER_PANE, pane(OTHER_PANE, None)),
+            tab(
+                OTHER_HIDDEN_TAB,
+                OTHER_HIDDEN_PANE,
+                pane(
+                    OTHER_HIDDEN_PANE,
+                    Some(running(5, "cargo test", "/srv/api")),
+                ),
+            ),
+        ],
+    });
+    let close = inventory.close.as_mut().expect("close facts");
+    close.sessions.push(ConfirmedPane {
+        id: OTHER_PANE,
+        session: None,
+    });
+    close.sessions.push(ConfirmedPane {
+        id: OTHER_HIDDEN_PANE,
+        session: Some([44; 32]),
+    });
+    inventory
+}
+
+#[gpui::test]
+fn a_reattached_workspace_names_what_its_hidden_tab_runs_from_an_unchanged_inventory(
+    cx: &mut TestAppContext,
+) {
+    let (harness, cx) = launch_harness(vec![ready()], cx);
+    cx.run_until_parked();
+    harness.edits.set_inventory(with_detached_workspace());
+    sync(&harness, cx);
+    let attach = |cx: &mut VisualTestContext| {
+        cx.update(|window, cx| {
+            harness.manager.update(cx, |manager, cx| {
+                manager.attach_detached_workspace(ServerKey::LOCAL, OTHER_WORKSPACE, window, cx);
+            });
+        });
+        cx.run_until_parked();
+    };
+    attach(cx);
+    let other = harness.manager.read_with(cx, |manager, _| {
+        manager
+            .shared
+            .get(ServerKey::LOCAL)
+            .and_then(|shared| shared.local(OTHER_WORKSPACE))
+            .expect("the attached Workspace is presented")
+    });
+    cx.update(|window, cx| {
+        harness.manager.update(cx, |manager, cx| {
+            manager.detach_shared_workspace(other, window, cx);
+        });
+    });
+    cx.run_until_parked();
+
+    attach(cx);
+    // The server publishes nothing new, so each poll reports the same inventory.
+    sync(&harness, cx);
+
+    assert_eq!(
+        tab_identities(cx),
+        [
+            ("Terminal".to_owned(), String::new()),
+            ("cargo test".to_owned(), "api".to_owned()),
+        ]
+    );
+    assert_eq!(
+        harness.panes.pane(OTHER_HIDDEN_PANE).selections(),
+        0,
+        "presenting the hidden Tab neither selects nor claims its Pane"
+    );
+}
+
+/// The root Pane runs a Session that reports `percent` through the inventory.
+fn with_root_progress(revision: u64, metadata_revision: u64, percent: u8) -> Inventory {
+    use spaceterm_server::hierarchy::{CloseInventory, ConfirmedPane};
+    let mut inventory = inventory();
+    inventory.revision = revision;
+    let mut presentation = running(metadata_revision, "cargo build", "/srv/api");
+    presentation.progress = spaceterm_server::pane::metadata::Progress::Normal(percent);
+    inventory.workspaces[0].tabs[0].panes[0].presentation = Some(Box::new(presentation));
+    inventory.close = Some(CloseInventory {
+        boot: BOOT,
+        sessions: vec![ConfirmedPane {
+            id: PANE,
+            session: Some([45; 32]),
+        }],
+    });
+    inventory
+}
+
+/// What each Terminal Session status in the window says.
+fn session_statuses(cx: &mut VisualTestContext) -> Vec<String> {
+    let tree = spaceterm_ui::a11y_testing::A11yTree::read(cx);
+    tree.with_role("Status")
+        .iter()
+        .filter(|node| node["aria"]["label"] == "Terminal Session status")
+        .map(|node| {
+            node["aria"]["value"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned()
+        })
+        .collect()
+}
+
+#[gpui::test]
+fn a_pane_another_client_controls_keeps_showing_its_sessions_progress(cx: &mut TestAppContext) {
+    use crate::terminal::server_session::DevelopmentPaneStatus;
+    let (harness, cx) = launch_harness(vec![ready()], cx);
+    cx.run_until_parked();
+    harness.edits.set_inventory(with_root_progress(2, 3, 40));
+    sync(&harness, cx);
+
+    harness
+        .panes
+        .pane(PANE)
+        .set(DevelopmentPaneStatus::Takeover);
+    cx.executor()
+        .advance_clock(crate::ui::shared_workspaces::POLL_INTERVAL * 3);
+    cx.run_until_parked();
+    harness.edits.set_inventory(with_root_progress(3, 4, 60));
+    sync(&harness, cx);
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+
+    assert!(
+        cx.debug_bounds("shared-pane-takeover-1").is_some(),
+        "typing still belongs to the other client"
+    );
+    assert!(
+        session_statuses(cx).contains(&"Busy, 60%".to_owned()),
+        "the server's live progress still shows: {:?}",
+        session_statuses(cx)
+    );
 }

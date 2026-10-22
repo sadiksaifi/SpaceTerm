@@ -147,12 +147,13 @@ impl ServerRepositories {
                 if facts.failure.is_some()
                     && let Some(old) = old
                 {
-                    facts
-                        .repository
-                        .clone_from(&self.snapshot.directories[old].repository);
-                    facts
-                        .worktrees
-                        .clone_from(&self.snapshot.directories[old].worktrees);
+                    let previous = &self.snapshot.directories[old];
+                    if facts.repository.is_none() {
+                        facts.repository.clone_from(&previous.repository);
+                    }
+                    if facts.worktrees.is_none() {
+                        facts.worktrees.clone_from(&previous.worktrees);
+                    }
                 }
                 if old.is_some_and(|old| self.snapshot.directories[old] == facts)
                     && self.snapshot.git == git
@@ -201,9 +202,7 @@ impl ServerRepositories {
     }
 }
 pub(super) fn pane_directory(pane: &spaceterm_server::hierarchy::Pane) -> &Path {
-    pane.confirmed_directory
-        .as_deref()
-        .unwrap_or(&pane.starting_directory)
+    pane.presented_directory()
 }
 pub(super) fn workspace_directory(
     workspace: &spaceterm_server::hierarchy::Workspace,
@@ -390,8 +389,8 @@ fn read(
                     return Err(RepositoryReadError::InvalidResponse);
                 };
                 let changes = repository
-                    .count(root, probe.config.fsmonitor, &cancellation)?
-                    .changes;
+                    .count(root, probe.config.fsmonitor, &cancellation)
+                    .map(|summary| summary.changes);
                 facts.repository = Some(Repository {
                     root: root.clone(),
                     pull_request: policy::pull_request::pull_request_query(

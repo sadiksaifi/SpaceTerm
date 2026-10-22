@@ -4,6 +4,7 @@ pub mod control;
 pub mod directories;
 pub mod effects;
 pub mod graphics;
+pub mod metadata;
 pub mod presentation;
 pub mod reading;
 #[cfg(feature = "client")]
@@ -335,6 +336,10 @@ pub enum Request {
     Resize {
         lease: Lease,
         size: PaneSize,
+    },
+    /// Clear only this Pane's terminal content under its exact control and connection lease.
+    ClearScreenAndScrollback {
+        lease: Lease,
     },
     Style {
         lease: Lease,
@@ -756,7 +761,24 @@ impl PaneConnection {
                 stream.as_deref_mut().ok_or(ServerError::NotRunning)?,
             )?;
             wire.write(request)?;
-            wire.read()
+            let reply: Reply = wire.read()?;
+            if let Reply::Inventory { inventory, .. } = &reply {
+                let panes: Vec<_> = inventory
+                    .workspaces
+                    .iter()
+                    .flat_map(|workspace| &workspace.tabs)
+                    .flat_map(|tab| &tab.panes)
+                    .collect();
+                if panes.len() > crate::hierarchy::MAX_PANES {
+                    return Err(ServerError::Protocol);
+                }
+                for pane in panes {
+                    if let Some(snapshot) = &pane.presentation {
+                        snapshot.validate()?;
+                    }
+                }
+            }
+            Ok(reply)
         })();
         // An uncertain exchange fences every subscriber of this transport. A new
         // connection gets a fresh host identity; no request is replayed here.
