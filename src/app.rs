@@ -610,9 +610,7 @@ impl ApplicationQuitCoordinator {
         let choice =
             DismissalChoice::new(self.status_area, self.exit_ends_sessions, reach, &snapshot);
         // With no window open, a window of its own asks and closes with the answer.
-        let existing = cx
-            .active_window()
-            .or_else(|| cx.windows().into_iter().next());
+        let existing = open_active_window(cx).or_else(|| cx.windows().into_iter().next());
         let (window, host) = match existing {
             Some(window) => (window, None),
             None => match open_dismissal_host(cx) {
@@ -754,8 +752,7 @@ impl ApplicationQuitCoordinator {
         *state = ApplicationQuitCoordinatorState::Prompting;
         drop(state);
         let windows = workspace_windows(cx);
-        let confirmation_window = cx
-            .active_window()
+        let confirmation_window = open_active_window(cx)
             .and_then(|window| window.downcast::<WorkspaceManager>())
             .or_else(|| windows.into_iter().next());
         let Some(confirmation_window) = confirmation_window else {
@@ -1077,6 +1074,13 @@ fn workspace_window_options(host: &HostComposition, cx: &App) -> WindowOptions {
         cx,
     )
 }
+/// The host's active window while it is still open. A host can keep naming a window the client
+/// already closed, such as the window that asked the previous quit question.
+fn open_active_window(cx: &App) -> Option<gpui::AnyWindowHandle> {
+    cx.active_window()
+        .filter(|active| cx.windows().contains(active))
+}
+
 /// Every live Workspace window, resolved at call time from GPUI's own registry. A Settings window
 /// is never counted.
 fn workspace_windows(cx: &App) -> Vec<gpui::WindowHandle<WorkspaceManager>> {
@@ -1922,7 +1926,7 @@ mod tests {
         cx.update(crate::ui::init).expect("UI initialization");
         cx.update(|cx| init(cx, application_menu(), application_quit()).unwrap());
         let expected = [
-            ("cmd-q", CloseAllWindows.name()),
+            ("cmd-q", DismissApplication.name()),
             ("cmd-h", HideApplication.name()),
             ("alt-cmd-h", HideOtherApplications.name()),
             ("cmd-m", MinimizeWindow.name()),
@@ -2206,7 +2210,7 @@ mod runtime_tests {
     }
 
     #[gpui::test]
-    fn new_workspace_action_should_restore_window_with_one_local_workspace_when_headless(
+    fn new_workspace_action_should_restore_window_and_create_a_workspace_when_headless(
         cx: &mut gpui::TestAppContext,
     ) {
         use crate::terminal::testing::{TestTerminalSessionFactory, TestTerminalSessionRecords};
@@ -2235,9 +2239,11 @@ mod runtime_tests {
         cx.update(|cx| cx.dispatch_action(&NewWorkspace));
         cx.run_until_parked();
 
+        // The restored window presents the server's Default Workspace and creates the one New
+        // Workspace asked for.
         cx.update(|cx| {
             let restored = cx.windows()[0].downcast::<WorkspaceManager>().unwrap();
-            assert_eq!(restored.read(cx).unwrap().workspace_count(), 1);
+            assert_eq!(restored.read(cx).unwrap().workspace_count(), 2);
         });
 
         assert_eq!(
@@ -2602,7 +2608,7 @@ mod runtime_tests {
                 assert!(
                     cx.all_bindings_for_input(&[shortcut])
                         .iter()
-                        .any(|binding| { binding.action().name() == CloseAllWindows.name() })
+                        .any(|binding| { binding.action().name() == DismissApplication.name() })
                 );
                 assert!(cx.is_action_available(&crate::ui::settings_window::OpenSettings));
                 self.0.store(true, Ordering::SeqCst);
