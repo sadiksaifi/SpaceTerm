@@ -12,13 +12,11 @@ use std::{
 const CHILD: &str = "terminal::server_session::claim::process_tests::client_process";
 const SOCKET: &str = "SPACETERM_START_TEST_SOCKET";
 
-fn write<T: serde::Serialize>(stream: &mut UnixStream, value: &T) {
+fn write<T: serde::Serialize>(stream: &mut UnixStream, value: &T) -> std::io::Result<()> {
     let bytes = serde_json::to_vec(value).unwrap();
     assert!(bytes.len() <= pane::MAX_TERMINAL_FRAME);
-    stream
-        .write_all(&(bytes.len() as u32).to_be_bytes())
-        .unwrap();
-    stream.write_all(&bytes).unwrap();
+    stream.write_all(&(bytes.len() as u32).to_be_bytes())?;
+    stream.write_all(&bytes)
 }
 fn read<T: serde::de::DeserializeOwned>(stream: &mut UnixStream) -> Option<T> {
     let mut length = [0; 4];
@@ -188,7 +186,7 @@ fn a_fresh_client_process_observes_a_successful_start_after_its_reply_is_lost() 
                 // The PTY exists. Its successful acknowledgement never reaches the client.
                 break;
             }
-            write(&mut stream, &reply);
+            write(&mut stream, &reply).unwrap();
         }
         drop(stream);
         host.disconnected([3; 32]);
@@ -238,7 +236,7 @@ fn a_fresh_client_process_observes_a_successful_start_after_its_reply_is_lost() 
                 assert_eq!(lease.session, original.session);
                 attached = true;
             }
-            write(&mut stream, &reply);
+            write(&mut stream, &reply).unwrap();
         }
         host.disconnected([5; 32]);
         reopened.finish();
@@ -264,7 +262,7 @@ fn client_process() {
     stream
         .set_read_timeout(Some(Duration::from_secs(30)))
         .unwrap();
-    write(&mut stream, &Request::Inventory);
+    write(&mut stream, &Request::Inventory).unwrap();
     let Some(Reply::Inventory { inventory, .. }) = read(&mut stream) else {
         panic!("inventory missing")
     };
@@ -297,7 +295,7 @@ fn client_process() {
         |request| {
             presenter.send(request, |request| {
                 exchange(&state, pane, request, |request| {
-                    write(&mut stream, request);
+                    write(&mut stream, request).map_err(|_| ServerError::Protocol)?;
                     let reply = read::<Reply>(&mut stream).ok_or(ServerError::Protocol)?;
                     if matches!(reply, Reply::Takeover { .. }) {
                         state.take_over();
