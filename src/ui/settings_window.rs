@@ -647,6 +647,9 @@ impl SettingsWindow {
             if !settings.editor.flush_for_shutdown(cx) {
                 eprintln!("SpaceTerm Settings could not be saved during shutdown");
             }
+            // The direct registry ends with the application, so this window lets go of it and
+            // stops following it.
+            settings.direct_routes = None;
             async {}
         })
         .detach();

@@ -59,7 +59,7 @@ pub(super) struct DirectRouteRows {
     pub(super) join_tick: Option<Task<()>>,
     /// Why the latest step on a route didn't take effect.
     pub(super) problem: Option<(DirectRouteId, AccessFailure)>,
-    pub(super) _changes: Task<()>,
+    pub(super) _changes: crate::ui::direct_servers::DirectChanges,
     pub(super) _invitation_events: Subscription,
     pub(super) _work: Option<Task<()>>,
 }
@@ -100,18 +100,19 @@ impl DirectRouteRows {
                 _ => {}
             },
         );
-        let changes = connections.subscribe();
-        let follow = cx.spawn(async move |settings, cx| {
-            while changes.recv().await.is_ok() {
-                let followed = settings.update(cx, |settings, cx| {
-                    settings.follow_join(cx);
-                    settings.sync_server_location(cx);
-                    cx.notify();
-                });
-                if followed.is_err() {
-                    break;
+        let follow = crate::ui::direct_servers::DirectChanges::follow(&connections, |changes| {
+            cx.spawn(async move |settings, cx| {
+                while changes.recv().await.is_ok() {
+                    let followed = settings.update(cx, |settings, cx| {
+                        settings.follow_join(cx);
+                        settings.sync_server_location(cx);
+                        cx.notify();
+                    });
+                    if followed.is_err() {
+                        break;
+                    }
                 }
-            }
+            })
         });
         Self {
             connections,

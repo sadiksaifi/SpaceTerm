@@ -18,22 +18,26 @@ impl WorkspaceManager {
         let Some(connections) = crate::ui::direct_servers::installed(cx) else {
             return;
         };
-        let changes = connections.subscribe();
-        self._direct_servers = Some(cx.spawn_in(window, async move |manager, cx| {
-            loop {
-                if manager
-                    .update_in(cx, |manager, window, cx| {
-                        manager.sync_direct_servers(window, cx)
-                    })
-                    .is_err()
-                {
-                    break;
-                }
-                if changes.recv().await.is_err() {
-                    break;
-                }
-            }
-        }));
+        self._direct_servers = Some(crate::ui::direct_servers::DirectChanges::follow(
+            &connections,
+            |changes| {
+                cx.spawn_in(window, async move |manager, cx| {
+                    loop {
+                        if manager
+                            .update_in(cx, |manager, window, cx| {
+                                manager.sync_direct_servers(window, cx)
+                            })
+                            .is_err()
+                        {
+                            break;
+                        }
+                        if changes.recv().await.is_err() {
+                            break;
+                        }
+                    }
+                })
+            },
+        ));
     }
 
     /// Binds each newly presented direct route and withdraws each one the registry no longer

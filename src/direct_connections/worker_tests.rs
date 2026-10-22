@@ -222,3 +222,73 @@ fn direct_scheduler_bounds_route_work_and_reserves_revocation_capacity() {
         Event::Connect(5)
     );
 }
+
+#[test]
+fn direct_subscription_close_waits_for_an_inflight_wake_and_prevents_later_notifications() {
+    use std::future::Future;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::task::{Context, Poll, Wake, Waker};
+
+    struct InFlightWake {
+        entered: Sender<()>,
+        release: Arc<Release>,
+        calls: AtomicUsize,
+    }
+    impl Wake for InFlightWake {
+        fn wake(self: Arc<Self>) {
+            self.calls.fetch_add(1, Ordering::AcqRel);
+            self.entered.send(()).unwrap();
+            self.release.wait();
+        }
+    }
+
+    let (connections, _events, _network_release) = fixture(0, 0, false);
+    let receiver = connections.subscribe();
+    let release = Arc::new(Release::default());
+    let _release_on_failure = ReleaseOnDrop(release.clone());
+    let (entered, waking) = mpsc::channel();
+    let wake = Arc::new(InFlightWake {
+        entered,
+        release: release.clone(),
+        calls: AtomicUsize::new(0),
+    });
+    let waker = Waker::from(wake.clone());
+    let mut context = Context::from_waker(&waker);
+    let mut receive = Box::pin(receiver.recv());
+    assert!(matches!(receive.as_mut().poll(&mut context), Poll::Pending));
+
+    let notifier = connections.clone();
+    let notification = std::thread::spawn(move || notifier.0.notify());
+    waking.recv_timeout(Duration::from_secs(3)).unwrap();
+    let closer = connections.clone();
+    let closing_receiver = receiver.clone();
+    let (started, closing) = mpsc::channel();
+    let (completed, closed) = mpsc::channel();
+    let close = std::thread::spawn(move || {
+        started.send(()).unwrap();
+        closer.close_subscription(&closing_receiver);
+        completed.send(()).unwrap();
+    });
+    closing.recv_timeout(Duration::from_secs(3)).unwrap();
+    let waits_for_wake = matches!(
+        closed.recv_timeout(Duration::from_millis(150)),
+        Err(mpsc::RecvTimeoutError::Timeout)
+    );
+    release.unblock();
+    notification.join().unwrap();
+    close.join().unwrap();
+    assert!(
+        waits_for_wake,
+        "closing a view must fence a notification that already owns its task waker"
+    );
+
+    drop(receive);
+    assert!(receiver.is_closed());
+    assert_eq!(receiver.try_recv(), Ok(()));
+    connections.0.notify();
+    assert_eq!(
+        receiver.try_recv(),
+        Err(async_channel::TryRecvError::Closed)
+    );
+    assert_eq!(wake.calls.load(Ordering::Acquire), 1);
+}

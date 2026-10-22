@@ -247,6 +247,15 @@ impl DirectConnections {
         receiver
     }
 
+    /// Closes a view's subscription before its local task or executor is dropped.
+    /// When this returns, no notification for this receiver remains in flight.
+    pub(crate) fn close_subscription(&self, receiver: &async_channel::Receiver<()>) {
+        // Wait for earlier notify calls to finish before closing this receiver.
+        let mut changes = self.0.changes.lock().unwrap_or_else(|e| e.into_inner());
+        receiver.close();
+        changes.retain(|sender| !sender.is_closed());
+    }
+
     pub(crate) fn routes(&self) -> Vec<(DirectRouteId, DirectRouteStatus)> {
         self.0
             .state

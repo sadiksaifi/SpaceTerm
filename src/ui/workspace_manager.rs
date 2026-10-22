@@ -335,7 +335,7 @@ pub(crate) struct WorkspaceManager {
     /// Follows the desktop's SSH server connections while the window lives.
     _ssh_servers: Option<Task<()>>,
     /// Follows the desktop's direct network connections while the window lives.
-    _direct_servers: Option<Task<()>>,
+    _direct_servers: Option<crate::ui::direct_servers::DirectChanges>,
     /// Follows the submitted remote maintenance operations, so each machine heading offers what
     /// its server's state allows.
     _remote_maintenance: Option<Task<()>>,
@@ -400,6 +400,8 @@ impl WorkspaceManager {
             for shared in manager.shared.iter_mut() {
                 shared.flush_client_views();
             }
+            // The direct registry outlives this window's interest in it only until quit.
+            manager._direct_servers = None;
             async {}
         })
         .detach();

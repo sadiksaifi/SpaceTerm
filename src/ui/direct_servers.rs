@@ -6,7 +6,7 @@
 //! a status performs no network work and asks for no credential, so rendering stays quiet; only
 //! a step the person chooses may ask the system for this device's key.
 
-use gpui::{App, Global};
+use gpui::{App, Global, Task};
 
 use crate::direct_connections::{
     DirectConnections, DirectRouteStatus, PendingUnpair, RefusalReason, UnavailableReason,
@@ -20,16 +20,62 @@ impl Global for InstalledDirectServers {}
 
 /// Makes `connections` the desktop's registry. The first installation wins, so a later window
 /// reuses it.
+///
+/// Quitting the application lets go of the registry, so its background worker ends with the
+/// application rather than waking work the application no longer runs. Unfinished requests are
+/// retained and resume when SpaceTerm next opens.
 pub(crate) fn install(connections: DirectConnections, cx: &mut App) {
-    if cx.try_global::<InstalledDirectServers>().is_none() {
-        cx.set_global(InstalledDirectServers(connections));
+    if cx.has_global::<InstalledDirectServers>() {
+        return;
     }
+    cx.set_global(InstalledDirectServers(connections));
+    cx.on_app_quit(|cx| {
+        if cx.has_global::<InstalledDirectServers>() {
+            drop(cx.remove_global::<InstalledDirectServers>());
+        }
+        async {}
+    })
+    .detach();
 }
 
 /// The desktop's registry, or `None` in a build or test that installs none.
 pub(crate) fn installed(cx: &App) -> Option<DirectConnections> {
     cx.try_global::<InstalledDirectServers>()
         .map(|installed| installed.0.clone())
+}
+
+/// One view's subscription to the registry's changes.
+///
+/// The registry notifies from its own worker threads. Dropping this closes the subscription on the
+/// view's thread before the view's task goes, and the registry fences that close against any
+/// notification already underway, so no worker can wake a task the view no longer runs. The
+/// registry itself keeps working for the rest of the application.
+pub(crate) struct DirectChanges {
+    connections: DirectConnections,
+    receiver: async_channel::Receiver<()>,
+    _follow: Task<()>,
+}
+
+impl DirectChanges {
+    /// Subscribes to `connections` and hands the subscription to the task `follow` starts.
+    pub(crate) fn follow(
+        connections: &DirectConnections,
+        follow: impl FnOnce(async_channel::Receiver<()>) -> Task<()>,
+    ) -> Self {
+        let receiver = connections.subscribe();
+        let task = follow(receiver.clone());
+        Self {
+            connections: connections.clone(),
+            receiver,
+            _follow: task,
+        }
+    }
+}
+
+impl Drop for DirectChanges {
+    fn drop(&mut self) {
+        self.connections.close_subscription(&self.receiver);
+    }
 }
 
 /// What a person can do with one direct route from the Servers Settings Section.
@@ -302,7 +348,48 @@ pub(crate) fn present_unpair(pending: &PendingUnpair) -> (String, &'static [Unpa
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    use gpui::TestAppContext;
+
     use super::*;
+
+    /// A view that let go of its subscription hears nothing more, even from a notification made on
+    /// a registry thread. The test scheduler refuses any wake from another thread, so a subscription
+    /// left registered fails the test as it ends.
+    #[gpui::test]
+    fn a_released_subscription_is_never_woken_from_a_registry_thread(cx: &mut TestAppContext) {
+        let (direct, route) = crate::direct_connections::tests::offline("studio");
+        // Disconnecting closes the route's gate, so an attempt already underway ends without
+        // notifying, and only this test's own steps notify.
+        direct.disconnect(&route);
+        let heard = Rc::new(Cell::new(0_usize));
+        let changes = {
+            let heard = Rc::clone(&heard);
+            cx.update(|cx| {
+                DirectChanges::follow(&direct, |changes| {
+                    cx.spawn(async move |_| {
+                        while changes.recv().await.is_ok() {
+                            heard.set(heard.get() + 1);
+                        }
+                    })
+                })
+            })
+        };
+        direct.disconnect(&route);
+        cx.run_until_parked();
+        assert_eq!(heard.get(), 1, "a live subscription hears the registry");
+
+        drop(changes);
+        let notifier = direct.clone();
+        std::thread::spawn(move || notifier.disconnect(&route))
+            .join()
+            .expect("the registry thread notifies");
+        cx.run_until_parked();
+
+        assert_eq!(heard.get(), 1, "a released subscription hears nothing more");
+    }
 
     fn pending(state: UnpairState) -> PendingUnpair {
         PendingUnpair {

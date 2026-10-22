@@ -370,6 +370,9 @@ fn closing_pair_device_withdraws_its_invitation(cx: &mut TestAppContext) {
 fn unpairing_this_device_while_offline_removes_it_at_once_and_says_revocation_is_unconfirmed(
     cx: &mut TestAppContext,
 ) {
+    // The registry's worker tries the offline server on its own thread and wakes the window from
+    // there.
+    cx.executor().allow_parking();
     let access = ScriptedAccess::new(Listener::Off);
     let (direct, route) = crate::direct_connections::tests::offline("studio");
     let (_, cx) = open_servers_with(&access, Some(direct.clone()), cx);
@@ -398,6 +401,8 @@ fn unpairing_this_device_while_offline_removes_it_at_once_and_says_revocation_is
 
 #[gpui::test]
 fn connect_on_a_disconnected_direct_route_reaches_only_that_route(cx: &mut TestAppContext) {
+    // Connect starts the registry's worker, which tries the offline server on its own thread.
+    cx.executor().allow_parking();
     let access = ScriptedAccess::new(Listener::Off);
     let (direct, route) = crate::direct_connections::tests::offline("studio");
     direct.disconnect(&route);
