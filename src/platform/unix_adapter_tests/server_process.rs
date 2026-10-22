@@ -1040,6 +1040,9 @@ fn native_account_server_maintenance_originals(cx: &mut gpui::TestAppContext) {
         &backend,
         &target,
         stopped_original,
+        &crate::ssh::server_maintenance::SubmittedKind::Service(
+            spaceterm_server::service::maintenance::Action::Stop,
+        ),
         MaintenanceAuthority::Quiet,
         &cancellation,
         &|_| {},
