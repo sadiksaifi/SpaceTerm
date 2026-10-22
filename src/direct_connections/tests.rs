@@ -243,11 +243,29 @@ pub(crate) fn offline_with_lock(label: &str) -> (DirectConnections, DirectRouteI
     (connections, id, lock)
 }
 
+/// Offline saved routes named `labels`, in order, each keeping its own credential.
+pub(crate) fn offline_routes(labels: &[&str]) -> (DirectConnections, Vec<DirectRouteId>) {
+    let (connections, ids, _, _) = offline_fixture_routes(labels);
+    (connections, ids)
+}
+
 fn offline_fixture(
     label: &str,
 ) -> (
     DirectConnections,
     DirectRouteId,
+    CredentialLock,
+    Arc<MemoryRecords>,
+) {
+    let (connections, ids, lock, records) = offline_fixture_routes(&[label]);
+    (connections, ids[0], lock, records)
+}
+
+fn offline_fixture_routes(
+    labels: &[&str],
+) -> (
+    DirectConnections,
+    Vec<DirectRouteId>,
     CredentialLock,
     Arc<MemoryRecords>,
 ) {
@@ -282,19 +300,22 @@ fn offline_fixture(
             Err(DirectError::Transport)
         }
     }
-    let mut route = saved(1, 5);
-    route.route.label = label.to_owned();
-    route.active = true;
-    let id = route.route.id;
     let records = Arc::new(MemoryRecords::default());
-    records.0.lock().unwrap().routes.push(route);
     let credentials = Arc::new(Credentials::default());
-    credentials
-        .insert(
-            &[5; 32],
-            DeviceCredential::generate().unwrap().expose_bytes(),
-        )
-        .unwrap();
+    let mut ids = Vec::new();
+    for (index, label) in (0_u8..).zip(labels) {
+        let mut route = saved(1 + index, 5 + index);
+        route.route.label = (*label).to_owned();
+        route.active = true;
+        ids.push(route.route.id);
+        records.0.lock().unwrap().routes.push(route);
+        credentials
+            .insert(
+                &[5 + index; 32],
+                DeviceCredential::generate().unwrap().expose_bytes(),
+            )
+            .unwrap();
+    }
     let connections = DirectConnections::new(
         "spaceterm-development",
         records.clone(),
@@ -302,7 +323,7 @@ fn offline_fixture(
         Arc::new(OfflineNetwork),
     );
     connections.resume_retained();
-    (connections, id, CredentialLock(credentials), records)
+    (connections, ids, CredentialLock(credentials), records)
 }
 
 fn await_condition(mut condition: impl FnMut() -> bool) {

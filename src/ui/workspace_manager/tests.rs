@@ -9367,6 +9367,49 @@ fn a_direct_network_heading_should_act_on_its_own_route_and_never_on_ssh(cx: &mu
     );
 }
 
+/// Two direct routes that carry the same server name, such as an earlier pairing and a newer
+/// one to the same computer, keep separate headings: assistive technology reaches each one, and
+/// a command from one heading's menu reaches that route alone.
+#[gpui::test]
+fn same_named_direct_routes_should_keep_separate_headings_and_commands(cx: &mut TestAppContext) {
+    use crate::direct_connections::DirectRouteStatus;
+
+    let (harness, cx) = MachineGroupsHarness::new(cx);
+    let (_ssh, _connects) = waiting_ssh_registry(cx);
+    let (direct, routes) = crate::direct_connections::tests::offline_routes(&["studio", "studio"]);
+    cx.update(|_, cx| crate::ui::direct_servers::install(direct.clone(), cx));
+    harness.publish(ServerKey::LOCAL, &harness.local, &[("Here", 1)], cx);
+    redraw(cx);
+
+    let headings = heading_names(cx)
+        .into_iter()
+        .filter(|name| name.starts_with("studio, Direct network"))
+        .count();
+    assert_eq!(
+        headings,
+        2,
+        "each route has its own heading, got {:?}",
+        heading_names(cx)
+    );
+
+    right_click("machine-heading-studio", cx);
+    click("machine-menu-disconnect", cx);
+
+    let disconnected = routes
+        .iter()
+        .filter(|route| direct.status(route) == Some(DirectRouteStatus::Disconnected))
+        .count();
+    assert_eq!(disconnected, 1, "Disconnect reaches only its own route");
+    assert_eq!(
+        heading_names(cx)
+            .iter()
+            .filter(|name| name.starts_with("studio, Direct network"))
+            .count(),
+        1,
+        "the other route keeps its heading"
+    );
+}
+
 struct SettingsMovement;
 
 impl crate::platform::window_movement::WindowMovementFactory for SettingsMovement {

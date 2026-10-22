@@ -1120,9 +1120,15 @@ impl WorkspaceSidebar {
         let (leading, trailing) = row_padding(appearance, cx);
         let label = section.label.clone();
         let selector = format!("machine-heading-{label}");
+        // Element identity follows the heading's route, so same-named routes keep their own
+        // state, menu and accessibility node. The name stays the label people read.
+        let identity = match item {
+            SidebarItem::Machine(id) => format!("machine-{id}"),
+            SidebarItem::Workspace(_) => selector.clone(),
+        };
         let caption = appearance.typography.style(TextRole::Caption);
         let heading = div()
-            .id(SharedString::from(selector.clone()))
+            .id(SharedString::from(format!("{identity}-heading")))
             .debug_selector({
                 let selector = selector.clone();
                 move || selector.clone()
@@ -1174,39 +1180,36 @@ impl WorkspaceSidebar {
         let connect = (section.awaiting_connection && section.connects).then(|| {
             let target = target.clone();
             let sidebar = sidebar.clone();
-            spaceterm_ui::Button::new(
-                SharedString::from(format!("machine-connect-{label}")),
-                "Connect",
-            )
-            .variant(spaceterm_ui::ButtonVariant::Link)
-            .size(spaceterm_ui::ButtonSize::Compact)
-            .tab_stop(true)
-            .debug_selector(format!("machine-connect-{label}"))
-            .accessibility_description(SharedString::from(format!(
-                "Connect to {label} to show its Workspaces"
-            )))
-            .on_activate(move |_, _, cx| {
-                let target = target.clone();
-                let _ = sidebar.update(cx, |_, cx| {
-                    cx.emit(SidebarEvent::Machine {
-                        target,
-                        command: MachineMenuCommand::Connect,
+            spaceterm_ui::Button::new(SharedString::from(format!("{identity}-connect")), "Connect")
+                .variant(spaceterm_ui::ButtonVariant::Link)
+                .size(spaceterm_ui::ButtonSize::Compact)
+                .tab_stop(true)
+                .debug_selector(format!("machine-connect-{label}"))
+                .accessibility_description(SharedString::from(format!(
+                    "Connect to {label} to show its Workspaces"
+                )))
+                .on_activate(move |_, _, cx| {
+                    let target = target.clone();
+                    let _ = sidebar.update(cx, |_, cx| {
+                        cx.emit(SidebarEvent::Machine {
+                            target,
+                            command: MachineMenuCommand::Connect,
+                        });
                     });
-                });
-            })
+                })
         });
         let entries = machine_menu_entries(section);
         // A machine without a server SpaceTerm can act on has no menu, only its name.
         let heading = if entries.is_empty() {
             div()
-                .id(SharedString::from(format!("{selector}-name")))
+                .id(SharedString::from(format!("{identity}-name")))
                 .role(accesskit::Role::Heading)
                 .aria_label(accessible)
                 .child(heading)
                 .into_any_element()
         } else {
             ContextMenu::new(
-                SharedString::from(format!("{selector}-menu")),
+                SharedString::from(format!("{identity}-menu")),
                 format!("Server actions for {label}"),
                 heading,
                 entries,
@@ -1236,7 +1239,7 @@ impl WorkspaceSidebar {
         };
         let empty = (section.workspaces == 0).then(|| {
             div()
-                .id(SharedString::from(format!("machine-empty-{label}")))
+                .id(SharedString::from(format!("{identity}-empty")))
                 .role(accesskit::Role::Label)
                 .aria_value(empty_label)
                 .debug_selector({

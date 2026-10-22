@@ -124,7 +124,7 @@ pub(super) enum MachineMenuCommand {
 }
 
 /// The server a machine heading presents, by the route this client reaches it.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum MachineTarget {
     Local,
     Ssh(SshDestination),
@@ -376,7 +376,9 @@ pub(super) struct WorkspaceSidebar {
     /// Each heading's strip identity, parallel to `sections`, kept for the life of its label so a
     /// heading that returns keeps its place in the strip's motion.
     section_ids: Vec<u64>,
-    section_identities: std::collections::HashMap<SharedString, u64>,
+    /// Each heading's stable identity, by the server route it presents. Two routes may carry
+    /// the same name, such as a saved direct route and a newer one to the same computer.
+    section_identities: std::collections::HashMap<MachineTarget, u64>,
     remote_unavailable: Option<String>,
     layout: SidebarLayout,
     scroll_handle: ScrollHandle,
@@ -837,7 +839,7 @@ impl WorkspaceSidebar {
             .map(|section| {
                 // The map only grows, so its size names each new heading uniquely.
                 let next = identities.len() as u64;
-                *identities.entry(section.label.clone()).or_insert(next)
+                *identities.entry(section.target.clone()).or_insert(next)
             })
             .collect();
         self.sections = sections;
