@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
-use gpui::{App, Entity, EventEmitter, Global, SharedString, Window, WindowId};
+use gpui::{App, AppContext, Entity, EventEmitter, Global, SharedString, Window, WindowId};
 
 use crate::domain::SshDestination;
 use crate::platform::app_paths::AppPaths;

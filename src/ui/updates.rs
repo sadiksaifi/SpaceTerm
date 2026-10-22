@@ -9,8 +9,8 @@ pub(super) use dropdown::UpdateControl;
 pub(crate) use launch::{request_window_close as request_launch_window_close, show_launch};
 
 use gpui::{
-    AnyWindowHandle, App, Context, Entity, Global, SharedString, Subscription, Window,
-    WindowHandle, actions,
+    AnyWindowHandle, App, BorrowAppContext, Context, Entity, Global, SharedString, Subscription,
+    Window, WindowHandle, actions,
 };
 use spaceterm_ui::{
     Alert, AlertIntent, AlertOutcome, ModalAction, ModalActionEmphasis, ModalActionIntent,
