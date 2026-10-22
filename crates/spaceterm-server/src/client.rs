@@ -14,6 +14,36 @@ struct ClientIdentity {
     client: [u8; 32],
 }
 
+/// Opaque process-local identity for retaining client state across transport replacement.
+/// It grants no connection authority and deliberately has no diagnostic or retained encoding.
+#[derive(Clone, Eq, PartialEq, Hash)]
+pub struct ClientScope {
+    application: String,
+    directory: std::path::PathBuf,
+    account: String,
+    server: [u8; 32],
+    client: [u8; 32],
+    authority: ClientAuthority,
+}
+
+#[derive(Clone, Eq, PartialEq, Hash)]
+enum ClientAuthority {
+    Local,
+    Ssh(u32),
+    Direct {
+        pairing: [u8; 32],
+        public_key: [u8; 32],
+        certificate: [u8; 32],
+    },
+}
+
+/// Clones retain the same client identity binding and its attachment writer.
+#[derive(Default)]
+struct ClientCache {
+    attachments: std::sync::OnceLock<Result<crate::attachments::Attachments, ServerError>>,
+    scope: std::sync::OnceLock<ClientScope>,
+}
+
 /// Resolving this handle never reads or writes storage and never starts a process.
 #[derive(Clone)]
 pub struct LocalServer {
@@ -26,8 +56,7 @@ pub struct LocalServer {
     remote: Option<std::sync::Arc<RemoteRoute>>,
     direct: Option<std::sync::Arc<DirectRoute>>,
     shared_pane: std::sync::Arc<crate::pane::SharedPaneConnection>,
-    attachments:
-        std::sync::Arc<std::sync::OnceLock<Result<crate::attachments::Attachments, ServerError>>>,
+    client_cache: std::sync::Arc<ClientCache>,
 }
 struct RemoteRoute {
     expected: crate::account_bridge::AccountBridgeIdentity,
@@ -52,6 +81,48 @@ struct RemoteRecord {
 }
 
 impl LocalServer {
+    /// Reads previously bound identity fences without storage, network or credential access.
+    /// SSH and local handles bind after successful protocol/capability admission. Direct
+    /// handles bind their explicit retained pairing at construction. Clones share the binding;
+    /// a fresh handle must establish its own. Live admission still checks every transport.
+    pub fn client_scope(&self) -> Result<ClientScope, ServerError> {
+        self.client_cache
+            .scope
+            .get()
+            .cloned()
+            .ok_or(ServerError::AuthenticationRefused)
+    }
+
+    fn scope_for(&self, client: [u8; 32], server: [u8; 32]) -> ClientScope {
+        ClientScope {
+            application: self.identity.clone(),
+            directory: self.paths.data.clone(),
+            account: self.account.clone(),
+            server,
+            client,
+            authority: if let Some(remote) = &self.remote {
+                ClientAuthority::Ssh(remote.expected.account)
+            } else if let Some(direct) = &self.direct {
+                ClientAuthority::Direct {
+                    pairing: direct.paired.pairing,
+                    public_key: direct.paired.pin.public_key,
+                    certificate: direct.paired.pin.certificate,
+                }
+            } else {
+                ClientAuthority::Local
+            },
+        }
+    }
+
+    fn bind_scope(&self, scope: ClientScope) -> Result<(), ServerError> {
+        let bound = self.client_cache.scope.get_or_init(|| scope.clone());
+        if *bound != scope {
+            // A handle never silently rebinds retained presentation state to another identity.
+            return Err(ServerError::AuthenticationRefused);
+        }
+        Ok(())
+    }
+
     fn client_directory(&self) -> Result<Directory, ServerError> {
         let directory =
             Directory::open(&self.paths.data.join("clients").join(&self.account), true)?;
@@ -134,11 +205,12 @@ impl LocalServer {
     }
 
     pub fn attachments(&self) -> Result<crate::attachments::Attachments, ServerError> {
-        if let Some(attachments) = self.attachments.get() {
+        if let Some(attachments) = self.client_cache.attachments.get() {
             return attachments.clone();
         }
         let server = self.server_id()?;
-        self.attachments
+        self.client_cache
+            .attachments
             .get_or_init(|| {
                 crate::attachments::Attachments::open(
                     self.client_directory()?,
@@ -184,7 +256,7 @@ impl LocalServer {
             remote: None,
             direct: None,
             shared_pane: std::sync::Arc::default(),
-            attachments: std::sync::Arc::default(),
+            client_cache: std::sync::Arc::default(),
         })
     }
     /// Retain one remote account route with the local client's existing journals, views and
@@ -220,6 +292,7 @@ impl LocalServer {
             expected,
             connector,
         }));
+        self.client_cache = std::sync::Arc::default();
         Ok(self)
     }
     /// Whether this route has owning-machine local file authority.
@@ -238,21 +311,26 @@ impl LocalServer {
     }
     fn authenticate(&self) -> Result<AuthenticatedStatus, ServerError> {
         let mut stream = host::connect(&self.paths)?;
+        let client = self.client_id()?;
+        let server = self.server_id()?;
         let mut status = protocol::admit_client(
             &mut stream,
-            (&self.client_id()?, &self.client_name()),
-            &self.server_id()?,
+            (&client, &self.client_name()),
+            &server,
             &self.identity,
             &[protocol::MAJOR],
         )?;
         // Status is used by desktop startup too. Apply the same required-capability
         // admission as remote routes before reporting this server ready.
         crate::pane::PaneConnection::negotiate(stream)?;
+        self.bind_scope(self.scope_for(client, server))?;
         status.development_pane = true;
         Ok(status)
     }
     /// Admits a transport through its route's verified authority, without implicit Start.
-    fn connect_admitted(&self) -> Result<Box<dyn crate::transport::Transport>, ServerError> {
+    fn connect_admitted(
+        &self,
+    ) -> Result<(Box<dyn crate::transport::Transport>, ClientScope), ServerError> {
         if let Some(direct) = &self.direct {
             let mut connection = direct.connector.connect().map_err(ServerError::from)?;
             if connection.paired() != &direct.paired {
@@ -265,7 +343,10 @@ impl LocalServer {
                 &self.identity,
                 &[protocol::MAJOR],
             )?;
-            return Ok(Box::new(connection));
+            return Ok((
+                Box::new(connection),
+                self.scope_for(direct.paired.client, direct.paired.pin.server),
+            ));
         }
         if let Some(remote) = &self.remote {
             let client = self.client_id()?;
@@ -280,21 +361,29 @@ impl LocalServer {
                 &self.identity,
                 &[protocol::MAJOR],
             )?;
-            return Ok(Box::new(bridge));
+            return Ok((
+                Box::new(bridge),
+                self.scope_for(client, remote.expected.server),
+            ));
         }
         crate::service::check_admission(&self.paths)?;
         let mut stream = host::connect(&self.paths)?;
+        let client = self.client_id()?;
+        let server = self.server_id()?;
         protocol::admit_client(
             &mut stream,
-            (&self.client_id()?, &self.client_name()),
-            &self.server_id()?,
+            (&client, &self.client_name()),
+            &server,
             &self.identity,
             &[protocol::MAJOR],
         )?;
-        Ok(Box::new(stream))
+        Ok((Box::new(stream), self.scope_for(client, server)))
     }
     pub fn connect_pane(&self) -> Result<crate::pane::PaneConnection, ServerError> {
-        crate::pane::PaneConnection::negotiate(self.connect_admitted()?)
+        let (stream, scope) = self.connect_admitted()?;
+        let connection = crate::pane::PaneConnection::negotiate(stream)?;
+        self.bind_scope(scope)?;
+        Ok(connection)
     }
     /// Clones share a transport. Independent desktops retain distinct identities and views.
     pub fn connect_shared_pane(&self) -> Result<crate::pane::PaneConnection, ServerError> {
@@ -358,13 +447,19 @@ impl LocalServer {
             route.iter().map(|b| format!("{b:02x}")).collect::<String>()
         );
         self.direct = Some(std::sync::Arc::new(DirectRoute { paired, connector }));
+        self.client_cache = std::sync::Arc::default();
+        let direct = self
+            .direct
+            .as_ref()
+            .ok_or(ServerError::AuthenticationRefused)?;
+        self.bind_scope(self.scope_for(direct.paired.client, direct.paired.pin.server))?;
         Ok(self)
     }
     fn direct_manage(
         &self,
         request: crate::direct::Management,
     ) -> Result<crate::direct::ManagementReply, crate::direct::DirectError> {
-        let mut connection = self
+        let (mut connection, _) = self
             .connect_admitted()
             .map_err(crate::direct::DirectError::from)?;
         let mut wire = protocol::Wire::terminal(connection.as_mut())?;
@@ -651,6 +746,116 @@ mod tests {
     }
 
     #[test]
+    fn client_scopes_bind_after_admission_and_refuse_identity_changes_on_the_same_handle() {
+        use crate::pane::Request;
+        use std::os::unix::net::UnixStream;
+        struct Connector {
+            required: bool,
+        }
+        impl AccountConnector for Connector {
+            fn connect(&self) -> Result<AccountBridge, ServerError> {
+                let (client, mut peer) = UnixStream::pair().unwrap();
+                let required = self.required;
+                let worker = std::thread::spawn(move || {
+                    protocol::Wire::new(&mut peer)
+                        .unwrap()
+                        .write(&remote_identity())
+                        .unwrap();
+                    protocol::admit_server(&mut peer, &[7; 32], "spaceterm-development").unwrap();
+                    let mut wire = protocol::Wire::terminal(&mut peer).unwrap();
+                    assert!(matches!(
+                        wire.read::<Request>().unwrap(),
+                        Request::Capabilities
+                    ));
+                    wire.write(&serde_json::json!({"Capabilities": {
+                        "development_pane":true, "workspace_policy":required
+                    }}))
+                    .unwrap();
+                });
+                AccountBridge::from_streams(
+                    Box::new(client.try_clone().unwrap()),
+                    Box::new(client),
+                    Box::new(move || {
+                        worker.join().unwrap();
+                    }),
+                    &remote_identity(),
+                )
+            }
+        }
+        let root = std::env::temp_dir().canonicalize().unwrap().join(format!(
+            "st-client-scope-{:x}",
+            u64::from_be_bytes(protocol::random().unwrap()[..8].try_into().unwrap())
+        ));
+        let open = |name: &str, required| {
+            remote_fixture(
+                &root,
+                name,
+                remote_identity(),
+                Arc::new(Connector { required }),
+            )
+        };
+        let first = open("first", true);
+        assert!(matches!(
+            first.client_scope(),
+            Err(ServerError::AuthenticationRefused)
+        ));
+        assert!(
+            !root.exists(),
+            "reading the scope must perform no storage access"
+        );
+        drop(first.connect_pane().unwrap());
+        let scope = first.client_scope().unwrap();
+        assert!(first.clone().client_scope().unwrap() == scope);
+
+        let later = open("first", true);
+        assert!(
+            later.client_scope().is_err(),
+            "a new handle authenticates independently"
+        );
+        drop(later.connect_pane().unwrap());
+        assert!(later.client_scope().unwrap() == scope);
+        let other = open("other", true);
+        drop(other.connect_pane().unwrap());
+        assert!(other.client_scope().unwrap() != scope);
+
+        let refused = open("refused", false);
+        assert!(matches!(
+            refused.connect_pane(),
+            Err(ServerError::MissingRequiredCapability)
+        ));
+        assert!(
+            refused.client_scope().is_err(),
+            "failed admission cannot publish identity"
+        );
+
+        let directory = first.client_directory().unwrap();
+        directory
+            .write_json(
+                c"client.json",
+                &ClientIdentity {
+                    format: "account-local-1".into(),
+                    client: [19; 32],
+                },
+            )
+            .unwrap();
+        assert!(
+            matches!(
+                first.connect_pane(),
+                Err(ServerError::AuthenticationRefused)
+            ),
+            "an existing handle cannot transfer its original controls to a replacement identity"
+        );
+        assert!(
+            first.client_scope().unwrap() == scope,
+            "a failed rebind retains only the original fences"
+        );
+        let replacement = open("first", true);
+        drop(replacement.connect_pane().unwrap());
+        assert!(replacement.client_scope().unwrap() != scope);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn named_clients_keep_independent_remote_identities_for_the_same_route() {
         let root = std::env::temp_dir().canonicalize().unwrap().join(format!(
             "st-remote-{:x}",
@@ -880,7 +1085,7 @@ mod tests {
             remote: None,
             direct: None,
             shared_pane: std::sync::Arc::default(),
-            attachments: std::sync::Arc::default(),
+            client_cache: std::sync::Arc::default(),
         };
         let subscription = server.clone();
         assert!(matches!(
@@ -918,7 +1123,7 @@ mod tests {
             remote: None,
             direct: None,
             shared_pane: std::sync::Arc::default(),
-            attachments: std::sync::Arc::default(),
+            client_cache: std::sync::Arc::default(),
         };
         let data = Directory::open(&server.paths.data, true).unwrap();
         let stopped = serde_json::json!({"installation": "a".repeat(64), "stopped": true, "installed": true, "run": null});
@@ -954,7 +1159,7 @@ mod tests {
             remote: None,
             direct: None,
             shared_pane: std::sync::Arc::default(),
-            attachments: std::sync::Arc::default(),
+            client_cache: std::sync::Arc::default(),
         };
         let first = make("first");
         let second = make("second");

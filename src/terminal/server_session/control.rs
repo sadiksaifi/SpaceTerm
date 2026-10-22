@@ -20,15 +20,56 @@ use crate::local_server::ServerError;
 
 /// The client-lifetime control records of one server's Panes.
 #[derive(Default)]
-pub(crate) struct PaneControls(Mutex<HashMap<Id, Arc<PaneControl>>>);
+pub(crate) struct PaneControls {
+    panes: Mutex<HashMap<Id, Arc<PaneControl>>>,
+    refusal: Option<ServerError>,
+}
+
+#[derive(Clone, Eq, PartialEq, Hash)]
+pub(crate) enum ControlRoute {
+    Ssh(String),
+    Direct(Id),
+}
+
+/// Process-lifetime controls, independent of a presented writer or live transport.
+/// A route's original identity can reconnect; a different identity gets independent controls.
+#[derive(Default)]
+pub(crate) struct PaneControlRegistry {
+    clients: HashMap<(ControlRoute, spaceterm_server::ClientScope), Arc<PaneControls>>,
+}
+impl PaneControlRegistry {
+    pub(crate) fn controls(
+        &mut self,
+        route: ControlRoute,
+        scope: Result<spaceterm_server::ClientScope, ServerError>,
+    ) -> Arc<PaneControls> {
+        match scope {
+            Ok(scope) => Arc::clone(self.clients.entry((route, scope)).or_default()),
+            Err(error) => Arc::new(PaneControls {
+                refusal: Some(error),
+                ..PaneControls::default()
+            }),
+        }
+    }
+}
+
 impl PaneControls {
+    pub(crate) fn admission(&self) -> Result<(), ServerError> {
+        self.refusal.map_or(Ok(()), Err)
+    }
+
     pub(super) fn pane(&self, pane: Id) -> Arc<PaneControl> {
         Arc::clone(
-            self.0
+            self.panes
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .entry(pane)
-                .or_default(),
+                .or_insert_with(|| {
+                    Arc::new(PaneControl {
+                        refusal: self.refusal,
+                        ..PaneControl::default()
+                    })
+                }),
         )
     }
 
@@ -41,7 +82,7 @@ impl PaneControls {
             .flat_map(|tab| &tab.panes)
             .map(|pane| pane.id)
             .collect();
-        self.0
+        self.panes
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .retain(|pane, _| live.contains(pane));
@@ -55,6 +96,7 @@ const LAST: u64 = (u64::MAX - 1) / 2;
 
 #[derive(Default)]
 pub(super) struct PaneControl {
+    refusal: Option<ServerError>,
     /// An interrupted start belongs to the retained Pane, including across window replacement.
     pub(super) recovery: Arc<Mutex<super::recovery::Recovery>>,
     /// Held across each request, so a successor's claim waits for an in-flight request.
@@ -139,6 +181,9 @@ impl Presenter {
         let mut floor = self.control.turn.lock().unwrap_or_else(|e| e.into_inner());
         if !self.current() {
             return Err(ServerError::NotRunning);
+        }
+        if let Some(error) = self.control.refusal {
+            return Err(error);
         }
         if let Request::Focus { generation, .. } = request {
             // Count every generation that reaches the wire, even if its reply is lost.

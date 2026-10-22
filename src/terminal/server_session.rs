@@ -12,7 +12,7 @@ use super::session::clipboard::ClipboardAuthority;
 use super::session::*;
 use super::{emulator::*, geometry::TerminalGeometry, key::*};
 use crate::local_server::{LocalServer, ServerError};
-pub(crate) use control::PaneControls;
+pub(crate) use control::{ControlRoute, PaneControlRegistry, PaneControls};
 use effects::ClientEffects;
 use spaceterm_server::pane::{self, Lease, PaneSize, Reply, Request};
 use std::sync::{
