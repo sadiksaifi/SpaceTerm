@@ -3388,6 +3388,30 @@ mod tests {
                 },
             )
         };
+        let wait = |host: &mut crate::runtime::SharedWorkspaceHost, marker: Option<&str>| {
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            loop {
+                if let Reply::Screen(screen) =
+                    host.request([1; 32], [1; 32], Request::Poll { lease })
+                    && screen.rows.iter().any(|row| {
+                        let line = row
+                            .iter()
+                            .map(|cell| cell.text.as_str())
+                            .collect::<String>();
+                        marker.map_or(!line.trim().is_empty(), |marker| line.trim_end() == marker)
+                    })
+                {
+                    break;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "fixture PTY did not reach {marker:?}"
+                );
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        };
+        // Wait for the shell to finish its initial terminal setup before sending typeahead.
+        wait(&mut host, None);
         assert!(matches!(
             send(&mut host, KeyInput::text_input(command)),
             Reply::Unchanged
@@ -3397,29 +3421,7 @@ mod tests {
         enter.logical_key = "enter".into();
         enter.text = None;
         assert!(matches!(send(&mut host, enter), Reply::Unchanged));
-        let wait = |host: &mut crate::runtime::SharedWorkspaceHost, marker: &str| {
-            let deadline = std::time::Instant::now() + Duration::from_secs(10);
-            loop {
-                if let Reply::Screen(screen) =
-                    host.request([1; 32], [1; 32], Request::Poll { lease })
-                    && screen.rows.iter().any(|row| {
-                        row.iter()
-                            .map(|cell| cell.text.as_str())
-                            .collect::<String>()
-                            .trim_end()
-                            == marker
-                    })
-                {
-                    break;
-                }
-                assert!(
-                    std::time::Instant::now() < deadline,
-                    "fixture PTY did not finish"
-                );
-                std::thread::sleep(Duration::from_millis(5));
-            }
-        };
-        wait(&mut host, "READY");
+        wait(&mut host, Some("READY"));
         let mut adapter = Adapter::new();
         adapter.active.lease = lease;
         let outcome = adapter.handle.commit_input_method(&text).unwrap();
@@ -3444,7 +3446,7 @@ mod tests {
         assert!(chunks >= 4);
         assert_eq!(outcome.try_recv().unwrap(), InputMethodOutcome::Written);
         let digest = format!("{:x}", Sha256::digest(expected.as_bytes()));
-        wait(&mut host, &digest);
+        wait(&mut host, Some(&digest));
         host.shutdown().unwrap();
     }
 
