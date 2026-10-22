@@ -394,6 +394,15 @@ pub(crate) mod testing {
             self.1.lock().unwrap().push(read.clone());
             match read {
                 Read::Settings => Ok(ReadReply::Settings(self.0.lock().unwrap().clone())),
+                Read::Context { .. } => Ok(ReadReply::Context {
+                    settings: self.0.lock().unwrap().clone(),
+                    home: "/srv/home".into(),
+                    branches: spaceterm_server::worktree::Branches {
+                        local: vec!["main".into()],
+                        remote: Vec::new(),
+                    },
+                }),
+                Read::Location { location, .. } => Ok(ReadReply::Location(location.into())),
                 _ => Err(Error::Unavailable),
             }
         }

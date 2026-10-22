@@ -12138,6 +12138,44 @@ mod shared_repositories {
         );
     }
 
+    #[gpui::test]
+    fn a_new_shared_worktree_uses_the_owning_servers_location(cx: &mut TestAppContext) {
+        use spaceterm_server::hierarchy::Mutation;
+        use spaceterm_server::worktree::{Branch, BranchName, Operation};
+        use spaceterm_ui::a11y_testing::A11yTree;
+
+        // This server uses ~/{branch}; the client's retained default is ~/.worktrees/....
+        let (harness, edits, _, cx) = ssh_harness(cx, published(1, "main", true));
+        cx.update(|window, cx| {
+            window.activate_window();
+            harness.manager.update(cx, |manager, cx| {
+                assert!(manager.new_worktree(harness.shared, window, cx));
+            });
+        });
+        cx.run_until_parked();
+        click("new-worktree-name", cx);
+        cx.simulate_input("topic/new");
+        cx.run_until_parked();
+        assert_eq!(
+            A11yTree::read(cx).node("Location")["aria"]["value"],
+            "~/topic-new"
+        );
+        click("modal-action-new-worktree-create", cx);
+        cx.run_until_parked();
+        assert_eq!(
+            edits.submitted(),
+            [Mutation::Worktree(Operation::Create {
+                workspace: WORKSPACE,
+                root: MAIN_ROOT.into(),
+                path: "/srv/home/topic-new".into(),
+                branch: Branch::New {
+                    name: "topic/new".into(),
+                    base: BranchName::Local("main".into()),
+                },
+            })]
+        );
+    }
+
     /// The server reads Git for a Workspace nobody is looking at, and a new reading reaches its
     /// row and every Pane even though its organization revision never changes.
     #[gpui::test]
