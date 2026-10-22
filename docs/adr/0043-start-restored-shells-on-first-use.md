@@ -9,3 +9,5 @@ The first Controlling Client supplies the initial terminal dimensions. The serve
 [ADR 0048](0048-end-all-sessions-from-the-selected-servers-settings.md) applies first-use startup after End All Sessions, requiring an explicit selection or Tab-opening action before an ended Session starts again.
 
 Reconnecting to a running server reuses its existing Terminal Sessions. Once a restored shell starts, it has the independent server-owned lifetime in [ADR 0030](0030-start-servers-at-boot-independently-of-clients.md).
+
+After a lost shell-start acknowledgement, a fully reopened client first observes the authenticated server's existing Pane and Terminal Session state. An unresolved original start permits no replacement start, including through Take Over. [ADR 0037](0037-resolve-shared-mutations-at-the-server.md) owns operation uncertainty; reconnecting or replacing a presentation does not settle it.

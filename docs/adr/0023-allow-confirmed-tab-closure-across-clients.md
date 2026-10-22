@@ -1,3 +1,9 @@
 # Allow confirmed Tab closure across clients
 
 An authorized SpaceTerm Client can close a Tab containing Panes controlled by another client after Close Confirmation. The confirmation states that the affected Terminal Sessions end for every client. [Pane control](0022-give-one-client-control-of-each-pane.md) governs input and dimensions, so the closing client does not need to take over those Panes first.
+
+An idle Pane or Tab controlled by this client closes directly. Running work uses the contextual busy-work rules; work controlled by another client always needs explicit confirmation. Kill Workspace always needs confirmation. Every shared close names the exact reviewed targets and live Terminal Sessions, including its Tab and Workspace removal consequences. Changed targets invalidate approval; optimistic removal under [ADR 0037](0037-resolve-shared-mutations-at-the-server.md) never broadens or renews it.
+
+Closing the last Pane closes its Tab. Closing the final Tab removes its Workspace and uses Workspace-level confirmation. The client activates another attached Workspace when one exists; otherwise it closes the Workspace Window and remains available in its menu bar or status area. Explicit Detach preserves server-owned work and may leave an empty attachment view.
+
+Close Tabs in a Worktree establishes a usable Tab outside the target Worktree before closing its Tabs. If fallback creation fails, the existing Tabs remain. This operation keeps Worktree files and branches; [ADR 0019](0019-create-and-remove-worktrees-by-running-git.md) owns their removal.

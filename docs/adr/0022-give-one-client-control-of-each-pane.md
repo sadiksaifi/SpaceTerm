@@ -17,3 +17,5 @@ Detach Workspace releases that client's control of every Pane in the Workspace. 
 While the server remains running, a reconnecting client resumes control of its previous Panes only if no other client has taken them over and it has not explicitly released control. This rule also applies when a client intentionally quits its GUI and later relaunches it. Terminal Sessions continue running at their last dimensions while disconnected or unclaimed. Reconnection preserves a deliberate takeover.
 
 Connection-loss presentation and input handling follow [ADR 0045](0045-freeze-terminal-screens-while-reconnecting.md).
+
+Take Over can start a retained Pane's shell, so it obeys [ADR 0043](0043-start-restored-shells-on-first-use.md)'s first-use and unresolved-start rules. Transferring control does not authorize a replacement for an unconfirmed original start under [ADR 0037](0037-resolve-shared-mutations-at-the-server.md).
