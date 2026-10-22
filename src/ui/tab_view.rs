@@ -492,6 +492,7 @@ pub(crate) struct TabView {
     tab_focus: FocusHandle,
     /// The server Tab this Tab presents, when a SpaceTerm Server owns it.
     shared: Option<SharedPaneBinding>,
+    parked_shared_panes: BTreeMap<PaneId, crate::domain::tab::ParkedPane<Entity<TerminalPane>>>,
     directory_recovery: Option<Entity<super::server_pane::DirectoryRecovery>>,
     /// Reads every shared Pane's connection status while the Tab lives.
     _shared_status: Option<gpui::Task<()>>,
@@ -576,6 +577,7 @@ impl TabView {
             close_tab_requested: false,
             tab_focus: cx.focus_handle(),
             shared: None,
+            parked_shared_panes: BTreeMap::new(),
             directory_recovery: None,
             _shared_status: None,
         }
@@ -873,6 +875,9 @@ impl TabView {
         self.sync_terminal_focus(cx);
         for terminal in self.tab.panes() {
             terminal.update(cx, |terminal, _| terminal.close());
+        }
+        for (_, parked) in std::mem::take(&mut self.parked_shared_panes) {
+            parked.payload().update(cx, |terminal, _| terminal.close());
         }
     }
 
@@ -2019,6 +2024,12 @@ impl TabView {
 /// Shared server Panes: how this Tab presents one server Tab's Panes, submits its edits, and
 /// refuses the operations the server path does not support yet.
 impl TabView {
+    pub(crate) fn canonicalize_shared_ids(&mut self) {
+        if let Some(shared) = self.shared.as_mut() {
+            shared.canonicalize();
+        }
+    }
+
     pub(crate) fn shared_layout(&self) -> Option<spaceterm_server::client_view::Layout> {
         use spaceterm_server::client_view::{Layout, LayoutNode};
         use spaceterm_server::hierarchy::Axis;
@@ -2154,9 +2165,10 @@ impl TabView {
     ) -> bool {
         use spaceterm_server::hierarchy::Axis;
 
-        if self.shared.is_none() {
+        let Some(shared) = self.shared.as_mut() else {
             return false;
-        }
+        };
+        shared.canonicalize();
         // Every Pane the server published joins before any Pane it removed leaves. One poll can
         // carry both a creation and the removal of what it was created beside, and a Tab that
         // lost its last known Pane first would lose the Panes that replaced it.
@@ -2165,7 +2177,53 @@ impl TabView {
             let Some(shared) = self.shared.as_ref() else {
                 break;
             };
-            if shared.holds(pane.id) {
+            if let Some(pane_id) = shared.local_pane(pane.id) {
+                if self.tab.pane(pane_id).is_none()
+                    && let Some(parked) = self.parked_shared_panes.remove(&pane_id)
+                {
+                    let source = pane
+                        .source
+                        .and_then(|id| shared.local_pane(id))
+                        .filter(|id| self.tab.pane(*id).is_some())
+                        .unwrap_or_else(|| self.tab.root_pane_id());
+                    let axis = match pane.axis {
+                        Axis::Right => SplitAxis::Horizontal,
+                        Axis::Down => SplitAxis::Vertical,
+                    };
+                    if self.tab.restore_parked_pane(parked, source, axis).is_ok() {
+                        self.finish_shared_insertion(pane_id, cx);
+                        changed = true;
+                    }
+                }
+                let Some(shared) = self.shared.as_ref() else {
+                    continue;
+                };
+                if shared.needs_binding(pane_id, pane.id) {
+                    let Some((factory, state)) = shared.sessions().open(pane.id) else {
+                        continue;
+                    };
+                    let held_keyboard = self.tab.pane(pane_id).is_some_and(|terminal| {
+                        self.shared_pane_holds_focus(pane_id, terminal, window, cx)
+                    });
+                    if let Some(terminal) = self.tab.pane(pane_id) {
+                        terminal
+                            .update(cx, |terminal, cx| terminal.bind_pending_server(factory, cx));
+                    }
+                    if let Some(shared) = self.shared.as_mut() {
+                        let focus = shared
+                            .screen_focus(pane_id)
+                            .cloned()
+                            .unwrap_or_else(|| cx.focus_handle());
+                        shared.register(pane_id, pane.id, state, focus);
+                    }
+                    // Binding supplies membership. Only the focus still on this provisional Pane
+                    // asks for first use; sidebar, Find, chooser and later navigation keep focus.
+                    if self.active && self.tab.focused_pane_id() == pane_id && held_keyboard {
+                        self.select_shared_pane(pane_id);
+                        self.focus(window, cx);
+                    }
+                    changed = true;
+                }
                 continue;
             }
             // The Pane this one was split from may already be gone, and the server clears the
@@ -2198,6 +2256,22 @@ impl TabView {
             }
         }
         changed |= self.remove_absent_shared_panes(server_tab, window, cx);
+        let retired = self
+            .parked_shared_panes
+            .keys()
+            .copied()
+            .filter(|id| {
+                self.shared
+                    .as_ref()
+                    .is_none_or(|shared| !shared.closing(*id))
+            })
+            .collect::<Vec<_>>();
+        for id in retired {
+            if let Some(parked) = self.parked_shared_panes.remove(&id) {
+                parked.payload().update(cx, |terminal, _| terminal.close());
+                self.forget_shared_pane(id);
+            }
+        }
         if changed {
             self.sync_shared_panes(window, cx);
         }
@@ -2222,9 +2296,10 @@ impl TabView {
             .pane_ids()
             .into_iter()
             .filter(|&pane_id| {
-                shared
-                    .server_pane(pane_id)
-                    .is_some_and(|server| !server_tab.panes.iter().any(|pane| pane.id == server))
+                self.tab.pane(pane_id).is_some()
+                    && shared.server_pane(pane_id).is_some_and(|server| {
+                        !server_tab.panes.iter().any(|pane| pane.id == server)
+                    })
             })
             .collect();
         let mut removed = false;
@@ -2235,9 +2310,43 @@ impl TabView {
             let held_keyboard = self.tab.pane(pane_id).is_some_and(|terminal| {
                 self.shared_pane_holds_focus(pane_id, terminal, window, cx)
             });
-            self.forget_shared_pane(pane_id);
-            // Closing the final Pane closes its Tab, as an ordinary final close does.
-            self.close_pane_focusing(pane_id, held_keyboard, window, cx);
+            if self
+                .shared
+                .as_ref()
+                .is_some_and(|shared| shared.closing(pane_id))
+            {
+                if let Ok(Some(parked)) = self.tab.park_pane(pane_id) {
+                    parked.payload().update(cx, |terminal, cx| {
+                        terminal.set_product_focus(
+                            TerminalProductFocus {
+                                active_workspace: false,
+                                active_tab: false,
+                                pane_visible: false,
+                                focused_pane: false,
+                                blocker: None,
+                            },
+                            cx,
+                        );
+                        terminal.set_accessibility_hierarchy(false);
+                    });
+                    self.parked_shared_panes.insert(pane_id, parked);
+                    self.advance_native_service_hierarchy_generation(cx);
+                    self.pane_layout_revision += 1;
+                    self.pane_motion.expect_change();
+                    self.split_bounds.clear();
+                    self.sync_terminal_focus(cx);
+                    if self.active && held_keyboard {
+                        self.focus(window, cx);
+                    }
+                    cx.emit(TabViewEvent::PresentationChanged {
+                        tab_id: self.tab.id(),
+                    });
+                    cx.notify();
+                }
+            } else {
+                self.forget_shared_pane(pane_id);
+                self.close_pane_focusing(pane_id, held_keyboard, window, cx);
+            }
             removed = true;
         }
         removed
@@ -2454,7 +2563,7 @@ impl TabView {
         cx.notify();
     }
 
-    /// Asks the server to split a shared Pane. A refusal changes nothing and is never queued.
+    /// Presents a connected split immediately and queues its bounded membership request.
     fn split_shared(
         &mut self,
         source: PaneId,
@@ -2472,8 +2581,23 @@ impl TabView {
             SplitAxis::Horizontal => Axis::Right,
             SplitAxis::Vertical => Axis::Down,
         };
+        let edits = shared.edits();
         if let SharedSubmission::Refused(reason) = shared.split(source, axis) {
             self.report_shared_refusal("create a Pane", reason, window, cx);
+        } else {
+            let presentation = edits.take_presentation();
+            let tab = self
+                .shared
+                .as_ref()
+                .and_then(|shared| shared.presentation_tab());
+            let target = presentation.map(|event| edits.canonical(event.target));
+            if let Some(tab) = tab {
+                self.reconcile_shared(&tab, window, cx);
+            }
+            if let Some(target) = target {
+                // The initiating interaction owns this selection. Its acknowledgement owns none.
+                self.focus_shared_pane_explicitly(target, window, cx);
+            }
         }
         cx.notify();
     }
@@ -2517,6 +2641,13 @@ impl TabView {
         };
         let mut changed = false;
         for pane_id in pane_ids {
+            if self
+                .shared
+                .as_ref()
+                .is_some_and(|shared| shared.closing(pane_id))
+            {
+                continue;
+            }
             let Some(sync) = self
                 .shared
                 .as_mut()

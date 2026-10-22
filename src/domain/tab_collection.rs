@@ -19,6 +19,22 @@ struct TabEntry<T> {
     payload: T,
 }
 
+/// A presentation removed after consent while the server still owns its outcome.
+pub(crate) struct ParkedTab<T> {
+    entry: TabEntry<T>,
+    position: usize,
+    was_root: bool,
+}
+
+impl<T> ParkedTab<T> {
+    pub(crate) fn payload(&self) -> &T {
+        &self.entry.payload
+    }
+    pub(crate) fn position(&self) -> usize {
+        self.position
+    }
+}
+
 /// A step through the Tab order, as Next Tab, Previous Tab, and Move Tab take it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum TabStep {
@@ -309,6 +325,40 @@ impl<T> TabCollection<T> {
             active_tab_id: self.active_tab_id,
             payload: closed_tab.payload,
         })
+    }
+
+    /// Remove a nonfinal Tab from presentation without destroying its payload.
+    pub(crate) fn park_tab(
+        &mut self,
+        id: TabId,
+        position: usize,
+    ) -> Result<Option<ParkedTab<T>>, TabError> {
+        let index = self.index_of(id)?;
+        let scope = self.tabs[index].scope;
+        let was_root = self.root_tab_id == id;
+        match self.close_tab(id)? {
+            CloseTabOutcome::TabClosed { payload, .. } => Ok(Some(ParkedTab {
+                entry: TabEntry { id, scope, payload },
+                position,
+                was_root,
+            })),
+            CloseTabOutcome::CloseWorkspace { .. } => Ok(None),
+        }
+    }
+
+    /// A refusal restores only this Tab. Later selection and rearrangement stay where they are.
+    pub(crate) fn restore_parked_tab(&mut self, parked: ParkedTab<T>) {
+        let siblings = self.indices_in(parked.entry.scope);
+        let position = siblings
+            .get(parked.position)
+            .copied()
+            .or_else(|| siblings.last().map(|index| index + 1))
+            .unwrap_or(self.tabs.len());
+        if parked.was_root {
+            self.root_tab_id = parked.entry.id;
+        }
+        self.activation_order.insert(0, parked.entry.id);
+        self.tabs.insert(position, parked.entry);
     }
 
     fn next_tab_id(&self) -> Result<(TabId, u64), TabError> {

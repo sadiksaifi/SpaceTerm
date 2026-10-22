@@ -396,6 +396,10 @@ pub(crate) struct TabManager {
     close_workspace_requested: bool,
     /// The server Workspace this Tab strip presents, when a SpaceTerm Server owns it.
     shared: Option<SharedTabBinding>,
+    parked_shared_tabs: std::collections::BTreeMap<
+        TabId,
+        crate::domain::tab_collection::ParkedTab<Entity<TabView>>,
+    >,
     #[cfg(test)]
     rendered_window_active: bool,
     #[cfg(test)]
@@ -477,6 +481,7 @@ impl TabManager {
             tab_bar_scroll_handle: ScrollHandle::new(),
             close_workspace_requested: false,
             shared: None,
+            parked_shared_tabs: std::collections::BTreeMap::new(),
             #[cfg(test)]
             rendered_window_active: window.is_window_active(),
             #[cfg(test)]
@@ -641,6 +646,9 @@ impl TabManager {
     pub(crate) fn close_all(&self, cx: &mut App) {
         for (_, view) in self.tabs.iter() {
             view.update(cx, |view, cx| view.close_all(cx));
+        }
+        for parked in self.parked_shared_tabs.values() {
+            parked.payload().update(cx, |view, cx| view.close_all(cx));
         }
     }
 
@@ -2682,12 +2690,33 @@ impl TabManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        if self.shared.is_none() {
+        let Some(shared) = self.shared.as_mut() else {
             return false;
-        }
+        };
+        let applied_aliases = shared.aliases_to_apply();
+        let edits = shared.edits();
+        shared.canonicalize();
         // Every Tab the server published joins before any Tab it removed leaves, so one poll
         // carrying both never closes this Workspace through membership it has not applied yet.
         let mut changed = false;
+        let mut restoring = self
+            .parked_shared_tabs
+            .keys()
+            .copied()
+            .filter(|id| {
+                self.shared
+                    .as_ref()
+                    .and_then(|shared| shared.server_tab(*id))
+                    .is_some_and(|server| workspace.tabs.iter().any(|tab| tab.id == server))
+            })
+            .collect::<Vec<_>>();
+        restoring.sort_by_key(|id| self.parked_shared_tabs[id].position());
+        for id in restoring {
+            if let Some(parked) = self.parked_shared_tabs.remove(&id) {
+                self.tabs.restore_parked_tab(parked);
+                changed = true;
+            }
+        }
         for tab in &workspace.tabs {
             let tab_id = match self
                 .shared
@@ -2709,6 +2738,32 @@ impl TabManager {
             changed |= view.update(cx, |view, cx| view.reconcile_shared(tab, window, cx));
         }
         changed |= self.remove_absent_shared_tabs(workspace, removal, window, cx);
+        let retired = self
+            .parked_shared_tabs
+            .keys()
+            .copied()
+            .filter(|id| {
+                self.shared
+                    .as_ref()
+                    .is_none_or(|shared| !shared.optimistically_closing(*id))
+            })
+            .collect::<Vec<_>>();
+        for id in retired {
+            if let Some(parked) = self.parked_shared_tabs.remove(&id) {
+                parked.payload().update(cx, |view, cx| view.close_all(cx));
+                self.forget_shared_tab(id);
+            }
+        }
+        // Every Tab view, including a parked one, must translate its containing identities
+        // before their aliases retire. Pane aliases retire individually when binding succeeds.
+        for parked in self.parked_shared_tabs.values() {
+            parked
+                .payload()
+                .update(cx, |view, _| view.canonicalize_shared_ids());
+        }
+        for id in applied_aliases {
+            edits.retire_alias(id);
+        }
         if changed {
             cx.emit(TabManagerEvent::PresentationChanged);
             cx.notify();
@@ -2731,7 +2786,7 @@ impl TabManager {
         let Some(shared) = self.shared.as_ref() else {
             return false;
         };
-        let absent: Vec<TabId> = self
+        let absent: Vec<(TabId, usize)> = self
             .tabs
             .iter()
             .map(|(tab_id, _)| tab_id)
@@ -2740,20 +2795,45 @@ impl TabManager {
                     .server_tab(tab_id)
                     .is_some_and(|server| !workspace.tabs.iter().any(|tab| tab.id == server))
             })
+            .map(|id| {
+                let scope = self.tabs.scope_of(id).unwrap_or_default();
+                let position = self
+                    .tabs
+                    .tabs_in(scope)
+                    .position(|(candidate, _)| candidate == id)
+                    .unwrap_or_default();
+                (id, position)
+            })
             .collect();
         let mut removed = false;
-        for tab_id in absent {
-            if let Some(shared) = self.shared.as_mut() {
-                shared.forget(tab_id);
-            }
+        for (tab_id, position) in absent {
+            let optimistic = self
+                .shared
+                .as_ref()
+                .is_some_and(|shared| shared.optimistically_closing(tab_id));
             let own = removal == super::shared_workspaces::SharedRemoval::OwnClose;
             let held_keyboard = self
                 .tabs
                 .tab(tab_id)
                 .is_some_and(|view| view.read(cx).holds_keyboard(window, cx));
-            // Closing the final Tab closes its Workspace, as an ordinary final close does. Only
-            // this client's own close opens the Tab that takes its place.
-            self.close_tab_activating(tab_id, own, window, cx);
+            if optimistic {
+                let was_active = self.tabs.active_tab_id() == tab_id;
+                if let Ok(Some(parked)) = self.tabs.park_tab(tab_id, position) {
+                    parked.payload().update(cx, |view, cx| view.deactivate(cx));
+                    self.parked_shared_tabs.insert(tab_id, parked);
+                    if was_active && self.active {
+                        self.tabs
+                            .active_tab()
+                            .update(cx, |view, cx| view.activate_without_focus(cx));
+                        if held_keyboard {
+                            self.focus(window, cx);
+                        }
+                    }
+                    self.sync_terminal_focus_blocker(cx);
+                }
+            } else {
+                self.close_tab_activating(tab_id, own && held_keyboard, window, cx);
+            }
             // Another client's close asks the server for no Pane here, but the keyboard that was
             // in the Tab it removed still needs a place, so it rests in the Active Tab's Focused
             // Pane without selecting it. Typing anywhere else stays where it is.
@@ -2850,6 +2930,7 @@ impl TabManager {
         let Some(source) = active.shared_server_pane(active.focused_pane_id()) else {
             return;
         };
+        let edits = shared.edits();
         if let SharedSubmission::Refused(reason) = shared.create_tab(source) {
             let detail = format!(
                 "SpaceTerm did not create a Tab in this shared Workspace. {}",
@@ -2869,6 +2950,24 @@ impl TabManager {
             )
             .intent(AlertIntent::Warning)
             .present(window, cx, |_, _| {});
+        } else {
+            let presentation = edits.take_presentation();
+            let workspace = self
+                .shared
+                .as_ref()
+                .and_then(|shared| shared.presentation_workspace());
+            let target = presentation.map(|event| edits.canonical(event.target));
+            if let Some(workspace) = workspace {
+                self.reconcile_shared(
+                    &workspace,
+                    super::shared_workspaces::SharedRemoval::Published,
+                    window,
+                    cx,
+                );
+            }
+            if let Some(target) = target {
+                self.open_accepted_shared(target, window, cx);
+            }
         }
         cx.notify();
     }

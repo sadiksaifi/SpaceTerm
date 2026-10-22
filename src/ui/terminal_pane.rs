@@ -440,7 +440,7 @@ impl PaneTerminalSessionLifecycle {
         geometry: TerminalGeometry,
         appearance: crate::terminal::TerminalAppearanceUpdate,
     ) -> Option<Result<crate::terminal::StartedTerminalSession, TerminalFailure>> {
-        if self.session_start_attempted {
+        if self.session_start_attempted || self.session_factory.is_pending() {
             return None;
         }
         self.session_start_attempted = true;
@@ -1460,6 +1460,19 @@ impl TerminalPane {
                 std::time::Instant::now(),
             ),
         }
+    }
+
+    /// Bind a presentation-only Pane after the server supplies its actual membership.
+    pub(crate) fn bind_pending_server(
+        &mut self,
+        factory: WorkspaceTerminalSessionFactory,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.terminal_session.session_factory.is_pending() {
+            return;
+        }
+        self.terminal_session = PaneTerminalSessionLifecycle::new(factory);
+        cx.notify();
     }
 
     /// Whether the shell runs in a SpaceTerm Server.

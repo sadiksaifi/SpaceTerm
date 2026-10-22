@@ -10,7 +10,7 @@ use crate::domain::ValidatedLocalDirectory;
 #[derive(Clone)]
 /// Starts client presentations of Terminal Sessions owned by a SpaceTerm Server.
 pub(crate) struct WorkspaceTerminalSessionFactory {
-    session_factory: Rc<dyn TerminalSessionFactory>,
+    session_factory: Option<Rc<dyn TerminalSessionFactory>>,
     launch_plan: LocalTerminalLaunchPlan,
 }
 
@@ -37,9 +37,21 @@ impl WorkspaceTerminalSessionFactory {
         home_directory: ValidatedLocalDirectory,
     ) -> Self {
         Self {
-            session_factory,
+            session_factory: Some(session_factory),
             launch_plan: LocalTerminalLaunchPlan::new(home_directory),
         }
+    }
+
+    /// An optimistic Pane owns no Terminal Session or server identity yet.
+    pub(crate) fn pending(home_directory: ValidatedLocalDirectory) -> Self {
+        Self {
+            session_factory: None,
+            launch_plan: LocalTerminalLaunchPlan::new(home_directory),
+        }
+    }
+
+    pub(crate) fn is_pending(&self) -> bool {
+        self.session_factory.is_none()
     }
 
     pub(crate) fn start(
@@ -48,11 +60,17 @@ impl WorkspaceTerminalSessionFactory {
         initial_appearance: super::TerminalAppearanceUpdate,
     ) -> Result<StartedTerminalSession, TerminalSessionError> {
         self.session_factory
+            .as_ref()
+            .ok_or(TerminalSessionError::SpawnWorker(
+                std::io::ErrorKind::WouldBlock,
+            ))?
             .start(geometry, self.launch_plan.clone(), initial_appearance)
     }
 
     pub(crate) fn fallback_title(&self) -> String {
-        self.session_factory.fallback_title()
+        self.session_factory
+            .as_ref()
+            .map_or_else(|| "Terminal".to_owned(), |factory| factory.fallback_title())
     }
 
     /// Remote server metadata never grants client-local filesystem authority.
@@ -65,11 +83,17 @@ impl WorkspaceTerminalSessionFactory {
     }
 
     pub(crate) fn allows_permission_setup(&self) -> bool {
-        self.session_factory.local_file_authority().is_some()
+        self.session_factory
+            .as_ref()
+            .is_some_and(|factory| factory.local_file_authority().is_some())
     }
 
     pub(crate) fn file_insertion_capabilities(&self) -> TerminalLocalFileCapabilities {
-        if self.session_factory.allows_local_file_insertion() {
+        if self
+            .session_factory
+            .as_ref()
+            .is_some_and(|factory| factory.allows_local_file_insertion())
+        {
             TerminalLocalFileCapabilities::Enabled
         } else {
             self.local_file_capabilities()
@@ -77,6 +101,8 @@ impl WorkspaceTerminalSessionFactory {
     }
 
     pub(crate) fn is_server_backed(&self) -> bool {
-        self.session_factory.is_server_backed()
+        self.session_factory
+            .as_ref()
+            .is_none_or(|factory| factory.is_server_backed())
     }
 }

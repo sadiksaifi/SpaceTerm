@@ -5,10 +5,10 @@
 //! attached beside any Remote Workspaces the window owns. Another client's Workspace joins as
 //! membership and never changes the Active Workspace.
 //!
-//! Every shared change goes to the server as one [`Mutation`]. Nothing here creates, renames, or
-//! pins a Workspace locally and tells the server afterwards, so two clients cannot disagree about
-//! membership. The server's answer is authoritative, a refused edit keeps the draft a person
-//! typed, and an offline client offers no shared edit at all rather than queueing one.
+//! Every shared change goes to the server as one [`Mutation`]. Connected interactions project
+//! their presentation immediately over authoritative membership. Provisional identities open no
+//! Terminal Session and grant no input authority. A refusal recomputes the affected presentation
+//! without replacing later intent, and an offline client queues no new shared work.
 //!
 //! Closing a shared Pane or Tab, and Kill Workspace, end Terminal Sessions for every client. Each
 //! one asks the server to end exactly the Panes and Sessions a person reviewed, so a confirmation
@@ -41,6 +41,9 @@ pub(crate) use repositories::{
 #[cfg(test)]
 #[path = "shared_workspaces/tests.rs"]
 mod tests;
+
+#[path = "shared_workspaces/pending.rs"]
+mod pending;
 
 mod development {
     use std::collections::BTreeMap;
@@ -98,8 +101,8 @@ mod development {
     /// The server-side edits one desktop client submits, and the last answer it received.
     ///
     /// The implementation owns durable operation identity, reconciliation after a lost reply, and
-    /// bounded acknowledgement. This interface carries none of that: it offers one edit at a time
-    /// and reports what the server decided.
+    /// bounded acknowledgement. This transport accepts one operation at a time; SharedEditSource
+    /// orders the bounded connected interactions waiting for it.
     pub(crate) trait SharedWorkspaceEdits {
         fn snapshot(&self) -> SharedWorkspaceSnapshot;
 
@@ -107,8 +110,8 @@ mod development {
         /// Rendering reads this for every control, so it copies no hierarchy.
         fn availability(&self) -> (bool, bool);
 
-        /// Submits one edit, or reports that nothing was submitted because this client is offline
-        /// or is already waiting for an answer. A refusal is never queued.
+        /// Dispatches one Original Operation, or refuses while offline or resolving another one.
+        /// SharedEditSource owns the connected interactions waiting to dispatch.
         fn submit(&self, mutation: Mutation) -> bool;
 
         /// A data-free hint after each change the snapshot publishes, or `None` when only
@@ -145,65 +148,82 @@ mod development {
         }
     }
 
-    /// One desktop client's shared edit channel: the server connection, and the one edit this
-    /// process has not consumed yet.
-    ///
-    /// The channel is shared by every surface that submits, so the Workspace Window can tell an
-    /// answer to its own request from an answer recovered after a relaunch. A recovered answer
-    /// still reports a conflict, because the draft it rejected is a person's work; it never moves
-    /// the Active Workspace, Tab, or Pane, because nobody asked for that in this session.
+    /// Connected interaction intent is bounded and ordered here. The transport journals only
+    /// the operation currently dispatched; a disconnected client retains no undispatched work.
     #[derive(Clone)]
     pub(crate) struct SharedEditSource {
         edits: Rc<dyn SharedWorkspaceEdits>,
-        submitted: Rc<std::cell::RefCell<Option<Mutation>>>,
-        awaiting_poll: Rc<std::cell::Cell<bool>>,
-        completion: Rc<std::cell::RefCell<Option<AwaitedEdit>>>,
+        pending: Rc<std::cell::RefCell<super::pending::PendingEdits>>,
+        subscribers: Rc<std::cell::RefCell<Vec<async_channel::Sender<()>>>>,
     }
 
-    struct AwaitedEdit {
-        mutation: Mutation,
-        reply: async_channel::Sender<Result<RetainedOutcome, SharedRefusalReason>>,
+    pub(crate) struct SharedEditNotifications {
+        local: async_channel::Receiver<()>,
+        remote: Option<async_channel::Receiver<()>>,
+    }
+
+    impl SharedEditNotifications {
+        pub(crate) async fn recv(&self) -> Result<(), async_channel::RecvError> {
+            match &self.remote {
+                Some(remote) => futures_lite::future::race(self.local.recv(), remote.recv()).await,
+                None => self.local.recv().await,
+            }
+        }
     }
 
     impl SharedEditSource {
         pub(crate) fn new(edits: Rc<dyn SharedWorkspaceEdits>) -> Self {
-            let initial = edits.snapshot();
-            let awaiting_poll = !initial.connected || initial.pending || initial.outcome.is_some();
             Self {
                 edits,
-                submitted: Rc::new(std::cell::RefCell::new(None)),
-                awaiting_poll: Rc::new(std::cell::Cell::new(awaiting_poll)),
-                completion: Rc::new(std::cell::RefCell::new(None)),
+                pending: Rc::new(std::cell::RefCell::new(
+                    super::pending::PendingEdits::default(),
+                )),
+                subscribers: Rc::default(),
             }
         }
 
         fn editability(&self) -> SharedEditability {
-            match self.edits.availability() {
-                (false, _) => SharedEditability::Offline,
-                (true, pending) if pending || self.awaiting_poll.get() => {
-                    SharedEditability::Pending
-                }
-                (true, _) => SharedEditability::Available,
+            if !self.edits.availability().0 {
+                SharedEditability::Offline
+            } else if self.pending.borrow().full() {
+                SharedEditability::Pending
+            } else {
+                SharedEditability::Available
             }
         }
 
-        /// Submits one edit and records that this process asked for it.
         pub(crate) fn submit(&self, mutation: Mutation) -> SharedSubmission {
+            match self.enqueue(mutation, None) {
+                Ok(()) => SharedSubmission::Submitted,
+                Err(reason) => SharedSubmission::Refused(reason),
+            }
+        }
+
+        fn enqueue(
+            &self,
+            mutation: Mutation,
+            reply: Option<async_channel::Sender<Result<RetainedOutcome, SharedRefusalReason>>>,
+        ) -> Result<(), SharedRefusalReason> {
+            self.snapshot();
             let editability = self.editability();
             if !editability.available() {
-                return SharedSubmission::Refused(editability.into());
+                return Err(editability.into());
             }
-            if !self.edits.submit(mutation.clone()) {
-                // The worker refuses an edit it cannot submit, including when the rendered enabled
-                // state is one reading stale. Nothing is retained for later.
-                return SharedSubmission::Refused(self.editability().into());
+            if !mutation.is_bounded() {
+                return Err(SharedRefusalReason::Value);
             }
-            self.submitted.replace(Some(mutation));
-            self.awaiting_poll.set(true);
-            SharedSubmission::Submitted
+            self.pending.borrow_mut().push(mutation, reply)?;
+            self.dispatch();
+            self.subscribers.borrow_mut().retain(|sender| {
+                !matches!(
+                    sender.try_send(()),
+                    Err(async_channel::TrySendError::Closed(()))
+                )
+            });
+            Ok(())
         }
 
-        /// The result belongs to this submission even after another edit replaces the snapshot.
+        /// Each receiver belongs to one queue entry, including identical consecutive mutations.
         pub(crate) fn submit_waiting(
             &self,
             mutation: Mutation,
@@ -211,56 +231,57 @@ mod development {
             async_channel::Receiver<Result<RetainedOutcome, SharedRefusalReason>>,
             SharedRefusalReason,
         > {
-            if let SharedSubmission::Refused(reason) = self.submit(mutation.clone()) {
-                return Err(reason);
-            }
             let (reply, receiver) = async_channel::bounded(1);
-            self.completion
-                .replace(Some(AwaitedEdit { mutation, reply }));
+            self.enqueue(mutation, Some(reply))?;
             Ok(receiver)
         }
 
-        /// Whether the edit this process submitted and has not seen answered satisfies `test`.
-        fn submitted_satisfies(&self, test: impl Fn(&Mutation) -> bool) -> bool {
-            self.submitted.borrow().as_ref().is_some_and(test)
-        }
-
-        /// Whether this process asked for the edit an answer settles, which it reports once.
-        fn claims(&self, mutation: &Mutation) -> bool {
-            let mut submitted = self.submitted.borrow_mut();
-            if submitted.as_ref() == Some(mutation) {
-                *submitted = None;
-                return true;
+        fn dispatch(&self) {
+            let (connected, busy) = self.edits.availability();
+            if connected && !busy {
+                let mut pending = self.pending.borrow_mut();
+                if let Some(mutation) = pending.next_dispatch() {
+                    if self.edits.submit(mutation.clone()) {
+                        pending.dispatched(mutation);
+                    } else if !self.edits.availability().0 {
+                        pending.disconnect();
+                    }
+                }
             }
-            false
         }
 
         pub(crate) fn snapshot(&self) -> SharedWorkspaceSnapshot {
             let snapshot = self.edits.snapshot();
-            // Deliver the current submission before opening the gate to its successor. Each
-            // receiver retains its own result even if its task has not been polled yet.
-            let mut completion = self.completion.borrow_mut();
-            if let Some(awaited) = completion.as_ref() {
-                let result = if snapshot.rejected.as_ref() == Some(&awaited.mutation) {
-                    Some(Err(SharedRefusalReason::Offline))
-                } else {
-                    snapshot
-                        .outcome
-                        .as_ref()
-                        .filter(|outcome| outcome.mutation == awaited.mutation)
-                        .cloned()
-                        .map(Ok)
-                };
-                if let Some(result) = result
-                    && let Some(awaited) = completion.take()
-                {
-                    let _ = awaited.reply.try_send(result);
-                }
-            }
-            if snapshot.connected && !snapshot.pending {
-                self.awaiting_poll.set(false);
-            }
+            self.pending.borrow_mut().observe(&snapshot);
+            self.dispatch();
             snapshot
+        }
+
+        pub(crate) fn presentation_inventory(&self) -> Option<Inventory> {
+            let snapshot = self.snapshot();
+            snapshot
+                .inventory
+                .map(|inventory| self.pending.borrow_mut().project(inventory))
+        }
+
+        pub(crate) fn canonical(&self, id: Id) -> Id {
+            self.pending.borrow().canonical(id)
+        }
+        pub(crate) fn provisional(&self, id: Id) -> bool {
+            self.pending.borrow().provisional(id)
+        }
+        pub(crate) fn retire_alias(&self, id: Id) {
+            self.pending.borrow_mut().forget_alias(id);
+        }
+
+        pub(crate) fn has_pending(&self) -> bool {
+            self.pending.borrow().has_pending()
+        }
+        pub(crate) fn closing(&self, pane: Id) -> bool {
+            self.pending.borrow().closing(pane)
+        }
+        pub(crate) fn take_presentation(&self) -> Option<SharedAcceptance> {
+            self.pending.borrow_mut().take_presentation()
         }
     }
 
@@ -271,7 +292,7 @@ mod development {
         /// The client has no connection to the server, so shared edits are unavailable rather
         /// than queued.
         Offline,
-        /// One edit is already waiting for the server's answer.
+        /// The bounded connected interaction queue is full.
         Pending,
     }
 
@@ -288,7 +309,9 @@ mod development {
                     "Shared Workspace changes need the server. SpaceTerm is not connected, and \
                      nothing is saved for later."
                 }
-                Self::Pending => "SpaceTerm is waiting for the server to answer the last change.",
+                Self::Pending => {
+                    "SpaceTerm is waiting for the server to finish the queued changes. Try again after they finish."
+                }
             }
         }
     }
@@ -308,16 +331,6 @@ mod development {
                 warning: false,
             }
         }
-    }
-
-    /// Whether `mutation` changes what `workspace`'s row shows: its name or its directory.
-    fn changes_row(mutation: &Mutation, workspace: Id) -> bool {
-        matches!(
-            mutation,
-            Mutation::RenameWorkspace { workspace: target, .. }
-                | Mutation::PinWorkspace { workspace: target, .. }
-                if *target == workspace
-        )
     }
 
     /// What asking for a shared edit did. A refusal submitted nothing and retains nothing.
@@ -428,6 +441,7 @@ mod development {
         Invalid,
         /// The server is at its limit for Workspaces, Tabs, or Panes.
         Limit,
+        Disconnected,
     }
 
     impl SharedRefusal {
@@ -436,6 +450,7 @@ mod development {
                 Self::Missing => "No Longer on the Server",
                 Self::Invalid => "Change Not Accepted",
                 Self::Limit => "Server Is Full",
+                Self::Disconnected => "Changes Not Sent",
             }
         }
 
@@ -446,6 +461,9 @@ mod development {
                      apply it."
                 }
                 Self::Invalid => "The server did not accept this value, so nothing changed.",
+                Self::Disconnected => {
+                    "The connection ended before the waiting changes were sent. They were not saved for later. Any operation already sent still keeps its original identity until the server confirms its outcome."
+                }
                 Self::Limit => {
                     "The server already holds as many Workspaces, Tabs, or Panes as it allows, \
                      so nothing was created."
@@ -598,6 +616,7 @@ mod development {
     /// because only an explicit selection of that Pane asks the server for one.
     pub(crate) trait SharedPaneOpener {
         fn open(&self, pane: Id) -> Option<SharedPaneSubscription>;
+        fn placeholder(&self) -> WorkspaceTerminalSessionFactory;
 
         /// Only an account-local route can interpret server directory text on this client.
         fn local_filesystem(
@@ -665,6 +684,10 @@ mod development {
     }
 
     impl SharedPaneOpener for LocalServerPanes {
+        fn placeholder(&self) -> WorkspaceTerminalSessionFactory {
+            WorkspaceTerminalSessionFactory::pending(self.client_home.clone())
+        }
+
         fn local_filesystem(
             &self,
         ) -> Option<&crate::platform::local_filesystem::LocalFilesystemAuthority> {
@@ -707,6 +730,10 @@ mod development {
     }
 
     impl SharedPaneOpener for RemoteServerPanes {
+        fn placeholder(&self) -> WorkspaceTerminalSessionFactory {
+            WorkspaceTerminalSessionFactory::pending(self.client_home.clone())
+        }
+
         fn remote_destination(&self) -> Option<&crate::domain::SshDestination> {
             match &self.route {
                 RemoteRoute::Ssh(destination) => Some(destination),
@@ -745,6 +772,7 @@ mod development {
     pub(crate) struct SharedPaneSessions {
         opener: Rc<dyn SharedPaneOpener>,
         panes: PaneConstruction,
+        edits: Option<SharedEditSource>,
     }
 
     impl SharedPaneSessions {
@@ -815,6 +843,7 @@ mod development {
             Self {
                 opener,
                 panes: panes.clone(),
+                edits: None,
             }
         }
 
@@ -849,7 +878,19 @@ mod development {
 
         /// Subscribes to one server Pane.
         pub(crate) fn open(&self, pane: Id) -> Option<SharedPaneSubscription> {
+            if self
+                .edits
+                .as_ref()
+                .is_some_and(|edits| edits.provisional(pane))
+            {
+                return Some((self.opener.placeholder(), Arc::new(PendingPane)));
+            }
             self.opener.open(pane)
+        }
+
+        fn with_edits(mut self, edits: SharedEditSource) -> Self {
+            self.edits = Some(edits);
+            self
         }
 
         /// Reads the Terminal Metadata the server published for one of its Panes with this
@@ -875,6 +916,23 @@ mod development {
         }
     }
 
+    struct PendingPane;
+    impl ServerPaneConnection for PendingPane {
+        fn status(&self) -> crate::terminal::server_session::DevelopmentPaneStatus {
+            crate::terminal::server_session::DevelopmentPaneStatus::Connecting
+        }
+        fn controller(&self) -> Option<crate::ui::server_pane::Controller> {
+            None
+        }
+        fn connection_generation(&self) -> u64 {
+            0
+        }
+        fn select(&self) {}
+        fn retry(&self) {}
+        fn take_over(&self) {}
+        fn start_restored(&self) {}
+    }
+
     /// One shared Tab's Panes: their server identities, each one's view of its connection, and
     /// the focus the screen replacing a Pane rests on.
     pub(crate) struct SharedPanes {
@@ -887,6 +945,14 @@ mod development {
         screen_focus: BTreeMap<PaneId, gpui::FocusHandle>,
     }
 
+    impl Drop for SharedPanes {
+        fn drop(&mut self) {
+            for id in self.panes.values() {
+                self.edits.retire_alias(*id);
+            }
+        }
+    }
+
     impl SharedPanes {
         pub(crate) fn new(
             edits: SharedEditSource,
@@ -895,8 +961,8 @@ mod development {
             tab: Id,
         ) -> Self {
             Self {
+                sessions: sessions.with_edits(edits.clone()),
                 edits,
-                sessions,
                 workspace,
                 tab,
                 panes: BTreeMap::new(),
@@ -916,25 +982,60 @@ mod development {
             state: Arc<dyn ServerPaneConnection>,
             screen_focus: gpui::FocusHandle,
         ) {
-            self.panes.insert(pane_id, server);
+            if let Some(previous) = self.panes.insert(pane_id, server)
+                && previous != server
+            {
+                self.edits.retire_alias(previous);
+            }
             self.views.insert(pane_id, ServerPaneView::new(state));
             self.screen_focus.insert(pane_id, screen_focus);
         }
 
         pub(crate) fn forget(&mut self, pane_id: PaneId) {
-            self.panes.remove(&pane_id);
+            if let Some(previous) = self.panes.remove(&pane_id) {
+                self.edits.retire_alias(previous);
+            }
             self.views.remove(&pane_id);
             self.screen_focus.remove(&pane_id);
         }
 
         pub(crate) fn server_pane(&self, pane_id: PaneId) -> Option<Id> {
-            self.panes.get(&pane_id).copied()
+            self.panes.get(&pane_id).map(|id| self.edits.canonical(*id))
+        }
+
+        pub(crate) fn closing(&self, pane_id: PaneId) -> bool {
+            self.server_pane(pane_id)
+                .is_some_and(|id| self.edits.closing(id))
+        }
+
+        pub(crate) fn needs_binding(&self, pane_id: PaneId, server: Id) -> bool {
+            self.panes.get(&pane_id).is_some_and(|id| *id != server)
+        }
+
+        pub(crate) fn edits(&self) -> SharedEditSource {
+            self.edits.clone()
+        }
+
+        pub(crate) fn canonicalize(&mut self) {
+            self.workspace = self.edits.canonical(self.workspace);
+            self.tab = self.edits.canonical(self.tab);
+        }
+
+        pub(crate) fn presentation_tab(&self) -> Option<spaceterm_server::hierarchy::Tab> {
+            self.edits
+                .presentation_inventory()?
+                .workspaces
+                .into_iter()
+                .find(|w| w.id == self.edits.canonical(self.workspace))?
+                .tabs
+                .into_iter()
+                .find(|t| t.id == self.edits.canonical(self.tab))
         }
 
         pub(crate) fn local_pane(&self, server: Id) -> Option<PaneId> {
             self.panes
                 .iter()
-                .find_map(|(&pane_id, &id)| (id == server).then_some(pane_id))
+                .find_map(|(&pane_id, &id)| (self.edits.canonical(id) == server).then_some(pane_id))
         }
 
         /// Where the keyboard rests while a screen replaces the Pane.
@@ -943,7 +1044,9 @@ mod development {
         }
 
         pub(crate) fn holds(&self, server: Id) -> bool {
-            self.panes.values().any(|&pane| pane == server)
+            self.panes
+                .values()
+                .any(|&pane| self.edits.canonical(pane) == server)
         }
 
         pub(crate) fn missing_worktree_for_directory(&self, directory: &Path) -> bool {
@@ -985,7 +1088,7 @@ mod development {
         }
 
         pub(crate) fn pane_ids(&self) -> Vec<PaneId> {
-            self.views.keys().copied().collect()
+            self.panes.keys().copied().collect()
         }
 
         pub(crate) fn editability(&self) -> SharedEditability {
@@ -998,16 +1101,15 @@ mod development {
             self.edits.editability() != SharedEditability::Offline
         }
 
-        /// Asks the server to split one of this Tab's Panes. The new Pane appears here only when
-        /// the server publishes it, so two clients never disagree about the Pane Layout's
-        /// membership.
+        /// Requests a shared split. Its provisional Pane is presentation only until the server
+        /// supplies its authoritative identity and membership.
         pub(crate) fn split(&self, source: PaneId, axis: Axis) -> SharedSubmission {
             let Some(source) = self.server_pane(source) else {
                 return SharedSubmission::Refused(SharedRefusalReason::Value);
             };
             self.edits.submit(Mutation::SplitPane {
-                workspace: self.workspace,
-                tab: self.tab,
+                workspace: self.edits.canonical(self.workspace),
+                tab: self.edits.canonical(self.tab),
                 source,
                 axis,
             })
@@ -1029,15 +1131,53 @@ mod development {
             workspace: Id,
         ) -> Self {
             Self {
+                sessions: sessions.with_edits(edits.clone()),
                 edits,
-                sessions,
                 workspace,
                 tabs: BTreeMap::new(),
             }
         }
 
-        pub(crate) const fn workspace(&self) -> Id {
-            self.workspace
+        pub(crate) fn workspace(&self) -> Id {
+            self.edits.canonical(self.workspace)
+        }
+        pub(crate) fn optimistically_closing(&self, tab: TabId) -> bool {
+            let Some(server) = self.server_tab(tab) else {
+                return false;
+            };
+            self.edits
+                .edits
+                .snapshot()
+                .inventory
+                .as_ref()
+                .and_then(|i| {
+                    i.workspaces
+                        .iter()
+                        .flat_map(|w| &w.tabs)
+                        .find(|t| t.id == server)
+                })
+                .is_some_and(|t| t.panes.iter().all(|p| self.edits.closing(p.id)))
+        }
+
+        pub(crate) fn presentation_workspace(&self) -> Option<ServerWorkspace> {
+            self.edits
+                .presentation_inventory()?
+                .workspaces
+                .into_iter()
+                .find(|w| w.id == self.workspace())
+        }
+        pub(crate) fn aliases_to_apply(&self) -> Vec<Id> {
+            std::iter::once(self.workspace)
+                .chain(self.tabs.values().copied())
+                .filter(|id| self.edits.canonical(*id) != *id)
+                .collect()
+        }
+
+        pub(crate) fn canonicalize(&mut self) {
+            self.workspace = self.edits.canonical(self.workspace);
+            for id in self.tabs.values_mut() {
+                *id = self.edits.canonical(*id);
+            }
         }
 
         pub(crate) const fn sessions(&self) -> &SharedPaneSessions {
@@ -1057,13 +1197,13 @@ mod development {
         }
 
         pub(crate) fn server_tab(&self, tab_id: TabId) -> Option<Id> {
-            self.tabs.get(&tab_id).copied()
+            self.tabs.get(&tab_id).map(|id| self.edits.canonical(*id))
         }
 
         pub(crate) fn local_tab(&self, server: Id) -> Option<TabId> {
             self.tabs
                 .iter()
-                .find_map(|(&tab_id, &id)| (id == server).then_some(tab_id))
+                .find_map(|(&tab_id, &id)| (self.edits.canonical(id) == server).then_some(tab_id))
         }
 
         pub(crate) fn editability(&self) -> SharedEditability {
@@ -1072,11 +1212,10 @@ mod development {
 
         /// Asks the server for another Tab in this Workspace.
         pub(crate) fn create_tab(&self, source: Id) -> SharedSubmission {
-            let snapshot = self.edits.edits.snapshot();
-            let tab = snapshot
-                .inventory
+            let inventory = self.edits.presentation_inventory();
+            let tab = inventory
                 .as_ref()
-                .and_then(|i| i.workspaces.iter().find(|w| w.id == self.workspace))
+                .and_then(|i| i.workspaces.iter().find(|w| w.id == self.workspace()))
                 .and_then(|w| {
                     w.tabs
                         .iter()
@@ -1086,14 +1225,14 @@ mod development {
                 match tab.and_then(|t| t.worktree_repository.as_ref().zip(t.worktree.as_ref())) {
                     Some((root, path)) => {
                         Mutation::Worktree(spaceterm_server::worktree::Operation::OpenTab {
-                            workspace: self.workspace,
+                            workspace: self.workspace(),
                             root: root.clone(),
                             path: path.clone(),
                             source: Some(source),
                         })
                     }
                     None => Mutation::CreateTab {
-                        workspace: self.workspace,
+                        workspace: self.workspace(),
                         source: Some(source),
                     },
                 };
@@ -1114,7 +1253,7 @@ mod development {
         Uncertain,
     }
 
-    /// The Workspace Window's inventory, attachments, arrangements, and outstanding shared edit.
+    /// The Workspace Window's authoritative inventory, attachments and pending presentation.
     pub(crate) struct SharedWorkspaces {
         edits: SharedEditSource,
         sessions: SharedPaneSessions,
@@ -1122,6 +1261,7 @@ mod development {
         workspaces: BTreeMap<WorkspaceId, SharedWorkspaceFacts>,
         /// The inventory revision this client has applied.
         revision: Option<u64>,
+        presentation: Option<Inventory>,
         connected: bool,
         connection_error: Option<spaceterm_server::ServerError>,
         pending: bool,
@@ -1170,10 +1310,11 @@ mod development {
     impl SharedWorkspaces {
         pub(crate) fn new(edits: SharedEditSource, sessions: SharedPaneSessions) -> Self {
             Self {
+                sessions: sessions.with_edits(edits.clone()),
                 edits,
-                sessions,
                 workspaces: BTreeMap::new(),
                 revision: None,
+                presentation: None,
                 connected: false,
                 connection_error: None,
                 pending: false,
@@ -1210,6 +1351,27 @@ mod development {
                 })
                 .collect()
         }
+        /// The view is hidden by this client's exact approved close. Its owner retains the view
+        /// and edit channel until the Original Operation retires, even after published deletion.
+        pub(crate) fn optimistically_closing(&self, local: WorkspaceId) -> bool {
+            let Some(facts) = self.facts(local) else {
+                return false;
+            };
+            let server = self.edits.canonical(facts.server);
+            if self.edits.pending.borrow().closing_workspace(server) {
+                return true;
+            }
+            // A validated committed close can precede acknowledgement. Keep its owning host and
+            // parked view until the original transport operation retires, even when the server
+            // inventory already omits the Workspace or the route disconnects.
+            let transport = self.edits.edits.snapshot();
+            transport.pending
+                && transport
+                    .pending_operation
+                    .as_ref()
+                    .is_some_and(|mutation| super::pending::closes_workspace(mutation, server))
+        }
+
         pub(crate) fn latest_inventory(&self) -> Option<&Inventory> {
             self.latest.as_ref()
         }
@@ -1335,6 +1497,10 @@ mod development {
             &mut self,
             mut view: spaceterm_server::client_view::ClientView,
         ) {
+            // Presentation identities and optimistic removals are never retained as membership.
+            if self.edits.has_pending() {
+                return;
+            }
             // Detached Workspaces keep their arrangement until explicitly reattached.
             if let Some(previous) = self.last_saved_view.as_ref().or(self.saved_views.as_ref()) {
                 for saved in &previous.workspaces {
@@ -1412,10 +1578,8 @@ mod development {
         }
         /// What `workspace`'s sidebar row says in place of its directory, if anything.
         ///
-        /// A row speaks only for itself. A waiting edit marks the one row whose name, directory,
-        /// or Worktree it changes, so creating a Tab or a Workspace marks none. "Not connected"
-        /// waits for an established loss: a connection still finishing its handshake has lost
-        /// nothing, though its edits stay unavailable until it connects.
+        /// Ordinary name and pin edits project their values immediately. Worktree operations
+        /// retain their progress, and "Not connected" waits for an established connection loss.
         pub(crate) fn row_status(
             &self,
             workspace: Id,
@@ -1430,17 +1594,6 @@ mod development {
                         text: "Not connected",
                         warning: true,
                     })
-                }
-                SharedEditability::Pending
-                    if self
-                        .pending_operation
-                        .as_ref()
-                        .is_some_and(|mutation| changes_row(mutation, workspace))
-                        || self
-                            .edits
-                            .submitted_satisfies(|mutation| changes_row(mutation, workspace)) =>
-                {
-                    Some(SharedRowStatus::progress("Saving…"))
                 }
                 _ => None,
             }
@@ -1597,9 +1750,9 @@ mod development {
         }
 
         pub(crate) fn local(&self, server: Id) -> Option<WorkspaceId> {
-            self.workspaces
-                .iter()
-                .find_map(|(&workspace, facts)| (facts.server == server).then_some(workspace))
+            self.workspaces.iter().find_map(|(&workspace, facts)| {
+                (self.edits.canonical(facts.server) == server).then_some(workspace)
+            })
         }
 
         pub(crate) fn register(&mut self, workspace: WorkspaceId, facts: SharedWorkspaceFacts) {
@@ -1607,7 +1760,9 @@ mod development {
         }
 
         pub(crate) fn forget(&mut self, workspace: WorkspaceId) {
-            self.workspaces.remove(&workspace);
+            if let Some(facts) = self.workspaces.remove(&workspace) {
+                self.edits.retire_alias(facts.server);
+            }
         }
 
         /// The refused same-field edit to present, once this client can name the Workspace it
@@ -1633,8 +1788,13 @@ mod development {
         }
 
         /// Wakes for each change the server connection publishes, when it can say so.
-        pub(crate) fn subscribe(&self) -> Option<async_channel::Receiver<()>> {
-            self.edits.edits.subscribe()
+        pub(crate) fn subscribe(&self) -> Option<SharedEditNotifications> {
+            let (sender, local) = async_channel::bounded(1);
+            self.edits.subscribers.borrow_mut().push(sender);
+            Some(SharedEditNotifications {
+                local,
+                remote: self.edits.edits.subscribe(),
+            })
         }
 
         /// Reads the server's answer and its inventory together, and reports both.
@@ -1646,6 +1806,31 @@ mod development {
         pub(crate) fn poll(&mut self) -> SharedPoll {
             let snapshot = self.edits.snapshot();
             let mut poll = SharedPoll::default();
+            let completed = self.edits.pending.borrow_mut().take_completions();
+            for completion in completed {
+                self.consumed = Some(completion.outcome.sequence);
+                // Attachment authority records only server identities, never provisional ones.
+                if let RetainedOutcome {
+                    mutation: Mutation::CreateWorkspace { .. },
+                    outcome: Outcome::Accepted { target },
+                    ..
+                } = &completion.outcome
+                    && let Err(error) = self.attachments.attach(*target)
+                {
+                    self.attachment_error = Some(error);
+                }
+                self.settle(
+                    &completion.outcome,
+                    completion.inventory.as_ref(),
+                    !completion.optimistic,
+                    &mut poll,
+                );
+                poll.changed = true;
+            }
+            if std::mem::take(&mut self.edits.pending.borrow_mut().disconnected) {
+                self.refusal = Some(SharedRefusal::Disconnected);
+                poll.changed = true;
+            }
             self.pending_operation
                 .clone_from(&snapshot.pending_operation);
             if self.connection_error != snapshot.error {
@@ -1665,8 +1850,7 @@ mod development {
                 self.consumed = Some(outcome.sequence);
                 // The answer and the authoritative values come from one snapshot, so a conflict
                 // never names a value an accepted edit has already replaced.
-                let own = self.edits.claims(&outcome.mutation);
-                self.settle(outcome, snapshot.inventory.as_ref(), own, &mut poll);
+                self.settle(outcome, snapshot.inventory.as_ref(), false, &mut poll);
                 poll.changed = true;
             }
             // Live Session facts and Pane directories change without a membership revision, so
@@ -1688,6 +1872,7 @@ mod development {
             }
             if let Some(inventory) = snapshot
                 .inventory
+                .as_ref()
                 .filter(|inventory| self.revision != Some(inventory.revision))
             {
                 // A new client's first view presents the server's first Workspace. Retained
@@ -1700,13 +1885,6 @@ mod development {
                         self.attachment_error = Some(error);
                         return poll;
                     }
-                }
-                if let Some(accepted) = &poll.accepted
-                    && matches!(accepted.mutation, Mutation::CreateWorkspace { .. })
-                    && let Err(error) = self.attachments.attach(accepted.target)
-                {
-                    self.attachment_error = Some(error);
-                    poll.accepted = None;
                 }
                 // A waiting draft whose Workspace the server no longer has can never be asked
                 // again, so it reports the removal instead of waiting for a mapping.
@@ -1721,7 +1899,19 @@ mod development {
                 }
                 self.revision = Some(inventory.revision);
                 poll.changed = true;
-                poll.inventory = Some(inventory);
+            }
+            if let Some(inventory) = snapshot.inventory {
+                let projected = self.edits.pending.borrow_mut().project(inventory);
+                if self.presentation.as_ref() != Some(&projected) {
+                    self.presentation = Some(projected.clone());
+                    poll.inventory = Some(projected);
+                    poll.changed = true;
+                }
+            }
+            // Creation takes its place when requested. The eventual acknowledgement substitutes
+            // server identities and cannot move a newer Workspace, Tab, sidebar, Find or chooser.
+            if let Some(presentation) = self.edits.pending.borrow_mut().take_presentation() {
+                poll.accepted = Some(presentation);
             }
             poll
         }
@@ -1816,7 +2006,9 @@ mod development {
         pub(crate) fn plan(&self, inventory: &Inventory) -> Vec<SharedWorkspacePlan> {
             let mut plan = Vec::new();
             for workspace in &inventory.workspaces {
-                if !self.attachments.is_attached(workspace.id) {
+                if !self.attachments.is_attached(workspace.id)
+                    && !self.edits.provisional(workspace.id)
+                {
                     continue;
                 }
                 let facts = SharedWorkspaceFacts::from_server(workspace);
@@ -1827,7 +2019,9 @@ mod development {
             }
             for (&local, facts) in &self.workspaces {
                 if !inventory.workspaces.iter().any(|workspace| {
-                    workspace.id == facts.server && self.attachments.is_attached(workspace.id)
+                    workspace.id == self.edits.canonical(facts.server)
+                        && (self.attachments.is_attached(workspace.id)
+                            || self.edits.provisional(workspace.id))
                 }) {
                     plan.push(SharedWorkspacePlan::Removed { local });
                 }
@@ -1914,7 +2108,6 @@ mod development {
             let submission = self.edits.submit(mutation);
             if submission == SharedSubmission::Submitted {
                 self.pending = true;
-                self.conflict = None;
                 self.refusal = None;
                 self.stale_close = None;
                 self.submitted_close = None;
@@ -2161,22 +2354,22 @@ mod development {
         OwnClose,
     }
 
-    /// What one inventory reading changed.
+    /// What one authoritative reading and its pending presentation changed.
     #[derive(Default)]
     pub(crate) struct SharedPoll {
         /// The presentation changed, so the window repaints.
         pub(crate) changed: bool,
         /// The server published membership this client has not applied yet.
         pub(crate) inventory: Option<Inventory>,
-        /// The server accepted an edit this process asked for, so the window opens what it
-        /// created. An accepted edit from another client is absent here.
+        /// The initiating interaction presents a provisional creation, or a nonoptimistic edit
+        /// completed. An older creation's acknowledgement never opens its target again.
         pub(crate) accepted: Option<SharedAcceptance>,
         /// The Workspace this client chose as its first-ever view just now. Opening it is the
         /// person's first use, so the window opens its Active Tab for them.
         pub(crate) initial: Option<Id>,
     }
 
-    /// One accepted edit this process asked for, and the server identity it created or changed.
+    /// An initiating presentation target or a completed edit this process submitted.
     pub(crate) struct SharedAcceptance {
         pub(crate) mutation: Mutation,
         pub(crate) target: Id,
@@ -2420,6 +2613,14 @@ mod development {
         }
 
         impl super::SharedPaneOpener for ScriptedPanes {
+            fn placeholder(&self) -> super::WorkspaceTerminalSessionFactory {
+                super::WorkspaceTerminalSessionFactory::pending(
+                    crate::terminal::testing::test_local_directory(std::path::PathBuf::from(
+                        "/tmp/spaceterm-shared-test",
+                    )),
+                )
+            }
+
             fn local_filesystem(
                 &self,
             ) -> Option<&crate::platform::local_filesystem::LocalFilesystemAuthority> {
