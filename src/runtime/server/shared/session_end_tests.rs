@@ -211,11 +211,13 @@ fn ended_directory_recovery(confirmed: bool, choose: bool) {
         ),
     );
     await_text(&mut host, 1, old, "LIVE-DIRECTORY");
-    let before = git_facts(&mut host, &live, |facts| facts.worktrees.is_some());
+    let source = if confirmed { &restoration } else { &live };
+    let before = git_facts(&mut host, source, |facts| facts.worktrees.is_some());
     let workspace = &before.workspaces[0];
     let tab = &workspace.tabs[0];
     assert_eq!(tab.worktree.as_ref(), Some(&git.0));
-    assert_eq!(repositories::pane_directory(&tab.panes[0]), live);
+    assert_eq!(&repositories::pane_directory(&tab.panes[0]), source);
+    assert_eq!(tab.panes[0].presented_directory(), live);
     assert_eq!(
         tab.panes[0].confirmed_directory.as_ref(),
         confirmed.then_some(&restoration)
@@ -271,8 +273,8 @@ fn ended_directory_recovery(confirmed: bool, choose: bool) {
     );
     let unavailable = shared_inventory(&mut host);
     assert_eq!(
-        repositories::pane_directory(&unavailable.workspaces[0].tabs[0].panes[0]),
-        live
+        &repositories::pane_directory(&unavailable.workspaces[0].tabs[0].panes[0]),
+        source
     );
     assert!(unavailable.close.unwrap().sessions[0].session.is_none());
     if !choose {

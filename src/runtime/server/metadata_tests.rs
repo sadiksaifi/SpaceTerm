@@ -136,12 +136,13 @@ fn inventory_observers_receive_unpainted_pane_metadata_without_claiming_control(
         ),
         Reply::Unchanged
     ));
+    // Publish the source directory before the command starts so completion changes only metadata.
     // Neither client requests a Screen. Only the owner sends input; the observer reads Inventory.
     command(
         &mut host,
         1,
         lease,
-        "stty -echo; printf '\\033]133;C;cmdline=cargo%%20test\\007\\033]2;✳ cargo test · api\\007\\033]7;file://localhost/tmp/api\\007\\033]9;4;1;42\\007'",
+        "stty -echo; printf '\\033]7;file://localhost/tmp/api\\007\\033]133;C;cmdline=cargo%%20test\\007\\033]2;✳ cargo test · api\\007\\033]9;4;1;42\\007'",
     );
     wait(&mut host, 20, "✳ cargo test · api");
     command(
