@@ -123,6 +123,69 @@ fn rapid_idle_tab_closes_park_the_final_workspace_and_restore_the_refused_tab(
 }
 
 #[gpui::test]
+fn batched_conflict_notices_are_reviewed_one_at_a_time_beyond_the_modal_queue_limit(
+    cx: &mut TestAppContext,
+) {
+    use spaceterm_server::hierarchy::Outcome;
+    let (harness, cx) = attachment_harness(cx);
+    cx.update(|_, cx| {
+        let source = harness.manager.update(cx, |manager, _| {
+            let shared = manager.shared.local_mut().unwrap();
+            for index in 0..12 {
+                let workspace = if index % 2 == 0 {
+                    WorkspaceId::new(2)
+                } else {
+                    WorkspaceId::new(3)
+                };
+                assert_eq!(
+                    shared.rename(workspace, format!("queued-draft-{index}-end"), Some(0)),
+                    crate::ui::shared_workspaces::SharedSubmission::Submitted
+                );
+            }
+            shared.edits()
+        });
+        let mut inventory = attachment_inventory();
+        inventory.revision += 1;
+        for (index, workspace) in inventory.workspaces.iter_mut().enumerate() {
+            workspace.name = format!("Server value {index}");
+            workspace.name_version = 1;
+        }
+        harness.edits.set_inventory(inventory);
+        for _ in 0..12 {
+            harness.edits.answer(Outcome::Conflict);
+            source.snapshot();
+        }
+    });
+    for index in 0..12 {
+        harness.sync(cx);
+        let tree = spaceterm_ui::a11y_testing::A11yTree::read(cx);
+        let expected = format!("queued-draft-{index}-end");
+        assert!(
+            tree.in_order()
+                .iter()
+                .any(|node| node["aria"].to_string().contains(&expected)),
+            "every rejected draft must get its own visible review: {expected}"
+        );
+        // Another reading while the notice is open must leave the next draft retained.
+        harness.sync(cx);
+        let tree = spaceterm_ui::a11y_testing::A11yTree::read(cx);
+        assert!(
+            tree.in_order()
+                .iter()
+                .any(|node| node["aria"].to_string().contains(&expected))
+        );
+        click("shared-workspace-conflict-keep", cx);
+    }
+    harness.sync(cx);
+    assert!(cx.debug_bounds("shared-workspace-conflict-keep").is_none());
+    assert_eq!(
+        harness.edits.submitted().len(),
+        12,
+        "review never retries a draft automatically"
+    );
+}
+
+#[gpui::test]
 fn disconnect_drops_a_parked_remote_presentation_without_closing_other_servers(
     cx: &mut TestAppContext,
 ) {

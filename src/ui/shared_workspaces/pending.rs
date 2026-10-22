@@ -35,6 +35,8 @@ pub(super) struct Completion {
 pub(super) struct PendingEdits {
     edits: VecDeque<Edit>,
     completed: VecDeque<Completion>,
+    /// Delivered outcomes keep admission capacity while their rejected drafts await review.
+    unread_conflicts: usize,
     presentations: VecDeque<SharedAcceptance>,
     aliases: BTreeMap<Id, Id>,
     observed: Option<u64>,
@@ -43,10 +45,18 @@ pub(super) struct PendingEdits {
 
 impl PendingEdits {
     pub fn full(&self) -> bool {
-        self.edits.len() + self.completed.len() >= CAPACITY
+        self.edits.len() + self.completed.len() + self.unread_conflicts >= CAPACITY
     }
     pub fn has_pending(&self) -> bool {
         !self.edits.is_empty()
+    }
+
+    pub fn retain_conflict(&mut self) {
+        self.unread_conflicts += 1;
+    }
+
+    pub fn release_conflicts(&mut self, count: usize) {
+        self.unread_conflicts -= count;
     }
 
     pub fn push(

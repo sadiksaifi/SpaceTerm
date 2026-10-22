@@ -575,6 +575,95 @@ fn optimistic_refusal_removes_dependents_and_preserves_unrelated_later_work() {
 }
 
 #[test]
+fn batched_independent_conflicts_keep_both_drafts_and_their_reviewed_values() {
+    let server = DelayedServer::new();
+    let (source, mut model) = model(&server);
+    source.submit(Mutation::CreateWorkspace {
+        name: "Second".into(),
+        directory: None,
+    });
+    server.finish(true, true);
+    model.poll();
+    let workspaces = server.inventory().workspaces;
+    let second = crate::domain::WorkspaceId::new(2);
+    model.register(second, SharedWorkspaceFacts::from_server(&workspaces[1]));
+    for (workspace, draft) in [
+        (&workspaces[0], "First draft"),
+        (&workspaces[1], "Second draft"),
+    ] {
+        assert_eq!(
+            source.submit(Mutation::RenameWorkspace {
+                workspace: workspace.id,
+                version: 0,
+                name: draft.into(),
+            }),
+            SharedSubmission::Submitted
+        );
+    }
+    server.rename_elsewhere(workspaces[0].id, "First server value");
+    server.rename_elsewhere(workspaces[1].id, "Second server value");
+    assert_eq!(server.finish(true, true).outcome, Outcome::Conflict);
+    source.snapshot();
+    assert_eq!(server.finish(true, true).outcome, Outcome::Conflict);
+    source.snapshot();
+    // Tab and split presentation can advance delivery without a Workspace Window poll.
+    model.poll();
+    for (workspace, draft, authoritative) in [
+        (first_workspace_id(), "First draft", "First server value"),
+        (second, "Second draft", "Second server value"),
+    ] {
+        let review = model
+            .take_conflict()
+            .expect("each independent draft survives the batch");
+        assert_eq!(review.workspace, workspace);
+        assert_eq!(review.draft, SharedWorkspaceDraft::Name(draft.into()));
+        assert_eq!(review.authoritative.as_ref(), authoritative);
+    }
+    assert!(model.take_conflict().is_none());
+}
+
+#[test]
+fn unread_conflict_reviews_keep_the_connected_queue_bounded() {
+    let server = DelayedServer::new();
+    let (source, mut model) = model(&server);
+    let workspace = server.inventory().workspaces[0].id;
+    server.rename_elsewhere(workspace, "Server value");
+    let mut retained = 0;
+    for index in 0..128 {
+        let submission = source.submit(Mutation::RenameWorkspace {
+            workspace,
+            version: 0,
+            name: format!("Draft {index}"),
+        });
+        if submission == SharedSubmission::Refused(SharedRefusalReason::Pending) {
+            break;
+        }
+        assert_eq!(submission, SharedSubmission::Submitted);
+        assert_eq!(server.finish(true, true).outcome, Outcome::Conflict);
+        model.poll();
+        retained += 1;
+    }
+    assert!(
+        retained > 0 && retained < 128,
+        "unread drafts must consume bounded connected admission capacity"
+    );
+    for index in 0..retained {
+        assert_eq!(
+            model.take_conflict().unwrap().draft,
+            SharedWorkspaceDraft::Name(format!("Draft {index}"))
+        );
+    }
+    assert_eq!(
+        source.submit(Mutation::CreateTab {
+            workspace,
+            source: None
+        }),
+        SharedSubmission::Submitted,
+        "reviewing the retained drafts releases admission capacity"
+    );
+}
+
+#[test]
 fn optimistic_conflict_preserves_its_snapshot_and_draft_beside_a_later_pin() {
     let server = DelayedServer::new();
     let (source, mut model) = model(&server);

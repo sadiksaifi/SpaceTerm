@@ -3042,12 +3042,15 @@ impl WorkspaceManager {
         if let Some(accepted) = poll.accepted {
             self.open_accepted_shared(key, &accepted, window, cx);
         }
-        if let Some(conflict) = self
-            .shared
-            .get_mut(key)
-            .and_then(super::shared_workspaces::SharedWorkspaces::take_conflict)
+        if !spaceterm_ui::window_modal_is_open(window, cx)
+            && let Some(conflict) = self
+                .shared
+                .get(key)
+                .and_then(super::shared_workspaces::SharedWorkspaces::next_conflict)
+            && self.present_shared_conflict(conflict, window, cx)
+            && let Some(shared) = self.shared.get_mut(key)
         {
-            self.present_shared_conflict(conflict, window, cx);
+            let _ = shared.take_conflict();
         }
         if let Some(refusal) = self
             .shared
@@ -4105,7 +4108,7 @@ impl WorkspaceManager {
         conflict: super::shared_workspaces::SharedWorkspaceConflict,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
         let name = self.workspaces.workspace(conflict.workspace).map_or_else(
             || "this Workspace".to_owned(),
             |entry| entry.name().to_owned(),
@@ -4164,7 +4167,9 @@ impl WorkspaceManager {
         );
         if let Err(error) = result {
             eprintln!("failed to present the shared change conflict: {error}");
+            return false;
         }
+        true
     }
 
     /// Asks the server again with the preserved draft and the version shown in the conflict.

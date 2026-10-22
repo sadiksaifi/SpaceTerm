@@ -43,7 +43,7 @@ mod tests;
 mod pending;
 
 mod development {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, VecDeque};
     use std::path::{Path, PathBuf};
     use std::rc::Rc;
     use std::sync::Arc;
@@ -1286,8 +1286,8 @@ mod development {
         pending_operation: Option<Mutation>,
         /// The sequence of the last outcome this client presented, so one answer is read once.
         consumed: Option<u64>,
-        /// A refused same-field edit waiting for the local Workspace that presents its target.
-        conflict: Option<PendingConflict>,
+        /// Unread refused edits, each retaining its own draft and authoritative snapshot.
+        conflicts: VecDeque<PendingConflict>,
         refusal: Option<SharedRefusal>,
         worktree_failure: Option<(
             spaceterm_server::worktree::Operation,
@@ -1325,6 +1325,15 @@ mod development {
         authoritative: SharedString,
     }
 
+    impl Drop for SharedWorkspaces {
+        fn drop(&mut self) {
+            self.edits
+                .pending
+                .borrow_mut()
+                .release_conflicts(self.conflicts.len());
+        }
+    }
+
     impl SharedWorkspaces {
         pub(crate) fn new(edits: SharedEditSource, sessions: SharedPaneSessions) -> Self {
             Self {
@@ -1338,7 +1347,7 @@ mod development {
                 pending: false,
                 pending_operation: None,
                 consumed: None,
-                conflict: None,
+                conflicts: VecDeque::new(),
                 refusal: None,
                 worktree_failure: None,
                 latest: None,
@@ -1793,9 +1802,29 @@ mod development {
 
         /// The refused same-field edit to present, once this client can name the Workspace it
         /// belongs to. Until then the draft waits here; it is never dropped.
+        fn presentable_conflict_index(&self) -> Option<usize> {
+            self.conflicts
+                .iter()
+                .position(|pending| self.local(pending.workspace).is_some())
+        }
+
+        /// Leaves ownership and admission capacity here until the notice is admitted.
+        pub(crate) fn next_conflict(&self) -> Option<SharedWorkspaceConflict> {
+            let pending = &self.conflicts[self.presentable_conflict_index()?];
+            Some(SharedWorkspaceConflict {
+                workspace: self.local(pending.workspace)?,
+                field: pending.field,
+                reviewed_version: pending.reviewed_version,
+                draft: pending.draft.clone(),
+                authoritative: pending.authoritative.clone(),
+            })
+        }
+
         pub(crate) fn take_conflict(&mut self) -> Option<SharedWorkspaceConflict> {
-            let workspace = self.local(self.conflict.as_ref()?.workspace)?;
-            let pending = self.conflict.take()?;
+            let index = self.presentable_conflict_index()?;
+            let pending = self.conflicts.remove(index)?;
+            let workspace = self.local(pending.workspace)?;
+            self.edits.pending.borrow_mut().release_conflicts(1);
             Some(SharedWorkspaceConflict {
                 workspace,
                 field: pending.field,
@@ -1847,17 +1876,6 @@ mod development {
                         self.attachment_error = Some(error);
                         return poll;
                     }
-                }
-                // A waiting draft whose Workspace the server no longer has can never be asked
-                // again, so it reports the removal instead of waiting for a mapping.
-                if let Some(pending) = self.conflict.as_ref()
-                    && !inventory
-                        .workspaces
-                        .iter()
-                        .any(|workspace| workspace.id == pending.workspace)
-                {
-                    self.conflict = None;
-                    self.refusal = Some(SharedRefusal::Missing);
                 }
                 self.revision = Some(inventory.revision);
                 poll.changed = true;
@@ -1916,6 +1934,23 @@ mod development {
                 self.latest.clone_from(&snapshot.inventory);
                 poll.changed = true;
             }
+            if let Some(inventory) = &snapshot.inventory {
+                // A batch can contain an older conflict for a Workspace removed by its latest
+                // publication. Keep every other draft and release only the missing targets.
+                let before = self.conflicts.len();
+                self.conflicts.retain(|pending| {
+                    inventory
+                        .workspaces
+                        .iter()
+                        .any(|w| w.id == pending.workspace)
+                });
+                let removed = before - self.conflicts.len();
+                if removed != 0 {
+                    self.edits.pending.borrow_mut().release_conflicts(removed);
+                    self.refusal = Some(SharedRefusal::Missing);
+                    poll.changed = true;
+                }
+            }
             // Git facts carry their own revision, so a new reading reaches every view even when
             // membership is unchanged. Facts kept from before a disconnection stay presented as
             // last known.
@@ -1969,8 +2004,13 @@ mod development {
                     }
                 }
                 Outcome::Conflict => {
-                    self.conflict = inventory
-                        .and_then(|inventory| Self::conflicted(&outcome.mutation, inventory));
+                    if let Some(conflict) = inventory
+                        .and_then(|inventory| Self::conflicted(&outcome.mutation, inventory))
+                    {
+                        // Moving a completion into review keeps its place in the shared bound.
+                        self.edits.pending.borrow_mut().retain_conflict();
+                        self.conflicts.push_back(conflict);
+                    }
                 }
                 Outcome::Missing => self.refusal = Some(SharedRefusal::Missing),
                 Outcome::Invalid => self.refusal = Some(SharedRefusal::Invalid),
