@@ -32,9 +32,12 @@ pub(super) const JOIN_STATUS_SELECTOR: &str = "settings-join-invitation-status";
 /// How often a waiting join repaints its countdown.
 const TICK: Duration = Duration::from_secs(1);
 
-/// What a join that couldn't finish says, in one sentence.
+/// What a join that couldn't finish says. A declined request, a server that couldn't prove its
+/// identity and a pairing interrupted on this computer each read differently, and none claims
+/// more than SpaceTerm knows about what the server recorded.
 fn join_failure(error: DirectError) -> &'static str {
     match error {
+        DirectError::Rejected => DECLINED,
         DirectError::InvalidInvitation => {
             "That isn\u{2019}t a valid invitation, or it was already used. Ask for a new one."
         }
@@ -54,14 +57,16 @@ fn join_failure(error: DirectError) -> &'static str {
         | DirectError::ChangedClaim
         | DirectError::Substituted => {
             "The server couldn\u{2019}t prove it\u{2019}s the one that made this invitation, so \
-             SpaceTerm stopped and paired nothing."
+             SpaceTerm stopped and won\u{2019}t use it."
         }
         DirectError::CredentialUnavailable | DirectError::InteractionRequired => {
-            "SpaceTerm couldn\u{2019}t store this device\u{2019}s key in the system\u{2019}s \
-             credential storage, so it paired nothing."
+            "SpaceTerm couldn\u{2019}t keep this device\u{2019}s key in the system\u{2019}s \
+             credential storage, so this device can\u{2019}t use the pairing."
         }
         DirectError::StorageUnavailable => {
-            "SpaceTerm couldn\u{2019}t save the connection on this computer, so it paired nothing."
+            "SpaceTerm couldn\u{2019}t save the connection on this computer, so this device \
+             can\u{2019}t use it. If the server already approved this device, SpaceTerm \
+             withdraws that pairing and shows its progress under Unpair requests."
         }
         DirectError::Capacity => {
             "SpaceTerm is already finishing as many pairings as it can. Try again shortly."
@@ -74,9 +79,14 @@ fn join_failure(error: DirectError) -> &'static str {
         | DirectError::Revoked
         | DirectError::InvalidRequest
         | DirectError::InvalidAddress
-        | DirectError::AlreadyDecided => "The server refused the request, so nothing was paired.",
+        | DirectError::AlreadyDecided => {
+            "The server refused the request, so this device isn\u{2019}t paired."
+        }
     }
 }
+
+/// What a request the server's owner declined says.
+const DECLINED: &str = "The server\u{2019}s owner declined this device, so it isn\u{2019}t paired.";
 
 impl SettingsWindow {
     /// Hands the pasted invitation to the registry once. The field empties as it does, so the
@@ -372,10 +382,13 @@ impl SettingsWindow {
                     .debug_selector(|| JOIN_STATUS_SELECTOR.to_owned())
                     .role(accesskit::Role::Status)
                     .child(secondary(
+                        // A request the server already received is withdrawn in the background and
+                        // listed under Unpair requests until it is.
                         if rows.join_cancelled {
-                            "You cancelled the request, so nothing was paired."
+                            "You cancelled the request. SpaceTerm withdraws anything the server \
+                             already received."
                         } else {
-                            "The server didn\u{2019}t approve this device, so nothing was paired."
+                            DECLINED
                         }
                         .into(),
                         colors.text_secondary,

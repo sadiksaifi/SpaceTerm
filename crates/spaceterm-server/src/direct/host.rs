@@ -312,7 +312,7 @@ impl State {
                 if claim.decision.is_some() {
                     return Err(DirectError::AlreadyDecided);
                 }
-                claim.decision = Some(Err(DirectError::AuthenticationRefused));
+                claim.decision = Some(Err(DirectError::Rejected));
                 ManagementReply::Rejected
             }
             Management::Devices => ManagementReply::Devices(

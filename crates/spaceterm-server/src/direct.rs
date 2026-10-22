@@ -139,6 +139,8 @@ pub enum DirectError {
     InvalidInvitation,
     #[error("This invitation or device claim has expired.")]
     Expired,
+    #[error("The server owner rejected this device claim.")]
+    Rejected,
     #[error("The device claim changed. Review the current claim before approving it.")]
     ChangedClaim,
     #[error("The server or device proof did not match this connection.")]

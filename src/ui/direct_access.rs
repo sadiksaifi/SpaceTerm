@@ -211,7 +211,8 @@ fn classify(error: impl Into<DirectError>) -> AccessFailure {
         DirectError::StorageUnavailable => AccessFailure::Storage,
         DirectError::InvalidInvitation => AccessFailure::InvitationEnded,
         DirectError::Expired => AccessFailure::ClaimExpired,
-        DirectError::AlreadyDecided => AccessFailure::ClaimDecided,
+        // A claim another client declined is one already answered.
+        DirectError::AlreadyDecided | DirectError::Rejected => AccessFailure::ClaimDecided,
         DirectError::ChangedClaim | DirectError::Substituted | DirectError::WrongServer => {
             AccessFailure::ClaimChanged
         }

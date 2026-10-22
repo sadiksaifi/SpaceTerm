@@ -237,6 +237,45 @@ fn invalid_device_proof_cannot_consume_an_invitation_or_substitute_an_approval()
 }
 
 #[test]
+fn an_explicit_owner_rejection_crosses_wss_as_rejected_without_enrolling_the_device() {
+    let fixture = Fixture::new();
+    fixture.enable();
+    let invitation = fixture.invite();
+    let credential = DeviceCredential::generate().unwrap();
+    let server = fixture.serve_next();
+    let mut enrollment =
+        Enrollment::claim(&invitation, "Rejected device".into(), &credential).unwrap();
+    server.join().unwrap().unwrap();
+    let ManagementReply::Claims(claims) = fixture.management(Management::Claims).unwrap() else {
+        panic!()
+    };
+    let claim = claims
+        .into_iter()
+        .find(|claim| claim.id == enrollment.claim_id())
+        .unwrap();
+    let server = fixture.serve_next();
+    assert_eq!(enrollment.finish(), Ok(None));
+    server.join().unwrap().unwrap();
+
+    fixture.management(Management::Reject(claim.id)).unwrap();
+    for _ in 0..2 {
+        let server = fixture.serve_next();
+        assert_eq!(enrollment.finish(), Err(DirectError::Rejected));
+        server.join().unwrap().unwrap();
+    }
+    assert!(
+        matches!(fixture.management(Management::Claims), Ok(ManagementReply::Claims(claims)) if claims.is_empty())
+    );
+    assert!(
+        matches!(fixture.management(Management::Devices), Ok(ManagementReply::Devices(devices)) if devices.is_empty())
+    );
+    assert!(matches!(
+        fixture.management(Management::Approve(claim)),
+        Err(DirectError::AlreadyDecided)
+    ));
+}
+
+#[test]
 fn withdraw_and_signed_cancel_prevent_late_approval_of_the_original_claim() {
     let fixture = Fixture::new();
     fixture.enable();

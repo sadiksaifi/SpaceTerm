@@ -154,10 +154,10 @@ impl DirectConnections {
                     if let Some(join) = state.joins.get_mut(&id)
                         && !join.cancelled
                     {
-                        join.status = if error == DirectError::Expired {
-                            JoinStatus::Expired
-                        } else {
-                            JoinStatus::Failed(error)
+                        join.status = match error {
+                            DirectError::Expired => JoinStatus::Expired,
+                            DirectError::Rejected => JoinStatus::Rejected,
+                            error => JoinStatus::Failed(error),
                         };
                     }
                     drop(state);
