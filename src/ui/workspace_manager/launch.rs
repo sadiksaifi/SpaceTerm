@@ -1037,6 +1037,8 @@ pub(crate) mod testing {
                                 source: None,
                                 axis: Axis::Right,
                                 starting_directory: client_home.path().to_owned(),
+                                current_directory: None,
+                                presentation: None,
                                 confirmed_directory: None,
                                 creator: None,
                             }],

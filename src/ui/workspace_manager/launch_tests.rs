@@ -44,6 +44,8 @@ fn inventory() -> Inventory {
                     source: None,
                     axis: Axis::Right,
                     starting_directory: PathBuf::from("/server/home"),
+                    current_directory: None,
+                    presentation: None,
                     confirmed_directory: None,
                     creator: None,
                 }],

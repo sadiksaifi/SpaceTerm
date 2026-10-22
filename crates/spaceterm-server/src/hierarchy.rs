@@ -175,9 +175,23 @@ pub struct Pane {
     pub source: Option<Id>,
     pub axis: Axis,
     pub starting_directory: PathBuf,
+    /// Live terminal directory presentation. Never retained as restoration authority.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_directory: Option<PathBuf>,
+    /// Current presentation for every authorized client, independent of Pane control or visibility.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub presentation: Option<Box<crate::pane::metadata::Snapshot>>,
     pub confirmed_directory: Option<PathBuf>,
     /// The creator reserves control even before measured first use starts a shell.
     pub creator: Option<Id>,
+}
+impl Pane {
+    pub fn presented_directory(&self) -> &Path {
+        self.current_directory
+            .as_deref()
+            .or(self.confirmed_directory.as_deref())
+            .unwrap_or(&self.starting_directory)
+    }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Axis {
@@ -307,6 +321,8 @@ impl State {
                 for t in &mut w.tabs {
                     for p in &mut t.panes {
                         p.creator = None;
+                        p.current_directory = None;
+                        p.presentation = None;
                     }
                 }
             }
@@ -360,6 +376,8 @@ impl State {
                             source: None,
                             axis: Axis::Right,
                             starting_directory: org.starting_directory.clone(),
+                            current_directory: None,
+                            presentation: None,
                             confirmed_directory: org.confirmed_directory.clone(),
                             creator: None,
                         }],
@@ -400,6 +418,16 @@ impl State {
         let mut retained = self.clone();
         retained.inventory.repositories = None;
         retained.inventory.close = None;
+        for pane in retained
+            .inventory
+            .workspaces
+            .iter_mut()
+            .flat_map(|workspace| &mut workspace.tabs)
+            .flat_map(|tab| &mut tab.panes)
+        {
+            pane.current_directory = None;
+            pane.presentation = None;
+        }
         org.shared = Some(Box::new(retained));
         Ok(org)
     }
@@ -484,6 +512,8 @@ impl State {
                 source: None,
                 axis: Axis::Right,
                 starting_directory,
+                current_directory: None,
+                presentation: None,
                 confirmed_directory: None,
                 creator: Some(device),
             }],
@@ -651,6 +681,8 @@ impl State {
                             source: None,
                             axis: Axis::Right,
                             starting_directory: pin.clone().unwrap_or_else(|| directory.to_owned()),
+                            current_directory: None,
+                            presentation: None,
                             confirmed_directory: None,
                             creator: Some(device),
                         }],
@@ -704,6 +736,8 @@ impl State {
                         source: None,
                         axis: Axis::Right,
                         starting_directory: start,
+                        current_directory: None,
+                        presentation: None,
                         confirmed_directory: None,
                         creator: Some(device),
                     }],
@@ -753,6 +787,8 @@ impl State {
                     source: Some(*source),
                     axis: *axis,
                     starting_directory: start,
+                    current_directory: None,
+                    presentation: None,
                     confirmed_directory: None,
                     creator: Some(device),
                 });
@@ -901,6 +937,39 @@ impl State {
             }
         }
     }
+    /// Publish presentation in memory. The retained Organization excludes these facts.
+    pub fn present_presentation(
+        &mut self,
+        id: Id,
+        snapshot: Option<Box<crate::pane::metadata::Snapshot>>,
+    ) {
+        for workspace in &mut self.inventory.workspaces {
+            for tab in &mut workspace.tabs {
+                if let Some(pane) = tab.panes.iter_mut().find(|pane| pane.id == id) {
+                    if pane.presentation != snapshot {
+                        pane.presentation = snapshot;
+                        self.inventory.revision = self.inventory.revision.saturating_add(1);
+                    }
+                    return;
+                }
+            }
+        }
+    }
+    /// Publish an OSC 7 directory without granting restoration or filesystem authority.
+    pub fn present_directory(&mut self, id: Id, path: PathBuf) {
+        for workspace in &mut self.inventory.workspaces {
+            for tab in &mut workspace.tabs {
+                if let Some(pane) = tab.panes.iter_mut().find(|pane| pane.id == id) {
+                    if pane.presented_directory() != path {
+                        pane.current_directory = Some(path);
+                        self.recalculate_names();
+                        self.inventory.revision += 1;
+                    }
+                    return;
+                }
+            }
+        }
+    }
     /// The allocation policy from domain/workspace_collection/naming.rs, at the local owner.
     fn recalculate_names(&mut self) {
         let mut occupied: std::collections::HashSet<String> =
@@ -921,13 +990,10 @@ impl State {
                 .iter()
                 .find(|t| t.id == workspace.root_tab)
                 .and_then(|t| t.panes.iter().find(|p| p.id == t.root_pane));
-            let directory = workspace.pinned_directory.as_deref().or_else(|| {
-                root.map(|p| {
-                    p.confirmed_directory
-                        .as_deref()
-                        .unwrap_or(&p.starting_directory)
-                })
-            });
+            let directory = workspace
+                .pinned_directory
+                .as_deref()
+                .or_else(|| root.map(Pane::presented_directory));
             let mut base = match directory {
                 Some(directory) if Some(directory) != self.home_directory.as_deref() => directory
                     .file_name()
@@ -1041,6 +1107,9 @@ impl State {
                     if p.id == [0; 32]
                         || !ids.insert(p.id)
                         || p.source.is_some_and(|id| !preceding.contains(&id))
+                        || p.presentation
+                            .as_ref()
+                            .is_some_and(|snapshot| snapshot.validate().is_err())
                         || !valid_path(&p.starting_directory)
                         || p.confirmed_directory
                             .as_ref()

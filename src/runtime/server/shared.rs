@@ -124,6 +124,15 @@ impl SharedWorkspaceHost {
         for (id, host) in &mut self.panes {
             host.retain_directory()?;
             host.retire_exited()?;
+            if let Some(metadata) = host
+                .pane
+                .as_ref()
+                .and_then(|pane| pane.runtime.metadata_snapshot())
+            {
+                // OSC 7 is live presentation even without owned prompt markers. Restoration
+                // continues to use only retain_directory's independently confirmed candidate.
+                next.present_directory(*id, metadata.directory.path.as_ref().into());
+            }
             if let Some(org) = &host.organization {
                 if let Some(path) = &org.confirmed_directory {
                     next.confirm_directory(*id, path.clone());
@@ -135,6 +144,21 @@ impl SharedWorkspaceHost {
         self.repositories.update(&mut next);
         if next != self.state {
             self.commit(next)?;
+        }
+        // Presentation is ephemeral. Apply it after durable synchronization so title and
+        // activity frames publish to every observer without rewriting Organization storage.
+        for (id, host) in &self.panes {
+            let snapshot = host
+                .pane
+                .as_ref()
+                .and_then(|pane| pane.runtime.metadata_snapshot());
+            self.state.present_presentation(
+                *id,
+                snapshot
+                    .as_deref()
+                    .map(super::metadata::encode)
+                    .map(Box::new),
+            );
         }
         // Keep an exited runtime until its controller has observed its final screen.
         self.panes.retain(|id, h| {
@@ -656,6 +680,7 @@ impl SharedWorkspaceHost {
                     | Request::Read { lease, .. }
                     | Request::GraphicsChunk { lease, .. }
                     | Request::SelectionChunk { lease, .. }
+                    | Request::Metadata { lease, .. }
                     | Request::Poll { lease }
                     | Request::PollChanges { lease, .. }
                     | Request::PresentationDemand { lease, .. }

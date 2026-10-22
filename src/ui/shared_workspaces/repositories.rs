@@ -216,12 +216,9 @@ fn pull_request_key(
     })
 }
 
-/// The directory a server Pane presents: the last one its shell confirmed, else the one it starts
-/// in.
+/// The live directory a server Pane presents, independent of restoration authority.
 pub(crate) fn pane_directory(pane: &Pane) -> &Path {
-    pane.confirmed_directory
-        .as_deref()
-        .unwrap_or(&pane.starting_directory)
+    pane.presented_directory()
 }
 
 /// The directory a server Workspace's row reads: its Pinned Directory, else its Root Pane's.
@@ -616,6 +613,8 @@ mod tests {
                 source: None,
                 axis: Axis::Right,
                 starting_directory: worktree.into(),
+                current_directory: None,
+                presentation: None,
                 confirmed_directory: None,
                 creator: None,
             }],

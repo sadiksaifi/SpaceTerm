@@ -563,11 +563,7 @@ mod development {
                 .iter()
                 .find(|tab| tab.id == workspace.root_tab)
                 .and_then(|tab| tab.panes.iter().find(|pane| pane.id == tab.root_pane))
-                .map_or_else(PathBuf::new, |pane| {
-                    pane.confirmed_directory
-                        .clone()
-                        .unwrap_or_else(|| pane.starting_directory.clone())
-                });
+                .map_or_else(PathBuf::new, |pane| pane.presented_directory().to_owned());
             Self {
                 server: workspace.id,
                 name: workspace.name.clone(),

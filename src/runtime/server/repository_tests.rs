@@ -66,6 +66,151 @@ pub(super) fn git_facts(
 }
 
 #[test]
+fn osc7_without_owned_prompts_updates_repository_worktrees_and_workspace_without_restoration() {
+    use spaceterm_server::hierarchy::State;
+    let git = GitFixture::new();
+    let tree = git.0.join("live-worktree");
+    git.git(&["worktree", "add", "-b", "feature", tree.to_str().unwrap()]);
+    git.git(&[
+        "remote",
+        "add",
+        "origin",
+        "https://github.com/owner/example.git",
+    ]);
+    let mut host = SharedWorkspaceHost::new(host());
+    host.prepare_initial_organization().unwrap();
+    let before = shared_inventory(&mut host);
+    let pane = before.workspaces[0].tabs[0].root_pane;
+    let Reply::Attached { lease } = host.request(
+        [1; 32],
+        [1; 32],
+        Request::SelectPane {
+            pane,
+            explicit: true,
+            size: size(),
+            style: None,
+        },
+    ) else {
+        panic!("Root Pane did not start")
+    };
+    // The fixture disables automatic shell integration. No prompt marker accompanies OSC 7.
+    command(
+        &mut host,
+        1,
+        lease,
+        &format!(
+            "stty -echo; cd '{}'; printf '\\033]7;file://localhost%s\\007' \"$PWD\"; printf '\\033[2J\\033[HOSC7-LIVE\\n'",
+            tree.display(),
+        ),
+    );
+    await_text(&mut host, 1, lease, "OSC7-LIVE");
+    let current = git_facts(&mut host, &tree, |facts| {
+        facts.repository.is_some() && facts.worktrees.is_some()
+    });
+    let workspace = &current.workspaces[0];
+    assert_eq!(workspace.name, "live-worktree");
+    assert_eq!(
+        super::repositories::workspace_directory(workspace),
+        Some(tree.as_path())
+    );
+    assert_eq!(workspace.tabs[0].worktree.as_ref(), Some(&tree));
+    assert_eq!(workspace.tabs[0].panes[0].confirmed_directory, None);
+    assert_eq!(
+        current
+            .repositories
+            .as_ref()
+            .unwrap()
+            .directories
+            .iter()
+            .find(|facts| facts.directory == tree)
+            .unwrap()
+            .repository
+            .as_ref()
+            .unwrap()
+            .pull_request
+            .as_ref()
+            .unwrap()
+            .head_branch
+            .as_ref(),
+        "feature"
+    );
+    let mut state = State::empty();
+    state.inventory = current;
+    let retained = state.envelope(&git.0).unwrap();
+    assert!(
+        retained.shared.as_ref().unwrap().inventory.workspaces[0].tabs[0].panes[0]
+            .current_directory
+            .is_none()
+    );
+    assert!(
+        retained.shared.as_ref().unwrap().inventory.workspaces[0].tabs[0].panes[0]
+            .presentation
+            .is_none()
+    );
+    assert!(
+        !String::from_utf8(serde_json::to_vec(&retained).unwrap())
+            .unwrap()
+            .contains("current_directory")
+    );
+    let restored = State::from_legacy(
+        &serde_json::from_slice(&serde_json::to_vec(&retained).unwrap()).unwrap(),
+    );
+    assert_eq!(
+        restored.inventory.workspaces[0].tabs[0].panes[0].confirmed_directory,
+        None
+    );
+    assert_eq!(
+        super::repositories::workspace_directory(&restored.inventory.workspaces[0]),
+        Some(
+            before.workspaces[0].tabs[0].panes[0]
+                .starting_directory
+                .as_path()
+        )
+    );
+    // Once an owned prompt has confirmed this directory, a later plain OSC 7 still moves
+    // live facts. The earlier owning-shell confirmation remains the restoration target.
+    command(
+        &mut host,
+        1,
+        lease,
+        "printf '\\033]133;A;spaceterm=%s\\007' \"$SPACETERM_PROMPT_OWNER\"; printf '\\033[2J\\033[HOWNED-DIRECTORY\\n'",
+    );
+    await_text(&mut host, 1, lease, "OWNED-DIRECTORY");
+    assert_eq!(
+        shared_inventory(&mut host).workspaces[0].tabs[0].panes[0]
+            .confirmed_directory
+            .as_ref(),
+        Some(&tree)
+    );
+    command(
+        &mut host,
+        1,
+        lease,
+        &format!(
+            "cd '{}'; printf '\\033]7;file://localhost%s\\007' \"$PWD\"; printf '\\033[2J\\033[HOSC7-AFTER-OWNER\\n'",
+            git.0.display()
+        ),
+    );
+    await_text(&mut host, 1, lease, "OSC7-AFTER-OWNER");
+    let after_owner = git_facts(&mut host, &git.0, |facts| facts.worktrees.is_some());
+    assert_eq!(
+        super::repositories::workspace_directory(&after_owner.workspaces[0]),
+        Some(git.0.as_path())
+    );
+    assert_eq!(
+        after_owner.workspaces[0].tabs[0].worktree.as_ref(),
+        Some(&git.0)
+    );
+    assert_eq!(
+        after_owner.workspaces[0].tabs[0].panes[0]
+            .confirmed_directory
+            .as_ref(),
+        Some(&tree)
+    );
+    host.shutdown().unwrap();
+}
+
+#[test]
 fn count_failure_keeps_current_branch_upstream_pull_request_and_worktree_facts() {
     assert_count_failure_keeps_facts(false);
 }
@@ -560,7 +705,10 @@ fn repairing_an_unpinned_root_preserves_missing_worktree_membership_after_reads_
     let mut expected = original.clone();
     expected.tabs[0].panes[0].confirmed_directory = Some(git.0.clone());
     expected.tabs[0].worktree_membership_fixed = true;
-    assert_eq!(after.workspaces[0], expected);
+    let mut organization = after.workspaces[0].clone();
+    // Live terminal presentation is independent of the repaired saved organization.
+    organization.tabs[0].panes[0].presentation = None;
+    assert_eq!(organization, expected);
     assert!(
         !tree.exists(),
         "repair must never recreate a missing Worktree"

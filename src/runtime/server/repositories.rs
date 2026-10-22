@@ -202,9 +202,7 @@ impl ServerRepositories {
     }
 }
 pub(super) fn pane_directory(pane: &spaceterm_server::hierarchy::Pane) -> &Path {
-    pane.confirmed_directory
-        .as_deref()
-        .unwrap_or(&pane.starting_directory)
+    pane.presented_directory()
 }
 pub(super) fn workspace_directory(
     workspace: &spaceterm_server::hierarchy::Workspace,
