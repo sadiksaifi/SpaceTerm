@@ -61,7 +61,10 @@ impl LocalServerOperations {
                 let running = state
                     .status
                     .is_some_and(|status| status.running && !status.stopped);
-                owner.service_failure = state.failure;
+                // Authorization refusal admits no service change and may clear on a later read.
+                owner.service_failure = state
+                    .failure
+                    .filter(|error| *error != ServerError::AuthorizationRequired);
                 owner.service = Some(state);
                 owner.finished(CompletedOperation::Service, running, cx);
             });
@@ -96,7 +99,13 @@ impl LocalServerOperations {
                             })))
                         )
                     });
-                owner.update_failure = state.failure;
+                // A follow-up read can fail after activation succeeded. Retain the operation's
+                // own failure; a successful later read clears only the observation failure.
+                owner.update_failure = owner
+                    .last_update
+                    .as_ref()
+                    .and_then(|outcome| outcome.as_ref().err())
+                    .copied();
                 owner.update = Some(state);
                 owner.finished(CompletedOperation::Update, running, cx);
             });

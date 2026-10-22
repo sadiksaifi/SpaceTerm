@@ -1142,6 +1142,7 @@ pub(super) mod testing {
         shared: Arc<Mutex<Shared>>,
         /// The refusal the next preparation returns.
         refusal: Mutex<Option<ServerError>>,
+        read_failure: Mutex<Option<ServerError>>,
     }
 
     impl ScriptedUpdate {
@@ -1152,6 +1153,7 @@ pub(super) mod testing {
                     ..Shared::default()
                 })),
                 refusal: Mutex::new(None),
+                read_failure: Mutex::new(None),
             })
         }
 
@@ -1166,6 +1168,10 @@ pub(super) mod testing {
 
         pub(in crate::ui::settings_window) fn refuse_next(&self, error: ServerError) {
             *self.refusal.lock().expect("refusal") = Some(error);
+        }
+
+        pub(in crate::ui::settings_window) fn refuse_next_read(&self, error: ServerError) {
+            *self.read_failure.lock().expect("read failure") = Some(error);
         }
 
         pub(in crate::ui::settings_window) fn answer(&self, outcome: Outcome) {
@@ -1187,6 +1193,9 @@ pub(super) mod testing {
         fn read(&self) -> Result<UpdateFacts, ServerError> {
             let mut shared = self.shared();
             shared.calls.push(UpdateCall::Read);
+            if let Some(error) = self.read_failure.lock().expect("read failure").take() {
+                return Err(error);
+            }
             Ok(shared.facts().clone())
         }
 

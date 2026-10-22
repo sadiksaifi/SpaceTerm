@@ -639,6 +639,33 @@ fn a_confirmed_update_keeps_its_error_after_settings_reopens(cx: &mut TestAppCon
 }
 
 #[gpui::test]
+fn a_successful_update_does_not_keep_a_transient_followup_read_failure(cx: &mut TestAppContext) {
+    let mut harness = open(available(), cx);
+    click(UPDATE_SELECTOR, harness.cx);
+    harness
+        .update
+        .refuse_next_read(ServerError::StorageUnavailable);
+    click_modal(UPDATE_CONFIRM_SELECTOR, harness.cx);
+    assert_eq!(harness.presentation().state, "Unknown");
+    harness.window.update(harness.cx, |settings, cx| {
+        settings.check_server_update(cx);
+    });
+    harness.cx.run_until_parked();
+    assert_eq!(harness.presentation().state, "Up to Date");
+    assert_eq!(
+        harness.window.read_with(harness.cx, |settings, _| {
+            settings.server_update.as_ref().unwrap().state.failure
+        }),
+        None,
+        "a successful reread must not claim the confirmed update failed"
+    );
+    assert_eq!(
+        harness.update.changes(),
+        [UpdateCall::PrepareUpdate, UpdateCall::Activate]
+    );
+}
+
+#[gpui::test]
 fn updating_a_stopped_server_after_settings_reopens_keeps_it_stopped(cx: &mut TestAppContext) {
     let mut facts = available();
     facts.status = Ok(stopped());
