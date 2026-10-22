@@ -3051,6 +3051,57 @@ impl WorkspaceManager {
         // Workspaces nobody is looking at.
         if poll.changed {
             self.present_shared_repositories(cx);
+            self.present_shared_metadata(key, cx);
+        }
+    }
+
+    /// Presents the Terminal Metadata one server published for every Pane of its Workspaces this
+    /// window shows, active or not, painted or not. The inventory names each Pane's Session run,
+    /// so metadata from a run that ended never replaces the current one's.
+    fn present_shared_metadata(&self, key: ServerKey, cx: &mut Context<Self>) {
+        use crate::ui::terminal_pane::ServerSessionRun;
+
+        let Some(inventory) = self
+            .shared
+            .get(key)
+            .and_then(super::shared_workspaces::SharedWorkspaces::latest_inventory)
+        else {
+            return;
+        };
+        let runs = inventory.close.as_ref().map(|close| {
+            close
+                .sessions
+                .iter()
+                .filter_map(|pane| {
+                    let session = pane.session?;
+                    Some((
+                        pane.id,
+                        ServerSessionRun {
+                            boot: close.boot,
+                            session,
+                        },
+                    ))
+                })
+                .collect::<std::collections::BTreeMap<_, _>>()
+        });
+        let published = inventory
+            .workspaces
+            .iter()
+            .flat_map(|workspace| &workspace.tabs)
+            .flat_map(|tab| &tab.panes)
+            .filter_map(|pane| {
+                let run = *runs.as_ref()?.get(&pane.id)?;
+                Some((pane.id, (run, pane.presentation.as_deref()?)))
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let lookup = |pane| published.get(&pane).copied();
+        for entry in self.workspaces.iter() {
+            if self.shared.owner(entry.id()) != Some(key) {
+                continue;
+            }
+            entry.payload().clone().update(cx, |manager, cx| {
+                manager.present_shared_metadata(&lookup, cx);
+            });
         }
     }
 
