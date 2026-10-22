@@ -108,13 +108,11 @@ fn join_paused(stage: EnrollmentStage) -> String {
             "SpaceTerm lost contact with the server while waiting for approval."
         }
     };
-    let next = if cfg!(target_os = "macos") {
-        "If macOS asks whether SpaceTerm can find devices on your local network, allow it. \
-         Otherwise, check that this Mac can reach the server on the network. Then choose Try \
-         Again."
-    } else {
-        "Check that this computer can reach the server on the network, then choose Try Again."
-    };
+    // Some systems ask before an app reaches the local network, so the copy covers that prompt
+    // without claiming one appeared.
+    let next = "If this computer asks whether SpaceTerm can find devices on the local network, \
+                allow it. Otherwise, check that this computer can reach the server on the network. \
+                Then choose Try Again.";
     format!(
         "{what} {next} SpaceTerm keeps this request until the invitation expires, and asks again \
          only when you choose Try Again."
