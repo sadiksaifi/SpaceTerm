@@ -164,7 +164,11 @@ fn digest(bytes: &[u8]) -> String {
 fn public_key(identity: &str) -> Result<Vec<u8>, ServerError> {
     #[cfg(test)]
     if test_support::active() {
-        return Ok(test_support::key());
+        return Ok(if identity == "spaceterm" {
+            test_support::production_key()
+        } else {
+            test_support::key()
+        });
     }
     let key = match identity {
         "spaceterm" => {
@@ -221,7 +225,7 @@ pub(super) fn verify_candidate_installation(
 fn verify_installation(
     path: &Path,
     identity: &str,
-    requirements: Option<(u16, &[&str])>,
+    candidate_requirements: Option<(u16, &[&str])>,
 ) -> Result<(), ServerError> {
     let directory = owned_directory(path)?;
     let bytes = read_file(&directory, Path::new("artifact.tar.gz"), MAX_ARCHIVE)?;
@@ -229,16 +233,27 @@ fn verify_installation(
     if path.file_name().and_then(|v| v.to_str()) != Some(&digest(&bytes)) {
         return Err(ServerError::RuntimeUnavailable);
     }
-    authenticate(&bytes, &signature, identity)?;
+    let legacy_production = authenticate(&bytes, &signature, identity).is_err();
+    if legacy_production {
+        // Previous builds signed nonproduction runtimes with production trust. Retained
+        // installations remain usable for Start, recovery and the previous side of Update.
+        // Newly offered candidates must use current identity trust at every admission check.
+        if candidate_requirements.is_some()
+            || !matches!(identity, "spaceterm-preflight" | "spaceterm-development")
+        {
+            return Err(ServerError::RuntimeUnavailable);
+        }
+        authenticate(&bytes, &signature, "spaceterm")?;
+    }
     let info = verify_contents(&directory, &bytes, identity)?;
-    if let Some((major, capabilities)) = requirements {
+    if let Some((major, capabilities)) = candidate_requirements {
         info.require_compatibility(major, capabilities)?;
     }
-    verify_native(path, identity)?;
+    verify_native(path, identity, legacy_production)?;
     verify_executable(path, &info)?;
     verify_directory_path(&directory, path)
 }
-fn verify_native(path: &Path, identity: &str) -> Result<(), ServerError> {
+fn verify_native(path: &Path, identity: &str, legacy_production: bool) -> Result<(), ServerError> {
     #[cfg(test)]
     if test_support::active() {
         return Ok(());
@@ -246,7 +261,7 @@ fn verify_native(path: &Path, identity: &str) -> Result<(), ServerError> {
     #[cfg(target_os = "macos")]
     {
         let mut requirement = format!("identifier \"io.github.sadiksaifi.{identity}.server\"");
-        if identity == "spaceterm" {
+        if identity == "spaceterm" || legacy_production {
             let template = include_str!("../../../../packaging/macos/spaceterm/Packager.toml");
             let signer = template
                 .lines()
@@ -268,7 +283,7 @@ fn verify_native(path: &Path, identity: &str) -> Result<(), ServerError> {
         .map_err(|_| ServerError::RuntimeUnavailable)?;
     }
     #[cfg(not(target_os = "macos"))]
-    let _ = (path, identity);
+    let _ = (path, identity, legacy_production);
     Ok(())
 }
 fn verify_executable(path: &Path, expected: &Build) -> Result<(), ServerError> {
@@ -722,7 +737,7 @@ fn retain(
         verify_contents(&prepared.directory, bytes, identity)?;
         let prepared_path = prepared.path(parent);
         verify_directory_path(&prepared.directory, &prepared_path)?;
-        verify_native(&prepared_path, identity)?;
+        verify_native(&prepared_path, identity, false)?;
         verify_executable(&prepared_path, info)?;
         verify_directory_path(&directory, parent)?;
         prepared

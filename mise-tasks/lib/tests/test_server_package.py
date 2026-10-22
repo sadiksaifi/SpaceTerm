@@ -103,6 +103,17 @@ class ServerArchiveTests(unittest.TestCase):
             os.umask(previous)
         self.assertEqual(stat.S_IMODE((self.root / "unpacked/server").stat().st_mode), 0o755)
 
+    def test_previous_production_trust_cannot_authenticate_a_new_nonproduction_candidate(self):
+        self.archive_with([("server/build.json", json.dumps(self.info).encode(), tarfile.REGTYPE)])
+        production_fixture_seed = bytes(range(32))
+        release.sign_ed25519(production_fixture_seed, self.archive, self.signature)
+        with patch.object(
+            release, "public_key", return_value=release.derived_public_key(production_fixture_seed)
+        ):
+            with self.assertRaises(TaskError):
+                self.unpack()
+        self.assertFalse((self.root / "unpacked").exists())
+
     def test_unsigned_and_tampered_archives_are_refused_before_extraction(self):
         self.archive_with([("server/build.json", json.dumps(self.info).encode(), tarfile.REGTYPE)])
         self.archive.write_bytes(self.archive.read_bytes() + b"tampered")
