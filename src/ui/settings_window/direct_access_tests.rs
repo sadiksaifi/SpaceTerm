@@ -30,7 +30,7 @@ use crate::ui::direct_access::{
 use crate::ui::direct_pairing::{APPROVE_SELECTOR, COPY_SELECTOR, DONE_SELECTOR};
 use crate::ui::settings_window::SettingsWindow;
 use crate::ui::settings_window::direct_join::{
-    WITHDRAW_CONFIRM_SELECTOR, WITHDRAW_FAILURE_SELECTOR, WITHDRAW_SELECTOR,
+    JOIN_RETRY_SELECTOR, WITHDRAW_CONFIRM_SELECTOR, WITHDRAW_FAILURE_SELECTOR, WITHDRAW_SELECTOR,
 };
 use crate::ui::settings_window::direct_routes::{
     PENDING_SELECTOR, UNPAIR_SELF_CONFIRM_SELECTOR, UNPAIR_SELF_SELECTOR, UNSAVED_CHANGES,
@@ -568,6 +568,47 @@ fn a_pairing_saved_without_confirmation_is_selected_and_its_detail_keeps_the_war
         says(UNSAVED_CHANGES, cx),
         "the selected route keeps its durability warning"
     );
+}
+
+/// A join the network interrupted keeps its request and asks again only when the person
+/// chooses Try Again, without claiming why the server was out of reach.
+#[gpui::test]
+fn an_interrupted_join_waits_for_try_again_with_the_same_request(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let access = ScriptedAccess::new(Listener::Off);
+    let (direct, join) = crate::direct_connections::tests::retryable_join(
+        "studio",
+        crate::direct_connections::EnrollmentStage::Claim,
+    );
+    let (window, cx) = open_servers_with(&access, Some(direct.clone()), cx);
+
+    follow(&window, join, cx);
+    settle(cx, |cx| open(JOIN_RETRY_SELECTOR, cx));
+
+    assert!(
+        says(
+            "SpaceTerm didn\u{2019}t get an answer from the server at the invitation\u{2019}s address.",
+            cx
+        ),
+        "the row says what happened"
+    );
+    assert!(
+        !says("denied", cx) && !says("permission", cx),
+        "a network failure names no cause SpaceTerm didn't observe"
+    );
+    assert!(
+        direct.pending_unpairs().is_empty(),
+        "an interrupted join withdraws nothing"
+    );
+
+    click(JOIN_RETRY_SELECTOR, cx);
+
+    settle(cx, |cx| {
+        window
+            .read_with(cx, |settings, _| settings.selected_server())
+            .is_some_and(|server| matches!(server, ServerChoice::Direct(route) if route == join))
+    });
+    assert!(direct.pending_unpairs().is_empty());
 }
 
 /// The fixture's storage can't confirm any further save after an unknown publication, so the

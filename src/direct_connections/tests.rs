@@ -13,10 +13,14 @@ pub(crate) fn unconfirmed_join(label: &str) -> (DirectConnections, JoinId) {
     super::worker::enrollment_tests::unconfirmed_join(label)
 }
 
+pub(crate) fn retryable_join(label: &str, stage: EnrollmentStage) -> (DirectConnections, JoinId) {
+    super::worker::enrollment_tests::retryable_join(label, stage)
+}
+
 /// Records kept in memory. While `failing`, a save publishes nothing, as a full or locked
 /// disk does.
 #[derive(Default)]
-struct MemoryRecords(Mutex<Document>, AtomicBool);
+pub(super) struct MemoryRecords(Mutex<Document>, AtomicBool);
 impl Records for MemoryRecords {
     fn load(&self) -> Result<Document, ()> {
         Ok(self.0.lock().unwrap().clone())
