@@ -9,14 +9,14 @@ Development identity's entry so its Exec follows the current source prefix.
 import json
 import os
 import shutil
-import signal
 import subprocess
 import tempfile
 import xml.etree.ElementTree as ElementTree
 from pathlib import Path
 
-from spaceterm_tasks import ROOT, TaskError, developer_environment
+from spaceterm_tasks import ROOT, TaskError
 from spaceterm_tasks.cargo import build_executable
+from spaceterm_tasks.development_supervision import development_run, source_environment, supervise
 
 APPLICATION_ID = "io.github.sadiksaifi.spaceterm-development"
 ICON_DOCUMENT = Path("packaging/macos/development/SpaceTerm Development.icon")
@@ -219,7 +219,7 @@ def register(prefix: Path, root: Path = ROOT) -> None:
     atomic_write(destination, contents)
 
 
-def stage_prefix(executable: Path, root: Path = ROOT) -> Path:
+def stage_prefix(executable: Path, server: Path, root: Path = ROOT) -> Path:
     """Stage an installed layout beside Cargo's artifact and rename it into place."""
     parent = executable.parent.parent / "development-apps"
     parent.mkdir(parents=True, exist_ok=True)
@@ -228,6 +228,8 @@ def stage_prefix(executable: Path, root: Path = ROOT) -> Path:
         (staging / "bin").mkdir()
         shutil.copyfile(executable, staging / "bin" / "spaceterm")
         (staging / "bin" / "spaceterm").chmod(0o755)
+        shutil.copyfile(server, staging / "bin" / "spaceterm-server")
+        (staging / "bin" / "spaceterm-server").chmod(0o755)
         resources = staging / "share" / "spaceterm"
         shutil.copytree(root / SHELL_INTEGRATION, resources / "shell-integration")
         compiled = subprocess.run(
@@ -244,36 +246,36 @@ def stage_prefix(executable: Path, root: Path = ROOT) -> Path:
     return prefix
 
 
-def interrupt(signum, _frame):
-    raise SystemExit(128 + signum)
-
-
-def launch(backend: str | None = None) -> None:
-    """Build, stage, register, and replace this process with SpaceTerm Development.
-
-    backend is None to let GPUI choose (Wayland when WAYLAND_DISPLAY is set), or
-    "wayland" or "x11" to require that display server.
-    """
-    environment = developer_environment(os.environ)
-    if backend == "wayland" and not environment.get("WAYLAND_DISPLAY"):
-        raise TaskError("Wayland requires WAYLAND_DISPLAY")
-    if backend == "x11":
-        if not environment.get("DISPLAY"):
-            raise TaskError("X11 requires DISPLAY")
-        environment.pop("WAYLAND_DISPLAY", None)
-    for tool in REQUIRED_TOOLS:
-        if shutil.which(tool) is None:
-            raise TaskError(f"{tool} is required; run mise doctor project")
-    for signum in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM):
-        signal.signal(signum, interrupt)
-    prefix = stage_prefix(build_executable("--locked"))
-    try:
-        register(prefix)
-    except (OSError, ValueError, subprocess.CalledProcessError):
-        raise TaskError(
-            "could not register the Development desktop entry; run mise doctor project"
-        ) from None
-    executable = str(prefix / "bin" / "spaceterm")
-    # Like macOS `open -n`, run this build beside a running Development instance instead of
-    # activating it. Desktop launches of the registered entry still activate the running instance.
-    os.execve(executable, [executable, "--new-instance"], environment)
+def launch(backend: str | None = None) -> int | None:
+    """Build and own the current client and foreground Server for this Development run."""
+    with development_run():
+        environment = source_environment(os.environ)
+        if backend == "wayland" and not environment.get("WAYLAND_DISPLAY"):
+            raise TaskError("Wayland requires WAYLAND_DISPLAY")
+        if backend == "x11":
+            if not environment.get("DISPLAY"):
+                raise TaskError("X11 requires DISPLAY")
+            environment.pop("WAYLAND_DISPLAY", None)
+        for tool in REQUIRED_TOOLS:
+            if shutil.which(tool) is None:
+                raise TaskError(f"{tool} is required; run mise doctor project")
+        server = build_executable(
+            "--package",
+            "spaceterm-server-host",
+            "--no-default-features",
+            "--locked",
+            binary="spaceterm-server",
+            env=environment,
+        )
+        prefix = stage_prefix(build_executable("--locked", env=environment), server)
+        try:
+            register(prefix)
+        except (OSError, ValueError, subprocess.CalledProcessError):
+            raise TaskError(
+                "could not register the Development desktop entry; run mise doctor project"
+            ) from None
+        return supervise(
+            [str(prefix / "bin/spaceterm-server"), "development-serve", "spaceterm-development"],
+            [str(prefix / "bin/spaceterm"), "--new-instance"],
+            environment,
+        )

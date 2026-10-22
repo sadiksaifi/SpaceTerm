@@ -8,8 +8,9 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from spaceterm_tasks import TaskError, developer_environment
+from spaceterm_tasks import TaskError
 from spaceterm_tasks.cargo import build_executable
+from spaceterm_tasks.development_supervision import development_run, source_environment, supervise
 from spaceterm_tasks.macos_bundle import ICON_NAME, compile_icon, identity, identity_directory
 from spaceterm_tasks.packaging import (
     NOTICES,
@@ -44,7 +45,7 @@ def cached_icon(parent, name):
     return cache
 
 
-def stage_bundle(executable):
+def stage_bundle(executable, server):
     template = identity(IDENTITY)
     name = template["CFBundleName"]
     if name != template["CFBundleExecutable"]:
@@ -67,6 +68,8 @@ def stage_bundle(executable):
         (contents / "Info.plist").write_bytes(plistlib.dumps(info))
         shutil.copyfile(executable, contents / "MacOS" / name)
         (contents / "MacOS" / name).chmod(0o755)
+        shutil.copyfile(server, contents / "MacOS" / "spaceterm-server")
+        (contents / "MacOS" / "spaceterm-server").chmod(0o755)
         resources = contents / "Resources"
         shutil.copytree(SHELL_INTEGRATION, resources / "shell-integration")
         shutil.copyfile(NOTICES, resources / NOTICES.name)
@@ -75,6 +78,17 @@ def stage_bundle(executable):
             "Development terminfo compilation failed",
         )
         verify_resources(resources, "Development bundle")
+        checked(
+            [
+                "codesign",
+                "--force",
+                "--sign",
+                "-",
+                "--timestamp=none",
+                str(contents / "MacOS/spaceterm-server"),
+            ],
+            "codesign could not sign the Development Server",
+        )
         signed = subprocess.run(
             ["codesign", "--force", "--sign", "-", "--timestamp=none", str(contents.parent)],
             stdout=subprocess.DEVNULL,
@@ -90,18 +104,32 @@ def stage_bundle(executable):
 
 
 def launch():
-    bundle = stage_bundle(build_executable("--locked"))
-    scenario = os.environ.get("SPACETERM_UPDATE_PREVIEW")
-    if scenario:
-        print(f"Update preview: {scenario}. Choose SpaceTerm Development > Check for Updates…")
-        print("Downloads and installation are simulated. Nothing will be installed or restarted.")
-    # LaunchServices makes the bundle the responsible process for its own privacy checks, as it
-    # is for an installed SpaceTerm. Executing the binary from here would attribute those checks
-    # to the terminal that ran this task, so System Permissions would follow that terminal.
-    output = os.ttyname(0) if os.isatty(0) else os.devnull
-    # open passes its environment to the application.
-    os.execvpe(
-        "open",
-        ["open", "-W", "-n", "--stdout", output, "--stderr", output, str(bundle)],
-        developer_environment(os.environ),
-    )
+    with development_run():
+        environment = source_environment(os.environ)
+        server = build_executable(
+            "--package",
+            "spaceterm-server-host",
+            "--no-default-features",
+            "--locked",
+            binary="spaceterm-server",
+            env=environment,
+        )
+        bundle = stage_bundle(build_executable("--locked", env=environment), server)
+        scenario = environment.get("SPACETERM_UPDATE_PREVIEW")
+        if scenario:
+            print(f"Update preview: {scenario}. Choose SpaceTerm Development > Check for Updates…")
+            print(
+                "Downloads and installation are simulated. Nothing will be installed or restarted."
+            )
+        # LaunchServices attributes System Permissions to this bundle. The private owner
+        # connection ends this exact client without signaling an unrelated Development process.
+        output = os.ttyname(0) if os.isatty(0) else os.devnull
+        return supervise(
+            [
+                str(bundle / "Contents/MacOS/spaceterm-server"),
+                "development-serve",
+                "spaceterm-development",
+            ],
+            ["open", "-W", "-n", "--stdout", output, "--stderr", output, str(bundle)],
+            environment,
+        )

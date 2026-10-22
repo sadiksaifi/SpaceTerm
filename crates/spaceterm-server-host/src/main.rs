@@ -24,6 +24,7 @@ fn main() -> ExitCode {
 
 enum Request<'a> {
     Serve,
+    DevelopmentServe,
     ServiceServe,
     SetupState,
     Status,
@@ -54,6 +55,9 @@ impl<'a> Request<'a> {
         }
         match (command.to_str(), options) {
             (Some("serve"), []) => Ok(Self::Serve),
+            (Some("development-serve"), []) if IDENTITY == "spaceterm-development" => {
+                Ok(Self::DevelopmentServe)
+            }
             (Some("service-serve"), []) => Ok(Self::ServiceServe),
             (Some("setup-state"), []) => Ok(Self::SetupState),
             (Some("status"), []) => Ok(Self::Status),
@@ -228,6 +232,21 @@ fn run() -> Result<ExitCode, cli::Error> {
                 spaceterm::runtime::SharedWorkspaceHost::account_service()?,
             )?;
         }
+        Request::DevelopmentServe => {
+            use std::io::Write;
+            check::resources()?;
+            spaceterm_server::run_owned_development(
+                spaceterm::runtime::SharedWorkspaceHost::local()?,
+                std::io::stdin(),
+                || {
+                    let mut output = std::io::stdout().lock();
+                    output
+                        .write_all(b"spaceterm-development-ready-v1\n")
+                        .and_then(|()| output.flush())
+                        .map_err(|_| ServerError::StartupFailed)
+                },
+            )?;
+        }
         Request::Serve => {
             check::resources()?;
             spaceterm_server::run_local_with_panes(
@@ -271,6 +290,19 @@ fn run() -> Result<ExitCode, cli::Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn owned_foreground_entry_is_restricted_to_the_compiled_development_identity() {
+        for identity in ["spaceterm-development", "spaceterm-preflight", "spaceterm"] {
+            let args = ["development-serve", identity].map(OsString::from);
+            assert_eq!(
+                matches!(Request::parse(&args), Ok(Request::DevelopmentServe)),
+                identity == "spaceterm-development" && IDENTITY == "spaceterm-development",
+            );
+        }
+        let args = ["development-serve", IDENTITY, "--confirm"].map(OsString::from);
+        assert!(matches!(Request::parse(&args), Err(ServerError::Protocol)));
+    }
 
     #[test]
     fn ssh_authorization_reads_passwords_only_after_the_explicit_password_command() {

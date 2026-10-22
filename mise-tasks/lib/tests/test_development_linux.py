@@ -19,8 +19,11 @@ from spaceterm_tasks.development_linux import APPLICATION_ID, ICON_DOCUMENT
 ICON_DOCUMENT = ROOT / ICON_DOCUMENT
 
 # Cargo is the controlled external boundary. It reports a recording executable as its artifact.
-FAKE_CARGO = """import json, pathlib, sys
+FAKE_CARGO = """import json, os, pathlib, sys
 arguments = sys.argv[1:]
+assert not any(name in os.environ for name in (
+    "SPACETERM_PACKAGED", "SPACETERM_RELEASE_TAG", "SPACETERM_SERVER_ARCHIVE", "SPACETERM_SERVER_SIGNATURE"
+))
 assert arguments[0] == "build" and "--locked" in arguments and "--features" not in arguments
 binary = arguments[arguments.index("--bin") + 1]
 executable = pathlib.Path.cwd() / "target" / "debug" / binary
@@ -32,6 +35,10 @@ executable.write_text(
     "fi\\n"
     "printf '%s\\\\n' \\"$0\\" \\"${SPACETERM_DEVELOPER_WORKBENCH:-}\\" \\"$#\\" \\"$@\\" > \\"$SPACETERM_TEST_RECORD\\"\\n"
 )
+if binary == "spaceterm-server":
+    executable.write_text(
+        "#!/bin/sh\\nprintf '%s\\n' spaceterm-development-ready-v1\\ncat >/dev/null\\n"
+    )
 executable.chmod(0o755)
 print(json.dumps({"reason": "compiler-artifact", "target": {"name": binary},
                   "executable": str(executable)}))
@@ -130,6 +137,18 @@ class LinuxPrefixTests(unittest.TestCase):
             ["development"],
             "the staging directory must be renamed into place",
         )
+
+    def test_source_launch_ignores_packaging_and_signed_artifact_overrides(self):
+        result = self.run_development(
+            overrides={
+                "SPACETERM_PACKAGED": "1",
+                "SPACETERM_RELEASE_TAG": "v1.0.0",
+                "SPACETERM_SERVER_ARCHIVE": "/absent/archive",
+                "SPACETERM_SERVER_SIGNATURE": "/absent/signature",
+            }
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(self.record.exists())
 
     def test_development_registers_its_desktop_identity_and_replaces_only_its_entry(self):
         applications = self.data / "applications"

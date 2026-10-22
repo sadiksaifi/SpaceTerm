@@ -56,5 +56,9 @@ pub fn run_desktop() {
         }
         _ => {}
     }
+    if let Err(error) = local_startup::supervise_development_client() {
+        eprintln!("{error}");
+        return;
+    }
     platform::main();
 }

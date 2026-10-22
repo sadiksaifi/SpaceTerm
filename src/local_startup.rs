@@ -8,6 +8,14 @@ use std::path::{Path, PathBuf};
 /// Existing service policy bypasses candidate discovery.
 pub fn run(cancelled: impl Fn() -> bool) -> Result<StartupOutcome, ServerError> {
     let identity = crate::application_identity::ApplicationIdentity::current().directory_name();
+    if owned_foreground() {
+        if cancelled() {
+            return Ok(StartupOutcome::Cancelled);
+        }
+        let server = spaceterm_server::LocalServer::for_identity(identity)?;
+        let status = server.refresh()?;
+        return Ok(StartupOutcome::Ready { server, status });
+    }
     LocalStartup::for_identity(identity)?.run(
         || {
             discover_candidate()
@@ -16,6 +24,33 @@ pub fn run(cancelled: impl Fn() -> bool) -> Result<StartupOutcome, ServerError> 
         },
         cancelled,
     )
+}
+
+/// Only source Development launch may bypass the retained service lifecycle.
+fn owned_foreground() -> bool {
+    !cfg!(spaceterm_packaged)
+        && crate::application_identity::ApplicationIdentity::current().directory_name()
+            == "spaceterm-development"
+        && std::env::var_os("SPACETERM_DEVELOPMENT_FOREGROUND").as_deref()
+            == Some(std::ffi::OsStr::new("1"))
+}
+
+/// Called before graphical startup, including Workbench and update previews.
+/// LaunchServices need not make the client our child: the private owner connection controls exit.
+pub(crate) fn supervise_development_client() -> Result<(), ServerError> {
+    if !owned_foreground() {
+        return Ok(());
+    }
+    let endpoint =
+        std::env::var_os("SPACETERM_DEVELOPMENT_OWNER_SOCKET").ok_or(ServerError::StartupFailed)?;
+    let mut owner = std::os::unix::net::UnixStream::connect(endpoint)
+        .map_err(|_| ServerError::StartupFailed)?;
+    std::thread::spawn(move || {
+        use std::io::Read;
+        let _ = owner.read(&mut [0]);
+        std::process::exit(0);
+    });
+    Ok(())
 }
 
 /// Authenticated candidate declarations and the exact source pair to revalidate during staging.
