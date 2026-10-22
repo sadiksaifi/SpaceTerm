@@ -2605,18 +2605,35 @@ fn a_native_dismissal_offers_the_same_choice_and_an_exit_does_not(cx: &mut TestA
 }
 
 #[gpui::test]
-fn command_q_without_a_status_area_only_offers_quitting(cx: &mut TestAppContext) {
-    let (_, _, application_quit, cx) = workspace_manager_with_application_actions(cx);
+fn command_q_without_a_status_area_keeps_the_windows_open(cx: &mut TestAppContext) {
+    let (manager, records, application_quit, cx) = workspace_manager_with_application_actions(cx);
     redraw(cx);
     cx.simulate_keystrokes("cmd-q");
     cx.run_until_parked();
 
-    // Nothing could reach a windowless client, so Command-Q is Quit SpaceTerm.
-    let (title, _) = cx.pending_prompt().expect("running work asks first");
-    assert_eq!(title, "Quit SpaceTerm?");
-    cx.simulate_prompt_answer("Cancel");
+    // Nothing could reach a windowless client, so keeping it closes no window, and says so.
+    let (title, detail) = cx.pending_prompt().expect("Command-Q asks first");
+    let name = crate::application_identity::ApplicationIdentity::current().display_name();
+    assert_eq!(title, format!("Keep {name} in the menu bar?"));
+    assert!(detail.starts_with("The menu bar isn't available, so Keep in Menu Bar keeps"));
+    cx.simulate_prompt_answer("Keep in Menu Bar");
     cx.run_until_parked();
+    assert!(!cx.has_pending_prompt());
+    assert!(manager.read_with(cx, |manager, _| {
+        manager.close_confirmation.pending().is_none()
+    }));
+    assert_eq!(cx.update(|_, cx| cx.windows().len()), 1);
+    assert!(records.dropped_session_ids().is_empty());
     assert_eq!(application_quit.confirmations(), 0);
+
+    // Quitting stays available.
+    cx.simulate_keystrokes("cmd-q");
+    cx.run_until_parked();
+    cx.simulate_prompt_answer(&quit_choice());
+    cx.run_until_parked();
+    assert!(!cx.has_pending_prompt());
+    assert_eq!(application_quit.requests(), 0);
+    assert_eq!(application_quit.confirmations(), 1);
 }
 
 #[gpui::test]
