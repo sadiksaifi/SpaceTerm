@@ -34,7 +34,7 @@ pub(super) struct ServerLocation {
 impl ServerLocation {
     pub(super) fn new(window: &mut Window, cx: &mut Context<SettingsWindow>) -> Self {
         Self {
-            field: super::git::WorktreeLocationField::with_scope("", true, window, cx),
+            field: super::git::WorktreeLocationField::new(window, cx),
             saved: None,
             latest: None,
             connected: false,

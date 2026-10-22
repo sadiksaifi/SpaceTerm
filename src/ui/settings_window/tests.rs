@@ -2692,7 +2692,6 @@ fn rendered_control_selector(row: SettingsRowId) -> Option<String> {
             SettingsRowId::GitTool => "settings-row-git-tool-control",
             SettingsRowId::GitHubCli => "settings-row-github-cli-control",
             SettingsRowId::ServerWorktreeLocation => "settings-server-worktree-location-frame",
-            SettingsRowId::WorktreeLocation => "settings-worktree-location-frame",
             SettingsRowId::LocalServer => "settings-local-server-control",
             SettingsRowId::ServerService => "settings-server-service-control",
             SettingsRowId::ServerUpdate => "settings-server-update-control",
@@ -4207,55 +4206,6 @@ fn git_switches_save_reset_and_hiding_repository_status_locks_pull_requests(
 }
 
 #[gpui::test]
-fn the_worktree_location_saves_valid_templates_and_explains_invalid_ones(cx: &mut TestAppContext) {
-    let (window, harness, cx) = open_settings(cx);
-    select_section(SettingsSectionId::Git, cx);
-    let saved = |harness: &Harness| {
-        harness
-            .storage
-            .document()
-            .map(|document| document.git.worktree_path_template)
-    };
-    let default = crate::worktrees::path_template::DEFAULT_WORKTREE_PATH_TEMPLATE;
-    assert!(
-        cx.debug_bounds("settings-row-worktree-location-reset")
-            .is_none()
-    );
-
-    click("settings-worktree-location", cx);
-    cx.simulate_keystrokes("cmd-a");
-    cx.simulate_input("~/wt/{repository}");
-    settle(cx);
-    let explained = cx
-        .debug_bounds("settings-worktree-location-invalid")
-        .is_some();
-    cx.simulate_keystrokes("enter");
-    settle(cx);
-    let refused = document_of(&window, cx).git.worktree_path_template;
-    cx.simulate_input("/{branch}");
-    cx.simulate_keystrokes("enter");
-    settle(cx);
-    let accepted = saved(&harness);
-    click("settings-row-worktree-location-reset", cx);
-    settle(cx);
-
-    assert!(
-        explained,
-        "a template without {{branch}} is explained as it is typed"
-    );
-    assert_eq!(
-        refused, default,
-        "Return keeps an invalid template out of Settings"
-    );
-    assert_eq!(accepted.as_deref(), Some("~/wt/{repository}/{branch}"));
-    assert_eq!(saved(&harness).as_deref(), Some(default));
-    assert!(
-        cx.debug_bounds("settings-worktree-location-invalid")
-            .is_none()
-    );
-}
-
-#[gpui::test]
 fn git_tool_rows_follow_the_reported_tool_status(cx: &mut TestAppContext) {
     use crate::repository_status::{GitHubCliStatus, GitToolStatus, ToolVersion};
     use crate::ui::repository_status_store::RepositoryTools;
@@ -4898,7 +4848,6 @@ fn a_search_that_orders_a_group_apart_should_still_show_it_as_one_card(cx: &mut 
             "Pull Requests",
             "Pull Requests",
             "Repository Status",
-            "Worktrees"
         ]
     );
 

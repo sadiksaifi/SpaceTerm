@@ -999,6 +999,38 @@ fn server_settings_are_unavailable_until_the_selected_server_is_connected(cx: &m
     );
 }
 
+/// New Worktrees go where the selected server's own setting names, so Settings Search reveals
+/// that setting and no client field that only seeds a new local server.
+#[gpui::test]
+fn searching_for_the_worktree_location_reveals_the_selected_servers_setting(
+    cx: &mut TestAppContext,
+) {
+    let (mut servers, _alpha, _bravo) = present_both(cx);
+    select("bravo", servers.cx);
+    click("settings-navigation-settings-section-git", servers.cx);
+
+    search_for("worktree", &mut servers);
+
+    servers.window.read_with(servers.cx, |settings, _| {
+        use crate::ui::sidebar_window::SidebarOwner as _;
+        assert_eq!(settings.active_section, SettingsSectionId::Servers);
+        assert_eq!(
+            settings.revealed,
+            Some(super::super::SettingsRowId::ServerWorktreeLocation)
+        );
+        assert!(
+            !settings
+                .navigable_sections()
+                .contains(&SettingsSectionId::Git),
+            "the Git section offers no second New Worktree Location"
+        );
+    });
+    settle(servers.cx, |cx| {
+        location_field(cx) == "~/bravo/{repository}/{branch}"
+    });
+    assert_eq!(listed(servers.cx)[1], ("bravo".to_owned(), true));
+}
+
 #[gpui::test]
 fn a_server_settings_change_reaches_only_the_selected_server(cx: &mut TestAppContext) {
     use crate::ui::shared_workspaces::testing::ScriptedEdits;
