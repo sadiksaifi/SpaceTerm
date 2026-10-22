@@ -1107,7 +1107,18 @@ fn server_removal_protects_pins_in_unattached_workspaces_and_rechecks_missing_lo
             },
         },
     );
-    let inventory = git_facts(&mut host, &git.0, |facts| facts.worktrees.is_some());
+    let mut inventory = git_facts(&mut host, &git.0, |facts| facts.worktrees.is_some());
+    let until = Instant::now() + Duration::from_secs(3);
+    while inventory.repositories.as_ref().unwrap().pin_check
+        == spaceterm_server::repository::PinCheckState::Checking
+    {
+        assert!(
+            Instant::now() < until,
+            "the owning server must finish physical pin discovery"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+        inventory = shared_inventory(&mut host);
+    }
     assert!(
         inventory
             .repositories

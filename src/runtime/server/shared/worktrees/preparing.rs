@@ -217,7 +217,13 @@ pub(super) fn prepare(
             if !list.worktrees.iter().any(|r| r == &approval.record) {
                 return Err(Error::Changed);
             }
-            if pinned_in_worktree(&inventory, &path)? {
+            if pinned_in_worktree(
+                inventory
+                    .workspaces
+                    .iter()
+                    .filter_map(|w| w.pinned_directory.as_deref()),
+                &path,
+            )? {
                 return Err(Error::Pinned);
             }
             git.confirm_location(&path, &approval.expected, &token)

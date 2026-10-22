@@ -93,6 +93,13 @@ impl SharedRepositories {
             .is_some_and(|snapshot| snapshot.pinned_worktrees.iter().any(|path| path == root))
     }
 
+    pub(crate) fn pin_check_state(&self) -> spaceterm_server::repository::PinCheckState {
+        self.snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.pin_check)
+            .unwrap_or_default()
+    }
+
     /// The Worktrees of the repository containing one directory, as git on the server lists them.
     ///
     /// A failed read keeps the directory's last listing, which a removed Worktree would keep
@@ -291,6 +298,7 @@ mod tests {
             git: GitToolStatus::Unknown,
             directories,
             pinned_worktrees: Vec::new(),
+            pin_check: spaceterm_server::repository::PinCheckState::Ready,
         }
     }
 

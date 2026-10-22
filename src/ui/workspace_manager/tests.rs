@@ -11832,6 +11832,7 @@ mod shared_repositories {
                 }),
                 directories,
                 pinned_worktrees: Vec::new(),
+                pin_check: spaceterm_server::repository::PinCheckState::Ready,
             }),
             revision: 1,
             close: None,

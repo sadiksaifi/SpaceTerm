@@ -254,4 +254,15 @@ pub struct Snapshot {
     /// The owning server resolves symbolic links; clients grant no local file authority.
     #[serde(default)]
     pub pinned_worktrees: Vec<PathBuf>,
+    #[serde(default)]
+    pub pin_check: PinCheckState,
+}
+
+/// Physical removal eligibility is resolved independently of Git and the terminal request lock.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PinCheckState {
+    #[default]
+    Ready,
+    Checking,
+    Unavailable,
 }

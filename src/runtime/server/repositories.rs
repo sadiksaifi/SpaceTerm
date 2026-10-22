@@ -54,6 +54,7 @@ impl ServerRepositories {
                 git: GitToolStatus::Unknown,
                 directories: Vec::new(),
                 pinned_worktrees: Vec::new(),
+                pin_check: PinCheckState::Ready,
             },
             worker: None,
             next_read: Instant::now(),
@@ -206,8 +207,11 @@ impl ServerRepositories {
                 }
             }
         }
-        self.pin_membership
-            .update(&state.inventory, &mut self.snapshot);
+        self.pin_membership.update(
+            &state.inventory,
+            &mut self.snapshot,
+            !self.subscribers.is_empty(),
+        );
         reconcile_membership(state, &self.snapshot);
         if !self.subscribers.is_empty() && self.worker.is_none() && Instant::now() >= self.next_read
         {

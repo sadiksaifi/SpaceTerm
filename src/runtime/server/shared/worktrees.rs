@@ -185,15 +185,11 @@ fn affected_worktree_tabs(inventory: &Inventory, root: &Path, path: &Path) -> Ve
         directory.starts_with(path) || local_filesystem().physically_contains(path, directory)
     })
 }
-pub(in crate::runtime::server) fn pinned_in_worktree(
-    inventory: &Inventory,
+pub(in crate::runtime::server) fn pinned_in_worktree<'a>(
+    pins: impl IntoIterator<Item = &'a Path>,
     path: &Path,
 ) -> Result<bool, Error> {
-    for pin in inventory
-        .workspaces
-        .iter()
-        .filter_map(|w| w.pinned_directory.as_deref())
-    {
+    for pin in pins {
         if pin.starts_with(path) {
             return Ok(true);
         }
