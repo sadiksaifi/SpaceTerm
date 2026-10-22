@@ -762,24 +762,21 @@ impl PaneConnection {
             )?;
             wire.write(request)?;
             let reply: Reply = wire.read()?;
-            match &reply {
-                Reply::Inventory { inventory, .. } => {
-                    let panes: Vec<_> = inventory
-                        .workspaces
-                        .iter()
-                        .flat_map(|workspace| &workspace.tabs)
-                        .flat_map(|tab| &tab.panes)
-                        .collect();
-                    if panes.len() > crate::hierarchy::MAX_PANES {
-                        return Err(ServerError::Protocol);
-                    }
-                    for pane in panes {
-                        if let Some(snapshot) = &pane.presentation {
-                            snapshot.validate()?;
-                        }
+            if let Reply::Inventory { inventory, .. } = &reply {
+                let panes: Vec<_> = inventory
+                    .workspaces
+                    .iter()
+                    .flat_map(|workspace| &workspace.tabs)
+                    .flat_map(|tab| &tab.panes)
+                    .collect();
+                if panes.len() > crate::hierarchy::MAX_PANES {
+                    return Err(ServerError::Protocol);
+                }
+                for pane in panes {
+                    if let Some(snapshot) = &pane.presentation {
+                        snapshot.validate()?;
                     }
                 }
-                _ => {}
             }
             Ok(reply)
         })();
