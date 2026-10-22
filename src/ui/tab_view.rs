@@ -100,7 +100,7 @@ const PANE_DROP_TARGET_FILL_OPACITY: u8 = 56;
 #[cfg(test)]
 const PANE_STATUS_WIDTH: f32 = 13.0 + PANE_STATUS_ICON_GAP;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum PaneCaptionAction {
     SplitRight,
     SplitDown,
@@ -463,8 +463,8 @@ pub(crate) struct TabView {
     pane_bounds: BTreeMap<PaneId, Bounds<Pixels>>,
     /// Where each Pane's surface was drawn, which differs from its place while Panes move.
     pane_surfaces: BTreeMap<PaneId, Bounds<Pixels>>,
-    /// Where each Pane's caption Close control took presses in the last frame.
-    pane_close_controls: BTreeMap<PaneId, gpui::Hitbox>,
+    /// Where each Pane's caption Split and Close controls took presses in the last frame.
+    pane_unselecting_controls: BTreeMap<(PaneId, PaneCaptionAction), gpui::Hitbox>,
     pane_layout_size: Option<PaneSize>,
     /// A Split that waits for the next Pane measurement, because the retained bounds are stale.
     pending_split: Option<(PaneId, SplitAxis)>,
@@ -556,7 +556,7 @@ impl TabView {
             pane_construction,
             pane_bounds: BTreeMap::new(),
             pane_surfaces: BTreeMap::new(),
-            pane_close_controls: BTreeMap::new(),
+            pane_unselecting_controls: BTreeMap::new(),
             pane_layout_size: None,
             pending_split: None,
             split_bounds: BTreeMap::new(),
@@ -1342,7 +1342,8 @@ impl TabView {
                 });
                 self.pane_bounds.remove(&pane_id);
                 self.pane_surfaces.remove(&pane_id);
-                self.pane_close_controls.remove(&pane_id);
+                self.pane_unselecting_controls
+                    .retain(|(control_pane_id, _), _| *control_pane_id != pane_id);
                 self.split_bounds.clear();
                 self.pane_titles.remove(&pane_id);
                 self.pane_captions.remove(&pane_id);
@@ -1798,13 +1799,17 @@ impl TabView {
             .capture_any_mouse_down(move |event: &MouseDownEvent, window, cx| {
                 let _ = focus_view.update(cx, |view, cx| {
                     // A press is an explicit Pane selection, so a shared Pane asks the server for
-                    // itself. Focus a Pane regains on its own never does, and neither does a press
-                    // on Close, which only asks for confirmation.
-                    let on_close = view
-                        .pane_close_controls
-                        .get(&pane_id)
-                        .is_some_and(|close| close.is_hovered_at(event.position, window));
-                    if !on_close {
+                    // itself. Focus a Pane regains on its own never does. Neither does a press on
+                    // Split, which validates the restored allocation first, or on Close, which
+                    // only asks for confirmation.
+                    let on_unselecting_control = view
+                        .pane_unselecting_controls
+                        .range(
+                            (pane_id, PaneCaptionAction::SplitRight)
+                                ..=(pane_id, PaneCaptionAction::Close),
+                        )
+                        .any(|(_, control)| control.is_hovered_at(event.position, window));
+                    if !on_unselecting_control {
                         view.select_shared_pane(pane_id);
                     }
                     if view.tab.focused_pane_id() != pane_id {
@@ -3935,14 +3940,17 @@ fn render_pane_caption_content(
                 view.perform_caption_action(action, pane_id, window, cx);
             });
         });
-        controls = if matches!(action, PaneCaptionAction::Close) {
-            // The Pane's surface reads where Close takes presses, so a press there selects
-            // nothing.
-            let close_control = gpui::canvas(
+        controls = if matches!(action, PaneCaptionAction::ToggleZoom) {
+            controls.child(button)
+        } else {
+            // The Pane's surface reads where Split and Close take presses, so a press there
+            // selects nothing.
+            let unselecting_control = gpui::canvas(
                 move |bounds, window, cx| {
                     let hitbox = window.insert_hitbox(bounds, gpui::HitboxBehavior::Normal);
                     let _ = control_view.update(cx, |view, _| {
-                        view.pane_close_controls.insert(pane_id, hitbox);
+                        view.pane_unselecting_controls
+                            .insert((pane_id, action), hitbox);
                     });
                 },
                 |_, _, _, _| (),
@@ -3952,12 +3960,12 @@ fn render_pane_caption_content(
             controls.child(
                 div()
                     .relative()
-                    .ml(-appearance.spacing(PANE_CLOSE_OPTICAL_TRIM))
-                    .child(close_control)
+                    .when(matches!(action, PaneCaptionAction::Close), |control| {
+                        control.ml(-appearance.spacing(PANE_CLOSE_OPTICAL_TRIM))
+                    })
+                    .child(unselecting_control)
                     .child(button),
             )
-        } else {
-            controls.child(button)
         };
     }
     let caption_name = format!("Pane Caption, {}", text.name);

@@ -210,6 +210,8 @@ struct WorkspaceRenameState {
     input: Entity<TextInput>,
     focus_handle: FocusHandle,
     context_menu_open: bool,
+    /// Whether a window modal borrows the keyboard and returns it to the draft when it closes.
+    modal_hold: bool,
     /// Whether finishing returns focus to the sidebar rather than the Pane.
     return_to_sidebar: bool,
 }
@@ -539,6 +541,35 @@ impl WorkspaceSidebar {
             .is_some_and(|rename| rename.focus_handle.is_focused(window))
     }
 
+    /// Keeps a focused inline rename open while the window modal about to present borrows its
+    /// keyboard, so closing the modal returns typing to the draft. Returns whether it held one.
+    pub(super) fn hold_rename_for_modal(&mut self, window: &Window) -> bool {
+        let Some(rename) = self
+            .rename
+            .as_mut()
+            .filter(|rename| rename.focus_handle.is_focused(window))
+        else {
+            return false;
+        };
+        rename.modal_hold = true;
+        true
+    }
+
+    /// Ends the hold. A held rename the closed modal did not return the keyboard to finishes as
+    /// a blur does.
+    pub(super) fn release_rename_hold(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(rename) = self.rename.as_mut().filter(|rename| rename.modal_hold) else {
+            return;
+        };
+        rename.modal_hold = false;
+        if rename.focus_handle.is_focused(window) {
+            return;
+        }
+        let input_id = rename.input.entity_id();
+        let value = rename.input.read(cx).value().to_owned();
+        self.finish_rename(input_id, Some(value), false, window, cx);
+    }
+
     fn scrollbar_metrics(&self) -> Option<ScrollMetrics<f32>> {
         let track_height_px = f32::from(self.scroll_handle.bounds().size.height);
         let maximum_offset_px = f32::from(self.scroll_handle.max_offset().y);
@@ -668,12 +699,14 @@ impl WorkspaceSidebar {
                             });
                         }
                         TextInputEvent::FocusLost => {
-                            let menu_open = sidebar
+                            let held = sidebar
                                 .rename
                                 .as_ref()
                                 .filter(|rename| rename.input.entity_id() == input_id)
-                                .is_some_and(|rename| rename.context_menu_open);
-                            if !menu_open {
+                                .is_some_and(|rename| {
+                                    rename.context_menu_open || rename.modal_hold
+                                });
+                            if !held {
                                 let value = input.read(cx).value().to_owned();
                                 cx.defer_in(window, move |sidebar, window, cx| {
                                     sidebar.finish_rename(input_id, Some(value), false, window, cx);
@@ -716,6 +749,7 @@ impl WorkspaceSidebar {
                     focus_handle: input.read(cx).focus_handle(),
                     input,
                     context_menu_open: false,
+                    modal_hold: false,
                     return_to_sidebar: self.menu_from_sidebar,
                 });
                 cx.emit(SidebarEvent::FocusChanged);

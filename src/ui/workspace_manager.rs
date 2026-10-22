@@ -3842,7 +3842,7 @@ impl WorkspaceManager {
                 self.sync_shared_workspaces(key, window, cx);
             }
             SharedCloseState::Changed => {
-                Self::present_shared_close_changed(
+                self.present_shared_close_changed(
                     review.approval.changed_title(),
                     Some(target),
                     window,
@@ -3888,7 +3888,7 @@ impl WorkspaceManager {
             SharedCloseState::Missing => {
                 Self::present_shared_close_missing(&review.approval, window, cx);
             }
-            _ => Self::present_shared_close_changed(
+            _ => self.present_shared_close_changed(
                 review.approval.changed_title(),
                 Some(review.target),
                 window,
@@ -3899,8 +3899,10 @@ impl WorkspaceManager {
 
     /// Explains that what a close would end changed after it was approved or shown, so nothing
     /// was closed. Review opens a fresh confirmation of what the server holds now; nothing asks
-    /// again on its own.
+    /// again on its own. A refusal can arrive while a person types in the sidebar, so the notice
+    /// returns the keyboard to that draft when it closes.
     fn present_shared_close_changed(
+        &mut self,
         title: &'static str,
         target: Option<CloseTarget>,
         window: &mut Window,
@@ -3928,6 +3930,14 @@ impl WorkspaceManager {
         ));
         let manager = cx.weak_entity();
         let window_handle = window.window_handle();
+        let sidebar = self.sidebar.clone();
+        let held_rename = sidebar.update(cx, |sidebar, _| sidebar.hold_rename_for_modal(window));
+        let release_sidebar = sidebar.downgrade();
+        let release_rename = move |window: &mut Window, cx: &mut App| {
+            let _ = release_sidebar.update(cx, |sidebar, cx| {
+                sidebar.release_rename_hold(window, cx);
+            });
+        };
         let result = Alert::new(
             ModalId::new("shared-close-changed"),
             title,
@@ -3944,16 +3954,22 @@ impl WorkspaceManager {
                     ..
                 }
             );
-            let Some(target) = target.filter(|_| reviewed) else {
-                return;
-            };
             let _ = window_handle.update(cx, |_, window, cx| {
-                let _ = manager.update(cx, |manager, cx| {
-                    manager.request_close(target, window, cx);
-                });
+                if held_rename {
+                    // The modal returns focus as it next draws, so the hold ends after that frame.
+                    window.on_next_frame(move |window, _| window.on_next_frame(release_rename));
+                }
+                if let Some(target) = target.filter(|_| reviewed) {
+                    let _ = manager.update(cx, |manager, cx| {
+                        manager.request_close(target, window, cx);
+                    });
+                }
             });
         });
         if let Err(error) = result {
+            if held_rename {
+                sidebar.update(cx, |sidebar, cx| sidebar.release_rename_hold(window, cx));
+            }
             eprintln!("failed to present the changed shared close: {error}");
         }
     }
@@ -3969,7 +3985,7 @@ impl WorkspaceManager {
     ) {
         let local =
             local.filter(|local| self.shared_close_target(*local, cx) == Some(server_target));
-        Self::present_shared_close_changed(
+        self.present_shared_close_changed(
             super::shared_workspaces::shared_close_changed_title(server_target),
             local,
             window,
