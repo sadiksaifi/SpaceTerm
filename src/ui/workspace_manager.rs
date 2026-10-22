@@ -3049,6 +3049,8 @@ impl WorkspaceManager {
         self.revalidate_server_removal(window, cx);
         // A Remote Workspace waiting for this server's edits may be asked for now.
         self.open_pending_remote_workspace(window, cx);
+        // New Workspace chosen with no Workspace Window open waits for this reading.
+        self.create_pending_workspace(key, window, cx);
         if let Some((operation, error)) = self
             .shared
             .get_mut(key)

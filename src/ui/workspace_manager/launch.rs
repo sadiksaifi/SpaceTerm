@@ -435,6 +435,9 @@ pub(super) struct LocalLaunchState {
     /// once per refusal, off the event thread; `false` until the read answers.
     refusal_offer: Option<(ServerError, bool)>,
     _refusal_offer: Option<Task<()>>,
+    /// New Workspace was chosen with no Workspace Window open. The window opened for it creates
+    /// the Workspace once this computer's server presents its Workspaces.
+    create_when_presented: bool,
 }
 
 impl LocalLaunchState {
@@ -452,6 +455,7 @@ impl LocalLaunchState {
             _views_read: None,
             refusal_offer: None,
             _refusal_offer: None,
+            create_when_presented: false,
         }
     }
 
@@ -530,6 +534,40 @@ pub(crate) fn resume_waiting_launches(cx: &mut App) {
 }
 
 impl WorkspaceManager {
+    /// The application's New Workspace, chosen while no Workspace Window was open. This window
+    /// opened for it, so it creates a Workspace as soon as this computer's server presents its
+    /// Workspaces, even when this client has none attached.
+    pub(crate) fn create_workspace_when_presented(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.launch.create_when_presented = true;
+        self.create_pending_workspace(super::ServerKey::LOCAL, window, cx);
+    }
+
+    /// Creates the Workspace New Workspace asked for before this computer's server presented
+    /// its Workspaces, once it has.
+    pub(super) fn create_pending_workspace(
+        &mut self,
+        key: super::ServerKey,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if key != super::ServerKey::LOCAL
+            || !self.launch.create_when_presented
+            || self.launch_presentation().is_some()
+        {
+            return;
+        }
+        self.launch.create_when_presented = false;
+        self.run_workspace_creation(
+            crate::ui::workspace_creation::WorkspaceCreation::Local,
+            window,
+            cx,
+        );
+    }
+
     /// Runs launch, after the person's explicit step when there is one.
     pub(super) fn run_local_launch(
         &mut self,

@@ -821,6 +821,44 @@ fn new_workspace_asks_the_server_rather_than_creating_desktop_work(cx: &mut Test
     );
 }
 
+/// New Workspace chosen with no Workspace Window opens one that has no attached Workspaces yet.
+/// It creates one Workspace once the server presents them, where opening SpaceTerm creates none.
+#[gpui::test]
+fn new_workspace_without_a_window_creates_once_the_server_presents_its_workspaces(
+    cx: &mut TestAppContext,
+) {
+    use spaceterm_server::hierarchy::Mutation;
+
+    let (harness, cx) = launch_harness_with(vec![ready()], ScriptedEdits::new(None), [], cx);
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        harness.manager.update(cx, |manager, cx| {
+            manager.create_workspace_when_presented(window, cx);
+        });
+    });
+    cx.run_until_parked();
+    assert!(
+        harness.edits.submitted().is_empty(),
+        "the server has not presented its Workspaces yet"
+    );
+
+    harness.edits.set_inventory(Inventory {
+        workspaces: Vec::new(),
+        ..inventory()
+    });
+    sync(&harness, cx);
+    sync(&harness, cx);
+
+    assert_eq!(
+        harness.edits.submitted(),
+        vec![Mutation::CreateWorkspace {
+            name: String::new(),
+            directory: None,
+        }],
+        "one request creates one Workspace"
+    );
+}
+
 #[gpui::test]
 fn open_local_directory_creates_a_server_workspace_rooted_there(cx: &mut TestAppContext) {
     use spaceterm_server::hierarchy::Mutation;

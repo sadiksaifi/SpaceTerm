@@ -928,14 +928,24 @@ pub(crate) fn activate_default_window(cx: &mut App, token: Option<&str>) {
 
 fn install_headless_window_actions(cx: &mut App, host: Rc<HostComposition>) {
     cx.set_global(DefaultWorkspaceWindowHost(host.clone()));
-    cx.on_action(move |_: &NewWorkspace, cx| {
-        if !workspace_windows(cx).is_empty() {
-            return;
+    cx.on_action(move |_: &NewWorkspace, cx| new_workspace_without_window(cx, &host));
+}
+
+/// New Workspace with no Workspace Window opens one that creates the Workspace, unlike opening
+/// SpaceTerm, which only presents this client's attached Workspaces.
+fn new_workspace_without_window(cx: &mut App, host: &HostComposition) {
+    if !workspace_windows(cx).is_empty() {
+        return;
+    }
+    leave_menu_only(cx);
+    match open(cx, host) {
+        Ok(window) => {
+            let _ = window.update(cx, |manager, window, cx| {
+                manager.create_workspace_when_presented(window, cx);
+            });
         }
-        if let Err(error) = open(cx, &host) {
-            eprintln!("failed to restore the default SpaceTerm window: {error}");
-        }
-    });
+        Err(error) => eprintln!("failed to open a SpaceTerm window for a new Workspace: {error}"),
+    }
 }
 
 #[cfg_attr(
