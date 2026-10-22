@@ -10,7 +10,7 @@ SpaceTerm organizes terminal work into Workspaces, Tabs, Pane Layouts, and Pane-
 
 **Local Workspace**: A Workspace whose Terminal Sessions run on this machine.
 
-**Remote Workspace**: A Workspace whose Terminal Sessions run on the machine identified by an SSH Destination.
+**Remote Workspace**: A Workspace whose Terminal Sessions run on another machine, reached through SSH or a paired direct-network connection.
 
 **Current Directory**: A Terminal Session's current working directory on its machine.
 
@@ -259,7 +259,7 @@ _Avoid_: shell token, session secret
 **Pull Request**: The open GitHub pull request whose head is a repository's current branch, found through the local GitHub CLI.
 _Avoid_: PR, merge request
 
-**Worktree**: One of a git repository's working trees, listed under a Local Workspace whose directory is in that repository. Its Tabs start inside it.
+**Worktree**: One of a git repository's working trees, listed under a Workspace whose directory is in that repository. Its Tabs start inside it.
 _Avoid_: checkout, working copy
 
 **Main Worktree**: The Worktree git lists first, which holds the repository's own working tree. It cannot be removed.

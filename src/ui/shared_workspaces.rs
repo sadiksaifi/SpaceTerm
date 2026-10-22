@@ -743,8 +743,8 @@ mod development {
 
     /// Opens passive subscriptions to the server's Panes and supplies their Pane construction.
     ///
-    /// Shared Panes reuse native client effects and same-machine file authority. Accessible
-    /// shell text remains unavailable until server-backed accessibility is implemented.
+    /// Shared Panes reuse native client effects and obtain accessible shell text from the server.
+    /// Same-machine file authority applies only to Panes on this machine's server.
     #[derive(Clone)]
     pub(crate) struct SharedPaneSessions {
         opener: Rc<dyn SharedPaneOpener>,
