@@ -59,3 +59,7 @@ required-features = ["client"]
 [[example]]
 name = "server_update"
 required-features = ["client"]
+
+[[example]]
+name = "server_compatibility"
+required-features = ["client"]

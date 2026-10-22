@@ -690,3 +690,19 @@ flag "--remote-server <binary>" help="Absolute path of the prepared remote candi
 flag "--account <uid>" help="Remote non-root account UID"
 '''
 run = '"${CARGO_TARGET_DIR:-target}/debug/examples/terminal_presentation" --run --expect-server {{usage.server | quote}} {% if usage.boot %}--expect-boot {{usage.boot | quote}}{% endif %} {% if usage.ssh %}--ssh {{usage.ssh | quote}}{% endif %} {% if usage.remote_server %}--remote-server {{usage.remote_server | quote}}{% endif %} {% if usage.account %}--account {{usage.account | quote}}{% endif %}'
+
+[tasks."server:compatibility:check"]
+description = "Check the real older-server process compatibility fixture"
+run = "cargo check --package spaceterm-server-host --features client --locked --example server_compatibility"
+
+[tasks."server:compatibility:build"]
+description = "Build the current client for an isolated older-server process fixture"
+run = "cargo build --package spaceterm-server-host --features client --locked --example server_compatibility"
+
+[tasks."server:compatibility:run:linux"]
+description = "Exercise an exact older Development server in disposable Linux namespaces"
+usage = '''
+arg "<installation>" help="Older server directory containing bin/spaceterm-server and share/spaceterm resources"
+arg "<commit>" help="Exact older server commit expected from --build-info"
+'''
+run = "python -m spaceterm_tasks.server_compatibility {{usage.installation | quote}} {{usage.commit | quote}}"
