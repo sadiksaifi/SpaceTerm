@@ -379,25 +379,42 @@ impl DirectConnections {
             join.cancelled = true;
             join.status = JoinStatus::Rejected;
         }
-        let saved = if let Some(pending) = state
-            .document
-            .pending
-            .iter_mut()
-            .find(|p| p.operation == id)
-        {
+        let result = if let Some(pending) = state.document.pending.iter_mut().find(|p| {
+            p.operation == id && matches!(p.authority, records::Authority::Enrollment { .. })
+        }) {
             pending.cancel_requested = true;
-            self.0.save(&mut state)
+            if self.0.save(&mut state) {
+                Ok(())
+            } else {
+                Err(DirectError::StorageUnavailable)
+            }
+        } else if let Some(target) = state
+            .document
+            .routes
+            .iter()
+            .find(|saved| saved.route.id == id)
+            .map(|saved| saved.route.paired.pairing)
+        {
+            // Completion uses this same lock. A published join transfers its exact
+            // route into the ordinary self-unpair path before cancellation returns.
+            self.unpair_locked(&mut state, &id, target)
         } else {
-            true
+            // Another self-unpair may already own the exact cleanup. Reuse it,
+            // including its retention failure, instead of adding another operation.
+            let retained = state.document.pending.iter().any(|pending| {
+                matches!(&pending.authority, records::Authority::Direct(actor)
+                    if actor.route.id == id && pending.target == actor.route.paired.pairing)
+            });
+            if retained && state.persistence_error && !self.0.save(&mut state) {
+                Err(DirectError::StorageUnavailable)
+            } else {
+                Ok(())
+            }
         };
         drop(state);
         self.start_worker();
         self.0.notify();
-        if saved {
-            Ok(())
-        } else {
-            Err(DirectError::StorageUnavailable)
-        }
+        result
     }
 
     pub(crate) fn pending_unpairs(&self) -> Vec<PendingUnpair> {
@@ -444,8 +461,21 @@ impl DirectConnections {
     }
 
     pub(crate) fn unpair(&self, id: &DirectRouteId, target: PairingId) -> Result<(), DirectError> {
-        let operation = random_id()?;
         let mut state = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
+        let result = self.unpair_locked(&mut state, id, target);
+        drop(state);
+        self.start_worker();
+        self.0.notify();
+        result
+    }
+
+    fn unpair_locked(
+        &self,
+        state: &mut State,
+        id: &DirectRouteId,
+        target: PairingId,
+    ) -> Result<(), DirectError> {
+        let operation = random_id()?;
         let actor = state
             .document
             .routes
@@ -471,11 +501,7 @@ impl DirectConnections {
                     .store(false, std::sync::atomic::Ordering::Release);
             }
         }
-        let saved = self.0.save(&mut state);
-        drop(state);
-        self.start_worker();
-        self.0.notify();
-        if saved {
+        if self.0.save(state) {
             Ok(())
         } else {
             Err(DirectError::StorageUnavailable)

@@ -889,6 +889,111 @@ pub(super) mod enrollment_tests {
     }
 
     #[test]
+    fn cancel_after_enrollment_completion_removes_the_route_and_retains_exact_revocation() {
+        for outcome in [None, Some(SecureCommitOutcome::CommittedButUnsynced)] {
+            let fixture = EnrollmentFixture::new("Server 1");
+            fixture.filesystem.files.lock().unwrap().commit_outcome = outcome;
+            let id = fixture.saved.route.id;
+            complete_enrollment(&fixture.owner, id, fixture.saved.clone());
+            let gate = fixture.owner.0.state.lock().unwrap().routes[&id]
+                .gate
+                .clone();
+            fixture.filesystem.files.lock().unwrap().commit_outcome = None;
+
+            fixture.owner.cancel_join(id).unwrap();
+
+            assert!(
+                fixture.owner.route(&id).is_none(),
+                "successful cancellation must remove an already-published route"
+            );
+            assert!(fixture.owner.server(&id).is_none());
+            assert!(!gate.load(Ordering::Acquire));
+            let relaunched = fixture.relaunch();
+            for owner in [&fixture.owner, &relaunched] {
+                assert!(owner.route(&id).is_none());
+                assert!(owner.server(&id).is_none());
+                let state = owner.0.state.lock().unwrap();
+                assert_eq!(state.document.pending.len(), 1);
+                let pending = &state.document.pending[0];
+                assert_eq!(pending.target, fixture.saved.route.paired.pairing);
+                assert!(!pending.confirmed);
+                assert!(matches!(&pending.authority, Authority::Direct(actor)
+                    if actor.route.id == id
+                    && actor.route.endpoint == fixture.saved.route.endpoint
+                    && actor.route.paired == fixture.saved.route.paired
+                    && actor.credential == fixture.saved.credential));
+            }
+            assert!(
+                fixture
+                    .credentials
+                    .values
+                    .lock()
+                    .unwrap()
+                    .contains_key(&fixture.saved.credential)
+            );
+        }
+    }
+
+    #[test]
+    fn cancel_after_self_unpair_reuses_its_exact_retained_operation() {
+        for retention_fails in [false, true] {
+            let fixture = EnrollmentFixture::new("Server 1");
+            let id = fixture.saved.route.id;
+            complete_enrollment(&fixture.owner, id, fixture.saved.clone());
+            if retention_fails {
+                fixture.filesystem.files.lock().unwrap().prepare_error =
+                    Some(crate::platform::secure_filesystem::SecureFilesystemError::Unavailable);
+            }
+            let expected = if retention_fails {
+                Err(DirectError::StorageUnavailable)
+            } else {
+                Ok(())
+            };
+            assert_eq!(fixture.owner.unpair_self(&id), expected);
+            let original = fixture.owner.0.state.lock().unwrap().document.pending[0].operation;
+
+            assert_eq!(fixture.owner.cancel_join(id), expected);
+
+            let state = fixture.owner.0.state.lock().unwrap();
+            assert_eq!(state.document.pending.len(), 1);
+            assert_eq!(state.document.pending[0].operation, original);
+            assert!(state.document.routes.is_empty());
+            assert!(state.routes.is_empty());
+        }
+    }
+
+    #[test]
+    fn cancel_before_enrollment_completion_keeps_only_the_original_claim_cleanup() {
+        let fixture = EnrollmentFixture::new("Server 1");
+        let id = fixture.saved.route.id;
+
+        fixture.owner.cancel_join(id).unwrap();
+        complete_enrollment(&fixture.owner, id, fixture.saved.clone());
+
+        let relaunched = fixture.relaunch();
+        for owner in [&fixture.owner, &relaunched] {
+            assert!(owner.route(&id).is_none());
+            let state = owner.0.state.lock().unwrap();
+            assert_eq!(state.document.pending.len(), 1);
+            let pending = &state.document.pending[0];
+            assert_eq!(pending.operation, id);
+            assert!(pending.cancel_requested);
+            assert!(
+                matches!(&pending.authority, Authority::Enrollment { claim, credential, .. }
+                if *claim == [8; 32] && *credential == fixture.saved.credential)
+            );
+        }
+        assert!(
+            fixture
+                .credentials
+                .values
+                .lock()
+                .unwrap()
+                .contains_key(&fixture.saved.credential)
+        );
+    }
+
+    #[test]
     fn published_enrollment_with_uncertain_sync_is_never_reported_as_failed() {
         let fixture = EnrollmentFixture::new("Server 1");
         fixture.filesystem.files.lock().unwrap().commit_outcome =
