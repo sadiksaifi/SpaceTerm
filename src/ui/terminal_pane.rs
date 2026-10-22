@@ -4255,7 +4255,11 @@ impl TerminalPane {
             .find
             .as_ref()
             .filter(|snapshot| snapshot.generation == self.find_generation);
-        let result_label = if input.read(cx).value().is_empty() {
+        let query_too_large = self.server_backed()
+            && input.read(cx).value().len() > spaceterm_server::pane::reading::MAX_QUERY_BYTES;
+        let result_label = if query_too_large {
+            "Query exceeds 4,096 bytes".to_owned()
+        } else if input.read(cx).value().is_empty() {
             "Find".to_owned()
         } else {
             snapshot.map_or_else(
@@ -4274,7 +4278,8 @@ impl TerminalPane {
                 },
             )
         };
-        let has_results = snapshot.is_some_and(|snapshot| snapshot.total_matches > 0);
+        let has_results =
+            !query_too_large && snapshot.is_some_and(|snapshot| snapshot.total_matches > 0);
         let pane = cx.entity().downgrade();
         let previous_pane = pane.clone();
         let next_pane = pane.clone();

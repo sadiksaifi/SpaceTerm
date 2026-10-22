@@ -2177,6 +2177,9 @@ impl TerminalSessionHandle for PresentationHandle {
                 generation: generation.value(),
                 text,
             });
+        } else {
+            // Retire the previous search while the field presents this generation's limit.
+            self.end_find(generation);
         }
     }
     fn navigate_find(
@@ -2862,7 +2865,7 @@ mod tests {
                 unconfirmed: false,
             })
         }
-        fn drain(
+        pub(super) fn drain(
             &mut self,
             mut exchange: impl FnMut(&Request) -> Result<Reply, ServerError>,
         ) -> Result<(), ServerError> {

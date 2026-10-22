@@ -2572,6 +2572,32 @@ fn terminal_find_open_edit_navigate_and_close_are_pane_scoped(cx: &mut TestAppCo
 }
 
 #[gpui::test]
+fn server_find_reports_an_oversized_query_and_recovers_after_edit(cx: &mut TestAppContext) {
+    let (pane, cx, _) = terminal_pane_with_session_options(cx, |sessions| {
+        sessions.server_backed().with_reading_available(true)
+    });
+    cx.dispatch_action(OpenTerminalFind);
+    let input = terminal_find_input(&pane, cx);
+    let query = "界".repeat(1366);
+    replace_terminal_find_input(&input, &query, cx);
+    cx.run_until_parked();
+    assert_eq!(
+        input.read_with(cx, |input, _| input.value().to_owned()),
+        query
+    );
+    assert_eq!(
+        spaceterm_ui::a11y_testing::A11yTree::read(cx).node("Terminal Find results")["aria"]["value"],
+        "Query exceeds 4,096 bytes"
+    );
+    replace_terminal_find_input(&input, "short", cx);
+    cx.run_until_parked();
+    assert_eq!(
+        spaceterm_ui::a11y_testing::A11yTree::read(cx).node("Terminal Find results")["aria"]["value"],
+        "Searching…"
+    );
+}
+
+#[gpui::test]
 fn terminal_find_should_handle_native_select_all_and_cut(cx: &mut TestAppContext) {
     let (pane, cx, records) = connected_terminal_pane(cx);
     cx.dispatch_action(OpenTerminalFind);
