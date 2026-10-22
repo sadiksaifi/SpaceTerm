@@ -1,4 +1,4 @@
-//! Private local SpaceTerm Protocol and explicit local server setup.
+//! SpaceTerm Protocol admission, direct-network access and account server setup.
 pub mod account_bridge;
 pub mod attachments;
 #[cfg(feature = "client")]
@@ -6,6 +6,7 @@ mod client;
 pub mod client_view;
 #[cfg(feature = "client")]
 mod computer_name;
+pub mod direct;
 pub mod hierarchy;
 mod host;
 pub mod organization;
@@ -33,6 +34,8 @@ pub struct AuthenticatedStatus {
 /// Bounded classifications. Native errors and peer-supplied values never cross this boundary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum ServerError {
+    #[error("{0}")]
+    Direct(crate::direct::DirectError),
     #[error("The local server is not set up.")]
     NotSetUp,
     #[error("The local server service is unavailable. Try again after signing in.")]

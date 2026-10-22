@@ -101,6 +101,8 @@ mod desktop_profile;
 mod architecture_tests;
 
 #[cfg(feature = "desktop")]
+mod direct_connections;
+#[cfg(feature = "desktop")]
 mod directory_selection;
 mod local_path;
 #[cfg(feature = "desktop")]

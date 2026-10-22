@@ -3083,14 +3083,13 @@ impl TabView {
         let remote = self
             .shared
             .as_ref()
-            .and_then(|shared| shared.sessions().remote_destination().cloned());
+            .and_then(|shared| shared.sessions().remote_name());
         let notice = pane.notice().map(|(title, detail, intent)| {
             let detail = match &remote {
-                Some(destination) if pane.server_stopped() => gpui::SharedString::from(format!(
-                    "The SpaceTerm server on \u{201C}{}\u{201D} was stopped, so the programs in \
-                     this Pane ended. It stays stopped until it\u{2019}s started on that \
-                     computer.",
-                    destination.as_str()
+                Some(name) if pane.server_stopped() => gpui::SharedString::from(format!(
+                    "The SpaceTerm server on \u{201C}{name}\u{201D} was stopped, so the programs \
+                     in this Pane ended. It stays stopped until it\u{2019}s started on that \
+                     computer."
                 )),
                 _ => detail,
             };
@@ -3290,6 +3289,19 @@ impl TabView {
         {
             crate::ui::ssh_servers::present_prompts_in(window, cx);
             connections.connect(destination);
+        }
+        // A direct network route asks the system for this device's key only now, because the
+        // person asked. It never falls back to SSH for that computer.
+        if let Some(route) = self
+            .shared
+            .as_ref()
+            .and_then(|shared| shared.sessions().direct_route())
+            .map(|direct| direct.route)
+            && let Some(connections) = crate::ui::direct_servers::installed(cx)
+            && connections.status(&route)
+                != Some(crate::direct_connections::DirectRouteStatus::Connected)
+        {
+            connections.resume(&route);
         }
         if self
             .shared

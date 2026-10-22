@@ -2699,6 +2699,9 @@ fn rendered_control_selector(row: SettingsRowId) -> Option<String> {
             SettingsRowId::ServerList => "settings-server-list",
             SettingsRowId::EndAllSessions => "settings-server-end-all-sessions",
             SettingsRowId::ServerConnection => "settings-row-server-connection-value",
+            // The fixture's local server offers no direct network operations, so both rows
+            // present their value alone.
+            SettingsRowId::DirectNetworkAccess => "settings-row-direct-network-access-value",
             SettingsRowId::DirectNetworkPairing => "settings-row-direct-network-pairing-value",
             // The fixture installs no SSH server registry or operations owner, so the SSH rows
             // are absent.
@@ -2712,7 +2715,12 @@ fn rendered_control_selector(row: SettingsRowId) -> Option<String> {
             | SettingsRowId::SshServerStartup
             | SettingsRowId::RemoveServer
             // No connection was removed, so nothing is kept for one.
-            | SettingsRowId::RemovedServerOperations => return None,
+            | SettingsRowId::RemovedServerOperations
+            // The fixture installs no direct registry, so the direct route rows are absent.
+            | SettingsRowId::JoinInvitation
+            | SettingsRowId::PendingUnpairs
+            | SettingsRowId::DirectServerStatus
+            | SettingsRowId::UnpairThisDevice => return None,
             // The fixture installs no update service, so this row presents no action control.
             SettingsRowId::UpdateStatus => return None,
             SettingsRowId::AutomaticUpdateDownloads => "settings-automatic-update-downloads",

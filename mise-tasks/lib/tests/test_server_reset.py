@@ -44,6 +44,12 @@ class ResetTests(unittest.TestCase):
         return match[1]
 
     def test_preview_and_exact_confirmation_archive_only_the_selected_state(self):
+        direct = self.data / "direct.json"
+        self.write(direct, {"policy": None, "devices": [{"pairing": "retired fixture"}]})
+        direct_bytes = direct.read_bytes()
+        native_references = self.root / "direct-device-connections.json"
+        self.write(native_references, {"pending": [{"credential": "preserved fixture reference"}]})
+        native_bytes = native_references.read_bytes()
         service = (self.data / "service.json").read_bytes()
         identity = self.identity.read_bytes()
         token = self.preview()
@@ -53,16 +59,23 @@ class ResetTests(unittest.TestCase):
         archive = next(self.data.glob("reset-*"))
         self.assertEqual((archive / "identity.json").read_bytes(), identity)
         self.assertTrue((archive / "clients/desktop/operations.json").is_file())
+        self.assertEqual((archive / "direct.json").read_bytes(), direct_bytes)
+        self.assertFalse(direct.exists())
+        self.assertEqual(native_references.read_bytes(), native_bytes)
         self.assertEqual((self.data / "service.json").read_bytes(), service)
         self.assertFalse(self.identity.exists())
 
     def test_changed_scope_cannot_use_an_earlier_confirmation(self):
-        token = self.preview()
-        self.write(self.identity, {"organization": {"name": "Later work"}})
-        with self.assertRaises(TaskError), contextlib.redirect_stdout(io.StringIO()):
-            reset_at(self.data, self.runtime, token)
-        self.assertTrue(self.identity.exists())
-        self.assertFalse(list(self.data.glob("reset-*")))
+        direct = self.data / "direct.json"
+        self.write(direct, {"devices": []})
+        for path in (self.identity, direct):
+            with self.subTest(path=path.name):
+                token = self.preview()
+                self.write(path, {"changed": path.name})
+                with self.assertRaises(TaskError), contextlib.redirect_stdout(io.StringIO()):
+                    reset_at(self.data, self.runtime, token)
+                self.assertTrue(path.exists())
+                self.assertFalse(list(self.data.glob("reset-*")))
 
     def test_pending_client_or_started_server_write_refuses_reset(self):
         self.write(self.client / "operations.json", {"pending": {"sequence": 1}})

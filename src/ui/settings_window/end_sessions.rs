@@ -283,6 +283,7 @@ impl SettingsWindow {
                 let client = cx.update(|cx| match &target {
                     ServerChoice::Local => Client::get(cx),
                     ServerChoice::Ssh(destination) => Client::presented_ssh(destination, cx),
+                    ServerChoice::Direct(route) => Client::presented_direct(route, cx),
                 });
                 let availability = client.as_ref().map_or(Availability::Unknown, |client| {
                     Availability::of(&client.source.snapshot())

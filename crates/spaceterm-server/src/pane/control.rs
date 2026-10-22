@@ -19,6 +19,25 @@ impl ClientName {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// This computer's bounded display name, using the native computer-name adapter.
+    #[cfg(feature = "client")]
+    pub fn this_computer() -> Self {
+        Self::for_computer(&crate::computer_name::SystemComputerName, None)
+    }
+
+    #[cfg(feature = "client")]
+    pub(crate) fn for_computer(
+        computer: &dyn crate::computer_name::ComputerName,
+        development: Option<&str>,
+    ) -> Self {
+        match (computer.computer_name(), development) {
+            (Some(computer), Some(development)) => format!("{computer} ({development})").into(),
+            (Some(computer), None) => computer.into(),
+            (None, Some(development)) => development.into(),
+            (None, None) => "".into(),
+        }
+    }
 }
 
 impl From<String> for ClientName {

@@ -191,6 +191,7 @@ pub enum AttachmentClaim {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Request {
+    Direct(crate::direct::Management),
     EndAccessibilityDemand {
         lease: Lease,
     },
@@ -337,6 +338,7 @@ pub enum Request {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Reply {
+    Direct(Result<crate::direct::ManagementReply, crate::direct::DirectError>),
     Accessibility(Result<accessibility::Chunk, accessibility::Error>),
     AccessibilityRevision {
         revision: u64,
@@ -521,6 +523,8 @@ pub trait PaneService: Send {
     fn tick(&mut self) {}
     /// Records the Client Name an admitted client supplied, before any of its requests.
     fn admitted(&mut self, _client: [u8; 32], _name: control::ClientName) {}
+    /// Permanently releases this paired identity's live and dormant control grants.
+    fn revoked(&mut self, _client: [u8; 32]) {}
     fn request(&mut self, device: [u8; 32], connection: [u8; 32], request: Request) -> Reply;
     fn disconnected(&mut self, connection: [u8; 32]);
     fn shutdown(&mut self) -> Result<(), ServerError>;

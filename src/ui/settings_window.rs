@@ -5,6 +5,9 @@ mod advanced;
 mod background_image;
 mod catalog;
 mod clipboard;
+mod direct_access;
+mod direct_join;
+mod direct_routes;
 mod editor;
 mod end_sessions;
 mod git;
@@ -248,20 +251,22 @@ pub(crate) fn open_or_activate(section: Option<SettingsSectionId>, cx: &mut App)
 
 /// Opens Settings on Servers with one server selected: an SSH server by its destination, or the
 /// account-local server for `None`. Selecting reads nothing from that server.
-pub(crate) fn open_server_settings(
-    destination: Option<crate::domain::SshDestination>,
-    cx: &mut App,
-) {
+pub(crate) fn open_server_settings(target: crate::ui::MachineTarget, cx: &mut App) {
     open_or_activate(Some(SettingsSectionId::Servers), cx);
     // An existing window selects the section in a deferred update, so the selection follows it.
     cx.defer(move |cx| {
         if let Some(settings) = open_settings_window(cx) {
             let _ = settings.update(cx, |settings, _, cx| {
                 settings.select_server(
-                    destination.map_or(
-                        server_list::ServerChoice::Local,
-                        server_list::ServerChoice::Ssh,
-                    ),
+                    match target {
+                        crate::ui::MachineTarget::Local => server_list::ServerChoice::Local,
+                        crate::ui::MachineTarget::Ssh(destination) => {
+                            server_list::ServerChoice::Ssh(destination)
+                        }
+                        crate::ui::MachineTarget::Direct(route) => {
+                            server_list::ServerChoice::Direct(route)
+                        }
+                    },
                     cx,
                 );
             });
@@ -398,6 +403,8 @@ pub(crate) struct SettingsWindow {
     worktree_location: git::WorktreeLocationField,
     server_location: server_location::ServerLocation,
     end_all_sessions: end_sessions::EndAllSessions,
+    /// The selected server's direct network access and paired devices.
+    direct_access: direct_access::DirectAccess,
     /// The local server this window presents. `None` omits the Servers section.
     local_server: Option<servers::LocalServerRow>,
     /// The service that runs the local server. `None` omits its row.
@@ -408,6 +415,8 @@ pub(crate) struct SettingsWindow {
     ssh_servers: Option<ssh_servers::SshServerRows>,
     /// The submitted remote maintenance operations. `None` omits the maintenance rows.
     ssh_maintenance: Option<ssh_maintenance::SshMaintenanceRows>,
+    /// The desktop's direct network connections. `None` omits their rows.
+    direct_routes: Option<direct_routes::DirectRouteRows>,
     /// The server the person selected in the Servers list. A server no longer listed gives way
     /// to the local server or the first saved one.
     selected_server: Option<server_list::ServerChoice>,
@@ -638,6 +647,9 @@ impl SettingsWindow {
             if !settings.editor.flush_for_shutdown(cx) {
                 eprintln!("SpaceTerm Settings could not be saved during shutdown");
             }
+            // The direct registry ends with the application, so this window lets go of it and
+            // stops following it.
+            settings.direct_routes = None;
             async {}
         })
         .detach();
@@ -670,6 +682,8 @@ impl SettingsWindow {
         let ssh_maintenance = crate::ssh::server_operations::installed(cx).map(|operations| {
             ssh_maintenance::SshMaintenanceRows::new(operations, window.window_handle(), cx)
         });
+        let direct_routes = crate::ui::direct_servers::installed(cx)
+            .map(|connections| direct_routes::DirectRouteRows::new(connections, window, cx));
         let presentation = crate::desktop_profile::DesktopPresentation::get(cx);
         let this_computer = presentation.wording().this_computer;
         let available_sections = SettingsSectionId::ALL
@@ -697,6 +711,14 @@ impl SettingsWindow {
                             .as_ref()
                             .is_none_or(|offered| offered.update.is_none()))
                     || (*row == SettingsRowId::SshConnect && ssh_servers.is_none())
+                    // A build with no direct registry offers no direct network routes.
+                    || (matches!(
+                        *row,
+                        SettingsRowId::JoinInvitation
+                            | SettingsRowId::PendingUnpairs
+                            | SettingsRowId::DirectServerStatus
+                            | SettingsRowId::UnpairThisDevice
+                    ) && direct_routes.is_none())
                     // A build with no operations owner offers no remote maintenance.
                     || (matches!(
                         *row,
@@ -740,6 +762,7 @@ impl SettingsWindow {
             worktree_location,
             server_location,
             end_all_sessions: end_sessions::EndAllSessions::new(),
+            direct_access: direct_access::DirectAccess::new(),
             server_service: local_server
                 .as_ref()
                 .and_then(|offered| offered.service.clone())
@@ -754,6 +777,7 @@ impl SettingsWindow {
                 .map(|offered| servers::LocalServerRow::new(offered.connection)),
             ssh_servers,
             ssh_maintenance,
+            direct_routes,
             selected_server: None,
             search_selected_server: None,
             server_list_focus: cx.focus_handle().tab_stop(true),
@@ -1367,7 +1391,7 @@ impl SettingsWindow {
             descriptor.label(self.permission_access.naming()),
             control,
         )
-        .layout(row_layout(row))
+        .layout(self.row_layout(row))
         .reset(self.row_reset(row, appearance, cx))
         .matched_indices(matched_indices)
         .highlighted(highlighted);
@@ -1475,9 +1499,12 @@ impl SettingsWindow {
                 let (method, _) = self.server_connection_presentation();
                 self.render_server_value(row, method, appearance)
             }
-            SettingsRowId::DirectNetworkPairing => {
-                self.render_server_value(row, "None", appearance)
-            }
+            SettingsRowId::DirectNetworkAccess => self.render_direct_access(appearance, cx),
+            SettingsRowId::DirectServerStatus => self.render_direct_server_status(appearance, cx),
+            SettingsRowId::UnpairThisDevice => self.render_unpair_this_device(cx),
+            SettingsRowId::JoinInvitation => self.render_join_invitation(appearance, cx),
+            SettingsRowId::PendingUnpairs => self.render_pending_unpairs(appearance, cx),
+            SettingsRowId::DirectNetworkPairing => self.render_paired_devices(appearance, cx),
             SettingsRowId::RemoveServer => self.render_remove_server(cx),
             SettingsRowId::UpdateStatus => self.render_update_status(cx),
             SettingsRowId::AutomaticUpdateDownloads => self.render_automatic_update_downloads(cx),
@@ -2319,7 +2346,9 @@ fn row_layout(row: SettingsRowId) -> FormRowLayout {
         | SettingsRowId::InstalledThemes
         | SettingsRowId::ServerList
         | SettingsRowId::SshConnect
+        | SettingsRowId::JoinInvitation
         | SettingsRowId::RemovedServerOperations
+        | SettingsRowId::PendingUnpairs
         | SettingsRowId::SettingsFile => FormRowLayout::Full,
         SettingsRowId::WorktreeLocation | SettingsRowId::ServerWorktreeLocation => {
             FormRowLayout::Above
@@ -2329,6 +2358,17 @@ fn row_layout(row: SettingsRowId) -> FormRowLayout {
 }
 
 impl SettingsWindow {
+    /// How `row` arranges its label and content now. Paired devices drop below their label as a
+    /// list once the server lists them, and otherwise read as a value beside it, as the other
+    /// server facts do.
+    fn row_layout(&self, row: SettingsRowId) -> FormRowLayout {
+        if row == SettingsRowId::DirectNetworkPairing && self.direct_access.lists_devices() {
+            FormRowLayout::Above
+        } else {
+            row_layout(row)
+        }
+    }
+
     /// One line of guidance for the rows that warrant it.
     fn row_description(&self, row: SettingsRowId, cx: &App) -> Option<&'static str> {
         match row {

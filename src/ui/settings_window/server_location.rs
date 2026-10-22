@@ -114,6 +114,10 @@ impl SettingsWindow {
                 .ssh_servers
                 .as_ref()
                 .is_some_and(|rows| rows.connections.server(destination).is_some()),
+            ServerChoice::Direct(route) => self
+                .direct_routes
+                .as_ref()
+                .is_some_and(|rows| rows.connections.server(route).is_some()),
         }
     }
 
@@ -121,8 +125,10 @@ impl SettingsWindow {
     /// Selection, section and connection changes call this; rendering never does, so painting
     /// asks no server anything.
     pub(super) fn sync_server_location(&mut self, cx: &mut Context<Self>) {
-        // End All Sessions follows the same server through the same changes.
+        // End All Sessions and direct network access follow the same server through the same
+        // changes.
         self.sync_end_all_sessions(cx);
+        self.sync_direct_access(cx);
         let target = if self.active_section == SettingsSectionId::Servers {
             self.selected_server()
         } else {
@@ -150,6 +156,7 @@ impl SettingsWindow {
                 let client = cx.update(|cx| match &target {
                     ServerChoice::Local => Client::get(cx),
                     ServerChoice::Ssh(destination) => Client::presented_ssh(destination, cx),
+                    ServerChoice::Direct(route) => Client::presented_direct(route, cx),
                 });
                 let read = match &client {
                     Some(client) => Some(cx.update(|cx| client.read(Read::Settings, cx)).await),
@@ -362,6 +369,9 @@ impl SettingsWindow {
         let server = match self.selected_server() {
             Some(ServerChoice::Ssh(destination)) => {
                 format!("the server on {}", destination.as_str())
+            }
+            Some(ServerChoice::Direct(_)) => {
+                format!("the server on {}", self.selected_server_name())
             }
             _ => "your account\u{2019}s server".to_owned(),
         };

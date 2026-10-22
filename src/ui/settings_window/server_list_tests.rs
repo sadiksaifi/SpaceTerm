@@ -369,6 +369,7 @@ fn selecting_an_ssh_server_presents_its_detail_under_headings_naming_it(cx: &mut
         "settings-row-ssh-server-status",
         "settings-row-ssh-server-version",
         "settings-row-server-connection",
+        "settings-row-direct-network-access",
         "settings-row-direct-network-pairing",
         "settings-row-remove-server",
     ] {
@@ -382,7 +383,13 @@ fn selecting_an_ssh_server_presents_its_detail_under_headings_naming_it(cx: &mut
         tree.find_text("Unknown").is_some(),
         "facts read as unknown until SpaceTerm observes the server"
     );
-    assert!(tree.find_text("None").is_some(), "no device is paired");
+    assert!(
+        tree.find_text(
+            "Connect to \u{201C}penguin\u{201D} to see or change its direct network access."
+        )
+        .is_some(),
+        "direct network access waits for a connection to the selected server"
+    );
 }
 
 /// A build with no remote operations owner offers no remote maintenance, so the selected SSH
@@ -576,7 +583,15 @@ fn opening_server_settings_selects_the_named_server(cx: &mut TestAppContext) {
         );
     });
     let opened = |destination: Option<SshDestination>, cx: &mut TestAppContext| {
-        cx.update(|cx| super::super::open_server_settings(destination, cx));
+        cx.update(|cx| {
+            super::super::open_server_settings(
+                destination.map_or(
+                    crate::ui::MachineTarget::Local,
+                    crate::ui::MachineTarget::Ssh,
+                ),
+                cx,
+            )
+        });
         cx.run_until_parked();
         let windows: Vec<_> = cx
             .windows()

@@ -456,6 +456,23 @@ impl SshServerConnections {
                 .and_then(|entry| entry.presented.clone())
         })
     }
+    /// Captures the route and continuity belonging to this exact presented handle in one read.
+    /// A removed connection or a later handle under the same destination grants no authority.
+    pub(crate) fn admitted_route_for(
+        &self,
+        server: &LocalServer,
+    ) -> Option<(SshDestination, SshServerContinuity)> {
+        let state = self.inner.state.lock().ok()?;
+        state.entries.iter().find_map(|(destination, entry)| {
+            if !entry.presented.as_ref()?.same_handle(server) {
+                return None;
+            }
+            Some((
+                SshDestination::new(destination.clone()).ok()?,
+                entry.continuity.clone()?,
+            ))
+        })
+    }
     /// Connections the person removed whose removal couldn't be saved. Each one reappears and may
     /// reconnect when SpaceTerm reopens unless a later removal saves.
     pub(crate) fn unsaved_removals(&self) -> Vec<SshDestination> {

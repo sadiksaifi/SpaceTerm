@@ -12509,6 +12509,37 @@ fn a_machine_headings_menu_should_connect_its_server(cx: &mut TestAppContext) {
     );
 }
 
+/// A direct network server's heading names its route, and its commands reach that route alone:
+/// the SSH registry hears nothing, even for a computer it could also reach.
+#[gpui::test]
+fn a_direct_network_heading_should_act_on_its_own_route_and_never_on_ssh(cx: &mut TestAppContext) {
+    let (harness, cx) = MachineGroupsHarness::new(cx);
+    let (_ssh, connects) = waiting_ssh_registry(cx);
+    let (direct, route) = crate::direct_connections::tests::offline("studio");
+    cx.update(|_, cx| crate::ui::direct_servers::install(direct.clone(), cx));
+    harness.publish(ServerKey::LOCAL, &harness.local, &[("Here", 1)], cx);
+    redraw(cx);
+
+    assert!(
+        heading_names(cx)
+            .iter()
+            .any(|name| name.starts_with("studio, Direct network")),
+        "the heading says how this client reaches the server, got {:?}",
+        heading_names(cx)
+    );
+    right_click("machine-heading-studio", cx);
+    click("machine-menu-disconnect", cx);
+
+    assert_eq!(
+        direct.status(&route),
+        Some(crate::direct_connections::DirectRouteStatus::Disconnected)
+    );
+    assert!(
+        connects.try_recv().is_err(),
+        "a direct network heading never asks SSH to reach its computer"
+    );
+}
+
 struct SettingsMovement;
 
 impl crate::platform::window_movement::WindowMovementFactory for SettingsMovement {

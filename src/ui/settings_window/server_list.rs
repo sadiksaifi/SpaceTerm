@@ -1,9 +1,10 @@
 //! The Servers section's server list and the selection every Servers row acts on.
 //!
-//! The list names the local server first, then each saved SSH connection by destination. The
-//! selected server's detail follows, and its headings name that machine, so every step identifies
-//! the machine it affects. The list reads the local row and the registry's snapshot only, so
-//! rendering reaches no computer.
+//! The list names the local server first, then each saved SSH connection by destination, then
+//! each direct network server this device is paired with by the name it gave. The selected
+//! server's detail follows, and its headings name that machine, so every step identifies the
+//! machine it affects. The list reads the local row and the registries' snapshots only, so
+//! rendering reaches no computer and asks for no credential.
 
 use gpui::prelude::*;
 use gpui::{AnyElement, Context, KeyDownEvent, SharedString, Window, accesskit, div, px};
@@ -11,6 +12,7 @@ use spaceterm_ui::{Icon, IconName, ProgressRing, ProgressSize, ProgressState};
 
 use super::SettingsWindow;
 use super::catalog::{SettingsRowId, SettingsSectionId};
+use crate::direct_connections::{DirectRouteId, DirectRouteStatus};
 use crate::domain::SshDestination;
 use crate::ssh::server_connection::RemoteConnectionStatus;
 use crate::ui::appearance::{ChromeAppearance, gpui_color};
@@ -30,6 +32,8 @@ pub(super) const SERVER_LIST_NAME: &str = "Server list";
 pub(super) enum ServerChoice {
     Local,
     Ssh(SshDestination),
+    /// A server this device reaches over a paired direct network route.
+    Direct(DirectRouteId),
 }
 
 /// One server the list offers, read from what SpaceTerm already knows about it.
@@ -79,10 +83,16 @@ const SSH_ROWS: [SettingsRowId; 8] = [
     SettingsRowId::SshServerStartup,
     SettingsRowId::RemoveServer,
 ];
+/// The rows that present one direct network server alone.
+const DIRECT_ROWS: [SettingsRowId; 2] = [
+    SettingsRowId::DirectServerStatus,
+    SettingsRowId::UnpairThisDevice,
+];
 /// The rows that present whichever server is selected.
-const SELECTED_ROWS: [SettingsRowId; 4] = [
+const SELECTED_ROWS: [SettingsRowId; 5] = [
     SettingsRowId::EndAllSessions,
     SettingsRowId::ServerConnection,
+    SettingsRowId::DirectNetworkAccess,
     SettingsRowId::DirectNetworkPairing,
     SettingsRowId::ServerWorktreeLocation,
 ];
@@ -93,6 +103,8 @@ pub(super) fn row_presents(row: SettingsRowId, server: Option<&ServerChoice>) ->
         server == Some(&ServerChoice::Local)
     } else if SSH_ROWS.contains(&row) {
         matches!(server, Some(ServerChoice::Ssh(_)))
+    } else if DIRECT_ROWS.contains(&row) {
+        matches!(server, Some(ServerChoice::Direct(_)))
     } else if SELECTED_ROWS.contains(&row) {
         server.is_some()
     } else {
@@ -105,6 +117,7 @@ fn leading_row(server: &ServerChoice) -> SettingsRowId {
     match server {
         ServerChoice::Local => SettingsRowId::LocalServer,
         ServerChoice::Ssh(_) => SettingsRowId::SshServerStatus,
+        ServerChoice::Direct(_) => SettingsRowId::DirectServerStatus,
     }
 }
 
@@ -115,6 +128,22 @@ impl SettingsWindow {
             .as_ref()
             .map(|rows| rows.connections.connections())
             .unwrap_or_default()
+    }
+
+    /// The saved direct routes, their statuses and names, from the registry's snapshot.
+    pub(super) fn saved_direct_servers(&self) -> Vec<(DirectRouteId, DirectRouteStatus, String)> {
+        let Some(direct) = self.direct_routes.as_ref() else {
+            return Vec::new();
+        };
+        direct
+            .connections
+            .routes()
+            .into_iter()
+            .filter_map(|(route, status)| {
+                let label = direct.connections.route(&route)?.label;
+                Some((route, status, label))
+            })
+            .collect()
     }
 
     fn listed_servers(&self) -> Vec<ListedServer> {
@@ -144,7 +173,21 @@ impl SettingsWindow {
                     working: presentation.working,
                 }
             });
-        local.into_iter().chain(ssh).collect()
+        let direct = self
+            .saved_direct_servers()
+            .into_iter()
+            .map(|(route, status, label)| {
+                let presentation = crate::ui::direct_servers::present(status, &label);
+                ListedServer {
+                    name: SharedString::from(label),
+                    choice: ServerChoice::Direct(route),
+                    method: "Direct network",
+                    state: presentation.state,
+                    tone: StatusTone::of(status == DirectRouteStatus::Connected, presentation.tone),
+                    working: presentation.working,
+                }
+            });
+        local.into_iter().chain(ssh).chain(direct).collect()
     }
 
     /// The server the Servers detail presents: the one the person selected while it is listed,
@@ -152,9 +195,11 @@ impl SettingsWindow {
     pub(super) fn selected_server(&self) -> Option<ServerChoice> {
         let local = self.local_server.is_some();
         let saved = self.saved_ssh_servers();
+        let direct = self.saved_direct_servers();
         let listed = |choice: &ServerChoice| match choice {
             ServerChoice::Local => local,
             ServerChoice::Ssh(destination) => saved.iter().any(|(saved, _)| saved == destination),
+            ServerChoice::Direct(route) => direct.iter().any(|(saved, _, _)| saved == route),
         };
         let searching = !self.query.trim().is_empty();
         searching
@@ -169,6 +214,12 @@ impl SettingsWindow {
                     .next()
                     .map(|(destination, _)| ServerChoice::Ssh(destination))
             })
+            .or_else(|| {
+                direct
+                    .into_iter()
+                    .next()
+                    .map(|(route, _, _)| ServerChoice::Direct(route))
+            })
     }
 
     /// The name of the selected server, as its list item and headings show it.
@@ -177,6 +228,14 @@ impl SettingsWindow {
             Some(ServerChoice::Ssh(destination)) => {
                 SharedString::from(destination.as_str().to_owned())
             }
+            Some(ServerChoice::Direct(route)) => self
+                .saved_direct_servers()
+                .into_iter()
+                .find(|(saved, _, _)| *saved == route)
+                .map_or_else(
+                    || SharedString::new_static("Direct network server"),
+                    |(_, _, label)| label.into(),
+                ),
             _ => SharedString::new_static(self.this_computer),
         }
     }
@@ -190,18 +249,22 @@ impl SettingsWindow {
         cx.notify();
     }
 
-    /// The server a removal leaves selected: the local server, otherwise the next saved server,
+    /// The server a removal leaves selected: the local server, otherwise the next listed server,
     /// otherwise the one before it.
-    pub(super) fn server_after_removing(&self, removed: &SshDestination) -> Option<ServerChoice> {
+    pub(super) fn server_after_removing(&self, removed: &ServerChoice) -> Option<ServerChoice> {
         if self.local_server.is_some() {
             return Some(ServerChoice::Local);
         }
-        let saved = self.saved_ssh_servers();
-        let index = saved.iter().position(|(saved, _)| saved == removed)?;
-        saved
+        let listed: Vec<ServerChoice> = self
+            .listed_servers()
+            .into_iter()
+            .map(|server| server.choice)
+            .collect();
+        let index = listed.iter().position(|listed| listed == removed)?;
+        listed
             .get(index + 1)
-            .or_else(|| index.checked_sub(1).and_then(|before| saved.get(before)))
-            .map(|(destination, _)| ServerChoice::Ssh(destination.clone()))
+            .or_else(|| index.checked_sub(1).and_then(|before| listed.get(before)))
+            .cloned()
     }
 
     /// Whether `row` belongs on the page for `selected`, the resolved selection.
@@ -217,13 +280,16 @@ impl SettingsWindow {
                             .as_ref()
                             .and_then(|row| row.worktree_server())
                             .is_some(),
-                        Some(ServerChoice::Ssh(_)) => true,
+                        Some(ServerChoice::Ssh(_) | ServerChoice::Direct(_)) => true,
                         None => false,
                     }
             }
             // Servers whose saved connection the person removed are not selected servers, so the
             // row appears only while SpaceTerm still has something to tell them.
             SettingsRowId::RemovedServerOperations => self.has_removed_operations(),
+            // An unpair the server hasn't confirmed outlives its connection, so it appears while
+            // there is something to tell the person.
+            SettingsRowId::PendingUnpairs => self.has_pending_unpairs(),
             row => row_presents(row, selected),
         }
     }
@@ -265,7 +331,7 @@ impl SettingsWindow {
         let selected = self.selected_server();
         let detail = |row: &&SettingsRowId| {
             row.descriptor().section == SettingsSectionId::Servers
-                && (LOCAL_ROWS.contains(row) || SSH_ROWS.contains(row))
+                && (LOCAL_ROWS.contains(row) || SSH_ROWS.contains(row) || DIRECT_ROWS.contains(row))
         };
         if reachable
             .iter()
@@ -447,6 +513,7 @@ impl SettingsWindow {
             let icon = match server.choice {
                 ServerChoice::Local => IconName::AppWindow,
                 ServerChoice::Ssh(_) => IconName::Globe,
+                ServerChoice::Direct(_) => IconName::Lock,
             };
             let choice = server.choice.clone();
             let pressed = server.choice.clone();
@@ -553,6 +620,16 @@ impl SettingsWindow {
     /// How SpaceTerm reaches the selected server, and whose authority admits it.
     pub(super) fn server_connection_presentation(&self) -> (&'static str, SharedString) {
         match self.selected_server() {
+            Some(ServerChoice::Direct(_)) => (
+                "Direct network",
+                SharedString::from(format!(
+                    "This device is paired with \u{201C}{}\u{201D} and connects to it over the \
+                     network, verifying the server each time. The pairing grants SpaceTerm \
+                     access only, never SSH or administrator access, and this device\u{2019}s \
+                     key stays in the system\u{2019}s credential storage.",
+                    self.selected_server_name()
+                )),
+            ),
             Some(ServerChoice::Ssh(destination)) => (
                 "SSH",
                 SharedString::from(format!(
@@ -584,10 +661,11 @@ impl SettingsWindow {
                 self.server_connection_presentation().1,
                 CaptionTone::Guidance,
             )),
-            SettingsRowId::DirectNetworkPairing => Some((
-                SharedString::new_static(DIRECT_NETWORK_PAIRING),
-                CaptionTone::Guidance,
-            )),
+            SettingsRowId::DirectNetworkAccess | SettingsRowId::DirectNetworkPairing => {
+                self.direct_access_caption(row)
+            }
+            row if DIRECT_ROWS.contains(&row) => self.direct_route_caption(row),
+            SettingsRowId::PendingUnpairs => self.pending_unpairs_caption(),
             SettingsRowId::RemovedServerOperations => Some((
                 SharedString::new_static(super::ssh_maintenance::REMOVED_GUIDANCE),
                 CaptionTone::Guidance,
@@ -624,10 +702,6 @@ pub(super) const SERVER_GROUP: &str = "Server";
 pub(super) const CONNECTION_GROUP: &str = "Connection";
 /// The group of preferences the selected server owns.
 pub(super) const SERVER_SETTINGS_GROUP: &str = "Server Settings";
-
-/// Why the selected server has no direct-network pairing.
-pub(super) const DIRECT_NETWORK_PAIRING: &str = "Direct network connections aren\u{2019}t \
-     available in this version of SpaceTerm, so no device is paired with this server.";
 
 #[cfg(test)]
 #[path = "server_list_tests.rs"]

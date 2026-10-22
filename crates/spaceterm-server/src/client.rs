@@ -24,6 +24,7 @@ pub struct LocalServer {
     development: Option<String>,
     computer: std::sync::Arc<dyn crate::computer_name::ComputerName>,
     remote: Option<std::sync::Arc<RemoteRoute>>,
+    direct: Option<std::sync::Arc<DirectRoute>>,
     shared_pane: std::sync::Arc<crate::pane::SharedPaneConnection>,
     attachments:
         std::sync::Arc<std::sync::OnceLock<Result<crate::attachments::Attachments, ServerError>>>,
@@ -31,6 +32,16 @@ pub struct LocalServer {
 struct RemoteRoute {
     expected: crate::account_bridge::AccountBridgeIdentity,
     connector: std::sync::Arc<dyn crate::account_bridge::AccountConnector>,
+}
+struct DirectRoute {
+    paired: crate::direct::PairedDevice,
+    connector: std::sync::Arc<dyn crate::direct::DirectConnector>,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DirectRecord {
+    version: u8,
+    paired: crate::direct::PairedDevice,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -44,6 +55,20 @@ impl LocalServer {
     fn client_directory(&self) -> Result<Directory, ServerError> {
         let directory =
             Directory::open(&self.paths.data.join("clients").join(&self.account), true)?;
+        if let Some(direct) = &self.direct {
+            let _lock = directory.lock("route.lock", false)?;
+            match directory.read_json::<DirectRecord>("route.json")? {
+                Some(record) if record.version == 1 && record.paired == direct.paired => {}
+                Some(_) => return Err(ServerError::AuthenticationRefused),
+                None => directory.write_json(
+                    c"route.json",
+                    &DirectRecord {
+                        version: 1,
+                        paired: direct.paired.clone(),
+                    },
+                )?,
+            }
+        }
         if let Some(remote) = &self.remote {
             let _lock = directory.lock("route.lock", false)?;
             match directory.read_json::<RemoteRecord>("route.json")? {
@@ -61,6 +86,10 @@ impl LocalServer {
         Ok(directory)
     }
     fn client_id(&self) -> Result<[u8; 32], ServerError> {
+        if let Some(direct) = &self.direct {
+            self.client_directory()?;
+            return Ok(direct.paired.client);
+        }
         let directory = self.client_directory()?;
         let _lock = directory.lock("identity.lock", false)?;
         if let Some(record) = directory.read_json::<ClientIdentity>("client.json")? {
@@ -81,14 +110,16 @@ impl LocalServer {
     }
     /// What other clients call this one while it controls a Pane.
     fn client_name(&self) -> crate::pane::control::ClientName {
-        match (self.computer.computer_name(), &self.development) {
-            (Some(computer), Some(development)) => format!("{computer} ({development})").into(),
-            (Some(computer), None) => computer.into(),
-            (None, Some(development)) => development.as_str().into(),
-            (None, None) => "".into(),
-        }
+        crate::pane::control::ClientName::for_computer(
+            self.computer.as_ref(),
+            self.development.as_deref(),
+        )
     }
     fn server_id(&self) -> Result<[u8; 32], ServerError> {
+        if let Some(direct) = &self.direct {
+            self.client_directory()?;
+            return Ok(direct.paired.pin.server);
+        }
         if let Some(remote) = &self.remote {
             self.client_directory()?;
             return Ok(remote.expected.server);
@@ -151,6 +182,7 @@ impl LocalServer {
             development,
             computer: std::sync::Arc::new(crate::computer_name::SystemComputerName),
             remote: None,
+            direct: None,
             shared_pane: std::sync::Arc::default(),
             attachments: std::sync::Arc::default(),
         })
@@ -192,7 +224,7 @@ impl LocalServer {
     }
     /// Whether this route has owning-machine local file authority.
     pub fn is_account_local(&self) -> bool {
-        self.remote.is_none()
+        self.remote.is_none() && self.direct.is_none()
     }
     /// An independent named desktop with a retained nonsecret identity.
     pub fn for_development_client(name: &str, protocol_major: u16) -> Result<Self, ServerError> {
@@ -223,8 +255,22 @@ impl LocalServer {
         );
         Ok(status)
     }
-    /// Admits a terminal transport using owning-account authority, without implicit Start.
-    pub fn connect_pane(&self) -> Result<crate::pane::PaneConnection, ServerError> {
+    /// Admits a transport through its route's verified authority, without implicit Start.
+    fn connect_admitted(&self) -> Result<Box<dyn crate::transport::Transport>, ServerError> {
+        if let Some(direct) = &self.direct {
+            let mut connection = direct.connector.connect().map_err(ServerError::from)?;
+            if connection.paired() != &direct.paired {
+                return Err(ServerError::AuthenticationRefused);
+            }
+            protocol::admit_transport(
+                &mut connection,
+                (&direct.paired.client, &self.client_name()),
+                &direct.paired.pin.server,
+                &self.identity,
+                &[protocol::MAJOR],
+            )?;
+            return Ok(Box::new(connection));
+        }
         if let Some(remote) = &self.remote {
             let client = self.client_id()?;
             let mut bridge = remote.connector.connect()?;
@@ -238,7 +284,7 @@ impl LocalServer {
                 &self.identity,
                 &[protocol::MAJOR],
             )?;
-            return crate::pane::PaneConnection::negotiate(bridge);
+            return Ok(Box::new(bridge));
         }
         crate::service::check_admission(&self.paths)?;
         let mut stream = host::connect(&self.paths)?;
@@ -249,7 +295,10 @@ impl LocalServer {
             &self.identity,
             &[protocol::MAJOR],
         )?;
-        crate::pane::PaneConnection::negotiate(stream)
+        Ok(Box::new(stream))
+    }
+    pub fn connect_pane(&self) -> Result<crate::pane::PaneConnection, ServerError> {
+        crate::pane::PaneConnection::negotiate(self.connect_admitted()?)
     }
     /// Clones share a transport. Independent desktops retain distinct identities and views.
     pub fn connect_shared_pane(&self) -> Result<crate::pane::PaneConnection, ServerError> {
@@ -257,7 +306,7 @@ impl LocalServer {
     }
     /// Checks an existing server. Never sets up storage or starts it.
     pub fn refresh(&self) -> Result<AuthenticatedStatus, ServerError> {
-        if self.remote.is_some() {
+        if self.remote.is_some() || self.direct.is_some() {
             self.connect_pane()?;
             return Ok(AuthenticatedStatus {
                 protocol_major: protocol::MAJOR,
@@ -270,7 +319,7 @@ impl LocalServer {
     }
     /// Explicit first setup retains a nonsecret server identity. It never changes Stop intent.
     pub fn setup(&self) -> Result<(), ServerError> {
-        if self.remote.is_some() {
+        if self.remote.is_some() || self.direct.is_some() {
             return Err(ServerError::Unsupported);
         }
         let data = Directory::open(&self.paths.data, true)?;
@@ -278,6 +327,132 @@ impl LocalServer {
         data.read_or_create()?;
         self.client_id()?;
         Ok(())
+    }
+}
+
+impl LocalServer {
+    /// Retains only caller-supplied nonsecret fences. No storage, network or credential access.
+    pub fn direct(
+        identity: &str,
+        route: [u8; 32],
+        paired: crate::direct::PairedDevice,
+        connector: std::sync::Arc<dyn crate::direct::DirectConnector>,
+    ) -> Result<Self, ServerError> {
+        Self::for_identity(identity)?.with_direct(route, paired, connector)
+    }
+    fn with_direct(
+        mut self,
+        route: [u8; 32],
+        paired: crate::direct::PairedDevice,
+        connector: std::sync::Arc<dyn crate::direct::DirectConnector>,
+    ) -> Result<Self, ServerError> {
+        if route == [0; 32]
+            || paired.pin.build != self.identity
+            || paired.pin.server == [0; 32]
+            || paired.pin.public_key == [0; 32]
+            || paired.pin.certificate == [0; 32]
+            || paired.pairing == [0; 32]
+            || paired.client == [0; 32]
+        {
+            return Err(ServerError::AuthenticationRefused);
+        }
+        self.account = format!(
+            "{}-direct-{}",
+            self.account,
+            route.iter().map(|b| format!("{b:02x}")).collect::<String>()
+        );
+        self.direct = Some(std::sync::Arc::new(DirectRoute { paired, connector }));
+        Ok(self)
+    }
+    fn direct_manage(
+        &self,
+        request: crate::direct::Management,
+    ) -> Result<crate::direct::ManagementReply, crate::direct::DirectError> {
+        let mut connection = self
+            .connect_admitted()
+            .map_err(crate::direct::DirectError::from)?;
+        let mut wire = protocol::Wire::terminal(connection.as_mut())?;
+        wire.write(&crate::pane::Request::Direct(request))?;
+        match wire.read()? {
+            crate::pane::Reply::Direct(reply) => reply,
+            _ => Err(crate::direct::DirectError::InvalidRequest),
+        }
+    }
+    pub fn direct_status(&self) -> Result<crate::direct::DirectStatus, crate::direct::DirectError> {
+        match self.direct_manage(crate::direct::Management::Status)? {
+            crate::direct::ManagementReply::Status(status) => Ok(status),
+            _ => Err(crate::direct::DirectError::InvalidRequest),
+        }
+    }
+    pub fn set_direct_policy(
+        &self,
+        policy: Option<crate::direct::NetworkPolicy>,
+    ) -> Result<crate::direct::DirectStatus, crate::direct::DirectError> {
+        match self.direct_manage(crate::direct::Management::SetPolicy(policy))? {
+            crate::direct::ManagementReply::Status(status) => Ok(status),
+            _ => Err(crate::direct::DirectError::InvalidRequest),
+        }
+    }
+    pub fn invite_device(&self) -> Result<crate::direct::Invitation, crate::direct::DirectError> {
+        match self.direct_manage(crate::direct::Management::Invite)? {
+            crate::direct::ManagementReply::Invitation(text) => {
+                crate::direct::Invitation::parse(&text)
+            }
+            _ => Err(crate::direct::DirectError::InvalidRequest),
+        }
+    }
+    pub fn withdraw_invitation(
+        &self,
+        id: crate::direct::ClaimId,
+    ) -> Result<(), crate::direct::DirectError> {
+        match self.direct_manage(crate::direct::Management::Withdraw(id))? {
+            crate::direct::ManagementReply::Rejected => Ok(()),
+            _ => Err(crate::direct::DirectError::InvalidRequest),
+        }
+    }
+    pub fn pairing_claims(
+        &self,
+    ) -> Result<Vec<crate::direct::PairingClaim>, crate::direct::DirectError> {
+        match self.direct_manage(crate::direct::Management::Claims)? {
+            crate::direct::ManagementReply::Claims(claims) => Ok(claims),
+            _ => Err(crate::direct::DirectError::InvalidRequest),
+        }
+    }
+    pub fn approve_device(
+        &self,
+        claim: &crate::direct::PairingClaim,
+    ) -> Result<crate::direct::DeviceInfo, crate::direct::DirectError> {
+        match self.direct_manage(crate::direct::Management::Approve(claim.clone()))? {
+            crate::direct::ManagementReply::Approved(device) => Ok(device),
+            _ => Err(crate::direct::DirectError::InvalidRequest),
+        }
+    }
+    pub fn reject_device(
+        &self,
+        claim: crate::direct::ClaimId,
+    ) -> Result<(), crate::direct::DirectError> {
+        match self.direct_manage(crate::direct::Management::Reject(claim))? {
+            crate::direct::ManagementReply::Rejected => Ok(()),
+            _ => Err(crate::direct::DirectError::InvalidRequest),
+        }
+    }
+    pub fn paired_devices(
+        &self,
+    ) -> Result<Vec<crate::direct::DeviceInfo>, crate::direct::DirectError> {
+        match self.direct_manage(crate::direct::Management::Devices)? {
+            crate::direct::ManagementReply::Devices(devices) => Ok(devices),
+            _ => Err(crate::direct::DirectError::InvalidRequest),
+        }
+    }
+    pub fn revoke_device(
+        &self,
+        operation: crate::direct::OperationId,
+        target: crate::direct::PairingId,
+    ) -> Result<crate::direct::RevocationReceipt, crate::direct::DirectError> {
+        match self.direct_manage(crate::direct::Management::Revoke { operation, target })? {
+            crate::direct::ManagementReply::Revoked(receipt) => Ok(receipt),
+            _ => Err(crate::direct::DirectError::InvalidRequest),
+        }
     }
 }
 
@@ -296,6 +471,95 @@ mod tests {
     use super::*;
     use crate::account_bridge::{AccountBridge, AccountBridgeIdentity, AccountConnector};
     use std::sync::Arc;
+
+    #[test]
+    fn paired_direct_policy_changes_return_the_committed_status_before_disconnect() {
+        use crate::direct::{self, DirectConnection, DirectConnector, Management, ManagementReply};
+        struct Connector {
+            endpoint: String,
+            paired: direct::PairedDevice,
+            credential: direct::DeviceCredential,
+        }
+        impl DirectConnector for Connector {
+            fn connect(&self) -> Result<DirectConnection, direct::DirectError> {
+                DirectConnection::connect(&self.endpoint, &self.paired, &self.credential)
+            }
+        }
+        for change_address in [false, true] {
+            let fixture = direct::tests::Fixture::new();
+            fixture.enable();
+            let credential = direct::DeviceCredential::generate().unwrap();
+            let paired = fixture.enroll(&credential);
+            let endpoint = fixture.endpoint();
+            // The same pairing has another transport, which must close immediately.
+            let other_worker = fixture.serve_next();
+            let mut other = DirectConnection::connect(&endpoint, &paired, &credential).unwrap();
+            protocol::admit_transport(
+                &mut other,
+                (&paired.client, &"Other view".into()),
+                &paired.pin.server,
+                &paired.pin.build,
+                &[protocol::MAJOR],
+            )
+            .unwrap();
+            let policy = change_address.then(|| {
+                let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+                direct::NetworkPolicy::new(listener.local_addr().unwrap()).unwrap()
+            });
+            let local = LocalServer::with_paths(fixture.paths.clone())
+                .unwrap()
+                .with_direct(
+                    [42; 32],
+                    paired.clone(),
+                    Arc::new(Connector {
+                        endpoint,
+                        paired,
+                        credential,
+                    }),
+                )
+                .unwrap();
+            let issuer_worker = fixture.serve_next();
+            let result = local.set_direct_policy(policy.clone());
+            let _ = issuer_worker.join().unwrap();
+            let ManagementReply::Status(committed) =
+                fixture.management(Management::Status).unwrap()
+            else {
+                panic!()
+            };
+            assert_eq!(committed.policy, policy);
+            assert_eq!(
+                result,
+                Ok(committed),
+                "a successful durable policy change must reach its paired caller"
+            );
+            assert!(
+                protocol::Wire::terminal(&mut other)
+                    .unwrap()
+                    .read_frame()
+                    .is_err()
+            );
+            drop(other);
+            let _ = other_worker.join().unwrap();
+            assert!(
+                matches!(fixture.management(Management::Devices), Ok(ManagementReply::Devices(devices)) if devices.len() == 1)
+            );
+            fixture.state.lock().unwrap().stop();
+            let reopened = direct::host::State::open(&fixture.paths).unwrap();
+            let (ManagementReply::Status(restored), _) = reopened
+                .lock()
+                .unwrap()
+                .manage(None, Management::Status)
+                .unwrap()
+            else {
+                panic!()
+            };
+            assert_eq!(
+                restored.policy, policy,
+                "the reply must describe the policy retained across restart"
+            );
+            reopened.lock().unwrap().stop();
+        }
+    }
 
     struct Studio;
     impl crate::computer_name::ComputerName for Studio {
@@ -560,6 +824,7 @@ mod tests {
             development: None,
             computer: std::sync::Arc::new(crate::computer_name::SystemComputerName),
             remote: None,
+            direct: None,
             shared_pane: std::sync::Arc::default(),
             attachments: std::sync::Arc::default(),
         };
@@ -597,6 +862,7 @@ mod tests {
             development: None,
             computer: std::sync::Arc::new(crate::computer_name::SystemComputerName),
             remote: None,
+            direct: None,
             shared_pane: std::sync::Arc::default(),
             attachments: std::sync::Arc::default(),
         };
@@ -632,6 +898,7 @@ mod tests {
             development: None,
             computer: std::sync::Arc::new(crate::computer_name::SystemComputerName),
             remote: None,
+            direct: None,
             shared_pane: std::sync::Arc::default(),
             attachments: std::sync::Arc::default(),
         };

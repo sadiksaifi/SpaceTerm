@@ -106,7 +106,13 @@ def reset_at(data, runtime, confirm=None):
                     raise TaskError(
                         "finish server and process cleanup before reset; endpoint retained"
                     )
-            for name in ("setup.lock", "service.lock", "service-intent.lock", "worktree.lock"):
+            for name in (
+                "setup.lock",
+                "service.lock",
+                "service-intent.lock",
+                "worktree.lock",
+                "direct.lock",
+            ):
                 if name in os.listdir(root):
                     lock(stack, data / name)
             if "service.json" in os.listdir(root):
@@ -118,7 +124,9 @@ def reset_at(data, runtime, confirm=None):
                 if state.get("installed") and not state.get("stopped"):
                     raise TaskError("explicitly Stop the installed service before reset")
             selected = [
-                data / name for name in ("identity.json", "clients") if name in os.listdir(root)
+                data / name
+                for name in ("identity.json", "direct.json", "clients")
+                if name in os.listdir(root)
             ]
             if not selected:
                 raise TaskError("no selected unreleased state exists")
@@ -136,10 +144,12 @@ def reset_at(data, runtime, confirm=None):
                 print(f"Archive: {path}")
             print(
                 "Loss from active use: server identity and organization, completed operation outcomes, "
-                "client identities, attachments, deferred releases and personal views in this scope."
+                "direct server trust and paired-device grants, client identities, attachments, "
+                "deferred releases and personal views in this scope."
             )
             print(
-                "Kept: Settings, Commands, repository files, service Stop intent, installations, SSH trust and all credentials."
+                "Kept: Settings, Commands, repository files, service Stop intent, installations, "
+                "SSH trust, native client credentials and signing keys."
             )
             print(f"Review digest: {token}")
             if confirm is None:

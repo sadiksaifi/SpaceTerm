@@ -24,7 +24,7 @@
 #[cfg(test)]
 pub(crate) use development::testing;
 pub(crate) use development::{
-    POLL_INTERVAL, SharedAcceptance, SharedAttachmentFailure, SharedCloseApproval,
+    DirectServer, POLL_INTERVAL, SharedAcceptance, SharedAttachmentFailure, SharedCloseApproval,
     SharedCloseReview, SharedCloseState, SharedCloseUnavailable, SharedEditSource,
     SharedPaneSessions, SharedPanes, SharedRefusal, SharedRefusalReason, SharedRemoval,
     SharedRowStatus, SharedSubmission, SharedTabs, SharedWorkspaceConflict, SharedWorkspaceEdits,
@@ -611,9 +611,51 @@ mod development {
             None
         }
 
-        /// The SSH destination of another computer's server, or `None` for this computer's.
+        /// The SSH destination of another computer's server, or `None` for this computer's
+        /// and for one reached over a direct network connection.
         fn remote_destination(&self) -> Option<&crate::domain::SshDestination> {
             None
+        }
+
+        /// The direct network route reaching another computer's server, if that is how this
+        /// client reaches it.
+        fn direct_route(&self) -> Option<&DirectServer> {
+            None
+        }
+    }
+
+    /// Another computer's server as a direct network route reaches it.
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub(crate) struct DirectServer {
+        pub(crate) route: crate::direct_connections::DirectRouteId,
+        /// The server's name, which labels it and grants nothing.
+        pub(crate) name: SharedString,
+    }
+
+    impl DirectServer {
+        /// The machine name the Panes' terminal metadata displays for this server.
+        ///
+        /// Terminal metadata names a remote machine with an SSH Destination value, so this
+        /// spells the server's self-chosen name as one. It is a display label only: a
+        /// server-backed Pane reads no Repository Status and starts no SSH launch, and Retry and
+        /// every heading command reach the server through its direct route, so nothing connects
+        /// to this value or gains authority from it. A name that leaves nothing to show reads as
+        /// a generic server.
+        fn machine(&self) -> Option<crate::domain::SshDestination> {
+            let label: String = self
+                .name
+                .chars()
+                .map(|character| match character {
+                    // An account prefix would read as the Pane's user, which the name never
+                    // proves.
+                    '@' => '-',
+                    character if character.is_whitespace() || character.is_control() => '-',
+                    character => character,
+                })
+                .collect();
+            crate::domain::SshDestination::new(label.trim_start_matches('-').to_owned())
+                .or_else(|_| crate::domain::SshDestination::new("server".to_owned()))
+                .ok()
         }
     }
 
@@ -654,11 +696,20 @@ mod development {
         }
     }
 
-    /// Another computer's server Panes, reached through an SSH account route. Nothing here
-    /// grants local file authority: the server's paths and links name files on that computer.
+    /// How this client reaches another computer's server, which decides what Retry may ask.
+    enum RemoteRoute {
+        Ssh(crate::domain::SshDestination),
+        Direct(DirectServer),
+    }
+
+    /// Another computer's server Panes, reached through an SSH account route or a direct network
+    /// route. Nothing here grants local file authority: the server's paths and links name files
+    /// on that computer.
     struct RemoteServerPanes {
         server: LocalServer,
         controls: Arc<PaneControls>,
+        route: RemoteRoute,
+        /// The machine the Panes' terminal metadata names.
         destination: crate::domain::SshDestination,
         /// Completes the launch plan the server factory ignores, as for the local server.
         client_home: ValidatedLocalDirectory,
@@ -666,7 +717,17 @@ mod development {
 
     impl SharedPaneOpener for RemoteServerPanes {
         fn remote_destination(&self) -> Option<&crate::domain::SshDestination> {
-            Some(&self.destination)
+            match &self.route {
+                RemoteRoute::Ssh(destination) => Some(destination),
+                RemoteRoute::Direct(_) => None,
+            }
+        }
+
+        fn direct_route(&self) -> Option<&DirectServer> {
+            match &self.route {
+                RemoteRoute::Direct(server) => Some(server),
+                RemoteRoute::Ssh(_) => None,
+            }
         }
 
         fn open(&self, pane: Id) -> Option<SharedPaneSubscription> {
@@ -730,11 +791,34 @@ mod development {
                 Rc::new(RemoteServerPanes {
                     server,
                     controls,
+                    route: RemoteRoute::Ssh(destination.clone()),
                     destination,
                     client_home,
                 }),
                 panes,
             )
+        }
+
+        /// Panes of another computer's server reached over a direct network route, or `None` if
+        /// its name yields no machine label.
+        pub(crate) fn direct(
+            server: LocalServer,
+            controls: Arc<PaneControls>,
+            direct: DirectServer,
+            client_home: ValidatedLocalDirectory,
+            panes: &PaneConstruction,
+        ) -> Option<Self> {
+            let destination = direct.machine()?;
+            Some(Self::with_opener(
+                Rc::new(RemoteServerPanes {
+                    server,
+                    controls,
+                    destination,
+                    route: RemoteRoute::Direct(direct),
+                    client_home,
+                }),
+                panes,
+            ))
         }
 
         pub(crate) fn with_opener(
@@ -757,6 +841,19 @@ mod development {
         /// this computer's server takes Start Server from this client.
         pub(crate) fn remote_destination(&self) -> Option<&crate::domain::SshDestination> {
             self.opener.remote_destination()
+        }
+
+        /// The direct network route reaching another computer's server, if any.
+        pub(crate) fn direct_route(&self) -> Option<&DirectServer> {
+            self.opener.direct_route()
+        }
+
+        /// The name of another computer's server, however this client reaches it, or `None` for
+        /// this computer's.
+        pub(crate) fn remote_name(&self) -> Option<SharedString> {
+            self.remote_destination()
+                .map(|destination| SharedString::from(destination.as_str().to_owned()))
+                .or_else(|| self.direct_route().map(|direct| direct.name.clone()))
         }
 
         pub(crate) const fn panes(&self) -> &PaneConstruction {

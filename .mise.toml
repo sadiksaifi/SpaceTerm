@@ -624,3 +624,33 @@ run = "cargo test --package spaceterm --lib --all-features --locked -- ssh::serv
 description = "Finish a submitted SSH server original from a new client after the first one is lost"
 env = { SPACETERM_SSH_NATIVE_MAINTAIN = "1" }
 run = "cargo test --package spaceterm --lib --all-features --locked -- ssh::server_process::unix_adapter_tests::native_remote_original_finishes_after_the_client_is_lost --ignored --exact --nocapture"
+
+[tasks."server:direct:test"]
+description = "Test direct-network proof, exposure, enrollment and revocation boundaries"
+run = "cargo test --package spaceterm-server --features client --locked -- direct"
+
+[tasks."server:direct:desktop:test"]
+description = "Test saved direct connections, restricted revocation recovery and desktop presentation"
+run = "cargo test --package spaceterm --lib --no-default-features --features desktop-tests --locked -- direct_"
+
+[tasks."server:direct:build"]
+description = "Build the two-host direct-device verification helper before native signing"
+run = "cargo build --package spaceterm-server-host --features client --example direct_devices --locked"
+
+[tasks."server:direct:smoke"]
+description = "Verify WSS against Penguin using only explicitly confirmed idle Development work"
+usage = '''
+arg "<bind>" help="Concrete owner IP address and TCP port"
+arg "<server>" help="Exact idle Development server identity in hexadecimal"
+flag "--confirm-idle-development" help="Authorize only test-created pairings and Workspaces on the idle Development server"
+flag "--restart-idle-service" help="Also verify exposure policy through an explicit idle service restart"
+'''
+run = "target/debug/examples/direct_devices --bind {{usage.bind | quote}} --expect-server {{usage.server | quote}} {% if usage.confirm_idle_development %}--confirm-idle-development{% endif %} {% if usage.restart_idle_service %}--restart-idle-service{% endif %}"
+
+[tasks."server:direct:credentials:native:test"]
+description = "Verify two disposable native credential items without replacing another pairing"
+run = "cargo test --package spaceterm --lib --all-features --locked -- direct_connections::credentials::native_tests::unix_native_store_refuses_replacement_and_preserves_other_pairings --ignored --exact"
+
+[tasks."server:direct:control:test"]
+description = "Verify revocation releases only the retired device's Pane control and preserves terminal work"
+run = "cargo test --package spaceterm --lib --no-default-features --locked -- runtime::server::tests::revoking_a_device_releases_control_without_ending_its_terminal_session --exact"

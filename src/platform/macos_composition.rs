@@ -160,6 +160,7 @@ fn compose(
         )),
         super::launch_host::ssh_server_artifacts(),
     );
+    let direct_servers = startup.direct_servers();
     let repository_status = super::repository_status_host::repository_status_adapters(
         &startup.home_directory,
         Arc::new(super::macos_repository_tools::MacosRepositoryToolDiscovery::new()),
@@ -218,6 +219,7 @@ fn compose(
             background_images: Some(background_images),
             local_server: crate::ui::LocalServerAdapters::account(),
             ssh_servers: Some(ssh_servers),
+            direct_servers: Some(direct_servers),
         },
         services: Some(Rc::new(super::macos_services::NativeServicesRegistration)),
         window_movement: Rc::new(super::macos_window_drag::WindowMovementFactory),

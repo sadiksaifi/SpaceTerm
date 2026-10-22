@@ -69,10 +69,9 @@ pub(super) enum SidebarEvent {
         workspace_id: WorkspaceId,
         position: usize,
     },
-    /// A machine heading's command, naming the other machine's SSH Destination, or `None` for
-    /// this computer.
+    /// A machine heading's command, naming the server the heading presents.
     Machine {
-        destination: Option<SshDestination>,
+        target: MachineTarget,
         command: MachineMenuCommand,
     },
     Create(WorkspaceCreation),
@@ -122,14 +121,26 @@ pub(super) enum MachineMenuCommand {
     ServerSettings,
 }
 
+/// The server a machine heading presents, by the route this client reaches it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum MachineTarget {
+    Local,
+    Ssh(SshDestination),
+    Direct(crate::direct_connections::DirectRouteId),
+}
+
 /// The heading that names one machine above its Workspaces, as a source list names its
 /// sections.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct MachineSection {
-    /// This computer's name, or the other machine's SSH Destination.
+    /// This computer's name, the other machine's SSH Destination, or a direct network server's
+    /// name.
     pub(super) label: SharedString,
-    /// The other machine's SSH Destination, which the heading's commands name.
-    pub(super) destination: Option<SshDestination>,
+    /// How this client reaches the server, beside its name, where the name alone leaves it
+    /// unsaid.
+    pub(super) route: Option<&'static str>,
+    /// The server the heading's commands act on.
+    pub(super) target: MachineTarget,
     /// The SSH server connection's state while it isn't connected.
     pub(super) status: Option<&'static str>,
     pub(super) connects: bool,

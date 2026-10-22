@@ -1146,6 +1146,9 @@ impl WorkspaceSidebar {
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .child(label.clone()),
             )
+            .when_some(section.route, |heading, route| {
+                heading.child(div().flex_shrink_0().child(route))
+            })
             .when_some(section.status, |heading, status| {
                 heading.child(
                     div()
@@ -1157,11 +1160,15 @@ impl WorkspaceSidebar {
                         .child(status),
                 )
             });
-        let accessible = match section.status {
-            Some(status) => format!("{label}, {status}"),
+        let named = match section.route {
+            Some(route) => format!("{label}, {route}"),
             None => label.to_string(),
         };
-        let destination = section.destination.clone();
+        let accessible = match section.status {
+            Some(status) => format!("{named}, {status}"),
+            None => named,
+        };
+        let target = section.target.clone();
         let grow_sidebar = sidebar.clone();
         let entries = machine_menu_entries(section);
         // A machine without a server SpaceTerm can act on has no menu, only its name.
@@ -1184,12 +1191,9 @@ impl WorkspaceSidebar {
             .debug_selector(format!("{selector}-menu"))
             .on_activate(move |activation, _, cx| {
                 let command = *activation.action();
-                let destination = destination.clone();
+                let target = target.clone();
                 let _ = sidebar.update(cx, |_, cx| {
-                    cx.emit(SidebarEvent::Machine {
-                        destination,
-                        command,
-                    });
+                    cx.emit(SidebarEvent::Machine { target, command });
                 });
             })
             .into_any_element()
