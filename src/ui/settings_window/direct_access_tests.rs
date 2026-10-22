@@ -30,7 +30,7 @@ use crate::ui::direct_access::{
 use crate::ui::direct_pairing::{APPROVE_SELECTOR, COPY_SELECTOR, DONE_SELECTOR};
 use crate::ui::settings_window::SettingsWindow;
 use crate::ui::settings_window::direct_join::{
-    WITHDRAW_CONFIRM_SELECTOR, WITHDRAW_FAILURE_SELECTOR, WITHDRAW_SELECTOR,
+    JOIN_RETRY_SELECTOR, WITHDRAW_CONFIRM_SELECTOR, WITHDRAW_FAILURE_SELECTOR, WITHDRAW_SELECTOR,
 };
 use crate::ui::settings_window::direct_routes::{
     PENDING_SELECTOR, UNPAIR_SELF_CONFIRM_SELECTOR, UNPAIR_SELF_SELECTOR, UNSAVED_CHANGES,
@@ -369,6 +369,30 @@ fn approve_pairs_exactly_the_claim_the_person_saw(cx: &mut TestAppContext) {
     );
 }
 
+/// A pending request in Pair Device is in view with its answers, even when the
+/// window is too short for the whole dialog.
+#[gpui::test]
+fn a_pairing_request_is_in_view_without_scrolling(cx: &mut TestAppContext) {
+    let access = ScriptedAccess::listening();
+    access.claim(3, "MacBook");
+    let (_, cx) = open_servers(&access, cx);
+
+    click(PAIR_SELECTOR, cx);
+    cx.simulate_resize(gpui::size(gpui::px(720.0), gpui::px(320.0)));
+    cx.run_until_parked();
+
+    let viewport = cx
+        .debug_bounds("modal-body-viewport")
+        .expect("Pair Device shows its body");
+    let approve = cx
+        .debug_bounds(Box::leak(format!("{APPROVE_SELECTOR}-0").into_boxed_str()))
+        .expect("the request offers Approve");
+    assert!(
+        viewport.top() <= approve.top() && approve.bottom() <= viewport.bottom(),
+        "Approve is inside the dialog's visible body: {approve:?} within {viewport:?}"
+    );
+}
+
 #[gpui::test]
 fn closing_pair_device_withdraws_its_invitation(cx: &mut TestAppContext) {
     let access = ScriptedAccess::listening();
@@ -546,6 +570,47 @@ fn a_pairing_saved_without_confirmation_is_selected_and_its_detail_keeps_the_war
     );
 }
 
+/// A join the network interrupted keeps its request and asks again only when the person
+/// chooses Try Again, without claiming why the server was out of reach.
+#[gpui::test]
+fn an_interrupted_join_waits_for_try_again_with_the_same_request(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let access = ScriptedAccess::new(Listener::Off);
+    let (direct, join) = crate::direct_connections::tests::retryable_join(
+        "studio",
+        crate::direct_connections::EnrollmentStage::Claim,
+    );
+    let (window, cx) = open_servers_with(&access, Some(direct.clone()), cx);
+
+    follow(&window, join, cx);
+    settle(cx, |cx| open(JOIN_RETRY_SELECTOR, cx));
+
+    assert!(
+        says(
+            "SpaceTerm didn\u{2019}t get an answer from the server at the invitation\u{2019}s address.",
+            cx
+        ),
+        "the row says what happened"
+    );
+    assert!(
+        !says("denied", cx) && !says("permission", cx),
+        "a network failure names no cause SpaceTerm didn't observe"
+    );
+    assert!(
+        direct.pending_unpairs().is_empty(),
+        "an interrupted join withdraws nothing"
+    );
+
+    click(JOIN_RETRY_SELECTOR, cx);
+
+    settle(cx, |cx| {
+        window
+            .read_with(cx, |settings, _| settings.selected_server())
+            .is_some_and(|server| matches!(server, ServerChoice::Direct(route) if route == join))
+    });
+    assert!(direct.pending_unpairs().is_empty());
+}
+
 /// The fixture's storage can't confirm any further save after an unknown publication, so the
 /// person's withdrawal is requested but not retained, and the window says exactly that.
 #[gpui::test]
@@ -593,14 +658,18 @@ fn a_pairing_whose_save_is_unknown_uses_no_route_and_reports_an_unsaved_withdraw
     );
 }
 
-/// A stop that couldn't be saved stops saying so once the registry saves again, so the alert
-/// follows recovery instead of outliving it.
+/// A stop that couldn't be saved keeps saying so through the registry's unrelated changes, and
+/// stops once the registry saves again, so the alert follows recovery instead of outliving it.
 #[gpui::test]
 fn an_unsaved_stop_alert_clears_once_the_registry_saves_again(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
     let access = ScriptedAccess::new(Listener::Off);
-    let (direct, route) = crate::direct_connections::tests::offline("studio");
+    let (direct, route, storage) = crate::direct_connections::tests::offline_with_storage("studio");
     let (window, cx) = open_servers_with(&access, Some(direct.clone()), cx);
+    // This computer can't save the registry, as when the stop itself failed to save.
+    storage.set_failing(true);
+    direct.disconnect(&route);
+    assert!(direct.persistence_error(), "the registry couldn't save");
     window.update(cx, |settings, cx| {
         if let Some(rows) = settings.direct_routes.as_mut() {
             rows.join = Some(route);
@@ -613,7 +682,15 @@ fn an_unsaved_stop_alert_clears_once_the_registry_saves_again(cx: &mut TestAppCo
     cx.run_until_parked();
     assert!(open(WITHDRAW_FAILURE_SELECTOR, cx));
 
+    // Changes the registry announces but can't save leave the stop unsaved, so the alert stays.
+    direct.connect(&route);
+    direct.disconnect(&route);
+    cx.run_until_parked();
+    assert!(direct.persistence_error());
+    assert!(open(WITHDRAW_FAILURE_SELECTOR, cx));
+
     // A change the registry saves and announces, as a quiet retry's save would.
+    storage.set_failing(false);
     direct.disconnect(&route);
     assert!(!direct.persistence_error(), "the registry saved its change");
 

@@ -9,32 +9,22 @@ use super::workspace_sidebar::{
     WorkspaceSidebar, WorktreeMenuCommand, remote_connection_status,
 };
 #[cfg(test)]
-use super::workspace_sidebar::{
-    SIDEBAR_MAXIMUM_WIDTH, SIDEBAR_ROW_HEIGHT, TERMINAL_CONTENT_MINIMUM_WIDTH,
-};
+use super::workspace_sidebar::{SIDEBAR_MAXIMUM_WIDTH, TERMINAL_CONTENT_MINIMUM_WIDTH};
 use crate::platform::terminal_accessibility::TerminalAccessibilityAdapterFactory;
-use crate::ssh::remote_account::RemoteWorkspaceAccount;
 use crate::terminal::native_services::NativeServiceAdapters;
 use crate::ui::appearance::gpui_color;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::chrome_typography::{ChromeTextStyleExt, TextRole};
 use super::directory_picker::{
     DirectoryPicker, DirectoryPickerEvent, DirectorySelection, DirectorySource,
-    LocalDirectorySource, RemoteDirectorySource,
+    LocalDirectorySource, ServerDirectorySource,
 };
 use super::remote_workspace_flow::{
-    ConnectedControlConnection, RemoteWorkspaceAliasPin, RemoteWorkspaceConnectContext,
-    RemoteWorkspaceConnectionProgress, RemoteWorkspaceFlow, RemoteWorkspaceFlowBackend,
-    RemoteWorkspaceFlowBackendError, RemoteWorkspaceFlowBackendFactory,
-    RemoteWorkspaceFlowCompletion, RemoteWorkspaceFlowCompletionHandle, RemoteWorkspaceFlowEvent,
-    RemoteWorkspaceStart,
+    RemoteWorkspaceChoice, RemoteWorkspaceFlow, RemoteWorkspaceFlowEvent, RemoteWorkspaceStart,
 };
-use super::tab_manager::{PreparedTabManagerRemoteRestart, RemoteTabManagerLifecycleError};
 use super::terminal_focus::{TerminalFocusBlocker, TerminalFocusCoordinator, WorkspaceFocusOwners};
 use super::workspace_creation::WorkspaceCreation;
 use super::{
@@ -46,10 +36,9 @@ use super::{
     FocusNextPane, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp, FocusPreviousPane,
     MoveTabLeft, MoveTabRight, NewRemoteWorkspace, NewWorkspace, NewWorktree, NextTab,
     NextWorktree, OpenLocalDirectory, OpenRemoteDirectory, OpenTerminalFind, PreviousTab,
-    PreviousWorktree, RemoteChildLaunchUnavailable, ScrollPageDown, ScrollPageUp, ScrollToBottom,
-    ScrollToTop, ShowRepositoryStatus, SplitDown, SplitRight, SwitchWorkspace,
-    TERMINAL_KEY_CONTEXT, TabManager, TabManagerEvent, TogglePaneZoom, ToggleSidebar,
-    ToggleSidebarFocus,
+    PreviousWorktree, ScrollPageDown, ScrollPageUp, ScrollToBottom, ScrollToTop,
+    ShowRepositoryStatus, SplitDown, SplitRight, SwitchWorkspace, TERMINAL_KEY_CONTEXT, TabManager,
+    TabManagerEvent, TogglePaneZoom, ToggleSidebar, ToggleSidebarFocus,
 };
 use crate::appearance::Color;
 use crate::close_confirmation::{
@@ -58,21 +47,17 @@ use crate::close_confirmation::{
 };
 use crate::directory_selection::SystemDirectorySelection;
 use crate::domain::{
-    LocalDirectoryIdentity, PinnedDirectory, RemoteConnectionReduction, RemoteConnectionState,
-    RemoteDirectory, RemoteWorkspaceTarget, ValidatedLocalDirectory, WorkspaceCollection,
-    WorkspaceEntry, WorkspaceError, WorkspaceId, WorkspaceLocation,
+    PinnedDirectory, RemoteConnectionPhase, ValidatedLocalDirectory, WorkspaceCollection,
+    WorkspaceEntry, WorkspaceError, WorkspaceId,
 };
 use crate::platform::local_filesystem::{LocalFilesystemAuthority, LocalFilesystemError};
 use crate::platform::window_movement::{
     OperatingSystemWindowDragError, OperatingSystemWindowDragPlatform, WindowMoveStart,
 };
 use crate::settings::sidebar::SidebarState;
-use crate::ssh::live_connection::{ControlConnectionObserver, ControlConnectionTerminalState};
-use crate::ssh::process::TransientSshErrorOutput;
-use crate::terminal::metadata::RemoteTerminalMetadataContext;
 use crate::terminal::{
-    NativeServiceOrigin, NativeServiceStatus, PreparedWorkspaceTerminalLaunch, SelectionCopy,
-    TerminalKeyInputAdapterFactory, TerminalSessionFactory, WorkspaceTerminalSessionFactory,
+    NativeServiceOrigin, NativeServiceStatus, SelectionCopy, TerminalKeyInputAdapterFactory,
+    WorkspaceTerminalSessionFactory,
 };
 use gpui::prelude::*;
 
@@ -85,10 +70,8 @@ use spaceterm_ui::{
     AnchoredPlacementConfig, ButtonVariant, ComboBox, ComboBoxAccessory, ComboBoxCommand,
     ComboBoxCopy, ComboBoxHandle, ComboBoxItem, CustomIconName, Icon, IconButton, IconName,
     ModalAction, ModalActionEmphasis, ModalActionIntent, ModalActionRole, ModalId, ModalLayer,
-    ProgressCancelDecision, ProgressCancellation, ProgressDialog, ProgressDialogHandle,
-    ProgressDialogOutcome, ProgressDialogUpdate, ProgressState, Tooltip, WindowDragRegion,
-    WindowDragRegionEvent, WindowDragRegionResponse, WindowDragRegionStatus,
-    window_combo_box_is_open, window_modal_is_open,
+    Tooltip, WindowDragRegion, WindowDragRegionEvent, WindowDragRegionResponse,
+    WindowDragRegionStatus, window_combo_box_is_open, window_modal_is_open,
 };
 
 #[cfg(test)]
@@ -108,69 +91,6 @@ enum CloseConfirmationAction {
     Cancel,
 }
 
-struct RemoteWorkspaceRuntime {
-    generation: u64,
-    control_connection: Option<ConnectedControlConnection>,
-    lifecycle: Option<ControlConnectionObserver>,
-    alias_pin: Option<RemoteWorkspaceAliasPin>,
-    /// Lends the connection's reader to Repository Status while the connection lives.
-    repository_reader: Option<crate::ui::repository_status_store::RemoteReaderLease>,
-}
-
-impl RemoteWorkspaceRuntime {
-    fn new(
-        generation: u64,
-        control_connection: ConnectedControlConnection,
-        lifecycle: ControlConnectionObserver,
-        alias_pin: Option<RemoteWorkspaceAliasPin>,
-    ) -> Self {
-        Self {
-            generation,
-            control_connection: Some(control_connection),
-            lifecycle: Some(lifecycle),
-            alias_pin,
-            repository_reader: None,
-        }
-    }
-
-    /// Drops the connection and withdraws its reader, so Repository Status reads the machine
-    /// through another Workspace's live connection.
-    fn drop_connection(&mut self) {
-        self.repository_reader.take();
-        self.control_connection.take();
-    }
-
-    fn close(&mut self) {
-        self.lifecycle.take();
-        self.drop_connection();
-        self.alias_pin.take();
-    }
-}
-
-struct RemoteWorkspaceReconnectAttempt {
-    workspace_id: WorkspaceId,
-    generation: u64,
-    cancelled: Arc<AtomicBool>,
-    progress: Option<ProgressDialogHandle>,
-    progress_generation: u64,
-    _work: Task<()>,
-    _progress_updates: Task<()>,
-}
-
-#[derive(Clone, Copy)]
-struct RemoteWorkspaceReconnectProgressIdentity {
-    workspace_id: WorkspaceId,
-    reconnect_generation: u64,
-    presentation_generation: u64,
-}
-
-struct PreparedRemoteWorkspaceReconnect {
-    control_connection: ConnectedControlConnection,
-    lifecycle: ControlConnectionObserver,
-    restart: PreparedTabManagerRemoteRestart,
-    remote_user: crate::domain::RemoteUser,
-}
-
 struct TabManagerCreation {
     workspace_id: WorkspaceId,
     sidebar_visible: bool,
@@ -188,38 +108,10 @@ pub(crate) struct WorkspaceManagerAdapters {
     pub(crate) lifecycle: PaneLifecycleDependencies,
     pub(crate) directory_selection: Rc<dyn SystemDirectorySelection>,
     pub(crate) window_drag: Rc<dyn OperatingSystemWindowDragPlatform>,
-    pub(crate) remote_workspace: Arc<dyn RemoteWorkspaceFlowBackendFactory>,
     /// The account-local server this window launches and presents. It owns local Workspaces.
     pub(crate) local_server: launch::LocalServerAdapters,
-}
-
-struct PendingRemoteActivation {
-    flow: Entity<RemoteWorkspaceFlow>,
-    handle: RemoteWorkspaceFlowCompletionHandle,
-    completion: RemoteWorkspaceFlowCompletion,
-    terminal_factory: WorkspaceTerminalSessionFactory,
-}
-
-#[derive(Debug, Eq, PartialEq)]
-enum RemoteWorkspaceReconnectFailure {
-    Cancelled,
-    ConnectionFailed {
-        detail: Option<TransientSshErrorOutput>,
-    },
-    DirectoryUnavailable,
-    IdentityChanged,
-}
-
-impl Drop for RemoteWorkspaceReconnectAttempt {
-    fn drop(&mut self) {
-        self.cancelled.store(true, Ordering::Release);
-    }
-}
-
-impl Drop for RemoteWorkspaceRuntime {
-    fn drop(&mut self) {
-        self.close();
-    }
+    /// Each presented server's directory channel, which answers questions about its own paths.
+    pub(crate) server_directories: super::directory_picker::ServerDirectories,
 }
 
 /// Owns directory selection, its target, and the field version its draft began at.
@@ -298,29 +190,49 @@ enum SwitcherChoice {
     Detached(DetachedWorkspace),
 }
 
+/// One question to the owning server about the directory a person chose in Open Remote
+/// Directory: which attached Workspace there, if any, is already pinned to it.
+struct RemoteDirectoryMatch {
+    directory: PathBuf,
+    /// The Workspaces asked about, with their pins, in sidebar order.
+    pins: Vec<(WorkspaceId, PathBuf)>,
+    server: crate::local_server::LocalServer,
+    /// The position in `pins` the server matched, once it answers.
+    answer: Option<Result<Option<usize>, super::directory_picker::DirectorySourceError>>,
+    _task: Task<()>,
+}
+
+impl RemoteDirectoryMatch {
+    fn asks(
+        &self,
+        directory: &PathBuf,
+        pins: &[(WorkspaceId, PathBuf)],
+        server: &crate::local_server::LocalServer,
+    ) -> bool {
+        self.directory == *directory && self.pins == pins && self.server.same_handle(server)
+    }
+}
+
 pub(crate) struct WorkspaceManager {
     window_appearance: super::appearance_runtime::WindowAppearanceOwner,
     window_traffic_lights: super::appearance_runtime::WindowTrafficLightOwner,
     transient: WorkspaceTransientUi,
     workspace_switcher: ComboBoxHandle<SwitcherChoice, WorkspaceCreation>,
     remote_workspace_name: Option<String>,
+    /// The owning server's answer to whether a Workspace there already uses the directory the
+    /// person chose to open.
+    remote_directory_match: Option<RemoteDirectoryMatch>,
+    server_directories: super::directory_picker::ServerDirectories,
     sidebar: Entity<WorkspaceSidebar>,
     local_filesystem: LocalFilesystemAuthority,
     workspaces: WorkspaceCollection<Entity<TabManager>>,
-    session_factory: Rc<dyn TerminalSessionFactory>,
     pane_construction: PaneConstruction,
     local_home_directory_path: PathBuf,
-    local_home_identity: LocalDirectoryIdentity,
     directory_selection: Rc<dyn SystemDirectorySelection>,
-    remote_workspace_backend: Option<Arc<dyn RemoteWorkspaceFlowBackend>>,
-    remote_workspace_unavailable_reason: Option<String>,
     remote_workspace_flow: Option<Entity<RemoteWorkspaceFlow>>,
     pin_picker: Option<Entity<DirectoryPicker>>,
     pin_operation: u64,
-    remote_workspace_runtimes: BTreeMap<WorkspaceId, RemoteWorkspaceRuntime>,
-    remote_workspace_activation_task: Option<Task<()>>,
     remote_workspace_focus_restore_pending: bool,
-    remote_workspace_reconnect: Option<RemoteWorkspaceReconnectAttempt>,
     operating_system_window_drag_platform: Rc<dyn OperatingSystemWindowDragPlatform>,
     window_drag_status: WindowDragRegionStatus,
     update_control: Entity<super::updates::UpdateControl>,
@@ -347,7 +259,6 @@ pub(crate) struct WorkspaceManager {
 
 impl WorkspaceManager {
     pub(crate) fn new_with_adapters(
-        session_factory: Rc<dyn TerminalSessionFactory>,
         local_home_directory_path: PathBuf,
         adapters: WorkspaceManagerAdapters,
         default_sidebar: SidebarState,
@@ -382,8 +293,8 @@ impl WorkspaceManager {
             lifecycle: lifecycle_dependencies,
             directory_selection,
             window_drag: operating_system_window_drag_platform,
-            remote_workspace: remote_workspace_backend_factory,
             local_server,
+            server_directories,
         } = adapters;
         let pane_construction = PaneConstruction::new(
             key_input_adapter_factory,
@@ -391,8 +302,6 @@ impl WorkspaceManager {
             native_service_adapters,
             lifecycle_dependencies,
         );
-        let local_home_identity =
-            local_home_identity(local_home_directory_path.clone(), &local_filesystem);
         // The server owns this window's local Workspaces, which arrive once it is ready.
         let workspaces = WorkspaceCollection::empty();
         cx.on_app_quit(|manager, cx| {
@@ -419,21 +328,6 @@ impl WorkspaceManager {
             },
         )
         .detach();
-        let mut remote_unavailable_reason = remote_workspace_backend_factory.unavailable_reason();
-        let remote_workspace_backend = if remote_unavailable_reason.is_some() {
-            None
-        } else {
-            match remote_workspace_backend_factory.create(window, cx) {
-                Ok(backend) => Some(backend),
-                Err(error) => {
-                    eprintln!("failed to initialize Remote Workspace backend: {error:?}");
-                    remote_unavailable_reason = Some(
-                        "Remote Workspace setup failed; restart SpaceTerm to retry".to_owned(),
-                    );
-                    None
-                }
-            }
-        };
         cx.observe_window_activation(window, |manager, window, cx| {
             manager.restore_remote_workspace_focus_after_activation(window, cx);
             if window.is_window_active()
@@ -456,23 +350,18 @@ impl WorkspaceManager {
             },
             workspace_switcher: ComboBoxHandle::default(),
             remote_workspace_name: None,
+            remote_directory_match: None,
+            server_directories,
             sidebar,
             workspaces,
             local_filesystem,
-            session_factory,
             pane_construction,
             local_home_directory_path,
-            local_home_identity,
             directory_selection,
-            remote_workspace_backend,
-            remote_workspace_unavailable_reason: remote_unavailable_reason,
             remote_workspace_flow: None,
             pin_picker: None,
             pin_operation: 0,
-            remote_workspace_runtimes: BTreeMap::new(),
-            remote_workspace_activation_task: None,
             remote_workspace_focus_restore_pending: false,
-            remote_workspace_reconnect: None,
             operating_system_window_drag_platform,
             window_drag_status: WindowDragRegionStatus::new(),
             update_control: cx.new(super::updates::UpdateControl::new),
@@ -495,9 +384,8 @@ impl WorkspaceManager {
         manager
     }
 
-    fn create_tab_manager_with_prepared_launch(
+    fn create_tab_manager(
         session_factory: WorkspaceTerminalSessionFactory,
-        prepared_launch: PreparedWorkspaceTerminalLaunch,
         creation: TabManagerCreation,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -510,9 +398,8 @@ impl WorkspaceManager {
             pane_construction,
         } = creation;
         let manager = cx.new(|cx| {
-            let mut manager = TabManager::new_with_prepared_initial_launch(
+            let mut manager = TabManager::with_pane_construction(
                 session_factory,
-                prepared_launch,
                 operating_system_window_drag_platform,
                 pane_construction,
                 window,
@@ -577,51 +464,7 @@ impl WorkspaceManager {
             },
         )
         .detach();
-        cx.subscribe_in(
-            &manager,
-            window,
-            move |workspace_manager, _, event: &RemoteChildLaunchUnavailable, window, cx| {
-                workspace_manager.handle_remote_child_launch_unavailable(
-                    workspace_id,
-                    *event,
-                    window,
-                    cx,
-                );
-            },
-        )
-        .detach();
         manager
-    }
-
-    fn handle_remote_child_launch_unavailable(
-        &mut self,
-        workspace_id: WorkspaceId,
-        event: RemoteChildLaunchUnavailable,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self
-            .workspaces
-            .workspace(workspace_id)
-            .is_none_or(|workspace| workspace.remote_workspace_key().is_none())
-        {
-            return;
-        }
-        let failure = match event {
-            RemoteChildLaunchUnavailable::ConnectionUnavailable => {
-                RemoteWorkspaceReconnectFailure::ConnectionFailed { detail: None }
-            }
-            RemoteChildLaunchUnavailable::DirectoryUnavailable => {
-                RemoteWorkspaceReconnectFailure::DirectoryUnavailable
-            }
-            RemoteChildLaunchUnavailable::IdentityChanged => {
-                RemoteWorkspaceReconnectFailure::IdentityChanged
-            }
-            RemoteChildLaunchUnavailable::Cancelled | RemoteChildLaunchUnavailable::Stale => {
-                return;
-            }
-        };
-        self.present_remote_workspace_reconnect_error(failure, window, cx);
     }
 
     fn report_workspace_error(operation: &str, error: WorkspaceError) {
@@ -773,9 +616,9 @@ impl WorkspaceManager {
             .iter()
             .enumerate()
             .map(|(index, workspace)| {
-                let icon = match workspace.location() {
-                    WorkspaceLocation::Local => IconName::Terminal,
-                    WorkspaceLocation::Remote { .. } => IconName::Globe,
+                let icon = match self.machine(workspace.id()) {
+                    Some(machine_groups::Machine::Local) | None => IconName::Terminal,
+                    Some(_) => IconName::Globe,
                 };
                 let item = ComboBoxItem::new(
                     SwitcherChoice::Presented(workspace.id()),
@@ -939,21 +782,6 @@ impl WorkspaceManager {
     }
 
     #[cfg(test)]
-    fn set_sidebar_layout(
-        &mut self,
-        visible: bool,
-        width: Pixels,
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.sidebar.update(cx, |sidebar, cx| {
-            sidebar.set_layout(visible, width, window, cx);
-        });
-        self.synchronize_tab_manager_layouts(window, cx);
-        cx.notify();
-    }
-
-    #[cfg(test)]
     fn resize_sidebar(&mut self, width: Pixels, window: &mut Window, cx: &mut Context<Self>) {
         self.sidebar
             .update(cx, |sidebar, cx| sidebar.resize(width, window, cx));
@@ -1085,11 +913,6 @@ impl WorkspaceManager {
         }
         self.pin_operation = self.pin_operation.wrapping_add(1);
         self.transient.end_pin();
-        if let Some(workspace) = self.workspaces.workspace(workspace_id) {
-            workspace
-                .payload()
-                .update(cx, |manager, cx| manager.set_pinned_directory(pin, cx));
-        }
         self.synchronize_tab_manager_layouts(window, cx);
 
         self.sync_terminal_focus_blocker(window, cx);
@@ -1115,53 +938,43 @@ impl WorkspaceManager {
         if self.active_directory_recovery(cx).is_some() {
             return;
         }
-        let (location, placeholder) = match &target {
-            PinTarget::Workspace(workspace_id) => {
-                let Some(location) = self
-                    .workspaces
-                    .workspace(*workspace_id)
-                    .map(|workspace| workspace.location().clone())
-                else {
-                    return;
-                };
-                (location, "Pin to Directory")
-            }
-            PinTarget::NewLocalWorkspace { .. } => (
-                WorkspaceLocation::Local,
-                crate::keybindings::Command::OpenLocalDirectory.label(),
-            ),
-        };
-        let (source, remote_generation): (Rc<dyn DirectorySource>, Option<u64>) = match location {
-            WorkspaceLocation::Local => (
-                Rc::new(LocalDirectorySource::new(
-                    self.local_filesystem.clone(),
-                    self.local_home_directory_path.clone(),
-                    cx.background_executor().clone(),
-                )),
-                None,
-            ),
-            WorkspaceLocation::Remote { key, .. } => {
-                let PinTarget::Workspace(workspace_id) = target else {
-                    unreachable!("only an existing Workspace can be remote");
-                };
-                let Some(runtime) = self.remote_workspace_runtimes.get(&workspace_id) else {
-                    return;
-                };
-                let Some(control_connection) = runtime.control_connection.as_ref() else {
-                    Self::show_pin_error(window, cx);
-                    return;
-                };
-                let host = key.destination().host().to_owned();
-                (
-                    Rc::new(RemoteDirectorySource::new(
-                        control_connection.provider(),
-                        &host,
-                    )),
-                    Some(runtime.generation),
-                )
+        let placeholder = match &target {
+            PinTarget::Workspace(_) => "Pin to Directory",
+            PinTarget::NewLocalWorkspace { .. } => {
+                crate::keybindings::Command::OpenLocalDirectory.label()
             }
         };
-        let system_selection = remote_generation.is_none().then(|| {
+        // Another computer's server Workspace browses that server's own directories. Nothing on
+        // this computer reads or validates them.
+        let server = match &target {
+            PinTarget::Workspace(workspace_id)
+                if self.is_shared_workspace(*workspace_id)
+                    && !self.is_local_server_workspace(*workspace_id) =>
+            {
+                let Some(source) = self.owning_directory_source(*workspace_id, cx) else {
+                    Self::show_shared_refusal(
+                        "change the pinned directory",
+                        super::shared_workspaces::SharedRefusalReason::Offline,
+                        window,
+                        cx,
+                    );
+                    self.transient.end_pin();
+                    return;
+                };
+                Some(source)
+            }
+            _ => None,
+        };
+        let remote = server.is_some();
+        let source: Rc<dyn DirectorySource> = match server {
+            Some(source) => Rc::new(source),
+            None => Rc::new(LocalDirectorySource::new(
+                self.local_filesystem.clone(),
+                self.local_home_directory_path.clone(),
+                cx.background_executor().clone(),
+            )),
+        };
+        let system_selection = (!remote).then(|| {
             gpui::SharedString::from(
                 crate::desktop_profile::DesktopPresentation::get(cx)
                     .wording()
@@ -1184,42 +997,26 @@ impl WorkspaceManager {
                     return;
                 }
                 match event {
-                    DirectoryPickerEvent::Confirmed(pinned) => {
-                        let DirectorySelection::Pin(pinned) = pinned else {
-                            picker.update(cx, |picker, cx| picker.activation_failed(window, cx));
-                            return;
-                        };
-                        let current = manager.pin_operation == operation
-                            && remote_generation.is_none_or(|generation| {
-                                let PinTarget::Workspace(workspace_id) = &target else {
-                                    return false;
-                                };
-                                manager
-                                    .remote_workspace_runtimes
-                                    .get(workspace_id)
-                                    .is_some_and(|runtime| {
-                                        runtime.generation == generation
-                                            && runtime.control_connection.is_some()
-                                    })
-                            });
-                        let application = match (current, pinned.clone(), target.clone()) {
-                            (false, _, _)
-                            | (
-                                _,
-                                PinnedDirectory::Remote { .. },
-                                PinTarget::NewLocalWorkspace { .. },
-                            ) => PinApplication::Failed,
-                            (true, PinnedDirectory::Local(directory), target) => {
+                    DirectoryPickerEvent::Confirmed(selection) => {
+                        let current = manager.pin_operation == operation;
+                        // A local selection pins only a local target, and a server path pins
+                        // only that server's Workspace.
+                        let application = match (current, selection.clone(), target.clone()) {
+                            (
+                                true,
+                                DirectorySelection::Pin(PinnedDirectory::Local(directory)),
+                                target,
+                            ) if !remote => {
                                 manager.apply_local_pin_target(target, directory, window, cx)
                             }
-                            (true, remote, PinTarget::Workspace(workspace_id)) => {
-                                PinApplication::from_applied(manager.apply_directory_pin(
-                                    workspace_id,
-                                    Some(remote),
-                                    window,
-                                    cx,
-                                ))
-                            }
+                            (
+                                true,
+                                DirectorySelection::Server(directory),
+                                PinTarget::Workspace(workspace_id),
+                            ) if remote => PinApplication::from_applied(
+                                manager.pin_server_directory(workspace_id, directory, window, cx),
+                            ),
+                            _ => PinApplication::Failed,
                         };
                         // A reported failure already closed the picker.
                         if application == PinApplication::Reported {
@@ -1278,6 +1075,270 @@ impl WorkspaceManager {
         self.choose_directory(PinTarget::Workspace(workspace_id), window, cx);
     }
 
+    /// Why this window offers no Remote Workspace, or `None` when SSH can reach servers.
+    fn remote_workspace_unavailable_reason(&self, cx: &App) -> Option<String> {
+        crate::ui::ssh_servers::installed(cx)
+            .is_none()
+            .then(|| "SSH isn\u{2019}t available on this computer".to_owned())
+    }
+
+    /// Opens New Remote Workspace or Open Remote Directory: choose an SSH host, connect to the
+    /// SpaceTerm Server for that account, and create a Workspace on it named `name` unless blank.
+    fn present_remote_workspace_flow(
+        &mut self,
+        name: String,
+        start: RemoteWorkspaceStart,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.remote_workspace_flow.is_some() {
+            return;
+        }
+        let (Some(connections), Some(hosts)) = (
+            crate::ui::ssh_servers::installed(cx),
+            crate::ui::ssh_servers::host_source(cx),
+        ) else {
+            self.sync_terminal_focus_blocker(window, cx);
+            return;
+        };
+        let flow = cx.new(|cx| RemoteWorkspaceFlow::new(connections, hosts, window, cx));
+        cx.subscribe_in(
+            &flow,
+            window,
+            |manager, flow, event: &RemoteWorkspaceFlowEvent, window, cx| {
+                manager.handle_remote_workspace_flow_event(flow, event, window, cx);
+            },
+        )
+        .detach();
+        if !flow.update(cx, |flow, cx| flow.open(start, window, cx)) {
+            return;
+        }
+        self.remote_workspace_flow = Some(flow);
+        self.remote_workspace_name = Some(name);
+        self.sync_terminal_focus_blocker(window, cx);
+        cx.notify();
+    }
+
+    fn handle_remote_workspace_flow_event(
+        &mut self,
+        source: &Entity<RemoteWorkspaceFlow>,
+        event: &RemoteWorkspaceFlowEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.remote_workspace_flow.as_ref() != Some(source) {
+            return;
+        }
+        match event {
+            RemoteWorkspaceFlowEvent::StateChanged => {}
+            RemoteWorkspaceFlowEvent::Cancelled => {
+                self.remote_workspace_focus_restore_pending = !window.is_window_active();
+                self.remote_workspace_flow = None;
+                self.remote_workspace_name = None;
+                self.remote_directory_match = None;
+            }
+            // The flow keeps showing that the Workspace is opening until its server takes it.
+            RemoteWorkspaceFlowEvent::Ready => {
+                // The flow saw the server presented; this window may not have bound it yet.
+                // Binding it also tries the request once the server's edits are ready.
+                self.sync_ssh_servers(window, cx);
+                self.open_pending_remote_workspace(window, cx);
+            }
+        }
+        self.sync_terminal_focus_blocker(window, cx);
+        cx.notify();
+    }
+
+    /// Asks the SSH server the Remote Workspace flow connected to for its Workspace, once that
+    /// exact connection's edits are ready, or activates the Workspace already pinned to the chosen
+    /// directory there. Until then the request waits in the flow, which shows that it is
+    /// opening; a server still finishing its first reading never drops it.
+    fn open_pending_remote_workspace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        use super::shared_workspaces::{SharedRefusalReason, SharedSubmission};
+
+        let Some(flow) = self.remote_workspace_flow.clone() else {
+            return;
+        };
+        let Some(RemoteWorkspaceChoice {
+            destination,
+            directory,
+            server,
+        }) = flow.read(cx).opening().cloned()
+        else {
+            return;
+        };
+        let destination_name = destination.as_str().to_owned();
+        // The flow reports a replaced or lost connection itself; nothing reaches another one.
+        let current = crate::ui::ssh_servers::installed(cx)
+            .and_then(|connections| connections.server(&destination))
+            .is_some_and(|presented| presented.same_handle(&server));
+        let Some(key) = self
+            .shared
+            .key_of(&ServerOrigin::Ssh(destination))
+            .filter(|_| current)
+        else {
+            return;
+        };
+        if !self
+            .shared
+            .get(key)
+            .is_some_and(|shared| shared.accepts_edits())
+        {
+            return;
+        }
+        // A server path compares only with that server's own pins, and only that server can
+        // tell whether two of its paths name one directory, such as through a symbolic link.
+        let pins: Vec<(WorkspaceId, PathBuf)> = self
+            .shared
+            .get(key)
+            .map(|shared| {
+                self.workspaces
+                    .iter()
+                    .filter_map(|entry| {
+                        let pin = shared
+                            .server_workspace(entry.id())?
+                            .pinned_directory
+                            .clone()?;
+                        Some((entry.id(), pin))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let existing = match directory.as_ref() {
+            Some(directory) if !pins.is_empty() => {
+                match self.match_remote_directory(directory, &pins, &server, window, cx) {
+                    None => return,
+                    Some(Ok(matched)) => matched.or_else(|| {
+                        pins.iter()
+                            .find(|(_, pin)| pin == directory)
+                            .map(|(workspace_id, _)| *workspace_id)
+                    }),
+                    Some(Err(())) => {
+                        self.remote_workspace_flow = None;
+                        self.remote_workspace_name = None;
+                        self.remote_directory_match = None;
+                        flow.update(cx, |flow, cx| flow.opened(window, cx));
+                        Self::show_shared_unavailable(
+                            &format!(
+                                "SpaceTerm couldn\u{2019}t check whether a Workspace on \
+                                 \u{201C}{}\u{201D} already uses this directory, so it didn\u{2019}t \
+                                 open one. Try again.",
+                                destination_name
+                            ),
+                            window,
+                            cx,
+                        );
+                        self.sync_terminal_focus_blocker(window, cx);
+                        cx.notify();
+                        return;
+                    }
+                }
+            }
+            _ => None,
+        };
+        let name = self.remote_workspace_name.clone().unwrap_or_default();
+        let refusal = match existing {
+            Some(workspace_id) => {
+                if self.activate_workspace(workspace_id, window, cx) {
+                    self.focus(window, cx);
+                    self.scroll_active_workspace_into_view(cx);
+                }
+                None
+            }
+            None => match self.shared.get_mut(key) {
+                Some(shared) => match shared.create_workspace(name, directory) {
+                    SharedSubmission::Submitted => None,
+                    // Readiness was just checked, so only a publication arriving between the
+                    // check and the submission refuses it this way; the next reading retries.
+                    SharedSubmission::Refused(
+                        SharedRefusalReason::Offline | SharedRefusalReason::Pending,
+                    ) => return,
+                    SharedSubmission::Refused(reason) => Some(reason),
+                },
+                None => return,
+            },
+        };
+        self.remote_workspace_flow = None;
+        self.remote_workspace_name = None;
+        self.remote_directory_match = None;
+        flow.update(cx, |flow, cx| flow.opened(window, cx));
+        if let Some(reason) = refusal {
+            Self::show_shared_refusal("create a Workspace", reason, window, cx);
+        }
+        self.sync_terminal_focus_blocker(window, cx);
+        cx.notify();
+    }
+
+    /// The owning server's answer to which of `pins` names `directory`, or `None` while it is
+    /// asked. A new question replaces an answer to a different one; the question is always the
+    /// current choice and the current pins, so a changed list is asked again.
+    fn match_remote_directory(
+        &mut self,
+        directory: &PathBuf,
+        pins: &[(WorkspaceId, PathBuf)],
+        server: &crate::local_server::LocalServer,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Result<Option<WorkspaceId>, ()>> {
+        if let Some(pending) = self
+            .remote_directory_match
+            .as_ref()
+            .filter(|pending| pending.asks(directory, pins, server))
+        {
+            return pending.answer.as_ref().map(|answer| {
+                answer
+                    .as_ref()
+                    .map(|index| index.and_then(|index| pins.get(index)).map(|(id, _)| *id))
+                    .map_err(|_| ())
+            });
+        }
+        // The question goes to this exact presented server and stops once it's replaced.
+        let presented = server.clone();
+        let destination = self.remote_workspace_flow.as_ref().and_then(|flow| {
+            flow.read(cx)
+                .opening()
+                .map(|choice| choice.destination.clone())
+        });
+        let connections = crate::ui::ssh_servers::installed(cx);
+        let available: Rc<dyn Fn() -> bool> = Rc::new(move || {
+            destination
+                .as_ref()
+                .zip(connections.as_ref())
+                .and_then(|(destination, connections)| connections.server(destination))
+                .is_some_and(|current| current.same_handle(&presented))
+        });
+        let source = ServerDirectorySource::browsing_through(
+            (self.server_directories)(server),
+            None,
+            available,
+        );
+        let question = source.match_directory(
+            directory.clone(),
+            pins.iter().map(|(_, pin)| pin.clone()).collect(),
+        );
+        let asked = (directory.clone(), pins.to_vec(), server.clone());
+        let task = cx.spawn_in(window, async move |manager, cx| {
+            let answer = question.await;
+            drop(source);
+            let _ = manager.update_in(cx, |manager, window, cx| {
+                if let Some(pending) = manager.remote_directory_match.as_mut()
+                    && pending.asks(&asked.0, &asked.1, &asked.2)
+                {
+                    pending.answer = Some(answer);
+                    manager.open_pending_remote_workspace(window, cx);
+                }
+            });
+        });
+        self.remote_directory_match = Some(RemoteDirectoryMatch {
+            directory: directory.clone(),
+            pins: pins.to_vec(),
+            server: server.clone(),
+            answer: None,
+            _task: task,
+        });
+        None
+    }
+
     /// Opens Open Local Directory, which creates a Local Workspace named `name` unless blank.
     fn open_local_directory(&mut self, name: String, window: &mut Window, cx: &mut Context<Self>) {
         self.choose_directory(PinTarget::NewLocalWorkspace { name }, window, cx);
@@ -1301,16 +1362,6 @@ impl WorkspaceManager {
         {
             return;
         }
-        // The Directory Picker browses this computer, whose folders another computer's server
-        // Workspace can never take, so it doesn't open for one.
-        if let PinTarget::Workspace(workspace_id) = &target
-            && self.is_shared_workspace(*workspace_id)
-            && !self.is_local_server_workspace(*workspace_id)
-        {
-            Self::show_shared_unavailable(REMOTE_PIN_UNAVAILABLE, window, cx);
-            return;
-        }
-
         // A shared Workspace's draft is fenced to the pin version the chooser opened on.
         let version = match &target {
             PinTarget::Workspace(workspace_id) => self
@@ -1387,336 +1438,6 @@ impl WorkspaceManager {
         cx.notify();
     }
 
-    fn present_remote_workspace_flow(
-        &mut self,
-        name: String,
-        start: RemoteWorkspaceStart,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(backend) = self.remote_workspace_backend.as_ref().map(Arc::clone) else {
-            self.sync_terminal_focus_blocker(window, cx);
-            return;
-        };
-        if self.remote_workspace_flow.is_some() {
-            return;
-        }
-        self.remote_workspace_name = Some(name);
-        let flow = self.remote_workspace_flow.get_or_insert_with(|| {
-            let flow = cx.new(|cx| RemoteWorkspaceFlow::new(backend, window, cx));
-            cx.subscribe_in(
-                &flow,
-                window,
-                |manager, flow, event: &RemoteWorkspaceFlowEvent, window, cx| {
-                    manager.handle_remote_workspace_flow_event(flow, event, window, cx);
-                },
-            )
-            .detach();
-            flow
-        });
-        if !flow.update(cx, |flow, cx| flow.open(start, window, cx)) {
-            self.remote_workspace_flow = None;
-            self.remote_workspace_name = None;
-        }
-        self.sync_terminal_focus_blocker(window, cx);
-        cx.notify();
-    }
-
-    fn handle_remote_workspace_flow_event(
-        &mut self,
-        source: &Entity<RemoteWorkspaceFlow>,
-        event: &RemoteWorkspaceFlowEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self
-            .remote_workspace_flow
-            .as_ref()
-            .is_none_or(|current| current != source)
-        {
-            return;
-        }
-        match event {
-            RemoteWorkspaceFlowEvent::StateChanged => {
-                self.sync_terminal_focus_blocker(window, cx);
-                cx.notify();
-            }
-            RemoteWorkspaceFlowEvent::Cancelled => {
-                self.remote_workspace_activation_task.take();
-                self.remote_workspace_focus_restore_pending = !window.is_window_active();
-                self.remote_workspace_flow = None;
-                self.remote_workspace_name = None;
-                self.sync_terminal_focus_blocker(window, cx);
-                cx.notify();
-            }
-            RemoteWorkspaceFlowEvent::Completed(handle) => {
-                self.activate_remote_workspace(source, handle, window, cx);
-            }
-        }
-    }
-
-    fn activate_remote_workspace(
-        &mut self,
-        flow: &Entity<RemoteWorkspaceFlow>,
-        handle: &RemoteWorkspaceFlowCompletionHandle,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(completion) = handle.take() else {
-            return;
-        };
-        if completion.pinned_directory().is_some()
-            && let Some(workspace_id) = self.workspaces.remote_workspace_pinned_to(
-                completion.destination(),
-                completion.physical_directory(),
-            )
-        {
-            // The existing Workspace already owns a connection to this directory.
-            drop(completion);
-            self.acknowledge_remote_workspace_activation(flow, handle, window, cx);
-            self.activate_workspace(workspace_id, window, cx);
-            return;
-        }
-        let mut terminal_factory = WorkspaceTerminalSessionFactory::new_remote(
-            Rc::clone(&self.session_factory),
-            ValidatedLocalDirectory::new(
-                self.local_home_directory_path.clone(),
-                self.local_home_identity.clone(),
-            ),
-            RemoteTerminalMetadataContext::new(
-                completion.destination().clone(),
-                completion.initial_directory().clone(),
-            )
-            .with_machine(remote_machine(completion.account())),
-            completion.physical_directory().clone(),
-            // A Remote Pane falls back to its login shell, exactly as a Local Pane does. The
-            // The sidebar's machine label identifies the destination independently of its name.
-            completion.account().login_shell().name().to_owned(),
-            completion.terminal_session_channels(),
-        );
-        terminal_factory.set_pinned_directory(completion.pinned_directory());
-        let Some(revalidation) = terminal_factory.revalidate_remote_child_launch() else {
-            unreachable!("a Remote Workspace Terminal factory must require revalidation")
-        };
-        let activation = PendingRemoteActivation {
-            flow: flow.clone(),
-            handle: handle.clone(),
-            completion,
-            terminal_factory,
-        };
-        self.remote_workspace_activation_task =
-            Some(cx.spawn_in(window, async move |manager, cx| {
-                let revalidation = revalidation.await;
-                let _ = manager.update_in(cx, |manager, window, cx| {
-                    manager.finish_remote_workspace_activation(
-                        activation,
-                        revalidation,
-                        window,
-                        cx,
-                    );
-                });
-            }));
-        self.sync_terminal_focus_blocker(window, cx);
-        cx.notify();
-    }
-
-    fn finish_remote_workspace_activation(
-        &mut self,
-        activation: PendingRemoteActivation,
-        revalidation: Result<(), crate::terminal::TerminalSessionChannelRevalidationError>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let PendingRemoteActivation {
-            flow,
-            handle,
-            completion,
-            terminal_factory,
-        } = activation;
-        let is_current = self.remote_workspace_flow.as_ref() == Some(&flow)
-            && flow.read(cx).owns_activation(&handle);
-        if !is_current {
-            drop(completion);
-            return;
-        }
-        if let Err(error) = revalidation {
-            eprintln!("cannot create Remote Workspace because {error}");
-            self.return_remote_workspace_activation(&flow, &handle, completion, window, cx);
-            return;
-        }
-        let prepared_launch = match terminal_factory.prepare_child_launch() {
-            Ok(prepared_launch) => prepared_launch,
-            Err(error) => {
-                eprintln!("cannot create Remote Workspace because {error}");
-                self.return_remote_workspace_activation(&flow, &handle, completion, window, cx);
-                return;
-            }
-        };
-        match self.try_create_remote_workspace(
-            completion,
-            terminal_factory,
-            prepared_launch,
-            window,
-            cx,
-        ) {
-            Ok(()) => self.acknowledge_remote_workspace_activation(&flow, &handle, window, cx),
-            Err(completion) => {
-                self.return_remote_workspace_activation(&flow, &handle, *completion, window, cx)
-            }
-        }
-    }
-
-    fn try_create_remote_workspace(
-        &mut self,
-        completion: RemoteWorkspaceFlowCompletion,
-        terminal_factory: WorkspaceTerminalSessionFactory,
-        prepared_launch: PreparedWorkspaceTerminalLaunch,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Result<(), Box<RemoteWorkspaceFlowCompletion>> {
-        let alias_pin = match completion.acquire_workspace_alias_pin() {
-            Ok(alias_pin) => alias_pin,
-            Err(_) => return Err(Box::new(completion)),
-        };
-        let key = RemoteWorkspaceTarget::new(
-            completion.destination().clone(),
-            completion.physical_directory().clone(),
-        );
-        let previous_workspace_id = self.workspaces.active_workspace_id();
-        let previous_manager = self.active_tab_manager();
-        let sidebar_visible = self.sidebar.read(cx).layout().visible;
-        let sidebar_width = self.sidebar.read(cx).layout().width;
-        let window_drag_platform = Rc::clone(&self.operating_system_window_drag_platform);
-        let pane_construction = self.pane_construction.clone();
-        let result = self.workspaces.create_remote_workspace(
-            key,
-            completion.account().remote_user().clone(),
-            completion.initial_directory().clone(),
-            completion.remote_home_identity().clone(),
-            RemoteConnectionState::connected(1),
-            |workspace_id| {
-                Self::create_tab_manager_with_prepared_launch(
-                    terminal_factory,
-                    prepared_launch,
-                    TabManagerCreation {
-                        workspace_id,
-                        sidebar_visible,
-                        sidebar_width,
-                        operating_system_window_drag_platform: window_drag_platform,
-                        pane_construction,
-                    },
-                    window,
-                    cx,
-                )
-            },
-        );
-        let workspace_id = match result {
-            Ok(workspace_id) => workspace_id,
-            Err(_) => return Err(Box::new(completion)),
-        };
-        if let Some(pinned) = completion.pinned_directory()
-            && let Err(error) = self
-                .workspaces
-                .set_pinned_directory(workspace_id, Some(pinned))
-        {
-            Self::report_workspace_error("pin", error);
-        }
-        if let Some(name) = self.remote_workspace_name.take()
-            && let Err(error) = self.workspaces.rename_workspace(workspace_id, name)
-        {
-            Self::report_workspace_error("rename", error);
-        }
-        self.arrange_by_machine();
-        let (control_connection, _, _, _, _, _, lifecycle) = completion.into_parts();
-        let replaced = self.remote_workspace_runtimes.insert(
-            workspace_id,
-            RemoteWorkspaceRuntime::new(1, control_connection, lifecycle, alias_pin),
-        );
-        debug_assert!(
-            replaced.is_none(),
-            "a new Remote Workspace owns one runtime"
-        );
-        self.lend_repository_reader(workspace_id, cx);
-        self.activate_remote_tab_manager(
-            previous_workspace_id,
-            previous_manager,
-            workspace_id,
-            window,
-            cx,
-        );
-        self.observe_remote_workspace_runtime(workspace_id, 1, cx);
-        self.debug_assert_remote_runtime_invariants();
-        Ok(())
-    }
-
-    fn return_remote_workspace_activation(
-        &mut self,
-        flow: &Entity<RemoteWorkspaceFlow>,
-        handle: &RemoteWorkspaceFlowCompletionHandle,
-        completion: RemoteWorkspaceFlowCompletion,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let _ = flow.update(cx, |flow, cx| {
-            flow.activation_failed(handle, completion, window, cx)
-        });
-        self.sync_terminal_focus_blocker(window, cx);
-        cx.notify();
-    }
-
-    fn acknowledge_remote_workspace_activation(
-        &mut self,
-        flow: &Entity<RemoteWorkspaceFlow>,
-        handle: &RemoteWorkspaceFlowCompletionHandle,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let acknowledged =
-            flow.update(cx, |flow, cx| flow.activation_succeeded(handle, window, cx));
-        debug_assert!(
-            acknowledged,
-            "the active Remote Workspace completion must acknowledge"
-        );
-        if !acknowledged {
-            return;
-        }
-        self.remote_workspace_flow = None;
-        self.remote_workspace_name = None;
-        self.sync_terminal_focus_blocker(window, cx);
-        self.scroll_active_workspace_into_view(cx);
-
-        cx.notify();
-    }
-
-    fn activate_remote_tab_manager(
-        &self,
-        previous_workspace_id: Option<WorkspaceId>,
-        previous_manager: Option<Entity<TabManager>>,
-        workspace_id: WorkspaceId,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(next_manager) = self
-            .workspaces
-            .workspace(workspace_id)
-            .map(|workspace| workspace.payload().clone())
-        else {
-            unreachable!("an activated Remote Workspace must remain in its collection")
-        };
-        self.synchronize_tab_manager_layout(workspace_id, window, cx);
-        if previous_workspace_id != Some(workspace_id)
-            && let Some(previous_manager) = &previous_manager
-        {
-            previous_manager.update(cx, |manager, cx| manager.deactivate(cx));
-        }
-        let blocker = self.non_modal_terminal_focus_blocker(window, cx);
-        next_manager.update(cx, |manager, cx| {
-            manager.set_parent_focus_blocker(blocker, cx);
-            manager.activate(window, cx);
-        });
-        Self::hand_over_tab_strip(previous_manager.as_ref(), &next_manager, cx);
-    }
-
     /// Starts `next`'s Tab strip from the shape of `previous`'s, whose place it takes. The empty
     /// view has no Tab strip to hand over.
     fn hand_over_tab_strip(
@@ -1729,603 +1450,6 @@ impl WorkspaceManager {
         };
         if let Some(shape) = previous.read(cx).tab_strip_shape(cx) {
             next.update(cx, |manager, cx| manager.arrive_from(shape, cx));
-        }
-    }
-
-    fn debug_assert_remote_runtime_invariants(&self) {
-        debug_assert!(
-            self.remote_workspace_runtimes
-                .iter()
-                .all(|(workspace_id, _)| {
-                    self.workspaces
-                        .workspace(*workspace_id)
-                        .is_some_and(|workspace| {
-                            matches!(workspace.location(), WorkspaceLocation::Remote { .. })
-                        })
-                })
-        );
-        debug_assert!(self.workspaces.iter().all(|workspace| {
-            !matches!(workspace.location(), WorkspaceLocation::Remote { .. })
-                || self.remote_workspace_runtimes.contains_key(&workspace.id())
-        }));
-    }
-
-    fn observe_remote_workspace_runtime(
-        &mut self,
-        workspace_id: WorkspaceId,
-        generation: u64,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(observer) = self
-            .remote_workspace_runtimes
-            .get_mut(&workspace_id)
-            .filter(|runtime| runtime.generation == generation)
-            .and_then(|runtime| runtime.lifecycle.take())
-        else {
-            return;
-        };
-        cx.spawn(async move |manager, cx| {
-            let terminal = observer.terminal().await;
-            let _ = manager.update(cx, |manager, cx| {
-                manager.handle_remote_workspace_terminal(workspace_id, generation, terminal, cx);
-            });
-        })
-        .detach();
-    }
-
-    fn handle_remote_workspace_terminal(
-        &mut self,
-        workspace_id: WorkspaceId,
-        generation: u64,
-        _terminal: ControlConnectionTerminalState,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(state) = self
-            .workspaces
-            .workspace(workspace_id)
-            .and_then(|workspace| workspace.remote_connection_state())
-        else {
-            return;
-        };
-        if state != RemoteConnectionState::connected(generation)
-            || self
-                .remote_workspace_runtimes
-                .get(&workspace_id)
-                .is_none_or(|runtime| runtime.generation != generation)
-        {
-            return;
-        }
-        let Some(tab_manager) = self
-            .workspaces
-            .workspace(workspace_id)
-            .map(|workspace| workspace.payload().clone())
-        else {
-            return;
-        };
-        if let Err(error) =
-            tab_manager.update(cx, |manager, cx| manager.disconnect_remote(generation, cx))
-        {
-            eprintln!("cannot disconnect Remote Workspace terminals: {error}");
-            return;
-        }
-        let next = RemoteConnectionState::disconnected(generation);
-        if self
-            .workspaces
-            .reduce_remote_connection_state(workspace_id, next)
-            != Ok(RemoteConnectionReduction::Applied)
-        {
-            return;
-        }
-        if let Some(runtime) = self.remote_workspace_runtimes.get_mut(&workspace_id) {
-            runtime.drop_connection();
-        }
-
-        cx.notify();
-    }
-
-    fn start_remote_workspace_reconnect(
-        &mut self,
-        workspace_id: WorkspaceId,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.remote_workspace_reconnect.is_some() {
-            return;
-        }
-        let Some(backend) = self.remote_workspace_backend.clone() else {
-            return;
-        };
-        if self.workspaces.begin_remote_reconnect(workspace_id)
-            != Ok(RemoteConnectionReduction::Applied)
-        {
-            return;
-        }
-        let Some(workspace) = self.workspaces.workspace(workspace_id) else {
-            return;
-        };
-        let Some(key) = workspace.remote_workspace_key().cloned() else {
-            return;
-        };
-        let Some(directory) = workspace.remote_starting_directory().cloned() else {
-            return;
-        };
-        let Some(state) = workspace.remote_connection_state() else {
-            return;
-        };
-        let generation = state.generation();
-        let destination = key.destination().clone();
-        let pinned_directory = workspace.pinned_directory().cloned();
-        let expected_identity = key.physical_directory().clone();
-        let tab_manager = workspace.payload().clone();
-        let local_root = ValidatedLocalDirectory::new(
-            self.local_home_directory_path.clone(),
-            self.local_home_identity.clone(),
-        );
-        let session_factory = Rc::clone(&self.session_factory);
-        let cancelled = Arc::new(AtomicBool::new(false));
-        let Some(progress) = self.present_remote_workspace_reconnect_progress(
-            RemoteWorkspaceReconnectProgressIdentity {
-                workspace_id,
-                reconnect_generation: generation,
-                presentation_generation: 1,
-            },
-            RemoteWorkspaceConnectionProgress::CheckingCompatibility,
-            Arc::clone(&cancelled),
-            window,
-            cx,
-        ) else {
-            let _ = self.workspaces.reduce_remote_connection_state(
-                workspace_id,
-                RemoteConnectionState::failed(generation),
-            );
-            cx.notify();
-            return;
-        };
-        let (progress_sender, progress_receiver) = async_channel::bounded(8);
-        let context = RemoteWorkspaceConnectContext::new(progress_sender, Arc::clone(&cancelled));
-        let connection = backend.connect(destination.clone(), context);
-        let progress_updates = cx.spawn_in(window, async move |manager, cx| {
-            while let Ok(update) = progress_receiver.recv().await {
-                let Ok(current) = manager.update_in(cx, |manager, window, cx| {
-                    manager.apply_remote_workspace_reconnect_progress(
-                        workspace_id,
-                        generation,
-                        update,
-                        window,
-                        cx,
-                    )
-                }) else {
-                    break;
-                };
-                if !current {
-                    break;
-                }
-            }
-        });
-
-        let work_cancelled = Arc::clone(&cancelled);
-        let work = cx.spawn_in(window, async move |manager, cx| {
-            let result = async {
-                let mut control_connection = connection.await.map_err(|error| {
-                    if work_cancelled.load(Ordering::Acquire)
-                        || matches!(
-                            error,
-                            RemoteWorkspaceFlowBackendError::AuthenticationCancelled
-                        )
-                    {
-                        RemoteWorkspaceReconnectFailure::Cancelled
-                    } else {
-                        RemoteWorkspaceReconnectFailure::ConnectionFailed {
-                            detail: error.into_connection_detail(),
-                        }
-                    }
-                })?;
-                if work_cancelled.load(Ordering::Acquire) {
-                    return Err(RemoteWorkspaceReconnectFailure::Cancelled);
-                }
-                let provider = control_connection.provider();
-                let account = provider.discover_account().await.map_err(|_| {
-                    RemoteWorkspaceReconnectFailure::ConnectionFailed { detail: None }
-                })?;
-                if work_cancelled.load(Ordering::Acquire) {
-                    return Err(RemoteWorkspaceReconnectFailure::Cancelled);
-                }
-                let actual_identity = provider
-                    .validate_physical_identity(directory.clone())
-                    .await
-                    .map_err(|_| RemoteWorkspaceReconnectFailure::DirectoryUnavailable)?;
-                if actual_identity != expected_identity {
-                    return Err(RemoteWorkspaceReconnectFailure::IdentityChanged);
-                }
-                let channels = control_connection
-                    .bind_terminal_session_channels(account.login_shell())
-                    .map_err(|_| RemoteWorkspaceReconnectFailure::ConnectionFailed {
-                        detail: None,
-                    })?;
-                let lifecycle = control_connection
-                    .take_lifecycle_observer()
-                    .ok_or(RemoteWorkspaceReconnectFailure::ConnectionFailed { detail: None })?;
-                let mut factory = WorkspaceTerminalSessionFactory::new_remote(
-                    session_factory,
-                    local_root,
-                    RemoteTerminalMetadataContext::new(destination, directory)
-                        .with_machine(remote_machine(&account)),
-                    expected_identity.clone(),
-                    account.login_shell().name().to_owned(),
-                    channels,
-                );
-                factory.set_pinned_directory(pinned_directory);
-                let restart = tab_manager
-                    .update(cx, |manager, cx| {
-                        manager.prepare_remote_restart(factory, generation, cx)
-                    })
-                    .await
-                    .map_err(classify_remote_workspace_restart_failure)?;
-                if work_cancelled.load(Ordering::Acquire) {
-                    return Err(RemoteWorkspaceReconnectFailure::Cancelled);
-                }
-                Ok(PreparedRemoteWorkspaceReconnect {
-                    control_connection,
-                    lifecycle,
-                    restart,
-                    remote_user: account.remote_user().clone(),
-                })
-            }
-            .await;
-            let _ = manager.update_in(cx, |manager, window, cx| {
-                manager.finish_remote_workspace_reconnect(
-                    workspace_id,
-                    generation,
-                    result,
-                    window,
-                    cx,
-                );
-            });
-        });
-        self.remote_workspace_reconnect = Some(RemoteWorkspaceReconnectAttempt {
-            workspace_id,
-            generation,
-            cancelled,
-            progress: Some(progress),
-            progress_generation: 1,
-            _work: work,
-            _progress_updates: progress_updates,
-        });
-
-        cx.notify();
-    }
-
-    fn present_remote_workspace_reconnect_progress(
-        &self,
-        identity: RemoteWorkspaceReconnectProgressIdentity,
-        progress: RemoteWorkspaceConnectionProgress,
-        cancelled: Arc<AtomicBool>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Option<ProgressDialogHandle> {
-        let result_manager = cx.weak_entity();
-        let result_window = window.window_handle();
-        let cancel_flag = cancelled;
-        ProgressDialog::new(
-            ModalId::new("remote-workspace-reconnect-progress"),
-            "Remote reconnection progress",
-            "Reconnect Remote Workspace",
-            progress.status(),
-            ProgressState::Indeterminate,
-            ProgressCancellation::Cancellable(ModalAction::new(
-                (),
-                "Cancel",
-                ModalActionRole::Cancel,
-                "remote-workspace-reconnect-cancel",
-            )),
-        )
-        .detail("Authentication prompts open in a SpaceTerm dialog.")
-        .present(
-            window,
-            cx,
-            move |_, _, _| {
-                cancel_flag.store(true, Ordering::Release);
-                ProgressCancelDecision::Allow
-            },
-            move |outcome, cx| {
-                let _ = result_window.update(cx, |_, window, cx| {
-                    let _ = result_manager.update(cx, |manager, cx| {
-                        manager.finish_remote_workspace_reconnect_progress(
-                            identity, outcome, window, cx,
-                        );
-                    });
-                });
-            },
-        )
-        .ok()
-    }
-
-    fn apply_remote_workspace_reconnect_progress(
-        &mut self,
-        workspace_id: WorkspaceId,
-        generation: u64,
-        update: RemoteWorkspaceConnectionProgress,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        let is_current = self
-            .remote_workspace_reconnect
-            .as_ref()
-            .is_some_and(|attempt| {
-                attempt.workspace_id == workspace_id && attempt.generation == generation
-            });
-        if !is_current {
-            return false;
-        }
-        if update == RemoteWorkspaceConnectionProgress::Authenticating {
-            let progress = self
-                .remote_workspace_reconnect
-                .as_mut()
-                .and_then(|attempt| {
-                    let progress = attempt.progress.take();
-                    if progress.is_some() {
-                        attempt.progress_generation = attempt.progress_generation.wrapping_add(1);
-                    }
-                    progress
-                });
-            if let Some(progress) = progress {
-                let _ = progress.dismiss(window, cx);
-            }
-            return true;
-        }
-        if let Some(progress) = self
-            .remote_workspace_reconnect
-            .as_ref()
-            .and_then(|attempt| attempt.progress.as_ref())
-        {
-            let _ = progress.update(
-                ProgressDialogUpdate::new().status(update.status()),
-                window,
-                cx,
-            );
-            return true;
-        }
-        let attempt = self
-            .remote_workspace_reconnect
-            .as_ref()
-            .expect("the current reconnect attempt must remain owned");
-        let cancelled = Arc::clone(&attempt.cancelled);
-        let progress_generation = attempt.progress_generation;
-        let Some(progress) = self.present_remote_workspace_reconnect_progress(
-            RemoteWorkspaceReconnectProgressIdentity {
-                workspace_id,
-                reconnect_generation: generation,
-                presentation_generation: progress_generation,
-            },
-            update,
-            Arc::clone(&cancelled),
-            window,
-            cx,
-        ) else {
-            cancelled.store(true, Ordering::Release);
-            return false;
-        };
-        if let Some(attempt) = self.remote_workspace_reconnect.as_mut().filter(|attempt| {
-            attempt.workspace_id == workspace_id && attempt.generation == generation
-        }) {
-            attempt.progress = Some(progress);
-            return true;
-        }
-        let _ = progress.dismiss(window, cx);
-        false
-    }
-
-    fn finish_remote_workspace_reconnect(
-        &mut self,
-        workspace_id: WorkspaceId,
-        generation: u64,
-        result: Result<PreparedRemoteWorkspaceReconnect, RemoteWorkspaceReconnectFailure>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let is_current = self
-            .remote_workspace_reconnect
-            .as_ref()
-            .is_some_and(|attempt| {
-                attempt.workspace_id == workspace_id && attempt.generation == generation
-            })
-            && self
-                .workspaces
-                .workspace(workspace_id)
-                .and_then(|workspace| workspace.remote_connection_state())
-                == Some(RemoteConnectionState::reconnecting(generation));
-        if !is_current {
-            return;
-        }
-        let attempt = self
-            .remote_workspace_reconnect
-            .take()
-            .expect("a current reconnect attempt must remain owned");
-        match result {
-            Ok(prepared) => {
-                let Some(tab_manager) = self
-                    .workspaces
-                    .workspace(workspace_id)
-                    .map(|workspace| workspace.payload().clone())
-                else {
-                    return;
-                };
-                if let Err(error) = tab_manager.update(cx, |manager, cx| {
-                    manager.commit_remote_restart(prepared.restart, window, cx)
-                }) {
-                    let failure = classify_remote_workspace_restart_failure(error);
-                    let next = remote_workspace_reconnect_failure_state(&failure, generation);
-                    let _ = self
-                        .workspaces
-                        .reduce_remote_connection_state(workspace_id, next);
-                    if let Some(progress) = &attempt.progress {
-                        let _ = progress.fail(window, cx);
-                    }
-                    self.present_remote_workspace_reconnect_error(failure, window, cx);
-
-                    cx.notify();
-                    return;
-                }
-                let alias_pin = self
-                    .remote_workspace_runtimes
-                    .get_mut(&workspace_id)
-                    .and_then(|runtime| runtime.alias_pin.take());
-                self.remote_workspace_runtimes.insert(
-                    workspace_id,
-                    RemoteWorkspaceRuntime::new(
-                        generation,
-                        prepared.control_connection,
-                        prepared.lifecycle,
-                        alias_pin,
-                    ),
-                );
-                self.lend_repository_reader(workspace_id, cx);
-                let reduction = self.workspaces.reduce_remote_connection_state(
-                    workspace_id,
-                    RemoteConnectionState::connected(generation),
-                );
-                debug_assert_eq!(reduction, Ok(RemoteConnectionReduction::Applied));
-                if let Err(error) = self
-                    .workspaces
-                    .set_remote_user(workspace_id, prepared.remote_user)
-                {
-                    Self::report_workspace_error("update remote account", error);
-                }
-                self.observe_remote_workspace_runtime(workspace_id, generation, cx);
-                if let Some(progress) = &attempt.progress {
-                    let _ = progress.complete(window, cx);
-                }
-            }
-            Err(failure) => {
-                let next = remote_workspace_reconnect_failure_state(&failure, generation);
-                let _ = self
-                    .workspaces
-                    .reduce_remote_connection_state(workspace_id, next);
-                if matches!(failure, RemoteWorkspaceReconnectFailure::Cancelled) {
-                    if let Some(progress) = &attempt.progress {
-                        let _ = progress.dismiss(window, cx);
-                    }
-                } else {
-                    if let Some(progress) = &attempt.progress {
-                        let _ = progress.fail(window, cx);
-                    }
-                    self.present_remote_workspace_reconnect_error(failure, window, cx);
-                }
-            }
-        }
-
-        cx.notify();
-    }
-
-    fn present_remote_workspace_reconnect_error(
-        &mut self,
-        failure: RemoteWorkspaceReconnectFailure,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some((title, message)) = remote_workspace_reconnect_error_content(&failure) else {
-            return;
-        };
-        let manager = cx.weak_entity();
-        let window_handle = window.window_handle();
-        let result = Alert::new(
-            ModalId::new("remote-workspace-reconnect-error"),
-            "Remote Workspace reconnection failed",
-            title,
-            message,
-            vec![ModalAction::new(
-                (),
-                "OK",
-                ModalActionRole::Cancel,
-                "remote-workspace-reconnect-error-ok",
-            )],
-        )
-        .intent(AlertIntent::Warning)
-        .present(window, cx, move |_, cx| {
-            let _ = window_handle.update(cx, |_, window, cx| {
-                let _ = manager.update(cx, |manager, cx| {
-                    manager.sync_terminal_focus_blocker(window, cx);
-                    manager.focus(window, cx);
-                    cx.notify();
-                });
-            });
-        });
-        if result.is_ok() {
-            self.sync_terminal_focus_blocker(window, cx);
-            cx.notify();
-        }
-    }
-
-    fn finish_remote_workspace_reconnect_progress(
-        &mut self,
-        identity: RemoteWorkspaceReconnectProgressIdentity,
-        outcome: ProgressDialogOutcome,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(attempt) = self.remote_workspace_reconnect.as_ref() else {
-            return;
-        };
-        if attempt.workspace_id != identity.workspace_id
-            || attempt.generation != identity.reconnect_generation
-            || attempt.progress_generation != identity.presentation_generation
-        {
-            return;
-        }
-        if !matches!(
-            outcome,
-            ProgressDialogOutcome::Cancelled { .. }
-                | ProgressDialogOutcome::DeadlineExpired
-                | ProgressDialogOutcome::OwnerRemoved
-                | ProgressDialogOutcome::ProgrammaticDismissal
-                | ProgressDialogOutcome::Replaced
-        ) {
-            return;
-        }
-        attempt.cancelled.store(true, Ordering::Release);
-        self.remote_workspace_reconnect = None;
-        let _ = self.workspaces.reduce_remote_connection_state(
-            identity.workspace_id,
-            RemoteConnectionState::disconnected(identity.reconnect_generation),
-        );
-
-        cx.notify();
-    }
-
-    /// Lends the Workspace's Control Connection reader to Repository Status for its machine.
-    fn lend_repository_reader(&mut self, workspace_id: WorkspaceId, cx: &App) {
-        let Some(store) = crate::ui::repository_status_store::InstalledRepositoryStatus::store(cx)
-        else {
-            return;
-        };
-        let Some(WorkspaceLocation::Remote { key, .. }) = self
-            .workspaces
-            .workspace(workspace_id)
-            .map(|workspace| workspace.location())
-        else {
-            return;
-        };
-        let machine = crate::repository_status::RemoteMachineKey::new(key.destination().as_str());
-        let Some(runtime) = self.remote_workspace_runtimes.get_mut(&workspace_id) else {
-            return;
-        };
-        let Some(reader) = runtime
-            .control_connection
-            .as_ref()
-            .and_then(ConnectedControlConnection::repository_reader)
-        else {
-            return;
-        };
-        runtime.repository_reader = Some(store.read(cx).remote_readers().lend(machine, reader));
-    }
-
-    fn close_remote_runtimes(&mut self) {
-        if let Some(attempt) = self.remote_workspace_reconnect.take() {
-            attempt.cancelled.store(true, Ordering::Release);
-        }
-        self.remote_workspace_activation_task.take();
-        for runtime in self.remote_workspace_runtimes.values_mut() {
-            runtime.close();
         }
     }
 
@@ -2668,7 +1792,7 @@ impl WorkspaceManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.begin_remote_workspace_close(workspace_id, window, cx);
+        self.end_pin_for_closing(workspace_id, window, cx);
         let was_active = self.workspaces.active_workspace_id() == Some(workspace_id);
         let held_keyboard = self
             .workspaces
@@ -2683,8 +1807,6 @@ impl WorkspaceManager {
         };
         closed_manager.update(cx, |manager, cx| manager.close_all(cx));
         self.pending_final_tab_closes.remove(&workspace_id);
-        self.remote_workspace_runtimes.remove(&workspace_id);
-        self.debug_assert_remote_runtime_invariants();
         if let Some(shared) = self.shared.owning_mut(workspace_id) {
             shared.forget(workspace_id);
         }
@@ -2733,7 +1855,9 @@ impl WorkspaceManager {
         self.close_workspace_activating(workspace_id, true, window, cx);
     }
 
-    fn begin_remote_workspace_close(
+    /// Ends a directory choice for a Workspace that is closing, so it can't pin a Workspace that
+    /// no longer exists.
+    fn end_pin_for_closing(
         &mut self,
         workspace_id: WorkspaceId,
         window: &mut Window,
@@ -2744,30 +1868,6 @@ impl WorkspaceManager {
             self.transient.end_pin();
             if let Some(picker) = self.pin_picker.take() {
                 picker.update(cx, |picker, cx| picker.cancel(window, cx));
-            }
-        }
-
-        if self
-            .workspaces
-            .workspace(workspace_id)
-            .and_then(|workspace| workspace.remote_connection_state())
-            .is_none()
-        {
-            return;
-        }
-        let _ = self.workspaces.begin_remote_close(workspace_id);
-        let reconnect_matches = self
-            .remote_workspace_reconnect
-            .as_ref()
-            .is_some_and(|attempt| attempt.workspace_id == workspace_id);
-        if reconnect_matches {
-            let attempt = self
-                .remote_workspace_reconnect
-                .take()
-                .expect("matching reconnect attempt must remain owned");
-            attempt.cancelled.store(true, Ordering::Release);
-            if let Some(progress) = &attempt.progress {
-                let _ = progress.dismiss(window, cx);
             }
         }
     }
@@ -2924,8 +2024,30 @@ impl WorkspaceManager {
             WorkspaceMenuCommand::NewWorktree => {
                 self.new_worktree(workspace_id, window, cx);
             }
+            // A Workspace of another computer's server reconnects by connecting to that server,
+            // as its machine heading does.
             WorkspaceMenuCommand::Reconnect => {
-                self.start_remote_workspace_reconnect(workspace_id, window, cx)
+                let target = self
+                    .shared
+                    .owner(workspace_id)
+                    .and_then(|key| self.shared.origin(key))
+                    .and_then(|origin| match origin {
+                        ServerOrigin::Local => None,
+                        ServerOrigin::Ssh(destination) => {
+                            Some(super::MachineTarget::Ssh(destination.clone()))
+                        }
+                        ServerOrigin::Direct(direct) => {
+                            Some(super::MachineTarget::Direct(direct.route))
+                        }
+                    });
+                if let Some(target) = target {
+                    self.perform_machine_command(
+                        target,
+                        super::workspace_sidebar::MachineMenuCommand::Connect,
+                        window,
+                        cx,
+                    );
+                }
             }
             WorkspaceMenuCommand::Detach => self.detach_shared_workspace(workspace_id, window, cx),
             WorkspaceMenuCommand::Close => {
@@ -3184,7 +2306,60 @@ impl WorkspaceManager {
                 || workspace.pinned_directory().is_some(),
                 |shared| shared.pinned,
             ),
+            status: WorkspaceChromeStatus::resolve(self.server_connection_phase(workspace_id, cx)),
             ..chrome_identity(workspace)
+        }
+    }
+
+    /// How the connection to another computer's server that owns `workspace_id` stands, or
+    /// `None` for a Workspace of this computer's server. Reading it reaches no computer.
+    fn server_connection_phase(
+        &self,
+        workspace_id: WorkspaceId,
+        cx: &App,
+    ) -> Option<RemoteConnectionPhase> {
+        use crate::direct_connections::DirectRouteStatus;
+        use crate::ssh::server_connection::RemoteConnectionStatus;
+
+        let key = self.shared.owner(workspace_id)?;
+        match self.shared.origin(key)? {
+            ServerOrigin::Local => None,
+            ServerOrigin::Ssh(destination) => {
+                let status = crate::ui::ssh_servers::installed(cx)?.status(destination);
+                Some(match status {
+                    RemoteConnectionStatus::Connected { .. } => RemoteConnectionPhase::Connected,
+                    RemoteConnectionStatus::Working { .. }
+                    | RemoteConnectionStatus::Reconnecting { .. } => {
+                        RemoteConnectionPhase::Reconnecting
+                    }
+                    RemoteConnectionStatus::Paused { .. }
+                    | RemoteConnectionStatus::Incompatible { .. }
+                    | RemoteConnectionStatus::Refused { .. }
+                    | RemoteConnectionStatus::Unavailable { .. }
+                    | RemoteConnectionStatus::Unconfirmed { .. } => RemoteConnectionPhase::Failed,
+                    RemoteConnectionStatus::Inactive
+                    | RemoteConnectionStatus::Cancelling
+                    | RemoteConnectionStatus::NeedsPerson { .. }
+                    | RemoteConnectionStatus::InstallationOffered { .. }
+                    | RemoteConnectionStatus::Checked { .. }
+                    | RemoteConnectionStatus::Stopped => RemoteConnectionPhase::Disconnected,
+                })
+            }
+            ServerOrigin::Direct(direct) => {
+                let status = crate::ui::direct_servers::installed(cx)?.status(&direct.route)?;
+                Some(match status {
+                    DirectRouteStatus::Connected => RemoteConnectionPhase::Connected,
+                    DirectRouteStatus::Connecting | DirectRouteStatus::Reconnecting => {
+                        RemoteConnectionPhase::Reconnecting
+                    }
+                    DirectRouteStatus::Refused(_) | DirectRouteStatus::Unavailable(_) => {
+                        RemoteConnectionPhase::Failed
+                    }
+                    DirectRouteStatus::Disconnected | DirectRouteStatus::NeedsInteraction => {
+                        RemoteConnectionPhase::Disconnected
+                    }
+                })
+            }
         }
     }
 
@@ -3206,23 +2381,20 @@ impl WorkspaceManager {
     /// hidden. The empty view has none, so the chooser shows only its glyph.
     fn workspace_chrome_identity(&self, cx: &App) -> Option<(WorkspaceChromeIdentity, Tooltip)> {
         let workspace = self.workspaces.active_workspace()?;
-        let remote_connection_phase = workspace
-            .remote_connection_state()
-            .map(RemoteConnectionState::phase);
-        let remote_status = remote_connection_phase.and_then(remote_connection_status);
+        let remote_status = self
+            .server_connection_phase(workspace.id(), cx)
+            .and_then(remote_connection_status);
         let shared = self.shared_row_facts(workspace.id());
-        let (path, _) = match &shared {
+        let path = match &shared {
             // The directory belongs to the server, so the chrome shows the server's own.
-            Some(shared) => (
-                compact_home_path(&shared.directory, &self.local_home_directory_path),
-                String::new(),
-            ),
-            None => directory_labels(
-                workspace.location(),
-                workspace.local_display_directory(),
-                workspace.remote_display_directory(),
-                &self.local_home_directory_path,
-            ),
+            Some(shared) => compact_home_path(&shared.directory, &self.local_home_directory_path),
+            None => {
+                directory_labels(
+                    workspace.local_display_directory(),
+                    &self.local_home_directory_path,
+                )
+                .0
+            }
         };
         let tooltip_detail = remote_status
             .map(|status| format!("{path}: {status}"))
@@ -3277,7 +2449,7 @@ impl WorkspaceManager {
         let accept_manager = manager.clone();
         let combo_lifecycle_window = window.window_handle();
         let presentation = crate::desktop_profile::DesktopPresentation::get(cx);
-        let remote_unavailable_reason = self.remote_workspace_unavailable_reason.clone();
+        let remote_unavailable_reason = self.remote_workspace_unavailable_reason(cx);
         let creation_rows = WorkspaceCreation::ALL.to_vec();
         let creation_shortcuts: Vec<_> = creation_rows
             .iter()
@@ -3558,9 +2730,7 @@ impl WorkspaceManager {
             .iter()
             .map(|workspace| {
                 let (path, directory_tooltip) = directory_labels(
-                    workspace.location(),
                     workspace.local_display_directory(),
-                    workspace.remote_display_directory(),
                     &self.local_home_directory_path,
                 );
                 let mut path: gpui::SharedString = path.into();
@@ -3634,25 +2804,17 @@ impl WorkspaceManager {
                     workspace_id: workspace.id(),
                     name: workspace.name().to_owned().into(),
                     path,
-                    machine: match workspace.location() {
-                        // Another computer's server Workspace names that computer, as a Remote
-                        // Workspace does.
-                        WorkspaceLocation::Local => shared
-                            .as_ref()
-                            .and_then(|shared| shared.machine.clone())
-                            .map(Into::into),
-                        WorkspaceLocation::Remote { key, .. } => {
-                            Some(key.destination().host().to_owned().into())
-                        }
-                    },
+                    // Another computer's server Workspace names that computer.
+                    machine: shared
+                        .as_ref()
+                        .and_then(|shared| shared.machine.clone())
+                        .map(Into::into),
                     tooltip: tooltip.into(),
                     pinned: shared.as_ref().map_or_else(
                         || workspace.pinned_directory().is_some(),
                         |shared| shared.pinned,
                     ),
-                    remote_connection_phase: workspace
-                        .remote_connection_state()
-                        .map(RemoteConnectionState::phase),
+                    remote_connection_phase: self.server_connection_phase(workspace.id(), cx),
                     repository,
                     worktrees,
                     creates_worktrees: self.creates_worktrees(workspace.id(), cx),
@@ -3859,11 +3021,12 @@ impl WorkspaceManager {
             self.present_stale_shared_close(server_target, local, window, cx);
         }
         self.revalidate_shared_close(key, window, cx);
-        // Worktree writes reach only the account-local server.
-        if key == ServerKey::LOCAL {
-            self.open_created_server_worktree(window, cx);
-            self.revalidate_server_removal(window, cx);
-        }
+        // Each server's reading may present the Worktree it created or change the one under
+        // review; both look up their own Workspace's server.
+        self.open_created_server_worktree(window, cx);
+        self.revalidate_server_removal(window, cx);
+        // A Remote Workspace waiting for this server's edits may be asked for now.
+        self.open_pending_remote_workspace(window, cx);
         if let Some((operation, error)) = self
             .shared
             .get_mut(key)
@@ -4013,9 +3176,7 @@ impl WorkspaceManager {
         else {
             return;
         };
-        let Some((session_factory, prepared_launch, root_state)) =
-            sessions.open(root_tab.root_pane)
-        else {
+        let Some((session_factory, root_state)) = sessions.open(root_tab.root_pane) else {
             return;
         };
         // The Workspace's own directory stays this client's home: it is launch scaffolding the
@@ -4037,9 +3198,8 @@ impl WorkspaceManager {
         let created = self
             .workspaces
             .create_local_workspace(directory, |workspace_id, _| {
-                Self::create_tab_manager_with_prepared_launch(
+                Self::create_tab_manager(
                     session_factory,
-                    prepared_launch,
                     TabManagerCreation {
                         workspace_id,
                         sidebar_visible,
@@ -4215,8 +3375,6 @@ impl WorkspaceManager {
                 return Some(false);
             }
             Some(PinnedDirectory::Local(directory)) => Some(directory.path().to_owned()),
-            // A Remote Workspace's directory is never a shared server Workspace's directory.
-            Some(PinnedDirectory::Remote { .. }) => return Some(false),
             None => None,
         };
         self.pin_operation = self.pin_operation.wrapping_add(1);
@@ -4230,6 +3388,81 @@ impl WorkspaceManager {
         }
         cx.notify();
         Some(submission == SharedSubmission::Submitted)
+    }
+
+    /// Asks another computer's server to pin its Workspace to `directory`, a path that server
+    /// validated on its own filesystem. Returns whether the request reached the server.
+    fn pin_server_directory(
+        &mut self,
+        workspace_id: WorkspaceId,
+        directory: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        use super::shared_workspaces::SharedSubmission;
+
+        let observed_version = self.transient.pin_version(workspace_id);
+        let Some(owner) = self
+            .shared
+            .owner(workspace_id)
+            .filter(|owner| *owner != ServerKey::LOCAL)
+        else {
+            return false;
+        };
+        self.pin_operation = self.pin_operation.wrapping_add(1);
+        self.transient.end_pin();
+        let Some(shared) = self.shared.get_mut(owner) else {
+            return false;
+        };
+        let submission = shared.pin(workspace_id, Some(directory), observed_version);
+        if let SharedSubmission::Refused(reason) = submission {
+            Self::show_shared_refusal("change the pinned directory", reason, window, cx);
+        }
+        self.sync_terminal_focus_blocker(window, cx);
+        cx.notify();
+        submission == SharedSubmission::Submitted
+    }
+
+    /// The edit writer of the server that owns a shared Workspace. It reaches that server, and
+    /// only it, over the route this client admitted for it.
+    pub(super) fn owning_client(
+        &self,
+        workspace_id: WorkspaceId,
+        cx: &mut App,
+    ) -> Option<crate::ui::server_worktrees::Client> {
+        use crate::ui::server_worktrees::Client;
+
+        let key = self.shared.owner(workspace_id)?;
+        match self.shared.origin(key)? {
+            ServerOrigin::Local => Client::get(cx),
+            ServerOrigin::Ssh(destination) => Client::ssh(destination, cx),
+            ServerOrigin::Direct(direct) => Client::direct(&direct.route, cx),
+        }
+    }
+
+    /// Browses the directories of the server on another computer that owns `workspace_id`, or
+    /// `None` while that server is unreachable.
+    fn owning_directory_source(
+        &self,
+        workspace_id: WorkspaceId,
+        cx: &mut App,
+    ) -> Option<ServerDirectorySource> {
+        let machine = self
+            .shared
+            .owner(workspace_id)
+            .and_then(|key| self.shared.origin(key))
+            .and_then(ServerOrigin::remote_name)?;
+        let client = self.owning_client(workspace_id, cx)?;
+        if !client.availability().0 {
+            return None;
+        }
+        let server = client.server.clone();
+        let available: Rc<dyn Fn() -> bool> = Rc::new(move || client.availability().0);
+        Some(ServerDirectorySource::browsing(
+            server,
+            Some(machine),
+            available,
+        ))
     }
 
     /// Asks to close a Pane, Tab, or Workspace a SpaceTerm Server owns, returning whether the
@@ -5099,7 +4332,7 @@ impl WorkspaceManager {
         }
         self.pending_final_tab_closes.remove(&workspace_id);
         // Ends a pin chooser open for the Workspace; a shared Workspace has no remote runtime.
-        self.begin_remote_workspace_close(workspace_id, window, cx);
+        self.end_pin_for_closing(workspace_id, window, cx);
         let was_active = self.workspaces.active_workspace_id() == Some(workspace_id);
         let held_keyboard = self
             .workspaces
@@ -5240,21 +4473,10 @@ const SHARED_CLOSE_DISMISS_SELECTOR: &str = "shared-close-dismiss";
 const SHARED_CONFLICT_RETRY_SELECTOR: &str = "shared-workspace-conflict-retry";
 const SHARED_CONFLICT_KEEP_SELECTOR: &str = "shared-workspace-conflict-keep";
 
-/// Why the Directory Picker doesn't open for another computer's server Workspace.
-const REMOTE_PIN_UNAVAILABLE: &str = "This Workspace runs on another computer. Choosing its \
-                                      pinned directory from here isn\u{2019}t available yet. \
-                                      Nothing changed.";
-
 /// Why a directory on this computer never becomes another computer's server Workspace pin.
 const REMOTE_LOCAL_PIN_REFUSED: &str = "This Workspace runs on another computer, so a folder on \
                                         this computer can\u{2019}t be its pinned directory. \
                                         Nothing changed.";
-
-impl Drop for WorkspaceManager {
-    fn drop(&mut self) {
-        self.close_remote_runtimes();
-    }
-}
 
 impl Render for WorkspaceManager {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -5312,7 +4534,7 @@ impl WorkspaceManager {
         };
         let rows = self.sidebar_rows(cx);
         let sections = self.machine_sections(cx);
-        let remote_unavailable = self.remote_workspace_unavailable_reason.clone();
+        let remote_unavailable = self.remote_workspace_unavailable_reason(cx);
 
         self.sidebar.update(cx, |sidebar, cx| {
             sidebar.set_rows(rows, sections, remote_unavailable, cx)
@@ -5494,80 +4716,13 @@ fn workspace_activation_shortcut(
     }
 }
 
-fn classify_remote_workspace_restart_failure(
-    error: RemoteTabManagerLifecycleError,
-) -> RemoteWorkspaceReconnectFailure {
-    match error {
-        RemoteTabManagerLifecycleError::Revalidation(
-            crate::terminal::TerminalSessionChannelRevalidationError::DirectoryUnavailable,
-        ) => RemoteWorkspaceReconnectFailure::DirectoryUnavailable,
-        RemoteTabManagerLifecycleError::Revalidation(
-            crate::terminal::TerminalSessionChannelRevalidationError::IdentityChanged,
-        ) => RemoteWorkspaceReconnectFailure::IdentityChanged,
-        _ => RemoteWorkspaceReconnectFailure::ConnectionFailed { detail: None },
-    }
-}
-
-fn remote_workspace_reconnect_failure_state(
-    failure: &RemoteWorkspaceReconnectFailure,
-    generation: u64,
-) -> RemoteConnectionState {
-    match failure {
-        RemoteWorkspaceReconnectFailure::ConnectionFailed { .. } => {
-            RemoteConnectionState::failed(generation)
-        }
-        RemoteWorkspaceReconnectFailure::Cancelled
-        | RemoteWorkspaceReconnectFailure::DirectoryUnavailable
-        | RemoteWorkspaceReconnectFailure::IdentityChanged => {
-            RemoteConnectionState::disconnected(generation)
-        }
-    }
-}
-
-fn remote_workspace_reconnect_error_content(
-    failure: &RemoteWorkspaceReconnectFailure,
-) -> Option<(&'static str, String)> {
-    match failure {
-        RemoteWorkspaceReconnectFailure::Cancelled => None,
-        RemoteWorkspaceReconnectFailure::ConnectionFailed { detail } => Some((
-            "Couldn’t Reconnect",
-            detail.as_ref().map_or_else(
-                || {
-                    "SpaceTerm couldn’t restore the remote connection. Check the SSH host and try again."
-                        .to_owned()
-                },
-                |detail| {
-                    format!(
-                        "SpaceTerm couldn’t restore the remote connection. OpenSSH reported:\n\n{}",
-                        detail.as_str()
-                    )
-                },
-            ),
-        )),
-        RemoteWorkspaceReconnectFailure::DirectoryUnavailable => Some((
-            "Remote Directory Unavailable",
-            "SpaceTerm can’t access the selected remote directory. Check its permissions or reopen the Remote Workspace."
-                .to_owned(),
-        )),
-        RemoteWorkspaceReconnectFailure::IdentityChanged => Some((
-            "Remote Directory Changed",
-            "The selected remote path now resolves to a different directory. Reopen the Remote Workspace to review it."
-                .to_owned(),
-        )),
-    }
-}
-
 /// The collapsed title-bar identity a Workspace presents, before its Active Worktree.
 fn chrome_identity<T>(workspace: &WorkspaceEntry<T>) -> WorkspaceChromeIdentity {
     WorkspaceChromeIdentity {
         name: workspace.name().to_owned(),
         worktree: None,
         pinned: workspace.pinned_directory().is_some(),
-        status: WorkspaceChromeStatus::resolve(
-            workspace
-                .remote_connection_state()
-                .map(RemoteConnectionState::phase),
-        ),
+        status: None,
     }
 }
 
@@ -5581,82 +4736,15 @@ fn compact_home_path(path: &std::path::Path, home: &std::path::Path) -> String {
         .unwrap_or_else(|| path.display().to_string())
 }
 
+/// The compact directory a row shows and its full spelling for the tooltip.
 fn directory_labels(
-    location: &WorkspaceLocation,
     local_directory: Option<&std::path::Path>,
-    remote_directory: Option<&RemoteDirectory>,
     local_home: &std::path::Path,
 ) -> (String, String) {
-    match (location, local_directory, remote_directory) {
-        (WorkspaceLocation::Local, Some(directory), None) => (
-            compact_home_path(directory, local_home),
-            directory.display().to_string(),
-        ),
-        (
-            WorkspaceLocation::Remote {
-                key,
-                remote_user,
-                remote_home_identity,
-                ..
-            },
-            None,
-            Some(directory),
-        ) => {
-            let destination = key.destination().as_str();
-            let origin = if destination.contains('@') {
-                destination.to_owned()
-            } else {
-                format!("{}@{destination}", remote_user.as_str())
-            };
-            let compact_directory = compact_remote_home_path(directory, remote_home_identity);
-            (
-                compact_directory,
-                format!("{origin}:{}", directory.as_str()),
-            )
-        }
-        _ => {
-            unreachable!("a Workspace must own exactly one local or remote directory")
-        }
-    }
-}
-
-fn compact_remote_home_path(
-    directory: &RemoteDirectory,
-    home: &crate::domain::RemoteDirectoryIdentity,
-) -> String {
-    if directory.is_home_spelling(home) {
-        return "~".to_owned();
-    }
-    directory
-        .as_str()
-        .strip_prefix(home.as_str())
-        .filter(|relative| relative.starts_with('/'))
-        .map(|relative| format!("~{relative}"))
-        .unwrap_or_else(|| directory.as_str().to_owned())
-}
-
-/// The account facts a Remote Pane presents: who is logged in, and the home its paths shorten to.
-fn remote_machine(account: &RemoteWorkspaceAccount) -> crate::terminal::metadata::RemoteMachine {
-    crate::terminal::metadata::RemoteMachine::new(
-        Some(account.user()),
-        Some(account.home_identity().as_str()),
-    )
-}
-
-/// The local home directory's identity, which completes server-backed launch plans and names
-/// the directory local file actions may read.
-fn local_home_identity(
-    path: PathBuf,
-    local_filesystem: &LocalFilesystemAuthority,
-) -> LocalDirectoryIdentity {
-    #[cfg(test)]
-    let _ = (path, local_filesystem);
-    #[cfg(test)]
-    return LocalDirectoryIdentity::for_test(0);
-    #[cfg(not(test))]
-    local_filesystem.validate_directory(&path).map_or_else(
-        |_| LocalDirectoryIdentity::unavailable(),
-        |directory| directory.identity(),
+    let directory = local_directory.unwrap_or(local_home);
+    (
+        compact_home_path(directory, local_home),
+        directory.display().to_string(),
     )
 }
 

@@ -132,13 +132,6 @@ impl PorcelainParser {
         self.into_summary(total)
     }
 
-    /// Finishes a stream cut at an output limit: drops the partial trailing record and reports the
-    /// counted records as a lower bound.
-    pub(crate) fn finish_truncated(self) -> Result<PorcelainSummary, RepositoryReadError> {
-        let total = ChangeTotal::AtLeast(self.records);
-        self.into_summary(total)
-    }
-
     fn into_summary(mut self, total: ChangeTotal) -> Result<PorcelainSummary, RepositoryReadError> {
         if self.failed || !self.saw_oid || !self.saw_head {
             return Err(RepositoryReadError::InvalidResponse);
@@ -352,6 +345,7 @@ fn count(digits: &[u8]) -> Option<u32> {
 }
 
 /// Parses one complete stream held in memory.
+#[cfg(test)]
 pub(crate) fn parse_porcelain(output: &[u8]) -> Result<PorcelainSummary, RepositoryReadError> {
     let mut parser = PorcelainParser::new();
     parser.push(output);
@@ -634,46 +628,6 @@ mod tests {
     }
 
     #[test]
-    fn truncated_finish_should_drop_a_partial_record_and_report_a_lower_bound() {
-        let output = headers() + "? one.rs\0? two.rs\0? thr";
-        let mut parser = PorcelainParser::new();
-        parser.push(output.as_bytes());
-
-        let summary = parser.finish_truncated().unwrap();
-
-        assert_eq!(summary.changes.total, ChangeTotal::AtLeast(2));
-        assert_eq!(summary.changes.untracked, 2);
-        assert_eq!(summary.changes.entries.len(), 2);
-    }
-
-    #[test]
-    fn truncated_finish_should_drop_a_rename_whose_original_path_is_missing() {
-        let output = headers() + "? one.rs\0" + &renamed("R.", "new.rs", "old.rs");
-        let cut = output.len() - "old.rs\0".len();
-        for end in [cut, cut + 3] {
-            let mut parser = PorcelainParser::new();
-            parser.push(&output.as_bytes()[..end]);
-
-            let summary = parser.finish_truncated().unwrap();
-
-            assert_eq!(summary.changes.total, ChangeTotal::AtLeast(1));
-            assert_eq!(summary.changes.renamed, 0);
-            assert_eq!(summary.changes.entries.len(), 1);
-        }
-    }
-
-    #[test]
-    fn truncated_finish_should_report_a_lower_bound_even_at_a_record_boundary() {
-        let mut parser = PorcelainParser::new();
-        parser.push((headers() + "? one.rs\0").as_bytes());
-
-        assert_eq!(
-            parser.finish_truncated().unwrap().changes.total,
-            ChangeTotal::AtLeast(1)
-        );
-    }
-
-    #[test]
     fn complete_finish_should_reject_an_unterminated_record_or_missing_original_path() {
         assert_eq!(
             parse(&(headers() + "? one.rs")),
@@ -748,10 +702,7 @@ mod tests {
         }
 
         assert!(parser.field.len() <= MAXIMUM_FIELD_BYTES);
-        assert_eq!(
-            parser.finish_truncated(),
-            Err(RepositoryReadError::InvalidResponse)
-        );
+        assert_eq!(parser.finish(), Err(RepositoryReadError::InvalidResponse));
     }
 
     #[test]

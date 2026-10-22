@@ -694,6 +694,10 @@ mod connection {
         /// Asks for a reconnection attempt now instead of at the next automatic one.
         fn retry(&self);
 
+        /// Records that the person stopped the server behind this Pane, as its route reported, so
+        /// the Pane stops reconnecting on its own until the server is started.
+        fn report_server_stopped(&self) {}
+
         /// Asks the server to make this client the Controlling Client.
         fn take_over(&self);
 
@@ -739,6 +743,10 @@ mod connection {
 
         fn retry(&self) {
             Self::retry(self);
+        }
+
+        fn report_server_stopped(&self) {
+            Self::report_server_stopped(self);
         }
 
         fn take_over(&self) {
@@ -1134,6 +1142,12 @@ mod connection {
                 return ServerPaneSync::default();
             }
             self.connection.retry();
+            self.sync()
+        }
+
+        /// Presents the person's stop of this Pane's server, which its route reported.
+        pub(crate) fn server_stopped_elsewhere(&mut self) -> ServerPaneSync {
+            self.connection.report_server_stopped();
             self.sync()
         }
 

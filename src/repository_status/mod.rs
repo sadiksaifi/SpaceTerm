@@ -15,7 +15,6 @@ pub(crate) mod porcelain;
 pub(crate) mod presentation;
 pub(crate) mod pull_request;
 pub(crate) mod pull_request_lookup;
-pub(crate) mod remote_read;
 pub(crate) mod remote_url;
 pub(crate) mod scheduler;
 #[cfg(test)]
@@ -31,7 +30,6 @@ use std::time::Instant;
 
 use thiserror::Error;
 
-use crate::domain::RemoteDirectory;
 use crate::ssh::cancellation::SshCancellationToken;
 
 mod preferences;
@@ -390,78 +388,6 @@ pub(crate) trait RepositoryWatcher: Send + Sync + 'static {
         directories: Vec<WatchDirectory>,
         changed: Box<dyn Fn() + Send + Sync>,
     ) -> Result<Box<dyn RepositoryWatch>, RepositoryWatchError>;
-}
-
-/// Raw, bounded results of the remote repository probe script, parsed by the portable parsers.
-#[derive(Clone, Default, Eq, PartialEq)]
-pub(crate) struct RemoteRepositoryProbe {
-    pub(crate) outcome: RemoteProbeOutcome,
-    /// Raw `git --version` output, for the version-dependent fsmonitor policy and tool status.
-    pub(crate) git_version: Vec<u8>,
-    /// The discovery `git rev-parse` exited with status 0. Inside a git directory or in a bare
-    /// repository it exits non-zero after printing its first lines.
-    pub(crate) discovery_succeeded: bool,
-    /// `git rev-parse` discovery output, in the same layout the local probe uses.
-    pub(crate) discovery: Vec<u8>,
-    /// The remote account's physical home directory.
-    pub(crate) physical_home: Vec<u8>,
-    /// Headers-only `git status --porcelain=v2 --branch -z` output.
-    pub(crate) status_headers: Vec<u8>,
-    /// `git config -z` records (`key\nvalue\0`), in the `--get-regexp` layout. Only whole
-    /// records are kept.
-    pub(crate) config: Vec<u8>,
-    pub(crate) markers: OperationMarkers,
-}
-
-impl fmt::Debug for RemoteRepositoryProbe {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("RemoteRepositoryProbe")
-            .field("outcome", &self.outcome)
-            .finish_non_exhaustive()
-    }
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) enum RemoteProbeOutcome {
-    #[default]
-    Repository,
-    NotRepository,
-    GitMissing,
-    DirectoryUnavailable,
-}
-
-/// Raw, bounded remote `git status --porcelain=v2 --branch -z` output.
-#[derive(Clone, Default, Eq, PartialEq)]
-pub(crate) struct RemoteRepositoryCount {
-    pub(crate) status: Vec<u8>,
-    /// The output was cut at the remote field limit.
-    pub(crate) truncated: bool,
-}
-
-impl fmt::Debug for RemoteRepositoryCount {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("RemoteRepositoryCount")
-            .field("truncated", &self.truncated)
-            .finish_non_exhaustive()
-    }
-}
-
-/// Reads repositories on one remote machine through its Control Connection. Blocking.
-pub(crate) trait RemoteRepositoryReader: Send + Sync + 'static {
-    fn probe(
-        &self,
-        directory: &RemoteDirectory,
-        cancellation: &SshCancellationToken,
-    ) -> Result<RemoteRepositoryProbe, RepositoryReadError>;
-
-    fn count(
-        &self,
-        root: &str,
-        fsmonitor: FsmonitorPolicy,
-        cancellation: &SshCancellationToken,
-    ) -> Result<RemoteRepositoryCount, RepositoryReadError>;
 }
 
 pub(crate) use spaceterm_server::repository::{

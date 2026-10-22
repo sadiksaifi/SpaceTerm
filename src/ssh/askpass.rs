@@ -1142,10 +1142,12 @@ impl AskPassAttemptObservation {
         self.state.prompt_started.load(Ordering::Acquire)
     }
 
+    #[cfg(test)]
     pub(crate) fn prompt_active(&self) -> bool {
         self.state.prompt_active.load(Ordering::Acquire)
     }
 
+    #[cfg(test)]
     pub(crate) fn cancelled(&self) -> bool {
         self.state.cancelled.load(Ordering::Acquire)
     }

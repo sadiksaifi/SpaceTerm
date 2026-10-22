@@ -1120,9 +1120,15 @@ impl WorkspaceSidebar {
         let (leading, trailing) = row_padding(appearance, cx);
         let label = section.label.clone();
         let selector = format!("machine-heading-{label}");
+        // Element identity follows the heading's route, so same-named routes keep their own
+        // state, menu and accessibility node. The name stays the label people read.
+        let identity = match item {
+            SidebarItem::Machine(id) => format!("machine-{id}"),
+            SidebarItem::Workspace(_) => selector.clone(),
+        };
         let caption = appearance.typography.style(TextRole::Caption);
         let heading = div()
-            .id(SharedString::from(selector.clone()))
+            .id(SharedString::from(format!("{identity}-heading")))
             .debug_selector({
                 let selector = selector.clone();
                 move || selector.clone()
@@ -1170,18 +1176,40 @@ impl WorkspaceSidebar {
         };
         let target = section.target.clone();
         let grow_sidebar = sidebar.clone();
+        // A connection waiting for the person offers Connect in view, not only in its menu.
+        let connect = (section.awaiting_connection && section.connects).then(|| {
+            let target = target.clone();
+            let sidebar = sidebar.clone();
+            spaceterm_ui::Button::new(SharedString::from(format!("{identity}-connect")), "Connect")
+                .variant(spaceterm_ui::ButtonVariant::Link)
+                .size(spaceterm_ui::ButtonSize::Compact)
+                .tab_stop(true)
+                .debug_selector(format!("machine-connect-{label}"))
+                .accessibility_description(SharedString::from(format!(
+                    "Connect to {label} to show its Workspaces"
+                )))
+                .on_activate(move |_, _, cx| {
+                    let target = target.clone();
+                    let _ = sidebar.update(cx, |_, cx| {
+                        cx.emit(SidebarEvent::Machine {
+                            target,
+                            command: MachineMenuCommand::Connect,
+                        });
+                    });
+                })
+        });
         let entries = machine_menu_entries(section);
         // A machine without a server SpaceTerm can act on has no menu, only its name.
         let heading = if entries.is_empty() {
             div()
-                .id(SharedString::from(format!("{selector}-name")))
+                .id(SharedString::from(format!("{identity}-name")))
                 .role(accesskit::Role::Heading)
                 .aria_label(accessible)
                 .child(heading)
                 .into_any_element()
         } else {
             ContextMenu::new(
-                SharedString::from(format!("{selector}-menu")),
+                SharedString::from(format!("{identity}-menu")),
                 format!("Server actions for {label}"),
                 heading,
                 entries,
@@ -1200,16 +1228,20 @@ impl WorkspaceSidebar {
         };
         // A connection that isn't presented yet has no Workspaces to show until it connects, and
         // SpaceTerm hasn't read them, so it never claims there are none.
-        let empty_note = match (section.awaiting_connection, section.connects) {
-            (true, true) => "Connect to show its Workspaces.",
-            (true, false) => "Workspaces appear once connected.",
-            (false, _) => "No Workspaces",
+        let (empty_note, empty_label) = match (section.awaiting_connection, section.connects) {
+            // The Connect button before it starts the sentence.
+            (true, true) => ("to show its Workspaces.", "Connect to show its Workspaces."),
+            (true, false) => (
+                "Workspaces appear once connected.",
+                "Workspaces appear once connected.",
+            ),
+            (false, _) => ("No Workspaces", "No Workspaces"),
         };
         let empty = (section.workspaces == 0).then(|| {
             div()
-                .id(SharedString::from(format!("machine-empty-{label}")))
+                .id(SharedString::from(format!("{identity}-empty")))
                 .role(accesskit::Role::Label)
-                .aria_value(empty_note)
+                .aria_value(empty_label)
                 .debug_selector({
                     let label = label.clone();
                     move || format!("machine-empty-{label}")
@@ -1221,10 +1253,11 @@ impl WorkspaceSidebar {
                 .items_center()
                 .pl(leading + appearance.spacing(ICON_COLUMN_WIDTH + ROW_CONTENT_GAP))
                 .pr(trailing)
-                .truncate()
+                .gap(appearance.spacing(4.0))
                 .chrome_text(appearance.typography.style(TextRole::Secondary))
                 .text_color(gpui_color(colors.row_secondary))
-                .child(empty_note)
+                .children(connect)
+                .child(div().min_w_0().truncate().child(empty_note))
         });
         let motion = self.workspace_reorder.motion(item, cx);
         motion
@@ -1872,6 +1905,16 @@ fn maintenance_icon(action: crate::ui::remote_maintenance::RemoteAction) -> Icon
 /// allows, the maintenance steps its server state allows, and the Servers Settings Section.
 fn machine_menu_entries(section: &MachineSection) -> Vec<MenuEntry<MachineMenuCommand>> {
     let mut entries = Vec::new();
+    if section.creates_workspaces {
+        entries.push(
+            MenuEntry::action("New Workspace", MachineMenuCommand::NewWorkspace)
+                .icon(|foreground, size| {
+                    Icon::new(IconName::Plus, size, foreground).into_any_element()
+                })
+                .debug_selector("machine-menu-new-workspace"),
+        );
+        entries.push(MenuEntry::separator());
+    }
     if section.connects {
         entries.push(
             MenuEntry::action("Connect", MachineMenuCommand::Connect)

@@ -3,10 +3,6 @@ mod repository;
 
 use super::pane_lifecycle::PaneLifecycleDependencies;
 use super::terminal_focus::TerminalFocusBlocker;
-pub(crate) use crate::domain::remote_workspace::RemotePaneLifecycleError;
-use crate::domain::remote_workspace::{RemotePaneFacts, RemoteRestartAuthority};
-#[cfg(test)]
-use crate::terminal::TerminalSessionChannelUnavailable;
 use crate::ui::appearance::gpui_color;
 use std::cell::Cell;
 use std::ops::Range;
@@ -66,9 +62,9 @@ use crate::terminal::{
     FindQueryGeneration, InputModifiers, KeyAction, KeyInput, KeyTranslation, NativeContextActions,
     NativeServiceCapabilities, NativeServiceOrigin, NativeServiceStatus, PaneTerminalState,
     PasteConfirmation, PasteDecision, PastePayload, PasteRequestOutcome, PasteResolution,
-    PhysicalKey, PointerButton, PointerInput, PointerPhase, PreparedWorkspaceTerminalLaunch,
-    ScreenSnapshot, ScrollbackMovement, SelectionCopy, SelectionCopyError, ShiftSelectionPolicy,
-    SurfacePosition, TerminalAccessibilityModel, TerminalFailure, TerminalKeyInputAdapter,
+    PhysicalKey, PointerButton, PointerInput, PointerPhase, ScreenSnapshot, ScrollbackMovement,
+    SelectionCopy, SelectionCopyError, ShiftSelectionPolicy, SurfacePosition,
+    TerminalAccessibilityModel, TerminalFailure, TerminalKeyInputAdapter,
     TerminalKeyInputEventKind, TerminalLocalFileCapabilities, TerminalSessionEvent,
     TerminalSessionHandle, UnhandledKeyDiagnostic, WheelInput, WheelPhase,
     WorkspaceTerminalSessionFactory,
@@ -295,38 +291,9 @@ pub(super) struct OperationToken {
     recovery: Option<RecoveryToken>,
 }
 
-/// A move-only restart token bound to one Pane's Terminal Session epoch and successor generation.
-pub(crate) struct PreparedRemotePaneRestart {
-    session_factory: WorkspaceTerminalSessionFactory,
-    prepared_launch: PreparedWorkspaceTerminalLaunch,
-    authority: RemoteRestartAuthority,
-}
-
-#[derive(Clone, Copy)]
-enum PaneTerminalSessionStartFailure {
-    Preparation,
-    Worker,
-    RemoteRestart,
-}
-
-impl PaneTerminalSessionStartFailure {
-    fn terminal_failure(self) -> TerminalFailure {
-        TerminalFailure::platform(match self {
-            Self::Preparation => "prepare-terminal-session-channel",
-            Self::Worker => "start-terminal-session-worker",
-            Self::RemoteRestart => "restart-remote-terminal-session",
-        })
-    }
-
-    fn preserves_frame(self, remote: bool) -> bool {
-        remote && !matches!(self, Self::Preparation)
-    }
-}
-
 /// Owns a Pane's Terminal Session, launch authority and event task retirement.
 struct PaneTerminalSessionLifecycle {
     session_factory: WorkspaceTerminalSessionFactory,
-    prepared_launch: Option<PreparedWorkspaceTerminalLaunch>,
     current_directory: Option<crate::terminal::metadata::CurrentDirectory>,
     local_file_capabilities: TerminalLocalFileCapabilities,
     session: Option<Box<dyn TerminalSessionHandle>>,
@@ -335,11 +302,8 @@ struct PaneTerminalSessionLifecycle {
     accepted_screen_generation: Option<crate::terminal::PresentationGeneration>,
     /// The newest Terminal Metadata from Screens or the Terminal Session's retained snapshot.
     metadata: Option<Arc<crate::terminal::metadata::TerminalMetadataSnapshot>>,
-    remote_connection_generation: Option<u64>,
-    /// The Terminal Session takes no input because its Control Connection or server connection is
-    /// lost.
-    remote_input_blocked: bool,
-    remote_restart_start_pending: bool,
+    /// The Terminal Session takes no input because its server connection is interrupted.
+    connection_interrupted: bool,
     native_service_session_identity: u64,
     _event_task: Option<Task<()>>,
     _accessibility_task: Option<Task<()>>,
@@ -347,40 +311,22 @@ struct PaneTerminalSessionLifecycle {
 }
 
 impl PaneTerminalSessionLifecycle {
-    fn new(
-        session_factory: WorkspaceTerminalSessionFactory,
-        prepared_launch: Option<PreparedWorkspaceTerminalLaunch>,
-    ) -> Self {
+    fn new(session_factory: WorkspaceTerminalSessionFactory) -> Self {
         Self {
-            // A server-backed launch plan names no directory the shell actually starts in.
-            current_directory: prepared_launch
-                .as_ref()
-                .filter(|_| !session_factory.is_server_backed())
-                .map(PreparedWorkspaceTerminalLaunch::starting_directory),
+            // The owning server reports the directory the shell actually starts in.
+            current_directory: None,
             local_file_capabilities: session_factory.local_file_capabilities(),
             session_factory,
-            prepared_launch,
             session: None,
             session_start_attempted: false,
             session_epoch: 0,
             accepted_screen_generation: None,
             metadata: None,
-            remote_connection_generation: None,
-            remote_input_blocked: false,
-            remote_restart_start_pending: false,
+            connection_interrupted: false,
             native_service_session_identity: 0,
             _event_task: None,
             _accessibility_task: None,
             _clipboard_task: None,
-        }
-    }
-
-    fn remote_facts(&self) -> RemotePaneFacts {
-        RemotePaneFacts {
-            remote: self.session_factory.is_remote(),
-            generation: self.remote_connection_generation,
-            disconnected: self.remote_input_blocked,
-            epoch: self.session_epoch,
         }
     }
 
@@ -394,33 +340,12 @@ impl PaneTerminalSessionLifecycle {
         }
     }
 
-    fn suspend(&mut self) {
-        self.remote_input_blocked = true;
-        self.retire_events();
-    }
-
     fn close(&mut self) {
         self.retire_events();
         if self.session.take().is_some() {
             self.native_service_session_identity =
                 self.native_service_session_identity.wrapping_add(1);
         }
-    }
-
-    fn commit_restart(&mut self, prepared: PreparedRemotePaneRestart) {
-        self.retire_events();
-        self.session.take();
-        self.native_service_session_identity = self.native_service_session_identity.wrapping_add(1);
-        self.session_factory = prepared.session_factory;
-        self.current_directory = Some(prepared.prepared_launch.starting_directory());
-        self.metadata = prepared.prepared_launch.initial_remote_metadata();
-        self.prepared_launch = Some(prepared.prepared_launch);
-        self.local_file_capabilities = self.session_factory.local_file_capabilities();
-        self.session_start_attempted = false;
-        self.remote_connection_generation = Some(prepared.authority.generation());
-        self.remote_input_blocked = false;
-        self.remote_restart_start_pending = true;
-        self.accepted_screen_generation = None;
     }
 
     fn attach(
@@ -510,31 +435,16 @@ impl PaneTerminalSessionLifecycle {
         &mut self,
         geometry: TerminalGeometry,
         appearance: crate::terminal::TerminalAppearanceUpdate,
-    ) -> Option<Result<crate::terminal::StartedTerminalSession, PaneTerminalSessionStartFailure>>
-    {
+    ) -> Option<Result<crate::terminal::StartedTerminalSession, TerminalFailure>> {
         if self.session_start_attempted {
             return None;
         }
         self.session_start_attempted = true;
-        let prepared = self.prepared_launch.take().or_else(|| {
-            (!self.session_factory.is_remote())
-                .then(|| self.session_factory.prepare_child_launch().ok())
-                .flatten()
-        });
-        let Some(prepared) = prepared else {
-            return Some(Err(PaneTerminalSessionStartFailure::Preparation));
-        };
-        let operation = if self.remote_restart_start_pending {
-            PaneTerminalSessionStartFailure::RemoteRestart
-        } else {
-            PaneTerminalSessionStartFailure::Worker
-        };
-        let result = self
-            .session_factory
-            .start(geometry, prepared, appearance)
-            .map_err(|_| operation);
-        self.remote_restart_start_pending = false;
-        Some(result)
+        Some(
+            self.session_factory
+                .start(geometry, appearance)
+                .map_err(|_| TerminalFailure::platform("start-terminal-session-worker")),
+        )
     }
 }
 
@@ -685,10 +595,8 @@ impl TerminalPane {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let prepared_launch = session_factory.prepare_child_launch().ok();
-        Self::new_with_services(
+        Self::with_adapters(
             session_factory,
-            prepared_launch,
             crate::terminal::testing::test_terminal_key_input_adapter(),
             &crate::platform::terminal_accessibility::testing::RecordingAccessibilityFactory::default(),
             crate::terminal::native_services::testing::adapters(),
@@ -698,39 +606,9 @@ impl TerminalPane {
         )
     }
 
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "Explicit capability injection follows hierarchy ownership"
-    )]
-    pub(crate) fn new_with_prepared_launch(
+    /// A Pane presenting `session_factory`'s Terminal Session with the host's adapters.
+    pub(crate) fn with_adapters(
         session_factory: WorkspaceTerminalSessionFactory,
-        prepared_launch: PreparedWorkspaceTerminalLaunch,
-        key_input_adapter: Box<dyn TerminalKeyInputAdapter>,
-        accessibility_adapter_factory: &dyn TerminalAccessibilityAdapterFactory,
-        native_service_adapters: NativeServiceAdapters,
-        lifecycle_dependencies: PaneLifecycleDependencies,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
-        Self::new_with_services(
-            session_factory,
-            Some(prepared_launch),
-            key_input_adapter,
-            accessibility_adapter_factory,
-            native_service_adapters,
-            lifecycle_dependencies,
-            window,
-            cx,
-        )
-    }
-
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "Explicit capability injection follows hierarchy ownership"
-    )]
-    fn new_with_services(
-        session_factory: WorkspaceTerminalSessionFactory,
-        prepared_launch: Option<PreparedWorkspaceTerminalLaunch>,
         key_input_adapter: Box<dyn TerminalKeyInputAdapter>,
         accessibility_adapter_factory: &dyn TerminalAccessibilityAdapterFactory,
         native_service_adapters: NativeServiceAdapters,
@@ -876,7 +754,7 @@ impl TerminalPane {
         .detach();
 
         Self {
-            terminal_session: PaneTerminalSessionLifecycle::new(session_factory, prepared_launch),
+            terminal_session: PaneTerminalSessionLifecycle::new(session_factory),
             window_handle: window.window_handle(),
             text_clipboard: native_service_adapters.text_clipboard,
             native_service_focus_epoch: Cell::new(0),
@@ -1287,7 +1165,7 @@ impl TerminalPane {
         activity: SurfaceActivity,
         modal_open: bool,
     ) -> Option<TerminalFocusFacts> {
-        if self.terminal_session.remote_input_blocked
+        if self.terminal_session.connection_interrupted
             || self.native_attention_pane.is_none()
             || (self.server_backed() && !self.interactive_input_available())
         {
@@ -1356,7 +1234,7 @@ impl TerminalPane {
                     self.product_focus.blocker,
                     None | Some(TerminalFocusBlocker::Modal)
                 )
-                || self.terminal_session.remote_input_blocked
+                || self.terminal_session.connection_interrupted
             {
                 self.cancel_pending_paste();
             }
@@ -1619,7 +1497,7 @@ impl TerminalPane {
     fn native_focus_authority(&mut self) -> Option<u64> {
         let current = (self.native_focus.presented
             && (!self.server_backed()
-                || (!self.terminal_session.remote_input_blocked
+                || (!self.terminal_session.connection_interrupted
                     && self
                         .terminal_session
                         .session
@@ -1643,7 +1521,7 @@ impl TerminalPane {
 
     fn terminal_session_available(&self) -> bool {
         self.terminal_session.session.is_some()
-            && !self.terminal_session.remote_input_blocked
+            && !self.terminal_session.connection_interrupted
             && !matches!(self.pane_state, PaneTerminalState::Exited(_))
             && !self
                 .pane_state
@@ -1655,7 +1533,7 @@ impl TerminalPane {
         PaneCloseFacts {
             live_session: self.terminal_session.session.is_some(),
             state: &self.pane_state,
-            disconnected: self.terminal_session.remote_input_blocked,
+            disconnected: self.terminal_session.connection_interrupted,
             metadata: self.metadata(),
         }
     }
@@ -1669,24 +1547,6 @@ impl TerminalPane {
     #[cfg(test)]
     pub(crate) const fn font_size(&self) -> f32 {
         self.font_size
-    }
-
-    #[cfg(test)]
-    pub(crate) const fn remote_session_state(&self) -> (bool, bool) {
-        (
-            self.terminal_session.remote_input_blocked,
-            self.terminal_session.session.is_some(),
-        )
-    }
-
-    #[cfg(test)]
-    pub(crate) fn restart_state(&self) -> (bool, Option<&'static str>) {
-        (
-            self.terminal_session.session.is_some(),
-            self.pane_state
-                .failure()
-                .map(crate::terminal::TerminalFailure::operation),
-        )
     }
 
     pub(crate) fn close(&mut self) {
@@ -1718,55 +1578,6 @@ impl TerminalPane {
         self.terminal_session.close();
     }
 
-    fn validate_remote_generation(&self, generation: u64) -> Result<(), RemotePaneLifecycleError> {
-        self.terminal_session
-            .remote_facts()
-            .validate_generation(generation)
-    }
-
-    /// Validates that `generation` may disconnect this Remote Pane without mutating it.
-    pub(crate) fn can_disconnect_remote(
-        &self,
-        generation: u64,
-    ) -> Result<(), RemotePaneLifecycleError> {
-        self.validate_remote_generation(generation)
-    }
-
-    /// Suspends a Remote Pane for an authoritative Control Connection loss. Repeated notification
-    /// for one generation is idempotent; stale generations and Local Panes are rejected unchanged.
-    pub(crate) fn disconnect_remote(
-        &mut self,
-        generation: u64,
-        cx: &mut Context<Self>,
-    ) -> Result<(), RemotePaneLifecycleError> {
-        self.validate_remote_generation(generation)?;
-        if self.terminal_session.remote_connection_generation == Some(generation)
-            && self.terminal_session.remote_input_blocked
-        {
-            return Ok(());
-        }
-        self.terminal_session.remote_connection_generation = Some(generation);
-        self.suspend_remote_session(cx);
-        Ok(())
-    }
-
-    fn suspend_remote_session(&mut self, cx: &mut Context<Self>) {
-        let was_available = self.terminal_session_available();
-        self.sync_metadata(self.terminal_session.session_epoch);
-        self.terminal_session.suspend();
-        self.reset_hidden_input();
-        self.apply_terminal_input_focus(false);
-        self.context_menu = None;
-        self.pressed_button = None;
-        self.selection_copy_pending = false;
-        self.pressed_link = None;
-        if was_available != self.terminal_session_available() {
-            cx.emit(TerminalPaneEvent::CaptionChanged);
-        }
-        self.sync_repository_status(cx);
-        cx.notify();
-    }
-
     /// Pauses or resumes input while a server-backed Pane's server connection is interrupted. The
     /// Terminal Session and its last Screen stay in place, so the screen reads frozen. Input during
     /// the interruption reaches nothing and is never replayed.
@@ -1777,12 +1588,12 @@ impl TerminalPane {
         cx: &mut Context<Self>,
     ) {
         if !self.terminal_session.session_factory.is_server_backed()
-            || self.terminal_session.remote_input_blocked == interrupted
+            || self.terminal_session.connection_interrupted == interrupted
         {
             return;
         }
         let was_available = self.terminal_session_available();
-        self.terminal_session.remote_input_blocked = interrupted;
+        self.terminal_session.connection_interrupted = interrupted;
         if interrupted {
             self.pending_file_insertion = None;
             self.reset_hidden_input();
@@ -1853,85 +1664,6 @@ impl TerminalPane {
         }
         cx.emit(TerminalPaneEvent::CaptionChanged);
         cx.notify();
-    }
-
-    fn suspend_if_terminal_session_channel_unavailable(&mut self, cx: &mut Context<Self>) -> bool {
-        if self
-            .terminal_session
-            .session_factory
-            .terminal_session_channel_is_ready()
-            != Some(false)
-        {
-            return false;
-        }
-        self.suspend_remote_session(cx);
-        true
-    }
-
-    /// Binds one prepared channel to this disconnected Pane without mutating its session. The token
-    /// captures the current Terminal Session epoch so delayed preparation cannot replace a
-    /// successor.
-    pub(crate) fn prepare_remote_restart(
-        &self,
-        session_factory: WorkspaceTerminalSessionFactory,
-        generation: u64,
-        prepared_launch: PreparedWorkspaceTerminalLaunch,
-    ) -> Result<PreparedRemotePaneRestart, RemotePaneLifecycleError> {
-        let authority =
-            RemoteRestartAuthority::prepare(self.terminal_session.remote_facts(), generation)?;
-        if !session_factory.is_remote() {
-            return Err(RemotePaneLifecycleError::LocalPane);
-        }
-        Ok(PreparedRemotePaneRestart {
-            session_factory,
-            prepared_launch,
-            authority,
-        })
-    }
-
-    pub(crate) fn can_commit_remote_restart(
-        &self,
-        prepared: &PreparedRemotePaneRestart,
-    ) -> Result<(), RemotePaneLifecycleError> {
-        prepared
-            .authority
-            .validate(self.terminal_session.remote_facts())
-    }
-
-    /// Commits a prevalidated successor Terminal Session in the existing Pane entity. The retained
-    /// presentation stays visible until the successor publishes its first snapshot.
-    pub(crate) fn commit_remote_restart(
-        &mut self,
-        prepared: PreparedRemotePaneRestart,
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) -> Result<(), RemotePaneLifecycleError> {
-        self.can_commit_remote_restart(&prepared)?;
-        let restart_geometry = self.last_geometry;
-        self.terminal_session.commit_restart(prepared);
-        self.fallback_title =
-            normalized_pane_title("", &self.terminal_session.session_factory.fallback_title())
-                .into();
-        self.reset_hidden_input();
-        self.render_lifecycle.reset_session_presentations();
-        self.pending_accessibility_notifications
-            .insert(AccessibilityNotification::Value);
-        self.pending_accessibility_notifications
-            .insert(AccessibilityNotification::Selection);
-        self.last_geometry = restart_geometry;
-        self.pane_state = PaneTerminalState::Running;
-        self.pending_recovery = None;
-        self.recovery_retry_requested = None;
-        self.status = None;
-        self.state_revision = self.state_revision.wrapping_add(1);
-        if let Some(geometry) = restart_geometry {
-            self.start_session(geometry, cx);
-        }
-        let _ = self.sync_terminal_input_focus(window, cx);
-        self.sync_repository_status(cx);
-        cx.emit(TerminalPaneEvent::CaptionChanged);
-        cx.notify();
-        Ok(())
     }
 
     fn stop_surface_animations(&mut self) {
@@ -2301,11 +2033,7 @@ impl TerminalPane {
                 self.flush_pending_file_insertion(cx);
             }
             Err(failure) => {
-                self.present_failure(
-                    failure.terminal_failure(),
-                    failure.preserves_frame(self.terminal_session.session_factory.is_remote()),
-                    Some(RecoveryAction::StartSession),
-                );
+                self.present_failure(failure, false, Some(RecoveryAction::StartSession));
                 cx.notify();
             }
         }
@@ -2611,9 +2339,6 @@ impl TerminalPane {
                 return self.offer_permission_setup(request.permissions(), cx);
             }
             TerminalSessionEvent::Exited(status) => {
-                if self.suspend_if_terminal_session_channel_unavailable(cx) {
-                    return false;
-                }
                 self.context_menu = None;
                 self.cancel_pending_paste();
                 self.file_preview.dismiss();
@@ -2637,9 +2362,6 @@ impl TerminalPane {
                 cx.emit(TerminalPaneEvent::Exited);
             }
             TerminalSessionEvent::Failed(failure) => {
-                if self.suspend_if_terminal_session_channel_unavailable(cx) {
-                    return false;
-                }
                 let was_available = self.terminal_session_available();
                 self.context_menu = None;
                 self.file_preview.dismiss();
@@ -3230,7 +2952,7 @@ impl TerminalPane {
             self.hovered_link = hovered_link;
             cx.notify();
         }
-        if self.terminal_session.remote_input_blocked {
+        if self.terminal_session.connection_interrupted {
             cx.stop_propagation();
             return;
         }
@@ -3370,7 +3092,7 @@ impl TerminalPane {
         if self.reading_available() {
             self.reveal_scrollbar(cx);
         }
-        if self.terminal_session.remote_input_blocked {
+        if self.terminal_session.connection_interrupted {
             cx.stop_propagation();
             return;
         }
@@ -4370,7 +4092,7 @@ impl TerminalPane {
                 self.product_focus.blocker,
                 None | Some(TerminalFocusBlocker::Modal)
             )
-            || self.terminal_session.remote_input_blocked
+            || self.terminal_session.connection_interrupted
             || !activity.application_active
             || !activity.operating_system_window_key
         {

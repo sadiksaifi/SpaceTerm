@@ -255,10 +255,15 @@ pub(crate) struct FormBackend {
     pub root: PathBuf,
     pub workspace: [u8; 32],
     pub branches: crate::worktrees::git::BranchList,
+    /// The other computer whose server runs Git, or `None` for this computer's.
+    pub machine: Option<String>,
 }
 impl crate::ui::worktree_form::WorktreeFormBackend for FormBackend {
     fn server(&self) -> bool {
         true
+    }
+    fn machine(&self) -> Option<&str> {
+        self.machine.as_deref()
     }
     fn connected(&self) -> bool {
         self.client.availability().0
@@ -346,20 +351,30 @@ pub(crate) mod testing {
     use spaceterm_server::worktree::Settings;
     use std::sync::Mutex;
 
-    /// One server's Server Settings, answered from memory.
-    pub(crate) struct ScriptedReads(Mutex<Settings>);
+    /// One server's Server Settings, answered from memory. It records every read it answers,
+    /// so a test can tell which server a Worktree read reached.
+    pub(crate) struct ScriptedReads(Mutex<Settings>, Mutex<Vec<Read>>);
 
     impl ScriptedReads {
         pub(crate) fn new(template: &str) -> Arc<Self> {
-            Arc::new(Self(Mutex::new(Settings {
-                template: template.to_owned(),
-                version: 0,
-            })))
+            Arc::new(Self(
+                Mutex::new(Settings {
+                    template: template.to_owned(),
+                    version: 0,
+                }),
+                Mutex::default(),
+            ))
+        }
+
+        /// Every read this server was asked, oldest first.
+        pub(crate) fn reads(&self) -> Vec<Read> {
+            self.1.lock().unwrap().clone()
         }
     }
 
     impl WorktreeReads for ScriptedReads {
         fn read(&self, read: Read) -> Result<ReadReply, Error> {
+            self.1.lock().unwrap().push(read.clone());
             match read {
                 Read::Settings => Ok(ReadReply::Settings(self.0.lock().unwrap().clone())),
                 _ => Err(Error::Unavailable),

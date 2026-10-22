@@ -7,8 +7,8 @@ use spaceterm::runtime::{
     BackingScale, CellGridSize, KeyAction, KeyInput, LocalMachine, LocalTerminalLaunchPlan,
     LogicalCellSize, LogicalSize, NativeTerminalSessionFactory, PhysicalKey, ScreenSnapshot,
     ShellEnvironment, ShellIntegrationMode, ShellIntegrationPolicy, ShellLaunchPlanner,
-    TerminalAppearanceUpdate, TerminalGeometry, TerminalLaunchPlan, TerminalRuntime,
-    TerminalSessionEvent, TerminalSessionHandle, local_filesystem, native_pty_factory,
+    TerminalAppearanceUpdate, TerminalGeometry, TerminalRuntime, TerminalSessionEvent,
+    TerminalSessionHandle, local_filesystem, native_pty_factory,
 };
 
 fn geometry(columns: u16, rows: u16) -> TerminalGeometry {
@@ -98,7 +98,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     );
     let mut runtime = factory.start_runtime(
         geometry(80, 24),
-        TerminalLaunchPlan::Local(LocalTerminalLaunchPlan::new(directory)),
+        LocalTerminalLaunchPlan::new(directory),
         TerminalAppearanceUpdate::builtin()?,
     )?;
     let first = runtime.subscribe();

@@ -35,6 +35,10 @@ pub(crate) trait WorktreeFormBackend {
     fn server(&self) -> bool {
         false
     }
+    /// The other computer whose server runs Git, or `None` for this computer's.
+    fn machine(&self) -> Option<&str> {
+        None
+    }
     fn connected(&self) -> bool {
         true
     }
@@ -251,10 +255,12 @@ impl WorktreeForm {
             format!(
                 "Check out a branch of {} in its own directory.",
                 self.context.repository_name
-            ) + if self.backend.server() {
-                " The local server runs Git and creates it."
-            } else {
-                ""
+            ) + &match (self.backend.server(), self.backend.machine()) {
+                (true, Some(machine)) => format!(
+                    " The SpaceTerm Server on \u{201C}{machine}\u{201D} runs Git and creates it there."
+                ),
+                (true, None) => " The local server runs Git and creates it.".to_owned(),
+                (false, _) => String::new(),
             },
         )
         .size(DialogSize::Wide)

@@ -333,7 +333,7 @@ impl TerminalPane {
             directory,
             finished_commands: metadata.finished_commands,
             visible: focus.active_workspace && focus.active_tab && focus.pane_visible,
-            available: !self.terminal_session.remote_input_blocked,
+            available: !self.terminal_session.connection_interrupted,
             stopped: stale || exited,
         })
     }

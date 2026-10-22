@@ -13,13 +13,22 @@ pub(crate) fn unconfirmed_join(label: &str) -> (DirectConnections, JoinId) {
     super::worker::enrollment_tests::unconfirmed_join(label)
 }
 
+pub(crate) fn retryable_join(label: &str, stage: EnrollmentStage) -> (DirectConnections, JoinId) {
+    super::worker::enrollment_tests::retryable_join(label, stage)
+}
+
+/// Records kept in memory. While `failing`, a save publishes nothing, as a full or locked
+/// disk does.
 #[derive(Default)]
-struct MemoryRecords(Mutex<Document>);
+pub(super) struct MemoryRecords(Mutex<Document>, AtomicBool);
 impl Records for MemoryRecords {
     fn load(&self) -> Result<Document, ()> {
         Ok(self.0.lock().unwrap().clone())
     }
     fn save(&self, document: &Document) -> Result<Durability, SaveError> {
+        if self.1.load(Ordering::Acquire) {
+            return Err(SaveError::NotPublished);
+        }
         *self.0.lock().unwrap() = document.clone();
         Ok(Durability::Synchronized)
     }
@@ -211,8 +220,55 @@ impl CredentialLock {
     }
 }
 
+/// Whether the offline fixture's records can be saved.
+pub(crate) struct RecordsStorage(Arc<MemoryRecords>);
+
+impl RecordsStorage {
+    pub(crate) fn set_failing(&self, failing: bool) {
+        self.0.1.store(failing, Ordering::Release);
+    }
+}
+
+/// The offline fixture with control over whether its records save.
+pub(crate) fn offline_with_storage(
+    label: &str,
+) -> (DirectConnections, DirectRouteId, RecordsStorage) {
+    let (connections, id, _, records) = offline_fixture(label);
+    (connections, id, RecordsStorage(records))
+}
+
 /// The offline fixture with control over its own in-memory credential boundary.
 pub(crate) fn offline_with_lock(label: &str) -> (DirectConnections, DirectRouteId, CredentialLock) {
+    let (connections, id, lock, _) = offline_fixture(label);
+    (connections, id, lock)
+}
+
+/// Offline saved routes named `labels`, in order, each keeping its own credential.
+pub(crate) fn offline_routes(labels: &[&str]) -> (DirectConnections, Vec<DirectRouteId>) {
+    let (connections, ids, _, _) = offline_fixture_routes(labels);
+    (connections, ids)
+}
+
+fn offline_fixture(
+    label: &str,
+) -> (
+    DirectConnections,
+    DirectRouteId,
+    CredentialLock,
+    Arc<MemoryRecords>,
+) {
+    let (connections, ids, lock, records) = offline_fixture_routes(&[label]);
+    (connections, ids[0], lock, records)
+}
+
+fn offline_fixture_routes(
+    labels: &[&str],
+) -> (
+    DirectConnections,
+    Vec<DirectRouteId>,
+    CredentialLock,
+    Arc<MemoryRecords>,
+) {
     struct OfflineNetwork;
     impl DirectNetwork for OfflineNetwork {
         fn connect(
@@ -244,27 +300,30 @@ pub(crate) fn offline_with_lock(label: &str) -> (DirectConnections, DirectRouteI
             Err(DirectError::Transport)
         }
     }
-    let mut route = saved(1, 5);
-    route.route.label = label.to_owned();
-    route.active = true;
-    let id = route.route.id;
     let records = Arc::new(MemoryRecords::default());
-    records.0.lock().unwrap().routes.push(route);
     let credentials = Arc::new(Credentials::default());
-    credentials
-        .insert(
-            &[5; 32],
-            DeviceCredential::generate().unwrap().expose_bytes(),
-        )
-        .unwrap();
+    let mut ids = Vec::new();
+    for (index, label) in (0_u8..).zip(labels) {
+        let mut route = saved(1 + index, 5 + index);
+        route.route.label = (*label).to_owned();
+        route.active = true;
+        ids.push(route.route.id);
+        records.0.lock().unwrap().routes.push(route);
+        credentials
+            .insert(
+                &[5 + index; 32],
+                DeviceCredential::generate().unwrap().expose_bytes(),
+            )
+            .unwrap();
+    }
     let connections = DirectConnections::new(
         "spaceterm-development",
-        records,
+        records.clone(),
         credentials.clone(),
         Arc::new(OfflineNetwork),
     );
     connections.resume_retained();
-    (connections, id, CredentialLock(credentials))
+    (connections, ids, CredentialLock(credentials), records)
 }
 
 fn await_condition(mut condition: impl FnMut() -> bool) {

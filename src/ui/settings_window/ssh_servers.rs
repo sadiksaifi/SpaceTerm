@@ -532,8 +532,14 @@ impl SettingsWindow {
                         )
                     ));
                 }
-                if self.ssh_server_reconnects(&destination) && !presentation.working {
-                    explanation.push_str(" SpaceTerm tries again quietly when it reopens.");
+                // Nothing proves a route signs in without a prompt after SpaceTerm reopens, so a
+                // saved connection then waits for the person's Connect.
+                if self.ssh_server_reconnects(&destination)
+                    && !presentation.working
+                    && !matches!(status, RemoteConnectionStatus::NeedsPerson { .. })
+                {
+                    explanation
+                        .push_str(" When SpaceTerm reopens, it waits for you to choose Connect.");
                 }
                 Some((SharedString::from(explanation), presentation.tone))
             }

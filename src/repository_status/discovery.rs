@@ -240,6 +240,7 @@ fn is_git_true(value: &[u8]) -> bool {
 }
 
 /// Parses one complete configuration output held in memory.
+#[cfg(test)]
 pub(crate) fn parse_config(
     output: &[u8],
     branch: Option<&str>,

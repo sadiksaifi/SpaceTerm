@@ -7,8 +7,8 @@ pub use crate::appearance::resolution::{
 };
 pub use crate::appearance::terminal_theme::{Appearance, CatalogError, TerminalColors, ThemeId};
 pub use crate::domain::workspace_collection::{
-    CurrentDirectory, RemoteDirectory, RemoteDirectoryIdentity, RemoteUser,
-    RemoteWorkspaceValueError, SshDestination, ValidatedLocalDirectory,
+    CurrentDirectory, RemoteDirectory, RemoteWorkspaceValueError, SshDestination,
+    ValidatedLocalDirectory,
 };
 pub use crate::local_path::LocalPathSemantics;
 pub use crate::platform::local_filesystem::{
@@ -22,7 +22,6 @@ pub use crate::platform::shell_integration::*;
 pub use crate::platform::shell_launch::{
     PreparedShellLaunch, ShellLaunchFailure, ShellLaunchPlanner,
 };
-pub use crate::ssh::command::PreparedSshTerminalSessionChannelError;
 pub use crate::terminal::accessibility::{
     AccessibilityCellRef, AccessibilityCellView, AccessibilityGeometry, AccessibilityRowId,
     AccessibilityRowView, AccessibilityScreen, AccessibilitySelectionRequest,
@@ -64,10 +63,10 @@ pub use crate::terminal::permission_request::PermissionRequest;
 pub use crate::terminal::pointer_input::*;
 pub use crate::terminal::session::{
     AccessibilityDemandSender, AccessibilitySelectionSender, ClipboardCompletion, ClipboardRequest,
-    LocalTerminalLaunchPlan, NativeTerminalSessionFactory, RemoteTerminalLaunchPlan,
-    SelectionCopyError, StartedTerminalSession, TerminalAppearanceUpdate, TerminalLaunchPlan,
-    TerminalRuntime, TerminalSessionError, TerminalSessionEvent, TerminalSessionExit,
-    TerminalSessionFactory, TerminalSessionFailure, TerminalSessionHandle, TerminalSubscription,
+    LocalTerminalLaunchPlan, NativeTerminalSessionFactory, SelectionCopyError,
+    StartedTerminalSession, TerminalAppearanceUpdate, TerminalRuntime, TerminalSessionError,
+    TerminalSessionEvent, TerminalSessionExit, TerminalSessionFactory, TerminalSessionFailure,
+    TerminalSessionHandle, TerminalSubscription,
 };
 pub use crate::terminal::title::TitleGlyph;
 
@@ -82,4 +81,6 @@ pub fn local_filesystem() -> LocalFilesystemAuthority {
 }
 
 mod server;
+#[cfg(all(test, feature = "desktop"))]
+pub(crate) use server::testing as directory_testing;
 pub use server::{DevelopmentPaneHost, SharedWorkspaceHost};

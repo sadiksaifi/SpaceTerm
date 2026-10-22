@@ -167,18 +167,14 @@ fn launch_harness_with(
         launch: Arc::clone(&launch) as Arc<_>,
         connector,
     };
-    let records = TestTerminalSessionRecords::default();
-    let session_factory: Rc<dyn TerminalSessionFactory> =
-        Rc::new(TestTerminalSessionFactory::new(records).with_fallback_title("zsh"));
     let (manager, cx) = cx.add_window_view(|window, cx| {
         WorkspaceManager::new_with_adapters(
-            session_factory,
             std::env::temp_dir(),
             WorkspaceManagerAdapters {
                 local_server: adapters,
                 local_filesystem: crate::runtime::local_filesystem(),
                 directory_selection: Rc::new(ScriptedDirectorySelection::new(selections)),
-                ..workspace_adapters(test_remote_backend_factory())
+                ..workspace_adapters()
             },
             SidebarState::Expanded,
             window,
@@ -725,17 +721,12 @@ fn a_second_launched_window_brings_the_presenting_one_forward(cx: &mut TestAppCo
             panes: Rc::clone(&harness.panes),
         }),
     };
-    let session_factory: Rc<dyn TerminalSessionFactory> = Rc::new(
-        TestTerminalSessionFactory::new(TestTerminalSessionRecords::default())
-            .with_fallback_title("zsh"),
-    );
     let second = cx.add_window(|window, cx| {
         WorkspaceManager::new_with_adapters(
-            session_factory,
             std::env::temp_dir(),
             WorkspaceManagerAdapters {
                 local_server: adapters,
-                ..workspace_adapters(test_remote_backend_factory())
+                ..workspace_adapters()
             },
             SidebarState::Expanded,
             window,

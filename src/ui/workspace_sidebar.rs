@@ -110,6 +110,8 @@ pub(super) enum WorkspaceMenuCommand {
 /// What a machine heading's menu asks of the application.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum MachineMenuCommand {
+    /// Creates a Workspace on the machine's presented SpaceTerm Server.
+    NewWorkspace,
     /// Connects to the machine's SpaceTerm Server, asking the person in this window if needed.
     Connect,
     /// Stops presenting the SSH server's Workspaces. They keep running on that machine.
@@ -122,7 +124,7 @@ pub(super) enum MachineMenuCommand {
 }
 
 /// The server a machine heading presents, by the route this client reaches it.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum MachineTarget {
     Local,
     Ssh(SshDestination),
@@ -150,6 +152,8 @@ pub(super) struct MachineSection {
     /// Whether the machine's server is a Saved Connection that isn't presented yet, so its
     /// Workspaces appear only once it connects.
     pub(super) awaiting_connection: bool,
+    /// Whether another computer's presented server takes a new Workspace from this heading.
+    pub(super) creates_workspaces: bool,
     /// The maintenance steps the machine's observed server state allows, in menu order.
     pub(super) maintenance: Vec<crate::ui::remote_maintenance::RemoteAction>,
     /// How many Workspace rows follow the heading.
@@ -372,7 +376,9 @@ pub(super) struct WorkspaceSidebar {
     /// Each heading's strip identity, parallel to `sections`, kept for the life of its label so a
     /// heading that returns keeps its place in the strip's motion.
     section_ids: Vec<u64>,
-    section_identities: std::collections::HashMap<SharedString, u64>,
+    /// Each heading's stable identity, by the server route it presents. Two routes may carry
+    /// the same name, such as a saved direct route and a newer one to the same computer.
+    section_identities: std::collections::HashMap<MachineTarget, u64>,
     remote_unavailable: Option<String>,
     layout: SidebarLayout,
     scroll_handle: ScrollHandle,
@@ -779,7 +785,6 @@ pub(super) fn remote_connection_status(phase: RemoteConnectionPhase) -> Option<&
         RemoteConnectionPhase::Reconnecting => Some("Reconnecting…"),
         RemoteConnectionPhase::Disconnected => Some("Disconnected"),
         RemoteConnectionPhase::Failed => Some("Connection failed"),
-        RemoteConnectionPhase::Closing => Some("Closing…"),
     }
 }
 
@@ -790,7 +795,7 @@ pub(super) fn remote_connection_color(
     match phase {
         RemoteConnectionPhase::Reconnecting => colors.info,
         RemoteConnectionPhase::Connected => colors.success,
-        RemoteConnectionPhase::Disconnected | RemoteConnectionPhase::Closing => colors.icon_muted,
+        RemoteConnectionPhase::Disconnected => colors.icon_muted,
         RemoteConnectionPhase::Failed => colors.error,
     }
 }
@@ -834,7 +839,7 @@ impl WorkspaceSidebar {
             .map(|section| {
                 // The map only grows, so its size names each new heading uniquely.
                 let next = identities.len() as u64;
-                *identities.entry(section.label.clone()).or_insert(next)
+                *identities.entry(section.target.clone()).or_insert(next)
             })
             .collect();
         self.sections = sections;
@@ -1600,10 +1605,6 @@ mod tests {
                 RemoteConnectionPhase::Disconnected,
                 &ChromeColors::default()
             ),
-            ChromeColors::default().icon_muted
-        );
-        assert_eq!(
-            remote_connection_color(RemoteConnectionPhase::Closing, &ChromeColors::default()),
             ChromeColors::default().icon_muted
         );
     }

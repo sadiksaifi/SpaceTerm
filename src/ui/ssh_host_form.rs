@@ -27,13 +27,10 @@ const CANCEL_ACTION_SELECTOR: &str = "managed-ssh-host-cancel";
 const SAVE_FAILURE_MESSAGE: &str =
     "SpaceTerm couldn\u{2019}t save this SSH host. Check permissions and try again.";
 const COLLISION_MESSAGE: &str = "That SSH host alias is already configured.";
-const HOST_IN_USE_MESSAGE: &str =
-    "This SSH host alias is in use by a Remote Workspace. Close that Workspace, then try again.";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ManagedHostFormBackendError {
     AliasCollision,
-    HostInUse,
     SaveFailed,
 }
 
@@ -504,10 +501,6 @@ impl SshHostForm {
                     ManagedHostFormBackendError::AliasCollision => {
                         self.errors.alias = Some(COLLISION_MESSAGE);
                         Some(self.alias.read(cx).focus_handle())
-                    }
-                    ManagedHostFormBackendError::HostInUse => {
-                        self.backend_error = Some(HOST_IN_USE_MESSAGE);
-                        None
                     }
                     ManagedHostFormBackendError::SaveFailed => {
                         self.backend_error = Some(SAVE_FAILURE_MESSAGE);

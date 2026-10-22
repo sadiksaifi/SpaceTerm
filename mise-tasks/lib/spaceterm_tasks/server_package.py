@@ -13,6 +13,7 @@ import platform
 import re
 import shutil
 import stat
+import struct
 import subprocess
 import sys
 import tarfile
@@ -103,7 +104,7 @@ def build_info(executable):
 
 
 def unpack_verified(
-    archive, signature, destination, expected, *, identity=None, expected_sha256=None
+    archive, signature, destination, expected, *, identity=None, target=None, expected_sha256=None
 ):
     """Authenticate exact archive bytes before parsing or extracting any member.
 
@@ -156,7 +157,7 @@ def unpack_verified(
             if expected is not None and info != expected:
                 raise TaskError("the server artifact differs from the requested exact build")
             if identity is not None:
-                compatible_candidate(info, identity)
+                compatible_candidate(info, identity, target=target)
             # A failure above cannot create any destination entry.
             source.extractall(destination, members=members, filter="data")
             # Archives may omit directory entries. Tarfile creates those parents using the
@@ -174,7 +175,32 @@ def signer():
     return config["macos"]["signing-identity"]
 
 
-def verify_tree(tree, expected):
+def verify_foreign_terminfo(path):
+    """Check portable table bounds; the native producer owns full terminfo decoding."""
+    # ncurses term(5): 0x011a has 16-bit numbers, 0x021e has 32-bit numbers.
+    # macOS's older infocmp cannot decode the latter Linux-produced format.
+    with path.open("rb") as source:
+        header = source.read(12)
+        if len(header) != 12:
+            raise TaskError("the foreign server terminfo header is truncated")
+        magic, names, booleans, numbers, strings, table = struct.unpack("<6h", header)
+        if (
+            magic not in (0x011A, 0x021E)
+            or names <= 0
+            or min(booleans, numbers, strings, table) < 0
+        ):
+            raise TaskError("the foreign server terminfo header is invalid")
+        aliases = source.read(names)
+        if not aliases.endswith(b"\0") or b"xterm-spaceterm" not in aliases[:-1].split(b"|"):
+            raise TaskError("the foreign server terminfo identity is invalid")
+        end = 12 + names + booleans
+        end += end % 2
+        end += numbers * (2 if magic == 0x011A else 4) + strings * 2 + table
+        if path.stat().st_size < end:
+            raise TaskError("the foreign server terminfo tables are truncated")
+
+
+def verify_tree(tree, expected, *, native=True):
     files = {str(path.relative_to(tree)) for path in tree.rglob("*") if path.is_file()}
     shell = {
         "share/spaceterm/shell-integration/" + str(path.relative_to(SHELL_INTEGRATION))
@@ -204,6 +230,26 @@ def verify_tree(tree, expected):
     if directories != required_directories:
         raise TaskError("the server directories do not match the supported layout")
     executable = tree / "bin/spaceterm-server"
+    if not native:
+        # Catalogs authenticate foreign native bytes without executing them. Their
+        # producer performs native signature, deployment, dependency and --check checks.
+        with executable.open("rb") as source:
+            header = source.read(64)
+        if expected["target"] == TARGETS["darwin"]:
+            valid = (
+                header[:8] == bytes.fromhex("cffaedfe0c000001") and header[12:16] == b"\x02\0\0\0"
+            )
+        else:
+            valid = (
+                header[:7] == b"\x7fELF\x02\x01\x01"
+                and header[16:18] in (b"\x02\0", b"\x03\0")
+                and header[18:20] == b"\x3e\0"
+            )
+        if not valid:
+            raise TaskError("the signed server executable differs from its declared native target")
+        for name in terminfo:
+            verify_foreign_terminfo(tree / name)
+        return
     if expected["target"] != host_target():
         raise TaskError("the server target cannot run on this host")
     if sys.platform == "darwin":
@@ -258,7 +304,17 @@ def verify_tree(tree, expected):
         raise TaskError("the installed server headless check failed")
 
 
-def verified_copy(archive, signature, directory, expected, *, identity=None, expected_sha256=None):
+def verified_copy(
+    archive,
+    signature,
+    directory,
+    expected,
+    *,
+    identity=None,
+    target=None,
+    expected_sha256=None,
+    native=True,
+):
     archive = Path(archive)
     signature = Path(signature)
     if archive.stat().st_size > MAX_ARCHIVE or signature.stat().st_size != 64:
@@ -273,10 +329,11 @@ def verified_copy(archive, signature, directory, expected, *, identity=None, exp
         directory / "payload",
         expected,
         identity=identity,
+        target=target,
         expected_sha256=expected_sha256,
     )
     tree = directory / "payload/server"
-    verify_tree(tree, info)
+    verify_tree(tree, info, native=native)
     return tree, private, raw
 
 
@@ -451,8 +508,8 @@ def stage_desktop_artifact(archive, signature, destination, expected=None, *, id
     }
 
 
-def compatible_candidate(info, identity):
-    if info["identity"] != identity or info["target"] != host_target():
+def compatible_candidate(info, identity, *, target=None):
+    if info["identity"] != identity or info["target"] != (target or host_target()):
         raise TaskError("the server candidate has a different identity or target")
     if info["protocol_major"] != 1:
         raise TaskError("the server candidate has an incompatible protocol major")
@@ -460,7 +517,7 @@ def compatible_candidate(info, identity):
         raise TaskError("the server candidate is missing a required capability")
 
 
-def prepare_desktop_artifact(destination, identity, release_tag=None):
+def prepare_desktop_artifact(destination, identity, release_tag=None, *, catalog_destination=None):
     """Signing happens during candidate preparation; launch only consumes the resulting pair.
 
     An explicit pair reuses its signed bytes across client releases. Without that pair,
@@ -473,7 +530,19 @@ def prepare_desktop_artifact(destination, identity, release_tag=None):
     require_clean_checkout()
     if not archive:
         archive, signature = package(identity, release_tag)
-    return stage_desktop_artifact(archive, signature, destination, identity=identity)
+    environment = stage_desktop_artifact(archive, signature, destination, identity=identity)
+    if catalog_destination is not None:
+        from spaceterm_tasks.server_catalog import stage_catalog
+
+        stage_catalog(
+            environment["SPACETERM_SERVER_ARCHIVE"],
+            environment["SPACETERM_SERVER_SIGNATURE"],
+            catalog_destination,
+            identity,
+            source=os.environ.get("SPACETERM_SSH_SERVER_ARTIFACTS"),
+            require_all=bool(release_tag),
+        )
+    return environment
 
 
 def verify_desktop_artifact(destination, identity, release_tag=None, *, executable=None):

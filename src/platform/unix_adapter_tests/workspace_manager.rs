@@ -18,7 +18,7 @@ fn workspace_manager_with_directory_selection(
     let directory_selection: Rc<dyn SystemDirectorySelection> =
         Rc::new(ScriptedDirectorySelection::new(selections));
     let (manager, cx) = cx.add_window_view(|window, cx| {
-        let mut manager = WorkspaceManager::new_with_adapters(
+        new_desktop_manager(
             session_factory,
             std::env::temp_dir(),
             WorkspaceManagerAdapters {
@@ -29,15 +29,13 @@ fn workspace_manager_with_directory_selection(
                 lifecycle: PaneLifecycleDependencies::testing(),
                 directory_selection,
                 window_drag: Rc::new(RecordingOperatingSystemWindowDragPlatform::default()),
-                remote_workspace: test_remote_backend_factory(),
                 local_server: crate::ui::launch_testing::unanswered(),
+                server_directories: crate::ui::directory_picker::server_directory_testing::older(),
             },
             SidebarState::Expanded,
             window,
             cx,
-        );
-        manager.present_desktop_workspace(window, cx);
-        manager
+        )
     });
     cx.update(|window, cx| {
         manager.update(cx, |manager, cx| manager.focus(window, cx));
@@ -64,11 +62,9 @@ fn changing_pin_to_equivalent_directory_should_preserve_selected_spelling(cx: &m
         (
             manager.workspaces.len(),
             workspace.local_display_directory().unwrap().to_path_buf(),
-            workspace.location().clone(),
         )
     });
-    assert_eq!((state.0, state.1), (1, equivalent.clone()));
-    assert!(matches!(state.2, WorkspaceLocation::Local));
+    assert_eq!(state, (1, equivalent.clone()));
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -118,4 +114,88 @@ fn replaced_pinned_directory_is_rejected_between_picker_validation_and_activatio
     );
     assert_eq!(records.starts().len(), 1);
     fs::remove_dir_all(root).unwrap();
+}
+
+/// Opening a symbolic link to a directory one of penguin's Workspaces is pinned to opens that
+/// Workspace: penguin's server compares the two directories, and nothing creates another
+/// Workspace or asks this computer's server.
+#[gpui::test]
+fn open_remote_directory_should_reuse_a_workspace_pinned_through_another_path(
+    cx: &mut TestAppContext,
+) {
+    // The owning server's directory worker answers from its own thread.
+    cx.executor().allow_parking();
+    let root = std::env::temp_dir().join(format!(
+        "spaceterm-remote-directory-alias-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("project")).unwrap();
+    std::fs::create_dir_all(root.join("elsewhere")).unwrap();
+    symlink(root.join("project"), root.join("alias")).unwrap();
+    let adapters = WorkspaceManagerAdapters {
+        server_directories: crate::ui::directory_picker::server_directory_testing::in_process(),
+        ..workspace_adapters()
+    };
+    let (harness, cx) = MachineGroupsHarness::using(adapters, cx);
+    let (connections, _backend, penguin) = connecting_penguin(cx);
+    connections.connect(penguin.clone());
+    wait_until(|| connections.server(&penguin).is_some(), cx);
+    let (_, penguin_edits) = harness.present_ssh("penguin", &[("Other", 6), ("Far", 7)], cx);
+    let mut inventory = machine_inventory(harness.next_revision(), &[("Other", 6), ("Far", 7)]);
+    inventory.workspaces[0].pinned_directory = Some(root.join("elsewhere"));
+    inventory.workspaces[1].pinned_directory = Some(root.join("project"));
+    penguin_edits.set_inventory(inventory);
+    cx.update(|window, cx| {
+        harness.manager.update(cx, |manager, cx| {
+            let key = manager
+                .shared
+                .key_of(&ServerOrigin::Ssh(penguin.clone()))
+                .unwrap();
+            manager.sync_shared_workspaces(key, window, cx);
+        })
+    });
+    cx.run_until_parked();
+
+    cx.simulate_keystrokes("cmd-shift-o");
+    cx.run_until_parked();
+    let flow = harness
+        .manager
+        .read_with(cx, |manager, _| manager.remote_workspace_flow.clone())
+        .expect("Open Remote Directory opens the flow");
+    choose_remote_directory(
+        &flow,
+        &connections,
+        &penguin,
+        &root.join("alias").display().to_string(),
+        cx,
+    );
+    // The server answers the comparison on its own thread before the flow finishes.
+    let deadline = Instant::now() + std::time::Duration::from_secs(5);
+    while harness
+        .manager
+        .read_with(cx, |manager, _| manager.remote_workspace_flow.is_some())
+    {
+        assert!(Instant::now() < deadline, "the flow finishes");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        cx.run_until_parked();
+    }
+
+    let opened = harness.manager.read_with(cx, |manager, _| {
+        let active = manager.workspaces.active_workspace_id()?;
+        (manager.machine(active) == Some(machine_groups::Machine::Ssh(penguin.clone())))
+            .then(|| manager.workspaces.active().name().to_owned())
+    });
+    assert_eq!(
+        opened.as_deref(),
+        Some("Far"),
+        "the Workspace pinned there opens"
+    );
+    assert_eq!(
+        penguin_edits.submitted(),
+        Vec::new(),
+        "no other Workspace is created"
+    );
+    assert_eq!(harness.local.submitted(), Vec::new());
+    let _ = std::fs::remove_dir_all(&root);
 }

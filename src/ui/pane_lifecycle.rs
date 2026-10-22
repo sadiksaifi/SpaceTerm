@@ -1,9 +1,6 @@
 use crate::platform::terminal_accessibility::TerminalAccessibilityAdapterFactory;
 use crate::terminal::native_services::NativeServiceAdapters;
-use crate::terminal::{
-    PreparedWorkspaceTerminalLaunch, TerminalKeyInputAdapterFactory,
-    WorkspaceTerminalSessionFactory,
-};
+use crate::terminal::{TerminalKeyInputAdapterFactory, WorkspaceTerminalSessionFactory};
 use gpui::{Context, Entity, Window};
 use std::rc::Rc;
 
@@ -80,13 +77,11 @@ impl PaneConstruction {
     pub(crate) fn create(
         &self,
         session_factory: WorkspaceTerminalSessionFactory,
-        prepared_launch: PreparedWorkspaceTerminalLaunch,
         window: &mut Window,
         cx: &mut Context<super::TerminalPane>,
     ) -> super::TerminalPane {
-        super::TerminalPane::new_with_prepared_launch(
+        super::TerminalPane::with_adapters(
             session_factory,
-            prepared_launch,
             self.key_input.create(),
             self.accessibility.as_ref(),
             self.native_services.clone(),
@@ -144,37 +139,5 @@ impl PaneConstruction {
                 .secure_input
                 .same_coordinator(&expected.lifecycle.secure_input)
         );
-    }
-}
-
-/// Invalidates pending child launches whenever the hierarchy changes remote lifecycle.
-#[derive(Default)]
-pub(crate) struct RemoteHierarchyLifecycle {
-    disconnected_generation: Option<u64>,
-    child_launch_generation: u64,
-}
-
-impl RemoteHierarchyLifecycle {
-    pub(crate) fn begin_child_launch(&mut self) -> u64 {
-        self.child_launch_generation = self.child_launch_generation.wrapping_add(1);
-        self.child_launch_generation
-    }
-
-    pub(crate) fn is_current_child_launch(&self, generation: u64) -> bool {
-        self.child_launch_generation == generation
-    }
-
-    pub(crate) const fn disconnected_generation(&self) -> Option<u64> {
-        self.disconnected_generation
-    }
-
-    pub(crate) fn disconnect(&mut self, generation: u64) {
-        self.disconnected_generation = Some(generation);
-        self.begin_child_launch();
-    }
-
-    pub(crate) fn restarted(&mut self) {
-        self.disconnected_generation = None;
-        self.begin_child_launch();
     }
 }

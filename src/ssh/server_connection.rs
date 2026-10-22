@@ -27,6 +27,9 @@ pub(crate) enum InteractionReason {
     Authentication,
     HostVerification,
     CredentialProvider,
+    /// SpaceTerm hasn't signed in over this route since it opened, so nothing proves it can
+    /// sign in without a prompt, and only the person starts the first sign-in.
+    FirstSignIn,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[expect(

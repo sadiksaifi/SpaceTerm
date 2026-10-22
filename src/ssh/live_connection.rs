@@ -11,17 +11,15 @@ use crate::platform::app_paths::RegisteredRuntimeSocket;
 /// Internal lifecycle state for one exact control-master authority.
 pub(crate) enum LiveConnectionState {
     Ready = 0,
-    ShuttingDown = 1,
-    Failed = 2,
-    Closed = 3,
+    Failed = 1,
+    Closed = 2,
 }
 
 impl LiveConnectionState {
     fn from_raw(value: u8) -> Self {
         match value {
             0 => Self::Ready,
-            1 => Self::ShuttingDown,
-            2 => Self::Failed,
+            1 => Self::Failed,
             _ => Self::Closed,
         }
     }
@@ -29,28 +27,23 @@ impl LiveConnectionState {
 
 /// Singular authority for child-command use of one registered control socket.
 ///
-/// Every capability is tied to this unforgeable instance, a numeric generation, a cancellation
-/// token, and the recorded socket identity. State transitions revoke prior capabilities before
-/// publishing a content-free terminal event.
+/// Every capability holds a weak reference to its exact authority, a numeric generation, a
+/// cancellation token, and the recorded socket identity. State transitions revoke prior capabilities.
 pub(crate) struct LiveConnectionAuthority {
-    instance: LiveConnectionInstance,
     state: AtomicU8,
     generation: AtomicU64,
     cancellation: Mutex<SshCancellationToken>,
     socket: RegisteredRuntimeSocket,
-    lifecycle: ControlConnectionLifecycleAuthority,
 }
 
 impl LiveConnectionAuthority {
     /// Creates a ready authority that owns verification of `socket` for its whole lifetime.
     pub(crate) fn new(socket: RegisteredRuntimeSocket) -> Arc<Self> {
         Arc::new(Self {
-            instance: LiveConnectionInstance::new(),
             state: AtomicU8::new(LiveConnectionState::Ready as u8),
             generation: AtomicU64::new(1),
             cancellation: Mutex::new(SshCancellationToken::default()),
             socket,
-            lifecycle: ControlConnectionLifecycleAuthority::default(),
         })
     }
 
@@ -76,165 +69,10 @@ impl LiveConnectionAuthority {
         }
         self.generation.fetch_add(1, Ordering::AcqRel);
         self.state.store(state as u8, Ordering::Release);
-        match state {
-            LiveConnectionState::Failed => self
-                .lifecycle
-                .publish(ControlConnectionTerminalState::Failed),
-            LiveConnectionState::Closed => self
-                .lifecycle
-                .publish(ControlConnectionTerminalState::Closed),
-            LiveConnectionState::Ready | LiveConnectionState::ShuttingDown => {}
-        }
     }
 
     pub(crate) fn state(&self) -> LiveConnectionState {
         LiveConnectionState::from_raw(self.state.load(Ordering::Acquire))
-    }
-
-    pub(crate) fn observe_lifecycle(&self) -> ControlConnectionObserver {
-        self.lifecycle.observe()
-    }
-}
-
-#[derive(Clone)]
-struct LiveConnectionInstance(Arc<()>);
-
-impl LiveConnectionInstance {
-    fn new() -> Self {
-        Self(Arc::new(()))
-    }
-}
-
-impl PartialEq for LiveConnectionInstance {
-    fn eq(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.0, &other.0)
-    }
-}
-
-impl Eq for LiveConnectionInstance {}
-
-/// Opaque identity for one exact live authority state.
-///
-/// The instance component prevents equal numeric generations from different control connections
-/// from authorizing one another.
-#[derive(Clone, Eq, PartialEq)]
-pub(crate) struct LiveConnectionBinding {
-    instance: LiveConnectionInstance,
-    generation: u64,
-}
-
-impl LiveConnectionBinding {
-    fn new(instance: LiveConnectionInstance, generation: u64) -> Self {
-        Self {
-            instance,
-            generation,
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn for_test(generation: u64) -> Self {
-        Self::new(LiveConnectionInstance::new(), generation)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn with_generation(&self, generation: u64) -> Self {
-        Self::new(self.instance.clone(), generation)
-    }
-}
-
-impl Drop for LiveConnectionAuthority {
-    fn drop(&mut self) {
-        self.lifecycle
-            .publish(ControlConnectionTerminalState::Closed);
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[repr(u8)]
-/// Content-free terminal outcome published once for a control connection.
-pub(crate) enum ControlConnectionTerminalState {
-    Failed = 1,
-    Closed = 2,
-}
-
-impl ControlConnectionTerminalState {
-    fn from_raw(value: u8) -> Option<Self> {
-        match value {
-            1 => Some(Self::Failed),
-            2 => Some(Self::Closed),
-            _ => None,
-        }
-    }
-}
-
-#[derive(Default)]
-struct ControlConnectionLifecycleAuthority {
-    terminal: AtomicU8,
-    observers: Mutex<Vec<async_channel::Sender<ControlConnectionTerminalState>>>,
-}
-
-impl ControlConnectionLifecycleAuthority {
-    fn observe(&self) -> ControlConnectionObserver {
-        let (sender, receiver) = async_channel::bounded(1);
-        let terminal = self.terminal.load(Ordering::Acquire);
-        if let Some(terminal) = ControlConnectionTerminalState::from_raw(terminal) {
-            let _ = sender.try_send(terminal);
-        } else if let Ok(mut observers) = self.observers.lock() {
-            let terminal = self.terminal.load(Ordering::Acquire);
-            if let Some(terminal) = ControlConnectionTerminalState::from_raw(terminal) {
-                let _ = sender.try_send(terminal);
-            } else {
-                observers.push(sender);
-            }
-        } else {
-            let _ = sender.try_send(ControlConnectionTerminalState::Failed);
-        }
-        ControlConnectionObserver { receiver }
-    }
-
-    fn publish(&self, terminal: ControlConnectionTerminalState) {
-        if self
-            .terminal
-            .compare_exchange(0, terminal as u8, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
-        {
-            return;
-        }
-        if let Ok(mut observers) = self.observers.lock() {
-            for observer in observers.drain(..) {
-                let _ = observer.try_send(terminal);
-            }
-        }
-    }
-}
-
-/// One-shot observer for the first terminal state of its exact connection instance.
-///
-/// The observer carries no destination, remote output, authentication state, or live capability.
-pub(crate) struct ControlConnectionObserver {
-    receiver: async_channel::Receiver<ControlConnectionTerminalState>,
-}
-
-impl ControlConnectionObserver {
-    /// Waits for the first terminal state, treating lost authority as `Closed`.
-    pub(crate) async fn terminal(&self) -> ControlConnectionTerminalState {
-        self.receiver
-            .recv()
-            .await
-            .unwrap_or(ControlConnectionTerminalState::Closed)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn closed() -> Self {
-        let authority = ControlConnectionLifecycleAuthority::default();
-        authority.publish(ControlConnectionTerminalState::Closed);
-        authority.observe()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn controlled() -> (async_channel::Sender<ControlConnectionTerminalState>, Self) {
-        let (sender, receiver) = async_channel::bounded(1);
-        (sender, Self { receiver })
     }
 }
 
@@ -253,15 +91,6 @@ impl LiveConnectionCapability {
     /// Verifies that this capability still authorizes its exact control socket.
     pub(crate) fn authorize(&self) -> Result<(), LiveConnectionError> {
         self.authorized_authority().map(drop)
-    }
-
-    /// Returns an opaque binding only after successful live authorization.
-    pub(crate) fn binding(&self) -> Result<LiveConnectionBinding, LiveConnectionError> {
-        let authority = self.authorized_authority()?;
-        Ok(LiveConnectionBinding::new(
-            authority.instance.clone(),
-            self.generation,
-        ))
     }
 
     fn authorized_authority(&self) -> Result<Arc<LiveConnectionAuthority>, LiveConnectionError> {
@@ -295,81 +124,4 @@ pub(crate) enum LiveConnectionError {
     Unavailable,
     #[error("the SSH control socket identity changed")]
     SocketReplaced,
-}
-
-#[cfg(test)]
-mod tests {
-    use std::future::Future;
-    use std::pin::Pin;
-    use std::sync::Arc;
-    use std::task::{Context, Poll, Wake, Waker};
-
-    use super::*;
-
-    fn block_on<T>(future: impl Future<Output = T>) -> T {
-        struct ThreadWake(std::thread::Thread);
-        impl Wake for ThreadWake {
-            fn wake(self: Arc<Self>) {
-                self.0.unpark();
-            }
-        }
-        let waker = Waker::from(Arc::new(ThreadWake(std::thread::current())));
-        let mut context = Context::from_waker(&waker);
-        let mut future = Box::pin(future);
-        loop {
-            match Pin::new(&mut future).poll(&mut context) {
-                Poll::Ready(output) => return output,
-                Poll::Pending => std::thread::park(),
-            }
-        }
-    }
-
-    #[test]
-    fn lifecycle_observer_should_publish_the_first_terminal_outcome_exactly_once() {
-        let authority = ControlConnectionLifecycleAuthority::default();
-        let observer = authority.observe();
-
-        authority.publish(ControlConnectionTerminalState::Failed);
-        authority.publish(ControlConnectionTerminalState::Closed);
-
-        assert_eq!(
-            block_on(observer.terminal()),
-            ControlConnectionTerminalState::Failed
-        );
-        assert!(observer.receiver.try_recv().is_err());
-    }
-
-    #[test]
-    fn lifecycle_observer_should_report_an_outcome_published_before_observation() {
-        let authority = ControlConnectionLifecycleAuthority::default();
-        authority.publish(ControlConnectionTerminalState::Closed);
-
-        assert_eq!(
-            block_on(authority.observe().terminal()),
-            ControlConnectionTerminalState::Closed
-        );
-    }
-
-    #[test]
-    fn lifecycle_observer_waits_until_terminal_publication() {
-        let authority = ControlConnectionLifecycleAuthority::default();
-        let observer = authority.observe();
-
-        assert!(observer.receiver.try_recv().is_err());
-        authority.publish(ControlConnectionTerminalState::Closed);
-        assert_eq!(
-            block_on(observer.terminal()),
-            ControlConnectionTerminalState::Closed
-        );
-    }
-
-    #[test]
-    fn live_connection_binding_should_distinguish_instances_at_the_same_generation() {
-        let first = LiveConnectionBinding::for_test(1);
-        let second = LiveConnectionBinding::for_test(1);
-
-        assert!(first != second);
-        assert!(first == first.with_generation(1));
-        assert!(first != first.with_generation(2));
-    }
 }

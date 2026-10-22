@@ -6,6 +6,15 @@ use super::records::Authority;
 use super::*;
 
 pub(super) trait DirectNetwork: Send + Sync {
+    fn submit_enrollment(&self, enrollment: &mut direct::Enrollment) -> Result<(), DirectError> {
+        enrollment.submit()
+    }
+    fn finish_enrollment(
+        &self,
+        enrollment: &mut direct::Enrollment,
+    ) -> Result<Option<PairedDevice>, DirectError> {
+        enrollment.finish()
+    }
     fn connect(
         &self,
         identity: &str,
@@ -115,6 +124,15 @@ impl DirectConnections {
             return Err(DirectError::WrongServer);
         }
         let id = random_id()?;
+        let now = Instant::now();
+        let lifetime = std::time::UNIX_EPOCH
+            .checked_add(Duration::from_secs(invitation.expires_at_unix_seconds()))
+            .ok_or(DirectError::InvalidInvitation)?
+            .duration_since(std::time::SystemTime::now())
+            .map_err(|_| DirectError::Expired)?;
+        let deadline = now
+            .checked_add(lifetime)
+            .ok_or(DirectError::InvalidInvitation)?;
         {
             let mut state = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
             if state.joins.len() >= 16 {
@@ -144,6 +162,8 @@ impl DirectConnections {
                 JoinState {
                     status: JoinStatus::Validating,
                     cancelled: false,
+                    retry_requested: false,
+                    deadline,
                 },
             );
         }
@@ -569,6 +589,59 @@ fn recover(owner: &Arc<Inner>, mut pending: PendingRecord, interaction: Interact
     owner.notify();
 }
 
+/// A failed network observation keeps its live original until the person retries or cancels.
+/// No network request is repeated while this join is paused.
+fn enrollment_attempt<T>(
+    owner: &DirectConnections,
+    id: JoinId,
+    stage: EnrollmentStage,
+    progress: &JoinStatus,
+    mut operation: impl FnMut() -> Result<T, DirectError>,
+) -> Result<Option<T>, DirectError> {
+    loop {
+        {
+            let mut state = owner.0.state.lock().unwrap_or_else(|e| e.into_inner());
+            let Some(join) = state.joins.get_mut(&id).filter(|join| !join.cancelled) else {
+                return Ok(None);
+            };
+            if Instant::now() >= join.deadline {
+                return Err(DirectError::Expired);
+            }
+            join.status = progress.clone();
+        }
+        owner.0.notify();
+        match operation() {
+            Err(DirectError::Transport) => {
+                {
+                    let mut state = owner.0.state.lock().unwrap_or_else(|e| e.into_inner());
+                    let Some(join) = state.joins.get_mut(&id).filter(|join| !join.cancelled) else {
+                        return Ok(None);
+                    };
+                    join.status = JoinStatus::Retryable { stage };
+                }
+                owner.0.notify();
+                loop {
+                    {
+                        let mut state = owner.0.state.lock().unwrap_or_else(|e| e.into_inner());
+                        let Some(join) = state.joins.get_mut(&id).filter(|join| !join.cancelled)
+                        else {
+                            return Ok(None);
+                        };
+                        if Instant::now() >= join.deadline {
+                            return Err(DirectError::Expired);
+                        }
+                        if std::mem::take(&mut join.retry_requested) {
+                            break;
+                        }
+                    }
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+            }
+            result => return result.map(Some),
+        }
+    }
+}
+
 fn enroll(
     owner: &DirectConnections,
     id: JoinId,
@@ -626,21 +699,23 @@ fn enroll(
             owner.start_worker();
             return Ok(());
         }
-        enrollment.submit()?;
-        {
-            let mut state = owner.0.state.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(join) = state.joins.get_mut(&id)
-                && !join.cancelled
-            {
-                join.status = JoinStatus::AwaitingApproval {
-                    server_name: invitation.server_name().to_owned(),
-                    server_fingerprint: invitation.server_pin().fingerprint(),
-                    device_fingerprint: credential.fingerprint(),
-                    expires_at: invitation.expires_at_unix_seconds(),
-                };
-            }
-        }
-        owner.0.notify();
+        let Some(()) = enrollment_attempt(
+            owner,
+            id,
+            EnrollmentStage::Claim,
+            &JoinStatus::Validating,
+            || owner.0.network.submit_enrollment(&mut enrollment),
+        )?
+        else {
+            owner.start_worker();
+            return Ok(());
+        };
+        let awaiting = JoinStatus::AwaitingApproval {
+            server_name: invitation.server_name().to_owned(),
+            server_fingerprint: invitation.server_pin().fingerprint(),
+            device_fingerprint: credential.fingerprint(),
+            expires_at: invitation.expires_at_unix_seconds(),
+        };
         loop {
             let cancelled = owner
                 .0
@@ -665,7 +740,15 @@ fn enroll(
                 owner.start_worker();
                 return Ok(());
             }
-            if let Some(paired) = enrollment.finish()? {
+            let Some(paired) =
+                enrollment_attempt(owner, id, EnrollmentStage::Approval, &awaiting, || {
+                    owner.0.network.finish_enrollment(&mut enrollment)
+                })?
+            else {
+                owner.start_worker();
+                return Ok(());
+            };
+            if let Some(paired) = paired {
                 let saved = SavedRoute {
                     route: DirectRoute {
                         id,
@@ -775,12 +858,280 @@ fn complete_enrollment(owner: &DirectConnections, id: JoinId, saved: SavedRoute)
 
 #[cfg(test)]
 pub(super) mod enrollment_tests {
-    use super::super::tests::{Answer, Credentials, Network};
+    use super::super::tests::{Answer, Credentials, MemoryRecords, Network};
     use super::*;
     use crate::platform::app_directories::AppDirectoryEnvironment;
     use crate::platform::app_paths::AppPaths;
     use crate::platform::secure_filesystem::SecureCommitOutcome;
     use crate::platform::testing::{RecordingFilesystem, resolve_app_paths};
+
+    /// The server accepts each original before its first reply is lost at the network boundary.
+    struct EnrollmentNetwork {
+        lost: EnrollmentStage,
+        calls: Mutex<Vec<(EnrollmentStage, [u8; 32])>>,
+        claims: Mutex<std::collections::BTreeSet<[u8; 32]>>,
+        cancellations: Mutex<Vec<[u8; 32]>>,
+        paired: PairedDevice,
+    }
+
+    impl DirectNetwork for EnrollmentNetwork {
+        fn submit_enrollment(
+            &self,
+            enrollment: &mut direct::Enrollment,
+        ) -> Result<(), DirectError> {
+            let claim = enrollment.claim_id();
+            self.claims.lock().unwrap().insert(claim);
+            let mut calls = self.calls.lock().unwrap();
+            calls.push((EnrollmentStage::Claim, claim));
+            if self.lost == EnrollmentStage::Claim && calls.len() == 1 {
+                Err(DirectError::Transport)
+            } else {
+                Ok(())
+            }
+        }
+        fn finish_enrollment(
+            &self,
+            enrollment: &mut direct::Enrollment,
+        ) -> Result<Option<PairedDevice>, DirectError> {
+            let mut calls = self.calls.lock().unwrap();
+            let first = !calls
+                .iter()
+                .any(|(stage, _)| *stage == EnrollmentStage::Approval);
+            calls.push((EnrollmentStage::Approval, enrollment.claim_id()));
+            if self.lost == EnrollmentStage::Approval && first {
+                Err(DirectError::Transport)
+            } else {
+                Ok(Some(self.paired.clone()))
+            }
+        }
+        fn connect(
+            &self,
+            _: &str,
+            _: &DirectRoute,
+            _: DeviceCredential,
+            _: Arc<std::sync::atomic::AtomicBool>,
+        ) -> Result<LocalServer, DirectError> {
+            Err(DirectError::Transport)
+        }
+        fn revoke(
+            &self,
+            _: &str,
+            _: &PairedDevice,
+            _: &DeviceCredential,
+            _: UnpairKey,
+            _: PairingId,
+        ) -> Result<direct::RevocationReceipt, DirectError> {
+            Err(DirectError::Transport)
+        }
+        fn cancel_enrollment(
+            &self,
+            _: &str,
+            _: &direct::ServerPin,
+            claim: [u8; 32],
+            _: &DeviceCredential,
+        ) -> Result<Option<direct::RevocationReceipt>, DirectError> {
+            self.cancellations.lock().unwrap().push(claim);
+            // Keep cleanup uncertain so tests can inspect its exact retained original.
+            Err(DirectError::Transport)
+        }
+    }
+
+    struct LiveJoin {
+        owner: DirectConnections,
+        credentials: Arc<Credentials>,
+        network: Arc<EnrollmentNetwork>,
+        id: JoinId,
+    }
+
+    impl LiveJoin {
+        fn new(label: &str, stage: EnrollmentStage) -> Self {
+            use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+            let credentials = Arc::new(Credentials::default());
+            let network = Arc::new(EnrollmentNetwork {
+                lost: stage,
+                calls: Mutex::default(),
+                claims: Mutex::default(),
+                cancellations: Mutex::default(),
+                paired: super::super::tests::saved(1, 5).route.paired,
+            });
+            let owner = DirectConnections::new(
+                "spaceterm-development",
+                Arc::new(MemoryRecords::default()),
+                credentials.clone(),
+                network.clone(),
+            );
+            owner.resume_retained();
+            let expires = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs()
+                + 60;
+            let payload = Zeroizing::new(
+                serde_json::to_vec(&serde_json::json!({
+                    "schema": 1, "id": ([7_u8; 32]), "endpoint": "wss://127.0.0.1:9231/spaceterm",
+                    "pin": network.paired.pin, "server_name": label, "token": ([8_u8; 32]),
+                    "expires": expires,
+                }))
+                .unwrap(),
+            );
+            let text = Zeroizing::new(format!(
+                "spaceterm-pair:{}",
+                URL_SAFE_NO_PAD.encode(&payload)
+            ));
+            let id = owner.join(text, "Test device".into()).unwrap();
+            let result = Self {
+                owner,
+                credentials,
+                network,
+                id,
+            };
+            result.wait(|status| matches!(status, JoinStatus::Retryable { stage: value } if *value == stage));
+            result
+        }
+
+        fn wait(&self, predicate: impl Fn(&JoinStatus) -> bool) {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                if self
+                    .owner
+                    .join_status(self.id)
+                    .as_ref()
+                    .is_some_and(&predicate)
+                {
+                    return;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "join did not reach its expected state"
+                );
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        }
+
+        fn original(&self) -> PendingRecord {
+            self.owner.0.state.lock().unwrap().document.pending[0].clone()
+        }
+    }
+
+    pub(crate) fn retryable_join(
+        label: &str,
+        stage: EnrollmentStage,
+    ) -> (DirectConnections, JoinId) {
+        let fixture = LiveJoin::new(label, stage);
+        (fixture.owner, fixture.id)
+    }
+
+    #[test]
+    fn lost_claim_and_finish_replies_retry_only_the_original_and_save_one_route() {
+        for stage in [EnrollmentStage::Claim, EnrollmentStage::Approval] {
+            let fixture = LiveJoin::new("Server 1", stage);
+            let original = fixture.original();
+            let Authority::Enrollment {
+                claim, credential, ..
+            } = original.authority
+            else {
+                panic!()
+            };
+            assert!(!original.cancel_requested);
+            assert!(fixture.owner.pending_unpairs().is_empty());
+            let attempts = fixture.network.calls.lock().unwrap().len();
+            std::thread::sleep(Duration::from_millis(150));
+            assert_eq!(
+                fixture.network.calls.lock().unwrap().len(),
+                attempts,
+                "paused join must not repeat network work"
+            );
+            assert_eq!(
+                fixture.owner.retry_join([99; 32]),
+                Err(DirectError::InvalidRequest)
+            );
+
+            fixture.owner.retry_join(fixture.id).unwrap();
+            fixture.wait(|status| matches!(status, JoinStatus::Approved(id) if *id == fixture.id));
+
+            let state = fixture.owner.0.state.lock().unwrap();
+            assert!(state.document.pending.is_empty());
+            assert_eq!(state.document.routes.len(), 1);
+            assert_eq!(state.document.routes[0].credential, credential);
+            assert_eq!(
+                state.document.routes[0].route.paired,
+                fixture.network.paired
+            );
+            drop(state);
+            assert_eq!(fixture.credentials.values.lock().unwrap().len(), 1);
+            assert_eq!(fixture.network.claims.lock().unwrap().len(), 1);
+            assert!(
+                fixture
+                    .network
+                    .calls
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .all(|(_, id)| *id == claim)
+            );
+            assert!(fixture.network.cancellations.lock().unwrap().is_empty());
+            assert_eq!(
+                fixture.owner.retry_join(fixture.id),
+                Err(DirectError::InvalidRequest)
+            );
+        }
+    }
+
+    #[test]
+    fn cancelling_a_paused_join_preserves_only_its_exact_cleanup_authority() {
+        for stage in [EnrollmentStage::Claim, EnrollmentStage::Approval] {
+            let fixture = LiveJoin::new("Server 1", stage);
+            let original = fixture.original();
+            let Authority::Enrollment {
+                claim, credential, ..
+            } = original.authority
+            else {
+                panic!()
+            };
+            fixture.owner.cancel_join(fixture.id).unwrap();
+            assert_eq!(
+                fixture.owner.retry_join(fixture.id),
+                Err(DirectError::InvalidRequest)
+            );
+            let pending = fixture.original();
+            assert_eq!(pending.operation, original.operation);
+            assert!(pending.cancel_requested);
+            assert!(
+                matches!(pending.authority, Authority::Enrollment { claim: c, credential: k, .. } if c == claim && k == credential)
+            );
+            assert!(fixture.owner.route(&fixture.id).is_none());
+            assert!(
+                fixture
+                    .credentials
+                    .values
+                    .lock()
+                    .unwrap()
+                    .contains_key(&credential)
+            );
+        }
+    }
+
+    #[test]
+    fn expiry_refuses_retry_and_retires_the_live_join_into_original_cleanup() {
+        let fixture = LiveJoin::new("Server 1", EnrollmentStage::Claim);
+        fixture
+            .owner
+            .0
+            .state
+            .lock()
+            .unwrap()
+            .joins
+            .get_mut(&fixture.id)
+            .unwrap()
+            .deadline = Instant::now();
+        assert_eq!(
+            fixture.owner.retry_join(fixture.id),
+            Err(DirectError::InvalidRequest)
+        );
+        fixture.wait(|status| matches!(status, JoinStatus::Expired));
+        assert!(fixture.original().cancel_requested);
+        assert_eq!(fixture.network.calls.lock().unwrap().len(), 1);
+    }
 
     struct EnrollmentFixture {
         owner: DirectConnections,
@@ -842,6 +1193,8 @@ pub(super) mod enrollment_tests {
                     JoinState {
                         status: JoinStatus::Validating,
                         cancelled: false,
+                        retry_requested: false,
+                        deadline: Instant::now() + Duration::from_secs(300),
                     },
                 );
                 owner.0.records.save(&state.document).unwrap();

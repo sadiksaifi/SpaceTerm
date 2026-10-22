@@ -62,6 +62,9 @@ pub(crate) struct DevelopmentPaneState {
     accessibility_demand: AtomicBool,
     client_effects: Mutex<std::collections::VecDeque<ClientEffectRequest>>,
     presentable: AtomicBool,
+    /// Whether the server's route reported a deliberate stop since this Pane last connected.
+    /// The Pane then waits for an explicit retry instead of reconnecting on its own.
+    server_stopped: AtomicBool,
     wake: schedule::Wake,
 }
 impl DevelopmentPaneState {
@@ -89,6 +92,7 @@ impl DevelopmentPaneState {
             accessibility_demand: AtomicBool::new(false),
             client_effects: Mutex::new(std::collections::VecDeque::new()),
             presentable: AtomicBool::new(true),
+            server_stopped: AtomicBool::new(false),
             wake: schedule::Wake::default(),
             effect_authority: {
                 let authority = ClipboardAuthority::default();
@@ -155,6 +159,22 @@ impl DevelopmentPaneState {
     pub(crate) fn retry(&self) {
         self.retry.store(true, Ordering::Release);
         self.wake.notify();
+    }
+    /// Records that the person stopped this Pane's server, as its route reported. An
+    /// interrupted Pane says so now, and later failures wait for an explicit retry, because no
+    /// automatic attempt can reach a stopped server.
+    pub(crate) fn report_server_stopped(&self) {
+        self.server_stopped.store(true, Ordering::Release);
+        let mut status = self.status.lock().unwrap_or_else(|e| e.into_inner());
+        *status = match *status {
+            DevelopmentPaneStatus::Reconnecting => {
+                DevelopmentPaneStatus::Failed(ServerError::Stopped)
+            }
+            DevelopmentPaneStatus::TakeoverReconnecting => {
+                DevelopmentPaneStatus::TakeoverFailed(ServerError::Stopped)
+            }
+            current => current,
+        };
     }
     pub(crate) fn start_restored(&self) {
         if matches!(
@@ -274,6 +294,15 @@ impl DevelopmentPaneState {
             .unwrap_or(Err(ServerError::NotRunning))
     }
     fn connection_failed(&self, error: ServerError, has_takeover: bool) -> bool {
+        // A route that reported a deliberate stop can't reach the server, whatever this attempt
+        // failed with.
+        let error = if self.server_stopped.load(Ordering::Acquire)
+            && error != ServerError::DirectoryUnavailable
+        {
+            ServerError::Stopped
+        } else {
+            error
+        };
         // An admitted server update refuses connections only until it resolves, so the Pane
         // keeps reconnecting on its backoff in every client, whoever started the update.
         let retryable = matches!(
@@ -347,6 +376,8 @@ impl DevelopmentPaneState {
             interaction.screen = mapping;
         }
         self.connected_epoch.store(epoch, Ordering::Release);
+        // Reaching the server again ends any stop its route reported.
+        self.server_stopped.store(false, Ordering::Release);
         if paste_unconfirmed {
             self.paste_unconfirmed.store(true, Ordering::Release);
         }
@@ -748,6 +779,11 @@ fn discard_input(state: &DevelopmentPaneState, epoch: u64, input: Input) {
     }
 }
 
+/// The most queued commands a Pane worker sends before it checks the screen again, so typing
+/// shows as it arrives. A key batch never holds more.
+const INPUT_DRAIN: usize = pane::MAX_KEY_BATCH;
+const _: () = assert!(INPUT_DRAIN > 0);
+
 struct ActiveInput {
     epoch: u64,
     lease: Lease,
@@ -785,6 +821,91 @@ impl ActiveInput {
         interaction.interactive = false;
         interaction.pending = None;
         interaction.resolving = None;
+    }
+    /// Sends up to [`INPUT_DRAIN`] queued commands in order before the worker next checks the
+    /// screen. Where the server takes key batches, adjacent queued keys travel in one exchange,
+    /// and any other command first sends the keys queued before it. It never waits for more.
+    fn drain(
+        &mut self,
+        state: &DevelopmentPaneState,
+        input: &mpsc::Receiver<SubmittedInput>,
+        batches: bool,
+        exchange: &mut impl FnMut(&Request) -> Result<Reply, ServerError>,
+        paste_unconfirmed: &mut bool,
+    ) -> Result<(), ServerError> {
+        let mut keys = Vec::new();
+        for _ in 0..INPUT_DRAIN {
+            let Ok(submitted) = input.try_recv() else {
+                break;
+            };
+            if state.epoch.load(Ordering::Acquire) != self.epoch {
+                return Err(ServerError::Protocol);
+            }
+            if batches && matches!(submitted.command, Input::Key(_)) {
+                keys.push(submitted);
+                continue;
+            }
+            self.send_keys(state, std::mem::take(&mut keys), exchange)?;
+            self.process(state, submitted, exchange, paste_unconfirmed)?;
+        }
+        self.send_keys(state, keys, exchange)
+    }
+    /// Sends queued keys as one batch, keeping only those a single key exchange would send now:
+    /// this lease's epoch, the current focus generation, and a target that takes them. The
+    /// server checks the whole batch before it enters any key. A batch whose outcome is
+    /// unknown invalidates the connection like a single key would, and is never sent again.
+    fn send_keys(
+        &mut self,
+        state: &DevelopmentPaneState,
+        submitted: Vec<SubmittedInput>,
+        exchange: &mut impl FnMut(&Request) -> Result<Reply, ServerError>,
+    ) -> Result<(), ServerError> {
+        if submitted.is_empty() || state.epoch.load(Ordering::Acquire) != self.epoch {
+            return Ok(());
+        }
+        if let Err(error) = self.sync_focus(state, exchange) {
+            state.invalidate();
+            return Err(error);
+        }
+        let (generation, keys) = {
+            let interaction = state.interaction.lock().unwrap_or_else(|e| e.into_inner());
+            if state.epoch.load(Ordering::Acquire) != self.epoch || !interaction.interactive {
+                return Ok(());
+            }
+            let generation = interaction.focus_generation;
+            let keys: Vec<_> = submitted
+                .into_iter()
+                .filter(|submitted| {
+                    submitted.epoch == self.epoch
+                        && submitted.focus_generation == generation
+                        && submitted.command.eligible(interaction.target)
+                })
+                .filter_map(|submitted| match submitted.command {
+                    Input::Key(key) => Some(encode_key(key)),
+                    _ => None,
+                })
+                .collect();
+            (generation, keys)
+        };
+        if keys.is_empty() {
+            return Ok(());
+        }
+        match exchange(&Request::Keys {
+            lease: self.lease,
+            generation,
+            keys,
+        }) {
+            Ok(Reply::Unchanged) => Ok(()),
+            Ok(_) => Err(ServerError::Protocol),
+            Err(ServerError::Unsupported) => {
+                self.disable(state);
+                Ok(())
+            }
+            Err(error) => {
+                state.invalidate();
+                Err(error)
+            }
+        }
     }
     fn process(
         &mut self,
@@ -1140,7 +1261,7 @@ impl TerminalSessionFactory for DevelopmentServerSessionFactory {
     fn start(
         &self,
         geometry: TerminalGeometry,
-        _: TerminalLaunchPlan,
+        _: LocalTerminalLaunchPlan,
         appearance: TerminalAppearanceUpdate,
     ) -> Result<StartedTerminalSession, TerminalSessionError> {
         let (input, receiver) = mpsc::sync_channel(512);
@@ -1301,6 +1422,7 @@ fn present(
             let mut semantic = accessibility::Fetcher::new(lease);
             let mut latest_screen = None;
             let changes = connection.supports_presentation_changes();
+            let batches = connection.supports_key_input_batches();
             // Row changes apply only to this exact lease's own previous screen.
             let mut decoder = pane::presentation::ScreenDecoder::default();
             let mut cadence = schedule::Cadence::new(
@@ -1318,27 +1440,20 @@ fn present(
                     return Err(ServerError::Protocol);
                 }
                 // Queued input is sent before any output check.
-                for _ in 0..32 {
-                    let Ok(submitted) = input.try_recv() else {
-                        break;
-                    };
-                    if state.epoch.load(Ordering::Acquire) != epoch {
-                        return Err(ServerError::Protocol);
-                    }
-                    active_input.process(
-                        &state,
-                        submitted,
-                        &mut |request| {
-                            let reply =
-                                send(&presenter, &alive, &attachment, &mut connection, request)?;
-                            if let Request::Resize { size, .. } = request {
-                                active_size = *size;
-                            }
-                            Ok(reply)
-                        },
-                        &mut paste_unconfirmed,
-                    )?;
-                }
+                active_input.drain(
+                    &state,
+                    &input,
+                    batches,
+                    &mut |request| {
+                        let reply =
+                            send(&presenter, &alive, &attachment, &mut connection, request)?;
+                        if let Request::Resize { size, .. } = request {
+                            active_size = *size;
+                        }
+                        Ok(reply)
+                    },
+                    &mut paste_unconfirmed,
+                )?;
                 let now = std::time::Instant::now();
                 cadence.set_visible(state.presentable.load(Ordering::Acquire), now);
                 if changes && let Some(visible) = cadence.take_demand() {
@@ -2661,6 +2776,25 @@ mod tests {
             }
             Ok(())
         }
+        /// Sends queued input as the worker does, in `rounds` bounded drains. A drain with
+        /// nothing queued sends nothing.
+        fn drain_rounds(
+            &mut self,
+            rounds: usize,
+            batches: bool,
+            mut exchange: impl FnMut(&Request) -> Result<Reply, ServerError>,
+        ) -> Result<(), ServerError> {
+            for _ in 0..rounds {
+                self.active.drain(
+                    &self.handle.state,
+                    &self.input,
+                    batches,
+                    &mut exchange,
+                    &mut self.unconfirmed,
+                )?;
+            }
+            Ok(())
+        }
         fn tracking_screen(&self, local: u64, wire: u64, mouse_tracking: bool) -> ScreenMapping {
             let mapping = ScreenMapping {
                 epoch: self.active.epoch,
@@ -2890,6 +3024,224 @@ mod tests {
             Adapter::attached(&successor),
             Err(ServerError::Unsupported)
         ));
+    }
+
+    /// A typed character: its press carries the text and its release carries none.
+    fn typed(text: &str) -> [KeyInput; 2] {
+        let press = KeyInput {
+            action: KeyAction::Press,
+            physical_key: PhysicalKey::A,
+            native_key_code: Some(0),
+            logical_key: "a".to_owned(),
+            text: Some(text.to_owned()),
+            unshifted_codepoint: Some('a'),
+            modifiers: InputModifiers::default(),
+            consumed_modifiers: InputModifiers::default(),
+            option_as_alt: OptionAsAltPolicy::None,
+        };
+        let release = KeyInput {
+            action: KeyAction::Release,
+            text: None,
+            ..press.clone()
+        };
+        [press, release]
+    }
+
+    /// What reached the server: each key exchange as the keys it carried, in order.
+    #[derive(Debug, PartialEq)]
+    enum Sent {
+        Batch(Vec<(u8, Option<String>, String)>),
+        Key(u8, Option<String>),
+        Resize,
+    }
+
+    fn record(sent: &mut Vec<Sent>, request: &Request) -> Result<Reply, ServerError> {
+        match request {
+            Request::Keys { keys, .. } => sent.push(Sent::Batch(
+                keys.iter()
+                    .map(|key| (key.action, key.text.clone(), key.logical.clone()))
+                    .collect(),
+            )),
+            Request::Input {
+                input: pane::InteractiveInput::Key(key),
+                ..
+            } => sent.push(Sent::Key(key.action, key.text.clone())),
+            Request::Resize { .. } => sent.push(Sent::Resize),
+            _ => {}
+        }
+        Ok(Reply::Unchanged)
+    }
+
+    /// Typing 53 characters queues 106 key events. A server that takes key batches gets them
+    /// in at most four exchanges, every press and release in order; one that doesn't gets the
+    /// same events one exchange each, releases included.
+    #[test]
+    fn queued_keys_travel_in_bounded_batches_only_to_a_server_that_takes_them() {
+        for batches in [true, false] {
+            let mut adapter = Adapter::new();
+            let typed_text: Vec<String> = (0..53).map(|index| format!("{}", index % 10)).collect();
+            for text in &typed_text {
+                for key in typed(text) {
+                    adapter.handle.key(key);
+                }
+            }
+            let mut sent = Vec::new();
+            adapter
+                .drain_rounds(8, batches, |request| record(&mut sent, request))
+                .unwrap();
+
+            let flat: Vec<(u8, Option<String>)> = sent
+                .iter()
+                .flat_map(|sent| match sent {
+                    Sent::Batch(keys) => keys
+                        .iter()
+                        .map(|(action, text, _)| (*action, text.clone()))
+                        .collect(),
+                    Sent::Key(action, text) => vec![(*action, text.clone())],
+                    Sent::Resize => Vec::new(),
+                })
+                .collect();
+            let expected: Vec<(u8, Option<String>)> = typed_text
+                .iter()
+                .flat_map(|text| [(0, Some(text.clone())), (2, None)])
+                .collect();
+            assert_eq!(flat, expected, "every press and release, in order");
+            if batches {
+                assert_eq!(sent.len(), 4, "106 events in at most four exchanges");
+                assert!(sent.iter().all(|sent| matches!(
+                    sent,
+                    Sent::Batch(keys) if (1..=pane::MAX_KEY_BATCH).contains(&keys.len())
+                )));
+            } else {
+                assert_eq!(sent.len(), 106, "one exchange per event without batches");
+                assert!(sent.iter().all(|sent| matches!(sent, Sent::Key(..))));
+            }
+        }
+    }
+
+    /// A batch holds only keys queued next to each other: any other command first sends the
+    /// keys before it. Input method text keeps its own payload inside a batch.
+    #[test]
+    fn a_key_batch_ends_at_any_other_command_and_keeps_input_method_text() {
+        use super::super::geometry::{BackingScale, CellGridSize, LogicalCellSize};
+        let mut adapter = Adapter::new();
+        let [press, release] = typed("a");
+        adapter.handle.key(press);
+        adapter.handle.key(KeyInput::input_method_commit("日本"));
+        adapter.handle.key(release);
+        adapter.handle.resize(TerminalGeometry::from_grid(
+            CellGridSize::new(30, 8),
+            LogicalCellSize::new(10.0, 20.0),
+            BackingScale::ONE,
+        ));
+        adapter.handle.key(typed("b")[0].clone());
+        let mut sent = Vec::new();
+        adapter
+            .drain_rounds(1, true, |request| record(&mut sent, request))
+            .unwrap();
+        assert_eq!(
+            sent,
+            vec![
+                Sent::Batch(vec![
+                    (0, Some("a".into()), "a".into()),
+                    (0, Some("日本".into()), "input-method-commit".into()),
+                    (2, None, "a".into()),
+                ]),
+                Sent::Resize,
+                Sent::Batch(vec![(0, Some("b".into()), "a".into())]),
+            ]
+        );
+    }
+
+    /// Keys queued before focus moved are dropped from a batch exactly as single keys would be.
+    #[test]
+    fn a_key_batch_carries_only_keys_of_the_current_focus() {
+        let mut adapter = Adapter::new();
+        adapter.handle.key(typed("stale")[0].clone());
+        adapter.handle.interactive_focus(false, false);
+        adapter.handle.interactive_focus(true, true);
+        adapter.handle.key(typed("current")[0].clone());
+        let mut sent = Vec::new();
+        adapter
+            .drain_rounds(1, true, |request| record(&mut sent, request))
+            .unwrap();
+        assert_eq!(
+            sent,
+            vec![Sent::Batch(vec![(0, Some("current".into()), "a".into())])]
+        );
+    }
+
+    /// A batch whose outcome is unknown ends the connection's input like a single key does, and
+    /// neither it nor the keys queued after it are sent again.
+    #[test]
+    fn an_uncertain_key_batch_is_never_sent_again() {
+        let mut adapter = Adapter::new();
+        for text in ["a", "b"] {
+            for key in typed(text) {
+                adapter.handle.key(key);
+            }
+        }
+        let epoch = adapter.active.epoch;
+        let mut batches = 0;
+        let failed = adapter.drain_rounds(1, true, |request| {
+            if matches!(request, Request::Keys { .. }) {
+                batches += 1;
+                return Err(ServerError::NotRunning);
+            }
+            Ok(Reply::Unchanged)
+        });
+        assert_eq!(failed, Err(ServerError::NotRunning));
+        assert_ne!(
+            adapter.handle.state.epoch.load(Ordering::Acquire),
+            epoch,
+            "the connection's input is invalidated"
+        );
+        for key in typed("c") {
+            adapter.handle.key(key);
+        }
+        let _ = adapter.drain_rounds(2, true, |request| {
+            if matches!(request, Request::Keys { .. }) {
+                batches += 1;
+            }
+            Ok(Reply::Unchanged)
+        });
+        assert_eq!(batches, 1, "nothing is replayed");
+    }
+
+    /// A Pane whose route reported the person's stop says the server stopped instead of
+    /// reconnecting, waits for an explicit retry, and reconnects normally once it reaches the
+    /// server again.
+    #[test]
+    fn a_reported_server_stop_ends_automatic_reconnection_until_the_pane_connects() {
+        let adapter = Adapter::new();
+        let state = &adapter.handle.state;
+        state.set(DevelopmentPaneStatus::Reconnecting);
+
+        state.report_server_stopped();
+        assert_eq!(
+            state.status(),
+            DevelopmentPaneStatus::Failed(ServerError::Stopped)
+        );
+        assert!(
+            !state.connection_failed(ServerError::NotRunning, false),
+            "no automatic attempt can reach a stopped server"
+        );
+        assert_eq!(
+            state.status(),
+            DevelopmentPaneStatus::Failed(ServerError::Stopped)
+        );
+        assert!(!state.connection_failed(ServerError::NotRunning, true));
+        assert_eq!(
+            state.status(),
+            DevelopmentPaneStatus::TakeoverFailed(ServerError::Stopped)
+        );
+
+        adapter.tracking_screen(1, 1, false);
+        assert!(
+            state.connection_failed(ServerError::NotRunning, false),
+            "a later interruption reconnects on its own again"
+        );
+        assert_eq!(state.status(), DevelopmentPaneStatus::Reconnecting);
     }
 
     #[test]

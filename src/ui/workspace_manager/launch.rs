@@ -617,9 +617,17 @@ impl WorkspaceManager {
         cx.notify();
     }
 
-    /// Reconnects each Pane the person's stop interrupted, once the server runs again.
+    /// Reconnects each Pane the person's stop interrupted, once this computer's server runs
+    /// again. Another computer's Panes follow their own server.
     fn server_started(&self, cx: &mut App) {
         for workspace in self.workspaces.iter() {
+            if self
+                .shared
+                .owner(workspace.id())
+                .is_some_and(|key| key != super::ServerKey::LOCAL)
+            {
+                continue;
+            }
             workspace
                 .payload()
                 .update(cx, |manager, cx| manager.server_started(cx));

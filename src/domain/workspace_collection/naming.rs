@@ -35,40 +35,16 @@ impl<T> WorkspaceCollection<T> {
 
 impl<T> WorkspaceEntry<T> {
     fn automatic_name(&self) -> String {
-        match &self.location {
-            WorkspaceLocation::Local => {
-                let directory = self
-                    .local_display_directory()
-                    .expect("Local Workspace has a local directory");
-                if Some(directory) == self.local_home_directory() {
-                    return "Default".to_owned();
-                }
-                directory
-                    .file_name()
-                    .map(|name| name.to_string_lossy().into_owned())
-                    .filter(|name| !name.is_empty())
-                    .unwrap_or_else(|| "/".into())
-            }
-            WorkspaceLocation::Remote {
-                remote_home_identity,
-                ..
-            } => {
-                let directory = self
-                    .remote_display_directory()
-                    .expect("Remote Workspace has a remote directory");
-                if directory.is_home_spelling(remote_home_identity) {
-                    return "Default".to_owned();
-                }
-                let basename = directory
-                    .as_str()
-                    .trim_end_matches('/')
-                    .rsplit('/')
-                    .next()
-                    .filter(|name| !name.is_empty())
-                    .unwrap_or("/");
-                basename.to_owned()
-            }
+        let directory = self.home_directory.path();
+        let directory = self.local_display_directory().unwrap_or(directory);
+        if Some(directory) == self.local_home_directory() {
+            return "Default".to_owned();
         }
+        directory
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| "/".into())
     }
 }
 
@@ -82,57 +58,6 @@ mod tests {
             PathBuf::from(path),
             LocalDirectoryIdentity::for_test(identity_label),
         )
-    }
-
-    #[test]
-    fn remote_home_names_should_ignore_trailing_separators_in_live_and_pinned_directories() {
-        let mut workspaces = crate::domain::workspace_collection::tests::local_collection(
-            validated("/home/local", 0),
-            |_, _| (),
-        );
-        let home = RemoteDirectoryIdentity::new("/home/remote".into()).unwrap();
-        let id = workspaces
-            .create_remote_workspace(
-                RemoteWorkspaceTarget::new(
-                    SshDestination::new("build".into()).unwrap(),
-                    home.clone(),
-                ),
-                RemoteUser::new("remote".into()).unwrap(),
-                RemoteDirectory::new("~/".into()).unwrap(),
-                home.clone(),
-                RemoteConnectionState::connected(1),
-                |_| (),
-            )
-            .unwrap();
-        let live = RemoteDirectory::new("/home/remote/".into()).unwrap();
-        workspaces
-            .update_automatic_directory(id, CurrentDirectory::Remote(live.clone()))
-            .unwrap();
-        let live_name = workspaces.workspace(id).unwrap().name().to_owned();
-        let pin = RemoteDirectory::new("/home/remote///".into()).unwrap();
-        workspaces
-            .set_pinned_directory(
-                id,
-                Some(PinnedDirectory::Remote {
-                    directory: pin.clone(),
-                    identity: home,
-                }),
-            )
-            .unwrap();
-        let workspace = workspaces.workspace(id).unwrap();
-        assert_eq!(
-            (
-                live_name.as_str(),
-                workspace.name(),
-                workspace.remote_display_directory()
-            ),
-            ("Default (2)", "Default (2)", Some(&pin))
-        );
-        workspaces.set_pinned_directory(id, None).unwrap();
-        assert_eq!(
-            workspaces.workspace(id).unwrap().remote_display_directory(),
-            Some(&live)
-        );
     }
 
     #[test]
@@ -243,65 +168,6 @@ mod tests {
         assert_eq!(
             names,
             ["project", "project (3)", "project (2)", "project (2) (2)"]
-        );
-    }
-
-    #[test]
-    fn remote_name_should_match_local_basename_behavior() {
-        let mut workspaces = crate::domain::workspace_collection::tests::local_collection(
-            validated("/home/local", 0),
-            |_, _| (),
-        );
-        let home = RemoteDirectoryIdentity::new("/home/remote".into()).unwrap();
-        let id = workspaces
-            .create_remote_workspace(
-                RemoteWorkspaceTarget::new(
-                    SshDestination::new("build".into()).unwrap(),
-                    home.clone(),
-                ),
-                RemoteUser::new("remote".into()).unwrap(),
-                RemoteDirectory::new("/srv/project".into()).unwrap(),
-                home,
-                RemoteConnectionState::connected(1),
-                |_| (),
-            )
-            .unwrap();
-
-        assert_eq!(workspaces.workspace(id).unwrap().name(), "project");
-    }
-
-    #[test]
-    fn automatic_name_collisions_should_span_all_machines() {
-        let mut workspaces = crate::domain::workspace_collection::tests::local_collection(
-            validated("/home/local", 0),
-            |_, _| (),
-        );
-        let home = RemoteDirectoryIdentity::new("/home/remote".into()).unwrap();
-        let mut create = |destination: &str| {
-            workspaces
-                .create_remote_workspace(
-                    RemoteWorkspaceTarget::new(
-                        SshDestination::new(destination.into()).unwrap(),
-                        RemoteDirectoryIdentity::new("/srv/project".into()).unwrap(),
-                    ),
-                    RemoteUser::new("remote".into()).unwrap(),
-                    RemoteDirectory::new("/srv/project".into()).unwrap(),
-                    home.clone(),
-                    RemoteConnectionState::connected(1),
-                    |_| (),
-                )
-                .unwrap()
-        };
-
-        let first = create("build");
-        let second = create("build");
-        let other_machine = create("build-alias");
-
-        assert_eq!(workspaces.workspace(first).unwrap().name(), "project");
-        assert_eq!(workspaces.workspace(second).unwrap().name(), "project (2)");
-        assert_eq!(
-            workspaces.workspace(other_machine).unwrap().name(),
-            "project (3)"
         );
     }
 }

@@ -85,12 +85,54 @@ impl WorkspaceManager {
             && self.open_server_worktree_tab(workspace_id, worktree_id, window, cx)
     }
 
-    /// Whether a Workspace's owning server can create Worktrees in it. Worktree writes reach
-    /// only the account-local server.
+    /// Whether a Workspace's owning server can create Worktrees in it. That server runs Git on its
+    /// own computer, whichever route reaches it.
     pub(super) fn creates_worktrees(&self, workspace_id: WorkspaceId, cx: &App) -> bool {
-        self.is_local_server_workspace(workspace_id)
-            && crate::ui::server_worktrees::available(cx)
+        self.owner_writes_worktrees(workspace_id, cx)
             && self.shared_inventory(workspace_id).is_some()
+    }
+
+    /// Whether the server that owns a Workspace accepts Worktree writes over this client's route.
+    /// Reading it reaches no computer.
+    pub(super) fn owner_writes_worktrees(&self, workspace_id: WorkspaceId, cx: &App) -> bool {
+        use crate::ui::server_worktrees::Client;
+
+        let Some(origin) = self
+            .shared
+            .owner(workspace_id)
+            .and_then(|key| self.shared.origin(key))
+        else {
+            return false;
+        };
+        match origin {
+            super::ServerOrigin::Local => crate::ui::server_worktrees::available(cx),
+            super::ServerOrigin::Ssh(destination) => {
+                Client::ssh(destination, cx).is_some_and(|client| client.supports_worktree_writes())
+            }
+            super::ServerOrigin::Direct(direct) => Client::direct(&direct.route, cx)
+                .is_some_and(|client| client.supports_worktree_writes()),
+        }
+    }
+
+    /// The edit writer of the server that owns a Workspace, when it accepts Worktree writes. Every
+    /// Worktree read and write for that Workspace goes through it, so Git runs on the owning
+    /// server's computer and never on this one's unless that server is this computer's.
+    pub(super) fn owning_worktree_client(
+        &self,
+        workspace_id: WorkspaceId,
+        cx: &mut App,
+    ) -> Option<crate::ui::server_worktrees::Client> {
+        self.owning_client(workspace_id, cx)
+            .filter(crate::ui::server_worktrees::Client::supports_worktree_writes)
+    }
+
+    /// The name of the other computer whose server owns a Workspace, or `None` for this
+    /// computer's.
+    pub(super) fn owning_machine(&self, workspace_id: WorkspaceId) -> Option<String> {
+        self.shared
+            .owner(workspace_id)
+            .and_then(|key| self.shared.origin(key))
+            .and_then(super::ServerOrigin::remote_name)
     }
 
     /// Presents the New Worktree dialog for a Workspace's repository.

@@ -22,7 +22,7 @@ use crate::platform::unix_adapter_tests::short_temporary_root;
 use crate::platform::unix_local_socket::UnixControlSocketProbe;
 use crate::platform::unix_secure_filesystem::UnixSecureFilesystem;
 use crate::ssh::command::{OpenSshExecutable, SshCommandSpec};
-use crate::ssh::process::{ProcessExit, ProcessRunError, ProcessSignal, SshProcessBackend};
+use crate::ssh::process::{ProcessExit, ProcessRunError, SshProcessBackend};
 
 static NEXT_TEST_DIRECTORY: AtomicU64 = AtomicU64::new(0);
 
@@ -72,7 +72,6 @@ struct FakeChild {
 struct FakeState {
     readiness: VecDeque<ProcessExit>,
     early_exits: VecDeque<Option<ProcessExit>>,
-    records: Vec<Vec<OsString>>,
     delays: Vec<Duration>,
     socket_path: Option<PathBuf>,
     reaps: usize,
@@ -80,10 +79,6 @@ struct FakeState {
     pending_delay: bool,
     elapsed: Duration,
     hang_readiness: bool,
-    hang_shutdown: bool,
-    exit_after_shutdown: bool,
-    exit_on_signal: ProcessSignal,
-    signals: Vec<ProcessSignal>,
     master_error_output: Option<TransientSshErrorOutput>,
 }
 
@@ -92,7 +87,6 @@ impl Default for FakeState {
         Self {
             readiness: VecDeque::new(),
             early_exits: VecDeque::new(),
-            records: Vec::new(),
             delays: Vec::new(),
             socket_path: None,
             reaps: 0,
@@ -100,10 +94,6 @@ impl Default for FakeState {
             pending_delay: false,
             elapsed: Duration::ZERO,
             hang_readiness: false,
-            hang_shutdown: false,
-            exit_after_shutdown: true,
-            exit_on_signal: ProcessSignal::Terminate,
-            signals: Vec::new(),
             master_error_output: None,
         }
     }
@@ -112,7 +102,6 @@ impl Default for FakeState {
 struct FakeBackend {
     epoch: Instant,
     state: Mutex<FakeState>,
-    environment: super::super::process::SshProcessEnvironment,
 }
 
 impl Default for FakeBackend {
@@ -120,11 +109,6 @@ impl Default for FakeBackend {
         Self {
             epoch: Instant::now(),
             state: Mutex::new(FakeState::default()),
-            environment: super::super::process::SshProcessEnvironment::new_without_authentication(
-                short_temporary_root().to_path_buf(),
-                None,
-            )
-            .unwrap(),
         }
     }
 }
@@ -137,16 +121,7 @@ impl FakeBackend {
                 readiness: readiness.into_iter().collect(),
                 ..FakeState::default()
             }),
-            environment: super::super::process::SshProcessEnvironment::new_without_authentication(
-                short_temporary_root().to_path_buf(),
-                None,
-            )
-            .unwrap(),
         }
-    }
-
-    fn records(&self) -> Vec<Vec<OsString>> {
-        self.state.lock().unwrap().records.clone()
     }
 
     fn socket_path(&self) -> PathBuf {
@@ -161,10 +136,6 @@ impl FakeBackend {
 impl SshProcessBackend for FakeBackend {
     type Child = FakeChild;
 
-    fn environment(&self) -> &super::super::process::SshProcessEnvironment {
-        &self.environment
-    }
-
     fn now(&self) -> Instant {
         self.epoch + self.state.lock().unwrap().elapsed
     }
@@ -175,7 +146,6 @@ impl SshProcessBackend for FakeBackend {
         let listener =
             UnixListener::bind(&socket_path).map_err(|_| SshProcessMechanismError::LaunchFailed)?;
         let mut state = self.state.lock().unwrap();
-        state.records.push(arguments);
         state.socket_path = Some(socket_path);
         Ok(FakeChild {
             listener: Some(listener),
@@ -193,11 +163,9 @@ impl SshProcessBackend for FakeBackend {
     ) -> Result<ProcessExit, ProcessRunError> {
         let arguments = spec.arguments().to_vec();
         let is_readiness = contains_pair(&arguments, "-O", "check");
-        let is_shutdown = contains_pair(&arguments, "-O", "exit");
         let should_hang = {
-            let mut state = self.state.lock().unwrap();
-            state.records.push(arguments);
-            (is_readiness && state.hang_readiness) || (is_shutdown && state.hang_shutdown)
+            let state = self.state.lock().unwrap();
+            is_readiness && state.hang_readiness
         };
         if should_hang {
             loop {
@@ -219,9 +187,6 @@ impl SshProcessBackend for FakeBackend {
                 .pop_front()
                 .unwrap_or(ProcessExit::unsuccessful(Some(255))))
         } else {
-            if is_shutdown && state.exit_after_shutdown {
-                state.early_exits.push_back(Some(ProcessExit::successful()));
-            }
             Ok(ProcessExit::successful())
         }
     }
@@ -240,19 +205,6 @@ impl SshProcessBackend for FakeBackend {
             }
         }
         Ok(exit)
-    }
-
-    fn signal_process_group(
-        &self,
-        _child: &mut Self::Child,
-        signal: ProcessSignal,
-    ) -> Result<(), SshProcessMechanismError> {
-        let mut state = self.state.lock().unwrap();
-        state.signals.push(signal);
-        if signal == state.exit_on_signal {
-            state.early_exits.push_back(Some(ProcessExit::successful()));
-        }
-        Ok(())
     }
 
     fn begin_cleanup(
@@ -354,7 +306,9 @@ fn connect_should_own_a_ready_private_control_socket(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn separate_ready_connections_should_have_distinct_initial_bindings(cx: &mut TestAppContext) {
+fn closing_one_connection_does_not_revoke_another_connections_server_authority(
+    cx: &mut TestAppContext,
+) {
     let directory = TestDirectory::new();
     let paths = directory.paths();
     let cancellation = SshCancellationToken::default();
@@ -383,11 +337,16 @@ fn separate_ready_connections_should_have_distinct_initial_bindings(cx: &mut Tes
         ))
         .unwrap();
 
-    assert!(first.live_binding().unwrap() != second.live_binding().unwrap());
+    let command = || ValidatedRemoteShellCommand::server_script("exec server").unwrap();
+    let (_, first_capability) = first.server_command(command()).unwrap();
+    let (_, second_capability) = second.server_command(command()).unwrap();
+    drop(first);
+    assert!(first_capability.authorize().is_err());
+    assert!(second_capability.authorize().is_ok());
 }
 
 #[gpui::test]
-fn ready_connection_should_prepare_utility_and_single_use_pane_commands(cx: &mut TestAppContext) {
+fn ready_connection_should_prepare_server_commands(cx: &mut TestAppContext) {
     let directory = TestDirectory::new();
     let paths = directory.paths();
     let backend = Arc::new(FakeBackend::with_readiness([ProcessExit::successful()]));
@@ -405,86 +364,24 @@ fn ready_connection_should_prepare_utility_and_single_use_pane_commands(cx: &mut
         ))
         .unwrap();
 
-    assert!(connection.remote_utility_command().is_ok());
-    let pane = connection
-        .prepare_terminal_session_channel(
-            ValidatedRemoteShellCommand::new("exec /bin/zsh -l".to_owned()).unwrap(),
+    let (_, capability) = connection
+        .server_command(
+            ValidatedRemoteShellCommand::server_script("exec spaceterm-server").unwrap(),
         )
         .unwrap();
-    assert!(pane.take().is_ok());
+    assert!(capability.authorize().is_ok());
 
     connection
         .authority
         .as_ref()
         .unwrap()
-        .transition(LiveConnectionState::ShuttingDown);
+        .transition(LiveConnectionState::Closed);
     assert!(matches!(
-        connection.remote_utility_command(),
-        Err(ControlConnectionError::NotReady)
-    ));
-    assert!(matches!(
-        connection.prepare_terminal_session_channel(
-            ValidatedRemoteShellCommand::new("exec /bin/zsh -l".to_owned()).unwrap()
+        connection.server_command(
+            ValidatedRemoteShellCommand::server_script("exec spaceterm-server").unwrap()
         ),
         Err(ControlConnectionError::NotReady)
     ));
-}
-
-#[gpui::test]
-fn shell_launch_should_preserve_prepared_environment_and_reject_revoked_terminal_session_channel(
-    cx: &mut TestAppContext,
-) {
-    use crate::platform::shell_launch::{PreparedShellLaunch, ShellLaunchFailure};
-    let directory = TestDirectory::new();
-    let paths = directory.paths();
-    let backend = Arc::new(FakeBackend::with_readiness([ProcessExit::successful()]));
-    let connection = cx
-        .foreground_executor()
-        .block_test(OpenSshControlConnection::connect(
-            &paths,
-            OpenSshExecutable::for_test(),
-            &UnixControlSocketProbe,
-            destination(),
-            backend,
-            &SshCancellationToken::default(),
-            timing(),
-        ))
-        .unwrap();
-    let prepare = || {
-        connection
-            .prepare_terminal_session_channel(
-                ValidatedRemoteShellCommand::new("exec /bin/zsh -l".to_owned()).unwrap(),
-            )
-            .unwrap()
-    };
-    let channel = prepare();
-    let launch = PreparedShellLaunch::remote(Path::new("/tmp"), channel.take().unwrap()).unwrap();
-    assert!(!launch.inherit_environment());
-    assert_eq!(launch.working_directory(), short_temporary_root());
-    assert!(launch.environment_removals().is_empty());
-    assert_eq!(
-        launch.environment(),
-        &[
-            (
-                OsString::from("HOME"),
-                short_temporary_root().as_os_str().to_owned()
-            ),
-            (OsString::from("PATH"), OsString::from("/fixture/bin")),
-            (OsString::from("TERM"), OsString::from("xterm-256color")),
-        ]
-    );
-    assert!(channel.take().is_err());
-    let command = prepare().take().unwrap();
-    connection
-        .authority
-        .as_ref()
-        .unwrap()
-        .transition(LiveConnectionState::ShuttingDown);
-    let error = PreparedShellLaunch::remote(Path::new("/tmp"), command).unwrap_err();
-    assert_eq!(error, ShellLaunchFailure::TerminalSessionChannelUnavailable);
-    assert!(
-        !format!("{launch:?} {error:?} {error}").contains(short_temporary_root().to_str().unwrap())
-    );
 }
 
 #[gpui::test]
@@ -636,46 +533,6 @@ fn dropped_connecting_control_should_preserve_an_unregistered_replacement_socket
 }
 
 #[gpui::test]
-fn shutdown_should_send_one_exact_exit_then_reap_and_cleanup(cx: &mut TestAppContext) {
-    let directory = TestDirectory::new();
-    let paths = directory.paths();
-    let backend = Arc::new(FakeBackend::with_readiness([ProcessExit::successful()]));
-    let cancellation = SshCancellationToken::default();
-    let mut connection = cx
-        .foreground_executor()
-        .block_test(OpenSshControlConnection::connect(
-            &paths,
-            OpenSshExecutable::for_test(),
-            &UnixControlSocketProbe,
-            destination(),
-            Arc::clone(&backend),
-            &cancellation,
-            timing(),
-        ))
-        .unwrap();
-    let socket_path = connection.control_path().to_path_buf();
-
-    cx.foreground_executor()
-        .block_test(connection.shutdown())
-        .unwrap();
-    cx.foreground_executor()
-        .block_test(connection.shutdown())
-        .unwrap();
-
-    let exit_commands = backend
-        .records()
-        .iter()
-        .filter(|arguments| contains_pair(arguments, "-O", "exit"))
-        .count();
-    assert!(
-        exit_commands == 1
-            && backend.reap_count() == 1
-            && !socket_path.exists()
-            && connection.state() == ControlConnectionState::Closed
-    );
-}
-
-#[gpui::test]
 fn hanging_readiness_check_should_obey_the_injected_deadline_and_reap(cx: &mut TestAppContext) {
     let directory = TestDirectory::new();
     let paths = directory.paths();
@@ -703,76 +560,7 @@ fn hanging_readiness_check_should_obey_the_injected_deadline_and_reap(cx: &mut T
 }
 
 #[gpui::test]
-fn hanging_exit_command_should_retain_ready_master_ownership(cx: &mut TestAppContext) {
-    let directory = TestDirectory::new();
-    let paths = directory.paths();
-    let backend = Arc::new(FakeBackend::with_readiness([ProcessExit::successful()]));
-    let mut connection = cx
-        .foreground_executor()
-        .block_test(OpenSshControlConnection::connect(
-            &paths,
-            OpenSshExecutable::for_test(),
-            &UnixControlSocketProbe,
-            destination(),
-            Arc::clone(&backend),
-            &SshCancellationToken::default(),
-            timing(),
-        ))
-        .unwrap();
-    backend.state.lock().unwrap().hang_shutdown = true;
-
-    let error = cx
-        .foreground_executor()
-        .block_test(connection.shutdown())
-        .unwrap_err();
-
-    assert!(
-        matches!(
-            error,
-            ControlConnectionError::ShutdownCommand {
-                source: ProcessRunError::TimedOut
-            }
-        ) && connection.state() == ControlConnectionState::Ready
-            && connection.control_path().exists()
-            && backend.reap_count() == 0
-    );
-}
-
-#[gpui::test]
-fn shutdown_should_escalate_from_terminate_to_kill_for_the_owned_group(cx: &mut TestAppContext) {
-    let directory = TestDirectory::new();
-    let paths = directory.paths();
-    let backend = Arc::new(FakeBackend::with_readiness([ProcessExit::successful()]));
-    let mut connection = cx
-        .foreground_executor()
-        .block_test(OpenSshControlConnection::connect(
-            &paths,
-            OpenSshExecutable::for_test(),
-            &UnixControlSocketProbe,
-            destination(),
-            Arc::clone(&backend),
-            &SshCancellationToken::default(),
-            timing(),
-        ))
-        .unwrap();
-    {
-        let mut state = backend.state.lock().unwrap();
-        state.exit_after_shutdown = false;
-        state.exit_on_signal = ProcessSignal::Kill;
-    }
-
-    cx.foreground_executor()
-        .block_test(connection.shutdown())
-        .unwrap();
-
-    assert_eq!(
-        backend.state.lock().unwrap().signals,
-        vec![ProcessSignal::Terminate, ProcessSignal::Kill]
-    );
-}
-
-#[gpui::test]
-fn master_death_should_invalidate_stale_pane_and_utility_commands(cx: &mut TestAppContext) {
+fn master_death_should_invalidate_server_command_authority(cx: &mut TestAppContext) {
     let directory = TestDirectory::new();
     let paths = directory.paths();
     let backend = Arc::new(FakeBackend::with_readiness([ProcessExit::successful()]));
@@ -788,13 +576,11 @@ fn master_death_should_invalidate_stale_pane_and_utility_commands(cx: &mut TestA
             timing(),
         ))
         .unwrap();
-    let pane = connection
-        .prepare_terminal_session_channel(
-            ValidatedRemoteShellCommand::new("exec /bin/zsh -l".to_owned()).unwrap(),
+    let (_, capability) = connection
+        .server_command(
+            ValidatedRemoteShellCommand::server_script("exec spaceterm-server").unwrap(),
         )
         .unwrap();
-    let utility = connection.remote_utility_command().unwrap();
-    let lifecycle = connection.lifecycle_observer().unwrap();
     backend
         .state
         .lock()
@@ -810,23 +596,12 @@ fn master_death_should_invalidate_stale_pane_and_utility_commands(cx: &mut TestA
     }
 
     assert_eq!(connection.state(), ControlConnectionState::Failed);
-    assert_eq!(
-        cx.foreground_executor().block_test(lifecycle.terminal()),
-        crate::ssh::live_connection::ControlConnectionTerminalState::Failed
-    );
-    assert!(matches!(
-        pane.take(),
-        Err(crate::ssh::command::PreparedSshTerminalSessionChannelError::Unavailable)
-    ));
-    assert!(
-        utility
-            .connection_cancellation()
-            .is_some_and(|cancellation| cancellation.is_cancelled())
-    );
+    assert!(capability.cancellation().is_cancelled());
+    assert!(capability.authorize().is_err());
 }
 
 #[gpui::test]
-fn dropping_a_ready_connection_should_publish_closed(cx: &mut TestAppContext) {
+fn dropping_a_ready_connection_revokes_server_command_authority(cx: &mut TestAppContext) {
     let directory = TestDirectory::new();
     let paths = directory.paths();
     let backend = Arc::new(FakeBackend::with_readiness([ProcessExit::successful()]));
@@ -842,14 +617,13 @@ fn dropping_a_ready_connection_should_publish_closed(cx: &mut TestAppContext) {
             timing(),
         ))
         .unwrap();
-    let lifecycle = connection.lifecycle_observer().unwrap();
+    let (_, capability) = connection
+        .server_command(ValidatedRemoteShellCommand::server_script("exec server").unwrap())
+        .unwrap();
 
     drop(connection);
 
-    assert_eq!(
-        cx.foreground_executor().block_test(lifecycle.terminal()),
-        crate::ssh::live_connection::ControlConnectionTerminalState::Closed
-    );
+    assert!(capability.cancellation().is_cancelled());
 }
 
 #[gpui::test]
@@ -869,12 +643,11 @@ fn socket_replacement_should_block_command_use_and_never_be_unlinked(cx: &mut Te
             timing(),
         ))
         .unwrap();
-    let pane = connection
-        .prepare_terminal_session_channel(
-            ValidatedRemoteShellCommand::new("exec /bin/zsh -l".to_owned()).unwrap(),
+    let (_, capability) = connection
+        .server_command(
+            ValidatedRemoteShellCommand::server_script("exec spaceterm-server").unwrap(),
         )
         .unwrap();
-    let command = pane.take().unwrap();
     let socket_path = connection.control_path().to_path_buf();
     connection
         .child
@@ -887,10 +660,7 @@ fn socket_replacement_should_block_command_use_and_never_be_unlinked(cx: &mut Te
     fs::remove_file(&socket_path).unwrap();
     let replacement = UnixListener::bind(&socket_path).unwrap();
 
-    assert!(matches!(
-        command.into_pane_launch_parts(),
-        Err(crate::ssh::command::PreparedSshTerminalSessionChannelError::Unavailable)
-    ));
+    assert!(capability.authorize().is_err());
     drop(connection);
     assert!(socket_path.exists());
 

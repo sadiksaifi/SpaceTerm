@@ -1096,9 +1096,8 @@ pub(crate) mod tests {
                 "/tmp/spaceterm-accessibility-test",
             )),
         );
-        crate::ui::TerminalPane::new_with_prepared_launch(
+        crate::ui::TerminalPane::with_adapters(
             session_factory.clone(),
-            session_factory.prepare_child_launch().unwrap(),
             crate::terminal::testing::test_terminal_key_input_adapter(),
             factory,
             crate::terminal::native_services::testing::adapters(),

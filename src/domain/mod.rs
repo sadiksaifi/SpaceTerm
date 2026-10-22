@@ -11,15 +11,13 @@ pub(crate) use tab::{
 };
 pub(crate) use tab_collection::{TabCollection, TabError, TabStep};
 #[cfg(test)]
+pub(crate) use workspace_collection::LocalDirectoryIdentity;
+#[cfg(test)]
 pub(crate) use workspace_collection::tests::PresentedWorkspace;
 pub(crate) use workspace_collection::{
-    CurrentDirectory, LocalDirectoryIdentity, PinnedDirectory, RemoteDirectory,
-    RemoteDirectoryIdentity, RemoteUser, RemoteWorkspaceTarget, SshDestination,
-    ValidatedLocalDirectory, WorkspaceCollection, WorkspaceEntry, WorkspaceError, WorkspaceId,
-    WorkspaceLocation,
+    CurrentDirectory, PinnedDirectory, RemoteDirectory, SshDestination, ValidatedLocalDirectory,
+    WorkspaceCollection, WorkspaceEntry, WorkspaceError, WorkspaceId,
 };
 pub(crate) use worktree::{RepositoryIdentity, WorktreeId, WorktreeKey, WorktreeRegistry};
 
-pub(crate) use remote_workspace::{
-    RemoteConnectionPhase, RemoteConnectionReduction, RemoteConnectionState,
-};
+pub(crate) use remote_workspace::RemoteConnectionPhase;

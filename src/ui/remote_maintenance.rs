@@ -1363,6 +1363,9 @@ fn interaction(reason: InteractionReason, machine: &str) -> String {
         InteractionReason::CredentialProvider => {
             format!("Your SSH key or credential provider needs your approval to reach {machine}.")
         }
+        InteractionReason::FirstSignIn => {
+            format!("SpaceTerm hasn\u{2019}t signed in to {machine} since it opened.")
+        }
     }
 }
 

@@ -11,9 +11,15 @@ pub fn command(
     lease: Lease,
     text: &str,
 ) -> Result<(), ServerError> {
-    connection.exchange(&Request::Key {
+    connection.exchange(&Request::Focus {
         lease,
-        key: Key {
+        generation: 1,
+        target: FocusTarget::Terminal,
+    })?;
+    connection.exchange(&Request::Input {
+        lease,
+        generation: 1,
+        input: InteractiveInput::Key(Key {
             physical: PhysicalKey::Unidentified as u32,
             action: 0,
             logical: "text-input".into(),
@@ -22,11 +28,12 @@ pub fn command(
             modifiers: 0,
             consumed: 0,
             option_as_alt: false,
-        },
+        }),
     })?;
-    connection.exchange(&Request::Key {
+    connection.exchange(&Request::Input {
         lease,
-        key: Key {
+        generation: 1,
+        input: InteractiveInput::Key(Key {
             physical: PhysicalKey::Enter as u32,
             action: 0,
             logical: "enter".into(),
@@ -35,7 +42,7 @@ pub fn command(
             modifiers: 0,
             consumed: 0,
             option_as_alt: false,
-        },
+        }),
     })?;
     Ok(())
 }

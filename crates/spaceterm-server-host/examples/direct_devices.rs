@@ -10,6 +10,10 @@
 mod support;
 
 #[cfg(feature = "client")]
+#[path = "support/terminal_semantics.rs"]
+mod terminal_semantics;
+
+#[cfg(feature = "client")]
 mod exercise {
     use std::fs::File;
     use std::io::{Read, Write};
@@ -26,9 +30,7 @@ mod exercise {
     };
     use spaceterm_server::hierarchy::{CloseTarget, Id, Inventory, Mutation, Outcome};
     use spaceterm_server::pane::control::Controller;
-    use spaceterm_server::pane::{
-        Lease, PaneConnection, PaneSize, Reply, Request, Screen, graphics, reading,
-    };
+    use spaceterm_server::pane::{Lease, PaneConnection, PaneSize, Reply, Request, Screen};
     use spaceterm_server::{LocalServer, ServerError};
 
     type Result<T> = std::result::Result<T, &'static str>;
@@ -43,6 +45,17 @@ mod exercise {
 
     fn require(condition: bool, failure: &'static str) -> Result<()> {
         if condition { Ok(()) } else { Err(failure) }
+    }
+
+    fn reply_classification(reply: &std::result::Result<Reply, ServerError>) -> &'static str {
+        match reply {
+            Ok(_) => "unexpected-reply",
+            Err(ServerError::Protocol) => "protocol",
+            Err(ServerError::NotRunning) => "not-running",
+            Err(ServerError::SessionUnavailable) => "session-unavailable",
+            Err(ServerError::StaleControl) => "stale-control",
+            Err(_) => "server-refusal",
+        }
     }
 
     fn random() -> Result<[u8; 32]> {
@@ -245,8 +258,11 @@ mod exercise {
         reader: &mut R,
         mut bytes: &mut [u8],
         until: Instant,
+        progress: &mut impl FnMut() -> Result<()>,
     ) -> Result<()> {
         while !bytes.is_empty() {
+            require(Instant::now() < until, "pipe phase deadline elapsed")?;
+            progress()?;
             let left = until.saturating_duration_since(Instant::now());
             require(!left.is_zero(), "pipe phase deadline elapsed")?;
             let mut poll = libc::pollfd {
@@ -254,7 +270,7 @@ mod exercise {
                 events: libc::POLLIN,
                 revents: 0,
             };
-            let millis = left.as_millis().min(i32::MAX as u128) as i32;
+            let millis = left.as_millis().clamp(1, 1_000) as i32;
             // SAFETY: poll borrows one initialized pollfd for at most the bounded deadline.
             let ready = unsafe { libc::poll(&mut poll, 1, millis) };
             if ready < 0
@@ -262,7 +278,10 @@ mod exercise {
             {
                 continue;
             }
-            require(ready > 0, "pipe phase unavailable or timed out")?;
+            require(ready >= 0, "pipe phase unavailable")?;
+            if ready == 0 {
+                continue;
+            }
             let read = api(reader.read(bytes))?;
             require(read != 0, "peer pipe closed before completing its phase")?;
             bytes = &mut bytes[read..];
@@ -271,17 +290,24 @@ mod exercise {
     }
 
     fn receive<R: Read + AsRawFd>(reader: &mut R) -> Result<Vec<u8>> {
+        receive_while(reader, &mut || Ok(()))
+    }
+
+    fn receive_while<R: Read + AsRawFd>(
+        reader: &mut R,
+        progress: &mut impl FnMut() -> Result<()>,
+    ) -> Result<Vec<u8>> {
         pipe_only(reader.as_raw_fd())?;
         let until = Instant::now() + PIPE_DEADLINE;
         let mut length = [0; 4];
-        read_exact(reader, &mut length, until)?;
+        read_exact(reader, &mut length, until, progress)?;
         let length = u32::from_be_bytes(length) as usize;
         require(
             length != 0 && length <= MAX_PIPE_FRAME,
             "pipe frame bound refused",
         )?;
         let mut bytes = vec![0; length];
-        if let Err(error) = read_exact(reader, &mut bytes, until) {
+        if let Err(error) = read_exact(reader, &mut bytes, until, progress) {
             wipe(&mut bytes);
             return Err(error);
         }
@@ -315,7 +341,14 @@ mod exercise {
     }
 
     fn receive_json<R: Read + AsRawFd>(reader: &mut R) -> Result<Value> {
-        let mut bytes = receive(reader)?;
+        receive_json_while(reader, &mut || Ok(()))
+    }
+
+    fn receive_json_while<R: Read + AsRawFd>(
+        reader: &mut R,
+        progress: &mut impl FnMut() -> Result<()>,
+    ) -> Result<Value> {
+        let mut bytes = receive_while(reader, progress)?;
         let result = serde_json::from_slice(&bytes).map_err(|_| "peer phase response malformed");
         wipe(&mut bytes);
         result
@@ -338,13 +371,37 @@ mod exercise {
 
     impl Peer {
         fn penguin() -> Result<Self> {
-            let mut child = api(Command::new("ssh").args([
-                "-T", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes",
-                "-o", "UpdateHostKeys=no", "-o", "AddKeysToAgent=no",
-                "-o", "UseKeychain=no", "-o", "LogLevel=ERROR",
-                "-o", "ControlMaster=no", "-o", "ControlPath=none", "penguin",
-                "exec \"$HOME/Projects/SpaceTerm/target/debug/examples/direct_devices\" device-pipe",
-            ]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::inherit()).spawn())?;
+            let command = if super::terminal_semantics::input_timing_requested() {
+                "SPACETERM_NATIVE_INPUT_TIMING=1 exec \"$HOME/Projects/SpaceTerm/target/debug/examples/direct_devices\" device-pipe"
+            } else {
+                "exec \"$HOME/Projects/SpaceTerm/target/debug/examples/direct_devices\" device-pipe"
+            };
+            let mut child = api(Command::new("ssh")
+                .args([
+                    "-T",
+                    "-o",
+                    "BatchMode=yes",
+                    "-o",
+                    "StrictHostKeyChecking=yes",
+                    "-o",
+                    "UpdateHostKeys=no",
+                    "-o",
+                    "AddKeysToAgent=no",
+                    "-o",
+                    "UseKeychain=no",
+                    "-o",
+                    "LogLevel=ERROR",
+                    "-o",
+                    "ControlMaster=no",
+                    "-o",
+                    "ControlPath=none",
+                    "penguin",
+                    command,
+                ])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::inherit())
+                .spawn())?;
             let input = child.stdin.take().ok_or("SSH input pipe unavailable")?;
             let output = child.stdout.take().ok_or("SSH output pipe unavailable")?;
             Ok(Self {
@@ -355,8 +412,16 @@ mod exercise {
         }
 
         fn message(&mut self, value: Value) -> Result<Value> {
+            self.message_while(value, || Ok(()))
+        }
+
+        fn message_while(
+            &mut self,
+            value: Value,
+            mut progress: impl FnMut() -> Result<()>,
+        ) -> Result<Value> {
             send_json(&mut self.input, value)?;
-            receive_json(&mut self.output)
+            receive_json_while(&mut self.output, &mut progress)
         }
 
         fn finish(&mut self) -> Result<()> {
@@ -621,26 +686,70 @@ mod exercise {
                 "stty -echo; printf '\\033[2J\\033[HDIRECT-LOCAL\\n'",
             )?;
             output(&mut connection, first, "DIRECT-LOCAL")?;
-            let response =
-                peer.message(json!({"pane": pane, "owner": name, "session": first.session}))?;
+            let started = Instant::now();
+            let mut next_health = started;
+            let mut heartbeats = 0_u64;
+            let response = peer.message_while(
+                json!({"pane": pane, "owner": name, "session": first.session}),
+                || {
+                    if Instant::now() < next_health {
+                        return Ok(());
+                    }
+                    // Keep this exact connection alive while the peer reads retained history.
+                    // Capabilities observes the transport without acquiring Pane control.
+                    let reply = connection.exchange(&Request::Capabilities);
+                    if !matches!(reply, Ok(Reply::Capabilities { .. })) {
+                        eprintln!(
+                            "WSS fixture failure: stage=owner-keepalive, class={}, elapsed_ms={}, heartbeats={heartbeats}",
+                            reply_classification(&reply),
+                            started.elapsed().as_millis(),
+                        );
+                        return Err("original owner connection keepalive failed");
+                    }
+                    heartbeats += 1;
+                    next_health = Instant::now() + Duration::from_secs(1);
+                    Ok(())
+                },
+            )?;
             println!(
-                "PASS delayed WSS consumer: Scrollback checked={}, graphics bytes={}",
+                "PASS delayed WSS consumer: Scrollback checked={}, copied rows={}, accessible rows={}, graphics supported={}, graphics bytes={}",
                 response["reading_checked"]
                     .as_bool()
                     .ok_or("reading capability report missing")?,
+                response["copied_rows"]
+                    .as_u64()
+                    .ok_or("copy report missing")?,
+                response["accessible_rows"]
+                    .as_u64()
+                    .ok_or("accessibility report missing")?,
+                response["graphics_supported"]
+                    .as_bool()
+                    .ok_or("graphics negotiation report missing")?,
                 response["graphics_bytes"]
                     .as_u64()
                     .ok_or("graphics capability report missing")?
             );
             let remote: Lease = api(serde_json::from_value(response["lease"].clone()))?;
-            require(
-                remote.session == first.session
-                    && matches!(
-                        connection.exchange(&Request::Poll { lease: first }),
-                        Err(ServerError::StaleControl)
-                    ),
-                "WSS takeover changed the Session or retained stale local control",
-            )?;
+            if remote.session != first.session {
+                eprintln!(
+                    "WSS fixture failure: stage=takeover-session, class=session-changed, elapsed_ms={}, heartbeats={heartbeats}",
+                    started.elapsed().as_millis(),
+                );
+                return Err("WSS takeover changed the Session");
+            }
+            let stale = connection.exchange(&Request::Poll { lease: first });
+            if !matches!(stale, Err(ServerError::StaleControl)) {
+                eprintln!(
+                    "WSS fixture failure: stage=takeover-old-control, class={}, elapsed_ms={}, heartbeats={heartbeats}",
+                    reply_classification(&stale),
+                    started.elapsed().as_millis(),
+                );
+                return Err("original owner connection did not refuse stale control");
+            }
+            println!(
+                "PASS original owner connection refused stale control: elapsed_ms={}, heartbeats={heartbeats}",
+                started.elapsed().as_millis(),
+            );
             let returned = take(&mut connection, pane, DEVICE_NAME)?;
             require(
                 returned.session == first.session,
@@ -826,81 +935,6 @@ mod exercise {
         Ok((server, connector))
     }
 
-    fn bulk(connection: &mut PaneConnection, lease: Lease) -> Result<(bool, usize)> {
-        let reading = connection.supports_reading();
-        let graphics = connection.supports_graphics();
-        let script = if graphics {
-            "python3 -c 'import base64,sys; w=sys.stdout.write; w(\"\\033[2J\\033[H\"); [w(\"DIRECT-BULK-%05d\\n\"%i) for i in range(5000)]; d=base64.b64encode(bytes([255,0,0,255])*320*240).decode(); [w(\"\\033_G\"+(\"a=T,f=32,s=320,v=240,i=541,q=2,\" if i==0 else \"\")+\"m=%d;\"%int(i+4096<len(d))+d[i:i+4096]+\"\\033\\\\\") for i in range(0,len(d),4096)]; w(\"\\nDIRECT-BULK-DONE\\n\"); sys.stdout.flush()'"
-        } else {
-            "printf '\\033[2J\\033[H'; i=0; while [ \"$i\" -lt 5000 ]; do printf 'DIRECT-BULK-%05d\\n' \"$i\"; i=$((i+1)); done; printf 'DIRECT-BULK-DONE\\n'"
-        };
-        command(connection, lease, script)?;
-        // Delay a real WSS consumer while the scoped terminal produces bulk output.
-        std::thread::sleep(Duration::from_millis(300));
-        let screen = output_snapshot(connection, lease, "DIRECT-BULK-DONE")?;
-        if reading {
-            require(
-                screen
-                    .reading
-                    .as_ref()
-                    .is_some_and(|state| state.total_rows >= 5000),
-                "bulk Scrollback did not retain its rows",
-            )?;
-        }
-        if graphics {
-            let snapshot = screen
-                .graphics
-                .as_ref()
-                .and_then(|result| result.as_ref().ok())
-                .ok_or("negotiated graphics manifest missing")?;
-            api(snapshot.validate())?;
-            let image = snapshot
-                .images
-                .iter()
-                .find(|image| image.width == 320 && image.height == 240)
-                .ok_or("bulk graphics resource missing")?;
-            let mut offset = 0;
-            while offset < 320 * 240 * 4 {
-                let Reply::GraphicsChunk(Ok(chunk)) =
-                    api(connection.exchange(&Request::GraphicsChunk {
-                        lease,
-                        image: image.key,
-                        offset,
-                    }))?
-                else {
-                    return Err("bulk graphics chunk missing");
-                };
-                let (pixels, remainder) = chunk.bytes.as_chunks::<4>();
-                require(
-                    chunk.image == image.key
-                        && chunk.offset == offset
-                        && !chunk.bytes.is_empty()
-                        && chunk.bytes.len() <= graphics::CHUNK_BYTES
-                        && remainder.is_empty()
-                        && pixels.iter().all(|pixel| *pixel == [255, 0, 0, 255]),
-                    "bulk graphics chunk binding or pixels changed",
-                )?;
-                offset += chunk.bytes.len();
-            }
-            require(
-                offset == 320 * 240 * 4,
-                "bulk graphics transfer length changed",
-            )?;
-        }
-        if reading {
-            api(connection.exchange(&Request::Read {
-                lease,
-                operation: reading::Operation::Scroll(reading::Scroll::Top),
-            }))?;
-            output(connection, lease, "DIRECT-BULK-00000")?;
-            api(connection.exchange(&Request::Read {
-                lease,
-                operation: reading::Operation::Scroll(reading::Scroll::Bottom),
-            }))?;
-        }
-        Ok((reading, if graphics { 320 * 240 * 4 } else { 0 }))
-    }
-
     fn device() -> Result<()> {
         require(
             std::env::consts::OS == "linux",
@@ -930,7 +964,12 @@ mod exercise {
             lease.session == session,
             "WSS Take Over changed the Session",
         )?;
-        let (reading_checked, graphics_bytes) = bulk(&mut connection, lease)?;
+        let report =
+            super::terminal_semantics::exercise(&mut connection, lease, super::support::command)
+                .map_err(|failure| {
+                    eprintln!("WSS fixture exercise failed: {failure}");
+                    "WSS semantic protocol exercise failed"
+                })?;
         drop(connection);
         let mut connection = api(server.connect_pane())?;
         let lease = attached(select(&mut connection, pane, false)?)?;
@@ -942,8 +981,9 @@ mod exercise {
         output(&mut connection, lease, "DIRECT-RECONNECTED")?;
         send_json(
             &mut output_pipe,
-            json!({"lease": lease, "reading_checked": reading_checked,
-            "graphics_bytes": graphics_bytes}),
+            json!({"lease": lease, "reading_checked": true,
+            "copied_rows": report.copied_rows, "accessible_rows": report.accessible_rows,
+            "graphics_supported": report.graphics_supported, "graphics_bytes": report.graphics_bytes}),
         )?;
         require(
             receive_json(&mut input)?["owner"].as_str() == Some(owner),
@@ -1125,6 +1165,61 @@ mod exercise {
             expected.ok_or("--expect-server is required")?,
             restart,
         )
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use std::os::unix::net::UnixStream;
+
+        use super::*;
+
+        #[test]
+        fn frame_receive_pumps_progress_through_idle_header_and_fragmented_body() {
+            let (mut reader, mut writer) = UnixStream::pair().unwrap();
+            let mut calls = 0;
+            let received = receive_while(&mut reader, &mut || {
+                calls += 1;
+                match calls {
+                    1 => {} // No bytes yet: progress must resume after the bounded poll wait.
+                    2 => writer.write_all(&[0, 0]).unwrap(),
+                    3 => writer.write_all(&[0, 4]).unwrap(),
+                    4 => writer.write_all(b"ab").unwrap(),
+                    5 => writer.write_all(b"cd").unwrap(),
+                    _ => panic!("frame should already be complete"),
+                }
+                Ok(())
+            })
+            .unwrap();
+            assert_eq!((received.as_slice(), calls), (b"abcd".as_slice(), 5));
+        }
+
+        #[test]
+        fn frame_receive_propagates_body_progress_failure() {
+            let (mut reader, mut writer) = UnixStream::pair().unwrap();
+            writer.write_all(&4_u32.to_be_bytes()).unwrap();
+            let mut calls = 0;
+            let received = receive_while(&mut reader, &mut || {
+                calls += 1;
+                if calls == 2 {
+                    Err("fixture progress refused")
+                } else {
+                    Ok(())
+                }
+            });
+            assert_eq!(received, Err("fixture progress refused"));
+        }
+
+        #[test]
+        fn expired_frame_deadline_does_not_run_progress() {
+            let (mut reader, _writer) = UnixStream::pair().unwrap();
+            let mut byte = [0];
+            assert_eq!(
+                read_exact(&mut reader, &mut byte, Instant::now(), &mut || {
+                    panic!("expired frame must not run progress")
+                }),
+                Err("pipe phase deadline elapsed"),
+            );
+        }
     }
 }
 

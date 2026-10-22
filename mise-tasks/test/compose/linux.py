@@ -120,22 +120,33 @@ def session(backend):
                 time.sleep(0.1)
             else:
                 raise RuntimeError("private Wayland display did not start")
+        test_name = (
+            "platform::linux_keyboard::native_compose_tests::"
+            "linux_compose_input_native_press_commit_release_reaches_kitty_encoder"
+        )
+        command = [
+            "cargo",
+            "test",
+            "--package",
+            "spaceterm",
+            "--lib",
+            "--features",
+            "native-tests",
+            "--locked",
+            test_name,
+        ]
+        listing = subprocess.run(
+            [*command, "--", "--ignored", "--exact", "--list"],
+            capture_output=True,
+            text=True,
+        )
+        if listing.returncode:
+            sys.stderr.write(listing.stderr)
+            return listing.returncode
+        if f"{test_name}: test" not in listing.stdout.splitlines():
+            raise RuntimeError("the native Compose test was not selected")
         result = subprocess.run(
-            [
-                "cargo",
-                "test",
-                "--package",
-                "spaceterm",
-                "--bin",
-                "spaceterm",
-                "--features",
-                "native-tests",
-                "--locked",
-                "linux_compose_input_native",
-                "--",
-                "--ignored",
-                "--test-threads=1",
-            ]
+            [*command, "--", "--ignored", "--exact", "--test-threads=1"]
         ).returncode
         # The outer runner owns the deadline and the entire inherited process group.
         if result != 0 and backend == "wayland":

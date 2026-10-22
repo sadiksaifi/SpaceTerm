@@ -594,11 +594,12 @@ impl Render for PairDevice {
                 .child(approve)
         });
         let waiting = matches!(self.invitation, Invitation::Open(_)) && self.claims.is_empty();
+        // A request waits on the person and expires, so it leads the dialog, where it is in
+        // view without scrolling. The invitation that brought it follows.
         div()
             .flex()
             .flex_col()
             .gap(appearance.spacing(12.0))
-            .child(invitation)
             .when(!self.claims.is_empty(), |body| {
                 body.child(secondary(SharedString::from(
                     "The name is what the device calls itself. Approve only a request you \
@@ -606,6 +607,7 @@ impl Render for PairDevice {
                 )))
                 .children(claims)
             })
+            .child(invitation)
             .when(waiting, |body| {
                 body.child(
                     div()

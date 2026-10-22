@@ -193,7 +193,7 @@ impl SharedWorkspaceHost {
                 directory_unavailable: false,
                 failed_directory_session: None,
                 dormant: None,
-                directories: super::directories::DirectoryReads::default(),
+                directories: super::directories::DirectoryOperations::default(),
                 names: Arc::clone(&self.prototype.names),
             };
             self.panes.insert(id, host);
@@ -309,6 +309,9 @@ impl SharedWorkspaceHost {
             )),
             Request::DirectoryRead(request) => Ok(Reply::DirectoryRead(
                 self.prototype.directories.request(connection, request),
+            )),
+            Request::DirectoryCreate(request) => Ok(Reply::DirectoryCreate(
+                self.prototype.directories.create(connection, request),
             )),
             Request::RepairDirectory {
                 target,
@@ -473,11 +476,14 @@ impl SharedWorkspaceHost {
                 development_pane: true,
                 pane_takeover: true,
                 interactive_input: true,
+                key_input_batches: true,
                 native_effects: true,
                 reading: true,
                 graphics: true,
                 accessibility: true,
                 directory_recovery: true,
+                directory_creation: true,
+                directory_matching: true,
                 worktree_writes: true,
                 end_all_sessions: true,
                 workspace_policy: true,
@@ -657,6 +663,7 @@ impl SharedWorkspaceHost {
                     | Request::CompleteClipboard { lease, .. }
                     | Request::Focus { lease, .. }
                     | Request::Input { lease, .. }
+                    | Request::Keys { lease, .. }
                     | Request::Key { lease, .. }
                     | Request::Resize { lease, .. }
                     | Request::Style { lease, .. }

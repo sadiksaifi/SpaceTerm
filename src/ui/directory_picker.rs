@@ -30,14 +30,16 @@ use super::{
 use crate::domain::PinnedDirectory;
 
 mod local_source;
-mod remote_source;
+#[cfg(test)]
+mod scripted_source;
 mod server_source;
-pub(crate) use server_source::ServerDirectorySource;
+#[cfg(test)]
+pub(crate) use server_source::testing as server_directory_testing;
+pub(crate) use server_source::{
+    ServerDirectories, ServerDirectorySource, owning_server_directories,
+};
 
 pub(crate) use local_source::LocalDirectorySource;
-pub(crate) use remote_source::{
-    RemoteDirectoryProvider, RemoteDirectoryProviderError, RemoteDirectorySource,
-};
 
 const HOME_DISPLAY: &str = "~/";
 const CREATE_ALERT_ID: &str = "directory-picker-create-directory";
@@ -52,17 +54,10 @@ const ENCLOSING_ROW: &str = "directory-picker-enclosing";
 const NO_SUBDIRECTORIES: &str = "No subdirectories";
 const TRUNCATED_LISTING_NOTE: &str =
     "Showing the first 1024 directories. Type a path to open others.";
-const UNSUPPORTED_LOGIN_SHELL_MESSAGE: &str =
-    "The remote login shell does not support login mode. Choose another account or shell.";
 pub(super) const MAXIMUM_DIRECTORY_ROWS: usize = 1024;
 const CONNECTION_LOST_NOTICE: EmptyNotice =
-    EmptyNotice::new(IconName::TriangleAlert, "SSH connection lost");
-const SESSION_UNAVAILABLE_NOTICE: EmptyNotice =
-    EmptyNotice::new(IconName::TriangleAlert, "SSH server refused a new session")
-        .description("Close a Pane on this connection or edit the path to try again.");
-const UNSUPPORTED_LOGIN_SHELL_NOTICE: EmptyNotice =
-    EmptyNotice::new(IconName::TriangleAlert, "Unsupported login shell")
-        .description(UNSUPPORTED_LOGIN_SHELL_MESSAGE);
+    EmptyNotice::new(IconName::TriangleAlert, "Server connection lost")
+        .description("Choose again once SpaceTerm reconnects to the server.");
 
 /// The content-unavailable view the list area presents in place of child directories.
 #[derive(Clone, Copy)]
@@ -91,12 +86,9 @@ impl EmptyNotice {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum DirectorySourceError {
     ConnectionLost,
-    /// The machine refused a new session on a connection that is still live.
-    SessionUnavailable,
     Missing,
     NotDirectory,
     PermissionDenied,
-    UnsupportedLoginShell,
     Other,
 }
 
@@ -432,8 +424,6 @@ enum DirectoryPickerStatus {
     NotDirectory,
     PermissionDenied,
     ConnectionLost,
-    SessionUnavailable,
-    UnsupportedLoginShell,
     Other,
     Invalid(PickerPathError),
 }
@@ -1020,10 +1010,18 @@ impl DirectoryPicker {
             ModalId::new(CREATE_ALERT_ID),
             "Create directory",
             "Create Directory?",
-            format!(
-                "Create {}? Missing parent directories will also be created.",
-                parsed.display()
-            ),
+            // Another computer's directory is created there, so the question names it.
+            match self.source.machine_name() {
+                Some(machine) => format!(
+                    "Create {} on \u{201C}{machine}\u{201D}? Missing parent directories will \
+                     also be created.",
+                    parsed.display()
+                ),
+                None => format!(
+                    "Create {}? Missing parent directories will also be created.",
+                    parsed.display()
+                ),
+            },
             vec![
                 ModalAction::new(
                     true,
@@ -1265,10 +1263,6 @@ impl DirectoryPicker {
                     .description("Your account can\u{2019}t open this directory.");
             }
             DirectoryPickerStatus::ConnectionLost => return CONNECTION_LOST_NOTICE,
-            DirectoryPickerStatus::SessionUnavailable => return SESSION_UNAVAILABLE_NOTICE,
-            DirectoryPickerStatus::UnsupportedLoginShell => {
-                return UNSUPPORTED_LOGIN_SHELL_NOTICE;
-            }
             DirectoryPickerStatus::Other => {
                 return EmptyNotice::new(IconName::CircleAlert, "Can\u{2019}t read this directory");
             }
@@ -1287,8 +1281,6 @@ impl DirectoryPicker {
         match self.listing_error {
             None => EmptyNotice::new(IconName::Folder, NO_SUBDIRECTORIES),
             Some(DirectorySourceError::ConnectionLost) => CONNECTION_LOST_NOTICE,
-            Some(DirectorySourceError::SessionUnavailable) => SESSION_UNAVAILABLE_NOTICE,
-            Some(DirectorySourceError::UnsupportedLoginShell) => UNSUPPORTED_LOGIN_SHELL_NOTICE,
             Some(DirectorySourceError::PermissionDenied) => {
                 EmptyNotice::new(IconName::Lock, "Permission denied")
                     .description("Your account can\u{2019}t list this directory.")
@@ -1485,11 +1477,9 @@ fn child_directory_item(
 fn status_for_source_error(error: DirectorySourceError) -> DirectoryPickerStatus {
     match error {
         DirectorySourceError::ConnectionLost => DirectoryPickerStatus::ConnectionLost,
-        DirectorySourceError::SessionUnavailable => DirectoryPickerStatus::SessionUnavailable,
         DirectorySourceError::Missing => DirectoryPickerStatus::Missing,
         DirectorySourceError::NotDirectory => DirectoryPickerStatus::NotDirectory,
         DirectorySourceError::PermissionDenied => DirectoryPickerStatus::PermissionDenied,
-        DirectorySourceError::UnsupportedLoginShell => DirectoryPickerStatus::UnsupportedLoginShell,
         DirectorySourceError::Other => DirectoryPickerStatus::Other,
     }
 }
@@ -1499,6 +1489,7 @@ mod tests {
     use std::cell::RefCell;
     use std::collections::VecDeque;
     use std::future::pending;
+    use std::path::PathBuf;
     use std::rc::Rc;
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
     use std::sync::{Arc, Mutex};
@@ -1508,33 +1499,27 @@ mod tests {
         BackgroundExecutor, Keystroke, Modifiers, Task, TestAppContext, VisualTestContext, div,
     };
 
+    use super::scripted_source::{
+        RemoteDirectoryProvider, RemoteDirectoryProviderError, RemoteDirectorySource,
+    };
+    use super::server_source::{DirectoryConnection, DirectoryConnector};
     use super::*;
-    use crate::domain::{RemoteDirectory, RemoteDirectoryIdentity};
-    use crate::ssh::fake_remote_utility_server::FakeRemoteUtilityServer;
-    use crate::ssh::remote_account::RemoteWorkspaceAccount;
+    use crate::domain::RemoteDirectory;
+    use spaceterm_server::pane::{Reply, Request as PaneRequest};
 
     #[test]
     fn remote_picker_wrapper_debug_should_redact_account_paths_and_rows() {
         let parsed = parse_picker_path("/sensitive/project").unwrap();
         let row = DirectoryRow::new("sensitive-child".to_owned()).unwrap();
         let listing = DirectoryListing::new(vec![row.clone()]);
-        let account = RemoteWorkspaceAccount::from_validated_login_shell(
-            "sensitive-user".to_owned(),
-            RemoteDirectoryIdentity::new("/sensitive/home".to_owned()).unwrap(),
-            crate::ssh::command::ValidatedRemoteLoginShell::new("/bin/zsh".to_owned()).unwrap(),
-        )
-        .unwrap();
-        let pinned = PinnedDirectory::Remote {
-            directory: RemoteDirectory::new("/sensitive/project".to_owned()).unwrap(),
-            identity: RemoteDirectoryIdentity::new("/sensitive/project".to_owned()).unwrap(),
-        };
-        let event = DirectoryPickerEvent::Confirmed(DirectorySelection::Pin(pinned));
+        let event = DirectoryPickerEvent::Confirmed(DirectorySelection::Server(
+            "/sensitive/project".into(),
+        ));
 
         for debug in [
             format!("{parsed:?}"),
             format!("{row:?}"),
             format!("{listing:?}"),
-            format!("{account:?}"),
             format!("{event:?}"),
             format!(
                 "{:?}",
@@ -1547,11 +1532,11 @@ mod tests {
 
     #[derive(Default)]
     struct ScriptedRemoteDirectoryProviderState {
-        accounts: VecDeque<Task<Result<RemoteWorkspaceAccount, RemoteDirectoryProviderError>>>,
+        accounts: VecDeque<Task<Result<String, RemoteDirectoryProviderError>>>,
         listings: VecDeque<Task<Result<DirectoryListing, RemoteDirectoryProviderError>>>,
         probes: VecDeque<Task<Result<ExactPathState, RemoteDirectoryProviderError>>>,
         creations: VecDeque<Task<Result<(), RemoteDirectoryProviderError>>>,
-        validations: VecDeque<Task<Result<RemoteDirectoryIdentity, RemoteDirectoryProviderError>>>,
+        validations: VecDeque<Task<Result<String, RemoteDirectoryProviderError>>>,
         listed_directories: Vec<RemoteDirectory>,
         created_directories: Vec<RemoteDirectory>,
         validated_directories: Vec<RemoteDirectory>,
@@ -1563,9 +1548,7 @@ mod tests {
     }
 
     impl RemoteDirectoryProvider for ScriptedRemoteDirectoryProvider {
-        fn discover_account(
-            &self,
-        ) -> Task<Result<RemoteWorkspaceAccount, RemoteDirectoryProviderError>> {
+        fn discover_account(&self) -> Task<Result<String, RemoteDirectoryProviderError>> {
             self.state
                 .lock()
                 .unwrap()
@@ -1613,7 +1596,7 @@ mod tests {
         fn validate_physical_identity(
             &self,
             directory: RemoteDirectory,
-        ) -> Task<Result<RemoteDirectoryIdentity, RemoteDirectoryProviderError>> {
+        ) -> Task<Result<String, RemoteDirectoryProviderError>> {
             let mut state = self.state.lock().unwrap();
             state.validated_directories.push(directory);
             state
@@ -1647,9 +1630,7 @@ mod tests {
     }
 
     impl RemoteDirectoryProvider for CancellationTrackingRemoteDirectoryProvider {
-        fn discover_account(
-            &self,
-        ) -> Task<Result<RemoteWorkspaceAccount, RemoteDirectoryProviderError>> {
+        fn discover_account(&self) -> Task<Result<String, RemoteDirectoryProviderError>> {
             Task::ready(Ok(remote_account()))
         }
 
@@ -1677,7 +1658,7 @@ mod tests {
         fn validate_physical_identity(
             &self,
             _: RemoteDirectory,
-        ) -> Task<Result<RemoteDirectoryIdentity, RemoteDirectoryProviderError>> {
+        ) -> Task<Result<String, RemoteDirectoryProviderError>> {
             self.pending()
         }
     }
@@ -1785,22 +1766,15 @@ mod tests {
         }
     }
 
-    fn remote_account() -> RemoteWorkspaceAccount {
-        RemoteWorkspaceAccount::from_validated_login_shell(
-            "tester".to_owned(),
-            RemoteDirectoryIdentity::new("/home/tester".to_owned()).unwrap(),
-            crate::ssh::command::ValidatedRemoteLoginShell::new("/bin/zsh".to_owned()).unwrap(),
-        )
-        .unwrap()
+    fn remote_account() -> String {
+        "/home/tester".to_owned()
     }
 
     fn scripted_provider(
         listings: impl IntoIterator<Item = Result<Vec<DirectoryRow>, RemoteDirectoryProviderError>>,
         probes: impl IntoIterator<Item = Result<ExactPathState, RemoteDirectoryProviderError>>,
         creations: impl IntoIterator<Item = Result<(), RemoteDirectoryProviderError>>,
-        validations: impl IntoIterator<
-            Item = Result<RemoteDirectoryIdentity, RemoteDirectoryProviderError>,
-        >,
+        validations: impl IntoIterator<Item = Result<String, RemoteDirectoryProviderError>>,
     ) -> Arc<ScriptedRemoteDirectoryProvider> {
         Arc::new(ScriptedRemoteDirectoryProvider {
             state: Arc::new(Mutex::new(ScriptedRemoteDirectoryProviderState {
@@ -1909,7 +1883,7 @@ mod tests {
         use gpui::accesskit::Action;
         use spaceterm_ui::a11y_testing::{A11yTree, perform};
 
-        let identity = RemoteDirectoryIdentity::new("/home/tester/alpha".to_owned()).unwrap();
+        let identity = "/home/tester/alpha".to_owned();
         let provider = scripted_provider(
             [Ok(remote_rows(["alpha", "Projects"])), Ok(Vec::new())],
             [
@@ -1980,7 +1954,7 @@ mod tests {
     fn the_confirm_key_should_pin_the_current_directory_while_a_child_is_selected(
         cx: &mut TestAppContext,
     ) {
-        let identity = RemoteDirectoryIdentity::new("/home/tester".to_owned()).unwrap();
+        let identity = "/home/tester".to_owned();
         let provider = scripted_provider(
             [Ok(remote_rows(["Projects"]))],
             [Ok(ExactPathState::ReadableDirectory)],
@@ -2006,14 +1980,14 @@ mod tests {
         );
         assert!(events.borrow().iter().any(|event| matches!(
             event,
-            DirectoryPickerEvent::Confirmed(DirectorySelection::Pin(PinnedDirectory::Remote { identity: pinned, .. }))
-                if pinned == &identity
+            DirectoryPickerEvent::Confirmed(DirectorySelection::Server(pinned))
+                if pinned.as_os_str() == identity.as_str()
         )));
     }
 
     #[gpui::test]
     fn return_in_an_empty_directory_should_open_it_rather_than_go_back(cx: &mut TestAppContext) {
-        let identity = RemoteDirectoryIdentity::new("/home/tester".to_owned()).unwrap();
+        let identity = "/home/tester".to_owned();
         let provider = scripted_provider(
             [Ok(Vec::new())],
             [Ok(ExactPathState::ReadableDirectory)],
@@ -2087,8 +2061,7 @@ mod tests {
     fn create_confirmation_uses_alert_then_emits_validated_remote_selection(
         cx: &mut TestAppContext,
     ) {
-        let identity =
-            RemoteDirectoryIdentity::new("/home/tester/Projects/new".to_owned()).unwrap();
+        let identity = "/home/tester/Projects/new".to_owned();
         let provider = scripted_provider(
             [Ok(Vec::new()), Ok(Vec::new())],
             [
@@ -2116,19 +2089,13 @@ mod tests {
         assert_eq!(records.created_directories, vec![expected.clone()]);
         assert_eq!(records.validated_directories, vec![expected.clone()]);
         drop(records);
-        let pinned = events.borrow().iter().find_map(|event| match event {
-            DirectoryPickerEvent::Confirmed(DirectorySelection::Pin(pinned)) => {
-                Some(pinned.clone())
+        let chosen = events.borrow().iter().find_map(|event| match event {
+            DirectoryPickerEvent::Confirmed(DirectorySelection::Server(chosen)) => {
+                Some(chosen.clone())
             }
             _ => None,
         });
-        assert_eq!(
-            pinned,
-            Some(PinnedDirectory::Remote {
-                directory: expected,
-                identity,
-            })
-        );
+        assert_eq!(chosen, Some(identity.as_str().into()));
     }
 
     #[gpui::test]
@@ -2215,31 +2182,6 @@ mod tests {
         assert_eq!(
             enclosing_directory_query(&parse_picker_path("~/").unwrap(), &home),
             None
-        );
-    }
-
-    #[gpui::test]
-    fn unsupported_login_shell_should_have_an_actionable_account_status(cx: &mut TestAppContext) {
-        assert_eq!(
-            status_for_source_error(DirectorySourceError::UnsupportedLoginShell),
-            DirectoryPickerStatus::UnsupportedLoginShell
-        );
-        let provider = scripted_provider([], [], [], []);
-        provider.state.lock().unwrap().accounts = [Task::ready(Err(
-            RemoteDirectoryProviderError::UnsupportedLoginShell,
-        ))]
-        .into();
-        let (picker, _, cx) = directory_picker(provider, cx);
-        let empty = picker.read_with(cx, |picker, _| picker.empty_state());
-        assert_eq!(empty.title(), "Unsupported login shell");
-        assert_eq!(
-            empty.description_text(),
-            Some(UNSUPPORTED_LOGIN_SHELL_MESSAGE)
-        );
-        assert!(cx.debug_bounds("command-palette-empty").is_some());
-        assert_eq!(
-            UNSUPPORTED_LOGIN_SHELL_MESSAGE,
-            "The remote login shell does not support login mode. Choose another account or shell."
         );
     }
 
@@ -2397,72 +2339,6 @@ mod tests {
             picker.finish_close(CommandPaletteCloseReason::Programmatic, cx);
         });
         cx.run_until_parked();
-    }
-
-    #[gpui::test]
-    fn rapid_remote_path_input_should_settle_within_the_connection_session_limit(
-        cx: &mut TestAppContext,
-    ) {
-        let server = FakeRemoteUtilityServer::new(cx.executor(), 10);
-        server.open_terminal_session_channels(8);
-        let (picker, _, cx) = directory_picker(Arc::new(server.provider()), cx);
-        cx.executor().advance_clock(Duration::from_secs(1));
-        cx.run_until_parked();
-
-        let path = "~/Projects/SpaceTerm/crates/";
-        for end in 1..=path.len() {
-            cx.update(|_, cx| {
-                picker.update(cx, |picker, cx| {
-                    picker
-                        .palette
-                        .update(cx, |palette, cx| palette.set_query(&path[..end], cx));
-                });
-            });
-            cx.executor().advance_clock(Duration::from_millis(2));
-            cx.run_until_parked();
-            picker.read_with(cx, |picker, _| {
-                assert_ne!(picker.status, DirectoryPickerStatus::ConnectionLost);
-                assert_ne!(
-                    picker.listing_error,
-                    Some(DirectorySourceError::ConnectionLost)
-                );
-            });
-        }
-        cx.executor().advance_clock(Duration::from_secs(1));
-        cx.run_until_parked();
-
-        picker.read_with(cx, |picker, _| {
-            assert_eq!(picker.status, DirectoryPickerStatus::Readable);
-            assert!(picker.can_confirm());
-            assert_eq!(picker.row_names(), ["Documents", "Projects", "srv"]);
-        });
-        assert_eq!(server.refused_sessions(), 0);
-        assert!(server.peak_utility_sessions() <= 2);
-    }
-
-    #[gpui::test]
-    fn a_server_that_keeps_refusing_sessions_should_not_report_a_lost_connection(
-        cx: &mut TestAppContext,
-    ) {
-        let server = FakeRemoteUtilityServer::new(cx.executor(), 10);
-        let (picker, _, cx) = directory_picker(Arc::new(server.provider()), cx);
-        cx.executor().advance_clock(Duration::from_secs(1));
-        cx.run_until_parked();
-        server.open_terminal_session_channels(10);
-
-        set_remote_input(&picker, "~/Projects/", cx);
-        cx.executor().advance_clock(Duration::from_secs(10));
-        cx.run_until_parked();
-
-        picker.read_with(cx, |picker, _| {
-            assert_eq!(picker.status, DirectoryPickerStatus::SessionUnavailable);
-            assert_eq!(
-                picker.empty_notice().title,
-                SESSION_UNAVAILABLE_NOTICE.title
-            );
-            assert!(!picker.can_confirm());
-        });
-        assert!(server.refused_sessions() > 2);
     }
 
     #[gpui::test]
@@ -2707,7 +2583,7 @@ mod tests {
 
     #[gpui::test]
     fn validation_makes_the_path_read_only_until_the_parent_advances(cx: &mut TestAppContext) {
-        let identity = RemoteDirectoryIdentity::new("/home/tester".to_owned()).unwrap();
+        let identity = "/home/tester".to_owned();
         let provider = scripted_provider(
             [Ok(Vec::new())],
             [Ok(ExactPathState::ReadableDirectory)],
@@ -2783,12 +2659,7 @@ mod tests {
                         lifecycle_generation,
                         operation_generation,
                         directory,
-                        result: Ok(DirectorySelection::Pin(PinnedDirectory::Remote {
-                            directory: crate::domain::RemoteDirectory::new("~/".to_owned())
-                                .unwrap(),
-                            identity: RemoteDirectoryIdentity::new("/home/tester".to_owned())
-                                .unwrap(),
-                        })),
+                        result: Ok(DirectorySelection::Server("/home/tester".into())),
                     },
                     window,
                     cx,
@@ -2816,7 +2687,7 @@ mod tests {
 
     #[gpui::test]
     fn escape_during_validation_dismisses_without_accepting_late_success(cx: &mut TestAppContext) {
-        let identity = RemoteDirectoryIdentity::new("/home/tester".to_owned()).unwrap();
+        let identity = "/home/tester".to_owned();
         let provider = scripted_provider(
             [Ok(Vec::new())],
             [Ok(ExactPathState::ReadableDirectory)],
@@ -2836,6 +2707,495 @@ mod tests {
                 .iter()
                 .any(|event| matches!(event, DirectoryPickerEvent::Confirmed(_)))
         );
+    }
+
+    use super::server_source::testing::InProcessServer;
+
+    /// The owning server reached over a route that, like an SSH server's session limit, refuses
+    /// a channel beyond the first two it opened.
+    struct LimitedChannels {
+        server: InProcessServer,
+        opened: Arc<AtomicUsize>,
+    }
+
+    impl DirectoryConnector for LimitedChannels {
+        fn connect(&self) -> Result<Box<dyn DirectoryConnection>, ()> {
+            if self.opened.fetch_add(1, AtomicOrdering::SeqCst) >= 2 {
+                return Err(());
+            }
+            self.server.connect()
+        }
+    }
+
+    /// Typing a path as one quick burst browses it over one server channel, so a route that
+    /// allows only a few channels never reads as a lost connection.
+    #[gpui::test]
+    fn typing_a_path_quickly_should_browse_it_over_one_server_channel(cx: &mut TestAppContext) {
+        // The server answers from its own directory channel thread.
+        cx.executor().allow_parking();
+        let root = std::env::temp_dir().join(format!(
+            "spaceterm-server-directory-burst-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("projects/alpha")).unwrap();
+        std::fs::create_dir_all(root.join("projects/beta")).unwrap();
+        let handler: Box<dyn FnMut(&PaneRequest) -> Reply + Send> =
+            Box::new(crate::runtime::directory_testing::directory_host());
+        let opened = Arc::new(AtomicUsize::new(0));
+        let server: Arc<dyn DirectoryConnector> = Arc::new(LimitedChannels {
+            server: InProcessServer(Arc::new(Mutex::new(handler))),
+            opened: Arc::clone(&opened),
+        });
+        cx.update(crate::ui::init).unwrap();
+        let (harness, cx) = cx.add_window_view(move |window, cx| {
+            let source = ServerDirectorySource::browsing_through(
+                server,
+                Some("penguin".to_owned()),
+                Rc::new(|| true),
+            );
+            DirectoryPickerHarness {
+                picker: cx.new(|cx| {
+                    DirectoryPicker::new(Rc::new(source), "Open Remote Directory", window, cx)
+                }),
+            }
+        });
+        let picker = harness.read_with(cx, |harness, _| harness.picker.clone());
+        cx.update(|window, cx| {
+            window.activate_window();
+            picker.update(cx, |picker, cx| assert!(picker.open(window, cx)));
+        });
+        wait_for(
+            |cx| {
+                picker.read_with(cx, |picker, _| {
+                    picker.status != DirectoryPickerStatus::DiscoveringAccount
+                })
+            },
+            cx,
+        );
+
+        // Each character replaces the query at once, as fast typing does.
+        let typed = format!("{}/projects/", root.display());
+        for end in 1..=typed.len() {
+            cx.update(|_, cx| {
+                picker.update(cx, |picker, cx| {
+                    picker
+                        .palette
+                        .update(cx, |palette, cx| palette.set_query(&typed[..end], cx));
+                });
+            });
+        }
+        wait_for(
+            |cx| {
+                picker.read_with(cx, |picker, _| {
+                    picker.status != DirectoryPickerStatus::Loading
+                })
+            },
+            cx,
+        );
+
+        assert_eq!(
+            picker.read_with(cx, |picker, _| picker.status),
+            DirectoryPickerStatus::Readable
+        );
+        assert_eq!(
+            picker.read_with(cx, |picker, _| picker.row_names()),
+            ["alpha", "beta"]
+        );
+        assert_eq!(
+            opened.load(AtomicOrdering::SeqCst),
+            1,
+            "the picker reuses its one server channel"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn wait_for(
+        mut settled: impl FnMut(&mut VisualTestContext) -> bool,
+        cx: &mut VisualTestContext,
+    ) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !settled(cx) {
+            assert!(std::time::Instant::now() < deadline, "the server answers");
+            std::thread::sleep(Duration::from_millis(10));
+            cx.run_until_parked();
+        }
+    }
+
+    /// Open Remote Directory and Pin to Directory create a missing directory on the owning
+    /// server after the person confirms, through the production server source and the server's
+    /// own directory handler, and pin the directory the server validated.
+    #[gpui::test]
+    fn a_server_directory_picker_should_create_a_missing_directory_on_its_server(
+        cx: &mut TestAppContext,
+    ) {
+        // The server answers from its own directory channel thread.
+        cx.executor().allow_parking();
+        let root = std::env::temp_dir().join(format!(
+            "spaceterm-server-directory-creation-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let missing = root.join("new/nested");
+        let handler: Box<dyn FnMut(&PaneRequest) -> Reply + Send> =
+            Box::new(crate::runtime::directory_testing::directory_host());
+        let server: Arc<dyn DirectoryConnector> =
+            Arc::new(InProcessServer(Arc::new(Mutex::new(handler))));
+        cx.update(crate::ui::init).unwrap();
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let recorded = Rc::clone(&events);
+        let (harness, cx) = cx.add_window_view(move |window, cx| {
+            let source = ServerDirectorySource::browsing_through(
+                server,
+                Some("penguin".to_owned()),
+                Rc::new(|| true),
+            );
+            let picker = cx.new(|cx| {
+                DirectoryPicker::new(Rc::new(source), "Open Remote Directory", window, cx)
+            });
+            cx.subscribe(&picker, move |_, _, event: &DirectoryPickerEvent, _| {
+                recorded.borrow_mut().push(event.clone());
+            })
+            .detach();
+            DirectoryPickerHarness { picker }
+        });
+        let picker = harness.read_with(cx, |harness, _| harness.picker.clone());
+        cx.update(|window, cx| {
+            window.activate_window();
+            picker.update(cx, |picker, cx| assert!(picker.open(window, cx)));
+        });
+        wait_for(
+            |cx| picker.read_with(cx, |picker, _| picker.source.allows_creation()),
+            cx,
+        );
+
+        set_remote_input(&picker, &missing.display().to_string(), cx);
+        wait_for(
+            |cx| {
+                picker.read_with(cx, |picker, _| {
+                    picker.status == DirectoryPickerStatus::Missing
+                })
+            },
+            cx,
+        );
+        cx.update(|window, cx| {
+            picker.update(cx, |picker, cx| picker.confirm_current(window, cx));
+        });
+        cx.run_until_parked();
+        let create = cx
+            .debug_bounds("modal-action-directory-picker-create")
+            .expect("the picker asks before the server creates the directory");
+        cx.simulate_click(create.center(), Modifiers::none());
+        wait_for(
+            |_| {
+                events.borrow().iter().any(|event| {
+                    matches!(
+                        event,
+                        DirectoryPickerEvent::Confirmed(DirectorySelection::Server(_))
+                    )
+                })
+            },
+            cx,
+        );
+
+        assert!(
+            missing.is_dir(),
+            "the server created the directory and its parents"
+        );
+        let chosen = events.borrow().iter().find_map(|event| match event {
+            DirectoryPickerEvent::Confirmed(DirectorySelection::Server(chosen)) => {
+                Some(chosen.clone())
+            }
+            _ => None,
+        });
+        assert_eq!(
+            chosen.map(|chosen| chosen.components().collect::<PathBuf>()),
+            Some(missing.components().collect::<PathBuf>())
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// What the test controls about the route to the owning server.
+    #[derive(Default)]
+    struct RouteControls {
+        /// Connections opened so far; each one remembers its place.
+        opened: AtomicUsize,
+        /// Connections opened before this count have been closed by the server, as it closes a
+        /// channel that stays idle.
+        closed_before: AtomicUsize,
+        /// Creation requests that reached the server.
+        creates: AtomicUsize,
+        /// Whether the reply to a creation is lost after the server acted on it.
+        lose_create_reply: std::sync::atomic::AtomicBool,
+        /// While set, opening a connection waits.
+        hold_connect: Mutex<bool>,
+        released: std::sync::Condvar,
+    }
+
+    impl RouteControls {
+        /// The server closes every connection opened so far.
+        fn close_open_channels(&self) {
+            self.closed_before.store(
+                self.opened.load(AtomicOrdering::SeqCst),
+                AtomicOrdering::SeqCst,
+            );
+        }
+        fn hold_connect(&self, held: bool) {
+            *self.hold_connect.lock().unwrap() = held;
+            self.released.notify_all();
+        }
+    }
+
+    struct ControlledRoute {
+        server: InProcessServer,
+        controls: Arc<RouteControls>,
+    }
+
+    struct ControlledConnection {
+        inner: Box<dyn DirectoryConnection>,
+        place: usize,
+        controls: Arc<RouteControls>,
+    }
+
+    impl DirectoryConnector for ControlledRoute {
+        fn connect(&self) -> Result<Box<dyn DirectoryConnection>, ()> {
+            let held = self.controls.hold_connect.lock().unwrap();
+            let _released = self
+                .controls
+                .released
+                .wait_timeout_while(held, Duration::from_secs(10), |held| *held)
+                .unwrap();
+            let place = self.controls.opened.fetch_add(1, AtomicOrdering::SeqCst);
+            Ok(Box::new(ControlledConnection {
+                inner: self.server.connect()?,
+                place,
+                controls: Arc::clone(&self.controls),
+            }))
+        }
+    }
+
+    impl DirectoryConnection for ControlledConnection {
+        fn reads_directories(&self) -> bool {
+            self.inner.reads_directories()
+        }
+        fn creates_directories(&self) -> bool {
+            self.inner.creates_directories()
+        }
+        fn exchange(&mut self, request: &PaneRequest) -> Result<Reply, ()> {
+            if self.place < self.controls.closed_before.load(AtomicOrdering::SeqCst) {
+                return Err(());
+            }
+            let begins_creation = matches!(
+                request,
+                PaneRequest::DirectoryCreate(
+                    spaceterm_server::pane::directories::CreationRequest::Begin { .. }
+                )
+            );
+            if begins_creation {
+                self.controls.creates.fetch_add(1, AtomicOrdering::SeqCst);
+            }
+            let reply = self.inner.exchange(request);
+            if begins_creation && self.controls.lose_create_reply.load(AtomicOrdering::SeqCst) {
+                return Err(());
+            }
+            reply
+        }
+    }
+
+    /// A server picker showing its creation alert for a missing directory under a fresh root.
+    struct CreationAlert {
+        picker: gpui::Entity<DirectoryPicker>,
+        events: Rc<RefCell<Vec<DirectoryPickerEvent>>>,
+        root: PathBuf,
+        missing: PathBuf,
+    }
+
+    /// Opens a server picker over `controls` and asks it to create a missing directory, up to
+    /// its creation alert.
+    fn creation_alert<'a>(
+        controls: &Arc<RouteControls>,
+        name: &str,
+        cx: &'a mut TestAppContext,
+    ) -> (CreationAlert, &'a mut VisualTestContext) {
+        // The server answers from its own directory channel thread.
+        cx.executor().allow_parking();
+        let root = std::env::temp_dir().join(format!(
+            "spaceterm-server-directory-{name}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let missing = root.join("new/nested");
+        let handler: Box<dyn FnMut(&PaneRequest) -> Reply + Send> =
+            Box::new(crate::runtime::directory_testing::directory_host());
+        let server: Arc<dyn DirectoryConnector> = Arc::new(ControlledRoute {
+            server: InProcessServer(Arc::new(Mutex::new(handler))),
+            controls: Arc::clone(controls),
+        });
+        cx.update(crate::ui::init).unwrap();
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let recorded = Rc::clone(&events);
+        let (harness, cx) = cx.add_window_view(move |window, cx| {
+            let source = ServerDirectorySource::browsing_through(
+                server,
+                Some("penguin".to_owned()),
+                Rc::new(|| true),
+            );
+            let picker = cx.new(|cx| {
+                DirectoryPicker::new(Rc::new(source), "Open Remote Directory", window, cx)
+            });
+            cx.subscribe(&picker, move |_, _, event: &DirectoryPickerEvent, _| {
+                recorded.borrow_mut().push(event.clone());
+            })
+            .detach();
+            DirectoryPickerHarness { picker }
+        });
+        let picker = harness.read_with(cx, |harness, _| harness.picker.clone());
+        cx.update(|window, cx| {
+            window.activate_window();
+            picker.update(cx, |picker, cx| assert!(picker.open(window, cx)));
+        });
+        wait_for(
+            |cx| picker.read_with(cx, |picker, _| picker.source.allows_creation()),
+            cx,
+        );
+        set_remote_input(&picker, &missing.display().to_string(), cx);
+        wait_for(
+            |cx| {
+                picker.read_with(cx, |picker, _| {
+                    picker.status == DirectoryPickerStatus::Missing
+                })
+            },
+            cx,
+        );
+        cx.update(|window, cx| {
+            picker.update(cx, |picker, cx| picker.confirm_current(window, cx));
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("modal-action-directory-picker-create")
+                .is_some()
+        );
+        (
+            CreationAlert {
+                picker,
+                events,
+                root,
+                missing,
+            },
+            cx,
+        )
+    }
+
+    fn click_create(cx: &mut VisualTestContext) {
+        let create = cx
+            .debug_bounds("modal-action-directory-picker-create")
+            .expect("the picker asks before the server creates the directory");
+        cx.simulate_click(create.center(), Modifiers::none());
+    }
+
+    fn confirmed(events: &Rc<RefCell<Vec<DirectoryPickerEvent>>>) -> bool {
+        events.borrow().iter().any(|event| {
+            matches!(
+                event,
+                DirectoryPickerEvent::Confirmed(DirectorySelection::Server(_))
+            )
+        })
+    }
+
+    /// The server closed the picker's channel while the person read the creation alert. The
+    /// creation still reaches the server once, over a channel admitted just before it.
+    #[gpui::test]
+    fn creating_after_an_idle_alert_should_reach_the_server_over_a_fresh_channel(
+        cx: &mut TestAppContext,
+    ) {
+        let controls = Arc::new(RouteControls::default());
+        let (alert, cx) = creation_alert(&controls, "idle-create", cx);
+        let CreationAlert {
+            events,
+            root,
+            missing,
+            ..
+        } = alert;
+
+        controls.close_open_channels();
+        click_create(cx);
+        wait_for(|_| confirmed(&events), cx);
+
+        assert!(missing.is_dir(), "the server created the directory");
+        assert_eq!(controls.creates.load(AtomicOrdering::SeqCst), 1);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A creation whose reply is lost may have taken effect, so it is reported as failed and
+    /// never sent again.
+    #[gpui::test]
+    fn a_creation_whose_reply_is_lost_should_fail_without_being_sent_again(
+        cx: &mut TestAppContext,
+    ) {
+        let controls = Arc::new(RouteControls::default());
+        let (alert, cx) = creation_alert(&controls, "lost-create", cx);
+        let CreationAlert {
+            picker,
+            events,
+            root,
+            missing,
+        } = alert;
+
+        controls
+            .lose_create_reply
+            .store(true, AtomicOrdering::SeqCst);
+        click_create(cx);
+        wait_for(
+            |cx| picker.read_with(cx, |picker, _| picker.busy.is_none()),
+            cx,
+        );
+        std::thread::sleep(Duration::from_millis(200));
+        cx.run_until_parked();
+
+        assert!(
+            !confirmed(&events),
+            "nothing claims the directory was created"
+        );
+        assert_eq!(
+            controls.creates.load(AtomicOrdering::SeqCst),
+            1,
+            "the creation is sent once"
+        );
+        assert!(missing.is_dir(), "what the server already did stays");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A creation abandoned while its channel was still opening never reaches the server.
+    #[gpui::test]
+    fn a_creation_abandoned_while_connecting_should_never_reach_the_server(
+        cx: &mut TestAppContext,
+    ) {
+        let controls = Arc::new(RouteControls::default());
+        let (alert, cx) = creation_alert(&controls, "abandoned-create", cx);
+        let CreationAlert {
+            picker,
+            events,
+            root,
+            missing,
+        } = alert;
+
+        controls.hold_connect(true);
+        click_create(cx);
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            picker.update(cx, |picker, cx| picker.cancel(window, cx));
+        });
+        cx.run_until_parked();
+        controls.hold_connect(false);
+        std::thread::sleep(Duration::from_millis(300));
+        cx.run_until_parked();
+
+        assert_eq!(controls.creates.load(AtomicOrdering::SeqCst), 0);
+        assert!(!missing.exists());
+        assert!(!confirmed(&events));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     fn set_remote_input(

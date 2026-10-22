@@ -122,9 +122,6 @@ pub(crate) trait SshProcessBackend: Send + Sync + 'static {
     /// Non-clone ownership of one child process and its private process group.
     type Child: Send + 'static;
 
-    /// Returns the captured, sanitized environment applied to all spawned SSH processes.
-    fn environment(&self) -> &SshProcessEnvironment;
-
     fn now(&self) -> Instant;
 
     /// Starts one owned command without blocking the caller's async executor thread.
@@ -155,12 +152,6 @@ pub(crate) trait SshProcessBackend: Send + Sync + 'static {
     fn observe_exit(&self, _child: &mut Self::Child) -> Option<SshProcessExitObservation> {
         None
     }
-
-    fn signal_process_group(
-        &self,
-        child: &mut Self::Child,
-        signal: ProcessSignal,
-    ) -> Result<(), SshProcessMechanismError>;
 
     /// Enqueues owned-process cleanup without blocking the caller.
     ///
@@ -204,10 +195,6 @@ impl SshProcessCleanup {
         )
     }
 
-    pub(crate) fn is_complete(&self) -> bool {
-        self.completion.is_closed()
-    }
-
     pub(crate) fn completed() -> Self {
         let (sender, completion) = async_channel::bounded(1);
         drop(sender);
@@ -221,6 +208,7 @@ impl SshProcessCleanup {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ProcessSignal {
+    #[cfg(test)]
     Terminate,
     Kill,
 }
@@ -614,20 +602,6 @@ impl SshProcessEnvironment {
         };
         (self.home.clone(), entries, askpass_capability)
     }
-
-    /// Builds the environment for an already-authorized Terminal Session Channel.
-    ///
-    /// Pane commands must use their live control connection and never receive AskPass transport
-    /// state. If that connection is unavailable, OpenSSH must fail instead of re-authenticating.
-    pub(crate) fn into_pane_launch_environment(self) -> (PathBuf, Vec<(OsString, OsString)>) {
-        let mut entries = vec![(OsString::from("HOME"), self.home.as_os_str().to_owned())];
-        entries.extend(
-            self.startup
-                .entries()
-                .map(|(name, value)| (name.into(), value.to_owned())),
-        );
-        (self.home, entries)
-    }
 }
 
 impl SshProbeEnvironment {
@@ -707,10 +681,6 @@ pub(crate) struct SupervisedSshChild<A: SshProcessAdapter> {
 impl<A: SshProcessAdapter> SshProcessBackend for SshProcessSupervisor<A> {
     type Child = SupervisedSshChild<A>;
 
-    fn environment(&self) -> &SshProcessEnvironment {
-        &self.environment
-    }
-
     fn now(&self) -> Instant {
         Instant::now()
     }
@@ -772,18 +742,6 @@ impl<A: SshProcessAdapter> SshProcessBackend for SshProcessSupervisor<A> {
 
     fn observe_exit(&self, child: &mut Self::Child) -> Option<SshProcessExitObservation> {
         child.adapter.observe_exit(child.process.as_mut()?)
-    }
-
-    fn signal_process_group(
-        &self,
-        child: &mut Self::Child,
-        signal: ProcessSignal,
-    ) -> Result<(), SshProcessMechanismError> {
-        let process = child
-            .process
-            .as_mut()
-            .ok_or(SshProcessMechanismError::StatusFailed)?;
-        child.adapter.signal(process, signal)
     }
 
     fn begin_cleanup(
@@ -1447,32 +1405,6 @@ fn join_writer(writer: Option<JoinHandle<io::Result<()>>>) -> Result<(), ()> {
     }
 }
 
-pub(crate) struct CancelOnDrop {
-    cancellation: SshCancellationToken,
-    armed: bool,
-}
-
-impl CancelOnDrop {
-    pub(crate) fn new(cancellation: SshCancellationToken) -> Self {
-        Self {
-            cancellation,
-            armed: true,
-        }
-    }
-
-    pub(crate) fn disarm(&mut self) {
-        self.armed = false;
-    }
-}
-
-impl Drop for CancelOnDrop {
-    fn drop(&mut self) {
-        if self.armed {
-            self.cancellation.cancel();
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1651,44 +1583,6 @@ mod tests {
             error,
             Some(SshProcessEnvironmentError::UnsafeHome)
         ));
-    }
-
-    #[test]
-    fn pane_environment_uses_captured_home_and_startup_entries() {
-        let home = PathBuf::from("/private/tmp");
-        let environment = SshProcessEnvironment::new_without_authentication(
-            home.clone(),
-            Some(OsString::from("/private/tmp/agent.sock")),
-        )
-        .unwrap();
-        let (directory, entries) = environment.into_pane_launch_environment();
-        let entries: std::collections::HashMap<_, _> = entries.into_iter().collect();
-        assert_eq!(directory, home);
-        assert_eq!(
-            entries.get(std::ffi::OsStr::new("HOME")),
-            Some(&OsString::from("/private/tmp"))
-        );
-        assert_eq!(
-            entries.get(std::ffi::OsStr::new("PATH")),
-            Some(&OsString::from("/fixture/bin"))
-        );
-        assert_eq!(
-            entries.get(std::ffi::OsStr::new("SSH_AUTH_SOCK")),
-            Some(&OsString::from("/private/tmp/agent.sock"))
-        );
-        assert!(!entries.contains_key(std::ffi::OsStr::new("SPACETERM_UNKNOWN")));
-    }
-
-    #[test]
-    fn authenticated_pane_environment_should_exclude_askpass_transport() {
-        let (directory, entries) = authenticated_test_environment().into_pane_launch_environment();
-
-        assert_eq!(directory, Path::new("/captured/home"));
-        assert!(entries.iter().all(|(name, _)| {
-            !ASKPASS_OVERLAY_NAMES
-                .iter()
-                .any(|candidate| name == candidate)
-        }));
     }
 
     use super::testing::*;

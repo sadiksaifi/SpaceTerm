@@ -18,11 +18,9 @@ mod direct_pairing;
 pub(crate) mod direct_servers;
 pub(crate) mod directory_picker;
 mod drag_and_drop;
-mod native_remote_workspace_flow_backend;
 pub(crate) mod pane_lifecycle;
 mod pane_motion;
 pub(crate) mod permission_setup;
-mod remote_child_launch;
 pub(crate) mod remote_maintenance;
 pub(crate) mod remote_workspace_flow;
 mod render_lifecycle;
@@ -41,7 +39,7 @@ pub(crate) mod settings_window;
 pub(crate) mod shared_workspaces;
 mod sidebar_motion;
 mod sidebar_window;
-mod ssh_host_form;
+pub(crate) mod ssh_host_form;
 mod ssh_host_picker;
 pub(crate) mod ssh_servers;
 mod tab_manager;
@@ -67,29 +65,22 @@ pub(crate) mod worktree_path_template;
 
 use gpui::{App, actions};
 
-pub(crate) use native_remote_workspace_flow_backend::{
-    NativeRemoteWorkspaceFlowBackendFactory, RemoteWorkspaceSshRuntime,
-};
-pub(crate) use remote_child_launch::RemoteChildLaunchUnavailable;
 #[cfg(test)]
 pub(crate) use render_lifecycle::{RenderLifecycle, ScaleChange, SurfaceVisibility};
 pub(crate) use tab_manager::{TabManager, TabManagerEvent};
-pub(crate) use tab_view::{
-    PreparedTabViewRemoteRestart, RemoteTabViewLifecycleError, TabIdentity, TabView, TabViewEvent,
-};
+pub(crate) use tab_view::{TabIdentity, TabView, TabViewEvent};
 #[cfg(test)]
 pub(crate) use terminal_focus::{
     TerminalFocusBlocker, TerminalFocusCoordinator, TerminalFocusFacts,
 };
-pub(crate) use terminal_pane::{
-    PaneOrigin, PreparedRemotePaneRestart, RemotePaneLifecycleError, TerminalPane,
-    TerminalPaneEvent,
-};
+pub(crate) use terminal_pane::{PaneOrigin, TerminalPane, TerminalPaneEvent};
 pub(crate) use workspace_frame::WorkspaceFrame;
 #[cfg(test)]
 pub(crate) use workspace_manager::launch_testing;
 #[cfg(test)]
-pub(crate) use workspace_manager::tests::assert_scroll_shortcuts_from_sidebar_focus;
+pub(crate) use workspace_manager::tests::{
+    assert_scroll_shortcuts_from_sidebar_focus, use_desktop_sessions,
+};
 pub(crate) use workspace_manager::{
     LocalServerAdapters, WorkspaceManager, WorkspaceManagerAdapters, resume_waiting_launches,
 };

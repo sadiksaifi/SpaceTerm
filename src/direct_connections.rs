@@ -64,6 +64,10 @@ pub(crate) struct DirectRoute {
 #[derive(Clone, Debug)]
 pub(crate) enum JoinStatus {
     Validating,
+    /// The live original is retained until explicit retry, cancellation or expiry.
+    Retryable {
+        stage: EnrollmentStage,
+    },
     AwaitingApproval {
         server_name: String,
         server_fingerprint: String,
@@ -78,6 +82,12 @@ pub(crate) enum JoinStatus {
     Rejected,
     Expired,
     Failed(DirectError),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum EnrollmentStage {
+    Claim,
+    Approval,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -145,6 +155,8 @@ struct RouteState {
 struct JoinState {
     status: JoinStatus,
     cancelled: bool,
+    retry_requested: bool,
+    deadline: Instant,
 }
 
 struct Retry {
@@ -369,6 +381,26 @@ impl DirectConnections {
             .joins
             .get(&id)
             .map(|j| j.status.clone())
+    }
+
+    /// Resumes only this paused live original. It never prepares another invitation or claim.
+    pub(crate) fn retry_join(&self, id: JoinId) -> Result<(), DirectError> {
+        let mut state = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
+        let join = state
+            .joins
+            .get_mut(&id)
+            .ok_or(DirectError::InvalidRequest)?;
+        if join.cancelled
+            || Instant::now() >= join.deadline
+            || !matches!(join.status, JoinStatus::Retryable { .. })
+        {
+            return Err(DirectError::InvalidRequest);
+        }
+        join.retry_requested = true;
+        join.status = JoinStatus::Validating;
+        drop(state);
+        self.0.notify();
+        Ok(())
     }
 
     /// Requests cancellation, reporting a failure to synchronize retained cleanup.

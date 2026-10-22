@@ -10,7 +10,6 @@ use super::shell_integration::{
     ShellEnvironment, ShellIntegrationMode, ShellIntegrationPolicy, ShellIntegrationStatus,
     plan_shell_integration,
 };
-use crate::ssh::command::SshCommandSpec;
 use crate::terminal::identity;
 
 const FOREIGN_RUNTIME_ENVIRONMENT: &[&str] = &[
@@ -173,29 +172,6 @@ pub struct PreparedShellLaunch {
 }
 
 impl PreparedShellLaunch {
-    pub(crate) fn remote(
-        local_home: &Path,
-        command: SshCommandSpec,
-    ) -> Result<Self, ShellLaunchFailure> {
-        validate_working_directory(local_home)?;
-        let (executable, arguments, prepared_environment) = command
-            .into_pane_launch_parts()
-            .map_err(|_| ShellLaunchFailure::TerminalSessionChannelUnavailable)?;
-        let (working_directory, mut environment) =
-            prepared_environment.into_pane_launch_environment();
-        environment.push(("TERM".into(), identity::TERM_FALLBACK.into()));
-        Ok(Self {
-            executable,
-            arguments,
-            working_directory,
-            inherit_environment: false,
-            environment_removals: Vec::new(),
-            environment,
-            integration: None,
-            terminal_name: identity::TERM_FALLBACK,
-        })
-    }
-
     /// Sets one more variable for the shell, replacing any inherited value.
     pub fn with_environment_value(mut self, name: &str, value: &str) -> Self {
         self.environment.push((name.into(), value.into()));
@@ -265,8 +241,6 @@ impl fmt::Debug for PreparedShellLaunch {
 pub enum ShellLaunchFailure {
     #[error("Shell launch directory is unavailable; select an existing directory and retry")]
     DirectoryUnavailable,
-    #[error("Remote Terminal Session Channel is unavailable; reconnect and retry")]
-    TerminalSessionChannelUnavailable,
 }
 
 fn validate_working_directory(directory: &Path) -> Result<(), ShellLaunchFailure> {
@@ -280,12 +254,7 @@ fn validate_working_directory(directory: &Path) -> Result<(), ShellLaunchFailure
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{RemoteDirectory, SshDestination};
     use crate::platform::shell_integration::ShellKind;
-    use crate::ssh::command::{
-        PreparedSshTerminalSessionChannelError, RemotePaneShellCommandBuilder,
-        ValidatedRemoteLoginShell,
-    };
 
     fn env_value<'a>(launch: &'a PreparedShellLaunch, key: &str) -> Option<&'a OsStr> {
         launch
@@ -497,46 +466,5 @@ mod tests {
             assert!(!format!("{error:?} {error}").contains("private-project"));
             assert!(std::error::Error::source(&error).is_none());
         }
-    }
-
-    #[test]
-    fn remote_launch_preserves_exact_command_consumes_once_and_excludes_local_markers() {
-        let context = crate::ssh::testing::SshConnectionFixture::new(
-            SshDestination::new("user@remote".to_owned()).unwrap(),
-        );
-        let directory = RemoteDirectory::new("~/private project".to_owned()).unwrap();
-        let shell = ValidatedRemoteLoginShell::new("/bin/zsh".to_owned()).unwrap();
-        let command = RemotePaneShellCommandBuilder::new(&directory, &shell)
-            .build()
-            .unwrap();
-        let channel = context.prepare_terminal_session_channel(command);
-        let taken = channel.take().unwrap();
-        let expected_arguments = taken.arguments().to_vec();
-        let launch = PreparedShellLaunch::remote(&std::env::temp_dir(), taken).unwrap();
-        assert!(matches!(
-            channel.take(),
-            Err(PreparedSshTerminalSessionChannelError::AlreadyConsumed)
-        ));
-        assert_eq!(launch.executable(), "/test/ssh");
-        assert_eq!(launch.arguments(), expected_arguments);
-        assert_eq!(launch.working_directory(), std::env::temp_dir());
-        assert!(!launch.inherit_environment());
-        assert_eq!(launch.integration, None);
-        assert_eq!(
-            launch.environment(),
-            [
-                ("HOME".into(), std::env::temp_dir().into_os_string()),
-                ("PATH".into(), "/fixture/bin".into()),
-                ("TERM".into(), "xterm-256color".into())
-            ]
-        );
-        let mut launch = launch;
-        launch
-            .environment
-            .push(("SSH_ASKPASS_TOKEN".into(), "sensitive-secret-value".into()));
-        assert_eq!(
-            format!("{launch:?}"),
-            "PreparedShellLaunch { integration: None, .. }"
-        );
     }
 }

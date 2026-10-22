@@ -16,10 +16,7 @@ use schedules::{FindQueryUpdate, ScheduleInput, WorkerSchedules};
 mod launch;
 use super::pointer_input::*;
 use crate::platform::local_filesystem::LocalFilesystemAuthority;
-pub use launch::{
-    LocalTerminalLaunchPlan, NativeTerminalSessionFactory, RemoteTerminalLaunchPlan,
-    TerminalLaunchPlan,
-};
+pub use launch::{LocalTerminalLaunchPlan, NativeTerminalSessionFactory};
 use std::fmt;
 #[cfg(test)]
 use std::io::Write;
@@ -57,9 +54,7 @@ use crate::terminal::identity;
 #[cfg(test)]
 use crate::terminal::key::OptionAsAltPolicy;
 use crate::terminal::key::{KeyInput, PhysicalKey};
-use crate::terminal::metadata::{
-    LocalMachine, RemoteTerminalMetadataContext, TerminalMetadataContext, TerminalMetadataSnapshot,
-};
+use crate::terminal::metadata::{LocalMachine, TerminalMetadataContext, TerminalMetadataSnapshot};
 use crate::terminal::osc52::{Osc52Effect, Osc52Filter};
 use crate::terminal::paste::{
     PasteConfirmationId, PasteDecision, PasteRejection, PasteRequestOutcome, PasteResolution,
@@ -263,10 +258,6 @@ impl fmt::Display for TerminalSessionStartupStage {
 pub enum TerminalSessionError {
     #[error("failed to start the terminal worker thread: {0:?}")]
     SpawnWorker(std::io::ErrorKind),
-    #[error(transparent)]
-    PreparedSshTerminalSessionChannel(
-        #[from] crate::ssh::command::PreparedSshTerminalSessionChannelError,
-    ),
     #[cfg(test)]
     #[error("terminal emulator initialization failed: {0}")]
     EmulatorStartup(String),
@@ -608,16 +599,14 @@ pub trait TerminalSessionHandle {
     fn update_appearance(&self, update: TerminalAppearanceUpdate);
 }
 
-/// Starts one Terminal Session by consuming typed Local or Remote launch authority.
+/// Starts a server-owned Terminal Session or its client presentation.
 pub trait TerminalSessionFactory {
-    /// Starts a Terminal Session without reparsing or weakening the supplied launch plan.
-    ///
-    /// Remote implementations consume the prepared OpenSSH command exactly once and use only the
-    /// plan's validated local home as local process working-directory authority.
+    /// Native runtimes consume the local launch authority. Server presentations use their
+    /// server-owned Pane and grant no client-local directory authority from this plan.
     fn start(
         &self,
         geometry: TerminalGeometry,
-        launch_plan: TerminalLaunchPlan,
+        launch_plan: LocalTerminalLaunchPlan,
         initial_appearance: TerminalAppearanceUpdate,
     ) -> Result<StartedTerminalSession, TerminalSessionError>;
 

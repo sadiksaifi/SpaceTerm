@@ -57,9 +57,9 @@ mod development {
     use crate::close_confirmation::CloseTarget;
     use crate::domain::{PaneId, TabId, ValidatedLocalDirectory, WorkspaceId};
     use crate::local_server::LocalServer;
+    use crate::terminal::WorkspaceTerminalSessionFactory;
     use crate::terminal::server_session::{DevelopmentServerSessionFactory, PaneControls};
     use crate::terminal::shared_workspace::{SharedWorkspaceClient, SharedWorkspaceSnapshot};
-    use crate::terminal::{PreparedWorkspaceTerminalLaunch, WorkspaceTerminalSessionFactory};
     use crate::ui::pane_lifecycle::PaneConstruction;
     use crate::ui::server_pane::{ServerPaneConnection, ServerPaneView};
 
@@ -589,11 +589,10 @@ mod development {
         }
     }
 
-    /// One Pane's passive subscription to the server: how it presents the Pane, its first launch
-    /// reservation, and the connection whose status the Pane reads.
+    /// One Pane's passive subscription to the server: how it presents the Pane and the connection
+    /// whose status the Pane reads.
     pub(crate) type SharedPaneSubscription = (
         WorkspaceTerminalSessionFactory,
-        PreparedWorkspaceTerminalLaunch,
         Arc<dyn ServerPaneConnection>,
     );
 
@@ -688,11 +687,7 @@ mod development {
                 Rc::new(factory.with_attachment(permit)),
                 self.client_home.clone(),
             );
-            let prepared = session_factory
-                .prepare_child_launch()
-                .inspect_err(|_| eprintln!("a server-backed launch reserves no channel"))
-                .ok()?;
-            Some((session_factory, prepared, state))
+            Some((session_factory, state))
         }
     }
 
@@ -742,18 +737,14 @@ mod development {
                 Rc::new(factory.with_attachment(permit)),
                 self.client_home.clone(),
             );
-            let prepared = session_factory
-                .prepare_child_launch()
-                .inspect_err(|_| eprintln!("a server-backed launch reserves no channel"))
-                .ok()?;
-            Some((session_factory, prepared, state))
+            Some((session_factory, state))
         }
     }
 
     /// Opens passive subscriptions to the server's Panes and supplies their Pane construction.
     ///
-    /// Shared Panes reuse native client effects and same-machine file authority. Accessible
-    /// shell text remains unavailable until server-backed accessibility is implemented.
+    /// Shared Panes reuse native client effects and obtain accessible shell text from the server.
+    /// Same-machine file authority applies only to Panes on this machine's server.
     #[derive(Clone)]
     pub(crate) struct SharedPaneSessions {
         opener: Rc<dyn SharedPaneOpener>,
@@ -1450,6 +1441,15 @@ mod development {
 
         pub(crate) fn editability(&self) -> SharedEditability {
             self.edits.editability()
+        }
+
+        /// Whether a new edit can go to the server now: its connection is up, its first
+        /// inventory is read and reconciled, and this client's retained views are applied, so an
+        /// accepted creation is attached to a view that a later reading won't replace.
+        pub(crate) fn accepts_edits(&self) -> bool {
+            self.editability().available()
+                && self.latest.is_some()
+                && (self.saved_views.is_some() || self.retained_views.is_none())
         }
 
         /// Captures what closing `target` ends, as the server reported it last. The capture is
@@ -2184,6 +2184,7 @@ mod development {
             take_overs: std::sync::atomic::AtomicUsize,
             restored_starts: std::sync::atomic::AtomicUsize,
             retries: std::sync::atomic::AtomicUsize,
+            stops: std::sync::atomic::AtomicUsize,
         }
 
         impl ScriptedPane {
@@ -2199,6 +2200,7 @@ mod development {
                     take_overs: std::sync::atomic::AtomicUsize::new(0),
                     restored_starts: std::sync::atomic::AtomicUsize::new(0),
                     retries: std::sync::atomic::AtomicUsize::new(0),
+                    stops: std::sync::atomic::AtomicUsize::new(0),
                 })
             }
 
@@ -2258,6 +2260,11 @@ mod development {
             pub(crate) fn retries(&self) -> usize {
                 self.retries.load(std::sync::atomic::Ordering::SeqCst)
             }
+
+            /// How many times the Pane heard that its route reported the server stopped.
+            pub(crate) fn stops(&self) -> usize {
+                self.stops.load(std::sync::atomic::Ordering::SeqCst)
+            }
         }
 
         impl crate::ui::server_pane::ServerPaneConnection for ScriptedPane {
@@ -2286,6 +2293,25 @@ mod development {
             fn retry(&self) {
                 self.retries
                     .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+
+            /// Reports the stop as the real connection does: an interrupted Pane says the server
+            /// stopped.
+            fn report_server_stopped(&self) {
+                use crate::terminal::server_session::DevelopmentPaneStatus;
+                self.stops.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let mut status = self.status.lock().expect("status");
+                *status = match *status {
+                    DevelopmentPaneStatus::Reconnecting => {
+                        DevelopmentPaneStatus::Failed(crate::local_server::ServerError::Stopped)
+                    }
+                    DevelopmentPaneStatus::TakeoverReconnecting => {
+                        DevelopmentPaneStatus::TakeoverFailed(
+                            crate::local_server::ServerError::Stopped,
+                        )
+                    }
+                    current => current,
+                };
             }
 
             fn take_over(&self) {
@@ -2338,6 +2364,16 @@ mod development {
                 })
             }
 
+            /// The scripted connections behind every server Pane opened so far.
+            pub(crate) fn opened(&self) -> Vec<std::sync::Arc<ScriptedPane>> {
+                self.panes
+                    .lock()
+                    .expect("panes")
+                    .values()
+                    .cloned()
+                    .collect()
+            }
+
             /// The scripted connection behind one server Pane, once it has been opened.
             pub(crate) fn pane(&self, pane: super::Id) -> std::sync::Arc<ScriptedPane> {
                 std::sync::Arc::clone(
@@ -2367,8 +2403,7 @@ mod development {
                     .lock()
                     .expect("panes")
                     .insert(pane, std::sync::Arc::clone(&connection));
-                let prepared = self.session_factory.prepare_child_launch().ok()?;
-                Some((self.session_factory.clone(), prepared, connection))
+                Some((self.session_factory.clone(), connection))
             }
         }
 

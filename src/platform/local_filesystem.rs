@@ -338,7 +338,13 @@ impl LocalFilesystemAuthority {
 
     pub fn create_directory_all(&self, path: &Path) -> Result<(), LocalFilesystemError> {
         validate_absolute_path(self.paths, path)?;
-        fs::create_dir_all(path).map_err(classify_io_error)
+        fs::create_dir_all(path).map_err(|error| {
+            if error.kind() == io::ErrorKind::AlreadyExists {
+                LocalFilesystemError::NotDirectory
+            } else {
+                classify_io_error(error)
+            }
+        })
     }
 
     fn identify_kind(

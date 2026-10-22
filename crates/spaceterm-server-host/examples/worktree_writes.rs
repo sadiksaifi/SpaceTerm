@@ -5,31 +5,24 @@ mod lifecycle;
 #[path = "support/repository.rs"]
 mod repository;
 use repository::*;
+#[path = "support/worktree.rs"]
+#[expect(
+    dead_code,
+    reason = "this exercise manages its interrupted originals explicitly"
+)]
+mod worktree_fixture;
 use spaceterm_server::{
     LocalServer,
-    hierarchy::{CloseTarget, Mutation, Outcome, RetainedOutcome},
+    hierarchy::{CloseTarget, Mutation, Outcome},
     pane::{PaneConnection, Reply, Request},
-    worktree::{Branch, BranchName, Error as WorktreeError, Operation, Read, ReadReply},
+    worktree::{Branch, BranchName, Error as WorktreeError, Operation},
 };
 use std::{
     error::Error,
     path::Path,
     time::{Duration, Instant},
 };
-fn finish(c: &mut PaneConnection, sequence: u64) -> Result<RetainedOutcome, Box<dyn Error>> {
-    let until = Instant::now() + Duration::from_secs(25);
-    loop {
-        match c.exchange(&Request::Resolve { sequence })? {
-            Reply::Outcome(outcome) => return Ok(outcome),
-            Reply::MutationPending => {}
-            _ => return Err("original write outcome unavailable".into()),
-        }
-        if Instant::now() > until {
-            return Err("write did not settle".into());
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
-}
+use worktree_fixture::{finish, review, write};
 fn reconcile_fixture_originals(c: &mut PaneConnection) -> Result<(), Box<dyn Error>> {
     let next = inventory(c)?.1;
     if next > 1024 {
@@ -53,38 +46,6 @@ fn reconcile_fixture_originals(c: &mut PaneConnection) -> Result<(), Box<dyn Err
     Ok(())
 }
 
-fn write(c: &mut PaneConnection, operation: Operation) -> Result<RetainedOutcome, Box<dyn Error>> {
-    let sequence = inventory(c)?.1;
-    let reply = c.exchange(&Request::Mutate {
-        sequence,
-        mutation: Mutation::Worktree(operation),
-    })?;
-    let outcome = match reply {
-        Reply::Outcome(o) => o,
-        Reply::MutationPending => finish(c, sequence)?,
-        _ => return Err("write response".into()),
-    };
-    c.exchange(&Request::Acknowledge { sequence })?;
-    Ok(outcome)
-}
-fn review(c: &mut PaneConnection, root: &Path, path: &Path) -> Result<Operation, Box<dyn Error>> {
-    let review = match c.read_worktree(Read::CheckRemoval {
-        root: root.into(),
-        path: path.into(),
-    })? {
-        Ok(ReadReply::Removal(review)) => review,
-        Err(error) => {
-            return Err(format!("removal review failed: {error:?}").into());
-        }
-        _ => return Err("removal review response".into()),
-    };
-    Ok(Operation::Remove {
-        root: root.into(),
-        path: path.into(),
-        boot: review.boot,
-        confirmation: review.confirmation,
-    })
-}
 fn main() -> Result<(), Box<dyn Error>> {
     let major = std::env::args().nth(1).unwrap_or("1".into()).parse()?;
     let a = LocalServer::for_development_client("worktree-writes-a", major)?;

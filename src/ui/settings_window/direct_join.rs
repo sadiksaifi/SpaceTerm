@@ -17,7 +17,7 @@ use zeroize::Zeroizing;
 
 use super::SettingsWindow;
 use super::server_list::ServerChoice;
-use crate::direct_connections::JoinStatus;
+use crate::direct_connections::{EnrollmentStage, JoinStatus};
 use crate::local_server::direct::DirectError;
 use crate::local_server::pane::control::ClientName;
 use crate::ui::appearance::{ChromeAppearance, gpui_color};
@@ -28,6 +28,7 @@ use crate::ui::direct_access::{countdown, remaining, unix_now};
 pub(super) const INVITATION_SELECTOR: &str = "settings-join-invitation";
 pub(super) const JOIN_SELECTOR: &str = "settings-join-invitation-join";
 pub(super) const JOIN_CANCEL_SELECTOR: &str = "settings-join-invitation-cancel";
+pub(super) const JOIN_RETRY_SELECTOR: &str = "settings-join-invitation-retry";
 pub(super) const JOIN_STATUS_SELECTOR: &str = "settings-join-invitation-status";
 pub(super) const WITHDRAW_SELECTOR: &str = "settings-join-invitation-withdraw";
 pub(super) const WITHDRAW_CONFIRM_SELECTOR: &str = "settings-join-invitation-withdraw-confirm";
@@ -92,6 +93,30 @@ fn join_failure(error: DirectError) -> &'static str {
             "The server refused the request, so this device isn\u{2019}t paired."
         }
     }
+}
+
+/// What a join paused by a network failure says. The failure names no cause, so the copy names
+/// none: a pending system prompt, a firewall and a server that stopped all read the same. The
+/// request stays as it was, so trying again asks with the same invitation.
+fn join_paused(stage: EnrollmentStage) -> String {
+    let what = match stage {
+        EnrollmentStage::Claim => {
+            "SpaceTerm didn\u{2019}t get an answer from the server at the invitation\u{2019}s \
+             address."
+        }
+        EnrollmentStage::Approval => {
+            "SpaceTerm lost contact with the server while waiting for approval."
+        }
+    };
+    // Some systems ask before an app reaches the local network, so the copy covers that prompt
+    // without claiming one appeared.
+    let next = "If this computer asks whether SpaceTerm can find devices on the local network, \
+                allow it. Otherwise, check that this computer can reach the server on the network. \
+                Then choose Try Again.";
+    format!(
+        "{what} {next} SpaceTerm keeps this request until the invitation expires, and asks again \
+         only when you choose Try Again."
+    )
 }
 
 /// What a request the server's owner declined says.
@@ -228,6 +253,19 @@ impl SettingsWindow {
         }
     }
 
+    /// Asks again with the paused join's own request, only because the person chose Try Again.
+    /// A join that expired or changed meanwhile reports its own status instead.
+    fn retry_join(&mut self, cx: &mut Context<Self>) {
+        let Some(rows) = self.direct_routes.as_mut() else {
+            return;
+        };
+        if let Some(join) = rows.join {
+            let _ = rows.connections.retry_join(join);
+        }
+        self.follow_join(cx);
+        cx.notify();
+    }
+
     /// Records the person's cancellation or withdrawal of the latest join. Saving it touches this
     /// computer's storage, so it runs off the window's thread, and a save that fails says so.
     fn cancel_join(&mut self, cx: &mut Context<Self>) {
@@ -273,9 +311,14 @@ impl SettingsWindow {
         let status = rows
             .join
             .and_then(|join| rows.connections.join_status(join));
+        // A paused join still holds its request, so a new invitation waits for Cancel.
         let waiting = matches!(
             status,
-            Some(JoinStatus::Validating | JoinStatus::AwaitingApproval { .. })
+            Some(
+                JoinStatus::Validating
+                    | JoinStatus::AwaitingApproval { .. }
+                    | JoinStatus::Retryable { .. }
+            )
         );
         let input = rows.invitation.clone();
         let focus = input.read(cx).focus_handle();
@@ -355,6 +398,51 @@ impl SettingsWindow {
                 .debug_selector(JOIN_STATUS_SELECTOR)
                 .into_any_element(),
             ),
+            (Some(JoinStatus::Retryable { stage }), None) => {
+                let retry = {
+                    let owner = owner.clone();
+                    Button::new(JOIN_RETRY_SELECTOR, "Try Again")
+                        .variant(ButtonVariant::Outline)
+                        .size(ButtonSize::Regular)
+                        .tab_stop(true)
+                        .debug_selector(JOIN_RETRY_SELECTOR)
+                        .accessibility_description("Ask the server again with the same invitation")
+                        .on_activate(move |_, _, cx| {
+                            let _ = owner.update(cx, |settings, cx| settings.retry_join(cx));
+                        })
+                };
+                let cancel = {
+                    let owner = owner.clone();
+                    Button::new(JOIN_CANCEL_SELECTOR, "Cancel")
+                        .variant(ButtonVariant::Outline)
+                        .size(ButtonSize::Regular)
+                        .tab_stop(true)
+                        .debug_selector(JOIN_CANCEL_SELECTOR)
+                        .accessibility_description("Stop this pairing request")
+                        .on_activate(move |_, _, cx| {
+                            let _ = owner.update(cx, |settings, cx| settings.cancel_join(cx));
+                        })
+                };
+                Some(
+                    div()
+                        .id(JOIN_STATUS_SELECTOR)
+                        .debug_selector(|| JOIN_STATUS_SELECTOR.to_owned())
+                        .role(accesskit::Role::Alert)
+                        .flex()
+                        .flex_row()
+                        .items_start()
+                        .gap(appearance.spacing(8.0))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .child(secondary(join_paused(*stage).into(), colors.warning)),
+                        )
+                        .child(retry)
+                        .child(cancel)
+                        .into_any_element(),
+                )
+            }
             (
                 Some(JoinStatus::AwaitingApproval {
                     server_name,

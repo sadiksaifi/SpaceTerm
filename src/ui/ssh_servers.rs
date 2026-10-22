@@ -13,6 +13,8 @@ use gpui::{App, Global, SharedString, Window, WindowId};
 use crate::domain::SshDestination;
 use crate::platform::app_paths::AppPaths;
 use crate::ssh::askpass::{AskPassAttempt, AskPassAttemptFactory, AskPassUnavailable};
+use crate::ssh::host_config::HostDiscovery;
+use crate::ssh::managed_hosts::ManagedSshHost;
 use crate::ssh::server_connection::{
     ConnectPhase, ContinuityChange, IncompatibilityKind, InteractionReason, RefusalKind,
     RemoteConnectionStatus, ServerAvailability, SshIntentStoreError, SshServerConnections,
@@ -20,6 +22,7 @@ use crate::ssh::server_connection::{
 };
 use crate::ssh::server_operations::RemoteServerOperations;
 use crate::ui::sidebar_window::form::CaptionTone;
+use crate::ui::ssh_host_form::ManagedHostFormBackendError;
 
 struct InstalledSshServers {
     connections: SshServerConnections,
@@ -63,10 +66,23 @@ impl AskPassAttemptFactory for PromptWindow {
     }
 }
 
-/// Lists the SSH hosts a person can connect to. Listing reads this computer's SSH configuration
-/// only; it reaches no host.
+/// Lists the SSH hosts a person can connect to and adds hosts to SpaceTerm's own SSH
+/// configuration. Both read or write this computer's SSH configuration only; neither reaches a
+/// host.
 pub(crate) trait SshHostSource: Send + Sync {
-    fn hosts(&self) -> Vec<SshDestination>;
+    /// Every host the configuration names, with what kept any of it from being read.
+    fn discover(&self) -> HostDiscovery;
+
+    /// Adds `host` to SpaceTerm's managed SSH configuration.
+    fn add_managed_host(&self, host: ManagedSshHost) -> Result<(), ManagedHostFormBackendError>;
+
+    fn hosts(&self) -> Vec<SshDestination> {
+        self.discover()
+            .hosts
+            .iter()
+            .filter_map(|host| SshDestination::new(host.alias().as_str().to_owned()).ok())
+            .collect()
+    }
 }
 
 /// Makes one registry the desktop's for a test, with no window presenting SSH's prompts.
@@ -504,6 +520,11 @@ const fn interaction_detail(reason: InteractionReason) -> &'static str {
         InteractionReason::CredentialProvider => {
             "Your SSH key or credential provider needs your approval. Choose Connect to approve \
              it; SpaceTerm doesn\u{2019}t ask in the background."
+        }
+        // Nothing has asked yet, so this names no prompt; SSH may or may not show one.
+        InteractionReason::FirstSignIn => {
+            "SpaceTerm hasn\u{2019}t signed in to this computer since it opened. Choose Connect \
+             to sign in; SpaceTerm doesn\u{2019}t connect in the background."
         }
     }
 }

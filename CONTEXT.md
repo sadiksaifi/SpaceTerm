@@ -10,7 +10,7 @@ SpaceTerm organizes terminal work into Workspaces, Tabs, Pane Layouts, and Pane-
 
 **Local Workspace**: A Workspace whose Terminal Sessions run on this machine.
 
-**Remote Workspace**: A Workspace whose Terminal Sessions run on the machine identified by an SSH Destination.
+**Remote Workspace**: A Workspace whose Terminal Sessions run on another machine, reached through SSH or a paired direct-network connection.
 
 **Current Directory**: A Terminal Session's current working directory on its machine.
 
@@ -41,7 +41,7 @@ _Avoid_: Window, Terminal Session
 
 ## Server architecture vocabulary
 
-The account-local SpaceTerm Server owns local terminal work. Production SSH Workspaces retain native ownership until the remote implementation in [issue #520](https://github.com/sadiksaifi/SpaceTerm/issues/520) replaces it.
+Each SpaceTerm Server owns terminal work on its machine. SpaceTerm Clients present that work over account-local IPC, SSH account bridges, or paired WSS connections.
 
 **SpaceTerm Server**: The application that owns its Workspaces and their Terminal Sessions independently of the applications presenting them.
 
@@ -198,17 +198,11 @@ _Avoid_: Hotkey, key equivalent
 
 **Remote Directory Identity**: The physical absolute path of a Remote Directory on its machine.
 
-**Control Connection**: The Workspace-owned OpenSSH transport shared by its Remote Panes.
-_Avoid_: Remote Workspace Session, SSH session
-
-**Terminal Session Channel**: The single-use remote shell channel consumed by one Remote Pane through its Control Connection.
-_Avoid_: remote channel, Pane channel
-
 **Authentication Prompt**: An OpenSSH confirmation or obscured response request presented by SpaceTerm.
 
 ## Terminal
 
-**Terminal Session**: The Pane-owned runtime joining a Terminal Emulator to a local shell or remote Terminal Session Channel.
+**Terminal Session**: The server-owned runtime joining a Pane's Terminal Emulator to a shell on that server's machine.
 _Avoid_: session, terminal
 
 **Terminal Emulator**: The state machine interpreting terminal output and owning screen state.
@@ -265,7 +259,7 @@ _Avoid_: shell token, session secret
 **Pull Request**: The open GitHub pull request whose head is a repository's current branch, found through the local GitHub CLI.
 _Avoid_: PR, merge request
 
-**Worktree**: One of a git repository's working trees, listed under a Local Workspace whose directory is in that repository. Its Tabs start inside it.
+**Worktree**: One of a git repository's working trees, listed under a Workspace whose directory is in that repository. Its Tabs start inside it.
 _Avoid_: checkout, working copy
 
 **Main Worktree**: The Worktree git lists first, which holds the repository's own working tree. It cannot be removed.

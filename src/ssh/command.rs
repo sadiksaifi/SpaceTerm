@@ -1,25 +1,23 @@
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::path::{Path, PathBuf};
+#[cfg(test)]
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use thiserror::Error;
 
 use super::cancellation::SshCancellationToken;
-use super::live_connection::LiveConnectionCapability;
 use super::process::{
-    CapturedProcessError, SshProbeEnvironment, SshProcessAdapter, SshProcessEnvironment,
-    SshProcessEnvironmentError, SshProcessMechanismError, run_probe_process,
+    CapturedProcessError, SshProbeEnvironment, SshProcessAdapter, SshProcessEnvironmentError,
+    SshProcessMechanismError, run_probe_process,
 };
 use super::startup_environment::StartupSshEnvironment;
-use crate::domain::{RemoteDirectory, SshDestination};
+use crate::domain::SshDestination;
 
 const MINIMUM_OPENSSH_VERSION: OpenSshVersion = OpenSshVersion::new(8, 2);
 const MAX_PROBE_STREAM_BYTES: usize = 4 * 1024;
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
-const MAXIMUM_REMOTE_SHELL_VALUE_BYTES: usize = 4 * 1024;
-const MAXIMUM_REMOTE_PANE_COMMAND_BYTES: usize = 32 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(crate) struct OpenSshVersion {
@@ -85,10 +83,6 @@ impl OpenSshExecutable {
     #[cfg(test)]
     pub(crate) fn for_test() -> Self {
         Self(PathBuf::from("/test/ssh"))
-    }
-
-    fn into_path(self) -> PathBuf {
-        self.0
     }
 }
 
@@ -311,22 +305,6 @@ impl SshCommandContext {
         self.control_operation("check")
     }
 
-    pub(crate) fn graceful_exit(&self) -> SshCommandSpec {
-        self.control_operation("exit")
-    }
-
-    pub(crate) fn remote_utility(&self) -> SshCommandSpec {
-        let mut arguments = self.child_arguments();
-        push_option(&mut arguments, OsString::from("ClearAllForwardings=yes"));
-        arguments.push(OsString::from("-T"));
-        push_option(&mut arguments, OsString::from("RemoteCommand=none"));
-        push_option(&mut arguments, OsString::from("RequestTTY=no"));
-        push_option(&mut arguments, OsString::from("SessionType=default"));
-        self.push_destination(&mut arguments);
-        arguments.extend([OsString::from("/bin/sh"), OsString::from("-s")]);
-        self.spec(arguments)
-    }
-
     pub(crate) fn server_channel(&self, command: ValidatedRemoteShellCommand) -> SshCommandSpec {
         let mut arguments = self.child_arguments();
         for option in [
@@ -352,21 +330,6 @@ impl SshCommandContext {
             "--".into(),
             self.destination.as_str().into(),
         ];
-        self.spec(arguments)
-    }
-
-    pub(crate) fn terminal_session_channel(
-        &self,
-        command: ValidatedRemoteShellCommand,
-    ) -> SshCommandSpec {
-        let mut arguments = self.child_arguments();
-        push_option(&mut arguments, OsString::from("ClearAllForwardings=yes"));
-        arguments.push(OsString::from("-tt"));
-        push_option(&mut arguments, OsString::from("RemoteCommand=none"));
-        push_option(&mut arguments, OsString::from("RequestTTY=force"));
-        push_option(&mut arguments, OsString::from("SessionType=default"));
-        self.push_destination(&mut arguments);
-        arguments.push(OsString::from(command.argument));
         self.spec(arguments)
     }
 
@@ -409,7 +372,6 @@ impl SshCommandContext {
         SshCommandSpec {
             executable: self.executable.clone(),
             arguments,
-            pane_execution: None,
         }
     }
 
@@ -432,12 +394,6 @@ fn push_option(arguments: &mut Vec<OsString>, option: OsString) {
 pub(crate) struct SshCommandSpec {
     executable: OpenSshExecutable,
     arguments: Vec<OsString>,
-    pane_execution: Option<SshPaneExecution>,
-}
-
-struct SshPaneExecution {
-    capability: LiveConnectionCapability,
-    environment: SshProcessEnvironment,
 }
 
 impl SshCommandSpec {
@@ -445,7 +401,6 @@ impl SshCommandSpec {
         Self {
             executable,
             arguments,
-            pane_execution: None,
         }
     }
 
@@ -461,112 +416,11 @@ impl SshCommandSpec {
     pub(crate) fn arguments(&self) -> &[OsString] {
         &self.arguments
     }
-
-    pub(crate) fn into_pane_launch_parts(
-        self,
-    ) -> Result<
-        (PathBuf, Vec<OsString>, SshProcessEnvironment),
-        PreparedSshTerminalSessionChannelError,
-    > {
-        let execution = self
-            .pane_execution
-            .ok_or(PreparedSshTerminalSessionChannelError::Unavailable)?;
-        execution
-            .capability
-            .authorize()
-            .map_err(|_| PreparedSshTerminalSessionChannelError::Unavailable)?;
-        Ok((
-            self.executable.into_path(),
-            self.arguments,
-            execution.environment,
-        ))
-    }
-}
-
-#[derive(Clone)]
-pub(crate) struct PreparedSshTerminalSessionChannelCommand {
-    command: Arc<Mutex<Option<SshCommandSpec>>>,
-    capability: LiveConnectionCapability,
-    environment: SshProcessEnvironment,
-}
-
-impl PreparedSshTerminalSessionChannelCommand {
-    pub(super) fn new(
-        command: SshCommandSpec,
-        capability: LiveConnectionCapability,
-        environment: SshProcessEnvironment,
-    ) -> Self {
-        Self {
-            command: Arc::new(Mutex::new(Some(command))),
-            capability,
-            environment,
-        }
-    }
-
-    pub(crate) fn take(&self) -> Result<SshCommandSpec, PreparedSshTerminalSessionChannelError> {
-        self.capability
-            .authorize()
-            .map_err(|_| PreparedSshTerminalSessionChannelError::Unavailable)?;
-        let mut command = self
-            .command
-            .lock()
-            .map_err(|_| PreparedSshTerminalSessionChannelError::Unavailable)?;
-        let mut command = command
-            .take()
-            .ok_or(PreparedSshTerminalSessionChannelError::AlreadyConsumed)?;
-        command.pane_execution = Some(SshPaneExecution {
-            capability: self.capability.clone(),
-            environment: self.environment.clone(),
-        });
-        Ok(command)
-    }
-}
-
-impl fmt::Debug for PreparedSshTerminalSessionChannelCommand {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("PreparedSshTerminalSessionChannelCommand")
-            .finish_non_exhaustive()
-    }
-}
-
-impl PartialEq for PreparedSshTerminalSessionChannelCommand {
-    fn eq(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.command, &other.command)
-    }
-}
-
-impl Eq for PreparedSshTerminalSessionChannelCommand {}
-
-#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
-pub enum PreparedSshTerminalSessionChannelError {
-    #[error("the prepared SSH Terminal Session Channel command has already been consumed")]
-    AlreadyConsumed,
-    #[error("the prepared SSH Terminal Session Channel command is unavailable")]
-    Unavailable,
 }
 
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
 pub(crate) enum RemoteShellCommandError {
-    #[error("the remote login shell is missing")]
-    MissingLoginShell,
-    #[error("the remote login shell must be an absolute path")]
-    RelativeLoginShell,
-    #[error("the remote login shell must not contain control characters")]
-    LoginShellControl,
-    #[error("the remote login shell path is invalid")]
-    InvalidLoginShellPath,
-    #[error("the remote login shell path is too long")]
-    LoginShellTooLong,
-    #[error("the remote login shell is not supported")]
-    UnsupportedLoginShell,
-    #[error("the POSIX sh login shell requires a verified login option")]
-    PosixShLoginCapabilityRequired,
-    #[error("the remote login-shell capability does not match the configured shell")]
-    InvalidLoginShellCapability,
-    #[error("the remote Starting Directory is too long to launch")]
-    StartingDirectoryTooLong,
-    #[error("the remote Pane launch command is too long")]
+    #[error("the remote server command is too long or contains NUL")]
     CommandTooLong,
 }
 
@@ -583,332 +437,10 @@ impl ValidatedRemoteShellCommand {
             argument: format!("/bin/sh -c {}", quote_for_posix_shell(script)),
         })
     }
-
-    #[cfg(test)]
-    pub(crate) fn new(argument: String) -> Result<Self, RemoteShellCommandError> {
-        if argument.is_empty() {
-            return Err(RemoteShellCommandError::MissingLoginShell);
-        }
-        if argument.chars().any(char::is_control) {
-            return Err(RemoteShellCommandError::LoginShellControl);
-        }
-        Ok(Self { argument })
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum SupportedRemoteLoginShell {
-    PosixSh,
-    Bash,
-    Zsh,
-    Fish,
-    Nushell,
-    Elvish,
-}
-
-impl SupportedRemoteLoginShell {
-    fn from_basename(basename: &str) -> Result<Self, RemoteShellCommandError> {
-        match basename {
-            "sh" => Ok(Self::PosixSh),
-            "bash" => Ok(Self::Bash),
-            "zsh" => Ok(Self::Zsh),
-            "fish" => Ok(Self::Fish),
-            "nu" | "nushell" => Ok(Self::Nushell),
-            "elvish" => Ok(Self::Elvish),
-            _ => Err(RemoteShellCommandError::UnsupportedLoginShell),
-        }
-    }
-
-    const fn login_arguments(self) -> &'static [&'static str] {
-        match self {
-            Self::PosixSh => &["-l"],
-            Self::Bash => &["-l"],
-            Self::Zsh => &["-l"],
-            Self::Fish => &["-l"],
-            Self::Nushell => &["-l"],
-            Self::Elvish => &[],
-        }
-    }
-
-    fn quote_login_shell(self, login_shell: &str) -> String {
-        match self {
-            Self::Nushell => quote_for_nushell(login_shell),
-            Self::PosixSh | Self::Bash | Self::Zsh | Self::Fish | Self::Elvish => {
-                quote_for_posix_shell(login_shell)
-            }
-        }
-    }
-
-    const fn launch_prefix(self) -> &'static str {
-        match self {
-            Self::PosixSh | Self::Bash | Self::Zsh => "SPACETERM='1' COLORTERM='truecolor' exec",
-            Self::Fish => "set -lx SPACETERM '1' && set -lx COLORTERM 'truecolor' && exec",
-            Self::Nushell => "$env.SPACETERM = \"1\"; $env.COLORTERM = \"truecolor\"; exec",
-            Self::Elvish => "set E:SPACETERM = '1'; set E:COLORTERM = 'truecolor'; exec",
-        }
-    }
-}
-
-/// Capability result produced by remote account discovery for a configured POSIX `sh`.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum PosixShLoginCapability {
-    /// The configured login shell is not POSIX `sh`.
-    NotApplicable,
-    /// The configured `sh` accepted its implementation's login option under supervision.
-    LoginOptionSupported,
-}
-
-/// Validated remote account metadata for one supported absolute login-shell path.
-#[derive(Clone, Eq, PartialEq)]
-pub(crate) struct ValidatedRemoteLoginShell {
-    path: String,
-    kind: SupportedRemoteLoginShell,
-}
-
-impl ValidatedRemoteLoginShell {
-    /// Validates a supported shell that does not require a separately discovered capability.
-    ///
-    /// POSIX does not standardize `sh -l`, so callers must use [`Self::from_discovery`] for `sh`.
-    #[cfg(test)]
-    pub(crate) fn new(path: String) -> Result<Self, RemoteShellCommandError> {
-        let shell = Self::parse(path)?;
-        if shell.kind == SupportedRemoteLoginShell::PosixSh {
-            return Err(RemoteShellCommandError::PosixShLoginCapabilityRequired);
-        }
-        Ok(shell)
-    }
-
-    /// Binds the remote capability observation to the exact configured login-shell path.
-    pub(crate) fn from_discovery(
-        path: String,
-        posix_sh_capability: PosixShLoginCapability,
-    ) -> Result<Self, RemoteShellCommandError> {
-        let shell = Self::parse(path)?;
-        match (shell.kind, posix_sh_capability) {
-            (SupportedRemoteLoginShell::PosixSh, PosixShLoginCapability::LoginOptionSupported) => {
-                Ok(shell)
-            }
-            (SupportedRemoteLoginShell::PosixSh, PosixShLoginCapability::NotApplicable) => {
-                Err(RemoteShellCommandError::PosixShLoginCapabilityRequired)
-            }
-            (_, PosixShLoginCapability::NotApplicable) => Ok(shell),
-            (_, PosixShLoginCapability::LoginOptionSupported) => {
-                Err(RemoteShellCommandError::InvalidLoginShellCapability)
-            }
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn as_str(&self) -> &str {
-        &self.path
-    }
-
-    /// The shell's basename, which names a Remote Pane the way a local shell names a Local one.
-    pub(crate) fn name(&self) -> &str {
-        self.path.rsplit('/').next().unwrap_or(&self.path)
-    }
-
-    fn parse(path: String) -> Result<Self, RemoteShellCommandError> {
-        if path.is_empty() {
-            return Err(RemoteShellCommandError::MissingLoginShell);
-        }
-        if path.len() > MAXIMUM_REMOTE_SHELL_VALUE_BYTES {
-            return Err(RemoteShellCommandError::LoginShellTooLong);
-        }
-        if path.chars().any(char::is_control) {
-            return Err(RemoteShellCommandError::LoginShellControl);
-        }
-        let Some(relative) = path.strip_prefix('/') else {
-            return Err(RemoteShellCommandError::RelativeLoginShell);
-        };
-        if relative.is_empty()
-            || relative
-                .split('/')
-                .any(|component| component.is_empty() || component == "." || component == "..")
-        {
-            return Err(RemoteShellCommandError::InvalidLoginShellPath);
-        }
-        let basename = relative
-            .rsplit('/')
-            .next()
-            .ok_or(RemoteShellCommandError::InvalidLoginShellPath)?;
-        let kind = SupportedRemoteLoginShell::from_basename(basename)?;
-        Ok(Self { path, kind })
-    }
-}
-
-impl fmt::Debug for ValidatedRemoteLoginShell {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("ValidatedRemoteLoginShell")
-            .field("kind", &self.kind)
-            .finish_non_exhaustive()
-    }
-}
-
-/// Builds the sole supported remote Pane startup command.
-///
-/// The caller must separately revalidate the selected directory's physical identity before
-/// creating a child. This builder preserves remote-string authority and performs no local path
-/// conversion or filesystem access.
-pub(crate) struct RemotePaneShellCommandBuilder<'a> {
-    directory: &'a RemoteDirectory,
-    login_shell: &'a ValidatedRemoteLoginShell,
-}
-
-impl<'a> RemotePaneShellCommandBuilder<'a> {
-    pub(crate) const fn new(
-        directory: &'a RemoteDirectory,
-        login_shell: &'a ValidatedRemoteLoginShell,
-    ) -> Self {
-        Self {
-            directory,
-            login_shell,
-        }
-    }
-
-    pub(crate) fn build(self) -> Result<ValidatedRemoteShellCommand, RemoteShellCommandError> {
-        if self.directory.as_str().len() > MAXIMUM_REMOTE_SHELL_VALUE_BYTES {
-            return Err(RemoteShellCommandError::StartingDirectoryTooLong);
-        }
-        let kind = self.login_shell.kind;
-        let bootstrap = remote_shell_bootstrap(self.directory, self.login_shell);
-        let quoted = kind.quote_login_shell(&bootstrap);
-        let command = format!("{} '/bin/sh' -c {quoted}", kind.launch_prefix());
-        if command.len() > MAXIMUM_REMOTE_PANE_COMMAND_BYTES {
-            return Err(RemoteShellCommandError::CommandTooLong);
-        }
-        Ok(ValidatedRemoteShellCommand { argument: command })
-    }
-}
-
-/// Builds a per-channel bootstrap without changing remote user configuration.
-/// The supervising shell retains the temporary resources until its child exits and removes them
-/// on normal exit or hangup. Paths and shell contents are always quoted as data.
-fn remote_shell_bootstrap(
-    directory: &RemoteDirectory,
-    shell: &ValidatedRemoteLoginShell,
-) -> String {
-    let mut script = format!(
-        "cd {} 2>/dev/null || exit 125\nspaceterm_shell_umask=$(umask)\numask 077\nspaceterm_integration_dir=$(mktemp -d \"${{TMPDIR:-/tmp}}/spaceterm-shell.XXXXXXXX\" 2>/dev/null) || exit 125\ntrap 'rm -rf -- \"$spaceterm_integration_dir\"' 0\ntrap 'exit 129' HUP\ntrap 'exit 130' INT\ntrap 'exit 143' TERM\nexport SPACETERM=1 COLORTERM=truecolor SPACETERM_SHELL_INTEGRATION_VERSION=1\n",
-        quote_remote_starting_directory_for_posix(directory)
-    );
-    let files: &[(&str, &str)] = match shell.kind {
-        SupportedRemoteLoginShell::Zsh => &[
-            (
-                "zsh/.zshenv",
-                include_str!("../../assets/shell-integration/zsh/.zshenv"),
-            ),
-            (
-                "zsh/spaceterm-integration",
-                include_str!("../../assets/shell-integration/zsh/spaceterm-integration"),
-            ),
-        ],
-        SupportedRemoteLoginShell::Bash => &[
-            (
-                "bash/spaceterm.bash",
-                include_str!("../../assets/shell-integration/bash/spaceterm.bash"),
-            ),
-            (
-                "bash/.bash_profile",
-                include_str!("../../assets/shell-integration/bash/remote-profile.bash"),
-            ),
-        ],
-        SupportedRemoteLoginShell::Fish => &[(
-            "fish/vendor_conf.d/spaceterm-shell-integration.fish",
-            include_str!(
-                "../../assets/shell-integration/fish/vendor_conf.d/spaceterm-shell-integration.fish"
-            ),
-        )],
-        SupportedRemoteLoginShell::Nushell => &[(
-            "nushell/vendor/autoload/spaceterm.nu",
-            include_str!("../../assets/shell-integration/nushell/vendor/autoload/spaceterm.nu"),
-        )],
-        SupportedRemoteLoginShell::Elvish => &[
-            (
-                "elvish/lib/spaceterm-integration.elv",
-                include_str!("../../assets/shell-integration/elvish/lib/spaceterm-integration.elv"),
-            ),
-            (
-                "elvish/rc.elv",
-                include_str!("../../assets/shell-integration/elvish/remote-rc.elv"),
-            ),
-        ],
-        SupportedRemoteLoginShell::PosixSh => &[
-            (
-                "sh/.profile",
-                include_str!("../../assets/shell-integration/sh/remote-profile.sh"),
-            ),
-            (
-                "sh/spaceterm.sh",
-                include_str!("../../assets/shell-integration/sh/spaceterm.sh"),
-            ),
-        ],
-    };
-    for (relative, contents) in files {
-        let parent = relative.rsplit_once('/').map_or("", |(parent, _)| parent);
-        script.push_str(&format!(
-            "mkdir -p \"$spaceterm_integration_dir/{parent}\" 2>/dev/null || exit 125\nprintf '%s' {} > \"$spaceterm_integration_dir/{relative}\" || exit 125\n",
-            quote_for_posix_shell(contents)
-        ));
-    }
-    match shell.kind {
-        SupportedRemoteLoginShell::Zsh => script.push_str(
-            "if [ \"${ZDOTDIR+set}\" = set ]; then export SPACETERM_ZSH_ZDOTDIR=\"$ZDOTDIR\"; fi\nexport ZDOTDIR=\"$spaceterm_integration_dir/zsh\"\n",
-        ),
-        // Bash has no post-profile injection option for login shells. Its system profile runs
-        // once with this temporary HOME; the wrapper restores account HOME before the user profile.
-        SupportedRemoteLoginShell::Bash => script.push_str(
-            "export SPACETERM_BASH_HOME=\"$HOME\" SPACETERM_BASH_INTEGRATION=\"$spaceterm_integration_dir/bash/spaceterm.bash\"\nexport HOME=\"$spaceterm_integration_dir/bash\"\n",
-        ),
-        SupportedRemoteLoginShell::Elvish => script.push_str(
-            "export SPACETERM_ELVISH_RC=\"${XDG_CONFIG_HOME:-$HOME/.config}/elvish/rc.elv\"\nexport SPACETERM_ELVISH_INTEGRATION=\"$spaceterm_integration_dir/elvish/lib/spaceterm-integration.elv\"\n",
-        ),
-        SupportedRemoteLoginShell::Fish | SupportedRemoteLoginShell::Nushell => script.push_str(
-            "export SPACETERM_SHELL_INTEGRATION_XDG_DIR=\"$spaceterm_integration_dir\"\nexport XDG_DATA_DIRS=\"$spaceterm_integration_dir:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}\"\n",
-        ),
-        // The login profile can replace ENV, so install the ENV wrapper after that profile runs.
-        SupportedRemoteLoginShell::PosixSh => script.push_str(
-            "export SPACETERM_SH_HOME=\"$HOME\" SPACETERM_SH_INTEGRATION=\"$spaceterm_integration_dir/sh/spaceterm.sh\"\nexport HOME=\"$spaceterm_integration_dir/sh\"\n",
-        ),
-    }
-    script.push_str("umask \"$spaceterm_shell_umask\"\n");
-    script.push_str(&quote_for_posix_shell(&shell.path));
-    match shell.kind {
-        SupportedRemoteLoginShell::Bash => script.push_str(" -il"),
-        SupportedRemoteLoginShell::Nushell => {
-            script.push_str(" -l --execute 'use spaceterm *; install'")
-        }
-        SupportedRemoteLoginShell::Elvish => {
-            script.push_str(" -rc \"$spaceterm_integration_dir/elvish/rc.elv\"")
-        }
-        _ => {
-            for argument in shell.kind.login_arguments() {
-                script.push(' ');
-                script.push_str(argument);
-            }
-        }
-    }
-    script.push_str("\nspaceterm_shell_status=$?\nexit \"$spaceterm_shell_status\"\n");
-    script
-}
-
-fn quote_remote_starting_directory_for_posix(directory: &RemoteDirectory) -> String {
-    match directory.as_str() {
-        "~" => "\"${HOME}\"".to_owned(),
-        value if value.starts_with("~/") => {
-            format!("\"${{HOME}}\"{}", quote_for_posix_shell(&value[1..]))
-        }
-        value => quote_for_posix_shell(value),
-    }
 }
 
 fn quote_for_posix_shell(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
-}
-
-fn quote_for_nushell(value: &str) -> String {
-    format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
 #[cfg(test)]
@@ -917,7 +449,7 @@ mod tests {
     use std::io::Cursor;
     use std::path::PathBuf;
 
-    use crate::domain::{RemoteDirectory, SshDestination};
+    use crate::domain::SshDestination;
     use crate::ssh::process::{
         ProcessExit, ProcessSignal, SpawnedSshProcess, SshProcessPipes, SshProcessSpawnRequest,
     };
@@ -1032,22 +564,6 @@ mod tests {
             .iter()
             .map(|argument| argument.to_string_lossy().into_owned())
             .collect()
-    }
-
-    pub(super) fn pane_command(
-        directory: &str,
-        login_shell: &str,
-    ) -> Result<ValidatedRemoteShellCommand, RemoteShellCommandError> {
-        let directory = RemoteDirectory::new(directory.to_owned()).unwrap();
-        let login_shell = if login_shell.rsplit('/').next() == Some("sh") {
-            ValidatedRemoteLoginShell::from_discovery(
-                login_shell.to_owned(),
-                PosixShLoginCapability::LoginOptionSupported,
-            )?
-        } else {
-            ValidatedRemoteLoginShell::new(login_shell.to_owned())?
-        };
-        RemotePaneShellCommandBuilder::new(&directory, &login_shell).build()
     }
 
     #[test]
@@ -1231,33 +747,9 @@ mod tests {
     }
 
     #[test]
-    fn graceful_exit_spec_should_target_only_the_private_master() {
-        let spec = context().graceful_exit();
-
-        assert_eq!(
-            arguments(&spec),
-            [
-                "-F",
-                "/private/config/spaceterm/ssh_config",
-                "-S",
-                "/private/runtime/spaceterm/ssh/control.sock",
-                "-o",
-                "ControlMaster=no",
-                "-o",
-                "ControlPersist=no",
-                "-o",
-                "ProxyCommand=; exit 1",
-                "-O",
-                "exit",
-                "--",
-                "root@fedora@orb",
-            ]
-        );
-    }
-
-    #[test]
-    fn utility_spec_should_disable_external_master_forwarding_and_tty_behavior() {
-        let spec = context().remote_utility();
+    fn server_spec_should_disable_external_master_forwarding_and_tty_behavior() {
+        let spec = context()
+            .server_channel(ValidatedRemoteShellCommand::server_script("exec server").unwrap());
 
         assert_eq!(
             arguments(&spec),
@@ -1274,266 +766,30 @@ mod tests {
                 "ProxyCommand=; exit 1",
                 "-o",
                 "ClearAllForwardings=yes",
-                "-T",
                 "-o",
                 "RemoteCommand=none",
                 "-o",
                 "RequestTTY=no",
                 "-o",
                 "SessionType=default",
+                "-o",
+                "BatchMode=yes",
+                "-T",
                 "--",
                 "root@fedora@orb",
-                "/bin/sh",
-                "-s",
+                "/bin/sh -c 'exec server'",
             ]
         );
-    }
-
-    #[test]
-    fn pane_spec_should_force_a_tty_and_append_one_validated_remote_argument() {
-        let command = pane_command("/srv/project", "/bin/zsh").unwrap();
-
-        let expected = command.argument.clone();
-        let spec = context().terminal_session_channel(command);
-
-        assert_eq!(
-            arguments(&spec),
-            [
-                "-F",
-                "/private/config/spaceterm/ssh_config",
-                "-S",
-                "/private/runtime/spaceterm/ssh/control.sock",
-                "-o",
-                "ControlMaster=no",
-                "-o",
-                "ControlPersist=no",
-                "-o",
-                "ProxyCommand=; exit 1",
-                "-o",
-                "ClearAllForwardings=yes",
-                "-tt",
-                "-o",
-                "RemoteCommand=none",
-                "-o",
-                "RequestTTY=force",
-                "-o",
-                "SessionType=default",
-                "--",
-                "root@fedora@orb",
-                &expected,
-            ]
-        );
-    }
-
-    #[test]
-    fn bootstrap_should_quote_hostile_directory_and_shell_values() {
-        let directory = RemoteDirectory::new("/srv/it's $(touch nope); ü".to_owned()).unwrap();
-        let shell = ValidatedRemoteLoginShell::new("/opt/it's/zsh".to_owned()).unwrap();
-        let script = remote_shell_bootstrap(&directory, &shell);
-        assert!(
-            script.starts_with("cd '/srv/it'\"'\"'s $(touch nope); ü' 2>/dev/null || exit 125\n")
-        );
-        assert!(script.contains("'/opt/it'\"'\"'s/zsh' -l"));
-        assert!(script.contains("trap 'rm -rf -- \"$spaceterm_integration_dir\"' 0"));
-    }
-
-    #[test]
-    fn bootstrap_should_expand_only_remote_home_prefix() {
-        let directory = RemoteDirectory::new("~/it's".to_owned()).unwrap();
-        let shell = ValidatedRemoteLoginShell::new("/bin/bash".to_owned()).unwrap();
-        let script = remote_shell_bootstrap(&directory, &shell);
-        assert!(script.starts_with("cd \"${HOME}\"'/it'\"'\"'s' 2>/dev/null || exit 125\n"));
-    }
-
-    #[test]
-    fn pane_command_should_install_directory_reports_for_supported_shells() {
-        for shell in [
-            "/bin/bash",
-            "/bin/zsh",
-            "/bin/fish",
-            "/bin/nu",
-            "/bin/elvish",
-        ] {
-            let command = pane_command("~/", shell).unwrap();
-            assert!(
-                command
-                    .argument
-                    .contains("SPACETERM_SHELL_INTEGRATION_VERSION=1")
-            );
-            assert!(command.argument.contains("file://localhost"));
-            assert!(command.argument.contains("spaceterm_shell_status"));
-        }
-    }
-
-    #[test]
-    fn posix_sh_should_require_a_matching_discovered_login_capability() {
-        assert_eq!(
-            ValidatedRemoteLoginShell::new("/bin/sh".to_owned()).unwrap_err(),
-            RemoteShellCommandError::PosixShLoginCapabilityRequired
-        );
-        assert_eq!(
-            ValidatedRemoteLoginShell::from_discovery(
-                "/bin/sh".to_owned(),
-                PosixShLoginCapability::NotApplicable,
-            )
-            .unwrap_err(),
-            RemoteShellCommandError::PosixShLoginCapabilityRequired
-        );
-        assert_eq!(
-            ValidatedRemoteLoginShell::from_discovery(
-                "/bin/zsh".to_owned(),
-                PosixShLoginCapability::LoginOptionSupported,
-            )
-            .unwrap_err(),
-            RemoteShellCommandError::InvalidLoginShellCapability
-        );
-        assert_eq!(
-            ValidatedRemoteLoginShell::from_discovery(
-                "/bin/sh".to_owned(),
-                PosixShLoginCapability::LoginOptionSupported,
-            )
-            .unwrap()
-            .as_str(),
-            "/bin/sh"
-        );
-    }
-
-    #[test]
-    fn login_shell_should_reject_missing_relative_control_and_unknown_metadata() {
-        let cases = [
-            ("", RemoteShellCommandError::MissingLoginShell),
-            ("bin/zsh", RemoteShellCommandError::RelativeLoginShell),
-            (
-                "/bin/zsh\nforged",
-                RemoteShellCommandError::LoginShellControl,
-            ),
-            (
-                "/bin/unknown",
-                RemoteShellCommandError::UnsupportedLoginShell,
-            ),
-        ];
-
-        for (shell, expected) in cases {
-            assert_eq!(
-                ValidatedRemoteLoginShell::new(shell.to_owned()).err(),
-                Some(expected)
-            );
-        }
-    }
-
-    #[test]
-    fn login_shell_should_reject_non_normal_absolute_paths() {
-        for shell in ["/bin/../bin/zsh", "/bin//zsh", "/bin/zsh/"] {
-            assert_eq!(
-                ValidatedRemoteLoginShell::new(shell.to_owned()).err(),
-                Some(RemoteShellCommandError::InvalidLoginShellPath)
-            );
-        }
-    }
-
-    #[test]
-    fn pane_command_should_reject_oversized_directory_and_shell_values() {
-        let oversized_directory =
-            RemoteDirectory::new(format!("/{}", "d".repeat(MAXIMUM_REMOTE_SHELL_VALUE_BYTES)))
-                .unwrap();
-        let shell = ValidatedRemoteLoginShell::new("/bin/zsh".to_owned()).unwrap();
-        assert_eq!(
-            RemotePaneShellCommandBuilder::new(&oversized_directory, &shell)
-                .build()
-                .err(),
-            Some(RemoteShellCommandError::StartingDirectoryTooLong)
-        );
-
-        let oversized_shell = format!("/{}/zsh", "s".repeat(MAXIMUM_REMOTE_SHELL_VALUE_BYTES));
-        assert_eq!(
-            ValidatedRemoteLoginShell::new(oversized_shell).err(),
-            Some(RemoteShellCommandError::LoginShellTooLong)
-        );
-    }
-
-    #[test]
-    fn pane_command_should_reject_oversized_quoted_output() {
-        let directory = RemoteDirectory::new(format!(
-            "/{}",
-            "'".repeat(MAXIMUM_REMOTE_SHELL_VALUE_BYTES - 1)
-        ))
-        .unwrap();
-        let shell = ValidatedRemoteLoginShell::new(format!(
-            "/{}/zsh",
-            "'".repeat(MAXIMUM_REMOTE_SHELL_VALUE_BYTES - 5)
-        ))
-        .unwrap();
-
-        assert_eq!(
-            RemotePaneShellCommandBuilder::new(&directory, &shell)
-                .build()
-                .err(),
-            Some(RemoteShellCommandError::CommandTooLong)
-        );
-    }
-
-    #[cfg(feature = "desktop")]
-    #[test]
-    fn prepared_pane_command_should_preserve_exact_argv_and_be_single_use() {
-        let connection = crate::ssh::testing::SshConnectionFixture::with_environment(
-            SshDestination::new("root@fedora@orb".to_owned()).unwrap(),
-            std::env::temp_dir(),
-            OpenSshExecutable::new("/selected/openssh".into()).unwrap(),
-            &crate::ssh::startup_environment::StartupSshEnvironment::default(),
-        );
-        let prepared = connection
-            .prepare_terminal_session_channel(pane_command("/srv/project", "/bin/zsh").unwrap());
-        let duplicate_owner = prepared.clone();
-
-        let spec = prepared.take().unwrap();
-
-        assert_eq!(spec.executable(), OsStr::new("/selected/openssh"));
-        assert_eq!(
-            arguments(&spec).last().map(String::as_str),
-            Some(
-                pane_command("/srv/project", "/bin/zsh")
-                    .unwrap()
-                    .argument
-                    .as_str()
-            )
-        );
-        assert_eq!(
-            duplicate_owner.take().err(),
-            Some(PreparedSshTerminalSessionChannelError::AlreadyConsumed)
-        );
-    }
-
-    #[cfg(feature = "desktop")]
-    #[test]
-    fn prepared_pane_command_debug_should_redact_command_context() {
-        let connection = crate::ssh::testing::SshConnectionFixture::with_environment(
-            SshDestination::new("root@fedora@orb".to_owned()).unwrap(),
-            std::env::temp_dir(),
-            OpenSshExecutable::new("/selected/openssh".into()).unwrap(),
-            &crate::ssh::startup_environment::StartupSshEnvironment::default(),
-        );
-        let prepared = connection.prepare_terminal_session_channel(
-            pane_command("/srv/sensitive-project", "/sensitive/shell/zsh").unwrap(),
-        );
-
-        let debug = format!("{prepared:?}");
-
-        assert_eq!(debug, "PreparedSshTerminalSessionChannelCommand { .. }");
-        assert!(!debug.contains("root@fedora@orb"));
-        assert!(!debug.contains("sensitive"));
-        assert!(!debug.contains("control.sock"));
     }
 
     #[test]
     fn all_specs_should_use_the_exact_selected_executable() {
         let context = context();
-        let command = pane_command("/srv/project", "/bin/fish").unwrap();
+        let command = ValidatedRemoteShellCommand::server_script("exec server").unwrap();
         let specs = [
             context.master(),
             context.readiness_check(),
-            context.graceful_exit(),
-            context.remote_utility(),
-            context.terminal_session_channel(command),
+            context.server_channel(command),
         ];
 
         assert!(
@@ -1561,11 +817,3 @@ mod tests {
         }
     }
 }
-
-#[cfg(all(
-    test,
-    any(target_os = "macos", target_os = "linux"),
-    feature = "native-tests"
-))]
-#[path = "../platform/unix_adapter_tests/command.rs"]
-mod unix_adapter_tests;

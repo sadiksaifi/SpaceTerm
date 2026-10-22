@@ -1,9 +1,5 @@
 mod naming;
 
-use super::remote_workspace::{
-    RemoteConnectionPhase, RemoteConnectionReduction, RemoteConnectionState,
-};
-
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -50,41 +46,10 @@ impl std::fmt::Debug for CurrentDirectory {
 ///
 /// Rejected strings must not reach OpenSSH arguments, remote utility commands, or local path APIs.
 pub enum RemoteWorkspaceValueError {
-    #[error("Remote user must be one non-empty, whitespace-free token")]
-    User,
     #[error("SSH destination must be one non-option, control-free token")]
     Destination,
     #[error("Remote Directory must be an absolute or ~/ path without control characters")]
     StartingDirectory,
-    #[error("Physical remote directory identity must be an absolute control-free path")]
-    DirectoryIdentity,
-}
-
-/// The validated account name discovered from a connected remote destination.
-#[derive(Clone, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct RemoteUser(String);
-
-impl fmt::Debug for RemoteUser {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("RemoteUser(<redacted>)")
-    }
-}
-
-impl RemoteUser {
-    pub fn new(value: String) -> Result<Self, RemoteWorkspaceValueError> {
-        if value.is_empty()
-            || value
-                .chars()
-                .any(|character| character.is_whitespace() || character.is_control())
-        {
-            return Err(RemoteWorkspaceValueError::User);
-        }
-        Ok(Self(value))
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
 }
 
 /// The exact OpenSSH destination token selected by the user.
@@ -152,103 +117,12 @@ impl RemoteDirectory {
     pub fn as_str(&self) -> &str {
         &self.0
     }
-
-    pub fn is_home_spelling(&self, home: &RemoteDirectoryIdentity) -> bool {
-        let directory = self.0.trim_end_matches('/');
-        directory == "~" || directory == home.as_str().trim_end_matches('/')
-    }
-}
-
-/// The physical absolute directory returned by the remote `pwd -P` validation protocol.
-///
-/// Its normalized path-like spelling is an opaque remote identity used for connection and pin
-/// revalidation. It must never become a local `PathBuf` or local filesystem identity.
-#[derive(Clone, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct RemoteDirectoryIdentity(String);
-
-impl fmt::Debug for RemoteDirectoryIdentity {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("RemoteDirectoryIdentity(<redacted>)")
-    }
-}
-
-impl RemoteDirectoryIdentity {
-    pub fn new(value: String) -> Result<Self, RemoteWorkspaceValueError> {
-        let normalized = value == "/"
-            || value.strip_prefix('/').is_some_and(|relative| {
-                !relative.is_empty()
-                    && relative.split('/').all(|component| {
-                        !component.is_empty() && component != "." && component != ".."
-                    })
-            });
-        if !normalized || value.chars().any(char::is_control) {
-            return Err(RemoteWorkspaceValueError::DirectoryIdentity);
-        }
-        Ok(Self(value))
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-/// The validated destination and home identity retained for a Remote Workspace connection.
-///
-/// Both the exact destination token and validated physical directory participate in equality.
-/// The selected directory spelling is deliberately excluded and remains separate startup data.
-#[derive(Clone, Eq, Hash, PartialEq)]
-pub(crate) struct RemoteWorkspaceTarget {
-    destination: SshDestination,
-    physical_directory: RemoteDirectoryIdentity,
-}
-
-impl fmt::Debug for RemoteWorkspaceTarget {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("RemoteWorkspaceTarget(<redacted>)")
-    }
-}
-
-impl RemoteWorkspaceTarget {
-    pub(crate) const fn new(
-        destination: SshDestination,
-        physical_directory: RemoteDirectoryIdentity,
-    ) -> Self {
-        Self {
-            destination,
-            physical_directory,
-        }
-    }
-
-    pub(crate) const fn destination(&self) -> &SshDestination {
-        &self.destination
-    }
-
-    pub(crate) const fn physical_directory(&self) -> &RemoteDirectoryIdentity {
-        &self.physical_directory
-    }
-}
-
-/// Where a Workspace runs. Pinning is independent of its execution location.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum WorkspaceLocation {
-    Local,
-    Remote {
-        key: RemoteWorkspaceTarget,
-        remote_user: RemoteUser,
-        remote_directory: RemoteDirectory,
-        remote_home_identity: RemoteDirectoryIdentity,
-        connection_state: RemoteConnectionState,
-    },
 }
 
 /// An explicit starting-directory override with authority retained on its own machine.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum PinnedDirectory {
     Local(ValidatedLocalDirectory),
-    Remote {
-        directory: RemoteDirectory,
-        identity: RemoteDirectoryIdentity,
-    },
 }
 
 #[derive(Clone, Eq)]
@@ -286,12 +160,6 @@ impl ValidatedLocalDirectory {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-enum HomeDirectoryLocation {
-    Local(ValidatedLocalDirectory),
-    Remote,
-}
-
 impl fmt::Display for WorkspaceId {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.0.fmt(formatter)
@@ -302,10 +170,6 @@ impl fmt::Display for WorkspaceId {
 pub(crate) enum WorkspaceError {
     #[error("Workspace {0} does not belong to this collection")]
     WorkspaceNotFound(WorkspaceId),
-    #[error("Workspace {0} is not a Remote Workspace")]
-    RemoteConnectionUnavailable(WorkspaceId),
-    #[error("Workspace {0} connection generation is exhausted")]
-    RemoteConnectionGenerationExhausted(WorkspaceId),
     #[error("Workspace {0} directory belongs to a different machine")]
     DirectoryLocationMismatch(WorkspaceId),
     #[error("Workspace ID space is exhausted")]
@@ -320,9 +184,8 @@ pub(crate) struct WorkspaceEntry<T> {
     custom_name: Option<String>,
     automatic_name_base: String,
     automatic_directory: Option<CurrentDirectory>,
-    location: WorkspaceLocation,
     pinned_directory: Option<PinnedDirectory>,
-    directory_location: HomeDirectoryLocation,
+    home_directory: ValidatedLocalDirectory,
     payload: T,
 }
 
@@ -336,57 +199,15 @@ impl<T> WorkspaceEntry<T> {
     }
 
     pub(crate) fn local_home_directory(&self) -> Option<&Path> {
-        match &self.directory_location {
-            HomeDirectoryLocation::Local(directory) => Some(directory.path()),
-            HomeDirectoryLocation::Remote => None,
-        }
-    }
-
-    pub(crate) const fn location(&self) -> &WorkspaceLocation {
-        &self.location
-    }
-
-    pub(crate) const fn remote_starting_directory(&self) -> Option<&RemoteDirectory> {
-        match &self.location {
-            WorkspaceLocation::Remote {
-                remote_directory, ..
-            } => Some(remote_directory),
-            WorkspaceLocation::Local => None,
-        }
-    }
-
-    pub(crate) const fn remote_workspace_key(&self) -> Option<&RemoteWorkspaceTarget> {
-        match &self.location {
-            WorkspaceLocation::Remote { key, .. } => Some(key),
-            WorkspaceLocation::Local => None,
-        }
-    }
-
-    pub(crate) const fn remote_connection_state(&self) -> Option<RemoteConnectionState> {
-        match &self.location {
-            WorkspaceLocation::Remote {
-                connection_state, ..
-            } => Some(*connection_state),
-            WorkspaceLocation::Local => None,
-        }
+        Some(self.home_directory.path())
     }
 
     pub(crate) fn local_display_directory(&self) -> Option<&Path> {
         match &self.pinned_directory {
             Some(PinnedDirectory::Local(directory)) => Some(directory.path()),
-            _ => match &self.automatic_directory {
+            None => match &self.automatic_directory {
                 Some(CurrentDirectory::Local(directory)) => Some(directory),
                 _ => self.local_home_directory(),
-            },
-        }
-    }
-
-    pub(crate) fn remote_display_directory(&self) -> Option<&RemoteDirectory> {
-        match &self.pinned_directory {
-            Some(PinnedDirectory::Remote { directory, .. }) => Some(directory),
-            _ => match &self.automatic_directory {
-                Some(CurrentDirectory::Remote(directory)) => Some(directory),
-                _ => self.remote_starting_directory(),
             },
         }
     }
@@ -442,71 +263,6 @@ impl<T> WorkspaceCollection<T> {
         self.workspaces.iter()
     }
 
-    /// Starts exactly one reconnect attempt from a disconnected or failed Remote Workspace.
-    ///
-    /// The collection owns checked generation allocation so callers cannot manufacture, reuse, or
-    /// skip generations. Errors and illegal reductions leave the Workspace unchanged.
-    pub(crate) fn begin_remote_reconnect(
-        &mut self,
-        workspace_id: WorkspaceId,
-    ) -> Result<RemoteConnectionReduction, WorkspaceError> {
-        self.remote_connection_state_mut(workspace_id)?
-            .begin_reconnect()
-            .ok_or(WorkspaceError::RemoteConnectionGenerationExhausted(
-                workspace_id,
-            ))
-    }
-
-    /// Applies one observed lifecycle transition to the owning Remote Workspace.
-    ///
-    /// The state's reducer rejects stale generations and illegal phase changes without mutation.
-    /// Missing and non-Remote Workspace IDs return typed errors.
-    pub(crate) fn reduce_remote_connection_state(
-        &mut self,
-        workspace_id: WorkspaceId,
-        next: RemoteConnectionState,
-    ) -> Result<RemoteConnectionReduction, WorkspaceError> {
-        Ok(self.remote_connection_state_mut(workspace_id)?.reduce(next))
-    }
-
-    /// Finds the open Remote Workspace on `destination` pinned to the directory `identity` names.
-    pub(crate) fn remote_workspace_pinned_to(
-        &self,
-        destination: &SshDestination,
-        identity: &RemoteDirectoryIdentity,
-    ) -> Option<WorkspaceId> {
-        self.workspaces
-            .iter()
-            .find(|workspace| {
-                let WorkspaceLocation::Remote {
-                    key,
-                    connection_state,
-                    ..
-                } = &workspace.location
-                else {
-                    return false;
-                };
-                key.destination() == destination
-                    && connection_state.phase() != RemoteConnectionPhase::Closing
-                    && matches!(&workspace.pinned_directory,
-                        Some(PinnedDirectory::Remote { identity: pinned, .. }) if pinned == identity)
-            })
-            .map(WorkspaceEntry::id)
-    }
-
-    /// Begins terminal shutdown without advancing the current Connection Generation.
-    ///
-    /// Closing is terminal: delayed readiness, failure, disconnect, and reconnect observations
-    /// cannot resurrect this Workspace. Rejection leaves the prior state unchanged.
-    pub(crate) fn begin_remote_close(
-        &mut self,
-        workspace_id: WorkspaceId,
-    ) -> Result<RemoteConnectionReduction, WorkspaceError> {
-        Ok(self
-            .remote_connection_state_mut(workspace_id)?
-            .begin_close())
-    }
-
     pub(crate) fn create_local_workspace(
         &mut self,
         directory: ValidatedLocalDirectory,
@@ -521,45 +277,8 @@ impl<T> WorkspaceCollection<T> {
             automatic_directory: None,
             name,
             custom_name: None,
-            location: WorkspaceLocation::Local,
             pinned_directory: None,
-            directory_location: HomeDirectoryLocation::Local(directory),
-            payload,
-        });
-        self.active_workspace_id = Some(id);
-        self.next_workspace_id = next;
-        self.recalculate_automatic_names();
-        Ok(id)
-    }
-
-    pub(crate) fn create_remote_workspace(
-        &mut self,
-        key: RemoteWorkspaceTarget,
-        remote_user: RemoteUser,
-        remote_directory: RemoteDirectory,
-        remote_home_identity: RemoteDirectoryIdentity,
-        connection_state: RemoteConnectionState,
-        create_payload: impl FnOnce(WorkspaceId) -> T,
-    ) -> Result<WorkspaceId, WorkspaceError> {
-        let (id, next) = self.next_workspace_id()?;
-        let payload = create_payload(id);
-        let location = WorkspaceLocation::Remote {
-            key,
-            remote_user,
-            remote_directory,
-            remote_home_identity,
-            connection_state,
-        };
-        let name = self.next_default_workspace_name(None);
-        self.workspaces.push(WorkspaceEntry {
-            id,
-            automatic_name_base: "Default".to_owned(),
-            automatic_directory: None,
-            name,
-            custom_name: None,
-            location,
-            pinned_directory: None,
-            directory_location: HomeDirectoryLocation::Remote,
+            home_directory: directory,
             payload,
         });
         self.active_workspace_id = Some(id);
@@ -576,14 +295,7 @@ impl<T> WorkspaceCollection<T> {
         let workspace = self
             .workspace_mut(workspace_id)
             .ok_or(WorkspaceError::WorkspaceNotFound(workspace_id))?;
-        if !matches!(
-            (&workspace.location, &directory),
-            (WorkspaceLocation::Local, CurrentDirectory::Local(_))
-                | (
-                    WorkspaceLocation::Remote { .. },
-                    CurrentDirectory::Remote(_)
-                )
-        ) {
+        if !matches!(directory, CurrentDirectory::Local(_)) {
             return Err(WorkspaceError::DirectoryLocationMismatch(workspace_id));
         }
         if workspace.automatic_directory.as_ref() == Some(&directory) {
@@ -602,18 +314,6 @@ impl<T> WorkspaceCollection<T> {
         let workspace = self
             .workspace_mut(workspace_id)
             .ok_or(WorkspaceError::WorkspaceNotFound(workspace_id))?;
-        if matches!(
-            (&workspace.location, &pin),
-            (
-                WorkspaceLocation::Local,
-                Some(PinnedDirectory::Remote { .. })
-            ) | (
-                WorkspaceLocation::Remote { .. },
-                Some(PinnedDirectory::Local(_))
-            )
-        ) {
-            return Err(WorkspaceError::DirectoryLocationMismatch(workspace_id));
-        }
         workspace.pinned_directory = pin;
         self.recalculate_automatic_names();
         Ok(())
@@ -681,25 +381,6 @@ impl<T> WorkspaceCollection<T> {
         Ok(())
     }
 
-    pub(crate) fn set_remote_user(
-        &mut self,
-        workspace_id: WorkspaceId,
-        remote_user: RemoteUser,
-    ) -> Result<(), WorkspaceError> {
-        let Some(workspace) = self.workspace_mut(workspace_id) else {
-            return Err(WorkspaceError::WorkspaceNotFound(workspace_id));
-        };
-        let WorkspaceLocation::Remote {
-            remote_user: stored_user,
-            ..
-        } = &mut workspace.location
-        else {
-            return Err(WorkspaceError::RemoteConnectionUnavailable(workspace_id));
-        };
-        *stored_user = remote_user;
-        Ok(())
-    }
-
     /// Removes a Workspace from the presentation without replacing it, returning its payload.
     ///
     /// Unlike closing, removing the final Workspace leaves the collection empty, with no Active
@@ -736,22 +417,6 @@ impl<T> WorkspaceCollection<T> {
         self.workspaces
             .iter_mut()
             .find(|workspace| workspace.id == workspace_id)
-    }
-
-    fn remote_connection_state_mut(
-        &mut self,
-        workspace_id: WorkspaceId,
-    ) -> Result<&mut RemoteConnectionState, WorkspaceError> {
-        let Some(workspace) = self.workspace_mut(workspace_id) else {
-            return Err(WorkspaceError::WorkspaceNotFound(workspace_id));
-        };
-        let WorkspaceLocation::Remote {
-            connection_state, ..
-        } = &mut workspace.location
-        else {
-            return Err(WorkspaceError::RemoteConnectionUnavailable(workspace_id));
-        };
-        Ok(connection_state)
     }
 
     fn next_workspace_id(&self) -> Result<(WorkspaceId, u64), WorkspaceError> {
@@ -840,116 +505,17 @@ pub(crate) mod tests {
     fn remote_directory(value: &str) -> RemoteDirectory {
         RemoteDirectory::new(value.to_owned()).unwrap()
     }
-
-    fn remote_user(value: &str) -> RemoteUser {
-        RemoteUser::new(value.to_owned()).unwrap()
-    }
-
-    #[test]
-    fn remote_identity_debug_should_redact_destination_and_directories() {
-        let destination = ssh_destination("sensitive-host");
-        let remote_user = remote_user("sensitive-user");
-        let selected = remote_directory("/sensitive/selected");
-        let physical = RemoteDirectoryIdentity::new("/sensitive/physical".to_owned()).unwrap();
-        let key = RemoteWorkspaceTarget::new(destination.clone(), physical.clone());
-        let local = ValidatedLocalDirectory::new(
-            PathBuf::from("/sensitive/local"),
-            LocalDirectoryIdentity::for_test(1001),
-        );
-
-        for debug in [
-            format!("{destination:?}"),
-            format!("{remote_user:?}"),
-            format!("{selected:?}"),
-            format!("{physical:?}"),
-            format!("{key:?}"),
-            format!("{local:?}"),
-        ] {
-            assert!(!debug.contains("sensitive"));
-        }
-    }
-
-    fn remote_identity(value: &str) -> RemoteDirectoryIdentity {
-        RemoteDirectoryIdentity::new(value.to_owned()).unwrap()
-    }
-
-    fn remote_key(destination: &str, physical_directory: &str) -> RemoteWorkspaceTarget {
-        RemoteWorkspaceTarget::new(
-            ssh_destination(destination),
-            remote_identity(physical_directory),
-        )
-    }
-
     #[test]
     fn remote_values_validate_without_changing_user_visible_spelling() {
         let destination = ssh_destination("root@fedora@orb");
         let directory = remote_directory("~/Projects/Space Term/");
-        let identity = remote_identity("/home/root/Projects/Space Term");
 
         assert_eq!(
-            (destination.as_str(), directory.as_str(), identity.as_str(),),
-            (
-                "root@fedora@orb",
-                "~/Projects/Space Term/",
-                "/home/root/Projects/Space Term",
-            )
+            (destination.as_str(), directory.as_str()),
+            ("root@fedora@orb", "~/Projects/Space Term/")
         );
         assert!(SshDestination::new("bad destination".to_owned()).is_err());
         assert!(RemoteDirectory::new("relative/path".to_owned()).is_err());
-        assert!(RemoteDirectoryIdentity::new("~/not-physical".to_owned()).is_err());
-    }
-
-    #[test]
-    fn remote_physical_identity_requires_normalized_absolute_form() {
-        for invalid in [
-            "",
-            "relative/path",
-            "//srv/project",
-            "/srv//project",
-            "/srv/./project",
-            "/srv/team/../project",
-            "/srv/project/",
-        ] {
-            assert!(
-                RemoteDirectoryIdentity::new(invalid.to_owned()).is_err(),
-                "{invalid:?} is not normalized `pwd -P` output"
-            );
-        }
-
-        assert_eq!(remote_identity("/").as_str(), "/");
-        assert_eq!(
-            remote_identity("/srv/Space Term").as_str(),
-            "/srv/Space Term"
-        );
-    }
-
-    #[test]
-    fn remote_directories_never_provide_local_filesystem_authority() {
-        let mut workspaces = local_collection(validated("/Users/test", 10), |_, _| ());
-        let workspace_id = workspaces
-            .create_remote_workspace(
-                remote_key("orb", "/home/test/project"),
-                remote_user("tester"),
-                remote_directory("~/project"),
-                remote_identity("/home/test"),
-                RemoteConnectionState::connected(1),
-                |_| (),
-            )
-            .unwrap();
-        let workspace = workspaces.workspace(workspace_id).unwrap();
-
-        assert_eq!(workspace.local_home_directory(), None);
-        assert_eq!(workspace.local_display_directory(), None);
-        assert!(matches!(
-            workspace.location(),
-            WorkspaceLocation::Remote { .. }
-        ));
-        assert_eq!(
-            workspace
-                .remote_starting_directory()
-                .map(RemoteDirectory::as_str),
-            Some("~/project")
-        );
     }
 
     #[test]
@@ -964,400 +530,6 @@ pub(crate) mod tests {
         assert_eq!(host("orb"), "orb");
         assert_eq!(host("tester@orb"), "orb");
         assert_eq!(host("tester@example.com@orb"), "orb");
-    }
-
-    #[test]
-    fn remote_workspace_key_keeps_different_destination_aliases_distinct() {
-        let mut workspaces = local_collection(validated("/Users/test", 10), |_, _| ());
-        let first = workspaces
-            .create_remote_workspace(
-                remote_key("orb", "/srv/project"),
-                remote_user("tester"),
-                remote_directory("/srv/project"),
-                remote_identity("/home/test"),
-                RemoteConnectionState::connected(1),
-                |_| (),
-            )
-            .unwrap();
-        let second = workspaces
-            .create_remote_workspace(
-                remote_key("orb-alias", "/srv/project"),
-                remote_user("tester"),
-                remote_directory("/srv/project"),
-                remote_identity("/home/test"),
-                RemoteConnectionState::connected(1),
-                |_| (),
-            )
-            .unwrap();
-
-        assert_ne!(first, second);
-        assert_eq!(workspaces.len(), 3);
-        let first_key = workspaces
-            .workspace(first)
-            .unwrap()
-            .remote_workspace_key()
-            .unwrap();
-        let second_key = workspaces
-            .workspace(second)
-            .unwrap()
-            .remote_workspace_key()
-            .unwrap();
-        assert_ne!(first_key, second_key);
-        assert_eq!(first_key.destination().as_str(), "orb");
-        assert_eq!(second_key.destination().as_str(), "orb-alias");
-        assert_eq!(
-            first_key.physical_directory(),
-            second_key.physical_directory()
-        );
-    }
-
-    #[test]
-    fn reconnect_requires_a_new_generation_and_rejects_predecessor_completions() {
-        let mut state = RemoteConnectionState::disconnected(7);
-
-        assert_eq!(
-            state.reduce(RemoteConnectionState::reconnecting(7)),
-            RemoteConnectionReduction::Illegal
-        );
-        assert_eq!(
-            state.reduce(RemoteConnectionState::reconnecting(8)),
-            RemoteConnectionReduction::Applied
-        );
-        assert_eq!(
-            state.reduce(RemoteConnectionState::connected(7)),
-            RemoteConnectionReduction::Stale
-        );
-        assert_eq!(
-            state.reduce(RemoteConnectionState::connected(8)),
-            RemoteConnectionReduction::Applied
-        );
-        assert_eq!(
-            state.reduce(RemoteConnectionState::disconnected(7)),
-            RemoteConnectionReduction::Stale
-        );
-        assert_eq!(state, RemoteConnectionState::connected(8));
-    }
-
-    #[test]
-    fn delayed_ready_cannot_resurrect_a_disconnected_generation() {
-        let mut state = RemoteConnectionState::connected(4);
-
-        assert_eq!(
-            state.reduce(RemoteConnectionState::disconnected(4)),
-            RemoteConnectionReduction::Applied
-        );
-        assert_eq!(
-            state.reduce(RemoteConnectionState::connected(4)),
-            RemoteConnectionReduction::Illegal
-        );
-        assert_eq!(state, RemoteConnectionState::disconnected(4));
-    }
-
-    #[test]
-    fn remote_connection_operations_reject_missing_and_local_workspaces_without_mutation() {
-        let mut workspaces = local_collection(validated("/Users/test", 10), |_, _| ());
-        let local_id = workspaces
-            .create_local_workspace(validated("/Users/test/project", 20), |_, _| ())
-            .unwrap();
-        let before = workspaces
-            .iter()
-            .map(|workspace| (workspace.id(), workspace.location().clone()))
-            .collect::<Vec<_>>();
-
-        for workspace_id in [WorkspaceId::new(1), local_id] {
-            assert_eq!(
-                workspaces.begin_remote_reconnect(workspace_id),
-                Err(WorkspaceError::RemoteConnectionUnavailable(workspace_id))
-            );
-            assert_eq!(
-                workspaces.reduce_remote_connection_state(
-                    workspace_id,
-                    RemoteConnectionState::disconnected(1),
-                ),
-                Err(WorkspaceError::RemoteConnectionUnavailable(workspace_id))
-            );
-            assert_eq!(
-                workspaces.begin_remote_close(workspace_id),
-                Err(WorkspaceError::RemoteConnectionUnavailable(workspace_id))
-            );
-        }
-        let missing = WorkspaceId::new(999);
-        assert_eq!(
-            workspaces.begin_remote_reconnect(missing),
-            Err(WorkspaceError::WorkspaceNotFound(missing))
-        );
-        assert_eq!(
-            workspaces
-                .reduce_remote_connection_state(missing, RemoteConnectionState::disconnected(1),),
-            Err(WorkspaceError::WorkspaceNotFound(missing))
-        );
-        assert_eq!(
-            workspaces.begin_remote_close(missing),
-            Err(WorkspaceError::WorkspaceNotFound(missing))
-        );
-        assert_eq!(
-            workspaces
-                .iter()
-                .map(|workspace| (workspace.id(), workspace.location().clone()))
-                .collect::<Vec<_>>(),
-            before
-        );
-    }
-
-    #[test]
-    fn reconnect_generation_exhaustion_does_not_mutate_remote_state() {
-        let mut workspaces = local_collection(validated("/Users/test", 10), |_, _| ());
-        let workspace_id = workspaces
-            .create_remote_workspace(
-                remote_key("orb", "/srv/project"),
-                remote_user("tester"),
-                remote_directory("/srv/project"),
-                remote_identity("/home/test"),
-                RemoteConnectionState::disconnected(u64::MAX),
-                |_| (),
-            )
-            .unwrap();
-
-        assert_eq!(
-            workspaces.begin_remote_reconnect(workspace_id),
-            Err(WorkspaceError::RemoteConnectionGenerationExhausted(
-                workspace_id
-            ))
-        );
-        assert_eq!(
-            workspaces
-                .workspace(workspace_id)
-                .and_then(WorkspaceEntry::remote_connection_state),
-            Some(RemoteConnectionState::disconnected(u64::MAX))
-        );
-    }
-
-    #[test]
-    fn begin_remote_reconnect_advances_once_and_rejects_a_second_begin() {
-        let mut workspaces = local_collection(validated("/Users/test", 10), |_, _| ());
-        let workspace_id = workspaces
-            .create_remote_workspace(
-                remote_key("orb", "/srv/project"),
-                remote_user("tester"),
-                remote_directory("/srv/project"),
-                remote_identity("/home/test"),
-                RemoteConnectionState::disconnected(7),
-                |_| (),
-            )
-            .unwrap();
-
-        assert_eq!(
-            workspaces.begin_remote_reconnect(workspace_id),
-            Ok(RemoteConnectionReduction::Applied)
-        );
-        assert_eq!(
-            workspaces.begin_remote_reconnect(workspace_id),
-            Ok(RemoteConnectionReduction::Illegal)
-        );
-        assert_eq!(
-            workspaces
-                .workspace(workspace_id)
-                .and_then(WorkspaceEntry::remote_connection_state),
-            Some(RemoteConnectionState::reconnecting(8))
-        );
-    }
-
-    #[test]
-    fn begin_remote_reconnect_rejects_connected_state_without_advancing() {
-        let mut workspaces = local_collection(validated("/Users/test", 10), |_, _| ());
-        let workspace_id = workspaces
-            .create_remote_workspace(
-                remote_key("orb", "/srv/project"),
-                remote_user("tester"),
-                remote_directory("/srv/project"),
-                remote_identity("/home/test"),
-                RemoteConnectionState::connected(7),
-                |_| (),
-            )
-            .unwrap();
-
-        assert_eq!(
-            workspaces.begin_remote_reconnect(workspace_id),
-            Ok(RemoteConnectionReduction::Illegal)
-        );
-        assert_eq!(
-            workspaces
-                .workspace(workspace_id)
-                .and_then(WorkspaceEntry::remote_connection_state),
-            Some(RemoteConnectionState::connected(7))
-        );
-    }
-
-    #[test]
-    fn begin_remote_close_accepts_each_live_phase_without_advancing_generation() {
-        for (index, state) in [
-            RemoteConnectionState::connected(4),
-            RemoteConnectionState::reconnecting(5),
-            RemoteConnectionState::disconnected(6),
-            RemoteConnectionState::failed(7),
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            let mut workspaces = local_collection(validated("/Users/test", 10), |_, _| ());
-            let workspace_id = workspaces
-                .create_remote_workspace(
-                    remote_key(&format!("orb-{index}"), "/srv/project"),
-                    remote_user("tester"),
-                    remote_directory("/srv/project"),
-                    remote_identity("/home/test"),
-                    state,
-                    |_| (),
-                )
-                .unwrap();
-
-            assert_eq!(
-                workspaces.begin_remote_close(workspace_id),
-                Ok(RemoteConnectionReduction::Applied)
-            );
-            assert_eq!(
-                workspaces
-                    .workspace(workspace_id)
-                    .and_then(WorkspaceEntry::remote_connection_state),
-                Some(RemoteConnectionState::closing(state.generation()))
-            );
-        }
-    }
-
-    #[test]
-    fn collection_reducer_preserves_stale_and_illegal_results_without_mutation() {
-        let mut workspaces = local_collection(validated("/Users/test", 10), |_, _| ());
-        let workspace_id = workspaces
-            .create_remote_workspace(
-                remote_key("orb", "/srv/project"),
-                remote_user("tester"),
-                remote_directory("/srv/project"),
-                remote_identity("/home/test"),
-                RemoteConnectionState::disconnected(7),
-                |_| (),
-            )
-            .unwrap();
-        assert_eq!(
-            workspaces.begin_remote_reconnect(workspace_id),
-            Ok(RemoteConnectionReduction::Applied)
-        );
-
-        assert_eq!(
-            workspaces
-                .reduce_remote_connection_state(workspace_id, RemoteConnectionState::failed(7),),
-            Ok(RemoteConnectionReduction::Stale)
-        );
-        assert_eq!(
-            workspaces.reduce_remote_connection_state(
-                workspace_id,
-                RemoteConnectionState::reconnecting(9),
-            ),
-            Ok(RemoteConnectionReduction::Illegal)
-        );
-        assert_eq!(
-            workspaces
-                .workspace(workspace_id)
-                .and_then(WorkspaceEntry::remote_connection_state),
-            Some(RemoteConnectionState::reconnecting(8))
-        );
-
-        let connected = workspaces
-            .create_remote_workspace(
-                remote_key("orb", "/srv/connected"),
-                remote_user("tester"),
-                remote_directory("/srv/connected"),
-                remote_identity("/home/test"),
-                RemoteConnectionState::reconnecting(7),
-                |_| (),
-            )
-            .unwrap();
-        assert_eq!(
-            workspaces
-                .reduce_remote_connection_state(connected, RemoteConnectionState::connected(7)),
-            Ok(RemoteConnectionReduction::Applied)
-        );
-        assert_eq!(
-            workspaces.reduce_remote_connection_state(connected, RemoteConnectionState::failed(6)),
-            Ok(RemoteConnectionReduction::Stale)
-        );
-        let state = workspaces
-            .workspace(connected)
-            .unwrap()
-            .remote_connection_state()
-            .unwrap();
-        assert_eq!(state, RemoteConnectionState::connected(7));
-        assert_eq!(state.generation(), 7);
-    }
-
-    #[test]
-    fn collection_remote_lifecycle_reduces_legal_transitions_and_closing_is_terminal() {
-        let mut workspaces = local_collection(validated("/Users/test", 10), |_, _| ());
-        let workspace_id = workspaces
-            .create_remote_workspace(
-                remote_key("orb", "/srv/project"),
-                remote_user("tester"),
-                remote_directory("/srv/project"),
-                remote_identity("/home/test"),
-                RemoteConnectionState::connected(4),
-                |_| (),
-            )
-            .unwrap();
-
-        assert_eq!(
-            workspaces.reduce_remote_connection_state(
-                workspace_id,
-                RemoteConnectionState::disconnected(4),
-            ),
-            Ok(RemoteConnectionReduction::Applied)
-        );
-        assert_eq!(
-            workspaces.begin_remote_reconnect(workspace_id),
-            Ok(RemoteConnectionReduction::Applied)
-        );
-        assert_eq!(
-            workspaces
-                .reduce_remote_connection_state(workspace_id, RemoteConnectionState::failed(5),),
-            Ok(RemoteConnectionReduction::Applied)
-        );
-        assert_eq!(
-            workspaces.begin_remote_reconnect(workspace_id),
-            Ok(RemoteConnectionReduction::Applied)
-        );
-        assert_eq!(
-            workspaces
-                .reduce_remote_connection_state(workspace_id, RemoteConnectionState::connected(6),),
-            Ok(RemoteConnectionReduction::Applied)
-        );
-        assert_eq!(
-            workspaces.begin_remote_close(workspace_id),
-            Ok(RemoteConnectionReduction::Applied)
-        );
-        assert_eq!(
-            workspaces.begin_remote_close(workspace_id),
-            Ok(RemoteConnectionReduction::Illegal)
-        );
-        assert_eq!(
-            workspaces.reduce_remote_connection_state(
-                workspace_id,
-                RemoteConnectionState::disconnected(6),
-            ),
-            Ok(RemoteConnectionReduction::Illegal)
-        );
-        for next in [
-            RemoteConnectionState::connected(6),
-            RemoteConnectionState::reconnecting(7),
-        ] {
-            assert_eq!(
-                workspaces.reduce_remote_connection_state(workspace_id, next),
-                Ok(RemoteConnectionReduction::Illegal)
-            );
-        }
-        assert_eq!(
-            workspaces
-                .workspace(workspace_id)
-                .and_then(WorkspaceEntry::remote_connection_state),
-            Some(RemoteConnectionState::closing(6))
-        );
     }
 
     #[test]
@@ -1394,119 +566,6 @@ pub(crate) mod tests {
         assert_eq!(
             workspaces.workspace(second).unwrap().pinned_directory(),
             Some(&pin)
-        );
-    }
-
-    #[test]
-    fn pinned_workspace_lookup_should_match_the_directory_identity_on_the_same_machine() {
-        let mut workspaces = local_collection(validated("/home/me", 1), |_, _| ());
-        let local = WorkspaceId::new(1);
-        let identity = remote_identity("/srv/app");
-        let pin = |directory: &str| PinnedDirectory::Remote {
-            directory: remote_directory(directory),
-            identity: identity.clone(),
-        };
-        let mut create_remote = |destination: &str| {
-            workspaces
-                .create_remote_workspace(
-                    remote_key(destination, "/home/me"),
-                    remote_user("me"),
-                    remote_directory("~/"),
-                    remote_identity("/home/me"),
-                    RemoteConnectionState::connected(1),
-                    |_| (),
-                )
-                .unwrap()
-        };
-        let server = create_remote("server");
-        let other = create_remote("other");
-        assert_eq!(
-            workspaces.remote_workspace_pinned_to(&ssh_destination("server"), &identity),
-            None
-        );
-
-        workspaces
-            .set_pinned_directory(
-                local,
-                Some(PinnedDirectory::Local(validated("/link/to/app", 2))),
-            )
-            .unwrap();
-        workspaces
-            .set_pinned_directory(other, Some(pin("/srv/app")))
-            .unwrap();
-        workspaces
-            .set_pinned_directory(server, Some(pin("~/../../srv/app")))
-            .unwrap();
-
-        assert_eq!(
-            workspaces.remote_workspace_pinned_to(&ssh_destination("server"), &identity),
-            Some(server)
-        );
-        assert_eq!(
-            workspaces.remote_workspace_pinned_to(&ssh_destination("other"), &identity),
-            Some(other)
-        );
-        assert_eq!(
-            workspaces.remote_workspace_pinned_to(&ssh_destination("third"), &identity),
-            None
-        );
-
-        workspaces.begin_remote_close(server).unwrap();
-        assert_eq!(
-            workspaces.remote_workspace_pinned_to(&ssh_destination("server"), &identity),
-            None,
-            "a closing Workspace must not be reused"
-        );
-    }
-
-    #[test]
-    fn remote_workspaces_at_the_same_home_are_independent_and_pins_keep_remote_authority() {
-        let mut workspaces = local_collection(validated("/home/me", 1), |_, _| ());
-        let mut create = || {
-            workspaces
-                .create_remote_workspace(
-                    remote_key("server", "/home/me"),
-                    remote_user("me"),
-                    remote_directory("~/"),
-                    remote_identity("/home/me"),
-                    RemoteConnectionState::connected(1),
-                    |_| (),
-                )
-                .unwrap()
-        };
-        let first = create();
-        let second = create();
-        assert_ne!(first, second);
-        assert_eq!(workspaces.workspace(first).unwrap().name(), "Default (2)");
-        assert_eq!(workspaces.workspace(second).unwrap().name(), "Default (3)");
-        let remote_pin = PinnedDirectory::Remote {
-            directory: remote_directory("/app"),
-            identity: remote_identity("/app"),
-        };
-        workspaces
-            .set_pinned_directory(first, Some(remote_pin.clone()))
-            .unwrap();
-        assert_eq!(
-            workspaces.workspace(first).unwrap().pinned_directory(),
-            Some(&remote_pin)
-        );
-        assert_eq!(
-            workspaces
-                .workspace(first)
-                .unwrap()
-                .local_display_directory(),
-            None
-        );
-        assert_eq!(
-            workspaces
-                .set_pinned_directory(first, Some(PinnedDirectory::Local(validated("/app", 2)))),
-            Err(WorkspaceError::DirectoryLocationMismatch(first))
-        );
-        assert_eq!(
-            workspaces.set_pinned_directory(WorkspaceId::new(1), Some(remote_pin)),
-            Err(WorkspaceError::DirectoryLocationMismatch(WorkspaceId::new(
-                1
-            )))
         );
     }
 
@@ -1813,51 +872,6 @@ pub(crate) mod tests {
             (workspace.name(), workspace.custom_name.as_deref()),
             (expected.as_str(), Some(expected.as_str()))
         );
-    }
-
-    #[test]
-    fn creation_name_should_preserve_explicit_names_across_all_machines() {
-        let mut workspaces = new_workspaces(());
-        let local = workspaces.active_id();
-        workspaces
-            .rename_workspace(local, "Project".to_owned())
-            .unwrap();
-        let mut assigned = Vec::new();
-        for (destination, directory) in [
-            ("orb", "/srv/first"),
-            ("orb", "/srv/second"),
-            ("orb-alias", "/srv/first"),
-        ] {
-            let id = workspaces
-                .create_remote_workspace(
-                    remote_key(destination, directory),
-                    remote_user("tester"),
-                    remote_directory(directory),
-                    remote_identity("/home/test"),
-                    RemoteConnectionState::connected(1),
-                    |_| (),
-                )
-                .unwrap();
-            workspaces
-                .rename_workspace(id, "Project".to_owned())
-                .unwrap();
-            assigned.push(workspaces.workspace(id).unwrap().name().to_owned());
-        }
-        let local_second = workspaces
-            .create_local_workspace(validated("/second", 0), |_, _| ())
-            .unwrap();
-        workspaces
-            .rename_workspace(local_second, "Project".to_owned())
-            .unwrap();
-        assigned.push(
-            workspaces
-                .workspace(local_second)
-                .unwrap()
-                .name()
-                .to_owned(),
-        );
-
-        assert_eq!(assigned, ["Project", "Project", "Project", "Project"]);
     }
 
     #[test]

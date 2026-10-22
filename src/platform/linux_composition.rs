@@ -7,7 +7,6 @@ use crate::desktop_profile::{
     ControlKeybindingProfiles, DesktopPresentation, DesktopProfile, DesktopProfileError,
     DesktopWording, HostFeature,
 };
-use crate::terminal::NativeTerminalSessionFactory;
 use std::{rc::Rc, sync::Arc};
 
 pub(crate) fn main() {
@@ -232,23 +231,6 @@ fn compose(
         paths,
         Arc::new(super::unix_local_identity::UnixLocalIdentity),
     );
-    let session_factory = Rc::new(NativeTerminalSessionFactory::new(
-        Arc::new(super::unix_pty::UnixNativePtyAdapterFactory::new(Arc::new(
-            super::linux_pty_host::LinuxPtyHost,
-        ))),
-        super::launch_host::shell_launch_planner(),
-        local_filesystem.clone(),
-        crate::terminal::metadata::LocalMachine::new(
-            super::launch_host::local_user().as_deref(),
-            super::launch_host::local_hostname().as_deref(),
-            startup.home_directory.to_str(),
-        ),
-    ));
-    let remote_workspace = startup.remote_backend_factory(Arc::new(
-        super::unix_askpass_transport::AskPassWindowFactory::new(
-            super::launch_host::running_executable(),
-        ),
-    ));
     let ssh_servers = startup.ssh_servers_factory(
         Arc::new(super::unix_askpass_transport::AskPassWindowFactory::new(
             super::launch_host::running_executable(),
@@ -277,7 +259,6 @@ fn compose(
             Rc::new(super::linux_keyboard_layout::LinuxKeyboardLayout),
         )?,
         home_directory: startup.home_directory,
-        session_factory,
         adapters: crate::app::ApplicationCapabilities {
             updates,
             selected_files: Some(Arc::new(super::unix_selected_file::UnixSelectedFileOpener)),
@@ -310,7 +291,6 @@ fn compose(
             permission_access: None,
             setup_guide: None,
             theme_registry: Some(Arc::new(super::https_transport::HttpsTransport::new())),
-            remote_workspace,
             repository_status,
             background_images: None,
             local_server: crate::ui::LocalServerAdapters::account(),
@@ -552,10 +532,9 @@ mod tests {
             crate::terminal::testing::test_local_directory(PathBuf::from("/tmp/linux-keymap-test")),
         );
         use crate::terminal::TerminalKeyInputAdapterFactory;
-        let prepared = factory.prepare_child_launch().unwrap();
         let (pane, cx) = cx.add_window_view(|window, cx| {
-            crate::ui::TerminalPane::new_with_prepared_launch(
-                factory, prepared,
+            crate::ui::TerminalPane::with_adapters(
+                factory,
                 super::super::linux_keyboard::LinuxTerminalKeyInputAdapterFactory::new().create(),
                 &crate::platform::terminal_accessibility::testing::RecordingAccessibilityFactory::default(),
                 crate::terminal::native_services::testing::adapters(),

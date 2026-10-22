@@ -546,10 +546,9 @@ mod tests {
             factory,
             test_local_directory(PathBuf::from("/keyboard-test")),
         );
-        let prepared = factory.prepare_child_launch().unwrap();
         let (pane, cx) = cx.add_window_view(|window, cx| {
-            crate::ui::TerminalPane::new_with_prepared_launch(
-                factory, prepared, LinuxTerminalKeyInputAdapterFactory::new().create(),
+            crate::ui::TerminalPane::with_adapters(
+                factory, LinuxTerminalKeyInputAdapterFactory::new().create(),
                 &crate::platform::terminal_accessibility::testing::RecordingAccessibilityFactory::default(),
                 crate::terminal::native_services::testing::adapters(),
                 crate::ui::pane_lifecycle::PaneLifecycleDependencies::testing(), window, cx,
@@ -979,10 +978,9 @@ mod native_compose_tests {
                     Rc::new(TestTerminalSessionFactory::new(records.clone())),
                     test_local_directory(PathBuf::from("/compose-test")),
                 );
-                let prepared = factory.prepare_child_launch().unwrap();
                 let primary = cx.open_window(gpui::WindowOptions::default(), |window, cx| {
-                    let pane = cx.new(|cx| crate::ui::TerminalPane::new_with_prepared_launch(
-                        factory, prepared, LinuxTerminalKeyInputAdapterFactory::new().create(),
+                    let pane = cx.new(|cx| crate::ui::TerminalPane::with_adapters(
+                        factory, LinuxTerminalKeyInputAdapterFactory::new().create(),
                         &crate::platform::terminal_accessibility::testing::RecordingAccessibilityFactory::default(),
                         crate::terminal::native_services::testing::adapters(),
                         crate::ui::pane_lifecycle::PaneLifecycleDependencies::testing(), window, cx,

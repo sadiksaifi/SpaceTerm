@@ -1,10 +1,9 @@
 //! Groups the Workspace Window's Workspaces by the machine they run on.
 //!
-//! The account-local server's Workspaces and this computer's own form the local group. Every other
-//! machine is named by its SSH Destination, so an SSH server's Workspaces and the Remote Workspaces
-//! opened at the same destination share one group. A server reached over a direct network route
-//! forms its own group under the name it gave, apart from any SSH route to the same computer,
-//! because the two routes carry separate authority. Workspace order keeps each group together,
+//! The account-local server's Workspaces form the local group. Every SSH server's group is named
+//! by its SSH Destination. A server reached over a direct network route forms its own group under
+//! the name it gave, apart from any SSH route to the same computer, because the two routes carry
+//! separate authority. Workspace order keeps each group together,
 //! the local one first, then the SSH machines and then the direct network servers by name, so the
 //! sidebar, the position shortcuts, and the Workspace Switcher present one order.
 
@@ -14,7 +13,7 @@ use gpui::{App, Context, Window};
 
 use super::{ServerBindings, ServerOrigin, WorkspaceManager};
 use crate::direct_connections::{DirectRouteId, DirectRouteStatus};
-use crate::domain::{SshDestination, WorkspaceEntry, WorkspaceId, WorkspaceLocation};
+use crate::domain::{SshDestination, WorkspaceEntry, WorkspaceId};
 use crate::ssh::server_connection::RemoteConnectionStatus;
 use crate::ssh::server_operations::RemoteOperationState;
 use crate::ui::remote_maintenance::{menu_actions_for, observed_menu_actions, working_state};
@@ -37,16 +36,10 @@ pub(crate) enum Machine {
 
 impl Machine {
     fn of<T>(servers: &ServerBindings, workspace: &WorkspaceEntry<T>) -> Self {
-        if let Some(origin) = servers
+        servers
             .owner(workspace.id())
             .and_then(|key| servers.origin(key))
-        {
-            return Self::from_origin(origin);
-        }
-        match workspace.location() {
-            WorkspaceLocation::Local => Self::Local,
-            WorkspaceLocation::Remote { key, .. } => Self::Ssh(key.destination().clone()),
-        }
+            .map_or(Self::Local, Self::from_origin)
     }
 }
 
@@ -226,6 +219,8 @@ impl WorkspaceManager {
                     disconnects: false,
                     has_settings: true,
                     awaiting_connection: false,
+                    // The footer's New Workspace already creates on this computer's server.
+                    creates_workspaces: false,
                     // The account-local server's own service and update controls live in its
                     // Settings detail, which this heading opens.
                     maintenance: Vec::new(),
@@ -236,8 +231,6 @@ impl WorkspaceManager {
                         .shared
                         .key_of(&ServerOrigin::Ssh(destination.clone()))
                         .is_some();
-                    // Settings lists saved SSH connections; native Remote Workspaces alone name
-                    // no server there.
                     let saved = connections.as_ref().is_some_and(|connections| {
                         connections
                             .connections()
@@ -247,9 +240,7 @@ impl WorkspaceManager {
                     let intended = connections
                         .as_ref()
                         .is_some_and(|connections| connections.intends(&destination));
-                    // A heading controls a connection SpaceTerm presents or keeps trying. A
-                    // machine with only native Remote Workspaces offers no Connect that would set
-                    // up a server there.
+                    // A heading controls a connection SpaceTerm presents or keeps trying.
                     let controlled = presented || intended;
                     let presentation = connections.as_ref().map(|connections| {
                         let status = connections.status(&destination);
@@ -277,9 +268,9 @@ impl WorkspaceManager {
                     MachineSection {
                         label: destination.as_str().to_owned().into(),
                         route: None,
-                        // A Remote Workspace reports its own connection on its row. The heading
-                        // reports the SSH server's, and an operation underway on that server
-                        // outranks it: it is what is happening to the machine now.
+                        // The heading reports the SSH server's connection, and an operation
+                        // underway on that server outranks it: it is what is happening to the
+                        // machine now.
                         status: maintenance
                             .as_ref()
                             .and_then(|states| {
@@ -298,6 +289,7 @@ impl WorkspaceManager {
                         // stopped or failing after it connected, and ends reconnect intent.
                         disconnects: controlled,
                         awaiting_connection: !presented && intended,
+                        creates_workspaces: presented,
                         maintenance: match &maintenance {
                             Some(states)
                                 if states.iter().any(|state| {
@@ -316,8 +308,6 @@ impl WorkspaceManager {
                                 .unwrap_or_default(),
                             None => Vec::new(),
                         },
-                        // Settings lists saved SSH connections; native Remote Workspaces alone
-                        // name no server there.
                         has_settings: saved,
                         target: MachineTarget::Ssh(destination),
                         workspaces,
@@ -359,6 +349,7 @@ impl WorkspaceManager {
                         disconnects: presented || intended,
                         has_settings: saved,
                         awaiting_connection: !presented,
+                        creates_workspaces: presented,
                         // A direct network server's maintenance lives in its Settings detail.
                         maintenance: Vec::new(),
                         workspaces,
@@ -377,6 +368,10 @@ impl WorkspaceManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if command == MachineMenuCommand::NewWorkspace {
+            self.create_workspace_on(&target, window, cx);
+            return;
+        }
         let destination = match target {
             MachineTarget::Ssh(destination) => Some(destination),
             MachineTarget::Direct(route) => {
@@ -413,7 +408,8 @@ impl WorkspaceManager {
                 | MachineMenuCommand::Disconnect
                 | MachineMenuCommand::Maintenance(_),
                 None,
-            ) => {}
+            )
+            | (MachineMenuCommand::NewWorkspace, _) => {}
         }
     }
 
@@ -439,7 +435,46 @@ impl WorkspaceManager {
                     direct.disconnect(&route);
                 }
             }
-            MachineMenuCommand::Maintenance(_) => {}
+            MachineMenuCommand::Maintenance(_) | MachineMenuCommand::NewWorkspace => {}
         }
+    }
+
+    /// Asks the server a machine heading names for a new Workspace, which it presents to every
+    /// connected client and this window activates once the server publishes it.
+    fn create_workspace_on(
+        &mut self,
+        target: &MachineTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::ui::shared_workspaces::{SharedRefusalReason, SharedSubmission};
+
+        let key =
+            self.shared
+                .keys()
+                .into_iter()
+                .find(|key| match (self.shared.origin(*key), target) {
+                    (Some(ServerOrigin::Local), MachineTarget::Local) => true,
+                    (Some(ServerOrigin::Ssh(bound)), MachineTarget::Ssh(destination)) => {
+                        bound == destination
+                    }
+                    (Some(ServerOrigin::Direct(bound)), MachineTarget::Direct(route)) => {
+                        bound.route == *route
+                    }
+                    _ => false,
+                });
+        let Some(shared) = key.and_then(|key| self.shared.get_mut(key)) else {
+            super::WorkspaceManager::show_shared_refusal(
+                "create a Workspace",
+                SharedRefusalReason::Offline,
+                window,
+                cx,
+            );
+            return;
+        };
+        if let SharedSubmission::Refused(reason) = shared.create_workspace(String::new(), None) {
+            super::WorkspaceManager::show_shared_refusal("create a Workspace", reason, window, cx);
+        }
+        cx.notify();
     }
 }

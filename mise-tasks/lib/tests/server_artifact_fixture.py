@@ -91,6 +91,33 @@ int main(int argc, char **argv) {{
     archive, signature = archive_tree(root, tree, expected)
     environment["SPACETERM_SERVER_ARCHIVE"] = str(archive)
     environment["SPACETERM_SERVER_SIGNATURE"] = str(signature)
+    environment.pop("SPACETERM_SSH_SERVER_ARTIFACTS", None)
+    if release_tag:
+        # Native production checks run above. A release fixture also needs a signed
+        # foreign target, which catalog verification never executes on this host.
+        catalog = directory / "catalog"
+        local = catalog / expected["target"]
+        local.mkdir(parents=True)
+        shutil.copyfile(archive, local / "artifact.tar.gz")
+        shutil.copyfile(signature, local / "artifact.sig")
+        (local / "artifact.sha256").write_text(release.sha256(archive) + "\n")
+        target = "x86_64-unknown-linux-gnu" if sys.platform == "darwin" else "aarch64-apple-darwin"
+        foreign = directory / "foreign/server"
+        (foreign / "bin").mkdir(parents=True)
+        executable = foreign / "bin/spaceterm-server"
+        if target == "aarch64-apple-darwin":
+            header = bytes.fromhex("cffaedfe0c0000010000000002000000") + bytes(16)
+        else:
+            header = b"\x7fELF\x02\x01\x01" + bytes(9) + bytes.fromhex("03003e00") + bytes(44)
+        executable.write_bytes(header)
+        executable.chmod(0o755)
+        other_archive, other_signature = archive_tree(root, foreign, {**expected, "target": target})
+        output = catalog / target
+        output.mkdir()
+        shutil.copyfile(other_archive, output / "artifact.tar.gz")
+        shutil.copyfile(other_signature, output / "artifact.sig")
+        (output / "artifact.sha256").write_text(release.sha256(other_archive) + "\n")
+        environment["SPACETERM_SSH_SERVER_ARTIFACTS"] = str(catalog)
     return archive, signature
 
 
