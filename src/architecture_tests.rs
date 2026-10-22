@@ -202,9 +202,6 @@ fn portable_verification_cannot_select_native_adapters_or_host_mechanics() {
         root.join("desktop_profile.rs"),
         root.join("keybindings.rs"),
         root.join("desktop_profile/default_keymap.rs"),
-        root.join("ui/mod.rs"),
-        root.join("ui/workspace_manager.rs"),
-        root.join("ui/terminal_pane.rs"),
         root.join("terminal/conformance.rs"),
         root.join("terminal/testing.rs"),
         root.join("terminal/key_input.rs"),
@@ -221,9 +218,8 @@ fn portable_verification_cannot_select_native_adapters_or_host_mechanics() {
         root.join("platform/shell_integration.rs"),
         root.join("platform/shell_launch.rs"),
         root.join("platform/app_paths.rs"),
-        root.join("ui/native_remote_workspace_flow_backend.rs"),
-        root.join("ui/remote_workspace_flow.rs"),
     ];
+    // Discover portable module trees rather than pinning individual UI implementations.
     for directory in [
         "ui",
         "desktop_profile",
