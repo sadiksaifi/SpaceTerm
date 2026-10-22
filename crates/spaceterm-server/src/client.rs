@@ -245,14 +245,10 @@ impl LocalServer {
             &self.identity,
             &[protocol::MAJOR],
         )?;
-        let mut connection = crate::pane::PaneConnection::new(stream, false);
-        status.development_pane = matches!(
-            connection.exchange(&crate::pane::Request::Capabilities),
-            Ok(crate::pane::Reply::Capabilities {
-                development_pane: true,
-                ..
-            })
-        );
+        // Status is used by desktop startup too. Apply the same required-capability
+        // admission as remote routes before reporting this server ready.
+        crate::pane::PaneConnection::negotiate(stream)?;
+        status.development_pane = true;
         Ok(status)
     }
     /// Admits a transport through its route's verified authority, without implicit Start.
@@ -471,6 +467,64 @@ mod tests {
     use super::*;
     use crate::account_bridge::{AccountBridge, AccountBridgeIdentity, AccountConnector};
     use std::sync::Arc;
+
+    #[test]
+    fn local_status_requires_workspace_capability_before_reporting_ready() {
+        use crate::pane::Request;
+        use std::os::unix::{fs::PermissionsExt, net::UnixListener};
+
+        for workspace_policy in [None, Some(false), Some(true)] {
+            let root = std::env::temp_dir().canonicalize().unwrap().join(format!(
+                "st-cap-{:x}",
+                u64::from_be_bytes(protocol::random().unwrap()[..8].try_into().unwrap())
+            ));
+            let paths = Paths {
+                identity: "spaceterm-development".into(),
+                data: root.join("d"),
+                runtime: root.join("r"),
+            };
+            let server = LocalServer::with_paths(paths.clone()).unwrap();
+            server.setup().unwrap();
+            Directory::open(&paths.runtime, true).unwrap();
+            let listener = UnixListener::bind(paths.socket()).unwrap();
+            std::fs::set_permissions(paths.socket(), std::fs::Permissions::from_mode(0o600))
+                .unwrap();
+            let pin = server.server_id().unwrap();
+            let peer = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                protocol::admit_server(&mut stream, &pin, &paths.identity).unwrap();
+                let mut wire = protocol::Wire::terminal(&mut stream).unwrap();
+                assert!(matches!(
+                    wire.read::<Request>().unwrap(),
+                    Request::Capabilities
+                ));
+                let mut reply = serde_json::json!({"Capabilities":{"development_pane":true}});
+                if let Some(supported) = workspace_policy {
+                    reply["Capabilities"]["workspace_policy"] = supported.into();
+                }
+                wire.write(&reply).unwrap();
+                assert!(
+                    wire.read::<Request>().is_err(),
+                    "status must send no operation"
+                );
+            });
+            let result = server.refresh();
+            peer.join().unwrap();
+            if workspace_policy == Some(true) {
+                assert_eq!(
+                    result,
+                    Ok(AuthenticatedStatus {
+                        protocol_major: 1,
+                        development_pane: true,
+                    }),
+                    "missing optional capabilities must not prevent admission"
+                );
+            } else {
+                assert_eq!(result, Err(ServerError::MissingRequiredCapability));
+            }
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
 
     #[test]
     fn paired_direct_policy_changes_return_the_committed_status_before_disconnect() {
