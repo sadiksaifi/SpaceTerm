@@ -11,6 +11,8 @@ use std::{sync::Arc, time::Duration};
 mod accessibility;
 #[cfg(test)]
 mod accessibility_tests;
+#[cfg(test)]
+mod clear_tests;
 mod directories;
 #[cfg(all(test, feature = "desktop"))]
 pub(crate) mod testing {
@@ -562,6 +564,7 @@ impl DevelopmentPaneHost {
             | Request::Keys { lease, .. }
             | Request::Key { lease, .. }
             | Request::Resize { lease, .. }
+            | Request::ClearScreenAndScrollback { lease }
             | Request::Close { lease }
             | Request::Style { lease, .. }
             | Request::Release { lease } => lease,
@@ -756,6 +759,13 @@ impl DevelopmentPaneHost {
                 }
                 pane.runtime.resize(geometry(size));
                 pane.size = size;
+                Ok(Reply::Unchanged)
+            }
+            Request::ClearScreenAndScrollback { .. } => {
+                if pane.ended || pane.failed {
+                    return Err(Refusal::Missing);
+                }
+                pane.runtime.clear_screen_and_scrollback();
                 Ok(Reply::Unchanged)
             }
             Request::Style { style, .. } => {

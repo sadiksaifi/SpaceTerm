@@ -341,6 +341,10 @@ pub enum Request {
         lease: Lease,
         size: PaneSize,
     },
+    /// Clear only this Pane's terminal content under its exact control and connection lease.
+    ClearScreenAndScrollback {
+        lease: Lease,
+    },
     Style {
         lease: Lease,
         style: PresentationStyle,

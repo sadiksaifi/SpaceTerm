@@ -691,6 +691,7 @@ impl SharedWorkspaceHost {
                     | Request::Keys { lease, .. }
                     | Request::Key { lease, .. }
                     | Request::Resize { lease, .. }
+                    | Request::ClearScreenAndScrollback { lease }
                     | Request::Style { lease, .. }
                     | Request::Release { lease }
                     | Request::Close { lease } => (*lease).into(),
