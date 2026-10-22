@@ -138,6 +138,25 @@ fn presented(facts: UpdateFacts) -> UpdatePresentation {
 }
 
 #[gpui::test]
+fn dropdown_local_update_opens_the_existing_confirmation_without_activation(
+    cx: &mut TestAppContext,
+) {
+    let harness = open(available(), cx);
+    harness.cx.update(|window, cx| {
+        cx.set_global(super::super::OpenSettingsWindow(
+            window.window_handle().downcast::<SettingsWindow>().unwrap(),
+        ));
+        crate::ui::updates::server_rows::ServerUpdateAction::Local.activate(cx);
+    });
+    harness.cx.run_until_parked();
+    assert_eq!(harness.update.changes(), [UpdateCall::PrepareUpdate]);
+    assert!(alert_open(UPDATE_CONFIRM_SELECTOR, harness.cx));
+    click_modal(UPDATE_CANCEL_SELECTOR, harness.cx);
+    assert_eq!(harness.update.changes(), [UpdateCall::PrepareUpdate]);
+    assert!(harness.service.changes().is_empty());
+}
+
+#[gpui::test]
 fn a_confirmed_update_replaces_the_running_server_once(cx: &mut TestAppContext) {
     let mut harness = open(available(), cx);
     let presentation = harness.presentation();

@@ -299,6 +299,43 @@ fn interrupted(
 }
 
 #[test]
+fn passive_inventory_preserves_an_admitted_operation_without_dispatch_or_setup() {
+    with_service(|service, previous, candidate, supervisor| {
+        interrupted(
+            &service,
+            &previous,
+            &candidate,
+            &supervisor,
+            Step::Admitted,
+            false,
+        );
+        supervisor.running.store(true, Ordering::SeqCst);
+        let policy = std::fs::read(service.paths.data.join("service.json")).unwrap();
+        let identity = std::fs::read(service.paths.data.join("identity.json")).unwrap();
+        assert_eq!(
+            service.passive_status(),
+            Err(ServerError::ActivationUnresolved)
+        );
+        assert!(service.passive_server_id().unwrap().is_some());
+        assert_eq!(supervisor.stops.load(Ordering::SeqCst), 0);
+        assert_eq!(supervisor.starts.load(Ordering::SeqCst), 0);
+        assert_eq!(*supervisor.approved.lock().unwrap(), previous.directory);
+        assert_eq!(
+            std::fs::read(service.paths.data.join("service.json")).unwrap(),
+            policy
+        );
+        assert_eq!(
+            std::fs::read(service.paths.data.join("identity.json")).unwrap(),
+            identity
+        );
+
+        std::fs::remove_file(service.paths.data.join("identity.json")).unwrap();
+        assert_eq!(service.passive_server_id().unwrap(), None);
+        assert!(!service.paths.data.join("identity.json").exists());
+    });
+}
+
+#[test]
 fn stopped_recovery_resolves_each_prelaunch_boundary_without_starting_or_stopping() {
     for step in [
         Step::Admitted,

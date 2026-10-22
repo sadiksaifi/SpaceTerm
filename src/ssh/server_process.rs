@@ -34,7 +34,7 @@ const OBSERVATION: Duration = Duration::from_secs(15);
 const MAX_DISCOVERY: usize = 16 * 1024;
 const MAX_ARTIFACT: u64 = 256 * 1024 * 1024;
 
-/// Captured source directory; no candidate is inspected until an authenticated account is missing.
+/// Captured artifact directory shared by Connect, explicit Update and passive update inventory.
 #[derive(Clone)]
 pub(crate) struct SshServerArtifacts {
     root: Option<PathBuf>,
@@ -459,6 +459,22 @@ impl<A: SshProcessAdapter> NativeSshConnectBackend<A> {
     }
 }
 impl<A: SshProcessAdapter> SshConnectBackend for NativeSshConnectBackend<A> {
+    fn verified_candidate(&self, platform: &(String, String)) -> Option<ServerCandidate> {
+        let target = match (platform.0.as_str(), platform.1.as_str()) {
+            ("macOS", "arm64") => "aarch64-apple-darwin",
+            ("linux", "x86_64") => "x86_64-unknown-linux-gnu",
+            _ => return None,
+        };
+        let candidate = self
+            .config
+            .artifacts
+            .candidate(self.config.filesystem.as_ref(), target)
+            .ok()?;
+        Some(ServerCandidate {
+            version: candidate.version,
+            digest: candidate.digest,
+        })
+    }
     fn disconnect(&self, destination: &SshDestination) {
         let route = self
             .routes

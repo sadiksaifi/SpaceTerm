@@ -90,37 +90,7 @@ pub(super) trait ServerUpdateControl: Send + Sync {
 
 impl ServerUpdateControl for Service {
     fn read(&self) -> Result<UpdateFacts, ServerError> {
-        // The recorded update is read first: a status read resumes it and refuses while it stays
-        // unresolved, which is exactly when the row must still offer Finish Update or Return.
-        let activation = self.activation_status()?;
-        let status = match (self.status(), &activation) {
-            (Ok(status), _) => Ok(status),
-            (Err(error), Some(_)) => Err(error),
-            (Err(error), None) => return Err(error),
-        };
-        // An installed service lists only its approved build.
-        let approved = match status {
-            Ok(status) if status.installed => self.retained_installations()?.into_iter().next(),
-            _ => None,
-        };
-        let included = crate::local_startup::discover_candidate().map(|candidate| IncludedServer {
-            version: candidate.version().to_owned(),
-            commit: candidate.commit().to_owned(),
-            package: candidate.digest().to_owned(),
-            approved: approved
-                .as_ref()
-                .is_some_and(|approved| candidate.is_approved(approved)),
-            // The service's own policy, so the row never offers what activation refuses.
-            earlier: approved.as_ref().is_some_and(|approved| {
-                is_released_downgrade(candidate.version(), &approved.version)
-            }),
-        });
-        Ok(UpdateFacts {
-            status,
-            approved,
-            included,
-            activation,
-        })
+        read_facts(self, self.activation_status()?, Service::status)
     }
 
     fn prepare_update(&self) -> Result<Option<PreparedChange>, ServerError> {
@@ -156,6 +126,59 @@ impl ServerUpdateControl for Service {
     fn finish(&self) -> Result<Option<ActivationStatus>, ServerError> {
         self.recover_activation()
     }
+}
+
+/// The dropdown observes the same facts and policy as Settings without resuming an activation.
+/// Blocking local reads and signature verification only; it retains no candidate.
+pub(crate) fn passive_update(service: &Service) -> Result<(SharedString, bool), ServerError> {
+    // activation_status can prove recovery eligibility and clean a stale endpoint while doing
+    // so. A passive read instead refuses unresolved originals and leaves their review to Settings.
+    let facts = read_facts(service, None, Service::passive_status)?;
+    let presentation = present_update(&UpdateState {
+        facts: Some(facts),
+        ..UpdateState::default()
+    });
+    Ok((
+        presentation.explanation,
+        presentation.actions.contains(&UpdateAction::Update),
+    ))
+}
+
+fn read_facts(
+    service: &Service,
+    activation: Option<ActivationStatus>,
+    status: fn(&Service) -> Result<ServiceStatus, ServerError>,
+) -> Result<UpdateFacts, ServerError> {
+    // Keep the recorded original visible even when the status read refuses an unresolved update.
+    // Settings may recover that original; the dropdown supplies the passive status reader.
+    let status = match (status(service), &activation) {
+        (Ok(status), _) => Ok(status),
+        (Err(error), Some(_)) => Err(error),
+        (Err(error), None) => return Err(error),
+    };
+    // An installed service lists only its approved build.
+    let approved = match status {
+        Ok(status) if status.installed => service.retained_installations()?.into_iter().next(),
+        _ => None,
+    };
+    let included = crate::local_startup::discover_candidate().map(|candidate| IncludedServer {
+        version: candidate.version().to_owned(),
+        commit: candidate.commit().to_owned(),
+        package: candidate.digest().to_owned(),
+        approved: approved
+            .as_ref()
+            .is_some_and(|approved| candidate.is_approved(approved)),
+        // The service's own policy, so the row never offers what activation refuses.
+        earlier: approved
+            .as_ref()
+            .is_some_and(|approved| is_released_downgrade(candidate.version(), &approved.version)),
+    });
+    Ok(UpdateFacts {
+        status,
+        approved,
+        included,
+        activation,
+    })
 }
 
 /// Whether the Server version row offers Update Server for `service`, for a surface that opens

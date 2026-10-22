@@ -246,6 +246,11 @@ pub(crate) enum SshConnectFailure {
 }
 /// All remote effects run on the registry's dedicated worker, never on a render thread.
 pub(crate) trait SshConnectBackend: Send + Sync {
+    /// Verify a locally held archive for an already observed platform. This performs no SSH,
+    /// authentication, staging or installation. Callers run it on a background executor.
+    fn verified_candidate(&self, _platform: &(String, String)) -> Option<ServerCandidate> {
+        None
+    }
     fn disconnect(&self, _destination: &SshDestination) {}
     fn forget(&self, destination: &SshDestination) {
         self.disconnect(destination);
@@ -278,6 +283,13 @@ pub(crate) struct SshFlowConnectionIntent {
 struct FlowConnectionOwner {
     id: u64,
     consumers: usize,
+}
+
+/// Metadata from a suitable, verified whole server archive held by this client.
+#[derive(Clone, Debug)]
+pub(crate) struct ServerCandidate {
+    pub version: String,
+    pub digest: String,
 }
 
 struct Entry {
@@ -352,6 +364,14 @@ pub(crate) struct SshServerConnections {
     inner: Arc<Inner>,
 }
 impl SshServerConnections {
+    /// Read local candidate evidence through the same artifact owner Connect and Update use.
+    /// Blocking verification only; it never opens or changes a remote route.
+    pub(crate) fn verified_candidate(
+        &self,
+        platform: &(String, String),
+    ) -> Option<ServerCandidate> {
+        self.inner.backend.verified_candidate(platform)
+    }
     pub(crate) fn new(
         backend: Arc<dyn SshConnectBackend>,
         intents: Arc<dyn SshConnectionIntentStore>,

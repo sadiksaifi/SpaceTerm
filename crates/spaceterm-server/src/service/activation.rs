@@ -167,6 +167,9 @@ impl Operation {
     pub(super) fn pending(&self) -> bool {
         !matches!(self.step, Step::Completed | Step::Returned)
     }
+    pub(super) fn settled(&self) -> bool {
+        !self.pending() && !self.failed
+    }
     pub(super) fn permits_start(&self) -> bool {
         matches!(
             self.step,
