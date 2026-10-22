@@ -10230,6 +10230,34 @@ fn a_shared_pane_takeover_should_take_focus_only_from_the_pane_that_held_it(
     );
 }
 
+/// A notice over a screen follows the screen's content in a short Pane, so it never covers the
+/// action that recovers the Pane.
+#[gpui::test]
+fn a_shared_pane_notice_should_never_cover_its_screen_actions(cx: &mut TestAppContext) {
+    use crate::local_server::ServerError;
+    use crate::terminal::server_session::DevelopmentPaneStatus;
+
+    let (harness, cx) = shared_pane_harness(cx);
+    let pane = harness.panes.pane(SHARED_FOCUS_PANE);
+    pane.set(DevelopmentPaneStatus::Restored);
+    settle_shared_panes(cx);
+    pane.set(DevelopmentPaneStatus::Failed(ServerError::Protocol));
+    cx.simulate_resize(gpui::size(px(640.0), px(260.0)));
+    settle_shared_panes(cx);
+
+    let action = cx
+        .debug_bounds("shared-pane-start-shell-1")
+        .expect("the restored screen keeps Start New Shell");
+    let notice = cx
+        .debug_bounds("shared-pane-notice-1")
+        .expect("the failure is explained");
+    assert!(
+        notice.top() >= action.bottom(),
+        "the notice follows the screen's actions instead of covering them: {notice:?} over \
+         {action:?}"
+    );
+}
+
 /// A shared Workspace whose Root Tab is split in two beside a second Tab, presented in this window
 /// with the scripted server that answers its edits.
 struct SharedCloseHarness {

@@ -2718,6 +2718,45 @@ impl TabView {
                     cx,
                 )
             }
+            ServerPaneScreen::StartUnknown {
+                checking,
+                unanswered,
+            } => {
+                // This client restarts this computer's server and an SSH server from Server
+                // Settings. A direct network server restarts only on its own computer.
+                let sessions = self.shared.as_ref().map(|shared| shared.sessions());
+                let restart_target = match sessions {
+                    Some(sessions) if sessions.direct_route().is_some() => None,
+                    Some(sessions) => Some(sessions.remote_destination().cloned().map_or(
+                        crate::ui::MachineTarget::Local,
+                        crate::ui::MachineTarget::Ssh,
+                    )),
+                    None => None,
+                };
+                let owner = view.clone();
+                server_pane::StartUnknownScreen {
+                    screen: selector("start-unknown"),
+                    retry: selector("check-start"),
+                    server_settings: restart_target
+                        .as_ref()
+                        .map(|_| selector("start-unknown-server-settings")),
+                    checking,
+                    unanswered,
+                    on_retry: move |window: &mut Window, cx: &mut App| {
+                        let _ = owner.update(cx, |view, cx| {
+                            view.retry_shared_pane(pane_id, window, cx);
+                        });
+                    },
+                    // Settings reads the server again, and Restart Server asks before it ends
+                    // anything. Nothing here restarts it.
+                    on_server_settings: move |_: &mut Window, cx: &mut App| {
+                        if let Some(target) = restart_target.clone() {
+                            crate::ui::settings_window::open_server_settings(target, cx);
+                        }
+                    },
+                }
+                .render(pane.announcements(), cx)
+            }
             ServerPaneScreen::DirectoryUnavailable { starting, offered } => {
                 let target = pane.connection().recovery_target();
                 let editability = self.shared.as_ref().map(|shared| shared.editability());
@@ -2774,15 +2813,7 @@ impl TabView {
                 )
             }
         });
-        // The screen's labeled Group rests on its own focus, so assistive technology announces
-        // where the keyboard landed, and plain Tab the terminal never took reaches its action
-        // while terminal input is paused.
-        let screen = screen.map(|screen| match &screen_focus {
-            Some(focus) => {
-                server_pane::with_tab_traversal(screen.track_focus(focus)).into_any_element()
-            }
-            None => screen.into_any_element(),
-        });
+        let has_screen = screen.is_some();
         // Start Server reaches only this computer's server. Another computer's stopped server
         // is started there, so its Pane explains that and offers nothing.
         let remote = self
@@ -2806,7 +2837,7 @@ impl TabView {
                     )
                 })
             } else {
-                pane.can_retry().then(|| {
+                pane.notice_offers_retry().then(|| {
                     let owner = view.clone();
                     server_pane::retry_button(selector("retry"), move |window, cx| {
                         let _ = owner.update(cx, |view, cx| {
@@ -2815,7 +2846,30 @@ impl TabView {
                     })
                 })
             };
-            server_pane::render_notice(selector("notice"), title, detail, intent, retry, true, cx)
+            // Over a screen, the notice follows the screen's content instead of floating over its
+            // actions.
+            server_pane::render_notice(
+                selector("notice"),
+                title,
+                detail,
+                intent,
+                retry,
+                !has_screen,
+                cx,
+            )
+        });
+        let (screen, notice) = match screen {
+            Some(screen) => (Some(server_pane::with_notice(screen, notice, cx)), None),
+            None => (None, notice),
+        };
+        // The screen's labeled Group rests on its own focus, so assistive technology announces
+        // where the keyboard landed, and plain Tab the terminal never took reaches its action
+        // while terminal input is paused.
+        let screen = screen.map(|screen| match &screen_focus {
+            Some(focus) => {
+                server_pane::with_tab_traversal(screen.track_focus(focus)).into_any_element()
+            }
+            None => screen.into_any_element(),
         });
         SharedPaneSurface { screen, notice }
     }
@@ -3027,6 +3081,17 @@ impl TabView {
             .map(crate::ui::server_pane::ServerPaneView::retry)
             .is_some()
         {
+            // A check waits disabled while the server answers, and a disabled control gives up
+            // focus. The screen keeps it, so the keyboard stays where the action was.
+            if matches!(
+                self.shared
+                    .as_ref()
+                    .and_then(|shared| shared.view(pane_id))
+                    .and_then(crate::ui::server_pane::ServerPaneView::screen),
+                Some(crate::ui::server_pane::ServerPaneScreen::StartUnknown { checking: true, .. })
+            ) {
+                self.focus_shared_screen(pane_id, window, cx);
+            }
             cx.notify();
         }
     }

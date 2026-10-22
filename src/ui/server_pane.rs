@@ -5,6 +5,7 @@
 //! shell's output paints or reaches assistive technology after another client takes control or the
 //! server restarts.
 
+use crate::local_server::ServerError;
 use gpui::prelude::*;
 use gpui::{AnyElement, App, SharedString, Stateful, div};
 use spaceterm_server::pane::control::Controller;
@@ -15,6 +16,8 @@ use spaceterm_ui::{
 use std::{cell::RefCell, rc::Rc};
 
 mod directory_recovery;
+#[cfg(test)]
+mod tests;
 pub(crate) use directory_recovery::{DirectoryRecovery, RecoveryActions};
 
 use super::appearance::gpui_color;
@@ -156,6 +159,60 @@ const CHOOSE_DIRECTORY_DESCRIPTION: &str = "Chooses another directory on the ser
 const CHOOSE_DIRECTORY_UNSUPPORTED: &str = "This server can't change a Pane's directory. Update \
                                             the server to choose another directory.";
 pub(crate) const START_SHELL_UNCONFIRMED: &str = "Starting the shell was not confirmed.";
+/// A start the server may have run. Starting again could leave a second shell in the Pane, so the
+/// screen offers a check, which never starts a shell, and names the one restart that ends the wait
+/// along with what it ends.
+pub(crate) const START_UNKNOWN_TITLE: &str = "Shell Start Not Confirmed";
+pub(crate) const START_UNKNOWN_DETAIL: &str = "The connection was interrupted before the server \
+                                               confirmed this Pane\u{2019}s new shell, so one may \
+                                               already be running. SpaceTerm won\u{2019}t start \
+                                               another until Retry finds it or the server \
+                                               restarts.";
+/// What restarting ends, where this client can restart the server from Server Settings.
+pub(crate) const START_UNKNOWN_RESTART_HERE: &str = "Restart Server in Server Settings ends every \
+                                                     Terminal Session on that server, for every \
+                                                     client, and asks first.";
+/// What restarting ends, where only the server's own computer can restart it.
+pub(crate) const START_UNKNOWN_RESTART_ELSEWHERE: &str = "Restarting the server on its computer \
+                                                          ends every Terminal Session on it, for \
+                                                          every client.";
+const CHECK_START_DESCRIPTION: &str =
+    "Checks whether the shell in this Pane started. It never starts a shell.";
+const SERVER_SETTINGS: &str = "Server Settings\u{2026}";
+const SERVER_SETTINGS_DESCRIPTION: &str = "Opens this Pane\u{2019}s server in Settings. Restart \
+                                           Server there ends every Terminal Session on that \
+                                           server, for every client, and asks first.";
+pub(crate) const CHECKING_START: &str = "Checking\u{2026}";
+pub(crate) const START_STILL_UNKNOWN: &str =
+    "The server hasn\u{2019}t confirmed a shell in this Pane yet.";
+
+/// The notice title and cause of a connection SpaceTerm stopped retrying. Incompatibility names
+/// the refusal and never which side is older, because release numbers don't say.
+fn failure_copy(error: ServerError) -> (&'static str, SharedString) {
+    match error {
+        ServerError::Protocol => (
+            "Connection Failed",
+            SharedString::new_static("SpaceTerm stopped reconnecting after repeated failures."),
+        ),
+        ServerError::IncompatibleProtocol => (
+            "Incompatible Server",
+            SharedString::new_static(
+                "SpaceTerm and this Pane\u{2019}s server have no protocol version in common, so \
+                 SpaceTerm didn\u{2019}t connect. The server and its Terminal Sessions keep \
+                 running.",
+            ),
+        ),
+        ServerError::MissingRequiredCapability => (
+            "Incompatible Server",
+            SharedString::new_static(
+                "This Pane\u{2019}s server doesn\u{2019}t support a feature this SpaceTerm \
+                 requires, so SpaceTerm didn\u{2019}t connect. The server and its Terminal \
+                 Sessions keep running.",
+            ),
+        ),
+        error => ("Not Connected", SharedString::from(error.to_string())),
+    }
+}
 
 /// Why a Pane has no shell after the server restarted. The screen naming it replaces the Pane,
 /// because the programs it showed ended with the server.
@@ -298,6 +355,9 @@ fn render_screen_content(
         .as_ref()
         .map_or_else(SharedString::default, |status| status.note.clone());
     let element_selector = selector.clone();
+    // The screen scrolls, and its content centers only while it fits. A Pane too short for it
+    // shows the title first instead of clipping it under the Pane Caption, and a notice placed
+    // after the content never covers the actions.
     div()
         .id(selector)
         .role(gpui::accesskit::Role::Group)
@@ -306,75 +366,105 @@ fn render_screen_content(
         .absolute()
         .inset_0()
         .bg(gpui_color(surface))
+        .overflow_y_scroll()
         .flex()
         .flex_col()
-        .items_center()
-        .justify_center()
-        .gap(appearance.spacing(12.0))
-        .px(appearance.spacing(24.0))
         .child(
             div()
+                .my_auto()
                 .flex()
                 .flex_col()
                 .items_center()
-                .gap(appearance.spacing(4.0))
-                .max_w(appearance.spacing(360.0))
-                .text_center()
+                .gap(appearance.spacing(12.0))
+                .px(appearance.spacing(24.0))
+                .py(appearance.spacing(12.0))
                 .child(
                     div()
-                        .chrome_text(appearance.typography.style(TextRole::Section))
-                        .text_color(gpui_color(appearance.colors.text))
-                        .child(title),
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .gap(appearance.spacing(4.0))
+                        .max_w(appearance.spacing(360.0))
+                        .text_center()
+                        // Every line wraps, so a narrow Pane keeps the whole screen readable.
+                        .child(
+                            div()
+                                .whitespace_normal()
+                                .chrome_text(appearance.typography.style(TextRole::Section))
+                                .text_color(gpui_color(appearance.colors.text))
+                                .child(title),
+                        )
+                        .children(path.map(|path| {
+                            div()
+                                .whitespace_normal()
+                                .chrome_text(appearance.typography.style(TextRole::Body))
+                                .text_color(gpui_color(appearance.colors.text))
+                                .child(path)
+                        }))
+                        .child(
+                            div()
+                                .id(detail_id)
+                                .role(gpui::accesskit::Role::Group)
+                                .a11y_synthetic_children(move |builder| {
+                                    let mut node = entry.node(&message, announce);
+                                    if let Some(bounds) = builder.parent_node().bounds() {
+                                        node.set_bounds(bounds);
+                                    }
+                                    builder.push_child(builder.synthetic_node_id("entry"), node);
+                                })
+                                .whitespace_normal()
+                                .chrome_text(appearance.typography.style(TextRole::Secondary))
+                                .text_color(gpui_color(appearance.colors.text_secondary))
+                                .child(detail),
+                        ),
                 )
-                .children(path.map(|path| {
-                    div()
-                        .whitespace_normal()
-                        .chrome_text(appearance.typography.style(TextRole::Body))
-                        .text_color(gpui_color(appearance.colors.text))
-                        .child(path)
-                }))
                 .child(
                     div()
-                        .id(detail_id)
+                        .flex()
+                        .flex_wrap()
+                        .justify_center()
+                        .gap(appearance.spacing(8.0))
+                        .children(actions),
+                )
+                // The slot keeps at least one line's height, so the action stays put while its
+                // status changes, and a status too long for a narrow Pane wraps below it.
+                .child(
+                    div()
+                        .id(slot_id)
                         .role(gpui::accesskit::Role::Group)
                         .a11y_synthetic_children(move |builder| {
-                            let mut node = entry.node(&message, announce);
+                            let mut node = outcome.node(&note, true);
                             if let Some(bounds) = builder.parent_node().bounds() {
                                 node.set_bounds(bounds);
                             }
-                            builder.push_child(builder.synthetic_node_id("entry"), node);
+                            builder.push_child(builder.synthetic_node_id("outcome"), node);
                         })
-                        .whitespace_normal()
-                        .chrome_text(appearance.typography.style(TextRole::Secondary))
-                        .text_color(gpui_color(appearance.colors.text_secondary))
-                        .child(detail),
+                        .min_h(appearance.spacing(20.0))
+                        .max_w(appearance.spacing(360.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .children(status.map(|status| status.content)),
                 ),
         )
-        .child(
-            div()
-                .flex()
-                .flex_wrap()
-                .justify_center()
-                .gap(appearance.spacing(8.0))
-                .children(actions),
-        )
-        // The slot keeps its height, so the action stays put while its status changes.
-        .child(
-            div()
-                .id(slot_id)
-                .role(gpui::accesskit::Role::Group)
-                .a11y_synthetic_children(move |builder| {
-                    let mut node = outcome.node(&note, true);
-                    if let Some(bounds) = builder.parent_node().bounds() {
-                        node.set_bounds(bounds);
-                    }
-                    builder.push_child(builder.synthetic_node_id("outcome"), node);
-                })
-                .h(appearance.spacing(20.0))
-                .flex()
-                .items_center()
-                .children(status.map(|status| status.content)),
-        )
+}
+
+/// Places an interruption notice after a screen's content, at the Pane's bottom edge while the
+/// content fits. A notice floating over a screen would cover its actions in a short Pane.
+pub(crate) fn with_notice(
+    screen: Stateful<gpui::Div>,
+    notice: Option<AnyElement>,
+    cx: &App,
+) -> Stateful<gpui::Div> {
+    let appearance = super::appearance::shared_chrome(cx);
+    screen.children(notice.map(|notice| {
+        div()
+            .flex()
+            .justify_end()
+            .px(appearance.spacing(12.0))
+            .pb(appearance.spacing(12.0))
+            .child(notice)
+    }))
 }
 
 /// Progress is available for exploration, without interrupting the action's outcome speech.
@@ -416,6 +506,8 @@ pub(crate) fn note_status(selector: SharedString, label: SharedString, cx: &App)
     let content = div()
         .id(selector)
         .debug_selector(move || element_selector.to_string())
+        .whitespace_normal()
+        .text_center()
         .chrome_text(appearance.typography.style(TextRole::Secondary))
         .text_color(gpui_color(appearance.colors.text_secondary))
         .child(label.clone())
@@ -522,6 +614,102 @@ pub(crate) fn directory_status(
         ));
     }
     note.map(|note| note_status(selector, note.into(), cx))
+}
+
+/// The screen of a Pane whose start may have run. Retry checks, and never starts a shell. Server
+/// Settings opens the existing Restart Server journey, which asks before it ends anything.
+///
+/// The caller owns the element ids, what each action does, and whether this client can restart
+/// the Pane's server.
+pub(crate) struct StartUnknownScreen<Retry, Settings> {
+    /// Element id and debug selector for the screen.
+    pub(crate) screen: SharedString,
+    /// Element id and debug selector for Retry, and the prefix of its status slot's.
+    pub(crate) retry: SharedString,
+    /// Element id and debug selector for Server Settings, when this client can restart the
+    /// Pane's server there. `None` explains the restart without offering it.
+    pub(crate) server_settings: Option<SharedString>,
+    /// A check is waiting for the server's answer.
+    pub(crate) checking: bool,
+    /// The last check ended without settling the start.
+    pub(crate) unanswered: bool,
+    pub(crate) on_retry: Retry,
+    pub(crate) on_server_settings: Settings,
+}
+
+impl<Retry, Settings> StartUnknownScreen<Retry, Settings>
+where
+    Retry: Fn(&mut gpui::Window, &mut App) + 'static,
+    Settings: Fn(&mut gpui::Window, &mut App) + 'static,
+{
+    pub(crate) fn render(
+        self,
+        announcements: &ScreenAnnouncements,
+        cx: &App,
+    ) -> Stateful<gpui::Div> {
+        let Self {
+            screen,
+            retry,
+            server_settings,
+            checking,
+            unanswered,
+            on_retry,
+            on_server_settings,
+        } = self;
+        let status_selector = SharedString::from(format!("{retry}-status"));
+        let status = if checking {
+            Some(progress_status(
+                status_selector,
+                format!("{retry}-progress").into(),
+                CHECKING_START.into(),
+                cx,
+            ))
+        } else if unanswered {
+            Some(note_status(status_selector, START_STILL_UNKNOWN.into(), cx))
+        } else {
+            None
+        };
+        let restart = if server_settings.is_some() {
+            START_UNKNOWN_RESTART_HERE
+        } else {
+            START_UNKNOWN_RESTART_ELSEWHERE
+        };
+        // The secondary action first and the primary last, as the directory screen orders them.
+        let mut actions = Vec::with_capacity(2);
+        if let Some(selector) = server_settings {
+            actions.push(
+                Button::new(selector.clone(), SERVER_SETTINGS)
+                    .variant(ButtonVariant::Secondary)
+                    .size(ButtonSize::Regular)
+                    .tab_stop(true)
+                    .accessibility_description(SERVER_SETTINGS_DESCRIPTION)
+                    .debug_selector(selector)
+                    .on_activate(move |_, window, cx| on_server_settings(window, cx)),
+            );
+        }
+        actions.push(
+            Button::new(retry.clone(), "Retry")
+                .variant(ButtonVariant::Primary)
+                .size(ButtonSize::Regular)
+                .disabled(checking)
+                .tab_stop(true)
+                .accessibility_description(CHECK_START_DESCRIPTION)
+                .debug_selector(retry)
+                .on_activate(move |_, window, cx| on_retry(window, cx)),
+        );
+        render_screen_content(
+            screen,
+            ScreenCopy::new(
+                START_UNKNOWN_TITLE.into(),
+                format!("{START_UNKNOWN_DETAIL} {restart}").into(),
+            ),
+            true,
+            actions,
+            status,
+            announcements,
+            cx,
+        )
+    }
 }
 
 /// The interruption notice over a frozen server-backed screen, with the action that retries now.
@@ -703,6 +891,12 @@ mod connection {
 
         /// Asks the server to start a fresh shell in a Pane retained across a server restart.
         fn start_restored(&self);
+
+        /// Whether a shell start this client asked for may have run without an answer. While it
+        /// may have, nothing starts another shell, and Retry only checks.
+        fn start_unconfirmed(&self) -> bool {
+            false
+        }
         fn directory_progress(&self) -> (bool, Option<&'static str>) {
             (false, None)
         }
@@ -756,6 +950,10 @@ mod connection {
         fn start_restored(&self) {
             Self::start_restored(self);
         }
+
+        fn start_unconfirmed(&self) -> bool {
+            Self::start_unconfirmed(self)
+        }
         fn directory_progress(&self) -> (bool, Option<&'static str>) {
             Self::directory_progress(self)
         }
@@ -800,6 +998,9 @@ mod connection {
         /// The server refused to start a shell because the Pane's directory is unavailable.
         /// Repairing it belongs to directory repair, which is not available yet.
         DirectoryUnavailable { starting: bool, offered: bool },
+        /// A start may have run without an answer, so only a check is offered. `checking` waits
+        /// for the server; `unanswered` means the last check settled nothing.
+        StartUnknown { checking: bool, unanswered: bool },
     }
 
     /// What one status reading changed about a Pane's presentation.
@@ -832,6 +1033,13 @@ mod connection {
         dormant: Option<Dormant>,
         start_pending: bool,
         start_unconfirmed: bool,
+        /// The connection's word that a start may have run, which withholds every new start.
+        start_unknown: bool,
+        check_pending: bool,
+        check_unanswered: bool,
+        /// An interruption lost a start's answer, so the Pane says the start is unconfirmed until
+        /// the server settles it.
+        unknown_shown: bool,
         directory_progress: (bool, Option<&'static str>),
     }
 
@@ -849,6 +1057,10 @@ mod connection {
                 dormant: None,
                 start_pending: false,
                 start_unconfirmed: false,
+                start_unknown: connection.start_unconfirmed(),
+                check_pending: false,
+                check_unanswered: false,
+                unknown_shown: false,
                 directory_progress: connection.directory_progress(),
             };
             view.apply();
@@ -871,14 +1083,26 @@ mod connection {
             let progress = self.connection.directory_progress();
             let controller = self.connection.controller();
             let session_dormant = self.connection.session_dormant();
+            let start_unknown = self.connection.start_unconfirmed();
             if status == self.status
                 && !generation_changed
                 && progress == self.directory_progress
                 && controller == self.controller
                 && session_dormant == self.session_dormant
+                && start_unknown == self.start_unknown
             {
                 return ServerPaneSync::default();
             }
+            // A check ends when the server answers it: a new connection reached the Pane, or the
+            // start is settled either way.
+            if self.check_pending && (generation_changed || !start_unknown) {
+                self.check_pending = false;
+                self.check_unanswered = start_unknown;
+            }
+            if !start_unknown {
+                self.check_unanswered = false;
+            }
+            self.start_unknown = start_unknown;
             self.directory_progress = progress;
             self.controller = controller;
             self.session_dormant = session_dormant;
@@ -922,6 +1146,8 @@ mod connection {
                 self.dormant = None;
                 self.start_pending = false;
                 self.start_unconfirmed = false;
+                self.check_pending = false;
+                self.check_unanswered = false;
             }
             let entering_dormant = self.apply_dormancy();
             // Another client controls the Pane, so this client forgets what it showed. Neither an
@@ -947,12 +1173,31 @@ mod connection {
                 self.start_pending = false;
                 self.start_unconfirmed = false;
             }
+            // A start in flight that meets an interruption has lost its answer, whether a click or
+            // a first selection sent it. The Pane says so through checks and reconnects until the
+            // server settles the start.
+            if !self.start_unknown || self.status == DevelopmentPaneStatus::Connected {
+                self.unknown_shown = false;
+            }
+            let entering_unknown = !self.unknown_shown
+                && self.start_unknown
+                && matches!(
+                    self.status,
+                    DevelopmentPaneStatus::Reconnecting
+                        | DevelopmentPaneStatus::TakeoverReconnecting
+                        | DevelopmentPaneStatus::Failed(_)
+                        | DevelopmentPaneStatus::TakeoverFailed(_)
+                );
+            if entering_unknown {
+                self.unknown_shown = true;
+            }
             ServerPaneSync {
                 changed: false,
                 clear_presentation: entering_takeover
                     || controlled_elsewhere
-                    || self.dormant.is_some(),
-                entering_screen: entering_takeover || entering_dormant,
+                    || self.dormant.is_some()
+                    || self.unknown_shown,
+                entering_screen: entering_takeover || entering_dormant || entering_unknown,
                 interrupted: self.status != DevelopmentPaneStatus::Connected,
             }
         }
@@ -996,14 +1241,22 @@ mod connection {
 
         /// The screen replacing the Pane, if one does.
         pub(crate) fn screen(&self) -> Option<ServerPaneScreen> {
+            if self.unknown_shown {
+                return Some(ServerPaneScreen::StartUnknown {
+                    checking: self.check_pending,
+                    unanswered: self.check_unanswered,
+                });
+            }
             if let Some(dormant) = self.dormant {
                 return Some(match dormant {
                     Dormant::DirectoryUnavailable => ServerPaneScreen::DirectoryUnavailable {
-                        starting: self.start_pending || self.directory_progress.0,
+                        starting: self.start_pending
+                            || self.directory_progress.0
+                            || self.start_in_flight(),
                         offered: self.can_start_shell(),
                     },
                     Dormant::Restored | Dormant::Ended => ServerPaneScreen::Restored {
-                        starting: self.starting_shell(),
+                        starting: self.starting_shell() || self.start_in_flight(),
                         unconfirmed: self.start_unconfirmed,
                         offered: self.can_start_shell(),
                         ended: dormant == Dormant::Ended,
@@ -1011,7 +1264,7 @@ mod connection {
                 });
             }
             let taking_over = self.status == DevelopmentPaneStatus::TakingOver;
-            let offered = self.status == DevelopmentPaneStatus::Takeover;
+            let offered = self.can_take_over();
             self.takeover_shown.then(|| ServerPaneScreen::Takeover {
                 taking_over,
                 unconfirmed: self.take_over_unconfirmed && !self.session_ended(),
@@ -1034,13 +1287,21 @@ mod connection {
                 )
         }
 
+        /// A start the server has not answered and no interruption has lost, such as one a first
+        /// selection sent. It shows as starting.
+        fn start_in_flight(&self) -> bool {
+            self.start_unknown && !self.unknown_shown
+        }
+
         pub(crate) fn can_start_shell(&self) -> bool {
-            matches!(
-                self.status,
-                DevelopmentPaneStatus::Restored
-                    | DevelopmentPaneStatus::SessionEnded
-                    | DevelopmentPaneStatus::Failed(ServerError::DirectoryUnavailable)
-            ) && !self.start_pending
+            !self.start_unknown
+                && matches!(
+                    self.status,
+                    DevelopmentPaneStatus::Restored
+                        | DevelopmentPaneStatus::SessionEnded
+                        | DevelopmentPaneStatus::Failed(ServerError::DirectoryUnavailable)
+                )
+                && !self.start_pending
                 && !self.directory_progress.0
         }
 
@@ -1055,7 +1316,7 @@ mod connection {
         }
 
         pub(crate) fn can_take_over(&self) -> bool {
-            self.status == DevelopmentPaneStatus::Takeover
+            self.status == DevelopmentPaneStatus::Takeover && !self.start_unknown
         }
 
         /// The interruption notice's title, detail, and intent, or `None` while nothing
@@ -1068,7 +1329,11 @@ mod connection {
                 DevelopmentPaneStatus::Reconnecting
                 | DevelopmentPaneStatus::TakeoverReconnecting => Some((
                     SharedString::new_static("Reconnecting…"),
-                    SharedString::new_static(if self.takeover_shown && self.session_dormant {
+                    // The screen explains the unconfirmed start and offers its check, so the notice
+                    // adds only what reconnecting does.
+                    SharedString::new_static(if self.unknown_shown {
+                        "SpaceTerm checks whether the shell started once it reconnects."
+                    } else if self.takeover_shown && self.session_dormant {
                         "Take Over is available once SpaceTerm reconnects."
                     } else if self.takeover_shown {
                         "Take Over is available once SpaceTerm reconnects. The shell keeps \
@@ -1101,12 +1366,44 @@ mod connection {
                     super::StatusIntent::Warning,
                 )),
                 DevelopmentPaneStatus::Failed(error)
-                | DevelopmentPaneStatus::TakeoverFailed(error) => Some((
-                    SharedString::new_static("Not Connected"),
-                    SharedString::from(error.to_string()),
-                    super::StatusIntent::Error,
-                )),
+                | DevelopmentPaneStatus::TakeoverFailed(error) => {
+                    let (title, cause) = super::failure_copy(error);
+                    // The screen explains an unconfirmed start, so the notice names only the cause.
+                    let next = if self.unknown_shown {
+                        None
+                    } else if error == ServerError::Protocol {
+                        Some(self.after_reconnecting())
+                    } else {
+                        None
+                    };
+                    Some((
+                        SharedString::new_static(title),
+                        match next {
+                            Some(next) => format!("{cause} {next}").into(),
+                            None => cause,
+                        },
+                        super::StatusIntent::Error,
+                    ))
+                }
                 _ => None,
+            }
+        }
+
+        /// What becomes of the Pane once SpaceTerm connects, after it stopped reconnecting.
+        fn after_reconnecting(&self) -> &'static str {
+            if self.takeover_shown && self.session_dormant {
+                "Take Over is available once SpaceTerm connects."
+            } else if self.takeover_shown {
+                "Take Over is available once SpaceTerm connects. The shell keeps running on the \
+                 server."
+            } else if self.dormant == Some(Dormant::Restored) {
+                "Start New Shell is available once SpaceTerm connects."
+            } else if self.dormant == Some(Dormant::Ended) {
+                "Start Session is available once SpaceTerm connects."
+            } else if self.dormant.is_some() {
+                "No shell is running in this Pane."
+            } else {
+                "The shell keeps running on the server."
             }
         }
 
@@ -1120,18 +1417,28 @@ mod connection {
         }
 
         /// Whether a person can ask for a connection attempt now. A stopped server offers
-        /// Start Server instead, because a retry could never connect.
+        /// Start Server instead, because a retry could never connect. A start that may have run
+        /// can be checked from any status, because the check is passive.
         pub(crate) fn can_retry(&self) -> bool {
-            !self.session_ended()
-                && !self.server_stopped()
-                && self.status != DevelopmentPaneStatus::Failed(ServerError::DirectoryUnavailable)
+            let interrupted = self.status
+                != DevelopmentPaneStatus::Failed(ServerError::DirectoryUnavailable)
                 && matches!(
                     self.status,
                     DevelopmentPaneStatus::Reconnecting
                         | DevelopmentPaneStatus::TakeoverReconnecting
                         | DevelopmentPaneStatus::TakeoverFailed(_)
                         | DevelopmentPaneStatus::Failed(_)
-                )
+                );
+            !self.session_ended()
+                && !self.server_stopped()
+                && !self.check_pending
+                && (interrupted || self.unknown_shown)
+        }
+
+        /// Whether the interruption notice offers Retry. The unconfirmed-start screen offers its own
+        /// Retry, so the notice doesn't repeat it.
+        pub(crate) fn notice_offers_retry(&self) -> bool {
+            self.can_retry() && !self.unknown_shown
         }
 
         /// Connects again once the person started the server this Pane stopped with. The
@@ -1151,13 +1458,21 @@ mod connection {
             self.sync()
         }
 
-        /// Retries the connection only. It never starts a shell in a dormant Pane.
+        /// Retries the connection only. It never starts a shell in a dormant Pane. While a start
+        /// may have run, the retry checks it until the server answers.
         pub(crate) fn retry(&mut self) -> ServerPaneSync {
             if !self.can_retry() {
                 return ServerPaneSync::default();
             }
+            let checking = self.unknown_shown;
+            if checking {
+                self.check_pending = true;
+                self.check_unanswered = false;
+            }
             self.connection.retry();
-            self.sync()
+            let mut sync = self.sync();
+            sync.changed |= checking;
+            sync
         }
 
         pub(crate) fn take_over(&mut self) -> ServerPaneSync {
