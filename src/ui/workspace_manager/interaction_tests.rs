@@ -85,6 +85,66 @@ fn a_refused_workspace_close_restores_its_views_without_overwriting_newer_focus(
     assert!(shared_close_rename_is_focused(&harness, cx));
 }
 
+/// Another client splits the shared Workspace while Kill Workspace is open. The person reviews
+/// the change and approves the fresh confirmation, so the keyboard their first request held moves
+/// at once to the Workspace that takes its place, and the server's answer leaves it there.
+#[gpui::test]
+fn a_reviewed_workspace_close_moves_the_keyboard_to_the_rendered_survivor(cx: &mut TestAppContext) {
+    use spaceterm_server::hierarchy::{Inventory, Outcome};
+
+    let (harness, cx) = shared_close_harness(cx);
+    assert!(shared_close_terminal_is_focused(&harness, cx));
+    cx.dispatch_action(crate::ui::CloseWorkspace);
+    redraw(cx);
+    harness.publish(
+        shared_close_inventory(
+            2,
+            &[
+                (
+                    SHARED_CLOSE_ROOT_TAB,
+                    &[
+                        (SHARED_CLOSE_ROOT_PANE, Some([31; 32])),
+                        (SHARED_CLOSE_SPLIT_PANE, Some([32; 32])),
+                        (SHARED_CLOSE_NEW_PANE, None),
+                    ],
+                ),
+                (SHARED_CLOSE_SECOND_TAB, &[(SHARED_CLOSE_SECOND_PANE, None)]),
+            ],
+        ),
+        cx,
+    );
+    assert!(
+        cx.debug_bounds("modal-action-shared-close-review")
+            .is_some(),
+        "the stale confirmation is withdrawn with a Review"
+    );
+
+    click("modal-action-shared-close-review", cx);
+    redraw(cx);
+    click("modal-action-shared-close-confirm", cx);
+    redraw(cx);
+    assert_eq!(harness.closes().len(), 1, "the fresh review is approved");
+    assert_eq!(harness.shared_rows(cx), 0);
+    assert!(
+        shared_close_terminal_is_focused(&harness, cx),
+        "the surviving Workspace's Pane takes the keyboard before the server answers"
+    );
+
+    harness.edits.answer(Outcome::Accepted {
+        target: SHARED_CLOSE_WORKSPACE,
+    });
+    harness.publish(
+        Inventory {
+            repositories: None,
+            revision: 3,
+            workspaces: Vec::new(),
+            close: None,
+        },
+        cx,
+    );
+    assert!(shared_close_terminal_is_focused(&harness, cx));
+}
+
 /// A disconnect discards an edit still queued behind one the server has not answered. Its notice
 /// arrives while a person types a newer rename, which an offline server would refuse, so the
 /// draft stays open and unsent beneath the notice and takes the keyboard back after it.

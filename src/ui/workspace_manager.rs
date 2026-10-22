@@ -239,6 +239,10 @@ pub(crate) struct WorkspaceManager {
     pending_final_tab_closes: BTreeSet<WorkspaceId>,
     close_empty_after_shared_removal: bool,
     close_confirmation: CloseConfirmation,
+    /// Whether the Workspace a shared close names held the keyboard when the person asked for
+    /// it. It is kept by confirmation generation, and a Review hands it to the fresh confirmation,
+    /// because each confirmation takes the keyboard before an approved close moves it.
+    shared_close_keyboard: SharedCloseKeyboard,
     sidebar_repositories: repository::SidebarRepositories,
     sidebar_worktrees: worktrees::SidebarWorktrees,
     shared_repositories: shared_repositories::SharedWorkspaceRepositories,
@@ -369,6 +373,7 @@ impl WorkspaceManager {
             pending_final_tab_closes: BTreeSet::new(),
             close_empty_after_shared_removal: false,
             close_confirmation: CloseConfirmation::default(),
+            shared_close_keyboard: SharedCloseKeyboard::default(),
             sidebar_repositories: repository::SidebarRepositories::default(),
             sidebar_worktrees: worktrees::SidebarWorktrees::default(),
             shared_repositories: shared_repositories::SharedWorkspaceRepositories::default(),
@@ -3612,6 +3617,17 @@ impl WorkspaceManager {
         if self.request_worktree_close_fallback(target, server_target, window, cx) {
             return true;
         }
+        // A Review hands over what the person's first request held; any other request reads it
+        // now, before a confirmation takes the keyboard.
+        let held_keyboard = self
+            .shared_close_keyboard
+            .reviewed
+            .take()
+            .unwrap_or_else(|| {
+                self.workspaces
+                    .workspace(workspace_id)
+                    .is_some_and(|entry| entry.payload().read(cx).holds_keyboard(window, cx))
+            });
         let Some(shared) = self.shared.owning(workspace_id) else {
             return true;
         };
@@ -3650,15 +3666,23 @@ impl WorkspaceManager {
                 })
         });
         if let Some(approval) = direct {
+            use super::shared_workspaces::SharedSubmission;
+
             let key = self.shared.owner(workspace_id);
-            if let Some(shared) = self.shared.owning_mut(workspace_id)
-                && let super::shared_workspaces::SharedSubmission::Refused(reason) =
-                    shared.close(approval, target)
-            {
+            let submission = self
+                .shared
+                .owning_mut(workspace_id)
+                .map(|shared| shared.close(approval, target));
+            if let Some(SharedSubmission::Refused(reason)) = submission {
                 Self::show_shared_refusal(Self::shared_close_operation(target), reason, window, cx);
             }
             if let Some(key) = key {
                 self.sync_shared_workspaces(key, window, cx);
+            }
+            // A reviewed close that needs no confirmation now still moves the keyboard the
+            // person's first request held.
+            if held_keyboard && submission == Some(SharedSubmission::Submitted) {
+                self.focus(window, cx);
             }
             return true;
         }
@@ -3668,12 +3692,7 @@ impl WorkspaceManager {
         let Some(generation) = self.close_confirmation.begin(target) else {
             return true;
         };
-        // The confirmation takes the keyboard, so whether the closing Workspace held it is read
-        // before it opens.
-        let held_keyboard = self
-            .workspaces
-            .workspace(workspace_id)
-            .is_some_and(|entry| entry.payload().read(cx).holds_keyboard(window, cx));
+        self.shared_close_keyboard.pending = Some((generation, held_keyboard));
         let mut alert = Alert::new(
             ModalId::new("shared-close-confirmation"),
             approval.title(),
@@ -3700,25 +3719,24 @@ impl WorkspaceManager {
         if let Some(detail) = approval.detail() {
             alert = alert.detail(detail);
         }
-        let presented = alert.present(window, cx, move |outcome, cx| {
-            let confirmed = matches!(
-                outcome,
-                AlertOutcome::Activated {
-                    action_id: CloseConfirmationAction::Confirm,
-                    ..
-                }
-            );
-            let _ = window_handle.update(cx, |manager, window, cx| {
-                manager.settle_shared_close(
-                    generation,
-                    target,
-                    confirmed,
-                    held_keyboard,
-                    window,
-                    cx,
+        // A Review opens this beneath the notice's held sidebar rename, which it keeps holding.
+        let presented = self.present_keeping_sidebar_rename(
+            alert,
+            move |outcome, cx| {
+                let confirmed = matches!(
+                    outcome,
+                    AlertOutcome::Activated {
+                        action_id: CloseConfirmationAction::Confirm,
+                        ..
+                    }
                 );
-            });
-        });
+                let _ = window_handle.update(cx, |manager, window, cx| {
+                    manager.settle_shared_close(generation, target, confirmed, window, cx);
+                });
+            },
+            window,
+            cx,
+        );
         match presented {
             Ok(presentation) => {
                 if let Some(shared) = self.shared.owning_mut(workspace_id) {
@@ -3732,6 +3750,7 @@ impl WorkspaceManager {
             }
             Err(error) => {
                 self.close_confirmation.presentation_failed(generation);
+                self.shared_close_keyboard.take(generation);
                 eprintln!("failed to present the shared close confirmation: {error}");
             }
         }
@@ -3817,16 +3836,19 @@ impl WorkspaceManager {
     /// An approved close hides what it ends at once. When the closing Workspace held the keyboard
     /// before the confirmation took it, the keyboard moves to what remains, as a close that needs
     /// no confirmation does. The confirmation would otherwise return it to a Pane that is gone.
+    /// A sidebar rename held beneath the confirmation gets the keyboard back unless the close
+    /// removed its Workspace, which ends the rename and moves the keyboard to what remains.
     fn settle_shared_close(
         &mut self,
         generation: u64,
         target: CloseTarget,
         confirmed: bool,
-        held_keyboard: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         use super::shared_workspaces::{SharedCloseState, SharedSubmission};
+
+        let held_keyboard = self.shared_close_keyboard.take(generation);
 
         // The review lives with the server that owns what it would close.
         let review = self.shared.keys().into_iter().find_map(|key| {
@@ -3847,6 +3869,7 @@ impl WorkspaceManager {
         };
         match shared.close_state(&review.approval) {
             SharedCloseState::Current => {
+                let renaming = self.sidebar.read(cx).is_renaming();
                 let submission = shared.close(review.approval, review.target);
                 if let SharedSubmission::Refused(reason) = submission {
                     Self::show_shared_refusal(
@@ -3857,7 +3880,8 @@ impl WorkspaceManager {
                     );
                 }
                 self.sync_shared_workspaces(key, window, cx);
-                if held_keyboard && submission == SharedSubmission::Submitted {
+                let rename_removed = renaming && !self.sidebar.read(cx).is_renaming();
+                if (held_keyboard || rename_removed) && submission == SharedSubmission::Submitted {
                     self.focus(window, cx);
                 }
             }
@@ -3865,6 +3889,7 @@ impl WorkspaceManager {
                 self.present_shared_close_changed(
                     review.approval.changed_title(),
                     Some(target),
+                    held_keyboard,
                     window,
                     cx,
                 );
@@ -3901,6 +3926,7 @@ impl WorkspaceManager {
         };
         // The pending confirmation ends here, so its own deferred answer settles nothing.
         self.close_confirmation.presentation_failed(generation);
+        let held_keyboard = self.shared_close_keyboard.take(generation);
         if let Some(presentation) = review.presentation.as_ref() {
             let _ = presentation.dismiss(window, cx);
         }
@@ -3911,6 +3937,7 @@ impl WorkspaceManager {
             _ => self.present_shared_close_changed(
                 review.approval.changed_title(),
                 Some(review.target),
+                held_keyboard,
                 window,
                 cx,
             ),
@@ -3919,11 +3946,13 @@ impl WorkspaceManager {
 
     /// Explains that what a close would end changed after it was approved or shown, so nothing
     /// was closed. Review opens a fresh confirmation of what the server holds now; nothing asks
-    /// again on its own.
+    /// again on its own. Review keeps `held_keyboard`, whether the closing Workspace held the
+    /// keyboard when the person asked, so the approved fresh close moves it as the first would.
     fn present_shared_close_changed(
         &mut self,
         title: &'static str,
         target: Option<CloseTarget>,
+        held_keyboard: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -3957,7 +3986,7 @@ impl WorkspaceManager {
             actions,
         )
         .intent(AlertIntent::Warning);
-        let result = self.present_outcome_notice(
+        let result = self.present_keeping_sidebar_rename(
             alert,
             move |outcome, cx| {
                 let reviewed = matches!(
@@ -3972,7 +4001,9 @@ impl WorkspaceManager {
                 };
                 let _ = window_handle.update(cx, |_, window, cx| {
                     let _ = manager.update(cx, |manager, cx| {
+                        manager.shared_close_keyboard.reviewed = Some(held_keyboard);
                         manager.request_close(target, window, cx);
+                        manager.shared_close_keyboard.reviewed = None;
                     });
                 });
             },
@@ -3984,10 +4015,10 @@ impl WorkspaceManager {
         }
     }
 
-    /// Presents a notice about an earlier operation's outcome. A person may be typing in the
-    /// sidebar by the time it arrives, so the notice returns the keyboard to that draft when it
-    /// closes rather than ending it.
-    fn present_outcome_notice<A: Clone + Eq + 'static>(
+    /// Presents a notice about an earlier operation's outcome, or the confirmation its Review
+    /// opens. A person may be typing in the sidebar by the time it arrives, so the modal returns
+    /// the keyboard to that draft when it closes rather than ending it.
+    fn present_keeping_sidebar_rename<A: Clone + Eq + 'static>(
         &mut self,
         alert: Alert<A>,
         on_result: impl FnOnce(AlertOutcome<A>, &mut App) + 'static,
@@ -4030,9 +4061,15 @@ impl WorkspaceManager {
     ) {
         let local =
             local.filter(|local| self.shared_close_target(*local, cx) == Some(server_target));
+        // The refused close already moved the keyboard, so a Review keeps what holds it now.
+        let held_keyboard = local
+            .and_then(close_target_workspace)
+            .and_then(|workspace_id| self.workspaces.workspace(workspace_id))
+            .is_some_and(|entry| entry.payload().read(cx).holds_keyboard(window, cx));
         self.present_shared_close_changed(
             super::shared_workspaces::shared_close_changed_title(server_target),
             local,
+            held_keyboard,
             window,
             cx,
         );
@@ -4058,7 +4095,7 @@ impl WorkspaceManager {
             )],
         )
         .intent(AlertIntent::Informational);
-        let _ = self.present_outcome_notice(alert, |_, _| {}, window, cx);
+        let _ = self.present_keeping_sidebar_rename(alert, |_, _| {}, window, cx);
     }
 
     /// Presents a refused same-field edit: the server's value, the draft it rejected, and the
@@ -4104,7 +4141,7 @@ impl WorkspaceManager {
             ],
         )
         .intent(AlertIntent::Warning);
-        let result = self.present_outcome_notice(
+        let result = self.present_keeping_sidebar_rename(
             alert,
             move |outcome, cx| {
                 if !matches!(
@@ -4168,7 +4205,7 @@ impl WorkspaceManager {
             )],
         )
         .intent(AlertIntent::Warning);
-        let _ = self.present_outcome_notice(alert, |_, _| {}, window, cx);
+        let _ = self.present_keeping_sidebar_rename(alert, |_, _| {}, window, cx);
     }
 
     /// Explains a shared edit this client could not submit. Nothing was sent, and nothing waits.
@@ -4319,6 +4356,10 @@ impl WorkspaceManager {
             if self.workspaces.park_workspace(workspace_id).is_err() {
                 return;
             }
+            // The person's close removed this Workspace from view, so its rename ends unsent.
+            self.sidebar.update(cx, |sidebar, cx| {
+                sidebar.cancel_rename_for(workspace_id, cx)
+            });
             if let Some(manager) = self.active_tab_manager() {
                 manager.update(cx, |manager, cx| {
                     if held_keyboard {
@@ -5061,6 +5102,39 @@ impl WorkspaceManager {
         );
         self.pane_construction
             .assert_application_capabilities(expected);
+    }
+}
+
+/// Whether a shared close's Workspace held the keyboard when the person asked for the close.
+#[derive(Default)]
+struct SharedCloseKeyboard {
+    /// The open confirmation's generation and its answer.
+    pending: Option<(u64, bool)>,
+    /// The answer a Review hands to the fresh request it makes.
+    reviewed: Option<bool>,
+}
+
+impl SharedCloseKeyboard {
+    /// Takes the answer for confirmation `generation`. Another generation's answer is false.
+    fn take(&mut self, generation: u64) -> bool {
+        match self.pending {
+            Some((pending, held)) if pending == generation => {
+                self.pending = None;
+                held
+            }
+            _ => false,
+        }
+    }
+}
+
+/// The Workspace a close target belongs to.
+const fn close_target_workspace(target: CloseTarget) -> Option<WorkspaceId> {
+    match target {
+        CloseTarget::Workspace(workspace_id)
+        | CloseTarget::Tab { workspace_id, .. }
+        | CloseTarget::Pane { workspace_id, .. }
+        | CloseTarget::Worktree { workspace_id, .. } => Some(workspace_id),
+        CloseTarget::Window => None,
     }
 }
 
