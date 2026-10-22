@@ -292,7 +292,7 @@ pub fn finish(
                 .is_some_and(|reading| reading.total_rows > reading.visible_rows)
     })?;
     // Reject each exact fence independently, as well as the disconnected lease.
-    let mut wrong = vec![previous];
+    let mut wrong = vec![(previous, ServerError::StaleControl)];
     for field in 0..4 {
         let mut stale = lease;
         match field {
@@ -301,9 +301,14 @@ pub fn finish(
             2 => stale.control[0] ^= 1,
             _ => stale.connection[0] ^= 1,
         }
-        wrong.push(stale);
+        let refusal = if field < 2 {
+            ServerError::SessionUnavailable
+        } else {
+            ServerError::StaleControl
+        };
+        wrong.push((stale, refusal));
     }
-    for stale in wrong {
+    for (stale, refusal) in wrong {
         for request in [
             Request::Metadata {
                 lease: stale,
@@ -314,7 +319,7 @@ pub fn finish(
             require(
                 matches!(
                     connection.exchange(&request),
-                    Err(ServerError::StaleControl)
+                    Err(error) if error == refusal
                 ),
                 "wrong lease admitted metadata or clear",
             )?;
