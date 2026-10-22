@@ -1472,6 +1472,9 @@ impl TerminalPane {
             return;
         }
         self.terminal_session = PaneTerminalSessionLifecycle::new(factory);
+        // The placeholder already measured this grid without starting a presentation worker.
+        // Revisit those bounds even when acceptance changes no layout dimensions.
+        self.last_geometry = None;
         cx.notify();
     }
 
