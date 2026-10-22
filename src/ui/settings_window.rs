@@ -1123,7 +1123,7 @@ impl SettingsWindow {
             section_heading(
                 section.selector(),
                 section.title(),
-                section.description(crate::desktop_profile::DesktopPresentation::get(cx)),
+                self.section_description(section, cx),
                 &settings.chrome,
             ),
             &self.window_movement,

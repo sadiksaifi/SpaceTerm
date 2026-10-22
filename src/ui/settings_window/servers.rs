@@ -39,7 +39,47 @@ pub(super) trait LocalServerControl: Send + Sync {
     }
     /// Connects using owning-account authority. Never creates an identity or starts a server.
     fn refresh(&self) -> Result<ServerConnection, ServerError>;
+    fn lifetime(&self) -> ServerLifetime {
+        ServerLifetime::Independent
+    }
 }
+
+/// How long the local server runs relative to the SpaceTerm presenting it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum ServerLifetime {
+    /// An installed service runs the server, which keeps running after SpaceTerm quits.
+    Independent,
+    /// The Development command owns a foreground server that ends, with its Terminal Sessions,
+    /// when the run ends.
+    DevelopmentRun,
+}
+
+/// The foreground server a source Development run owns. No service runs it and no update
+/// replaces it, so it is offered without either.
+pub(super) struct DevelopmentRunServer(pub(super) Arc<dyn LocalServerControl>);
+
+impl LocalServerControl for DevelopmentRunServer {
+    fn worktree_server(&self) -> Option<LocalServer> {
+        self.0.worktree_server()
+    }
+    fn direct_access(&self) -> Option<Arc<dyn DirectAccessControl>> {
+        self.0.direct_access()
+    }
+    fn refresh(&self) -> Result<ServerConnection, ServerError> {
+        self.0.refresh()
+    }
+    fn lifetime(&self) -> ServerLifetime {
+        ServerLifetime::DevelopmentRun
+    }
+}
+
+/// The Servers section's description while a Development run owns the local server.
+pub(super) const DEVELOPMENT_RUN_DESCRIPTION: &str = "The SpaceTerm servers that run your \
+                                                       Workspaces\u{2019} terminals. This \
+                                                       Development run owns the server on this \
+                                                       computer, which ends with its Terminal \
+                                                       Sessions when the run ends. Select a \
+                                                       server to see its connection and settings.";
 
 impl LocalServerControl for LocalServer {
     fn worktree_server(&self) -> Option<LocalServer> {
@@ -150,6 +190,15 @@ pub(super) type OfferedLocalServer = Option<OfferedServer>;
 /// sets up, installs, starts, and connects to nothing.
 pub(super) fn offered_local_server() -> OfferedLocalServer {
     let identity = ApplicationIdentity::current().directory_name();
+    if crate::local_startup::owned_foreground() {
+        return Some(OfferedServer {
+            connection: LocalServer::for_identity(identity).map(|server| {
+                Arc::new(DevelopmentRunServer(Arc::new(server))) as Arc<dyn LocalServerControl>
+            }),
+            service: None,
+            update: None,
+        });
+    }
     let resolved = Service::for_identity(identity);
     // Only a resolved service can report or replace its approved build.
     let update = resolved
@@ -220,6 +269,12 @@ impl LocalServerRow {
         }
     }
 
+    pub(super) fn lifetime(&self) -> ServerLifetime {
+        self.control
+            .as_ref()
+            .map_or(ServerLifetime::Independent, |control| control.lifetime())
+    }
+
     #[cfg(test)]
     pub(super) fn status(&self) -> LocalServerStatus {
         self.status
@@ -231,6 +286,16 @@ impl LocalServerRow {
             Ok(_) => self.status,
         };
         let mut presentation = present(status);
+        if let (ServerLifetime::DevelopmentRun, LocalServerStatus::Connected(connection)) =
+            (self.lifetime(), status)
+        {
+            presentation.explanation = format!(
+                "Connected to the server this Development run owns. It ends with its Terminal \
+                 Sessions when the run ends. Protocol version {}.",
+                connection.protocol_major
+            )
+            .into();
+        }
         // A server that could not be resolved offers no step: checking again resolves nothing.
         if self.control.is_err() {
             presentation.check = false;
@@ -1179,6 +1244,24 @@ impl SettingsWindow {
             });
         }));
         cx.notify();
+    }
+
+    /// The description under a section's heading. A Development run's server ends with the run,
+    /// so the Servers section never says its server keeps running after SpaceTerm quits.
+    pub(super) fn section_description(
+        &self,
+        section: super::SettingsSectionId,
+        cx: &gpui::App,
+    ) -> &'static str {
+        let development_run = self
+            .local_server
+            .as_ref()
+            .is_some_and(|row| row.lifetime() == ServerLifetime::DevelopmentRun);
+        if section == super::SettingsSectionId::Servers && development_run {
+            DEVELOPMENT_RUN_DESCRIPTION
+        } else {
+            section.description(crate::desktop_profile::DesktopPresentation::get(cx))
+        }
     }
 
     pub(super) fn local_server_presentation(&self) -> Option<LocalServerPresentation> {

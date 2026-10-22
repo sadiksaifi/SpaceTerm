@@ -27,7 +27,7 @@ pub fn run(cancelled: impl Fn() -> bool) -> Result<StartupOutcome, ServerError> 
 }
 
 /// Only source Development launch may bypass the retained service lifecycle.
-fn owned_foreground() -> bool {
+pub(crate) fn owned_foreground() -> bool {
     !cfg!(spaceterm_packaged)
         && crate::application_identity::ApplicationIdentity::current().directory_name()
             == "spaceterm-development"

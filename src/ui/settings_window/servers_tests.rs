@@ -245,6 +245,51 @@ fn a_connection_names_only_its_protocol_version() {
     assert!(presented.check);
 }
 
+/// A Development run's server ends with the run, so Servers never claims it keeps running after
+/// SpaceTerm quits, while an installed server keeps that description.
+#[gpui::test]
+fn a_development_run_server_is_described_as_ending_with_the_run(cx: &mut TestAppContext) {
+    let server = ScriptedServer::new(Ok(connected(2)));
+    let (window, cx) = open_settings(
+        Some(OfferedServer {
+            connection: Ok(Arc::new(super::DevelopmentRunServer(
+                Arc::clone(&server) as Arc<dyn LocalServerControl>
+            )) as Arc<dyn LocalServerControl>),
+            service: None,
+            update: None,
+        }),
+        cx,
+    );
+    click(NAVIGATION_SELECTOR, cx);
+    let (description, presentation) = window.read_with(cx, |settings, cx| {
+        (
+            settings.section_description(SettingsSectionId::Servers, cx),
+            settings.local_server_presentation(),
+        )
+    });
+    assert!(description.contains("ends with its Terminal Sessions when the run ends"));
+    assert!(!description.contains("keep running after SpaceTerm quits"));
+    let presentation = presentation.expect("the local server is presented");
+    assert_eq!(presentation.state, "Connected");
+    assert_eq!(
+        presentation.explanation.as_ref(),
+        "Connected to the server this Development run owns. It ends with its Terminal Sessions \
+         when the run ends. Protocol version 2."
+    );
+    assert!(!rendered(SERVICE_ROW_SELECTOR, cx), "no service runs it");
+}
+
+#[gpui::test]
+fn an_installed_server_keeps_running_after_spaceterm_quits(cx: &mut TestAppContext) {
+    let server = ScriptedServer::new(Ok(connected(2)));
+    let (window, cx) = open_settings(offered(&server), cx);
+    click(NAVIGATION_SELECTOR, cx);
+    let description = window.read_with(cx, |settings, cx| {
+        settings.section_description(SettingsSectionId::Servers, cx)
+    });
+    assert!(description.contains("keep running after SpaceTerm quits"));
+}
+
 #[gpui::test]
 fn opening_settings_asks_the_local_server_nothing(cx: &mut TestAppContext) {
     let server = ScriptedServer::new(Err(ServerError::NotSetUp));
