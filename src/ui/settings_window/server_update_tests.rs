@@ -509,3 +509,112 @@ fn progress_names_whether_sessions_end() {
             .contains("Terminal Sessions")
     );
 }
+
+/// Runs the real preparation and confirmation path, then replaces Settings before completion.
+fn confirmed_update_after_reopening(
+    facts: UpdateFacts,
+    outcome: Outcome,
+    cx: &mut TestAppContext,
+) -> (UpdatePresentation, Option<ServerError>, Vec<UpdateCall>) {
+    let (update, service, server) = {
+        let harness = open(facts, cx);
+        harness.update.answer(outcome);
+        click(UPDATE_SELECTOR, harness.cx);
+        let position = harness
+            .cx
+            .debug_bounds(modal_action(UPDATE_CONFIRM_SELECTOR))
+            .unwrap()
+            .center();
+        // Dispatch without parking the executor, so Settings closes before completion runs.
+        harness.cx.update(|window, cx| {
+            window.dispatch_event(
+                gpui::PlatformInput::MouseDown(gpui::MouseDownEvent {
+                    position,
+                    modifiers: Modifiers::none(),
+                    button: gpui::MouseButton::Left,
+                    click_count: 1,
+                    first_mouse: false,
+                }),
+                cx,
+            );
+            window.dispatch_event(
+                gpui::PlatformInput::MouseUp(gpui::MouseUpEvent {
+                    position,
+                    modifiers: Modifiers::none(),
+                    button: gpui::MouseButton::Left,
+                    click_count: 1,
+                }),
+                cx,
+            );
+        });
+        let released = harness.window.downgrade();
+        drop(harness.window);
+        harness.cx.update(|window, _| window.remove_window());
+        assert!(
+            released.upgrade().is_none(),
+            "admitted completion must not retain Settings"
+        );
+        (harness.update, harness.service, harness.server)
+    };
+    let offered = OfferedServer {
+        connection: Ok(server as Arc<dyn LocalServerControl>),
+        service: Some(Ok(service as Arc<dyn ServerServiceControl>)),
+        update: Some(Arc::clone(&update) as Arc<dyn ServerUpdateControl>),
+    };
+    let (settings, visual) = cx.add_window_view(|window, cx| {
+        let mut settings = SettingsWindow::new_with_capabilities(
+            Rc::new(RecordingOperatingSystemWindowDragPlatform::default()),
+            Default::default(),
+            None,
+            Some(offered),
+            window,
+            cx,
+        );
+        assert!(
+            settings
+                .server_update
+                .as_ref()
+                .unwrap()
+                .state
+                .working
+                .is_some(),
+            "reopened Settings must retain admitted progress"
+        );
+        // Reopening and a second request cannot prepare or dispatch another activation.
+        settings.request_update_action(UpdateAction::Update, cx);
+        settings
+    });
+    visual.run_until_parked();
+    settings.read_with(visual, |settings, _| {
+        let row = settings.server_update.as_ref().unwrap();
+        (row.presentation(), row.state.failure, update.changes())
+    })
+}
+
+#[gpui::test]
+fn a_confirmed_update_finishes_after_settings_reopens(cx: &mut TestAppContext) {
+    let (presentation, failure, calls) =
+        confirmed_update_after_reopening(available(), Outcome::Ready, cx);
+    assert_eq!(presentation.state, "Up to Date");
+    assert_eq!(failure, None);
+    assert_eq!(calls, [UpdateCall::PrepareUpdate, UpdateCall::Activate]);
+}
+
+#[gpui::test]
+fn a_confirmed_update_keeps_its_error_after_settings_reopens(cx: &mut TestAppContext) {
+    let (_, failure, calls) = confirmed_update_after_reopening(available(), Outcome::Changed, cx);
+    assert_eq!(failure, Some(ServerError::Changed));
+    assert_eq!(calls, [UpdateCall::PrepareUpdate, UpdateCall::Activate]);
+}
+
+#[gpui::test]
+fn updating_a_stopped_server_after_settings_reopens_keeps_it_stopped(cx: &mut TestAppContext) {
+    let mut facts = available();
+    facts.status = Ok(stopped());
+    let (presentation, failure, calls) =
+        confirmed_update_after_reopening(facts, Outcome::Ready, cx);
+    assert_eq!(presentation.state, "Up to Date");
+    assert!(presentation.explanation.contains("stopped"));
+    assert_eq!(failure, None);
+    assert_eq!(calls, [UpdateCall::PrepareUpdate, UpdateCall::Activate]);
+}

@@ -13,6 +13,7 @@ mod end_sessions;
 mod git;
 mod import;
 mod keybindings;
+mod local_operations;
 mod microphone;
 mod permission_access;
 mod server_list;
@@ -407,6 +408,7 @@ pub(crate) struct SettingsWindow {
     direct_access: direct_access::DirectAccess,
     /// The local server this window presents. `None` omits the Servers section.
     local_server: Option<servers::LocalServerRow>,
+    local_operations: Entity<local_operations::LocalServerOperations>,
     /// The service that runs the local server. `None` omits its row.
     server_service: Option<servers::ServerServiceRow>,
     /// The server version and its update journey. `None` omits its row.
@@ -728,7 +730,19 @@ impl SettingsWindow {
                     ) && ssh_maintenance.is_none())
             })
             .collect();
-        Self {
+        let local_operations = local_operations::LocalServerOperations::get(cx);
+        cx.subscribe(&local_operations, |settings, _, operation, cx| {
+            settings.synchronize_local_operations(cx);
+            settings.check_local_server(cx);
+            match operation {
+                local_operations::CompletedOperation::Service => settings.check_server_update(cx),
+                local_operations::CompletedOperation::Update => settings.check_server_service(cx),
+            }
+            settings.continue_requested_update(cx);
+            cx.notify();
+        })
+        .detach();
+        let mut settings = Self {
             window_appearance,
             window_traffic_lights,
             editor,
@@ -763,6 +777,7 @@ impl SettingsWindow {
             server_location,
             end_all_sessions: end_sessions::EndAllSessions::new(),
             direct_access: direct_access::DirectAccess::new(),
+            local_operations,
             server_service: local_server
                 .as_ref()
                 .and_then(|offered| offered.service.clone())
@@ -782,7 +797,9 @@ impl SettingsWindow {
             search_selected_server: None,
             server_list_focus: cx.focus_handle().tab_stop(true),
             this_computer,
-        }
+        };
+        settings.synchronize_local_operations(cx);
+        settings
     }
 
     /// Checks the local server when its section replaces another in the detail pane, so the

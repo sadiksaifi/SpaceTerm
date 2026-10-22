@@ -12,6 +12,7 @@ use spaceterm_ui::{
 };
 
 use super::SettingsWindow;
+use super::local_operations::UpdateCompletion;
 use crate::application_identity::ApplicationIdentity;
 use crate::local_server::ServerError;
 use crate::local_server::service::activation::{
@@ -272,7 +273,7 @@ impl UpdateStep {
 pub(super) struct UpdateState {
     /// The last read. `None` until the first read succeeds.
     pub(super) facts: Option<UpdateFacts>,
-    /// Why the last read or operation failed, until the next one.
+    /// The read failure, or the admitted failure retained until the next change.
     pub(super) failure: Option<ServerError>,
     pub(super) working: Option<UpdateStep>,
 }
@@ -581,7 +582,7 @@ impl UpdateConfirmation {
     }
 }
 
-/// Owns the offered update control, its last state, and the pending operation.
+/// Presents update state and owns preparation, confirmation, and passive reads.
 pub(super) struct ServerUpdateRow {
     control: Arc<dyn ServerUpdateControl>,
     pub(super) state: UpdateState,
@@ -652,7 +653,7 @@ impl SettingsWindow {
 
     /// Starts a requested update once a fresh read offers it. A read that no longer offers it
     /// drops the request, and the row says why.
-    fn continue_requested_update(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn continue_requested_update(&mut self, cx: &mut Context<Self>) {
         let Some(row) = &self.server_update else {
             return;
         };
@@ -699,21 +700,38 @@ impl SettingsWindow {
         if !self.server_update_ready(step) {
             return;
         }
+        if step == UpdateStep::Finish {
+            let Some(control) = self
+                .server_update
+                .as_ref()
+                .map(|row| Arc::clone(&row.control))
+            else {
+                return;
+            };
+            self.run_admitted_update(step, move || control.finish(), cx);
+            return;
+        }
         let Some(row) = &mut self.server_update else {
             return;
         };
         let control = Arc::clone(&row.control);
         row.state.working = Some(step);
+        let prior_failure = if step == UpdateStep::Check {
+            self.local_operations.read(cx).update_failure
+        } else {
+            self.local_operations
+                .update(cx, |owner, _| owner.update_failure = None);
+            None
+        };
         row.state.failure = None;
         let result = cx.background_spawn(async move {
             let outcome = match step {
                 UpdateStep::Prepare => control.prepare_update(),
                 UpdateStep::PrepareReturn => control.prepare_return().map(Some),
-                UpdateStep::Finish => control.finish().map(|_| None),
                 _ => Ok(None),
             };
             let (prepared, failure) = match outcome {
-                Ok(prepared) => (prepared, None),
+                Ok(prepared) => (prepared, prior_failure),
                 Err(error) => (None, Some(error)),
             };
             let read = control.read();
@@ -722,7 +740,7 @@ impl SettingsWindow {
         row._operation = Some(cx.spawn(async move |settings, cx| {
             let (prepared, failure, read) = result.await;
             let _ = settings.update(cx, |settings, cx| {
-                settings.update_step_finished(step, prepared, failure, read, cx);
+                settings.update_step_finished(prepared, failure, read, cx);
             });
         }));
         cx.notify();
@@ -730,7 +748,6 @@ impl SettingsWindow {
 
     fn update_step_finished(
         &mut self,
-        step: UpdateStep,
         prepared: Option<PreparedChange>,
         failure: Option<ServerError>,
         read: Result<UpdateFacts, ServerError>,
@@ -750,10 +767,11 @@ impl SettingsWindow {
                 row.state.failure = failure.or(Some(error));
             }
         }
+        let state = row.state.clone();
+        self.local_operations
+            .update(cx, |owner, _| owner.update = Some(state));
         if let Some(prepared) = prepared {
             self.confirm_change(prepared, cx);
-        } else if step.changes_service() {
-            self.server_changed(cx);
         }
         self.continue_requested_update(cx);
         cx.notify();
@@ -860,39 +878,42 @@ impl SettingsWindow {
         if !self.server_update_ready(step) {
             return;
         }
+        self.run_admitted_update(step, move || (prepared.commit)().map(Some), cx);
+    }
+
+    fn run_admitted_update(
+        &mut self,
+        step: UpdateStep,
+        change: impl FnOnce() -> Result<Option<ActivationStatus>, ServerError> + Send + 'static,
+        cx: &mut Context<Self>,
+    ) {
         let Some(row) = &mut self.server_update else {
             return;
         };
         let control = Arc::clone(&row.control);
         row.state.working = Some(step);
         row.state.failure = None;
+        let state = row.state.clone();
         let result = cx.background_spawn(async move {
-            let failure = (prepared.commit)().err();
-            (failure, control.read())
+            let outcome = change();
+            let failure = outcome.as_ref().err().copied();
+            let state = match control.read() {
+                Ok(facts) => UpdateState {
+                    facts: Some(facts),
+                    failure,
+                    working: None,
+                },
+                Err(error) => UpdateState {
+                    facts: None,
+                    failure: failure.or(Some(error)),
+                    working: None,
+                },
+            };
+            UpdateCompletion { state, outcome }
         });
-        row._operation = Some(cx.spawn(async move |settings, cx| {
-            let (failure, read) = result.await;
-            let _ = settings.update(cx, |settings, cx| {
-                settings.update_step_finished(step, None, failure, read, cx);
-            });
-        }));
+        self.local_operations
+            .update(cx, |owner, cx| owner.run_update(state, result, cx));
         cx.notify();
-    }
-
-    /// A step that may have replaced or restarted the server. The other rows read it afresh, and
-    /// a Workspace Window waiting on it opens its Workspaces once it runs.
-    fn server_changed(&mut self, cx: &mut Context<Self>) {
-        self.check_server_service(cx);
-        self.check_local_server(cx);
-        let running = self
-            .server_update
-            .as_ref()
-            .and_then(|row| row.state.facts.as_ref())
-            .and_then(|facts| facts.status.ok())
-            .is_some_and(|status| status.running && !status.stopped);
-        if running {
-            crate::ui::workspace_manager::resume_waiting_launches(cx);
-        }
     }
 
     /// The version badge, or progress while a step runs, and the row's steps.
