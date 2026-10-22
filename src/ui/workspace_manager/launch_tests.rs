@@ -366,6 +366,53 @@ fn a_local_server_started_after_an_ssh_server_joins_the_same_window(cx: &mut Tes
     );
 }
 
+/// A build without a server package and a package that failed verification need different
+/// remedies, so each names its own cause.
+#[gpui::test]
+fn a_missing_server_package_and_a_failed_verification_explain_themselves_differently(
+    cx: &mut TestAppContext,
+) {
+    let (harness, cx) = launch_harness(
+        vec![
+            Err(ServerError::CandidateMissing),
+            Err(ServerError::RuntimeUnavailable),
+        ],
+        cx,
+    );
+    cx.run_until_parked();
+    let presentation = |cx: &mut VisualTestContext| {
+        harness
+            .manager
+            .read_with(cx, |manager, _| manager.launch_presentation())
+            .expect("the failure is presented")
+    };
+    let missing = presentation(cx);
+    assert_eq!(missing.title, "Server Not Included");
+    assert!(
+        missing
+            .detail
+            .contains("doesn\u{2019}t include a server package")
+    );
+    assert!(!missing.detail.contains("verif"), "{}", missing.detail);
+    assert!(cx.debug_bounds(launch::LAUNCH_SETTINGS_SELECTOR).is_some());
+
+    harness.click(LAUNCH_RETRY_SELECTOR, cx);
+    let unverified = presentation(cx);
+    assert_eq!(unverified.title, "Server Not Verified");
+    assert!(unverified.detail.contains("could not be verified"));
+    assert!(
+        !unverified.detail.contains("include"),
+        "{}",
+        unverified.detail
+    );
+    assert!(cx.debug_bounds(launch::LAUNCH_SETTINGS_SELECTOR).is_some());
+    assert_eq!(
+        harness.launch.steps(),
+        ["run", "run"],
+        "nothing starts or activates"
+    );
+}
+
 #[gpui::test]
 fn a_refused_start_explains_itself_and_retries_launch_only_when_asked(cx: &mut TestAppContext) {
     let (harness, cx) = launch_harness(vec![Ok(LaunchOutcome::Stopped), ready()], cx);

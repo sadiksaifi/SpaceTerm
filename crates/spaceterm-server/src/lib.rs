@@ -54,6 +54,10 @@ pub enum ServerError {
     ReturnUnavailable,
     #[error("This server package could not be verified for this application identity.")]
     RuntimeUnavailable,
+    /// This build includes no server package to verify. Distinct from a package that failed
+    /// verification.
+    #[error("This SpaceTerm build doesn\u{2019}t include a server package for your account.")]
+    CandidateMissing,
     #[error("Administrator authorization is required to enable linger for this account.")]
     AuthorizationRequired,
     #[error("The local server is not running.")]

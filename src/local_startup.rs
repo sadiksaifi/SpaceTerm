@@ -11,11 +11,7 @@ pub fn run(cancelled: impl Fn() -> bool) -> Result<StartupOutcome, ServerError> 
     LocalStartup::for_identity(identity)?.run(
         || {
             discover_candidate()
-                .map_err(|error| match error {
-                    CandidateError::Unavailable => ServerError::RuntimeUnavailable,
-                    CandidateError::ClientRestartRequired => ServerError::CandidateChanged,
-                    CandidateError::Verification(error) => error,
-                })
+                .map_err(ServerError::from)
                 .and_then(|candidate| candidate.stage().map(|installation| installation.directory))
         },
         cancelled,
@@ -73,9 +69,21 @@ impl Candidate {
 /// Bounded classifications for candidate availability and verification.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CandidateError {
+    /// This build includes no candidate: no pinned digest or no artifact pair to read.
     Unavailable,
     ClientRestartRequired,
     Verification(ServerError),
+}
+
+impl From<CandidateError> for ServerError {
+    /// A missing candidate stays distinct from one that failed verification.
+    fn from(error: CandidateError) -> Self {
+        match error {
+            CandidateError::Unavailable => Self::CandidateMissing,
+            CandidateError::ClientRestartRequired => Self::CandidateChanged,
+            CandidateError::Verification(error) => error,
+        }
+    }
 }
 
 /// Read the pinned candidate without staging files or changing service policy.
@@ -91,8 +99,8 @@ pub fn discover_candidate() -> Result<Candidate, CandidateError> {
         &std::env::current_exe().map_err(|_| CandidateError::Unavailable)?,
         std::env::var_os("SPACETERM_SERVER_ARCHIVE").map(PathBuf::from),
         std::env::var_os("SPACETERM_SERVER_SIGNATURE").map(PathBuf::from),
-    )
-    .map_err(|_| CandidateError::Unavailable)?;
+    )?
+    .present()?;
     let identity = crate::application_identity::ApplicationIdentity::current().directory_name();
     let metadata = Service::for_identity(identity)
         .and_then(|service| {
@@ -121,18 +129,29 @@ struct ArtifactPaths {
     signature: PathBuf,
 }
 
+impl ArtifactPaths {
+    /// Both files exist. An unreadable file is left for verification to refuse.
+    fn present(self) -> Result<Self, CandidateError> {
+        let absent = |path: &Path| matches!(path.try_exists(), Ok(false));
+        if absent(&self.archive) || absent(&self.signature) {
+            return Err(CandidateError::Unavailable);
+        }
+        Ok(self)
+    }
+}
+
 fn artifact_paths(
     packaged: bool,
     macos: bool,
     executable: &Path,
     archive: Option<PathBuf>,
     signature: Option<PathBuf>,
-) -> Result<ArtifactPaths, ServerError> {
+) -> Result<ArtifactPaths, CandidateError> {
     if packaged {
         let root = executable
             .parent()
             .and_then(Path::parent)
-            .ok_or(ServerError::RuntimeUnavailable)?;
+            .ok_or(CandidateError::Unavailable)?;
         let resources = if macos {
             root.join("Resources/server-artifact")
         } else {
@@ -145,7 +164,7 @@ fn artifact_paths(
     }
     match (archive, signature) {
         (Some(archive), Some(signature)) => Ok(ArtifactPaths { archive, signature }),
-        _ => Err(ServerError::RuntimeUnavailable),
+        _ => Err(CandidateError::Unavailable),
     }
 }
 
@@ -189,7 +208,7 @@ mod tests {
                     archive,
                     signature
                 ),
-                Err(ServerError::RuntimeUnavailable)
+                Err(CandidateError::Unavailable)
             ));
         }
         let paths = artifact_paths(
@@ -202,6 +221,52 @@ mod tests {
         .unwrap();
         assert_eq!(paths.archive, Path::new("/approved/server.tar.gz"));
         assert_eq!(paths.signature, Path::new("/approved/server.sig"));
+    }
+
+    /// A package whose server artifact was never included is missing, not unverifiable, so
+    /// startup can say which one happened.
+    #[test]
+    fn an_absent_artifact_file_is_missing_rather_than_unverified() {
+        let root = std::env::temp_dir().join(format!(
+            "spaceterm-candidate-presence-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let paths = ArtifactPaths {
+            archive: root.join("artifact.tar.gz"),
+            signature: root.join("artifact.sig"),
+        };
+        assert!(matches!(
+            paths.clone().present(),
+            Err(CandidateError::Unavailable)
+        ));
+        std::fs::write(&paths.archive, b"archive").unwrap();
+        assert!(
+            matches!(paths.clone().present(), Err(CandidateError::Unavailable)),
+            "an archive without its signature is still missing"
+        );
+        std::fs::write(&paths.signature, b"signature").unwrap();
+        assert!(paths.present().is_ok());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn missing_and_unverified_candidates_stay_distinct_server_errors() {
+        assert_eq!(
+            ServerError::from(CandidateError::Unavailable),
+            ServerError::CandidateMissing
+        );
+        assert_eq!(
+            ServerError::from(CandidateError::Verification(
+                ServerError::RuntimeUnavailable
+            )),
+            ServerError::RuntimeUnavailable
+        );
+        assert_eq!(
+            ServerError::from(CandidateError::ClientRestartRequired),
+            ServerError::CandidateChanged
+        );
     }
 
     #[test]

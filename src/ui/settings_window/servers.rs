@@ -419,6 +419,13 @@ fn failure(error: ServerError) -> (&'static str, &'static str, bool) {
             "settings-local-server-state-runtime-unavailable",
             true,
         ),
+        // Only another SpaceTerm build includes a server package, so checking again from this
+        // one says nothing new.
+        ServerError::CandidateMissing => (
+            "Not Included",
+            "settings-local-server-state-candidate-missing",
+            false,
+        ),
         ServerError::AuthorizationRequired => (
             "Authorization Required",
             "settings-local-server-state-authorization-required",
