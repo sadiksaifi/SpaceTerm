@@ -1006,10 +1006,18 @@ impl DirectoryPicker {
             ModalId::new(CREATE_ALERT_ID),
             "Create directory",
             "Create Directory?",
-            format!(
-                "Create {}? Missing parent directories will also be created.",
-                parsed.display()
-            ),
+            // Another computer's directory is created there, so the question names it.
+            match self.source.machine_name() {
+                Some(machine) => format!(
+                    "Create {} on \u{201C}{machine}\u{201D}? Missing parent directories will \
+                     also be created.",
+                    parsed.display()
+                ),
+                None => format!(
+                    "Create {}? Missing parent directories will also be created.",
+                    parsed.display()
+                ),
+            },
             vec![
                 ModalAction::new(
                     true,
@@ -1477,6 +1485,7 @@ mod tests {
     use std::cell::RefCell;
     use std::collections::VecDeque;
     use std::future::pending;
+    use std::path::PathBuf;
     use std::rc::Rc;
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
     use std::sync::{Arc, Mutex};
@@ -1489,8 +1498,10 @@ mod tests {
     use super::scripted_source::{
         RemoteDirectoryProvider, RemoteDirectoryProviderError, RemoteDirectorySource,
     };
+    use super::server_source::{DirectoryConnection, DirectoryConnector};
     use super::*;
     use crate::domain::RemoteDirectory;
+    use spaceterm_server::pane::{Reply, Request as PaneRequest};
 
     #[test]
     fn remote_picker_wrapper_debug_should_redact_account_paths_and_rows() {
@@ -2692,6 +2703,154 @@ mod tests {
                 .iter()
                 .any(|event| matches!(event, DirectoryPickerEvent::Confirmed(_)))
         );
+    }
+
+    /// The owning server answering in process, through the same request handler and bounded
+    /// directory workers a real server runs.
+    type ServerHandler = Arc<Mutex<Box<dyn FnMut(&PaneRequest) -> Reply + Send>>>;
+
+    struct InProcessServer(ServerHandler);
+
+    struct InProcessConnection {
+        server: ServerHandler,
+        reads: bool,
+        creates: bool,
+    }
+
+    impl DirectoryConnector for InProcessServer {
+        fn connect(&self) -> Result<Box<dyn DirectoryConnection>, ()> {
+            let reply = (self.0.lock().unwrap())(&PaneRequest::Capabilities);
+            let Reply::Capabilities {
+                directory_recovery,
+                directory_creation,
+                ..
+            } = reply
+            else {
+                return Err(());
+            };
+            Ok(Box::new(InProcessConnection {
+                server: Arc::clone(&self.0),
+                reads: directory_recovery,
+                creates: directory_creation,
+            }))
+        }
+    }
+
+    impl DirectoryConnection for InProcessConnection {
+        fn reads_directories(&self) -> bool {
+            self.reads
+        }
+        fn creates_directories(&self) -> bool {
+            self.creates
+        }
+        fn exchange(&mut self, request: &PaneRequest) -> Result<Reply, ()> {
+            Ok((self.server.lock().unwrap())(request))
+        }
+    }
+
+    fn wait_for(
+        mut settled: impl FnMut(&mut VisualTestContext) -> bool,
+        cx: &mut VisualTestContext,
+    ) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !settled(cx) {
+            assert!(std::time::Instant::now() < deadline, "the server answers");
+            std::thread::sleep(Duration::from_millis(10));
+            cx.run_until_parked();
+        }
+    }
+
+    /// Open Remote Directory and Pin to Directory create a missing directory on the owning
+    /// server after the person confirms, through the production server source and the server's
+    /// own directory handler, and pin the directory the server validated.
+    #[gpui::test]
+    fn a_server_directory_picker_should_create_a_missing_directory_on_its_server(
+        cx: &mut TestAppContext,
+    ) {
+        let root = std::env::temp_dir().join(format!(
+            "spaceterm-server-directory-creation-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let missing = root.join("new/nested");
+        let handler: Box<dyn FnMut(&PaneRequest) -> Reply + Send> =
+            Box::new(crate::runtime::directory_testing::directory_host());
+        let server: Arc<dyn DirectoryConnector> =
+            Arc::new(InProcessServer(Arc::new(Mutex::new(handler))));
+        cx.update(crate::ui::init).unwrap();
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let recorded = Rc::clone(&events);
+        let (harness, cx) = cx.add_window_view(move |window, cx| {
+            let source = ServerDirectorySource::browsing_through(
+                server,
+                cx.background_executor().clone(),
+                Some("penguin".to_owned()),
+                Rc::new(|| true),
+            );
+            let picker = cx.new(|cx| {
+                DirectoryPicker::new(Rc::new(source), "Open Remote Directory", window, cx)
+            });
+            cx.subscribe(&picker, move |_, _, event: &DirectoryPickerEvent, _| {
+                recorded.borrow_mut().push(event.clone());
+            })
+            .detach();
+            DirectoryPickerHarness { picker }
+        });
+        let picker = harness.read_with(cx, |harness, _| harness.picker.clone());
+        cx.update(|window, cx| {
+            window.activate_window();
+            picker.update(cx, |picker, cx| assert!(picker.open(window, cx)));
+        });
+        wait_for(
+            |cx| picker.read_with(cx, |picker, _| picker.source.allows_creation()),
+            cx,
+        );
+
+        set_remote_input(&picker, &missing.display().to_string(), cx);
+        wait_for(
+            |cx| {
+                picker.read_with(cx, |picker, _| {
+                    picker.status == DirectoryPickerStatus::Missing
+                })
+            },
+            cx,
+        );
+        cx.update(|window, cx| {
+            picker.update(cx, |picker, cx| picker.confirm_current(window, cx));
+        });
+        cx.run_until_parked();
+        let create = cx
+            .debug_bounds("modal-action-directory-picker-create")
+            .expect("the picker asks before the server creates the directory");
+        cx.simulate_click(create.center(), Modifiers::none());
+        wait_for(
+            |_| {
+                events.borrow().iter().any(|event| {
+                    matches!(
+                        event,
+                        DirectoryPickerEvent::Confirmed(DirectorySelection::Server(_))
+                    )
+                })
+            },
+            cx,
+        );
+
+        assert!(
+            missing.is_dir(),
+            "the server created the directory and its parents"
+        );
+        let chosen = events.borrow().iter().find_map(|event| match event {
+            DirectoryPickerEvent::Confirmed(DirectorySelection::Server(chosen)) => {
+                Some(chosen.clone())
+            }
+            _ => None,
+        });
+        assert_eq!(
+            chosen.map(|chosen| chosen.components().collect::<PathBuf>()),
+            Some(missing.components().collect::<PathBuf>())
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     fn set_remote_input(
