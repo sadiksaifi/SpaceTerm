@@ -4960,7 +4960,7 @@ mod tests {
         });
         cx.run_until_parked();
         let split_title = tab_title(cx);
-        cx.simulate_keystrokes("cmd-alt-w");
+        cx.simulate_keystrokes("cmd-w");
         cx.run_until_parked();
         let restored_title = tab_title(cx);
 
@@ -5099,7 +5099,7 @@ mod tests {
         assert!(cx.debug_bounds("tab-account-1").is_none());
 
         // A single-Pane Tab carries the same mark as the Pane Caption under it.
-        cx.simulate_keystrokes("cmd-alt-w");
+        cx.simulate_keystrokes("cmd-w");
         cx.run_until_parked();
         let remaining = manager.read_with(cx, |manager, cx| {
             manager.tabs.active_tab().read(cx).focused_pane_id()
@@ -7238,14 +7238,12 @@ mod tests {
     }
 
     #[gpui::test]
-    fn option_command_w_should_close_only_the_focused_pane_when_the_tab_is_split(
-        cx: &mut TestAppContext,
-    ) {
+    fn command_w_should_close_only_the_focused_pane_when_the_tab_is_split(cx: &mut TestAppContext) {
         let (manager, records, cx) = tab_manager(cx);
         cx.simulate_keystrokes("cmd-d");
         cx.run_until_parked();
 
-        cx.simulate_keystrokes("cmd-alt-w");
+        cx.simulate_keystrokes("cmd-w");
         cx.run_until_parked();
 
         let state = manager.read_with(cx, |manager, cx| {
@@ -7259,13 +7257,11 @@ mod tests {
     }
 
     #[gpui::test]
-    fn option_command_w_should_close_the_active_tab_when_its_last_pane_closes(
-        cx: &mut TestAppContext,
-    ) {
+    fn command_w_should_close_the_active_tab_when_its_last_pane_closes(cx: &mut TestAppContext) {
         let (manager, records, cx) = tab_manager(cx);
         click("create-tab-button", cx);
 
-        cx.simulate_keystrokes("cmd-alt-w");
+        cx.simulate_keystrokes("cmd-w");
         cx.run_until_parked();
 
         let state = manager.read_with(cx, |manager, _| {

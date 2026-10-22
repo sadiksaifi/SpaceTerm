@@ -157,7 +157,7 @@ cmd-o	None	terminal::OpenLocalDirectory
 cmd-shift-o	None	terminal::OpenRemoteDirectory
 alt-cmd-]	Some(Identifier("TerminalPane"))	terminal::NextWorktree
 alt-cmd-[	Some(Identifier("TerminalPane"))	terminal::PreviousWorktree
-cmd-w	None	terminal::CloseWorkspace
+ctrl-cmd-w	None	terminal::CloseWorkspace
 ctrl-1	Some(Identifier("TerminalPane"))	terminal::ActivateWorkspace1
 ctrl-2	Some(Identifier("TerminalPane"))	terminal::ActivateWorkspace2
 ctrl-3	Some(Identifier("TerminalPane"))	terminal::ActivateWorkspace3
@@ -180,7 +180,7 @@ cmd-8	Some(Identifier("TerminalPane"))	terminal::ActivateTab8
 cmd-9	Some(Identifier("TerminalPane"))	terminal::ActivateTab9
 cmd-}	Some(Identifier("TerminalPane"))	terminal::NextTab
 cmd-{	Some(Identifier("TerminalPane"))	terminal::PreviousTab
-alt-cmd-w	None	terminal::ClosePane
+cmd-w	None	terminal::ClosePane
 cmd-d	Some(Identifier("TerminalPane"))	terminal::SplitRight
 cmd-shift-d	Some(Identifier("TerminalPane"))	terminal::SplitDown
 alt-cmd-left	Some(Identifier("TerminalPane"))	terminal::FocusPaneLeft

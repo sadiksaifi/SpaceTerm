@@ -60,10 +60,11 @@ pub(crate) fn profile(
             Command::PreviousWorktree,
             Some(DefaultBinding::new("alt-cmd-[", &[])),
         ),
-        // Cmd+W asks to Kill Workspace, so ClosePane takes the neighboring Option chord.
+        // Cmd+W closes the Focused Pane and Shift+Cmd+W the Active Tab, so Kill Workspace, which
+        // always asks first, takes the Control chord.
         (
             Command::CloseWorkspace,
-            Some(DefaultBinding::new("cmd-w", &[])),
+            Some(DefaultBinding::new("ctrl-cmd-w", &[])),
         ),
         (
             Command::ActivateWorkspace1,
@@ -152,10 +153,7 @@ pub(crate) fn profile(
         ),
         (Command::MoveTabRight, None),
         (Command::MoveTabLeft, None),
-        (
-            Command::ClosePane,
-            Some(DefaultBinding::new("cmd-alt-w", &[])),
-        ),
+        (Command::ClosePane, Some(DefaultBinding::new("cmd-w", &[]))),
         (Command::SplitRight, Some(DefaultBinding::new("cmd-d", &[]))),
         (
             Command::SplitDown,
@@ -387,18 +385,38 @@ mod tests {
     #[test]
     fn retained_overrides_keep_their_shortcuts_over_the_new_defaults() {
         let cmd_w = Shortcut::parse("cmd-w").unwrap();
+        let ctrl_cmd_w = Shortcut::parse("ctrl-cmd-w").unwrap();
 
-        let resolved = resolve(r#"{"close_pane":"cmd-w"}"#);
+        let resolved = resolve("{}");
         assert_eq!(resolved.owner(&cmd_w), Some(Command::ClosePane));
         assert_eq!(
-            resolved.state(Command::CloseWorkspace),
+            resolved.owner(&Shortcut::parse("cmd-shift-w").unwrap()),
+            Some(Command::CloseTab)
+        );
+        assert_eq!(resolved.owner(&ctrl_cmd_w), Some(Command::CloseWorkspace));
+
+        // An override retained from the former Cmd+W default still owns its Shortcut.
+        let resolved = resolve(r#"{"close_workspace":"cmd-w"}"#);
+        assert_eq!(resolved.owner(&cmd_w), Some(Command::CloseWorkspace));
+        assert_eq!(
+            resolved.state(Command::ClosePane),
             KeybindingState::Displaced {
-                by: Command::ClosePane
+                by: Command::CloseWorkspace
             }
         );
 
-        let resolved = resolve(r#"{"close_workspace":null}"#);
+        // Choosing the new default explicitly changes nothing else.
+        let resolved = resolve(r#"{"close_pane":"cmd-w"}"#);
+        assert_eq!(resolved.owner(&cmd_w), Some(Command::ClosePane));
+        assert_eq!(resolved.owner(&ctrl_cmd_w), Some(Command::CloseWorkspace));
+
+        let resolved = resolve(r#"{"close_pane":null,"close_workspace":null}"#);
         assert_eq!(resolved.owner(&cmd_w), None);
+        assert_eq!(resolved.owner(&ctrl_cmd_w), None);
+        assert_eq!(
+            resolved.state(Command::ClosePane),
+            KeybindingState::Unassigned
+        );
         assert_eq!(
             resolved.state(Command::CloseWorkspace),
             KeybindingState::Unassigned

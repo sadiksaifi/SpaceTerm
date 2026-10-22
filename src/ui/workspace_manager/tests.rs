@@ -2067,7 +2067,7 @@ fn risky_pane_close_should_follow_keyboard_focus_and_confirm_once(cx: &mut TestA
         (1, 2)
     );
 
-    cx.simulate_keystrokes("cmd-alt-w");
+    cx.simulate_keystrokes("cmd-w");
     cx.run_until_parked();
     let first_pending = manager.read_with(cx, |manager, _| {
         manager
@@ -2075,7 +2075,7 @@ fn risky_pane_close_should_follow_keyboard_focus_and_confirm_once(cx: &mut TestA
             .pending()
             .expect("risky close should present one confirmation")
     });
-    cx.simulate_keystrokes("cmd-alt-w");
+    cx.simulate_keystrokes("cmd-w");
     cx.run_until_parked();
 
     assert_eq!(
@@ -2168,7 +2168,7 @@ fn prompt_metadata_should_close_a_pane_without_confirmation(cx: &mut TestAppCont
         .unwrap();
     cx.run_until_parked();
 
-    cx.simulate_keystrokes("cmd-alt-w");
+    cx.simulate_keystrokes("cmd-w");
     cx.run_until_parked();
 
     assert!(manager.read_with(cx, |manager, _| {
@@ -2181,9 +2181,11 @@ fn prompt_metadata_should_close_a_pane_without_confirmation(cx: &mut TestAppCont
     assert_eq!(records.dropped_session_ids(), vec![2]);
 }
 
-/// Cmd+W asks to Kill Workspace, which confirms even when no Pane is running work.
+/// Control-Command-W asks to Kill Workspace, which confirms even when no Pane is running work.
 #[gpui::test]
-fn command_w_should_confirm_kill_workspace_even_when_its_panes_are_idle(cx: &mut TestAppContext) {
+fn control_command_w_should_confirm_kill_workspace_even_when_its_panes_are_idle(
+    cx: &mut TestAppContext,
+) {
     let (manager, records, cx) = workspace_manager(cx);
     redraw(cx);
     let mut metadata = crate::terminal::metadata::MetadataTracker::new(
@@ -2206,7 +2208,7 @@ fn command_w_should_confirm_kill_workspace_even_when_its_panes_are_idle(cx: &mut
     cx.run_until_parked();
     let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_id());
 
-    cx.simulate_keystrokes("cmd-w");
+    cx.simulate_keystrokes("ctrl-cmd-w");
     redraw(cx);
 
     assert_eq!(
@@ -6076,7 +6078,7 @@ fn close_pane_shortcut_from_sidebar_should_leave_the_empty_view_after_the_final_
 
     cx.simulate_keystrokes("cmd-shift-e");
     cx.run_until_parked();
-    cx.simulate_keystrokes("cmd-alt-w");
+    cx.simulate_keystrokes("cmd-w");
     cx.run_until_parked();
     click("modal-action-close-confirmation-confirm", cx);
 
@@ -10550,13 +10552,13 @@ fn shared_kill_workspace_should_confirm_then_end_exactly_what_it_showed_for_ever
     );
 }
 
-/// Cmd+W runs the retained close_workspace Command, which opens Kill Workspace on a shared
-/// Workspace rather than Close Pane.
+/// Control-Command-W runs the retained close_workspace Command, which opens Kill Workspace on a
+/// shared Workspace rather than Close Pane.
 #[gpui::test]
-fn shared_command_w_should_open_kill_workspace(cx: &mut TestAppContext) {
+fn shared_control_command_w_should_open_kill_workspace(cx: &mut TestAppContext) {
     let (harness, cx) = shared_close_harness(cx);
 
-    cx.simulate_keystrokes("cmd-w");
+    cx.simulate_keystrokes("ctrl-cmd-w");
     redraw(cx);
 
     assert!(
@@ -10956,7 +10958,7 @@ fn shared_close_pane_shortcut_should_confirm_and_escape_should_cancel(cx: &mut T
     let (harness, cx) = shared_close_harness(cx);
     assert!(shared_close_terminal_is_focused(&harness, cx));
 
-    cx.simulate_keystrokes("cmd-alt-w");
+    cx.simulate_keystrokes("cmd-w");
     redraw(cx);
     assert!(
         cx.debug_bounds("modal-action-shared-close-cancel-keyboard-focus")

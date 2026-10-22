@@ -451,7 +451,7 @@ fn a_bound_chord_while_recording_is_recorded_instead_of_closing_settings(cx: &mu
         retained(&window, Command::NewWorkspace, cx),
         Some(Some(shortcut("cmd-w")))
     );
-    assert_eq!(retained(&window, Command::CloseWorkspace, cx), Some(None));
+    assert_eq!(retained(&window, Command::ClosePane, cx), Some(None));
 }
 
 #[gpui::test]
@@ -709,7 +709,7 @@ fn searching_by_shortcut_captures_a_chord_that_closes_the_window(cx: &mut TestAp
     cx.simulate_keystrokes("cmd-w");
     cx.run_until_parked();
 
-    assert_eq!(found(&window, cx), vec![Command::CloseWorkspace]);
+    assert_eq!(found(&window, cx), vec![Command::ClosePane]);
     assert!(cx.debug_bounds("settings-window-surface").is_some());
 }
 
