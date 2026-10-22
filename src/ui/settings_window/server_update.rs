@@ -129,7 +129,8 @@ impl ServerUpdateControl for Service {
 }
 
 /// The dropdown observes the same facts and policy as Settings without resuming an activation.
-/// Blocking local reads and signature verification only; it retains no candidate.
+/// Blocking local reads and signature verification only; it retains no candidate. It returns the
+/// row's state badge, because the explanation refers to the Settings layout around it.
 pub(crate) fn passive_update(service: &Service) -> Result<(SharedString, bool), ServerError> {
     // activation_status can prove recovery eligibility and clean a stale endpoint while doing
     // so. A passive read instead refuses unresolved originals and leaves their review to Settings.
@@ -139,7 +140,7 @@ pub(crate) fn passive_update(service: &Service) -> Result<(SharedString, bool), 
         ..UpdateState::default()
     });
     Ok((
-        presentation.explanation,
+        presentation.state.into(),
         presentation.actions.contains(&UpdateAction::Update),
     ))
 }

@@ -21,6 +21,9 @@ use crate::ui::direct_servers::DirectChanges;
 use crate::ui::remote_maintenance::RemoteAction;
 use crate::ui::settings_window;
 
+/// Each status is a few words that fit the menu. The action's Settings journey explains it.
+const UPDATE_STATUS_UNKNOWN: &str = "Update Status Unknown";
+
 #[derive(Clone)]
 pub(crate) struct ServerUpdateRow {
     pub label: SharedString,
@@ -123,7 +126,7 @@ impl ServerUpdates {
             sources,
             rows: vec![ServerUpdateRow {
                 label: "This computer · this account".into(),
-                detail: "Reading server update information…".into(),
+                detail: "Reading Update Status…".into(),
                 action: Some(ServerUpdateAction::Settings(MachineTarget::Local)),
             }],
             reading: false,
@@ -191,21 +194,13 @@ fn read_inventory(sources: Sources) -> Vec<ServerUpdateRow> {
             server,
         });
     let (detail, available) = if crate::local_startup::owned_foreground() {
-        (
-            "Development server · updates use the source development workflow.".into(),
-            false,
-        )
+        ("Development Server".into(), false)
     } else {
         service
             .as_ref()
             .map_err(|error| *error)
             .and_then(settings_window::server_update::passive_update)
-            .unwrap_or_else(|_| {
-                (
-                    "Server update status unknown. Open Settings to review it.".into(),
-                    false,
-                )
-            })
+            .unwrap_or_else(|_| (UPDATE_STATUS_UNKNOWN.into(), false))
     };
     let local = Observation {
         key,
@@ -269,7 +264,7 @@ fn read_inventory(sources: Sources) -> Vec<ServerUpdateRow> {
             let state = if status == DirectRouteStatus::Connected {
                 "Connected"
             } else {
-                "Offline or not connected"
+                "Not Connected"
             };
             observations.push(Observation {
                 key: ServerKey::Known {
@@ -278,7 +273,8 @@ fn read_inventory(sources: Sources) -> Vec<ServerUpdateRow> {
                 },
                 row: ServerUpdateRow {
                     label: format!("{} · account unknown", route.label).into(),
-                    detail: format!("{state}. Server update status unknown. A paired network connection grants no server maintenance authority.").into(),
+                    // A paired network connection grants no server maintenance authority.
+                    detail: format!("{state} · {UPDATE_STATUS_UNKNOWN}").into(),
                     action: Some(ServerUpdateAction::Settings(MachineTarget::Direct(id))),
                 },
                 route_priority: 1,
@@ -346,15 +342,9 @@ fn ssh_row(
         _ => None,
     };
     let (detail, available) = match (known, facts) {
-        (false, _) => (
-            "Offline or status unknown. Open Settings to check this server.".to_owned(),
-            false,
-        ),
+        (false, _) => ("Offline or Status Unknown".to_owned(), false),
         (true, Some(facts)) => remote_update(facts, candidate),
-        (true, None) => (
-            "Server update status unknown. Open Settings to read its approved version.".to_owned(),
-            false,
-        ),
+        (true, None) => (UPDATE_STATUS_UNKNOWN.to_owned(), false),
     };
     ServerUpdateRow {
         label: label.into(),
@@ -369,48 +359,26 @@ fn ssh_row(
 
 fn remote_update(facts: &MaintenanceFacts, candidate: Option<&ServerCandidate>) -> (String, bool) {
     if !facts.status.installed {
-        return ("No server is installed for this account.".to_owned(), false);
+        return ("Not Installed".to_owned(), false);
     }
     if facts.activation.as_ref().is_some_and(|activation| {
         !activation.returned && !matches!(activation.phase, RemoteActivationPhase::Completed { .. })
     }) {
-        return (
-            "An existing server update needs attention in Settings.".to_owned(),
-            false,
-        );
+        return ("Update Needs Attention".to_owned(), false);
     }
     let Some(approved) = &facts.approved else {
-        return (
-            "Approved server version unknown. Open Settings to check it.".to_owned(),
-            false,
-        );
+        return (UPDATE_STATUS_UNKNOWN.to_owned(), false);
     };
-    let observed = format!("Last observed server version {}.", approved.version);
     let Some(candidate) = candidate else {
-        return (
-            format!("{observed} No suitable verified server candidate is available."),
-            false,
-        );
+        return ("No Update".to_owned(), false);
     };
     if candidate.digest == approved.digest {
-        return (
-            format!("{observed} The included server artifact is already approved."),
-            false,
-        );
+        return ("Up to Date".to_owned(), false);
     }
     if is_released_downgrade(&candidate.version, &approved.version) {
-        return (
-            format!("{observed} The included server candidate is an earlier release."),
-            false,
-        );
+        return ("No Update".to_owned(), false);
     }
-    (
-        format!(
-            "{observed} Verified server version {} is available. Review and confirm in Settings.",
-            candidate.version
-        ),
-        true,
-    )
+    ("Update Available".to_owned(), true)
 }
 
 #[cfg(test)]
@@ -546,7 +514,7 @@ mod tests {
             Some(&state),
             Some(&candidate),
         );
-        assert!(row.detail.contains("unknown"));
+        assert_eq!(&*row.detail, UPDATE_STATUS_UNKNOWN);
         assert!(!row.action.unwrap().offers_update());
     }
 
