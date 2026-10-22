@@ -355,7 +355,9 @@ mod development {
                     WorktreeRemoval::Main
                 } else if record.locked {
                     WorktreeRemoval::Locked
-                } else if self
+                } else if self.shared.owning(workspace_id).is_some_and(|shared| {
+                    shared.repositories().holds_pinned_directory(&record.root)
+                }) || self
                     .shared
                     .owning(workspace_id)
                     .and_then(|s| s.latest_inventory())

@@ -250,4 +250,8 @@ pub struct Snapshot {
     pub revision: u64,
     pub git: GitToolStatus,
     pub directories: Vec<DirectoryFacts>,
+    /// Listed Worktree roots that physically contain a Workspace's Pinned Directory.
+    /// The owning server resolves symbolic links; clients grant no local file authority.
+    #[serde(default)]
+    pub pinned_worktrees: Vec<PathBuf>,
 }

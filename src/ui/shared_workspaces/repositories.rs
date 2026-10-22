@@ -86,6 +86,13 @@ impl SharedRepositories {
         find(self.snapshot.as_ref()?, directory)
     }
 
+    /// The owning server resolves pins across all its Workspaces on its own filesystem.
+    pub(crate) fn holds_pinned_directory(&self, root: &Path) -> bool {
+        self.snapshot
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.pinned_worktrees.iter().any(|path| path == root))
+    }
+
     /// The Worktrees of the repository containing one directory, as git on the server lists them.
     ///
     /// A failed read keeps the directory's last listing, which a removed Worktree would keep
@@ -283,6 +290,7 @@ mod tests {
             revision,
             git: GitToolStatus::Unknown,
             directories,
+            pinned_worktrees: Vec::new(),
         }
     }
 

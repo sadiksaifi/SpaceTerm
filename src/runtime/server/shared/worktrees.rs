@@ -185,7 +185,10 @@ fn affected_worktree_tabs(inventory: &Inventory, root: &Path, path: &Path) -> Ve
         directory.starts_with(path) || local_filesystem().physically_contains(path, directory)
     })
 }
-fn pinned_in_worktree(inventory: &Inventory, path: &Path) -> Result<bool, Error> {
+pub(in crate::runtime::server) fn pinned_in_worktree(
+    inventory: &Inventory,
+    path: &Path,
+) -> Result<bool, Error> {
     for pin in inventory
         .workspaces
         .iter()

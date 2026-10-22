@@ -27,6 +27,8 @@ const MAX_DIRECTORIES: usize = 512;
 const MAX_WORKTREES: usize = 256;
 const MAX_SNAPSHOT_BYTES: usize = 8 * 1024 * 1024;
 
+mod pins;
+
 type Sources = BTreeSet<PathBuf>;
 struct Worker {
     cancellation: SshCancellationToken,
@@ -39,6 +41,7 @@ pub(super) struct ServerRepositories {
     snapshot: Snapshot,
     worker: Option<Worker>,
     next_read: Instant,
+    pin_membership: pins::PinMembership,
 }
 impl ServerRepositories {
     pub(super) fn new(boot: Id) -> Self {
@@ -50,9 +53,11 @@ impl ServerRepositories {
                 revision: 0,
                 git: GitToolStatus::Unknown,
                 directories: Vec::new(),
+                pinned_worktrees: Vec::new(),
             },
             worker: None,
             next_read: Instant::now(),
+            pin_membership: pins::PinMembership::default(),
         }
     }
 }
@@ -201,6 +206,8 @@ impl ServerRepositories {
                 }
             }
         }
+        self.pin_membership
+            .update(&state.inventory, &mut self.snapshot);
         reconcile_membership(state, &self.snapshot);
         if !self.subscribers.is_empty() && self.worker.is_none() && Instant::now() >= self.next_read
         {

@@ -7,6 +7,7 @@ use std::collections::BTreeMap;
 #[path = "shared/session_end_tests.rs"]
 mod session_end_tests;
 mod worktrees;
+pub(super) use worktrees::pinned_in_worktree;
 
 pub struct SharedWorkspaceHost {
     writes: worktrees::Writes,

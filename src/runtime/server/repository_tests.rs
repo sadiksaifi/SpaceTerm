@@ -1107,6 +1107,15 @@ fn server_removal_protects_pins_in_unattached_workspaces_and_rechecks_missing_lo
             },
         },
     );
+    let inventory = git_facts(&mut host, &git.0, |facts| facts.worktrees.is_some());
+    assert!(
+        inventory
+            .repositories
+            .unwrap()
+            .pinned_worktrees
+            .contains(&tree),
+        "the server publishes physical containment for a pin in another Workspace"
+    );
     assert!(matches!(
         read_worktree(
             &mut host,
@@ -1128,6 +1137,14 @@ fn server_removal_protects_pins_in_unattached_workspaces_and_rechecks_missing_lo
                 directory: None,
             },
         },
+    );
+    assert!(
+        !shared_inventory(&mut host)
+            .repositories
+            .unwrap()
+            .pinned_worktrees
+            .contains(&tree),
+        "unpinning removes the server's removal restriction"
     );
     let review = review_removal(&mut host, &git.0, &tree);
     std::fs::remove_dir_all(&tree).unwrap();

@@ -11831,6 +11831,7 @@ mod shared_repositories {
                     patch: 0,
                 }),
                 directories,
+                pinned_worktrees: Vec::new(),
             }),
             revision: 1,
             close: None,
@@ -12205,6 +12206,44 @@ mod shared_repositories {
         assert_eq!(rows[1].removal, WorktreeRemoval::Server);
         assert!(rows.iter().all(|row| !row.opens_tabs() && row.closes_tabs));
         assert!(!creates_worktrees, "New Worktree stays unavailable");
+    }
+
+    #[gpui::test]
+    fn a_server_physical_pin_should_disable_removal_across_workspaces(cx: &mut TestAppContext) {
+        use spaceterm_ui::a11y_testing::A11yTree;
+
+        let mut initial = published(1, "main", true);
+        // This path is an opaque alias on the server. The client cannot resolve it locally.
+        let mut other = initial.workspaces[0].clone();
+        other.id = [90; 32];
+        other.pinned_directory = Some("/server/pin-alias/src".into());
+        other.root_tab = [91; 32];
+        other.tabs.truncate(1);
+        other.tabs[0].id = other.root_tab;
+        other.tabs[0].root_pane = [92; 32];
+        other.tabs[0].panes = vec![pane([92; 32], "/server/pin-alias/src")];
+        initial.workspaces.push(other);
+        initial.repositories.as_mut().unwrap().pinned_worktrees = vec![FEATURE_ROOT.into()];
+        let (harness, _, _, cx) = ssh_harness(cx, initial);
+        cx.update(|window, cx| {
+            window.activate_window();
+            harness.manager.update(cx, |manager, cx| {
+                manager.activate_workspace(harness.shared, window, cx);
+            });
+        });
+        redraw(cx);
+        let section = harness.row(cx).worktrees.unwrap();
+        let feature = section
+            .rows()
+            .find(|row| row.name.as_ref() == "app-feature")
+            .unwrap();
+        assert_eq!(feature.removal, WorktreeRemoval::HoldsPinnedDirectory);
+        right_click(worktree_row(harness.shared, feature.worktree_id, cx), cx);
+        assert_eq!(
+            A11yTree::read(cx).node("Unpin the Directory to Remove")["aria"]["disabled"],
+            true
+        );
+        assert!(harness.edits.submitted().is_empty());
     }
 
     /// A Worktree removed outside SpaceTerm keeps its row while the server keeps its Tab there.
