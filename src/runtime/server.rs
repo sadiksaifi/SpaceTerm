@@ -12,6 +12,8 @@ mod accessibility;
 #[cfg(test)]
 mod accessibility_tests;
 #[cfg(test)]
+mod boundary_tests;
+#[cfg(test)]
 mod clear_tests;
 mod directories;
 #[cfg(all(test, feature = "desktop"))]

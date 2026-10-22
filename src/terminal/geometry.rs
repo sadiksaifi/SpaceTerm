@@ -109,8 +109,10 @@ impl TerminalGeometry {
         backing_scale: BackingScale,
         minimum_grid: CellGridSize,
     ) -> Self {
-        let cols = grid_dimension(viewport.width, cell.width, minimum_grid.cols);
-        let rows = grid_dimension(viewport.height, cell.height, minimum_grid.rows);
+        let cols = grid_dimension(viewport.width, cell.width, minimum_grid.cols)
+            .min(spaceterm_server::pane::MAX_COLUMNS);
+        let rows = grid_dimension(viewport.height, cell.height, minimum_grid.rows)
+            .min(spaceterm_server::pane::MAX_ROWS);
         let grid = CellGridSize::new(cols, rows);
         let fitted_cell = Self::fitted_cell_size(viewport, cell, grid);
         Self::from_grid_with_logical_cell(grid, cell, fitted_cell, backing_scale)
@@ -249,6 +251,25 @@ fn backing_dimension(logical: f32, scale: BackingScale) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn large_desktop_grids_use_the_same_supported_budget_as_the_server() {
+        let geometry = |columns, rows| {
+            TerminalGeometry::from_viewport(
+                LogicalSize::new(columns as f32 * 8.0, rows as f32 * 16.0),
+                LogicalCellSize::new(8.0, 16.0),
+                BackingScale::ONE,
+                CellGridSize::new(2, 2),
+            )
+        };
+        assert_eq!(geometry(320, 120).grid(), CellGridSize::new(320, 120));
+        let maximum = geometry(4096, 4096);
+        assert_eq!(maximum.grid(), CellGridSize::new(512, 256));
+        assert_eq!(
+            maximum.cell_at_backing_position(BackingPosition::new(4095.0, 4095.0)),
+            CellGridPosition::new(511, 255)
+        );
+    }
 
     #[test]
     fn viewport_remainder_should_be_distributed_across_real_cells() {

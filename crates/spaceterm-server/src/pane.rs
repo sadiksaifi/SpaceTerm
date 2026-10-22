@@ -12,12 +12,15 @@ mod transport;
 use crate::ServerError;
 use serde::{Deserialize, Serialize};
 
-pub const MAX_COLUMNS: u16 = 240;
-pub const MAX_ROWS: u16 = 100;
+// One supported grid budget shared by desktop geometry, emulator, PTY and wire validation.
+pub const MAX_COLUMNS: u16 = 512;
+pub const MAX_ROWS: u16 = 256;
 /// Maximum number of ordered key events accepted by one focused batch.
 pub const MAX_KEY_BATCH: usize = 32;
 pub const MAX_KEY_TEXT_BYTES: usize = 4096;
-pub const MAX_TERMINAL_FRAME: usize = 16 * 1024 * 1024;
+// Includes a full grid of 64-codepoint cells plus bounded links and graphics metadata.
+// Image pixels continue to travel in independently bounded GraphicsChunk messages.
+pub const MAX_TERMINAL_FRAME: usize = 96 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PaneSize {

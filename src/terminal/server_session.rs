@@ -1356,8 +1356,8 @@ fn pane_size(geometry: TerminalGeometry) -> PaneSize {
     let grid = geometry.grid();
     let cell = geometry.backing_cell_size();
     PaneSize {
-        columns: grid.cols.clamp(2, pane::MAX_COLUMNS),
-        rows: grid.rows.clamp(2, pane::MAX_ROWS),
+        columns: grid.cols.max(2),
+        rows: grid.rows.max(2),
         cell_width: cell.width.clamp(1, 256) as u16,
         cell_height: cell.height.clamp(1, 256) as u16,
     }
