@@ -37,7 +37,6 @@ impl DirectoryRecovery {
         } = actions;
         let source = Rc::new(ServerDirectorySource::new(
             server,
-            cx.background_executor().clone(),
             target.original.clone(),
             Rc::clone(&online),
         ));

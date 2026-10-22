@@ -2748,6 +2748,105 @@ mod tests {
         }
     }
 
+    /// The owning server reached over a route that, like an SSH server's session limit, refuses
+    /// a channel beyond the first two it opened.
+    struct LimitedChannels {
+        server: InProcessServer,
+        opened: Arc<AtomicUsize>,
+    }
+
+    impl DirectoryConnector for LimitedChannels {
+        fn connect(&self) -> Result<Box<dyn DirectoryConnection>, ()> {
+            if self.opened.fetch_add(1, AtomicOrdering::SeqCst) >= 2 {
+                return Err(());
+            }
+            self.server.connect()
+        }
+    }
+
+    /// Typing a path as one quick burst browses it over one server channel, so a route that
+    /// allows only a few channels never reads as a lost connection.
+    #[gpui::test]
+    fn typing_a_path_quickly_should_browse_it_over_one_server_channel(cx: &mut TestAppContext) {
+        // The server answers from its own directory channel thread.
+        cx.executor().allow_parking();
+        let root = std::env::temp_dir().join(format!(
+            "spaceterm-server-directory-burst-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("projects/alpha")).unwrap();
+        std::fs::create_dir_all(root.join("projects/beta")).unwrap();
+        let handler: Box<dyn FnMut(&PaneRequest) -> Reply + Send> =
+            Box::new(crate::runtime::directory_testing::directory_host());
+        let opened = Arc::new(AtomicUsize::new(0));
+        let server: Arc<dyn DirectoryConnector> = Arc::new(LimitedChannels {
+            server: InProcessServer(Arc::new(Mutex::new(handler))),
+            opened: Arc::clone(&opened),
+        });
+        cx.update(crate::ui::init).unwrap();
+        let (harness, cx) = cx.add_window_view(move |window, cx| {
+            let source = ServerDirectorySource::browsing_through(
+                server,
+                Some("penguin".to_owned()),
+                Rc::new(|| true),
+            );
+            DirectoryPickerHarness {
+                picker: cx.new(|cx| {
+                    DirectoryPicker::new(Rc::new(source), "Open Remote Directory", window, cx)
+                }),
+            }
+        });
+        let picker = harness.read_with(cx, |harness, _| harness.picker.clone());
+        cx.update(|window, cx| {
+            window.activate_window();
+            picker.update(cx, |picker, cx| assert!(picker.open(window, cx)));
+        });
+        wait_for(
+            |cx| {
+                picker.read_with(cx, |picker, _| {
+                    picker.status != DirectoryPickerStatus::DiscoveringAccount
+                })
+            },
+            cx,
+        );
+
+        // Each character replaces the query at once, as fast typing does.
+        let typed = format!("{}/projects/", root.display());
+        for end in 1..=typed.len() {
+            cx.update(|_, cx| {
+                picker.update(cx, |picker, cx| {
+                    picker
+                        .palette
+                        .update(cx, |palette, cx| palette.set_query(&typed[..end], cx));
+                });
+            });
+        }
+        wait_for(
+            |cx| {
+                picker.read_with(cx, |picker, _| {
+                    picker.status != DirectoryPickerStatus::Loading
+                })
+            },
+            cx,
+        );
+
+        assert_eq!(
+            picker.read_with(cx, |picker, _| picker.status),
+            DirectoryPickerStatus::Readable
+        );
+        assert_eq!(
+            picker.read_with(cx, |picker, _| picker.row_names()),
+            ["alpha", "beta"]
+        );
+        assert_eq!(
+            opened.load(AtomicOrdering::SeqCst),
+            1,
+            "the picker reuses its one server channel"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     fn wait_for(
         mut settled: impl FnMut(&mut VisualTestContext) -> bool,
         cx: &mut VisualTestContext,
@@ -2767,6 +2866,8 @@ mod tests {
     fn a_server_directory_picker_should_create_a_missing_directory_on_its_server(
         cx: &mut TestAppContext,
     ) {
+        // The server answers from its own directory channel thread.
+        cx.executor().allow_parking();
         let root = std::env::temp_dir().join(format!(
             "spaceterm-server-directory-creation-{}",
             std::process::id()
@@ -2784,7 +2885,6 @@ mod tests {
         let (harness, cx) = cx.add_window_view(move |window, cx| {
             let source = ServerDirectorySource::browsing_through(
                 server,
-                cx.background_executor().clone(),
                 Some("penguin".to_owned()),
                 Rc::new(|| true),
             );

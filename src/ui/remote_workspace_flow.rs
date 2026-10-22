@@ -885,7 +885,6 @@ impl RemoteWorkspaceFlow {
         });
         let source = Rc::new(ServerDirectorySource::browsing(
             server,
-            cx.background_executor().clone(),
             Some(destination.host().to_owned()),
             available,
         ));

@@ -3314,7 +3314,6 @@ impl WorkspaceManager {
         let available: Rc<dyn Fn() -> bool> = Rc::new(move || client.availability().0);
         Some(ServerDirectorySource::browsing(
             server,
-            cx.background_executor().clone(),
             Some(machine),
             available,
         ))
