@@ -165,6 +165,7 @@ fn a_reviewed_close_keeps_a_newer_rename_through_confirmation_and_acceptance(
             .read(cx)
             .rename_input()
             .expect("the newer draft")
+            .clone()
     });
     harness.edits.answer(Outcome::StaleConfirmation);
     harness.sync(cx);
