@@ -36,6 +36,8 @@ The default Development command does not use a Server Candidate. Explicit source
 
 Packaging prepares the signed server before compiling the desktop. The same variables can select an existing signed pair without recompressing it or matching its version to the client. Package verification compares the embedded archive with the digest reported by the desktop's `--build-info`. A running client refuses a different archive placed at its installation path and asks for a client restart.
 
+When startup has no usable Server state, recovery fills the window beneath its window controls. The Server Settings action remains available there. A missing Server package and a package that fails verification have separate explanations. Usable Workspaces from another connected Server keep the normal Workspace presentation.
+
 Linux first setup can return an authorization requirement before service registration. The caller must obtain explicit scoped linger authorization through the existing service control, then retry startup. Cancellation before service mutation preserves the previous policy; admitted service registration or Start is observed to completion without claiming rollback.
 
 ## SSH account servers
