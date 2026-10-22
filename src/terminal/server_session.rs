@@ -5,13 +5,14 @@ mod control;
 mod effects;
 use super::server_graphics as graphics;
 mod reading;
+mod recovery;
 mod schedule;
 use super::pointer_input::{PointerInput, WheelInput};
 use super::session::clipboard::ClipboardAuthority;
 use super::session::*;
 use super::{emulator::*, geometry::TerminalGeometry, key::*};
 use crate::local_server::{LocalServer, ServerError};
-pub(crate) use control::PaneControls;
+pub(crate) use control::{ControlRoute, PaneControlRegistry, PaneControls};
 use effects::ClientEffects;
 use spaceterm_server::pane::{self, Lease, PaneSize, Reply, Request};
 use std::sync::{
@@ -46,6 +47,7 @@ pub(crate) struct DevelopmentPaneState {
     selected: AtomicBool,
     take_over: AtomicBool,
     start_restored: AtomicBool,
+    connection_recovery: Arc<Mutex<recovery::Recovery>>,
     recovery: Mutex<Option<pane::directories::Target>>,
     repair: Mutex<Option<(pane::directories::Target, std::path::PathBuf)>>,
     directory_server: Mutex<Option<LocalServer>>,
@@ -77,6 +79,7 @@ impl DevelopmentPaneState {
             selected: AtomicBool::new(false),
             take_over: AtomicBool::new(false),
             start_restored: AtomicBool::new(false),
+            connection_recovery: Arc::default(),
             recovery: Mutex::default(),
             repair: Mutex::default(),
             directory_server: Mutex::default(),
@@ -144,21 +147,34 @@ impl DevelopmentPaneState {
     }
     pub(crate) fn select(&self) {
         let status = self.status.lock().unwrap_or_else(|e| e.into_inner());
-        if matches!(
-            *status,
-            DevelopmentPaneStatus::Connecting
-                | DevelopmentPaneStatus::Restored
-                | DevelopmentPaneStatus::SessionEnded
-                | DevelopmentPaneStatus::Takeover
-        ) {
+        if !self.start_unconfirmed()
+            && matches!(
+                *status,
+                DevelopmentPaneStatus::Connecting
+                    | DevelopmentPaneStatus::Restored
+                    | DevelopmentPaneStatus::SessionEnded
+                    | DevelopmentPaneStatus::Takeover
+            )
+        {
             self.selected.store(true, Ordering::Release);
             self.retry.store(true, Ordering::Release);
             self.wake.notify();
         }
     }
     pub(crate) fn retry(&self) {
+        self.connection_recovery
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retry();
         self.retry.store(true, Ordering::Release);
         self.wake.notify();
+    }
+    /// The original shell start may still be in flight. Retry observes it without starting again.
+    pub(crate) fn start_unconfirmed(&self) -> bool {
+        self.connection_recovery
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .start_unconfirmed()
     }
     /// Records that the person stopped this Pane's server, as its route reported. An
     /// interrupted Pane says so now, and later failures wait for an explicit retry, because no
@@ -177,13 +193,16 @@ impl DevelopmentPaneState {
         };
     }
     pub(crate) fn start_restored(&self) {
-        if matches!(
-            self.status(),
-            DevelopmentPaneStatus::Restored
-                | DevelopmentPaneStatus::SessionEnded
-                | DevelopmentPaneStatus::Failed(ServerError::DirectoryUnavailable)
-        ) {
-            self.directory_busy.store(true, Ordering::Release);
+        let status = self.status.lock().unwrap_or_else(|e| e.into_inner());
+        if !self.start_unconfirmed()
+            && matches!(
+                *status,
+                DevelopmentPaneStatus::Restored
+                    | DevelopmentPaneStatus::SessionEnded
+                    | DevelopmentPaneStatus::Failed(ServerError::DirectoryUnavailable)
+            )
+            && !self.directory_busy.swap(true, Ordering::AcqRel)
+        {
             *self
                 .directory_note
                 .lock()
@@ -219,6 +238,7 @@ impl DevelopmentPaneState {
         replacement: std::path::PathBuf,
     ) {
         if self.status() == DevelopmentPaneStatus::Failed(ServerError::DirectoryUnavailable)
+            && !self.start_unconfirmed()
             && self.recovery_target().as_ref() == Some(&target)
         {
             self.directory_busy.store(true, Ordering::Release);
@@ -232,7 +252,7 @@ impl DevelopmentPaneState {
     }
     pub(crate) fn take_over(&self) {
         let mut status = self.status.lock().unwrap_or_else(|e| e.into_inner());
-        if *status == DevelopmentPaneStatus::Takeover {
+        if *status == DevelopmentPaneStatus::Takeover && !self.start_unconfirmed() {
             // This action supersedes earlier selection; a later eligible selection stays queued.
             self.selected.store(false, Ordering::Release);
             *status = DevelopmentPaneStatus::TakingOver;
@@ -305,7 +325,7 @@ impl DevelopmentPaneState {
         };
         // An admitted server update refuses connections only until it resolves, so the Pane
         // keeps reconnecting on its backoff in every client, whoever started the update.
-        let retryable = matches!(
+        let mut retryable = matches!(
             error,
             ServerError::DirectoryUnavailable
                 | ServerError::Protocol
@@ -314,11 +334,25 @@ impl DevelopmentPaneState {
                 | ServerError::Controlled
                 | ServerError::ActivationUnresolved
         );
+        let error = if retryable
+            && (error != ServerError::DirectoryUnavailable || self.start_unconfirmed())
+        {
+            let (cause, allowed) = self
+                .connection_recovery
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .failed(error);
+            retryable = allowed;
+            cause
+        } else {
+            error
+        };
         {
             let mut status = self.status.lock().unwrap_or_else(|e| e.into_inner());
             // A click accepted before this interruption is never replayed after it.
             self.take_over.store(false, Ordering::Release);
             self.start_restored.store(false, Ordering::Release);
+            self.directory_busy.store(false, Ordering::Release);
             self.repair.lock().unwrap_or_else(|e| e.into_inner()).take();
 
             self.selected.store(false, Ordering::Release);
@@ -432,7 +466,11 @@ impl DevelopmentServerSessionFactory {
         remote_metadata: Option<super::metadata::RemoteTerminalMetadataContext>,
         pane_id: spaceterm_server::hierarchy::Id,
     ) -> (Self, Arc<DevelopmentPaneState>) {
-        let state = Arc::new(DevelopmentPaneState::new());
+        let control = controls.pane(pane_id);
+        let state = Arc::new(DevelopmentPaneState {
+            connection_recovery: Arc::clone(&control.recovery),
+            ..DevelopmentPaneState::new()
+        });
         *state
             .directory_server
             .lock()
@@ -444,7 +482,7 @@ impl DevelopmentServerSessionFactory {
                 remote_metadata,
                 pane_id,
                 attachment: None,
-                control: controls.pane(pane_id),
+                control,
                 state: Arc::clone(&state),
             },
             state,
@@ -1407,7 +1445,18 @@ fn present(
                 paste_unconfirmed: &mut paste_unconfirmed,
             })
             .run(
-                |request| send(&presenter, &alive, &attachment, &mut connection, request),
+                |request| {
+                    presenter.send(request, |request| {
+                        if !alive.load(Ordering::Acquire) {
+                            return Err(ServerError::NotRunning);
+                        }
+                        // Complete recovery bookkeeping before another presentation can send.
+                        // No Recovery lock is held while exchanging with the server.
+                        claim::exchange(&state, pane_id, request, |request| {
+                            exchange(&attachment, &mut connection, request)
+                        })
+                    })
+                },
                 || {
                     drain_input(&state, &input);
                     clear_presentation(&events, &mut generation, &appearance);
@@ -1695,6 +1744,14 @@ fn present(
                 if semantic.can_continue() {
                     next = next.max(reading::Next::Continue);
                 }
+                if polled && ready {
+                    // A complete healthy round renews recovery even when its screen is unchanged.
+                    state
+                        .connection_recovery
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .connected(std::time::Instant::now());
+                }
                 let now = std::time::Instant::now();
                 match next {
                     reading::Next::Idle => state.wake.wait_until(cadence.deadline()),
@@ -1732,7 +1789,7 @@ fn present(
                         .force_send(TerminalSessionEvent::Exited(TerminalSessionExit::Success));
                     return;
                 }
-                if !takeover {
+                if !takeover || state.start_unconfirmed() {
                     state.invalidate();
                 }
                 drain_input(&state, &input);
@@ -4197,6 +4254,55 @@ mod tests {
         state.set(DevelopmentPaneStatus::Takeover);
         assert!(state.connection_failed(ServerError::NotRunning, true));
         assert_eq!(state.status(), DevelopmentPaneStatus::TakeoverReconnecting);
+    }
+
+    #[test]
+    fn persistent_protocol_failure_stops_after_three_automatic_reconnections() {
+        for takeover in [false, true] {
+            let state = DevelopmentPaneState::new();
+            for _ in 0..3 {
+                assert!(state.connection_failed(ServerError::Protocol, takeover));
+            }
+            assert!(!state.connection_failed(ServerError::Protocol, takeover));
+            assert_eq!(
+                state.status(),
+                if takeover {
+                    DevelopmentPaneStatus::TakeoverFailed(ServerError::Protocol)
+                } else {
+                    DevelopmentPaneStatus::Failed(ServerError::Protocol)
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn a_brief_screen_between_protocol_failures_does_not_renew_automatic_retries() {
+        let adapter = Adapter::new();
+        let state = &adapter.handle.state;
+        for sequence in 1..=3 {
+            assert!(state.connection_failed(ServerError::Protocol, false));
+            adapter.tracking_screen(sequence, sequence, false);
+        }
+        assert!(!state.connection_failed(ServerError::Protocol, false));
+        assert_eq!(
+            state.status(),
+            DevelopmentPaneStatus::Failed(ServerError::Protocol)
+        );
+        state.retry();
+        assert!(state.connection_failed(ServerError::Protocol, false));
+    }
+
+    #[test]
+    fn an_outage_during_protocol_recovery_retains_the_original_failure() {
+        let state = DevelopmentPaneState::new();
+        assert!(state.connection_failed(ServerError::Protocol, false));
+        assert!(state.connection_failed(ServerError::NotRunning, false));
+        assert!(state.connection_failed(ServerError::NotRunning, false));
+        assert!(!state.connection_failed(ServerError::NotRunning, false));
+        assert_eq!(
+            state.status(),
+            DevelopmentPaneStatus::Failed(ServerError::Protocol)
+        );
     }
 
     #[test]

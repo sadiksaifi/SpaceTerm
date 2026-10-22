@@ -21,7 +21,7 @@ mod transport;
 pub mod worktree;
 
 #[cfg(feature = "client")]
-pub use client::LocalServer;
+pub use client::{ClientScope, LocalServer};
 #[cfg(feature = "client")]
 pub use startup::{LocalStartup, StartupOutcome};
 

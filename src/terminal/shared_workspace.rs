@@ -107,6 +107,15 @@ impl SharedWorkspaceClient {
         let (commands, receiver) = mpsc::sync_channel(1);
         let state = Arc::clone(&snapshot);
         let running = Arc::clone(&alive);
+        if let Err(error) = controls.admission() {
+            snapshot.publish(|snapshot| snapshot.error = Some(error));
+            alive.store(false, Ordering::Release);
+            return Self {
+                snapshot,
+                commands,
+                alive,
+            };
+        }
         if std::thread::Builder::new()
             .name("spaceterm-shared-workspaces".into())
             .spawn(move || run(server, controls, state, receiver, running, legacy_location))
@@ -254,9 +263,10 @@ fn run(
     let mut active: Option<(u64, Mutation)> = None;
     while alive.load(Ordering::Acquire) {
         let result = (|| {
+            // Validate the transport before opening this client's retained writers.
+            let mut connection = server.connect_shared_pane()?;
             let attachments = server.attachments()?;
             let mut journal = server.shared_journal()?;
-            let mut connection = server.connect_shared_pane()?;
             if connection.worktree_writes()
                 && let Some(template) = &legacy_location
             {

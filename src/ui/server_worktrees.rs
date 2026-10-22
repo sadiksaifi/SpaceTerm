@@ -1,7 +1,10 @@
 //! One shared edit writer per presented server, for the Workspace Window and server Settings.
 use crate::{
     local_server::LocalServer,
-    terminal::shared_workspace::SharedWorkspaceClient,
+    terminal::{
+        server_session::{ControlRoute, PaneControlRegistry},
+        shared_workspace::SharedWorkspaceClient,
+    },
     ui::shared_workspaces::{SharedEditSource, SharedRefusalReason, SharedWorkspaceEdits},
 };
 use gpui::{App, AppContext as _, Global, Task};
@@ -54,6 +57,12 @@ impl Global for SshClients {}
 #[derive(Default)]
 struct DirectClients(std::collections::HashMap<crate::direct_connections::DirectRouteId, Client>);
 impl Global for DirectClients {}
+
+/// Withdrawal drops presentation writers, while original Pane starts retain their controls.
+#[derive(Default)]
+struct RetainedPaneControls(PaneControlRegistry);
+impl Global for RetainedPaneControls {}
+
 impl Client {
     pub(crate) fn get(cx: &mut App) -> Option<Self> {
         if let Some(client) = cx.try_global::<Self>() {
@@ -83,18 +92,22 @@ impl Client {
     }
     /// The edit writer for a connected SSH server's account server, created once per connection
     /// so the Workspace Window and Settings share its sequence and Pane control. A writer kept
-    /// for an earlier connection to that destination is replaced, never reused.
+    /// for an earlier connection is replaced; its validated original Pane controls remain.
     pub(crate) fn for_ssh(
         destination: &crate::domain::SshDestination,
         server: LocalServer,
         cx: &mut App,
     ) -> Self {
-        if let Some(client) =
-            Self::ssh(destination, cx).filter(|client| client.server.same_handle(&server))
+        if let Some(client) = Self::ssh(destination, cx)
+            .filter(|client| client.server.same_handle(&server))
+            .filter(|client| client.controls.admission().is_ok() || server.client_scope().is_err())
         {
             return client;
         }
-        let controls = std::sync::Arc::<crate::terminal::server_session::PaneControls>::default();
+        let controls = cx.default_global::<RetainedPaneControls>().0.controls(
+            ControlRoute::Ssh(destination.as_str().to_owned()),
+            server.client_scope(),
+        );
         let edits = Rc::new(SharedWorkspaceClient::remote(
             server.clone(),
             std::sync::Arc::clone(&controls),
@@ -135,12 +148,16 @@ impl Client {
         server: LocalServer,
         cx: &mut App,
     ) -> Self {
-        if let Some(client) =
-            Self::direct(&route, cx).filter(|client| client.server.same_handle(&server))
+        if let Some(client) = Self::direct(&route, cx)
+            .filter(|client| client.server.same_handle(&server))
+            .filter(|client| client.controls.admission().is_ok() || server.client_scope().is_err())
         {
             return client;
         }
-        let controls = std::sync::Arc::<crate::terminal::server_session::PaneControls>::default();
+        let controls = cx
+            .default_global::<RetainedPaneControls>()
+            .0
+            .controls(ControlRoute::Direct(route), server.client_scope());
         let edits = Rc::new(SharedWorkspaceClient::remote(
             server.clone(),
             std::sync::Arc::clone(&controls),
@@ -433,7 +450,10 @@ mod tests {
                 "one connection keeps one writer"
             );
             let replaced = Client::for_ssh(&destination, later, cx);
-            assert!(!Arc::ptr_eq(&original.controls, &replaced.controls));
+            assert!(
+                !Rc::ptr_eq(&original.edits, &replaced.edits),
+                "a new connection gets a new presentation writer"
+            );
             assert!(Arc::ptr_eq(
                 &Client::ssh(&destination, cx).unwrap().controls,
                 &replaced.controls
