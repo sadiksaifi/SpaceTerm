@@ -587,9 +587,11 @@ pub(super) struct UpdateConfirmation {
 }
 
 impl UpdateConfirmation {
+    /// The local server has no machine name to show, so the detail first says whose server it is.
     pub(super) fn of(prepared: &PreparedChange) -> Self {
+        let identity = ApplicationIdentity::current();
         let wording = UpdateWording::new(
-            ApplicationIdentity::current().directory_name(),
+            identity.directory_name(),
             prepared.change,
             &prepared.previous,
             &prepared.candidate,
@@ -599,7 +601,12 @@ impl UpdateConfirmation {
         Self {
             title: wording.title(),
             message: wording.message().into(),
-            detail: wording.detail().into(),
+            detail: format!(
+                "This is the {} server for this account on this computer. {}",
+                identity.display_name(),
+                wording.detail()
+            )
+            .into(),
             confirm: wording.confirm_label(),
         }
     }

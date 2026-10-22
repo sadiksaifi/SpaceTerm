@@ -221,7 +221,19 @@ fn the_confirmation_names_both_builds_and_every_clients_sessions() {
     assert!(live.message.contains("version 1.5.0 (commit bbbbbbb)"));
     assert!(live.message.contains("end all of its Terminal Sessions"));
     assert!(live.detail.contains("from version 1.4.0 (commit aaaaaaa)"));
-    assert!(live.detail.contains("every client"));
+    assert!(
+        live.detail.starts_with(&format!(
+            "This is the {} server for this account on this computer. ",
+            crate::application_identity::ApplicationIdentity::current().display_name()
+        )),
+        "{}",
+        live.detail
+    );
+    assert!(live.detail.contains("including those other clients use"));
+    assert!(
+        live.detail
+            .ends_with("Other servers aren\u{2019}t affected.")
+    );
 
     let parked = super::UpdateConfirmation::of(&prepared(false, true));
     assert!(parked.message.contains("stopped"), "{}", parked.message);
