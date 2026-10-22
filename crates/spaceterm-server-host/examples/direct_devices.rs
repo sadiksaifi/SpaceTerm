@@ -11,9 +11,10 @@ mod support;
 
 #[cfg(feature = "client")]
 mod exercise {
+    use std::fs::File;
     use std::io::{Read, Write};
     use std::net::SocketAddr;
-    use std::os::fd::AsRawFd;
+    use std::os::fd::{AsRawFd, BorrowedFd};
     use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
     use std::sync::Arc;
     use std::time::{Duration, Instant};
@@ -26,7 +27,7 @@ mod exercise {
     use spaceterm_server::hierarchy::{CloseTarget, Id, Inventory, Mutation, Outcome};
     use spaceterm_server::pane::control::Controller;
     use spaceterm_server::pane::{
-        Lease, PaneConnection, PaneSize, Reply, Request, graphics, reading,
+        Lease, PaneConnection, PaneSize, Reply, Request, Screen, graphics, reading,
     };
     use spaceterm_server::{LocalServer, ServerError};
 
@@ -178,12 +179,51 @@ mod exercise {
         }))?)
     }
 
+    fn reclaim_after_revocation(connection: &mut PaneConnection, pane: Id) -> Result<Lease> {
+        let Reply::Takeover {
+            target,
+            controller: Controller::Nobody,
+            session_ended: false,
+        } = select(connection, pane, false)?
+        else {
+            return Err("revocation did not leave the running Pane without a controller");
+        };
+        attached(api(connection.exchange(&Request::TakeOver {
+            target,
+            size: size(),
+            style: None,
+        }))?)
+    }
+
     fn command(connection: &mut PaneConnection, lease: Lease, text: &str) -> Result<()> {
         api(super::support::command(connection, lease, text))
     }
 
     fn output(connection: &mut PaneConnection, lease: Lease, marker: &str) -> Result<()> {
-        api(super::support::await_output(connection, lease, marker)).map(|_| ())
+        output_snapshot(connection, lease, marker).map(|_| ())
+    }
+
+    fn output_snapshot(
+        connection: &mut PaneConnection,
+        lease: Lease,
+        marker: &str,
+    ) -> Result<Box<Screen>> {
+        let until = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < until {
+            if let Reply::Screen(screen) = api(connection.exchange(&Request::Poll { lease }))?
+                && screen.rows.iter().any(|row| {
+                    row.iter()
+                        .map(|cell| cell.text.as_str())
+                        .collect::<String>()
+                        .trim_end()
+                        == marker
+                })
+            {
+                return Ok(screen);
+            }
+            std::thread::sleep(Duration::from_millis(30));
+        }
+        Err("terminal output did not arrive")
     }
 
     fn pipe_only(fd: i32) -> Result<()> {
@@ -618,7 +658,7 @@ mod exercise {
                 response["revoked"] == true && response["self_confirmed"] == true,
                 "revoked device did not reject existing connections and fresh authentication",
             )?;
-            let returned = attached(select(&mut connection, pane, false)?)?;
+            let returned = reclaim_after_revocation(&mut connection, pane)?;
             require(
                 returned.session == first.session,
                 "revocation killed or replaced the Terminal Session",
@@ -648,7 +688,7 @@ mod exercise {
                 api(scope.owner.paired_devices())?.is_empty(),
                 "last-device revocation was not retained",
             )?;
-            let returned = attached(select(&mut connection, pane, false)?)?;
+            let returned = reclaim_after_revocation(&mut connection, pane)?;
             require(
                 returned.session == first.session,
                 "self-revocation killed or replaced the Terminal Session",
@@ -797,10 +837,7 @@ mod exercise {
         command(connection, lease, script)?;
         // Delay a real WSS consumer while the scoped terminal produces bulk output.
         std::thread::sleep(Duration::from_millis(300));
-        output(connection, lease, "DIRECT-BULK-DONE")?;
-        let Reply::Screen(screen) = api(connection.exchange(&Request::Poll { lease }))? else {
-            return Err("bulk terminal snapshot missing");
-        };
+        let screen = output_snapshot(connection, lease, "DIRECT-BULK-DONE")?;
         if reading {
             require(
                 screen
@@ -875,7 +912,11 @@ mod exercise {
         unsafe {
             std::env::set_var("SPACETERM_DEVELOPMENT_CLIENT", DEVICE_NAME);
         }
-        let mut input = std::io::stdin().lock();
+        // read_exact polls the descriptor before each read. A buffered StdinLock can consume
+        // the next frame bytes before poll sees them, so use an owned unbuffered descriptor.
+        // SAFETY: standard input is live throughout this process; cloning owns its duplicate.
+        let input = unsafe { BorrowedFd::borrow_raw(libc::STDIN_FILENO) };
+        let mut input = File::from(api(input.try_clone_to_owned())?);
         let mut output_pipe = std::io::stdout().lock();
         send_json(&mut output_pipe, json!({"os": std::env::consts::OS}))?;
         let (server, connector) = enroll_device(&mut input, &mut output_pipe)?;
