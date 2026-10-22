@@ -584,7 +584,7 @@ fn an_unpinned_root_tab_follows_entering_and_leaving_git_without_moving_other_ta
     prototype.directory = git.0.clone();
     let mut host = SharedWorkspaceHost::new(prototype);
     let workspace = create_shared(&mut host, 1);
-    git_facts(&mut host, &git.0, |facts| facts.repository.is_some());
+    git_facts(&mut host, &git.0, |facts| facts.worktrees.is_some());
     assert!(matches!(
         host.request(
             [1; 32],
