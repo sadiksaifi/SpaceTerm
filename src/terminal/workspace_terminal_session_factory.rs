@@ -1,26 +1,11 @@
 use std::rc::Rc;
 
 use super::geometry::TerminalGeometry;
-use super::metadata::{CurrentDirectory, TerminalLocalFileCapabilities};
+use super::metadata::TerminalLocalFileCapabilities;
 use super::session::{
-    LocalTerminalLaunchPlan, StartedTerminalSession,
-    TerminalSessionError, TerminalSessionFactory,
+    LocalTerminalLaunchPlan, StartedTerminalSession, TerminalSessionError, TerminalSessionFactory,
 };
-use crate::domain::{PinnedDirectory, ValidatedLocalDirectory};
-use crate::platform::local_filesystem::LocalFilesystemError;
-
-#[derive(Debug)]
-/// A launch request for a Pane owned by a SpaceTerm Server.
-pub(crate) struct PreparedWorkspaceTerminalLaunch {
-    launch_plan: LocalTerminalLaunchPlan,
-}
-
-impl PreparedWorkspaceTerminalLaunch {
-    pub(crate) fn starting_directory(&self) -> CurrentDirectory {
-        let plan = &self.launch_plan;
-        CurrentDirectory::Local(plan.working_directory().path().to_owned())
-    }
-}
+use crate::domain::ValidatedLocalDirectory;
 
 #[derive(Clone)]
 /// Starts client presentations of Terminal Sessions owned by a SpaceTerm Server.
@@ -57,22 +42,13 @@ impl WorkspaceTerminalSessionFactory {
         }
     }
 
-    pub(crate) fn prepare_child_launch(
-        &self,
-    ) -> Result<PreparedWorkspaceTerminalLaunch, super::TerminalSessionChannelUnavailable> {
-        Ok(PreparedWorkspaceTerminalLaunch {
-            launch_plan: self.launch_plan.clone(),
-        })
-    }
-
     pub(crate) fn start(
         &self,
         geometry: TerminalGeometry,
-        prepared_launch: PreparedWorkspaceTerminalLaunch,
         initial_appearance: super::TerminalAppearanceUpdate,
     ) -> Result<StartedTerminalSession, TerminalSessionError> {
         self.session_factory
-            .start(geometry, prepared_launch.launch_plan, initial_appearance)
+            .start(geometry, self.launch_plan.clone(), initial_appearance)
     }
 
     pub(crate) fn fallback_title(&self) -> String {
@@ -107,14 +83,5 @@ impl WorkspaceTerminalSessionFactory {
     #[cfg(test)]
     pub(crate) fn local_working_directory(&self) -> Option<&std::path::Path> {
         Some(self.launch_plan.working_directory().path())
-    }
-
-    pub(crate) fn set_pinned_directory(&mut self, _directory: Option<PinnedDirectory>) {}
-
-    pub(crate) fn for_source_directory(
-        &self,
-        _source: Option<CurrentDirectory>,
-    ) -> Result<Self, LocalFilesystemError> {
-        Ok(self.clone())
     }
 }

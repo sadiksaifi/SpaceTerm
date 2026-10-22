@@ -109,6 +109,7 @@ impl SshProcessAdapter for UnixSshProcessAdapter {
         signal: ProcessSignal,
     ) -> Result<(), SshProcessMechanismError> {
         let signal = match signal {
+            #[cfg(test)]
             ProcessSignal::Terminate => libc::SIGTERM,
             ProcessSignal::Kill => libc::SIGKILL,
         };

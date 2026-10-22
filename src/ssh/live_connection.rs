@@ -11,17 +11,15 @@ use crate::platform::app_paths::RegisteredRuntimeSocket;
 /// Internal lifecycle state for one exact control-master authority.
 pub(crate) enum LiveConnectionState {
     Ready = 0,
-    ShuttingDown = 1,
-    Failed = 2,
-    Closed = 3,
+    Failed = 1,
+    Closed = 2,
 }
 
 impl LiveConnectionState {
     fn from_raw(value: u8) -> Self {
         match value {
             0 => Self::Ready,
-            1 => Self::ShuttingDown,
-            2 => Self::Failed,
+            1 => Self::Failed,
             _ => Self::Closed,
         }
     }

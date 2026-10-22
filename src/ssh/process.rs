@@ -122,9 +122,6 @@ pub(crate) trait SshProcessBackend: Send + Sync + 'static {
     /// Non-clone ownership of one child process and its private process group.
     type Child: Send + 'static;
 
-    /// Returns the captured, sanitized environment applied to all spawned SSH processes.
-    fn environment(&self) -> &SshProcessEnvironment;
-
     fn now(&self) -> Instant;
 
     /// Starts one owned command without blocking the caller's async executor thread.
@@ -155,12 +152,6 @@ pub(crate) trait SshProcessBackend: Send + Sync + 'static {
     fn observe_exit(&self, _child: &mut Self::Child) -> Option<SshProcessExitObservation> {
         None
     }
-
-    fn signal_process_group(
-        &self,
-        child: &mut Self::Child,
-        signal: ProcessSignal,
-    ) -> Result<(), SshProcessMechanismError>;
 
     /// Enqueues owned-process cleanup without blocking the caller.
     ///
@@ -204,10 +195,6 @@ impl SshProcessCleanup {
         )
     }
 
-    pub(crate) fn is_complete(&self) -> bool {
-        self.completion.is_closed()
-    }
-
     pub(crate) fn completed() -> Self {
         let (sender, completion) = async_channel::bounded(1);
         drop(sender);
@@ -221,6 +208,7 @@ impl SshProcessCleanup {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ProcessSignal {
+    #[cfg(test)]
     Terminate,
     Kill,
 }
@@ -614,7 +602,6 @@ impl SshProcessEnvironment {
         };
         (self.home.clone(), entries, askpass_capability)
     }
-
 }
 
 impl SshProbeEnvironment {
@@ -694,10 +681,6 @@ pub(crate) struct SupervisedSshChild<A: SshProcessAdapter> {
 impl<A: SshProcessAdapter> SshProcessBackend for SshProcessSupervisor<A> {
     type Child = SupervisedSshChild<A>;
 
-    fn environment(&self) -> &SshProcessEnvironment {
-        &self.environment
-    }
-
     fn now(&self) -> Instant {
         Instant::now()
     }
@@ -759,18 +742,6 @@ impl<A: SshProcessAdapter> SshProcessBackend for SshProcessSupervisor<A> {
 
     fn observe_exit(&self, child: &mut Self::Child) -> Option<SshProcessExitObservation> {
         child.adapter.observe_exit(child.process.as_mut()?)
-    }
-
-    fn signal_process_group(
-        &self,
-        child: &mut Self::Child,
-        signal: ProcessSignal,
-    ) -> Result<(), SshProcessMechanismError> {
-        let process = child
-            .process
-            .as_mut()
-            .ok_or(SshProcessMechanismError::StatusFailed)?;
-        child.adapter.signal(process, signal)
     }
 
     fn begin_cleanup(
@@ -1431,32 +1402,6 @@ fn join_writer(writer: Option<JoinHandle<io::Result<()>>>) -> Result<(), ()> {
     match writer {
         Some(writer) => writer.join().map_err(|_| ())?.map_err(|_| ()),
         None => Ok(()),
-    }
-}
-
-pub(crate) struct CancelOnDrop {
-    cancellation: SshCancellationToken,
-    armed: bool,
-}
-
-impl CancelOnDrop {
-    pub(crate) fn new(cancellation: SshCancellationToken) -> Self {
-        Self {
-            cancellation,
-            armed: true,
-        }
-    }
-
-    pub(crate) fn disarm(&mut self) {
-        self.armed = false;
-    }
-}
-
-impl Drop for CancelOnDrop {
-    fn drop(&mut self) {
-        if self.armed {
-            self.cancellation.cancel();
-        }
     }
 }
 

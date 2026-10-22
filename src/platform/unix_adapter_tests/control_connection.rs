@@ -22,7 +22,7 @@ use crate::platform::unix_adapter_tests::short_temporary_root;
 use crate::platform::unix_local_socket::UnixControlSocketProbe;
 use crate::platform::unix_secure_filesystem::UnixSecureFilesystem;
 use crate::ssh::command::{OpenSshExecutable, SshCommandSpec};
-use crate::ssh::process::{ProcessExit, ProcessRunError, ProcessSignal, SshProcessBackend};
+use crate::ssh::process::{ProcessExit, ProcessRunError, SshProcessBackend};
 
 static NEXT_TEST_DIRECTORY: AtomicU64 = AtomicU64::new(0);
 
@@ -80,10 +80,6 @@ struct FakeState {
     pending_delay: bool,
     elapsed: Duration,
     hang_readiness: bool,
-    hang_shutdown: bool,
-    exit_after_shutdown: bool,
-    exit_on_signal: ProcessSignal,
-    signals: Vec<ProcessSignal>,
     master_error_output: Option<TransientSshErrorOutput>,
 }
 
@@ -100,10 +96,6 @@ impl Default for FakeState {
             pending_delay: false,
             elapsed: Duration::ZERO,
             hang_readiness: false,
-            hang_shutdown: false,
-            exit_after_shutdown: true,
-            exit_on_signal: ProcessSignal::Terminate,
-            signals: Vec::new(),
             master_error_output: None,
         }
     }
@@ -112,7 +104,6 @@ impl Default for FakeState {
 struct FakeBackend {
     epoch: Instant,
     state: Mutex<FakeState>,
-    environment: super::super::process::SshProcessEnvironment,
 }
 
 impl Default for FakeBackend {
@@ -120,11 +111,6 @@ impl Default for FakeBackend {
         Self {
             epoch: Instant::now(),
             state: Mutex::new(FakeState::default()),
-            environment: super::super::process::SshProcessEnvironment::new_without_authentication(
-                short_temporary_root().to_path_buf(),
-                None,
-            )
-            .unwrap(),
         }
     }
 }
@@ -137,11 +123,6 @@ impl FakeBackend {
                 readiness: readiness.into_iter().collect(),
                 ..FakeState::default()
             }),
-            environment: super::super::process::SshProcessEnvironment::new_without_authentication(
-                short_temporary_root().to_path_buf(),
-                None,
-            )
-            .unwrap(),
         }
     }
 
@@ -160,10 +141,6 @@ impl FakeBackend {
 
 impl SshProcessBackend for FakeBackend {
     type Child = FakeChild;
-
-    fn environment(&self) -> &super::super::process::SshProcessEnvironment {
-        &self.environment
-    }
 
     fn now(&self) -> Instant {
         self.epoch + self.state.lock().unwrap().elapsed
@@ -193,11 +170,10 @@ impl SshProcessBackend for FakeBackend {
     ) -> Result<ProcessExit, ProcessRunError> {
         let arguments = spec.arguments().to_vec();
         let is_readiness = contains_pair(&arguments, "-O", "check");
-        let is_shutdown = contains_pair(&arguments, "-O", "exit");
         let should_hang = {
             let mut state = self.state.lock().unwrap();
             state.records.push(arguments);
-            (is_readiness && state.hang_readiness) || (is_shutdown && state.hang_shutdown)
+            is_readiness && state.hang_readiness
         };
         if should_hang {
             loop {
@@ -219,9 +195,6 @@ impl SshProcessBackend for FakeBackend {
                 .pop_front()
                 .unwrap_or(ProcessExit::unsuccessful(Some(255))))
         } else {
-            if is_shutdown && state.exit_after_shutdown {
-                state.early_exits.push_back(Some(ProcessExit::successful()));
-            }
             Ok(ProcessExit::successful())
         }
     }
@@ -240,19 +213,6 @@ impl SshProcessBackend for FakeBackend {
             }
         }
         Ok(exit)
-    }
-
-    fn signal_process_group(
-        &self,
-        _child: &mut Self::Child,
-        signal: ProcessSignal,
-    ) -> Result<(), SshProcessMechanismError> {
-        let mut state = self.state.lock().unwrap();
-        state.signals.push(signal);
-        if signal == state.exit_on_signal {
-            state.early_exits.push_back(Some(ProcessExit::successful()));
-        }
-        Ok(())
     }
 
     fn begin_cleanup(
@@ -354,7 +314,9 @@ fn connect_should_own_a_ready_private_control_socket(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn closing_one_connection_does_not_revoke_another_connections_server_authority(cx: &mut TestAppContext) {
+fn closing_one_connection_does_not_revoke_another_connections_server_authority(
+    cx: &mut TestAppContext,
+) {
     let directory = TestDirectory::new();
     let paths = directory.paths();
     let cancellation = SshCancellationToken::default();
@@ -421,7 +383,7 @@ fn ready_connection_should_prepare_server_commands(cx: &mut TestAppContext) {
         .authority
         .as_ref()
         .unwrap()
-        .transition(LiveConnectionState::ShuttingDown);
+        .transition(LiveConnectionState::Closed);
     assert!(matches!(
         connection.server_command(
             ValidatedRemoteShellCommand::server_script("exec spaceterm-server").unwrap()
@@ -579,46 +541,6 @@ fn dropped_connecting_control_should_preserve_an_unregistered_replacement_socket
 }
 
 #[gpui::test]
-fn shutdown_should_send_one_exact_exit_then_reap_and_cleanup(cx: &mut TestAppContext) {
-    let directory = TestDirectory::new();
-    let paths = directory.paths();
-    let backend = Arc::new(FakeBackend::with_readiness([ProcessExit::successful()]));
-    let cancellation = SshCancellationToken::default();
-    let mut connection = cx
-        .foreground_executor()
-        .block_test(OpenSshControlConnection::connect(
-            &paths,
-            OpenSshExecutable::for_test(),
-            &UnixControlSocketProbe,
-            destination(),
-            Arc::clone(&backend),
-            &cancellation,
-            timing(),
-        ))
-        .unwrap();
-    let socket_path = connection.control_path().to_path_buf();
-
-    cx.foreground_executor()
-        .block_test(connection.shutdown())
-        .unwrap();
-    cx.foreground_executor()
-        .block_test(connection.shutdown())
-        .unwrap();
-
-    let exit_commands = backend
-        .records()
-        .iter()
-        .filter(|arguments| contains_pair(arguments, "-O", "exit"))
-        .count();
-    assert!(
-        exit_commands == 1
-            && backend.reap_count() == 1
-            && !socket_path.exists()
-            && connection.state() == ControlConnectionState::Closed
-    );
-}
-
-#[gpui::test]
 fn hanging_readiness_check_should_obey_the_injected_deadline_and_reap(cx: &mut TestAppContext) {
     let directory = TestDirectory::new();
     let paths = directory.paths();
@@ -642,75 +564,6 @@ fn hanging_readiness_check_should_obey_the_injected_deadline_and_reap(cx: &mut T
     assert!(
         matches!(error, ControlConnectionError::ReadinessTimedOut { .. })
             && backend.reap_count() == 1
-    );
-}
-
-#[gpui::test]
-fn hanging_exit_command_should_retain_ready_master_ownership(cx: &mut TestAppContext) {
-    let directory = TestDirectory::new();
-    let paths = directory.paths();
-    let backend = Arc::new(FakeBackend::with_readiness([ProcessExit::successful()]));
-    let mut connection = cx
-        .foreground_executor()
-        .block_test(OpenSshControlConnection::connect(
-            &paths,
-            OpenSshExecutable::for_test(),
-            &UnixControlSocketProbe,
-            destination(),
-            Arc::clone(&backend),
-            &SshCancellationToken::default(),
-            timing(),
-        ))
-        .unwrap();
-    backend.state.lock().unwrap().hang_shutdown = true;
-
-    let error = cx
-        .foreground_executor()
-        .block_test(connection.shutdown())
-        .unwrap_err();
-
-    assert!(
-        matches!(
-            error,
-            ControlConnectionError::ShutdownCommand {
-                source: ProcessRunError::TimedOut
-            }
-        ) && connection.state() == ControlConnectionState::Ready
-            && connection.control_path().exists()
-            && backend.reap_count() == 0
-    );
-}
-
-#[gpui::test]
-fn shutdown_should_escalate_from_terminate_to_kill_for_the_owned_group(cx: &mut TestAppContext) {
-    let directory = TestDirectory::new();
-    let paths = directory.paths();
-    let backend = Arc::new(FakeBackend::with_readiness([ProcessExit::successful()]));
-    let mut connection = cx
-        .foreground_executor()
-        .block_test(OpenSshControlConnection::connect(
-            &paths,
-            OpenSshExecutable::for_test(),
-            &UnixControlSocketProbe,
-            destination(),
-            Arc::clone(&backend),
-            &SshCancellationToken::default(),
-            timing(),
-        ))
-        .unwrap();
-    {
-        let mut state = backend.state.lock().unwrap();
-        state.exit_after_shutdown = false;
-        state.exit_on_signal = ProcessSignal::Kill;
-    }
-
-    cx.foreground_executor()
-        .block_test(connection.shutdown())
-        .unwrap();
-
-    assert_eq!(
-        backend.state.lock().unwrap().signals,
-        vec![ProcessSignal::Terminate, ProcessSignal::Kill]
     );
 }
 
@@ -753,7 +606,6 @@ fn master_death_should_invalidate_server_command_authority(cx: &mut TestAppConte
     assert_eq!(connection.state(), ControlConnectionState::Failed);
     assert!(capability.cancellation().is_cancelled());
     assert!(capability.authorize().is_err());
-
 }
 
 #[gpui::test]
@@ -773,9 +625,9 @@ fn dropping_a_ready_connection_revokes_server_command_authority(cx: &mut TestApp
             timing(),
         ))
         .unwrap();
-    let (_, capability) = connection.server_command(
-            ValidatedRemoteShellCommand::server_script("exec server").unwrap(),
-        ).unwrap();
+    let (_, capability) = connection
+        .server_command(ValidatedRemoteShellCommand::server_script("exec server").unwrap())
+        .unwrap();
 
     drop(connection);
 

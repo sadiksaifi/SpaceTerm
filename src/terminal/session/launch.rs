@@ -64,7 +64,6 @@ impl TerminalSessionLaunch {
             },
         }
     }
-
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -125,8 +124,7 @@ impl NativeTerminalSessionFactory {
         local: LocalTerminalLaunchPlan,
         initial_appearance: TerminalAppearanceUpdate,
     ) -> Result<TerminalRuntime, TerminalSessionError> {
-        let (runtime, subscription) =
-            self.start_subscribed(geometry, local, initial_appearance)?;
+        let (runtime, subscription) = self.start_subscribed(geometry, local, initial_appearance)?;
         drop(subscription);
         Ok(runtime)
     }
@@ -166,8 +164,7 @@ impl TerminalSessionFactory for NativeTerminalSessionFactory {
         local: LocalTerminalLaunchPlan,
         initial_appearance: TerminalAppearanceUpdate,
     ) -> Result<StartedTerminalSession, TerminalSessionError> {
-        let (session, subscription) =
-            self.start_subscribed(geometry, local, initial_appearance)?;
+        let (session, subscription) = self.start_subscribed(geometry, local, initial_appearance)?;
         Ok(StartedTerminalSession {
             clipboard: subscription.clipboard,
             handle: Box::new(session),

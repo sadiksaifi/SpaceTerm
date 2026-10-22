@@ -116,21 +116,9 @@ impl DevelopmentPaneHost {
             .home
             .map(std::path::PathBuf::from)
             .ok_or(ServerError::StartupFailed)?;
-        let shell = crate::platform::launch_host::user_shell();
         let factory = NativeTerminalSessionFactory::new(
             pty_factory,
-            ShellLaunchPlanner::new(
-                shell,
-                crate::platform::launch_host::resource_root(),
-                ShellIntegrationMode::Automatic,
-                ShellEnvironment::default(),
-                ShellIntegrationPolicy {
-                    supported: true,
-                    path_list_separator: ':',
-                    fallback_xdg_data_dirs: "/usr/local/share:/usr/share".into(),
-                },
-                &[],
-            ),
+            crate::platform::launch_host::shell_launch_planner(),
             filesystem,
             LocalMachine::default(),
         );

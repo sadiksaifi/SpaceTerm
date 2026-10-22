@@ -9,8 +9,8 @@ use thiserror::Error;
 
 use super::cancellation::SshCancellationToken;
 use super::process::{
-    CapturedProcessError, SshProbeEnvironment, SshProcessAdapter,
-    SshProcessEnvironmentError, SshProcessMechanismError, run_probe_process,
+    CapturedProcessError, SshProbeEnvironment, SshProcessAdapter, SshProcessEnvironmentError,
+    SshProcessMechanismError, run_probe_process,
 };
 use super::startup_environment::StartupSshEnvironment;
 use crate::domain::SshDestination;
@@ -84,7 +84,6 @@ impl OpenSshExecutable {
     pub(crate) fn for_test() -> Self {
         Self(PathBuf::from("/test/ssh"))
     }
-
 }
 
 impl fmt::Debug for OpenSshExecutable {
@@ -306,10 +305,6 @@ impl SshCommandContext {
         self.control_operation("check")
     }
 
-    pub(crate) fn graceful_exit(&self) -> SshCommandSpec {
-        self.control_operation("exit")
-    }
-
     pub(crate) fn server_channel(&self, command: ValidatedRemoteShellCommand) -> SshCommandSpec {
         let mut arguments = self.child_arguments();
         for option in [
@@ -421,7 +416,6 @@ impl SshCommandSpec {
     pub(crate) fn arguments(&self) -> &[OsString] {
         &self.arguments
     }
-
 }
 
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
@@ -443,7 +437,6 @@ impl ValidatedRemoteShellCommand {
             argument: format!("/bin/sh -c {}", quote_for_posix_shell(script)),
         })
     }
-
 }
 
 fn quote_for_posix_shell(value: &str) -> String {
@@ -754,33 +747,9 @@ mod tests {
     }
 
     #[test]
-    fn graceful_exit_spec_should_target_only_the_private_master() {
-        let spec = context().graceful_exit();
-
-        assert_eq!(
-            arguments(&spec),
-            [
-                "-F",
-                "/private/config/spaceterm/ssh_config",
-                "-S",
-                "/private/runtime/spaceterm/ssh/control.sock",
-                "-o",
-                "ControlMaster=no",
-                "-o",
-                "ControlPersist=no",
-                "-o",
-                "ProxyCommand=; exit 1",
-                "-O",
-                "exit",
-                "--",
-                "root@fedora@orb",
-            ]
-        );
-    }
-
-    #[test]
     fn server_spec_should_disable_external_master_forwarding_and_tty_behavior() {
-        let spec = context().server_channel(ValidatedRemoteShellCommand::server_script("exec server").unwrap());
+        let spec = context()
+            .server_channel(ValidatedRemoteShellCommand::server_script("exec server").unwrap());
 
         assert_eq!(
             arguments(&spec),
@@ -820,7 +789,6 @@ mod tests {
         let specs = [
             context.master(),
             context.readiness_check(),
-            context.graceful_exit(),
             context.server_channel(command),
         ];
 

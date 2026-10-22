@@ -172,7 +172,6 @@ pub struct PreparedShellLaunch {
 }
 
 impl PreparedShellLaunch {
-
     /// Sets one more variable for the shell, replacing any inherited value.
     pub fn with_environment_value(mut self, name: &str, value: &str) -> Self {
         self.environment.push((name.into(), value.into()));
@@ -468,5 +467,4 @@ mod tests {
             assert!(std::error::Error::source(&error).is_none());
         }
     }
-
 }

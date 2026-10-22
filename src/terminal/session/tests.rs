@@ -5,7 +5,7 @@ use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use super::*;
-use crate::domain::{LocalDirectoryIdentity};
+use crate::domain::LocalDirectoryIdentity;
 use crate::platform::native_pty::{NativePtyAdapter, NativePtyAdapterParts, NativePtyTermination};
 
 #[cfg(feature = "desktop")]
@@ -28,16 +28,14 @@ fn native_terminal_session_factory() -> NativeTerminalSessionFactory {
 fn native_factory_routes_local_launches_through_injected_factory() {
     let (factory, constructions) = recording_native_terminal_session_factory();
     let working_directory = std::env::temp_dir().join(".");
-    let plan = LocalTerminalLaunchPlan::new(
-        crate::domain::ValidatedLocalDirectory::new(
-            working_directory.clone(),
-            LocalFilesystemAuthority::testing()
-                .validate_directory(&working_directory)
-                .unwrap()
-                .identity()
-                .clone(),
-        ),
-    );
+    let plan = LocalTerminalLaunchPlan::new(crate::domain::ValidatedLocalDirectory::new(
+        working_directory.clone(),
+        LocalFilesystemAuthority::testing()
+            .validate_directory(&working_directory)
+            .unwrap()
+            .identity()
+            .clone(),
+    ));
 
     let started = factory
         .start(test_geometry(), plan, test_terminal_appearance_update())
@@ -1134,12 +1132,10 @@ fn native_factory_reports_local_launch_directory_failure_through_terminal_sessio
     } = native_terminal_session_factory()
         .start(
             test_geometry(),
-            LocalTerminalLaunchPlan::new(
-                crate::domain::ValidatedLocalDirectory::new(
-                    resources.path().join("missing-session-workspace"),
-                    crate::domain::LocalDirectoryIdentity::for_test(0),
-                ),
-            ),
+            LocalTerminalLaunchPlan::new(crate::domain::ValidatedLocalDirectory::new(
+                resources.path().join("missing-session-workspace"),
+                crate::domain::LocalDirectoryIdentity::for_test(0),
+            )),
             test_terminal_appearance_update(),
         )
         .unwrap();

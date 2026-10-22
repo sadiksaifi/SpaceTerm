@@ -7,8 +7,8 @@ use spaceterm::runtime::{
     BackingScale, CellGridSize, KeyAction, KeyInput, LocalMachine, LocalTerminalLaunchPlan,
     LogicalCellSize, LogicalSize, NativeTerminalSessionFactory, PhysicalKey, ScreenSnapshot,
     ShellEnvironment, ShellIntegrationMode, ShellIntegrationPolicy, ShellLaunchPlanner,
-    TerminalAppearanceUpdate, TerminalGeometry, TerminalRuntime,
-    TerminalSessionEvent, TerminalSessionHandle, local_filesystem, native_pty_factory,
+    TerminalAppearanceUpdate, TerminalGeometry, TerminalRuntime, TerminalSessionEvent,
+    TerminalSessionHandle, local_filesystem, native_pty_factory,
 };
 
 fn geometry(columns: u16, rows: u16) -> TerminalGeometry {

@@ -7,11 +7,11 @@ use std::sync::Arc;
 use crate::domain::{LocalDirectoryIdentity, ValidatedLocalDirectory};
 use crate::terminal::geometry::TerminalGeometry;
 use crate::terminal::{
-    FindDirection, FindQueryGeneration, KeyInput, PasteConfirmationId, PasteDecision,
-    PasteRequestOutcome, PasteResolution, PointerInput, PresentationGeneration, ScrollbackMovement,
-    SelectionCopy, SelectionCopyError, StartedTerminalSession, TerminalAccessibilityModel,
-    TerminalAppearanceUpdate, LocalTerminalLaunchPlan, TerminalSessionError, TerminalSessionEvent,
-    TerminalSessionFactory, TerminalSessionHandle, WheelInput,
+    FindDirection, FindQueryGeneration, KeyInput, LocalTerminalLaunchPlan, PasteConfirmationId,
+    PasteDecision, PasteRequestOutcome, PasteResolution, PointerInput, PresentationGeneration,
+    ScrollbackMovement, SelectionCopy, SelectionCopyError, StartedTerminalSession,
+    TerminalAccessibilityModel, TerminalAppearanceUpdate, TerminalSessionError,
+    TerminalSessionEvent, TerminalSessionFactory, TerminalSessionHandle, WheelInput,
 };
 
 #[cfg(feature = "desktop")]
