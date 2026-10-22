@@ -103,7 +103,7 @@ def build_info(executable):
 
 
 def unpack_verified(
-    archive, signature, destination, expected, *, identity=None, expected_sha256=None
+    archive, signature, destination, expected, *, identity=None, target=None, expected_sha256=None
 ):
     """Authenticate exact archive bytes before parsing or extracting any member.
 
@@ -156,7 +156,7 @@ def unpack_verified(
             if expected is not None and info != expected:
                 raise TaskError("the server artifact differs from the requested exact build")
             if identity is not None:
-                compatible_candidate(info, identity)
+                compatible_candidate(info, identity, target=target)
             # A failure above cannot create any destination entry.
             source.extractall(destination, members=members, filter="data")
             # Archives may omit directory entries. Tarfile creates those parents using the
@@ -174,7 +174,7 @@ def signer():
     return config["macos"]["signing-identity"]
 
 
-def verify_tree(tree, expected):
+def verify_tree(tree, expected, *, native=True):
     files = {str(path.relative_to(tree)) for path in tree.rglob("*") if path.is_file()}
     shell = {
         "share/spaceterm/shell-integration/" + str(path.relative_to(SHELL_INTEGRATION))
@@ -204,6 +204,29 @@ def verify_tree(tree, expected):
     if directories != required_directories:
         raise TaskError("the server directories do not match the supported layout")
     executable = tree / "bin/spaceterm-server"
+    if not native:
+        # Catalogs authenticate foreign native bytes without executing them. Their
+        # producer performs native signature, deployment, dependency and --check checks.
+        with executable.open("rb") as source:
+            header = source.read(64)
+        if expected["target"] == TARGETS["darwin"]:
+            valid = (
+                header[:8] == bytes.fromhex("cffaedfe0c000001") and header[12:16] == b"\x02\0\0\0"
+            )
+        else:
+            valid = (
+                header[:7] == b"\x7fELF\x02\x01\x01"
+                and header[16:18] in (b"\x02\0", b"\x03\0")
+                and header[18:20] == b"\x3e\0"
+            )
+        if not valid:
+            raise TaskError("the signed server executable differs from its declared native target")
+        checked(
+            ["infocmp", "-x", "-1", "xterm-spaceterm"],
+            "the server terminfo resource is invalid",
+            env={**os.environ, "TERMINFO": str(tree / "share/spaceterm/terminfo")},
+        )
+        return
     if expected["target"] != host_target():
         raise TaskError("the server target cannot run on this host")
     if sys.platform == "darwin":
@@ -258,7 +281,17 @@ def verify_tree(tree, expected):
         raise TaskError("the installed server headless check failed")
 
 
-def verified_copy(archive, signature, directory, expected, *, identity=None, expected_sha256=None):
+def verified_copy(
+    archive,
+    signature,
+    directory,
+    expected,
+    *,
+    identity=None,
+    target=None,
+    expected_sha256=None,
+    native=True,
+):
     archive = Path(archive)
     signature = Path(signature)
     if archive.stat().st_size > MAX_ARCHIVE or signature.stat().st_size != 64:
@@ -273,10 +306,11 @@ def verified_copy(archive, signature, directory, expected, *, identity=None, exp
         directory / "payload",
         expected,
         identity=identity,
+        target=target,
         expected_sha256=expected_sha256,
     )
     tree = directory / "payload/server"
-    verify_tree(tree, info)
+    verify_tree(tree, info, native=native)
     return tree, private, raw
 
 
@@ -451,8 +485,8 @@ def stage_desktop_artifact(archive, signature, destination, expected=None, *, id
     }
 
 
-def compatible_candidate(info, identity):
-    if info["identity"] != identity or info["target"] != host_target():
+def compatible_candidate(info, identity, *, target=None):
+    if info["identity"] != identity or info["target"] != (target or host_target()):
         raise TaskError("the server candidate has a different identity or target")
     if info["protocol_major"] != 1:
         raise TaskError("the server candidate has an incompatible protocol major")
