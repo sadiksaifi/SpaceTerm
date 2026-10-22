@@ -6,7 +6,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// listing, physical directory validation, and publication all use the production readers.
 struct DelayedCount {
     root: PathBuf,
+    also_delayed: Sources,
     released: AtomicBool,
+    cancelled: AtomicBool,
     calls: Mutex<BTreeMap<PathBuf, usize>>,
     started: Mutex<Option<Instant>>,
 }
@@ -29,11 +31,12 @@ impl RepositoryProgramRunner for DelayedCount {
                 .unwrap()
                 .entry(request.directory.clone())
                 .or_default() += 1;
-            if request.directory == self.root {
+            if request.directory == self.root || self.also_delayed.contains(&request.directory) {
                 *self.started.lock().unwrap() = Some(Instant::now());
                 let until = Instant::now() + Duration::from_secs(8);
                 while !self.released.load(Ordering::Acquire) {
                     if cancellation.is_cancelled() {
+                        self.cancelled.store(true, Ordering::Release);
                         return Err(ProgramError::Cancelled);
                     }
                     if Instant::now() >= until {
@@ -88,10 +91,13 @@ impl Reading {
         repositories.sources = sources.clone();
         let cancellation = SshCancellationToken::default();
         let token = cancellation.clone();
+        let sent_sources = sources.clone();
+        let (interests, updates) = mpsc::sync_channel(1);
         let (sender, receiver) = mpsc::sync_channel(1);
         let worker = std::thread::spawn(move || {
             read_sources(
                 sources,
+                updates,
                 Some(readers),
                 GitToolStatus::Ready(version),
                 token,
@@ -102,6 +108,8 @@ impl Reading {
             cancellation,
             handle: worker,
             results: receiver,
+            interests,
+            sent_sources,
         });
         Self {
             repositories,
@@ -115,15 +123,24 @@ impl Reading {
     }
     fn finish(&mut self) -> Snapshot {
         let until = Instant::now() + Duration::from_secs(4);
-        while self.repositories.worker.is_some() && Instant::now() < until {
-            self.poll();
+        loop {
+            let snapshot = self.poll();
+            if snapshot.directories.len() == self.repositories.sources.len()
+                && snapshot.directories.iter().all(|facts| {
+                    facts.failure.is_none()
+                        && facts.repository.as_ref().is_none_or(|repository| {
+                            repository.counting.is_none() && facts.worktrees.is_some()
+                        })
+                })
+            {
+                return snapshot;
+            }
+            assert!(
+                Instant::now() < until,
+                "current reads must finish without stopping recurring discovery"
+            );
             std::thread::sleep(POLL);
         }
-        assert!(
-            self.repositories.worker.is_none(),
-            "the bounded read must finish"
-        );
-        self.poll()
     }
 }
 
@@ -146,7 +163,9 @@ fn slow_count_publishes_branch_worktrees_other_sources_and_progress_before_compl
     std::fs::write(git.0.join("changed"), "untracked").unwrap();
     let runner = Arc::new(DelayedCount {
         root: git.0.clone(),
+        also_delayed: Sources::new(),
         released: AtomicBool::new(false),
+        cancelled: AtomicBool::new(false),
         calls: Mutex::default(),
         started: Mutex::default(),
     });
@@ -165,6 +184,7 @@ fn slow_count_publishes_branch_worktrees_other_sources_and_progress_before_compl
     let mut published = BTreeMap::new();
     let mut progress_at = None;
     let mut initial_pending = false;
+    let mut pending_at = None;
     let mut responsive = false;
     while Instant::now() < until {
         let snapshot = reading.poll();
@@ -186,6 +206,9 @@ fn slow_count_publishes_branch_worktrees_other_sources_and_progress_before_compl
                     "the delayed count has not completed"
                 );
                 initial_pending |= repository.counting == Some(ChangeCounting::Pending);
+                if repository.counting == Some(ChangeCounting::Pending) {
+                    pending_at.get_or_insert(Instant::now());
+                }
                 if repository.counting == Some(ChangeCounting::Counting) {
                     progress_at.get_or_insert(Instant::now());
                 }
@@ -219,7 +242,7 @@ fn slow_count_publishes_branch_worktrees_other_sources_and_progress_before_compl
     assert!(initial_pending);
     let elapsed = progress_at
         .expect("useful counting progress before completion")
-        .duration_since(runner.started.lock().unwrap().unwrap());
+        .duration_since(pending_at.expect("an initial pending count"));
     assert!(
         elapsed >= Duration::from_millis(900) && elapsed < Duration::from_secs(3),
         "{elapsed:?}"
@@ -258,7 +281,7 @@ fn slow_count_publishes_branch_worktrees_other_sources_and_progress_before_compl
         .collect();
     assert_eq!(completed, [git.0.clone(), subdirectory, alias].into());
     assert_eq!(*runner.calls.lock().unwrap().get(&git.0).unwrap(), 1);
-    assert_eq!(*runner.calls.lock().unwrap().get(&other.0).unwrap(), 1);
+    assert!(*runner.calls.lock().unwrap().get(&other.0).unwrap() >= 1);
     assert_eq!(runner.calls.lock().unwrap().len(), 3);
 }
 
@@ -287,7 +310,9 @@ fn refreshing_branch_retains_known_changes_until_the_new_count_finishes() {
     std::fs::write(git.0.join("second"), "also untracked").unwrap();
     let runner = Arc::new(DelayedCount {
         root: git.0.clone(),
+        also_delayed: Sources::new(),
         released: AtomicBool::new(false),
+        cancelled: AtomicBool::new(false),
         calls: Mutex::default(),
         started: Mutex::default(),
     });
@@ -334,11 +359,167 @@ fn refreshing_branch_retains_known_changes_until_the_new_count_finishes() {
 }
 
 #[test]
+fn discovery_refreshes_external_branch_and_worktree_changes_while_counts_remain_in_flight() {
+    let git = GitFixture::new();
+    let second = GitFixture::new();
+    let third = GitFixture::new();
+    let roots: Sources = [git.0.clone(), second.0.clone(), third.0.clone()].into();
+    let runner = Arc::new(DelayedCount {
+        root: git.0.clone(),
+        also_delayed: [second.0.clone(), third.0.clone()].into(),
+        released: AtomicBool::new(false),
+        cancelled: AtomicBool::new(false),
+        calls: Mutex::default(),
+        started: Mutex::default(),
+    });
+    let mut reading = Reading::start(roots.clone(), runner.clone(), git.0.join("unused-home"));
+    let until = Instant::now() + Duration::from_secs(4);
+    loop {
+        let snapshot = reading.poll();
+        if snapshot.directories.len() == roots.len()
+            && snapshot
+                .directories
+                .iter()
+                .all(|facts| facts.worktrees.is_some())
+            && runner.calls.lock().unwrap().len() == COUNT_WORKERS
+        {
+            assert_eq!(
+                snapshot
+                    .directories
+                    .iter()
+                    .find(|facts| facts.directory == git.0)
+                    .unwrap()
+                    .worktrees
+                    .as_ref()
+                    .unwrap()
+                    .worktrees
+                    .len(),
+                1
+            );
+            break;
+        }
+        assert!(
+            Instant::now() < until,
+            "publish the first listing and start the slow scans"
+        );
+        std::thread::sleep(POLL);
+    }
+    // Both count workers are blocked, with a third physical root waiting. Only now change
+    // independent Git facts, so initial publication cannot satisfy this regression.
+    let initially_started: Sources = runner.calls.lock().unwrap().keys().cloned().collect();
+    git.git(&["branch", "-m", "refreshed"]);
+    let tree = git.0.join("external-worktree");
+    git.git(&["worktree", "add", "-b", "external", tree.to_str().unwrap()]);
+    let changed_at = Instant::now();
+    let until = changed_at + Duration::from_secs(4);
+    loop {
+        let snapshot = reading.poll();
+        let updated = snapshot
+            .directories
+            .iter()
+            .find(|facts| facts.directory == git.0)
+            .is_some_and(|facts| {
+                facts.repository.as_ref().is_some_and(|repository| {
+                    repository.head == RepositoryHead::Branch("refreshed".into())
+                        && repository.counting.is_some()
+                }) && facts
+                    .worktrees
+                    .as_ref()
+                    .is_some_and(|list| list.worktrees.iter().any(|record| record.root == tree))
+            });
+        // The new row is a source edit as well: it must enter discovery without restarting
+        // either existing scan, even though there is no free count worker to service it.
+        let new_source = snapshot.directories.iter().any(|facts| {
+            facts.directory == tree
+                && facts.repository.as_ref().is_some_and(|repository| {
+                    repository.head == RepositoryHead::Branch("external".into())
+                })
+        });
+        if updated && new_source {
+            break;
+        }
+        assert!(
+            Instant::now() < until,
+            "recurring discovery must not wait for the count queue"
+        );
+        std::thread::sleep(POLL);
+    }
+    assert!(!runner.released.load(Ordering::Acquire));
+    assert!(
+        !runner.cancelled.load(Ordering::Acquire),
+        "source expansion must retain scans still in use"
+    );
+    let calls = runner.calls.lock().unwrap();
+    assert_eq!(
+        calls.len(),
+        COUNT_WORKERS,
+        "no slow scan has completed to free a worker"
+    );
+    for root in initially_started {
+        assert_eq!(
+            calls[&root], 1,
+            "recurring discovery must share the in-flight scan"
+        );
+    }
+    assert!(
+        reading
+            .repositories
+            .worker
+            .as_ref()
+            .is_some_and(|worker| !worker.cancellation.is_cancelled())
+    );
+}
+
+#[test]
+fn withdrawing_the_last_source_cancels_its_in_flight_count_and_discards_its_facts() {
+    let git = GitFixture::new();
+    let runner = Arc::new(DelayedCount {
+        root: git.0.clone(),
+        also_delayed: Sources::new(),
+        released: AtomicBool::new(false),
+        cancelled: AtomicBool::new(false),
+        calls: Mutex::default(),
+        started: Mutex::default(),
+    });
+    let mut reading = Reading::start(
+        [git.0.clone()].into(),
+        runner.clone(),
+        git.0.join("unused-home"),
+    );
+    let until = Instant::now() + Duration::from_secs(4);
+    while runner.started.lock().unwrap().is_none() {
+        reading.poll();
+        assert!(
+            Instant::now() < until,
+            "start the count before withdrawing its source"
+        );
+        std::thread::sleep(POLL);
+    }
+    reading.state.inventory.workspaces.clear();
+    let until = Instant::now() + Duration::from_secs(1);
+    loop {
+        assert!(reading.poll().directories.is_empty());
+        if runner.cancelled.load(Ordering::Acquire) {
+            break;
+        }
+        assert!(
+            Instant::now() < until,
+            "a count without any interest must be cancelled"
+        );
+        std::thread::sleep(POLL);
+    }
+    runner.released.store(true, Ordering::Release);
+    assert!(reading.poll().directories.is_empty());
+}
+
+#[test]
 fn cancellation_releases_count_workers_with_a_full_publication_queue() {
     let git = GitFixture::new();
     let runner = Arc::new(DelayedCount {
         root: git.0.clone(),
+        also_delayed: Sources::new(),
         released: AtomicBool::new(false),
+        cancelled: AtomicBool::new(false),
         calls: Mutex::default(),
         started: Mutex::default(),
     });
