@@ -716,10 +716,11 @@ fn each_confirmation_names_the_machine_and_the_sessions_that_end() {
     assert!(update.message.contains("penguin") && update.message.contains("1.5.0"));
     assert!(update.detail.contains("1.4.0") && update.detail.contains("1.5.0"));
     assert!(
-        update
-            .detail
-            .contains("Terminal Sessions end for every client")
+        update.detail.contains(
+            "All Terminal Sessions on this server end, including those other clients use"
+        )
     );
+    assert!(update.detail.ends_with("Other servers aren’t affected."));
     let returning = MaintenanceConfirmation::of(
         "penguin",
         RemoteMaintenanceRequest::Return,
