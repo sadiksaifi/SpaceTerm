@@ -1,6 +1,38 @@
 use super::*;
 
 #[gpui::test]
+fn disconnect_drops_a_parked_remote_presentation_without_closing_other_servers(
+    cx: &mut TestAppContext,
+) {
+    let (harness, cx) = MachineGroupsHarness::new(cx);
+    let (remote, _) = harness.present_ssh("penguin", &[("Far", 1)], cx);
+    let far = harness.named("Far", cx);
+    cx.update(|window, cx| {
+        harness.manager.update(cx, |manager, cx| {
+            manager.request_shared_close(
+                crate::close_confirmation::CloseTarget::Workspace { workspace_id: far },
+                window,
+                cx,
+            );
+        });
+    });
+    click("modal-action-shared-close-confirm", cx);
+    harness.manager.read_with(cx, |manager, _| {
+        assert_eq!(manager.workspaces.parked_ids().collect::<Vec<_>>(), [far]);
+    });
+    cx.update(|window, cx| {
+        harness.manager.update(cx, |manager, cx| {
+            manager.withdraw_server_workspaces(remote, window, cx);
+        });
+    });
+    harness.manager.read_with(cx, |manager, _| {
+        assert!(manager.workspaces.parked_ids().next().is_none());
+        assert!(manager.shared.get(remote).is_none());
+    });
+    assert_eq!(harness.names(cx), ["Default"]);
+}
+
+#[gpui::test]
 fn a_refused_workspace_close_restores_its_views_without_overwriting_newer_focus(
     cx: &mut TestAppContext,
 ) {

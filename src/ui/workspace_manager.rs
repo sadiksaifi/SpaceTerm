@@ -2969,6 +2969,17 @@ impl WorkspaceManager {
         for workspace_id in presented {
             self.remove_workspace_presentation(workspace_id, window, cx);
         }
+        let parked: Vec<_> = self
+            .workspaces
+            .parked_ids()
+            .filter(|&id| self.shared.owner(id) == Some(key))
+            .collect();
+        for id in parked {
+            if let Ok(manager) = self.workspaces.discard_parked_workspace(id) {
+                manager.update(cx, |manager, cx| manager.close_all(cx));
+            }
+            self.pending_final_tab_closes.remove(&id);
+        }
         if let Some(mut withdrawn) = self.shared.remove(key) {
             withdrawn.flush_client_views();
         }
@@ -2999,7 +3010,7 @@ impl WorkspaceManager {
             return;
         };
         self.reconcile_parked_shared_workspaces(key, window, cx);
-        // The removal that answers this client's own close takes the keyboard to what remains.
+        // Approved closes already moved presentation. Published membership never replaces newer focus.
         let removal = if poll.accepted.as_ref().is_some_and(|accepted| {
             matches!(
                 accepted.mutation,
