@@ -5119,8 +5119,11 @@ impl Render for TerminalPane {
             .on_action(cx.listener(Self::decline_permission_request_action))
             .when(self.terminal_session.session_factory.file_insertion_capabilities() == TerminalLocalFileCapabilities::Enabled && self.interactive_input_available(), |root| root.on_drop(cx.listener(Self::insert_dropped_files)))
             .when(local_operations, |root| {
+                root.on_action(cx.listener(Self::show_repository_status))
+            })
+            // The owning server clears its Terminal Session for the client whose input it takes.
+            .when(local_operations || self.interactive_input_available(), |root| {
                 root.on_action(cx.listener(Self::clear_screen_and_scrollback))
-                    .on_action(cx.listener(Self::show_repository_status))
             })
             .when(self.reading_available(), |root| {
                 root.on_action(cx.listener(Self::copy_selection))

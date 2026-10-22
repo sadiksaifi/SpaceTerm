@@ -2317,6 +2317,30 @@ fn command_k_should_clear_the_terminal_screen_and_scrollback(cx: &mut TestAppCon
     );
 }
 
+fn clear_requests(records: &TestTerminalSessionRecords) -> usize {
+    records
+        .commands()
+        .iter()
+        .filter(|call| matches!(call.command, RecordedCommand::ClearScreenAndScrollback))
+        .count()
+}
+
+/// The owning server clears its Terminal Session's screen and history.
+#[gpui::test]
+fn command_k_should_ask_the_server_to_clear_the_screen_and_scrollback(cx: &mut TestAppContext) {
+    let (_pane, cx, records) = server_terminal_pane(cx, true);
+    cx.simulate_keystrokes("cmd-k");
+    assert_eq!(clear_requests(&records), 1);
+}
+
+/// A server that takes no input from this client cannot clear for it either.
+#[gpui::test]
+fn command_k_should_ask_nothing_of_a_server_that_takes_no_input(cx: &mut TestAppContext) {
+    let (_pane, cx, records) = server_terminal_pane(cx, false);
+    cx.simulate_keystrokes("cmd-k");
+    assert_eq!(clear_requests(&records), 0);
+}
+
 #[gpui::test]
 fn scroll_shortcuts_move_scrollback_without_sending_keys(cx: &mut TestAppContext) {
     use crate::terminal::ScrollbackMovement;
