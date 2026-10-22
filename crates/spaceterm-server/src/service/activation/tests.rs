@@ -440,6 +440,66 @@ fn candidate_state_mutation_refuses_return_without_restoring_a_snapshot() {
 }
 
 #[test]
+fn changed_direct_policy_refuses_return_and_preserves_the_current_server_credentials() {
+    with_service(|service, previous, candidate, supervisor| {
+        let direct = crate::direct::host::State::open(&service.paths).unwrap();
+        drop(direct);
+        interrupted(
+            &service,
+            &previous,
+            &candidate,
+            &supervisor,
+            Step::StartDispatched,
+            false,
+        );
+        let data = Directory::open(&service.paths.data, false).unwrap();
+        let mut direct: serde_json::Value = data.read_json("direct.json").unwrap().unwrap();
+        direct["policy"] = serde_json::json!({"bind":"127.0.0.1:9231"});
+        data.write_json(c"direct.json", &direct).unwrap();
+        let retained = std::fs::read(service.paths.data.join("direct.json")).unwrap();
+        assert!(matches!(
+            service.prepare_return(),
+            Err(ServerError::ReturnUnavailable)
+        ));
+        assert_eq!(
+            service.activation_status().unwrap().unwrap().phase,
+            ActivationPhase::Failed { can_return: false }
+        );
+        assert_eq!(*supervisor.approved.lock().unwrap(), candidate.directory);
+        assert!(
+            retained == std::fs::read(service.paths.data.join("direct.json")).unwrap(),
+            "a refused return must preserve exact current direct state"
+        );
+    });
+}
+
+#[test]
+fn creating_a_direct_document_distinguishes_absence_from_a_present_json_null_before_return() {
+    with_service(|service, previous, candidate, supervisor| {
+        interrupted(
+            &service,
+            &previous,
+            &candidate,
+            &supervisor,
+            Step::StartDispatched,
+            false,
+        );
+        let data = Directory::open(&service.paths.data, false).unwrap();
+        data.write_json(c"direct.json", &serde_json::Value::Null)
+            .unwrap();
+        assert!(matches!(
+            service.prepare_return(),
+            Err(ServerError::ReturnUnavailable)
+        ));
+        assert_eq!(*supervisor.approved.lock().unwrap(), candidate.directory);
+        assert_eq!(
+            data.read_json::<serde_json::Value>("direct.json").unwrap(),
+            Some(serde_json::Value::Null)
+        );
+    });
+}
+
+#[test]
 fn readiness_and_lost_reply_never_repeat_dispatch_or_offer_return() {
     with_service(|service, previous, candidate, supervisor| {
         let id = interrupted(

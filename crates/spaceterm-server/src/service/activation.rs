@@ -660,9 +660,29 @@ pub(super) fn confirmation_token(value: &impl Serialize) -> Result<String, Serve
 }
 
 fn saved_state(data: &Directory) -> Result<[u8; 32], ServerError> {
-    // identity.json owns saved server identity and organization; client files are not rolled back.
-    let bytes = serde_json::to_vec(&data.read()?).map_err(|_| ServerError::StorageUnavailable)?;
-    ring::digest::digest(&ring::digest::SHA256, &bytes)
+    // The proof covers server organization and direct identity/policy/revocation together.
+    // Client files are not rolled back. Presence is distinct from a JSON null document.
+    let mut digest = ring::digest::Context::new(&ring::digest::SHA256);
+    digest.update(b"spaceterm-server-saved-state-2\0");
+    let identity = zeroize::Zeroizing::new(
+        serde_json::to_vec(&data.read()?).map_err(|_| ServerError::StorageUnavailable)?,
+    );
+    digest.update(b"identity.json\0present\0");
+    digest.update(&(identity.len() as u64).to_be_bytes());
+    digest.update(&identity);
+    match data.read_json::<serde_json::Value>("direct.json")? {
+        None => digest.update(b"direct.json\0absent\0"),
+        Some(value) => {
+            let direct = zeroize::Zeroizing::new(
+                serde_json::to_vec(&value).map_err(|_| ServerError::StorageUnavailable)?,
+            );
+            digest.update(b"direct.json\0present\0");
+            digest.update(&(direct.len() as u64).to_be_bytes());
+            digest.update(&direct);
+        }
+    }
+    digest
+        .finish()
         .as_ref()
         .try_into()
         .map_err(|_| ServerError::StorageUnavailable)
