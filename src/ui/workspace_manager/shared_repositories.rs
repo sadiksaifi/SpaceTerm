@@ -17,7 +17,7 @@ mod development {
 
     use gpui::{App, Context, Subscription, Window};
     use spaceterm_server::hierarchy::{Id, Workspace as ServerWorkspace};
-    use spaceterm_server::repository::WorktreeInventory;
+    use spaceterm_server::repository::{PinCheckState, WorktreeInventory};
 
     use super::super::WorkspaceManager;
     use super::super::worktrees::directory_name;
@@ -349,19 +349,22 @@ mod development {
                     .registry
                     .key(id)
                     .is_some_and(|key| key.root() == key.repository().main_root());
+                // Only the owning server resolves a pin's physical location. Its list of
+                // pinned Worktrees confirms a pin once a check is Ready, while a pin lexically
+                // inside the root is confirmed without one.
+                let owning = self.shared.owning(workspace_id);
+                let pin_check = owning.map(|shared| shared.repositories().pin_check_state());
                 let removal = if !listed {
                     WorktreeRemoval::Unlisted
                 } else if main {
                     WorktreeRemoval::Main
                 } else if record.locked {
                     WorktreeRemoval::Locked
-                } else if self.shared.owning(workspace_id).is_some_and(|shared| {
-                    shared.repositories().holds_pinned_directory(&record.root)
-                }) || self
-                    .shared
-                    .owning(workspace_id)
-                    .and_then(|s| s.latest_inventory())
-                    .is_some_and(|i| {
+                } else if (matches!(pin_check, Some(PinCheckState::Ready))
+                    && owning.is_some_and(|shared| {
+                        shared.repositories().holds_pinned_directory(&record.root)
+                    }))
+                    || owning.and_then(|s| s.latest_inventory()).is_some_and(|i| {
                         i.workspaces
                             .iter()
                             .filter_map(|w| w.pinned_directory.as_deref())
@@ -371,12 +374,12 @@ mod development {
                     WorktreeRemoval::HoldsPinnedDirectory
                 } else if !worktree_writes {
                     WorktreeRemoval::Server
-                } else if !self
-                    .shared
-                    .owning(workspace_id)
-                    .is_some_and(|s| s.editability().available())
-                {
+                } else if !owning.is_some_and(|s| s.editability().available()) {
                     WorktreeRemoval::NeedsServer
+                } else if matches!(pin_check, Some(PinCheckState::Checking)) {
+                    WorktreeRemoval::CheckingPinnedDirectories
+                } else if matches!(pin_check, Some(PinCheckState::Unavailable)) {
+                    WorktreeRemoval::PinnedDirectoriesUnavailable
                 } else {
                     WorktreeRemoval::Allowed
                 };

@@ -182,6 +182,10 @@ pub(super) enum WorktreeRemoval {
     Locked,
     /// A Workspace's Pinned Directory is inside the Worktree.
     HoldsPinnedDirectory,
+    /// The owning server is still resolving where its Workspaces' Pinned Directories are.
+    CheckingPinnedDirectories,
+    /// The owning server couldn't resolve where its Workspaces' Pinned Directories are.
+    PinnedDirectoriesUnavailable,
     /// The repository the Workspace reads doesn't list the Worktree, so only its Tabs remain.
     Unlisted,
     /// A SpaceTerm Server owns the Worktree, and removing it there is not available yet.

@@ -12247,10 +12247,9 @@ mod shared_repositories {
         assert!(!creates_worktrees, "New Worktree stays unavailable");
     }
 
-    #[gpui::test]
-    fn a_server_physical_pin_should_disable_removal_across_workspaces(cx: &mut TestAppContext) {
-        use spaceterm_ui::a11y_testing::A11yTree;
-
+    /// A second Workspace pinned through a server-side alias of the feature Worktree, which the
+    /// server reports as holding a pin once its check of `state` publishes.
+    fn pinned_through_an_alias(state: spaceterm_server::repository::PinCheckState) -> Inventory {
         let mut initial = published(1, "main", true);
         // This path is an opaque alias on the server. The client cannot resolve it locally.
         let mut other = initial.workspaces[0].clone();
@@ -12262,7 +12261,21 @@ mod shared_repositories {
         other.tabs[0].root_pane = [92; 32];
         other.tabs[0].panes = vec![pane([92; 32], "/server/pin-alias/src")];
         initial.workspaces.push(other);
-        initial.repositories.as_mut().unwrap().pinned_worktrees = vec![FEATURE_ROOT.into()];
+        let repositories = initial.repositories.as_mut().unwrap();
+        repositories.pinned_worktrees = vec![FEATURE_ROOT.into()];
+        repositories.pin_check = state;
+        initial
+    }
+
+    /// Opens the feature Worktree's menu and returns its removal state, asserting that the menu
+    /// shows `label` disabled and nothing reached the server.
+    fn feature_removal_reads(
+        initial: Inventory,
+        label: &str,
+        cx: &mut TestAppContext,
+    ) -> WorktreeRemoval {
+        use spaceterm_ui::a11y_testing::A11yTree;
+
         let (harness, _, _, cx) = ssh_harness(cx, initial);
         cx.update(|window, cx| {
             window.activate_window();
@@ -12276,13 +12289,46 @@ mod shared_repositories {
             .rows()
             .find(|row| row.name.as_ref() == "app-feature")
             .unwrap();
-        assert_eq!(feature.removal, WorktreeRemoval::HoldsPinnedDirectory);
         right_click(worktree_row(harness.shared, feature.worktree_id, cx), cx);
-        assert_eq!(
-            A11yTree::read(cx).node("Unpin the Directory to Remove")["aria"]["disabled"],
-            true
-        );
+        assert_eq!(A11yTree::read(cx).node(label)["aria"]["disabled"], true);
         assert!(harness.edits.submitted().is_empty());
+        feature.removal
+    }
+
+    #[gpui::test]
+    fn a_server_physical_pin_should_disable_removal_across_workspaces(cx: &mut TestAppContext) {
+        use spaceterm_server::repository::PinCheckState;
+
+        let removal = feature_removal_reads(
+            pinned_through_an_alias(PinCheckState::Ready),
+            "Unpin the Directory to Remove",
+            cx,
+        );
+        assert_eq!(removal, WorktreeRemoval::HoldsPinnedDirectory);
+    }
+
+    /// A pin list from before the current check confirms nothing, and removal waits for it.
+    #[gpui::test]
+    fn removal_should_wait_while_the_server_checks_pinned_directories(cx: &mut TestAppContext) {
+        use spaceterm_server::repository::PinCheckState;
+
+        let removal = feature_removal_reads(
+            pinned_through_an_alias(PinCheckState::Checking),
+            "Checking for Pinned Directories\u{2026}",
+            cx,
+        );
+        assert_eq!(removal, WorktreeRemoval::CheckingPinnedDirectories);
+    }
+
+    #[gpui::test]
+    fn removal_should_stay_unavailable_when_the_server_cannot_check_pins(cx: &mut TestAppContext) {
+        use spaceterm_server::repository::PinCheckState;
+
+        let mut initial = published(1, "main", true);
+        initial.repositories.as_mut().unwrap().pin_check = PinCheckState::Unavailable;
+        let removal =
+            feature_removal_reads(initial, "Pinned Directories Couldn\u{2019}t Be Checked", cx);
+        assert_eq!(removal, WorktreeRemoval::PinnedDirectoriesUnavailable);
     }
 
     /// A Worktree removed outside SpaceTerm keeps its row while the server keeps its Tab there.
