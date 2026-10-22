@@ -522,6 +522,16 @@ fn explicit_return_requires_never_ready_and_unchanged_saved_state_and_stays_stop
         assert_eq!(status.operation, id);
         assert_eq!(*supervisor.approved.lock().unwrap(), previous.directory);
         assert_eq!(
+            service.passive_status(),
+            Ok(ServiceStatus {
+                installed: true,
+                stopped: true,
+                enabled: false,
+                running: false,
+            }),
+            "a completed return settles the failed candidate without another recovery"
+        );
+        assert_eq!(
             service.status().unwrap(),
             ServiceStatus {
                 installed: true,
