@@ -33,9 +33,9 @@ def source_environment(environment):
 
 
 @contextmanager
-def development_run(ownership_directory=Path("/tmp")):
+def development_run():
     """Refuse a second source command before either command can replace staged executables."""
-    path = ownership_directory / f"spaceterm-development-owner-{os.geteuid()}.lock"
+    path = Path("/tmp") / f"spaceterm-development-owner-{os.geteuid()}.lock"
     descriptor = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
     try:
         metadata = os.fstat(descriptor)

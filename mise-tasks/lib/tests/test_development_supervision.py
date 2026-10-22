@@ -162,11 +162,11 @@ class DevelopmentSupervisionTests(unittest.TestCase):
         from spaceterm_tasks import TaskError
         from spaceterm_tasks.development_supervision import development_run
 
-        with development_run(self.root):
+        with development_run():
             with self.assertRaisesRegex(TaskError, "another source Development run"):
-                with development_run(self.root):
+                with development_run():
                     self.fail("a second owner acquired the account lock")
-        with development_run(self.root):
+        with development_run():
             pass
 
     def test_interrupt_waits_for_gated_cleanup_beyond_process_wait_deadlines(self):
