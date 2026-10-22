@@ -7,7 +7,7 @@ use crate::desktop_profile::{
     ControlKeybindingProfiles, DesktopPresentation, DesktopProfile, DesktopProfileError,
     DesktopWording,
 };
-use crate::terminal::{NativeTerminalSessionFactory, OptionAsAltPolicy};
+use crate::terminal::OptionAsAltPolicy;
 use gpui::TitlebarOptions;
 use std::{path::PathBuf, rc::Rc, sync::Arc};
 
@@ -137,23 +137,6 @@ fn compose(
         paths,
         Arc::new(super::unix_local_identity::UnixLocalIdentity),
     );
-    let session_factory = Rc::new(NativeTerminalSessionFactory::new(
-        Arc::new(super::unix_pty::UnixNativePtyAdapterFactory::new(Arc::new(
-            super::macos_pty_host::MacosPtyHost,
-        ))),
-        super::launch_host::shell_launch_planner(),
-        local_filesystem.clone(),
-        crate::terminal::metadata::LocalMachine::new(
-            super::launch_host::local_user().as_deref(),
-            super::launch_host::local_hostname().as_deref(),
-            startup.home_directory.to_str(),
-        ),
-    ));
-    let remote_workspace = startup.remote_backend_factory(Arc::new(
-        super::unix_askpass_transport::AskPassWindowFactory::new(
-            super::launch_host::running_executable(),
-        ),
-    ));
     let ssh_servers = startup.ssh_servers_factory(
         Arc::new(super::unix_askpass_transport::AskPassWindowFactory::new(
             super::launch_host::running_executable(),
@@ -168,7 +151,6 @@ fn compose(
     HostComposition::new(HostCompositionParts {
         profile: desktop_profile(Rc::new(super::macos_locale::ApplicationLocale))?,
         home_directory: startup.home_directory,
-        session_factory,
         adapters: crate::app::ApplicationCapabilities {
             updates: update_adapter(identity),
             selected_files: Some(Arc::new(super::unix_selected_file::UnixSelectedFileOpener)),
@@ -214,7 +196,6 @@ fn compose(
             setup_guide: Some(Arc::new(super::macos_setup_guide_host::MacosSetupGuideHost)
                 as Arc<dyn crate::platform::setup_guide_host::SetupGuideHost>),
             theme_registry: Some(Arc::new(super::https_transport::HttpsTransport::new())),
-            remote_workspace,
             repository_status: Some(repository_status),
             background_images: Some(background_images),
             local_server: crate::ui::LocalServerAdapters::account(),

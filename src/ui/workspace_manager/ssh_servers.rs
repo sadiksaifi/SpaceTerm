@@ -63,7 +63,7 @@ impl WorkspaceManager {
 
     /// Binds each newly presented SSH server and withdraws each one the registry no longer
     /// presents.
-    fn sync_ssh_servers(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn sync_ssh_servers(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(connections) = crate::ui::ssh_servers::installed(cx) else {
             return;
         };

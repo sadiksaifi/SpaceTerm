@@ -7,13 +7,10 @@ use std::collections::BTreeMap;
 use gpui::{App, Context, Entity, Subscription};
 
 use super::WorkspaceManager;
-use crate::domain::{
-    PinnedDirectory, RemoteConnectionPhase, RemoteConnectionState, WorkspaceEntry, WorkspaceId,
-    WorkspaceLocation,
-};
+use crate::domain::{PinnedDirectory, WorkspaceEntry, WorkspaceId};
 use crate::repository_status::presentation::{SidebarBadge, chip_tooltip_line};
 use crate::repository_status::scheduler::{Interest, InterestId, SourceDirectory};
-use crate::repository_status::{RemoteMachineKey, RepositoryMachine, RepositoryView};
+use crate::repository_status::{RepositoryMachine, RepositoryView};
 use crate::ui::TabManager;
 use crate::ui::repository_status_store::{
     InstalledRepositoryStatus, RepositoryStatusStore, RepositoryViewsChanged,
@@ -220,14 +217,10 @@ impl WorkspaceManager {
             return None;
         }
         let (machine, directory) = self.row_source(workspace, cx)?;
-        let connected = workspace
-            .remote_connection_state()
-            .map(RemoteConnectionState::phase)
-            .is_none_or(|phase| phase == RemoteConnectionPhase::Connected);
         Some(RowFacts {
             machine,
             directory,
-            available: connected,
+            available: true,
             visible: true,
         })
     }
@@ -239,36 +232,21 @@ impl WorkspaceManager {
         workspace: &WorkspaceEntry<Entity<TabManager>>,
         cx: &App,
     ) -> Option<(RepositoryMachine, SourceDirectory)> {
-        let location_machine = match workspace.location() {
-            WorkspaceLocation::Local => RepositoryMachine::Local,
-            WorkspaceLocation::Remote { key, .. } => {
-                RepositoryMachine::Remote(RemoteMachineKey::new(key.destination().as_str()))
-            }
-        };
         let (machine, directory) = match workspace.pinned_directory() {
             Some(PinnedDirectory::Local(directory)) => (
                 RepositoryMachine::Local,
                 SourceDirectory::Local(directory.path().to_path_buf()),
             ),
-            Some(PinnedDirectory::Remote { directory, .. }) => (
-                location_machine,
-                SourceDirectory::Remote(directory.as_str().into()),
-            ),
             None => workspace
                 .payload()
                 .read(cx)
                 .repository_source(cx)
-                .or_else(|| {
-                    let home = match workspace.location() {
-                        WorkspaceLocation::Local => {
-                            SourceDirectory::Local(self.local_home_directory_path.clone())
-                        }
-                        WorkspaceLocation::Remote { .. } => SourceDirectory::Remote(
-                            workspace.remote_display_directory()?.as_str().into(),
-                        ),
-                    };
-                    Some((location_machine, home))
-                })?,
+                .unwrap_or_else(|| {
+                    (
+                        RepositoryMachine::Local,
+                        SourceDirectory::Local(self.local_home_directory_path.clone()),
+                    )
+                }),
         };
         Some((machine, directory))
     }

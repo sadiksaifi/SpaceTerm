@@ -143,7 +143,7 @@ fn shared_tab_manager_on(
         cx.add_window_view(|window, cx| TabManager::new(session_factory.clone(), window, cx));
     cx.update(|window, cx| {
         window.activate_window();
-        let (_, _, state) = panes
+        let (_, state) = panes
             .open(ROOT_PANE)
             .expect("the Root Pane subscription must open");
         manager.update(cx, |manager, cx| {

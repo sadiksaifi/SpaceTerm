@@ -3,7 +3,7 @@ use std::cell::Cell;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use gpui::{
     EmptyView, Entity, KeyUpEvent, Keystroke, Modifiers, TestAppContext, VisualTestContext,
@@ -11,7 +11,6 @@ use gpui::{
 
 use super::*;
 use crate::appearance::{Color, TerminalColors};
-use crate::ssh::command::ValidatedRemoteShellCommand;
 use crate::terminal::native_services::clipboard::{
     ClipboardError, ClipboardRead, SelectionClipboard,
 };
@@ -20,8 +19,8 @@ use crate::terminal::testing::{
     RecordedCommand, TestTerminalSessionFactory, TestTerminalSessionRecords, test_local_directory,
 };
 use crate::terminal::{
-    LocalTerminalLaunchPlan, ScrollbarSnapshot, TerminalLaunchPlan, TerminalSessionChannelProvider,
-    TerminalSessionExit, TerminalSessionFactory, TerminalSessionFailure,
+    LocalTerminalLaunchPlan, ScrollbarSnapshot, TerminalSessionExit, TerminalSessionFactory,
+    TerminalSessionFailure,
 };
 use crate::ui::appearance::TerminalFonts;
 
@@ -452,8 +451,8 @@ fn visibility_subscription_coalesces_hidden_receivers_and_retires_without_pollin
         test_local_directory(std::env::temp_dir()),
     );
     let (pane, cx) = cx.add_window_view(|window, cx| {
-        TerminalPane::new_with_services(
-            session_factory, None, crate::terminal::testing::test_terminal_key_input_adapter(),
+        TerminalPane::with_adapters(
+            session_factory, crate::terminal::testing::test_terminal_key_input_adapter(),
             &crate::platform::terminal_accessibility::testing::RecordingAccessibilityFactory::default(),
             crate::terminal::native_services::testing::adapters(), dependencies, window, cx,
         )
@@ -850,143 +849,6 @@ fn connected_terminal_pane(
     let (pane, cx) = focused_pane(cx, same_machine_sessions(records.clone()));
     (pane, cx, records)
 }
-
-fn remote_workspace_session_factory(
-    records: TestTerminalSessionRecords,
-) -> WorkspaceTerminalSessionFactory {
-    remote_workspace_session_factory_with_readiness(records, Arc::new(AtomicBool::new(true)))
-}
-
-struct ToggleTerminalSessionChannelProvider {
-    ready: Arc<AtomicBool>,
-    command_context: Arc<crate::ssh::testing::SshConnectionFixture>,
-}
-
-impl TerminalSessionChannelProvider for ToggleTerminalSessionChannelProvider {
-    fn is_ready(&self) -> bool {
-        self.ready.load(Ordering::SeqCst)
-    }
-
-    fn revalidate(
-        &self,
-        _directory: crate::domain::RemoteDirectory,
-        _identity: Option<crate::domain::RemoteDirectoryIdentity>,
-    ) -> gpui::Task<Result<(), crate::terminal::TerminalSessionChannelRevalidationError>> {
-        if self.is_ready() {
-            gpui::Task::ready(Ok(()))
-        } else {
-            gpui::Task::ready(Err(
-                crate::terminal::TerminalSessionChannelRevalidationError::ConnectionUnavailable,
-            ))
-        }
-    }
-
-    fn prepare(
-        &self,
-        _directory: &crate::domain::RemoteDirectory,
-    ) -> Result<
-        crate::ssh::command::PreparedSshTerminalSessionChannelCommand,
-        TerminalSessionChannelUnavailable,
-    > {
-        if !self.is_ready() {
-            return Err(TerminalSessionChannelUnavailable);
-        }
-        Ok(self.command_context.prepare_terminal_session_channel(
-            ValidatedRemoteShellCommand::new("exec /bin/zsh -l".to_owned()).unwrap(),
-        ))
-    }
-}
-
-fn remote_workspace_session_factory_with_readiness(
-    records: TestTerminalSessionRecords,
-    ready: Arc<AtomicBool>,
-) -> WorkspaceTerminalSessionFactory {
-    let destination = crate::domain::SshDestination::new("tester@remote".to_owned()).unwrap();
-    let command_context = Arc::new(crate::ssh::testing::SshConnectionFixture::new(
-        destination.clone(),
-    ));
-    let channel_provider = Arc::new(ToggleTerminalSessionChannelProvider {
-        ready,
-        command_context,
-    });
-    WorkspaceTerminalSessionFactory::new_remote(
-        Rc::new(TestTerminalSessionFactory::new(records)),
-        test_local_directory(PathBuf::from("/local/home")),
-        crate::terminal::metadata::RemoteTerminalMetadataContext::new(
-            destination,
-            crate::domain::RemoteDirectory::new("~/project".to_owned()).unwrap(),
-        ),
-        crate::domain::RemoteDirectoryIdentity::new("/home/tester/project".to_owned()).unwrap(),
-        "project on remote".to_owned(),
-        channel_provider,
-    )
-}
-
-fn connected_remote_terminal_pane(
-    cx: &mut TestAppContext,
-) -> (
-    Entity<TerminalPane>,
-    &mut VisualTestContext,
-    TestTerminalSessionRecords,
-) {
-    cx.update(crate::ui::init)
-        .expect("UI initialization should succeed");
-    let records = TestTerminalSessionRecords::default();
-    let session_factory = remote_workspace_session_factory(records.clone());
-    let (pane, cx) =
-        cx.add_window_view(|window, cx| TerminalPane::new(session_factory, window, cx));
-    cx.update(|window, cx| {
-        window.activate_window();
-        pane.update(cx, |pane, cx| pane.focus(window, cx));
-    });
-    cx.run_until_parked();
-    (pane, cx, records)
-}
-
-fn connected_remote_terminal_pane_with_readiness(
-    cx: &mut TestAppContext,
-    ready: Arc<AtomicBool>,
-) -> (
-    Entity<TerminalPane>,
-    &mut VisualTestContext,
-    TestTerminalSessionRecords,
-) {
-    cx.update(crate::ui::init)
-        .expect("UI initialization should succeed");
-    let records = TestTerminalSessionRecords::default();
-    let session_factory = remote_workspace_session_factory_with_readiness(records.clone(), ready);
-    let (pane, cx) =
-        cx.add_window_view(|window, cx| TerminalPane::new(session_factory, window, cx));
-    cx.update(|window, cx| {
-        window.activate_window();
-        pane.update(cx, |pane, cx| pane.focus(window, cx));
-    });
-    cx.run_until_parked();
-    (pane, cx, records)
-}
-
-#[gpui::test]
-fn remote_disconnect_clears_live_terminal_progress(cx: &mut TestAppContext) {
-    let (pane, cx, records) = connected_remote_terminal_pane(cx);
-    let session_id = records.starts().last().unwrap().session_id;
-    records.report_metadata(session_id, |metadata| {
-        metadata.freshness = crate::terminal::metadata::MetadataFreshness::Live;
-        metadata.progress = crate::terminal::metadata::ProgressMetadata::Indeterminate;
-    });
-    cx.run_until_parked();
-    assert_eq!(
-        pane.read_with(cx, |pane, _| pane.caption().progress),
-        super::super::terminal_status::TerminalProgress::Indeterminate
-    );
-
-    pane.update(cx, |pane, cx| pane.disconnect_remote(7, cx).unwrap());
-
-    assert_eq!(
-        pane.read_with(cx, |pane, _| pane.caption().progress),
-        super::super::terminal_status::TerminalProgress::None
-    );
-}
-
 #[gpui::test]
 fn runtime_failure_clears_live_terminal_progress(cx: &mut TestAppContext) {
     let (pane, cx, records) = connected_terminal_pane(cx);
@@ -1016,521 +878,6 @@ fn runtime_failure_clears_live_terminal_progress(cx: &mut TestAppContext) {
         pane.read_with(cx, |pane, _| pane.caption().progress),
         super::super::terminal_status::TerminalProgress::None
     );
-}
-
-#[gpui::test]
-fn remote_restart_resets_caption_before_successor_output_and_preserves_screen(
-    cx: &mut TestAppContext,
-) {
-    use crate::terminal::metadata::{ProgressMetadata, TitleProvenance};
-
-    let (pane, cx, records) = connected_remote_terminal_pane(cx);
-    let session_id = records.starts().last().unwrap().session_id;
-    let mut old_screen = remote_directory_screen(90, "/old/project");
-    let metadata = Arc::make_mut(&mut Arc::make_mut(&mut old_screen).metadata);
-    metadata.title.value = Arc::from("π previous agent");
-    metadata.title.provenance = TitleProvenance::TerminalControl;
-    metadata.progress = ProgressMetadata::Indeterminate;
-    records
-        .event_sender(session_id)
-        .unwrap()
-        .try_send(TerminalSessionEvent::Screen(Arc::clone(&old_screen)))
-        .unwrap();
-    cx.run_until_parked();
-
-    let factory = pane.read_with(cx, |pane, _| pane.terminal_session.session_factory.clone());
-    pane.update(cx, |pane, cx| pane.disconnect_remote(7, cx).unwrap());
-    assert_eq!(
-        cx.foreground_executor().block_test(
-            factory
-                .revalidate_remote_child_launch()
-                .expect("remote restart must require revalidation"),
-        ),
-        Ok(())
-    );
-    let prepared_launch = factory.prepare_child_launch().unwrap();
-    let prepared = pane
-        .read_with(cx, |pane, _| {
-            pane.prepare_remote_restart(factory, 8, prepared_launch)
-        })
-        .unwrap();
-    let caption_changes = Rc::new(Cell::new(0));
-    let observed_changes = Rc::clone(&caption_changes);
-    pane.update(cx, |_, cx| {
-        cx.subscribe(&pane, move |_, _, event: &TerminalPaneEvent, _| {
-            if matches!(event, TerminalPaneEvent::CaptionChanged) {
-                observed_changes.set(observed_changes.get() + 1);
-            }
-        })
-        .detach();
-    });
-    cx.update(|window, cx| {
-        pane.update(cx, |pane, cx| {
-            pane.commit_remote_restart(prepared, window, cx).unwrap()
-        });
-    });
-    cx.run_until_parked();
-
-    assert_eq!(records.starts().len(), 2);
-    pane.read_with(cx, |pane, _| {
-        assert!(Arc::ptr_eq(&pane.screen, &old_screen));
-        let caption = pane.caption();
-        assert_eq!(
-            caption.progress,
-            super::super::terminal_status::TerminalProgress::None
-        );
-        assert_eq!(caption.glyph, None);
-        assert_eq!(caption.label.as_ref(), "project on remote");
-        assert_eq!(caption.directory.as_ref(), "~/project");
-        assert_eq!(caption.origin.user.as_ref(), "tester");
-        assert!(!caption.running);
-    });
-    assert_eq!(caption_changes.get(), 1);
-}
-
-#[gpui::test]
-fn remote_restart_ignores_prior_epoch_events_and_accepts_fresh_generation_one(
-    cx: &mut TestAppContext,
-) {
-    let (pane, cx, records) = connected_remote_terminal_pane(cx);
-    let exits = Rc::new(Cell::new(0));
-    let observed_exits = Rc::clone(&exits);
-    pane.update(cx, |_, cx| {
-        cx.subscribe(&pane, move |_, _, event: &TerminalPaneEvent, _| {
-            if matches!(event, TerminalPaneEvent::Exited) {
-                observed_exits.set(observed_exits.get() + 1);
-            }
-        })
-        .detach();
-    });
-
-    let (old_epoch, old_accessibility) = pane.update(cx, |pane, cx| {
-        let old_epoch = pane.terminal_session.session_epoch;
-        pane.handle_session_event(
-            old_epoch,
-            TerminalSessionEvent::Screen(text_screen(90, &["old"])),
-            cx,
-        );
-        pane.record_successfully_presented_screen(Arc::clone(&pane.screen));
-        let old_accessibility = Arc::new(TerminalAccessibilityModel::from_screen(&text_screen(
-            90,
-            &["old"],
-        )));
-        pane.handle_session_accessibility(old_epoch, Arc::clone(&old_accessibility));
-        (old_epoch, old_accessibility)
-    });
-    let factory = pane.read_with(cx, |pane, _| pane.terminal_session.session_factory.clone());
-    pane.update(cx, |pane, cx| pane.disconnect_remote(7, cx).unwrap());
-    assert_eq!(
-        cx.foreground_executor().block_test(
-            factory
-                .revalidate_remote_child_launch()
-                .expect("remote restart must require revalidation"),
-        ),
-        Ok(())
-    );
-    let prepared_launch = factory.prepare_child_launch().unwrap();
-    let prepared = pane
-        .read_with(cx, |pane, _| {
-            pane.prepare_remote_restart(factory, 8, prepared_launch)
-        })
-        .unwrap();
-    cx.update(|window, cx| {
-        pane.update(cx, |pane, cx| {
-            pane.commit_remote_restart(prepared, window, cx).unwrap()
-        });
-    });
-    cx.run_until_parked();
-    assert_eq!(records.starts().len(), 2);
-    assert_eq!(
-        pane.read_with(cx, |pane, _| (
-            pane.screen.generation,
-            pane.title.clone(),
-            Arc::ptr_eq(&pane.accessibility, &old_accessibility),
-        )),
-        (
-            crate::terminal::PresentationGeneration::test(90),
-            SharedString::from("text preflight"),
-            true,
-        )
-    );
-
-    pane.update(cx, |pane, cx| {
-        pane.handle_session_event(
-            old_epoch,
-            TerminalSessionEvent::Screen(text_screen(99, &["stale"])),
-            cx,
-        );
-        pane.handle_session_event(
-            old_epoch,
-            TerminalSessionEvent::Exited(TerminalSessionExit::Success),
-            cx,
-        );
-        pane.handle_session_accessibility(
-            old_epoch,
-            Arc::new(TerminalAccessibilityModel::from_screen(&text_screen(
-                99,
-                &["stale"],
-            ))),
-        );
-        let current_epoch = pane.terminal_session.session_epoch;
-        pane.handle_session_event(
-            current_epoch,
-            TerminalSessionEvent::Screen(text_screen(1, &["fresh"])),
-            cx,
-        );
-        pane.record_successfully_presented_screen(Arc::clone(&pane.screen));
-    });
-
-    let state = pane.read_with(cx, |pane, _| {
-        (
-            pane.screen.generation,
-            pane.last_valid_screen.generation,
-            pane.title.clone(),
-            Arc::ptr_eq(&pane.accessibility, &old_accessibility),
-        )
-    });
-    assert_eq!(state.0, crate::terminal::PresentationGeneration::test(1));
-    assert_eq!(state.1, crate::terminal::PresentationGeneration::test(1));
-    assert_eq!(state.2.as_ref(), "text preflight");
-    assert!(state.3);
-    assert_eq!(exits.get(), 0);
-
-    let successor_epoch = pane.read_with(cx, |pane, _| pane.terminal_session.session_epoch);
-    let delayed_disconnect = pane.update(cx, |pane, cx| pane.disconnect_remote(7, cx));
-    assert_eq!(
-        delayed_disconnect,
-        Err(RemotePaneLifecycleError::StaleGeneration {
-            current: 8,
-            received: 7,
-        })
-    );
-    assert_eq!(
-        pane.read_with(cx, |pane, _| (
-            pane.terminal_session.session_epoch,
-            pane.terminal_session.remote_input_blocked
-        )),
-        (successor_epoch, false)
-    );
-}
-
-#[gpui::test]
-fn disconnected_remote_pane_blocks_input_but_preserves_copy_selection_and_find(
-    cx: &mut TestAppContext,
-) {
-    let (pane, cx, records) = connected_remote_terminal_pane(cx);
-    let pointer_position = pane.read_with(cx, |pane, _| {
-        pane.grid_bounds
-            .expect("terminal grid was painted")
-            .center()
-    });
-    cx.update(|window, cx| {
-        pane.update(cx, |pane, cx| {
-            pane.handle_event(
-                TerminalSessionEvent::Screen(context_action_screen(None, true)),
-                cx,
-            );
-            pane.open_find(&OpenTerminalFind, window, cx);
-            pane.disconnect_remote(3, cx).unwrap();
-            pane.copy_selection(&CopySelection, window, cx);
-        });
-    });
-    cx.simulate_keystrokes("blocked");
-    cx.simulate_mouse_move(pointer_position, None, Modifiers::none());
-    cx.simulate_event(ScrollWheelEvent {
-        position: pointer_position,
-        delta: ScrollDelta::Lines(point(0.0, -1.0)),
-        modifiers: Modifiers::none(),
-        touch_phase: gpui::TouchPhase::Moved,
-    });
-    cx.run_until_parked();
-
-    let state = cx.update(|window, cx| {
-        pane.read_with(cx, |pane, _| {
-            (
-                pane.screen.selection_present,
-                pane.find_input.is_some(),
-                pane.terminal_input_focused(window, cx),
-                pane.terminal_session.session.is_some(),
-            )
-        })
-    });
-    assert_eq!(state, (true, true, false, true));
-    assert!(
-        records
-            .commands()
-            .iter()
-            .any(|call| { matches!(call.command, RecordedCommand::RequestSelectionCopy) })
-    );
-    assert!(!records.commands().iter().any(|call| matches!(
-        call.command,
-        RecordedCommand::Key(_)
-            | RecordedCommand::Pointer(_)
-            | RecordedCommand::PointerAndCopySelection(_)
-            | RecordedCommand::Wheel(_)
-    )));
-}
-
-#[gpui::test]
-fn failed_master_event_before_disconnect_retains_remote_pane(cx: &mut TestAppContext) {
-    let ready = Arc::new(AtomicBool::new(true));
-    let (pane, cx, _) = connected_remote_terminal_pane_with_readiness(cx, Arc::clone(&ready));
-    ready.store(false, Ordering::SeqCst);
-
-    pane.update(cx, |pane, cx| {
-        let epoch = pane.terminal_session.session_epoch;
-        pane.handle_session_event(
-            epoch,
-            TerminalSessionEvent::Failed(TerminalSessionFailure::Runtime(
-                crate::terminal::TerminalFailure::emulator("session-runtime"),
-            )),
-            cx,
-        );
-        pane.disconnect_remote(7, cx).unwrap();
-    });
-
-    assert!(pane.read_with(cx, |pane, _| {
-        pane.terminal_session.remote_input_blocked
-            && pane.terminal_session.remote_connection_generation == Some(7)
-            && pane.pane_state == PaneTerminalState::Running
-    }));
-}
-
-#[gpui::test]
-fn exited_master_event_before_disconnect_retains_remote_pane(cx: &mut TestAppContext) {
-    let ready = Arc::new(AtomicBool::new(true));
-    let (pane, cx, _) = connected_remote_terminal_pane_with_readiness(cx, Arc::clone(&ready));
-    let exits = Rc::new(Cell::new(0));
-    let observed_exits = Rc::clone(&exits);
-    pane.update(cx, |_, cx| {
-        cx.subscribe(&pane, move |_, _, event: &TerminalPaneEvent, _| {
-            if matches!(event, TerminalPaneEvent::Exited) {
-                observed_exits.set(observed_exits.get() + 1);
-            }
-        })
-        .detach();
-    });
-    ready.store(false, Ordering::SeqCst);
-
-    pane.update(cx, |pane, cx| {
-        let epoch = pane.terminal_session.session_epoch;
-        pane.handle_session_event(
-            epoch,
-            TerminalSessionEvent::Exited(TerminalSessionExit::Success),
-            cx,
-        );
-        pane.disconnect_remote(7, cx).unwrap();
-    });
-
-    assert_eq!(exits.get(), 0);
-    assert!(pane.read_with(cx, |pane, _| {
-        pane.terminal_session.remote_input_blocked
-            && pane.terminal_session.remote_connection_generation == Some(7)
-            && pane.pane_state == PaneTerminalState::Running
-    }));
-}
-
-#[gpui::test]
-fn authoritative_disconnect_before_terminal_events_ignores_exit_and_failure(
-    cx: &mut TestAppContext,
-) {
-    let ready = Arc::new(AtomicBool::new(true));
-    let (pane, cx, _) = connected_remote_terminal_pane_with_readiness(cx, Arc::clone(&ready));
-    let exits = Rc::new(Cell::new(0));
-    let observed_exits = Rc::clone(&exits);
-    pane.update(cx, |_, cx| {
-        cx.subscribe(&pane, move |_, _, event: &TerminalPaneEvent, _| {
-            if matches!(event, TerminalPaneEvent::Exited) {
-                observed_exits.set(observed_exits.get() + 1);
-            }
-        })
-        .detach();
-    });
-    ready.store(false, Ordering::SeqCst);
-
-    pane.update(cx, |pane, cx| {
-        let old_epoch = pane.terminal_session.session_epoch;
-        pane.disconnect_remote(7, cx).unwrap();
-        pane.handle_session_event(
-            old_epoch,
-            TerminalSessionEvent::Failed(TerminalSessionFailure::Runtime(
-                crate::terminal::TerminalFailure::emulator("session-runtime"),
-            )),
-            cx,
-        );
-        pane.handle_session_event(
-            old_epoch,
-            TerminalSessionEvent::Exited(TerminalSessionExit::ExitCode(255)),
-            cx,
-        );
-    });
-
-    assert_eq!(exits.get(), 0);
-    assert!(pane.read_with(cx, |pane, _| {
-        pane.terminal_session.remote_input_blocked && pane.pane_state == PaneTerminalState::Running
-    }));
-}
-
-#[gpui::test]
-fn disconnect_and_restart_clear_hidden_input_before_successor_focus(cx: &mut TestAppContext) {
-    let (pane, cx, _) = connected_remote_terminal_pane(cx);
-    pane.update(cx, |pane, cx| {
-        pane.handle_event(TerminalSessionEvent::HiddenInputChanged(true), cx);
-    });
-    assert!(pane.read_with(cx, |pane, _| pane.hidden_input && pane.terminal_input_focus));
-
-    let factory = pane.read_with(cx, |pane, _| pane.terminal_session.session_factory.clone());
-    pane.update(cx, |pane, cx| pane.disconnect_remote(7, cx).unwrap());
-    assert!(pane.read_with(cx, |pane, _| {
-        !pane.hidden_input && !pane.terminal_input_focus
-    }));
-
-    assert_eq!(
-        cx.foreground_executor().block_test(
-            factory
-                .revalidate_remote_child_launch()
-                .expect("remote restart must require revalidation"),
-        ),
-        Ok(())
-    );
-    let prepared_launch = factory.prepare_child_launch().unwrap();
-    let prepared = pane
-        .read_with(cx, |pane, _| {
-            pane.prepare_remote_restart(factory, 8, prepared_launch)
-        })
-        .unwrap();
-    cx.update(|window, cx| {
-        pane.update(cx, |pane, cx| {
-            pane.commit_remote_restart(prepared, window, cx).unwrap();
-            assert!(!pane.hidden_input);
-        });
-    });
-}
-
-#[gpui::test]
-fn local_pane_rejects_remote_disconnect_without_mutation(cx: &mut TestAppContext) {
-    let (pane, cx, records) = connected_terminal_pane(cx);
-    let epoch = pane.read_with(cx, |pane, _| pane.terminal_session.session_epoch);
-    let result = pane.update(cx, |pane, cx| pane.disconnect_remote(1, cx));
-    assert_eq!(result, Err(RemotePaneLifecycleError::LocalPane));
-    assert_eq!(
-        pane.read_with(cx, |pane, _| pane.terminal_session.session_epoch),
-        epoch
-    );
-    assert_eq!(records.starts().len(), 1);
-}
-
-#[gpui::test]
-fn remote_pane_disables_local_file_actions_but_preserves_text_services_and_web_links(
-    cx: &mut TestAppContext,
-) {
-    let directory = std::env::temp_dir().join(format!(
-        "spaceterm-remote-pane-capabilities-{}",
-        std::process::id()
-    ));
-    std::fs::create_dir_all(&directory).unwrap();
-    let file = directory.join("preview.txt");
-    std::fs::write(&file, b"preview").unwrap();
-    let local_link = crate::terminal::HyperlinkTarget::osc8(
-        "file:preview.txt",
-        &directory,
-        None,
-        TerminalLocalFileCapabilities::Enabled,
-    )
-    .unwrap();
-    let web_link = crate::terminal::HyperlinkTarget::url("https://example.test").unwrap();
-    let previews = Rc::new(Cell::new(0));
-    let (pane, cx, records) = connected_remote_terminal_pane(cx);
-
-    cx.update(|window, cx| {
-        pane.update(cx, |pane, cx| {
-            pane.screen = context_action_screen(Some(local_link.clone()), true);
-            pane.last_geometry = Some(TerminalGeometry::from_grid(
-                CellGridSize::new(1, 1),
-                LogicalCellSize::new(f32::from(pane.cell_width), pane.line_height),
-                BackingScale::ONE,
-            ));
-            pane.file_preview = FilePreviewPresenter::new(Box::new(RecordingFilePreviewPanel {
-                previews: Rc::clone(&previews),
-                dismissals: Rc::new(Cell::new(0)),
-            }));
-            let menu = TerminalContextMenuState {
-                generation: pane.screen.generation,
-                position: SurfacePosition::default(),
-                link: Some(local_link.clone()),
-                selection_present: true,
-                file_preview_eligible: true,
-            };
-            assert_eq!(
-                pane.context_menu_actions(&menu),
-                NativeContextActions {
-                    copy: true,
-                    open_link: false,
-                    file_preview: false,
-                }
-            );
-            pane.perform_context_menu_command(
-                menu,
-                TerminalContextMenuCommand::FilePreview,
-                window,
-                cx,
-            );
-        });
-    });
-    cx.run_until_parked();
-    let position = pane.read_with(cx, |pane, _| pane.grid_bounds.unwrap().center());
-    drop_file_paths(cx, position, vec![file.clone()]);
-    cx.write_to_clipboard(ClipboardItem::new_string("clipboard text".to_owned()));
-    cx.update(|window, cx| {
-        pane.update(cx, |pane, cx| {
-            pane.paste_clipboard(&PasteClipboard, window, cx);
-        });
-    });
-    cx.run_until_parked();
-    let origin = current_native_service_origin(&pane, cx);
-    let inserted = cx.update(|window, cx| {
-        pane.update(cx, |pane, cx| {
-            pane.insert_native_service_text(origin, "ordinary text".to_owned(), window, cx)
-        })
-    });
-    cx.run_until_parked();
-    cx.update(|window, cx| {
-        pane.update(cx, |pane, cx| {
-            pane.open_find(&OpenTerminalFind, window, cx);
-        });
-    });
-
-    assert!(inserted);
-    assert_eq!(previews.get(), 0);
-    assert!(pane.read_with(cx, |pane, _| pane.find_input.is_some()));
-    let generation = pane.read_with(cx, |pane, _| pane.screen.generation);
-    assert_eq!(
-        activated_link(
-            TerminalLocalFileCapabilities::Disabled,
-            generation,
-            &web_link,
-            generation,
-            Some(&web_link),
-            true,
-        ),
-        Some("https://example.test".to_owned())
-    );
-    assert!(
-        records.commands().iter().any(|call| {
-            call.command == RecordedCommand::RequestPaste("ordinary text".to_owned())
-        })
-    );
-    assert!(records.commands().iter().any(|call| {
-        call.command == RecordedCommand::RequestPaste("clipboard text".to_owned())
-    }));
-    assert!(records.commands().iter().all(|call| {
-        !matches!(
-            &call.command,
-            RecordedCommand::RequestPaste(text)
-                if text.contains(file.to_string_lossy().as_ref())
-        )
-    }));
-    std::fs::remove_dir_all(directory).unwrap();
 }
 
 #[gpui::test]
@@ -1659,9 +1006,8 @@ fn accesskit_server_pane_keeps_frozen_text_but_refuses_native_focus_while_interr
         test_local_directory(PathBuf::from("/tmp/spaceterm-terminal-pane-test")),
     );
     let (pane, cx) = cx.add_window_view(|window, cx| {
-        TerminalPane::new_with_services(
+        TerminalPane::with_adapters(
             session_factory,
-            None,
             crate::terminal::testing::test_terminal_key_input_adapter(),
             &crate::platform::accesskit_terminal_accessibility::AccessKitTerminalAccessibilityAdapterFactory,
             crate::terminal::native_services::testing::adapters(),
@@ -1817,9 +1163,8 @@ fn accesskit_terminal_pane_activation_publishes_text_focus_and_retires_hidden_pa
         test_local_directory(PathBuf::from("/")),
     );
     let (pane, cx) = cx.add_window_view(|window, cx| {
-        TerminalPane::new_with_services(
+        TerminalPane::with_adapters(
             session_factory,
-            None,
             crate::terminal::testing::test_terminal_key_input_adapter(),
             &crate::platform::accesskit_terminal_accessibility::AccessKitTerminalAccessibilityAdapterFactory,
             crate::terminal::native_services::testing::adapters(),
@@ -1904,9 +1249,8 @@ fn accessibility_adapter_receives_construction_publication_and_teardown(cx: &mut
     );
     let pane = cx.update(|window, cx| {
         cx.new(|cx| {
-            TerminalPane::new_with_prepared_launch(
+            TerminalPane::with_adapters(
                 session_factory.clone(),
-                session_factory.prepare_child_launch().unwrap(),
                 crate::terminal::testing::test_terminal_key_input_adapter(),
                 &factory,
                 crate::terminal::native_services::testing::adapters(),
@@ -1950,79 +1294,6 @@ fn accessibility_adapter_receives_construction_publication_and_teardown(cx: &mut
     cx.run_until_parked();
     assert!(record.borrow().dropped);
     assert!(record.borrow().selection_sender.is_none());
-}
-
-#[gpui::test]
-fn accessibility_selection_authority_follows_remote_restart_hierarchy_and_close(
-    cx: &mut TestAppContext,
-) {
-    let (pane, cx, records) = connected_remote_terminal_pane(cx);
-    let record = prepare_accessibility_presentation(&pane, cx);
-    let request = record.borrow().model.selection_request(0..0).unwrap();
-    let predecessor = record
-        .borrow()
-        .selection_sender
-        .clone()
-        .expect("Pane must publish Selection authority");
-    predecessor.request(request.clone());
-    assert_eq!(
-        records.accessibility_selection_requests(1),
-        std::slice::from_ref(&request)
-    );
-
-    pane.update(cx, |pane, _| pane.set_accessibility_hierarchy(false));
-    assert!(record.borrow().selection_sender.is_none());
-    cx.update(|window, cx| {
-        pane.update(cx, |pane, _| pane.sync_native_accessibility(window, false))
-    });
-    assert!(
-        record.borrow().selection_sender.is_none(),
-        "hidden publication must not restore authority"
-    );
-    pane.update(cx, |pane, _| pane.set_accessibility_hierarchy(false));
-    assert!(record.borrow().selection_sender.is_none());
-    pane.update(cx, |pane, _| pane.set_accessibility_hierarchy(true));
-    cx.update(|window, cx| pane.update(cx, |pane, _| pane.sync_native_accessibility(window, true)));
-    assert!(record.borrow().selection_sender.is_some());
-
-    let factory = pane.read_with(cx, |pane, _| pane.terminal_session.session_factory.clone());
-    pane.update(cx, |pane, cx| pane.disconnect_remote(7, cx).unwrap());
-    assert_eq!(
-        cx.foreground_executor()
-            .block_test(factory.revalidate_remote_child_launch().unwrap()),
-        Ok(())
-    );
-    let prepared_launch = factory.prepare_child_launch().unwrap();
-    let prepared = pane
-        .read_with(cx, |pane, _| {
-            pane.prepare_remote_restart(factory, 8, prepared_launch)
-        })
-        .unwrap();
-    cx.update(|window, cx| {
-        pane.update(cx, |pane, cx| {
-            pane.commit_remote_restart(prepared, window, cx).unwrap()
-        })
-    });
-    cx.run_until_parked();
-    cx.update(|window, cx| pane.update(cx, |pane, _| pane.sync_native_accessibility(window, true)));
-    predecessor.request(request.clone());
-    assert!(records.accessibility_selection_requests(2).is_empty());
-    let successor = record
-        .borrow()
-        .selection_sender
-        .clone()
-        .expect("restart must publish successor authority");
-    successor.request(request.clone());
-    assert_eq!(
-        records.accessibility_selection_requests(2),
-        std::slice::from_ref(&request)
-    );
-    assert_eq!(records.dropped_session_ids(), [1]);
-    pane.update(cx, |pane, _| pane.close());
-    assert!(record.borrow().selection_sender.is_none());
-    successor.request(request);
-    assert!(records.accessibility_selection_requests(2).is_empty());
-    assert_eq!(records.dropped_session_ids(), [1, 2]);
 }
 
 fn prepare_accessibility_presentation(
@@ -2397,8 +1668,8 @@ fn terminal_pane_with_session_options(
         test_local_directory(std::env::temp_dir()),
     );
     let (pane, cx) = cx.add_window_view(|window, cx| {
-        TerminalPane::new_with_services(
-            session_factory, None,
+        TerminalPane::with_adapters(
+            session_factory,
             crate::terminal::testing::test_terminal_key_input_adapter(),
             &crate::platform::accesskit_terminal_accessibility::AccessKitTerminalAccessibilityAdapterFactory,
             crate::terminal::native_services::testing::adapters(),
@@ -8036,8 +7307,8 @@ fn terminal_scrollbar_should_request_exact_row_offsets(cx: &mut TestAppContext) 
                 LogicalCellSize::new(8.0, 16.0),
                 BackingScale::ONE,
             ),
-            TerminalLaunchPlan::Local(LocalTerminalLaunchPlan::new(test_local_directory(
-                PathBuf::from("/tmp/spaceterm-terminal-pane-test"),
+            LocalTerminalLaunchPlan::new(test_local_directory(PathBuf::from(
+                "/tmp/spaceterm-terminal-pane-test",
             ))),
             crate::terminal::test_terminal_appearance_update(),
         )
@@ -10224,21 +9495,6 @@ mod permission_requests {
             [Accessibility, ScreenRecording]
         );
         assert!(cx.debug_bounds("permission-request-message").is_some());
-    }
-
-    #[gpui::test]
-    fn a_remote_pane_ignores_permission_requests(cx: &mut TestAppContext) {
-        let (pane, cx, _) = connected_remote_terminal_pane(cx);
-        install_setup(
-            &pane,
-            PermissionAuthorization::NotGranted,
-            PermissionAuthorization::NotGranted,
-            cx,
-        );
-
-        request(&pane, &[ScreenRecording], cx);
-        assert!(cx.debug_bounds("permission-request").is_none());
-        assert!(pane.read_with(cx, |pane, _| pane.permission_request.is_empty()));
     }
 
     #[gpui::test]

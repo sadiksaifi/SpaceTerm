@@ -57,9 +57,9 @@ mod development {
     use crate::close_confirmation::CloseTarget;
     use crate::domain::{PaneId, TabId, ValidatedLocalDirectory, WorkspaceId};
     use crate::local_server::LocalServer;
+    use crate::terminal::WorkspaceTerminalSessionFactory;
     use crate::terminal::server_session::{DevelopmentServerSessionFactory, PaneControls};
     use crate::terminal::shared_workspace::{SharedWorkspaceClient, SharedWorkspaceSnapshot};
-    use crate::terminal::{PreparedWorkspaceTerminalLaunch, WorkspaceTerminalSessionFactory};
     use crate::ui::pane_lifecycle::PaneConstruction;
     use crate::ui::server_pane::{ServerPaneConnection, ServerPaneView};
 
@@ -589,11 +589,10 @@ mod development {
         }
     }
 
-    /// One Pane's passive subscription to the server: how it presents the Pane, its first launch
-    /// reservation, and the connection whose status the Pane reads.
+    /// One Pane's passive subscription to the server: how it presents the Pane and the connection
+    /// whose status the Pane reads.
     pub(crate) type SharedPaneSubscription = (
         WorkspaceTerminalSessionFactory,
-        PreparedWorkspaceTerminalLaunch,
         Arc<dyn ServerPaneConnection>,
     );
 
@@ -688,11 +687,7 @@ mod development {
                 Rc::new(factory.with_attachment(permit)),
                 self.client_home.clone(),
             );
-            let prepared = session_factory
-                .prepare_child_launch()
-                .inspect_err(|_| eprintln!("a server-backed launch reserves no channel"))
-                .ok()?;
-            Some((session_factory, prepared, state))
+            Some((session_factory, state))
         }
     }
 
@@ -742,11 +737,7 @@ mod development {
                 Rc::new(factory.with_attachment(permit)),
                 self.client_home.clone(),
             );
-            let prepared = session_factory
-                .prepare_child_launch()
-                .inspect_err(|_| eprintln!("a server-backed launch reserves no channel"))
-                .ok()?;
-            Some((session_factory, prepared, state))
+            Some((session_factory, state))
         }
     }
 
@@ -2367,8 +2358,7 @@ mod development {
                     .lock()
                     .expect("panes")
                     .insert(pane, std::sync::Arc::clone(&connection));
-                let prepared = self.session_factory.prepare_child_launch().ok()?;
-                Some((self.session_factory.clone(), prepared, connection))
+                Some((self.session_factory.clone(), connection))
             }
         }
 

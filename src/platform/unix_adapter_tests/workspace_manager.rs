@@ -18,7 +18,7 @@ fn workspace_manager_with_directory_selection(
     let directory_selection: Rc<dyn SystemDirectorySelection> =
         Rc::new(ScriptedDirectorySelection::new(selections));
     let (manager, cx) = cx.add_window_view(|window, cx| {
-        let mut manager = WorkspaceManager::new_with_adapters(
+        new_desktop_manager(
             session_factory,
             std::env::temp_dir(),
             WorkspaceManagerAdapters {
@@ -29,15 +29,12 @@ fn workspace_manager_with_directory_selection(
                 lifecycle: PaneLifecycleDependencies::testing(),
                 directory_selection,
                 window_drag: Rc::new(RecordingOperatingSystemWindowDragPlatform::default()),
-                remote_workspace: test_remote_backend_factory(),
                 local_server: crate::ui::launch_testing::unanswered(),
             },
             SidebarState::Expanded,
             window,
             cx,
-        );
-        manager.present_desktop_workspace(window, cx);
-        manager
+        )
     });
     cx.update(|window, cx| {
         manager.update(cx, |manager, cx| manager.focus(window, cx));
@@ -64,11 +61,9 @@ fn changing_pin_to_equivalent_directory_should_preserve_selected_spelling(cx: &m
         (
             manager.workspaces.len(),
             workspace.local_display_directory().unwrap().to_path_buf(),
-            workspace.location().clone(),
         )
     });
-    assert_eq!((state.0, state.1), (1, equivalent.clone()));
-    assert!(matches!(state.2, WorkspaceLocation::Local));
+    assert_eq!(state, (1, equivalent.clone()));
     fs::remove_dir_all(root).unwrap();
 }
 

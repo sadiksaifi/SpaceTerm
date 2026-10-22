@@ -7,8 +7,8 @@ pub use crate::appearance::resolution::{
 };
 pub use crate::appearance::terminal_theme::{Appearance, CatalogError, TerminalColors, ThemeId};
 pub use crate::domain::workspace_collection::{
-    CurrentDirectory, RemoteDirectory, RemoteDirectoryIdentity, RemoteUser,
-    RemoteWorkspaceValueError, SshDestination, ValidatedLocalDirectory,
+    CurrentDirectory, RemoteDirectory, RemoteWorkspaceValueError, SshDestination,
+    ValidatedLocalDirectory,
 };
 pub use crate::local_path::LocalPathSemantics;
 pub use crate::platform::local_filesystem::{

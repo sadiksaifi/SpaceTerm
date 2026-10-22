@@ -110,6 +110,8 @@ pub(super) enum WorkspaceMenuCommand {
 /// What a machine heading's menu asks of the application.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum MachineMenuCommand {
+    /// Creates a Workspace on the machine's presented SpaceTerm Server.
+    NewWorkspace,
     /// Connects to the machine's SpaceTerm Server, asking the person in this window if needed.
     Connect,
     /// Stops presenting the SSH server's Workspaces. They keep running on that machine.
@@ -150,6 +152,8 @@ pub(super) struct MachineSection {
     /// Whether the machine's server is a Saved Connection that isn't presented yet, so its
     /// Workspaces appear only once it connects.
     pub(super) awaiting_connection: bool,
+    /// Whether another computer's presented server takes a new Workspace from this heading.
+    pub(super) creates_workspaces: bool,
     /// The maintenance steps the machine's observed server state allows, in menu order.
     pub(super) maintenance: Vec<crate::ui::remote_maintenance::RemoteAction>,
     /// How many Workspace rows follow the heading.
@@ -779,7 +783,6 @@ pub(super) fn remote_connection_status(phase: RemoteConnectionPhase) -> Option<&
         RemoteConnectionPhase::Reconnecting => Some("Reconnecting…"),
         RemoteConnectionPhase::Disconnected => Some("Disconnected"),
         RemoteConnectionPhase::Failed => Some("Connection failed"),
-        RemoteConnectionPhase::Closing => Some("Closing…"),
     }
 }
 
@@ -790,7 +793,7 @@ pub(super) fn remote_connection_color(
     match phase {
         RemoteConnectionPhase::Reconnecting => colors.info,
         RemoteConnectionPhase::Connected => colors.success,
-        RemoteConnectionPhase::Disconnected | RemoteConnectionPhase::Closing => colors.icon_muted,
+        RemoteConnectionPhase::Disconnected => colors.icon_muted,
         RemoteConnectionPhase::Failed => colors.error,
     }
 }
@@ -1600,10 +1603,6 @@ mod tests {
                 RemoteConnectionPhase::Disconnected,
                 &ChromeColors::default()
             ),
-            ChromeColors::default().icon_muted
-        );
-        assert_eq!(
-            remote_connection_color(RemoteConnectionPhase::Closing, &ChromeColors::default()),
             ChromeColors::default().icon_muted
         );
     }

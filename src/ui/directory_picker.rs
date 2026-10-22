@@ -30,14 +30,12 @@ use super::{
 use crate::domain::PinnedDirectory;
 
 mod local_source;
-mod remote_source;
+#[cfg(test)]
+mod scripted_source;
 mod server_source;
 pub(crate) use server_source::ServerDirectorySource;
 
 pub(crate) use local_source::LocalDirectorySource;
-pub(crate) use remote_source::{
-    RemoteDirectoryProvider, RemoteDirectoryProviderError, RemoteDirectorySource,
-};
 
 const HOME_DISPLAY: &str = "~/";
 const CREATE_ALERT_ID: &str = "directory-picker-create-directory";
@@ -52,17 +50,10 @@ const ENCLOSING_ROW: &str = "directory-picker-enclosing";
 const NO_SUBDIRECTORIES: &str = "No subdirectories";
 const TRUNCATED_LISTING_NOTE: &str =
     "Showing the first 1024 directories. Type a path to open others.";
-const UNSUPPORTED_LOGIN_SHELL_MESSAGE: &str =
-    "The remote login shell does not support login mode. Choose another account or shell.";
 pub(super) const MAXIMUM_DIRECTORY_ROWS: usize = 1024;
 const CONNECTION_LOST_NOTICE: EmptyNotice =
-    EmptyNotice::new(IconName::TriangleAlert, "SSH connection lost");
-const SESSION_UNAVAILABLE_NOTICE: EmptyNotice =
-    EmptyNotice::new(IconName::TriangleAlert, "SSH server refused a new session")
-        .description("Close a Pane on this connection or edit the path to try again.");
-const UNSUPPORTED_LOGIN_SHELL_NOTICE: EmptyNotice =
-    EmptyNotice::new(IconName::TriangleAlert, "Unsupported login shell")
-        .description(UNSUPPORTED_LOGIN_SHELL_MESSAGE);
+    EmptyNotice::new(IconName::TriangleAlert, "Server connection lost")
+        .description("Choose again once SpaceTerm reconnects to the server.");
 
 /// The content-unavailable view the list area presents in place of child directories.
 #[derive(Clone, Copy)]
@@ -91,12 +82,9 @@ impl EmptyNotice {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum DirectorySourceError {
     ConnectionLost,
-    /// The machine refused a new session on a connection that is still live.
-    SessionUnavailable,
     Missing,
     NotDirectory,
     PermissionDenied,
-    UnsupportedLoginShell,
     Other,
 }
 
@@ -432,8 +420,6 @@ enum DirectoryPickerStatus {
     NotDirectory,
     PermissionDenied,
     ConnectionLost,
-    SessionUnavailable,
-    UnsupportedLoginShell,
     Other,
     Invalid(PickerPathError),
 }
@@ -1265,10 +1251,6 @@ impl DirectoryPicker {
                     .description("Your account can\u{2019}t open this directory.");
             }
             DirectoryPickerStatus::ConnectionLost => return CONNECTION_LOST_NOTICE,
-            DirectoryPickerStatus::SessionUnavailable => return SESSION_UNAVAILABLE_NOTICE,
-            DirectoryPickerStatus::UnsupportedLoginShell => {
-                return UNSUPPORTED_LOGIN_SHELL_NOTICE;
-            }
             DirectoryPickerStatus::Other => {
                 return EmptyNotice::new(IconName::CircleAlert, "Can\u{2019}t read this directory");
             }
@@ -1287,8 +1269,6 @@ impl DirectoryPicker {
         match self.listing_error {
             None => EmptyNotice::new(IconName::Folder, NO_SUBDIRECTORIES),
             Some(DirectorySourceError::ConnectionLost) => CONNECTION_LOST_NOTICE,
-            Some(DirectorySourceError::SessionUnavailable) => SESSION_UNAVAILABLE_NOTICE,
-            Some(DirectorySourceError::UnsupportedLoginShell) => UNSUPPORTED_LOGIN_SHELL_NOTICE,
             Some(DirectorySourceError::PermissionDenied) => {
                 EmptyNotice::new(IconName::Lock, "Permission denied")
                     .description("Your account can\u{2019}t list this directory.")
@@ -1485,11 +1465,9 @@ fn child_directory_item(
 fn status_for_source_error(error: DirectorySourceError) -> DirectoryPickerStatus {
     match error {
         DirectorySourceError::ConnectionLost => DirectoryPickerStatus::ConnectionLost,
-        DirectorySourceError::SessionUnavailable => DirectoryPickerStatus::SessionUnavailable,
         DirectorySourceError::Missing => DirectoryPickerStatus::Missing,
         DirectorySourceError::NotDirectory => DirectoryPickerStatus::NotDirectory,
         DirectorySourceError::PermissionDenied => DirectoryPickerStatus::PermissionDenied,
-        DirectorySourceError::UnsupportedLoginShell => DirectoryPickerStatus::UnsupportedLoginShell,
         DirectorySourceError::Other => DirectoryPickerStatus::Other,
     }
 }
@@ -1508,33 +1486,25 @@ mod tests {
         BackgroundExecutor, Keystroke, Modifiers, Task, TestAppContext, VisualTestContext, div,
     };
 
+    use super::scripted_source::{
+        RemoteDirectoryProvider, RemoteDirectoryProviderError, RemoteDirectorySource,
+    };
     use super::*;
-    use crate::domain::{RemoteDirectory, RemoteDirectoryIdentity};
-    use crate::ssh::fake_remote_utility_server::FakeRemoteUtilityServer;
-    use crate::ssh::remote_account::RemoteWorkspaceAccount;
+    use crate::domain::RemoteDirectory;
 
     #[test]
     fn remote_picker_wrapper_debug_should_redact_account_paths_and_rows() {
         let parsed = parse_picker_path("/sensitive/project").unwrap();
         let row = DirectoryRow::new("sensitive-child".to_owned()).unwrap();
         let listing = DirectoryListing::new(vec![row.clone()]);
-        let account = RemoteWorkspaceAccount::from_validated_login_shell(
-            "sensitive-user".to_owned(),
-            RemoteDirectoryIdentity::new("/sensitive/home".to_owned()).unwrap(),
-            crate::ssh::command::ValidatedRemoteLoginShell::new("/bin/zsh".to_owned()).unwrap(),
-        )
-        .unwrap();
-        let pinned = PinnedDirectory::Remote {
-            directory: RemoteDirectory::new("/sensitive/project".to_owned()).unwrap(),
-            identity: RemoteDirectoryIdentity::new("/sensitive/project".to_owned()).unwrap(),
-        };
-        let event = DirectoryPickerEvent::Confirmed(DirectorySelection::Pin(pinned));
+        let event = DirectoryPickerEvent::Confirmed(DirectorySelection::Server(
+            "/sensitive/project".into(),
+        ));
 
         for debug in [
             format!("{parsed:?}"),
             format!("{row:?}"),
             format!("{listing:?}"),
-            format!("{account:?}"),
             format!("{event:?}"),
             format!(
                 "{:?}",
@@ -1547,11 +1517,11 @@ mod tests {
 
     #[derive(Default)]
     struct ScriptedRemoteDirectoryProviderState {
-        accounts: VecDeque<Task<Result<RemoteWorkspaceAccount, RemoteDirectoryProviderError>>>,
+        accounts: VecDeque<Task<Result<String, RemoteDirectoryProviderError>>>,
         listings: VecDeque<Task<Result<DirectoryListing, RemoteDirectoryProviderError>>>,
         probes: VecDeque<Task<Result<ExactPathState, RemoteDirectoryProviderError>>>,
         creations: VecDeque<Task<Result<(), RemoteDirectoryProviderError>>>,
-        validations: VecDeque<Task<Result<RemoteDirectoryIdentity, RemoteDirectoryProviderError>>>,
+        validations: VecDeque<Task<Result<String, RemoteDirectoryProviderError>>>,
         listed_directories: Vec<RemoteDirectory>,
         created_directories: Vec<RemoteDirectory>,
         validated_directories: Vec<RemoteDirectory>,
@@ -1563,9 +1533,7 @@ mod tests {
     }
 
     impl RemoteDirectoryProvider for ScriptedRemoteDirectoryProvider {
-        fn discover_account(
-            &self,
-        ) -> Task<Result<RemoteWorkspaceAccount, RemoteDirectoryProviderError>> {
+        fn discover_account(&self) -> Task<Result<String, RemoteDirectoryProviderError>> {
             self.state
                 .lock()
                 .unwrap()
@@ -1613,7 +1581,7 @@ mod tests {
         fn validate_physical_identity(
             &self,
             directory: RemoteDirectory,
-        ) -> Task<Result<RemoteDirectoryIdentity, RemoteDirectoryProviderError>> {
+        ) -> Task<Result<String, RemoteDirectoryProviderError>> {
             let mut state = self.state.lock().unwrap();
             state.validated_directories.push(directory);
             state
@@ -1647,9 +1615,7 @@ mod tests {
     }
 
     impl RemoteDirectoryProvider for CancellationTrackingRemoteDirectoryProvider {
-        fn discover_account(
-            &self,
-        ) -> Task<Result<RemoteWorkspaceAccount, RemoteDirectoryProviderError>> {
+        fn discover_account(&self) -> Task<Result<String, RemoteDirectoryProviderError>> {
             Task::ready(Ok(remote_account()))
         }
 
@@ -1677,7 +1643,7 @@ mod tests {
         fn validate_physical_identity(
             &self,
             _: RemoteDirectory,
-        ) -> Task<Result<RemoteDirectoryIdentity, RemoteDirectoryProviderError>> {
+        ) -> Task<Result<String, RemoteDirectoryProviderError>> {
             self.pending()
         }
     }
@@ -1785,22 +1751,15 @@ mod tests {
         }
     }
 
-    fn remote_account() -> RemoteWorkspaceAccount {
-        RemoteWorkspaceAccount::from_validated_login_shell(
-            "tester".to_owned(),
-            RemoteDirectoryIdentity::new("/home/tester".to_owned()).unwrap(),
-            crate::ssh::command::ValidatedRemoteLoginShell::new("/bin/zsh".to_owned()).unwrap(),
-        )
-        .unwrap()
+    fn remote_account() -> String {
+        "/home/tester".to_owned()
     }
 
     fn scripted_provider(
         listings: impl IntoIterator<Item = Result<Vec<DirectoryRow>, RemoteDirectoryProviderError>>,
         probes: impl IntoIterator<Item = Result<ExactPathState, RemoteDirectoryProviderError>>,
         creations: impl IntoIterator<Item = Result<(), RemoteDirectoryProviderError>>,
-        validations: impl IntoIterator<
-            Item = Result<RemoteDirectoryIdentity, RemoteDirectoryProviderError>,
-        >,
+        validations: impl IntoIterator<Item = Result<String, RemoteDirectoryProviderError>>,
     ) -> Arc<ScriptedRemoteDirectoryProvider> {
         Arc::new(ScriptedRemoteDirectoryProvider {
             state: Arc::new(Mutex::new(ScriptedRemoteDirectoryProviderState {
@@ -1909,7 +1868,7 @@ mod tests {
         use gpui::accesskit::Action;
         use spaceterm_ui::a11y_testing::{A11yTree, perform};
 
-        let identity = RemoteDirectoryIdentity::new("/home/tester/alpha".to_owned()).unwrap();
+        let identity = "/home/tester/alpha".to_owned();
         let provider = scripted_provider(
             [Ok(remote_rows(["alpha", "Projects"])), Ok(Vec::new())],
             [
@@ -1980,7 +1939,7 @@ mod tests {
     fn the_confirm_key_should_pin_the_current_directory_while_a_child_is_selected(
         cx: &mut TestAppContext,
     ) {
-        let identity = RemoteDirectoryIdentity::new("/home/tester".to_owned()).unwrap();
+        let identity = "/home/tester".to_owned();
         let provider = scripted_provider(
             [Ok(remote_rows(["Projects"]))],
             [Ok(ExactPathState::ReadableDirectory)],
@@ -2006,14 +1965,14 @@ mod tests {
         );
         assert!(events.borrow().iter().any(|event| matches!(
             event,
-            DirectoryPickerEvent::Confirmed(DirectorySelection::Pin(PinnedDirectory::Remote { identity: pinned, .. }))
-                if pinned == &identity
+            DirectoryPickerEvent::Confirmed(DirectorySelection::Server(pinned))
+                if pinned.as_os_str() == identity.as_str()
         )));
     }
 
     #[gpui::test]
     fn return_in_an_empty_directory_should_open_it_rather_than_go_back(cx: &mut TestAppContext) {
-        let identity = RemoteDirectoryIdentity::new("/home/tester".to_owned()).unwrap();
+        let identity = "/home/tester".to_owned();
         let provider = scripted_provider(
             [Ok(Vec::new())],
             [Ok(ExactPathState::ReadableDirectory)],
@@ -2087,8 +2046,7 @@ mod tests {
     fn create_confirmation_uses_alert_then_emits_validated_remote_selection(
         cx: &mut TestAppContext,
     ) {
-        let identity =
-            RemoteDirectoryIdentity::new("/home/tester/Projects/new".to_owned()).unwrap();
+        let identity = "/home/tester/Projects/new".to_owned();
         let provider = scripted_provider(
             [Ok(Vec::new()), Ok(Vec::new())],
             [
@@ -2116,19 +2074,13 @@ mod tests {
         assert_eq!(records.created_directories, vec![expected.clone()]);
         assert_eq!(records.validated_directories, vec![expected.clone()]);
         drop(records);
-        let pinned = events.borrow().iter().find_map(|event| match event {
-            DirectoryPickerEvent::Confirmed(DirectorySelection::Pin(pinned)) => {
-                Some(pinned.clone())
+        let chosen = events.borrow().iter().find_map(|event| match event {
+            DirectoryPickerEvent::Confirmed(DirectorySelection::Server(chosen)) => {
+                Some(chosen.clone())
             }
             _ => None,
         });
-        assert_eq!(
-            pinned,
-            Some(PinnedDirectory::Remote {
-                directory: expected,
-                identity,
-            })
-        );
+        assert_eq!(chosen, Some(identity.as_str().into()));
     }
 
     #[gpui::test]
@@ -2215,31 +2167,6 @@ mod tests {
         assert_eq!(
             enclosing_directory_query(&parse_picker_path("~/").unwrap(), &home),
             None
-        );
-    }
-
-    #[gpui::test]
-    fn unsupported_login_shell_should_have_an_actionable_account_status(cx: &mut TestAppContext) {
-        assert_eq!(
-            status_for_source_error(DirectorySourceError::UnsupportedLoginShell),
-            DirectoryPickerStatus::UnsupportedLoginShell
-        );
-        let provider = scripted_provider([], [], [], []);
-        provider.state.lock().unwrap().accounts = [Task::ready(Err(
-            RemoteDirectoryProviderError::UnsupportedLoginShell,
-        ))]
-        .into();
-        let (picker, _, cx) = directory_picker(provider, cx);
-        let empty = picker.read_with(cx, |picker, _| picker.empty_state());
-        assert_eq!(empty.title(), "Unsupported login shell");
-        assert_eq!(
-            empty.description_text(),
-            Some(UNSUPPORTED_LOGIN_SHELL_MESSAGE)
-        );
-        assert!(cx.debug_bounds("command-palette-empty").is_some());
-        assert_eq!(
-            UNSUPPORTED_LOGIN_SHELL_MESSAGE,
-            "The remote login shell does not support login mode. Choose another account or shell."
         );
     }
 
@@ -2397,72 +2324,6 @@ mod tests {
             picker.finish_close(CommandPaletteCloseReason::Programmatic, cx);
         });
         cx.run_until_parked();
-    }
-
-    #[gpui::test]
-    fn rapid_remote_path_input_should_settle_within_the_connection_session_limit(
-        cx: &mut TestAppContext,
-    ) {
-        let server = FakeRemoteUtilityServer::new(cx.executor(), 10);
-        server.open_terminal_session_channels(8);
-        let (picker, _, cx) = directory_picker(Arc::new(server.provider()), cx);
-        cx.executor().advance_clock(Duration::from_secs(1));
-        cx.run_until_parked();
-
-        let path = "~/Projects/SpaceTerm/crates/";
-        for end in 1..=path.len() {
-            cx.update(|_, cx| {
-                picker.update(cx, |picker, cx| {
-                    picker
-                        .palette
-                        .update(cx, |palette, cx| palette.set_query(&path[..end], cx));
-                });
-            });
-            cx.executor().advance_clock(Duration::from_millis(2));
-            cx.run_until_parked();
-            picker.read_with(cx, |picker, _| {
-                assert_ne!(picker.status, DirectoryPickerStatus::ConnectionLost);
-                assert_ne!(
-                    picker.listing_error,
-                    Some(DirectorySourceError::ConnectionLost)
-                );
-            });
-        }
-        cx.executor().advance_clock(Duration::from_secs(1));
-        cx.run_until_parked();
-
-        picker.read_with(cx, |picker, _| {
-            assert_eq!(picker.status, DirectoryPickerStatus::Readable);
-            assert!(picker.can_confirm());
-            assert_eq!(picker.row_names(), ["Documents", "Projects", "srv"]);
-        });
-        assert_eq!(server.refused_sessions(), 0);
-        assert!(server.peak_utility_sessions() <= 2);
-    }
-
-    #[gpui::test]
-    fn a_server_that_keeps_refusing_sessions_should_not_report_a_lost_connection(
-        cx: &mut TestAppContext,
-    ) {
-        let server = FakeRemoteUtilityServer::new(cx.executor(), 10);
-        let (picker, _, cx) = directory_picker(Arc::new(server.provider()), cx);
-        cx.executor().advance_clock(Duration::from_secs(1));
-        cx.run_until_parked();
-        server.open_terminal_session_channels(10);
-
-        set_remote_input(&picker, "~/Projects/", cx);
-        cx.executor().advance_clock(Duration::from_secs(10));
-        cx.run_until_parked();
-
-        picker.read_with(cx, |picker, _| {
-            assert_eq!(picker.status, DirectoryPickerStatus::SessionUnavailable);
-            assert_eq!(
-                picker.empty_notice().title,
-                SESSION_UNAVAILABLE_NOTICE.title
-            );
-            assert!(!picker.can_confirm());
-        });
-        assert!(server.refused_sessions() > 2);
     }
 
     #[gpui::test]
@@ -2707,7 +2568,7 @@ mod tests {
 
     #[gpui::test]
     fn validation_makes_the_path_read_only_until_the_parent_advances(cx: &mut TestAppContext) {
-        let identity = RemoteDirectoryIdentity::new("/home/tester".to_owned()).unwrap();
+        let identity = "/home/tester".to_owned();
         let provider = scripted_provider(
             [Ok(Vec::new())],
             [Ok(ExactPathState::ReadableDirectory)],
@@ -2783,12 +2644,7 @@ mod tests {
                         lifecycle_generation,
                         operation_generation,
                         directory,
-                        result: Ok(DirectorySelection::Pin(PinnedDirectory::Remote {
-                            directory: crate::domain::RemoteDirectory::new("~/".to_owned())
-                                .unwrap(),
-                            identity: RemoteDirectoryIdentity::new("/home/tester".to_owned())
-                                .unwrap(),
-                        })),
+                        result: Ok(DirectorySelection::Server("/home/tester".into())),
                     },
                     window,
                     cx,
@@ -2816,7 +2672,7 @@ mod tests {
 
     #[gpui::test]
     fn escape_during_validation_dismisses_without_accepting_late_success(cx: &mut TestAppContext) {
-        let identity = RemoteDirectoryIdentity::new("/home/tester".to_owned()).unwrap();
+        let identity = "/home/tester".to_owned();
         let provider = scripted_provider(
             [Ok(Vec::new())],
             [Ok(ExactPathState::ReadableDirectory)],

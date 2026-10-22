@@ -18,8 +18,8 @@ impl WorkspaceManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        // Worktree writes reach only the account-local server.
-        let Some(shared) = self.shared.local().filter(|s| s.is_shared(workspace_id)) else {
+        // The Workspace's own server runs Git, on its own computer.
+        let Some(shared) = self.shared.owning(workspace_id) else {
             return false;
         };
         if !shared.editability().available() {
@@ -37,9 +37,12 @@ impl WorkspaceManager {
         let Some(inventory) = self.shared_inventory(workspace_id).cloned() else {
             return false;
         };
-        let Some(client) = Client::get(cx) else {
+        let Some(client) = self.owning_worktree_client(workspace_id, cx) else {
             return false;
         };
+        let machine = self
+            .owning_machine(workspace_id)
+            .map(|machine| sanitize_for_display(&machine, MAXIMUM_NAME_CHARS));
         let root = inventory.main_root.clone();
         let active_path = self
             .workspaces
@@ -118,10 +121,11 @@ impl WorkspaceManager {
                         .collect(),
                 };
                 let backend = Rc::new(FormBackend {
-                    client,
+                    client: client.clone(),
                     root,
                     workspace,
                     branches,
+                    machine,
                 });
                 let probe: LocationProbe =
                     Rc::new(|_| Ok(crate::platform::local_filesystem::NewDirectoryTarget::Free));
@@ -143,9 +147,8 @@ impl WorkspaceManager {
                             });
                         }
                         if let WorktreeFormEvent::Created(path) = event {
-                            let revision = Client::get(cx)
-                                .and_then(|client| client.source.snapshot().inventory)
-                                .map_or(0, |i| i.revision);
+                            let revision =
+                                client.source.snapshot().inventory.map_or(0, |i| i.revision);
                             manager.sidebar_worktrees.created_shared =
                                 Some((workspace_id, path.clone(), revision));
                             manager.set_worktrees_expanded(workspace_id, true);
@@ -174,7 +177,7 @@ impl WorkspaceManager {
         };
         let Some(server) = self
             .shared
-            .local()
+            .owning(*workspace)
             .and_then(|s| s.server_workspace(*workspace))
         else {
             self.sidebar_worktrees.created_shared = None;
@@ -188,7 +191,7 @@ impl WorkspaceManager {
         else {
             if self
                 .shared
-                .local()
+                .owning(*workspace)
                 .and_then(|s| s.latest_inventory())
                 .is_some_and(|i| i.revision >= *minimum_revision)
             {
@@ -214,8 +217,7 @@ impl WorkspaceManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        // Worktree writes reach only the account-local server.
-        let Some(shared) = self.shared.local().filter(|s| s.is_shared(workspace_id)) else {
+        let Some(shared) = self.shared.owning(workspace_id) else {
             return false;
         };
         let Some(workspace) = shared.server_workspace(workspace_id).map(|w| w.id) else {
@@ -276,7 +278,7 @@ impl WorkspaceManager {
         if self.sidebar_worktrees.removal.is_some() {
             return;
         }
-        let Some(shared) = self.shared.local().filter(|s| s.is_shared(workspace_id)) else {
+        let Some(shared) = self.shared.owning(workspace_id) else {
             return;
         };
         if !shared.editability().available() {
@@ -297,7 +299,7 @@ impl WorkspaceManager {
         let Some(path) = self.shared_worktree_root(workspace_id, worktree_id) else {
             return;
         };
-        let Some(client) = Client::get(cx) else {
+        let Some(client) = self.owning_worktree_client(workspace_id, cx) else {
             return;
         };
         self.sidebar_worktrees.removal_generation =
@@ -356,7 +358,14 @@ impl WorkspaceManager {
         };
         let name = sanitize_for_display(&directory_name(&review.path), MAXIMUM_NAME_CHARS);
         let title = format!("Remove Worktree \u{201c}{name}\u{201d}?");
-        let mut message = vec!["The local server deletes its directory with Git.".to_owned()];
+        let machine = self.owning_machine(workspace);
+        let mut message = vec![match &machine {
+            Some(machine) => format!(
+                "The SpaceTerm Server on \u{201c}{}\u{201d} deletes its directory with Git.",
+                sanitize_for_display(machine, MAXIMUM_NAME_CHARS)
+            ),
+            None => "The local server deletes its directory with Git.".to_owned(),
+        }];
         if review.changes {
             message.push("Its uncommitted changes and untracked files will be deleted.".into());
         }
@@ -366,7 +375,12 @@ impl WorkspaceManager {
         let other = review
             .tabs
             .iter()
-            .filter(|t| self.shared.local().and_then(|s| s.local(t.workspace)) != Some(workspace))
+            .filter(|t| {
+                self.shared
+                    .owning(workspace)
+                    .and_then(|s| s.local(t.workspace))
+                    != Some(workspace)
+            })
             .count();
         if !review.tabs.is_empty() {
             let elsewhere = match other {
@@ -438,10 +452,11 @@ impl WorkspaceManager {
                 ),
             ],
         )
-        .detail(super::super::compact_home_path(
-            &review.path,
-            &self.local_home_directory_path,
-        ))
+        // Another computer's path is shown whole; this computer's home says nothing about it.
+        .detail(match machine {
+            Some(_) => review.path.display().to_string(),
+            None => super::super::compact_home_path(&review.path, &self.local_home_directory_path),
+        })
         .intent(AlertIntent::Critical)
         .present(window, cx, move |outcome, cx| {
             let confirmed = matches!(
@@ -503,7 +518,11 @@ impl WorkspaceManager {
         let Some(review) = self.sidebar_worktrees.server_review.as_ref() else {
             return;
         };
-        let Some(inventory) = self.shared.local().and_then(|s| s.latest_inventory()) else {
+        let Some(inventory) = self
+            .shared
+            .owning(review.workspace)
+            .and_then(|s| s.latest_inventory())
+        else {
             return;
         };
         let missing = self

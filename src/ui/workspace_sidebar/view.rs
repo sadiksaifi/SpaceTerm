@@ -1872,6 +1872,16 @@ fn maintenance_icon(action: crate::ui::remote_maintenance::RemoteAction) -> Icon
 /// allows, the maintenance steps its server state allows, and the Servers Settings Section.
 fn machine_menu_entries(section: &MachineSection) -> Vec<MenuEntry<MachineMenuCommand>> {
     let mut entries = Vec::new();
+    if section.creates_workspaces {
+        entries.push(
+            MenuEntry::action("New Workspace", MachineMenuCommand::NewWorkspace)
+                .icon(|foreground, size| {
+                    Icon::new(IconName::Plus, size, foreground).into_any_element()
+                })
+                .debug_selector("machine-menu-new-workspace"),
+        );
+        entries.push(MenuEntry::separator());
+    }
     if section.connects {
         entries.push(
             MenuEntry::action("Connect", MachineMenuCommand::Connect)

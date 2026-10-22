@@ -17,20 +17,14 @@ use crate::platform::application_quit::{
     ApplicationQuitAdapter, ApplicationQuitDecision, ApplicationQuitHandler,
 };
 use crate::platform::control_socket::ControlSocketProbe;
-use crate::ssh::alias_usage::ActiveSshAliasRegistry;
 use crate::ssh::command::{
     OpenSshExecutable, SshCapability, SshCapabilityProbe, SshUnavailableReason,
 };
 use crate::ssh::host_config::HostConfigFilesystem;
 use crate::ssh::process::SshProcessAdapter;
 use crate::ssh::startup_environment::StartupSshEnvironment;
-use crate::terminal::{
-    NativeServiceOrigin, NativeServiceStatus, SelectionCopy, TerminalSessionFactory,
-};
-use crate::ui::{
-    NativeRemoteWorkspaceFlowBackendFactory, NewWorkspace, RemoteWorkspaceSshRuntime,
-    SwitchWorkspace, WorkspaceManager,
-};
+use crate::terminal::{NativeServiceOrigin, NativeServiceStatus, SelectionCopy};
+use crate::ui::{NewWorkspace, SwitchWorkspace, WorkspaceManager};
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum StartupDependenciesError {
@@ -47,7 +41,6 @@ pub(crate) struct StartupDependencies<A: SshProcessAdapter> {
     pub(crate) home_directory: PathBuf,
     ssh_environment: StartupSshEnvironment,
     ssh_capability: SshCapability,
-    active_aliases: ActiveSshAliasRegistry,
     executable: OpenSshExecutable,
     process_adapter: A,
     control_socket_probe: Arc<dyn ControlSocketProbe>,
@@ -117,7 +110,6 @@ impl<A: SshProcessAdapter> StartupDependencies<A> {
             home_directory,
             ssh_environment,
             ssh_capability,
-            active_aliases: ActiveSshAliasRegistry::default(),
             executable,
             process_adapter,
             control_socket_probe,
@@ -157,26 +149,6 @@ impl<A: SshProcessAdapter> StartupDependencies<A> {
             artifacts,
         })
     }
-
-    pub(crate) fn remote_backend_factory(
-        &self,
-        askpass: Arc<dyn crate::ssh::askpass::AskPassWindowFactory>,
-    ) -> Arc<dyn crate::ui::remote_workspace_flow::RemoteWorkspaceFlowBackendFactory> {
-        Arc::new(NativeRemoteWorkspaceFlowBackendFactory::new(
-            RemoteWorkspaceSshRuntime {
-                paths: Arc::clone(&self.paths),
-                local_home: self.home_directory.clone(),
-                startup_environment: self.ssh_environment.clone(),
-                startup_capability: self.ssh_capability.clone(),
-                aliases: self.active_aliases.clone(),
-                executable: self.executable.clone(),
-                process_adapter: self.process_adapter.clone(),
-                control_socket_probe: Arc::clone(&self.control_socket_probe),
-                host_config_filesystem: Arc::clone(&self.host_config_filesystem),
-            },
-            askpass,
-        ))
-    }
 }
 
 /// Builds the native SSH server registry once a window can present SSH's prompts.
@@ -196,23 +168,34 @@ struct NativeSshServersFactory<A: SshProcessAdapter> {
 
 /// The hosts this computer's SSH configuration names, including SpaceTerm's managed hosts.
 struct ConfiguredSshHosts {
+    paths: Arc<AppPaths>,
     roots: crate::ssh::host_config::HostConfigRoots,
     filesystem: Arc<dyn HostConfigFilesystem>,
 }
 
 impl crate::ui::ssh_servers::SshHostSource for ConfiguredSshHosts {
-    fn hosts(&self) -> Vec<crate::domain::SshDestination> {
+    fn discover(&self) -> crate::ssh::host_config::HostDiscovery {
         crate::ssh::host_config::discover_ssh_hosts(
             self.filesystem.as_ref(),
             &self.roots,
             crate::ssh::host_config::HostDiscoveryLimits::default(),
         )
-        .hosts
-        .iter()
-        .filter_map(|host| {
-            crate::domain::SshDestination::new(host.alias().as_str().to_owned()).ok()
-        })
-        .collect()
+    }
+
+    fn add_managed_host(
+        &self,
+        host: crate::ssh::managed_hosts::ManagedSshHost,
+    ) -> Result<(), crate::ui::ssh_host_form::ManagedHostFormBackendError> {
+        use crate::ssh::managed_hosts::{ManagedHostsError, ManagedHostsStore};
+        use crate::ui::ssh_host_form::ManagedHostFormBackendError;
+
+        // Discovery names every configured alias, so a new host never shadows one.
+        ManagedHostsStore::new(&self.paths)
+            .insert(host, &self.discover().hosts)
+            .map_err(|error| match error {
+                ManagedHostsError::AliasCollision => ManagedHostFormBackendError::AliasCollision,
+                _ => ManagedHostFormBackendError::SaveFailed,
+            })
     }
 }
 
@@ -299,6 +282,7 @@ where
 
     fn hosts(&self) -> Option<Arc<dyn crate::ui::ssh_servers::SshHostSource>> {
         Some(Arc::new(ConfiguredSshHosts {
+            paths: Arc::clone(&self.paths),
             roots: crate::ssh::host_config::HostConfigRoots {
                 managed: self.paths.managed_ssh_config(),
                 user: self.home.join(".ssh/config"),
@@ -758,11 +742,9 @@ pub(crate) fn open(
             ..host.adapters.lifecycle.clone()
         },
         directory_selection: Rc::new(crate::directory_selection::GpuiDirectorySelection),
-        remote_workspace: Arc::clone(&host.adapters.remote_workspace),
         window_drag: host.window_movement.create(),
         local_server: host.adapters.local_server.clone(),
     };
-    let session_factory = Rc::clone(&host.session_factory);
     let home_directory = host.home_directory.clone();
     let default_sidebar = cx
         .try_global::<crate::ui::appearance_runtime::AppearanceRuntime>()
@@ -786,7 +768,6 @@ pub(crate) fn open(
         }
         let workspace_manager = cx.new(|cx| {
             WorkspaceManager::new_with_adapters(
-                session_factory,
                 home_directory,
                 adapters,
                 default_sidebar,
@@ -1062,8 +1043,6 @@ pub(crate) struct ApplicationCapabilities {
     pub(crate) setup_guide: Option<Arc<dyn crate::platform::setup_guide_host::SetupGuideHost>>,
     /// Reaches the Zed extension registry when the person browses it for Terminal Themes.
     pub(crate) theme_registry: Option<Arc<dyn crate::theme_registry::RegistryTransport>>,
-    pub(crate) remote_workspace:
-        Arc<dyn crate::ui::remote_workspace_flow::RemoteWorkspaceFlowBackendFactory>,
     /// Runs git and the GitHub CLI for Repository Status.
     pub(crate) repository_status:
         Option<crate::ui::repository_status_store::RepositoryStatusAdapters>,
@@ -1090,7 +1069,6 @@ impl gpui::Global for SelectedFileAccess {}
 pub(crate) struct HostCompositionParts {
     pub(crate) profile: crate::desktop_profile::DesktopProfile,
     pub(crate) home_directory: PathBuf,
-    pub(crate) session_factory: Rc<dyn TerminalSessionFactory>,
     pub(crate) adapters: ApplicationCapabilities,
     pub(crate) services:
         Option<Rc<dyn crate::platform::services_registration::ServicesRegistration>>,
@@ -1107,7 +1085,6 @@ pub(crate) struct HostComposition {
     modal_prompts: bool,
     profile: crate::desktop_profile::DesktopProfile,
     home_directory: PathBuf,
-    session_factory: Rc<dyn TerminalSessionFactory>,
     adapters: ApplicationCapabilities,
     services: Option<Rc<dyn crate::platform::services_registration::ServicesRegistration>>,
     window_movement: Rc<dyn crate::platform::window_movement::WindowMovementFactory>,
@@ -1162,7 +1139,6 @@ impl HostComposition {
             modal_prompts: false,
             profile: parts.profile,
             home_directory: parts.home_directory,
-            session_factory: parts.session_factory,
             adapters: parts.adapters,
             services: parts.services,
             window_movement: parts.window_movement,
@@ -1363,7 +1339,7 @@ mod tests {
 
     use super::*;
     use crate::terminal::testing::{TestTerminalSessionFactory, TestTerminalSessionRecords};
-    use crate::terminal::{SelectionCopy, WorkspaceTerminalSessionFactory};
+    use crate::terminal::{SelectionCopy, TerminalSessionFactory, WorkspaceTerminalSessionFactory};
     use crate::ui::TerminalPane;
 
     fn application_menu() -> Rc<dyn ApplicationMenuAdapter> {
@@ -1660,11 +1636,8 @@ mod runtime_tests {
         OperatingSystemWindowDragPlatform, RecordingOperatingSystemWindowDragPlatform,
         WindowMovementFactory,
     };
+    use crate::terminal::TerminalSessionFactory;
     use crate::terminal::native_services::services::ServiceEndpoint;
-    use crate::ui::remote_workspace_flow::{
-        RemoteWorkspaceFlowBackend, RemoteWorkspaceFlowBackendError,
-        RemoteWorkspaceFlowBackendFactory,
-    };
     use std::cell::RefCell;
 
     #[derive(Default)]
@@ -1700,19 +1673,6 @@ mod runtime_tests {
             movement
         }
     }
-    struct UnavailableRemote;
-    impl RemoteWorkspaceFlowBackendFactory for UnavailableRemote {
-        fn unavailable_reason(&self) -> Option<String> {
-            Some("Unavailable in this test".into())
-        }
-        fn create(
-            &self,
-            _: &gpui::Window,
-            _: &mut App,
-        ) -> Result<Arc<dyn RemoteWorkspaceFlowBackend>, RemoteWorkspaceFlowBackendError> {
-            panic!("unavailable capability must not be constructed")
-        }
-    }
     fn parts(
         services: Rc<RecordingServices>,
         movement: Rc<RecordingMovement>,
@@ -1723,7 +1683,6 @@ mod runtime_tests {
         HostCompositionParts {
             profile: crate::desktop_profile::testing_profile(spaceterm_ui::TextDirection::LeftToRight),
             home_directory: std::env::temp_dir(),
-            session_factory: Rc::clone(&session_factory),
             adapters: ApplicationCapabilities {
                 updates: Rc::new(crate::updates::testing::RecordingAdapter::default()),
                 selected_files: None,
@@ -1744,7 +1703,6 @@ mod runtime_tests {
                 permission_access: None,
                 setup_guide: None,
                 theme_registry: None,
-                remote_workspace: Arc::new(UnavailableRemote),
                 repository_status: None,
                 background_images: None,
                 local_server: crate::ui::launch_testing::presenting(session_factory),
@@ -1865,9 +1823,9 @@ mod runtime_tests {
         let records = TestTerminalSessionRecords::default();
         let services = Rc::new(RecordingServices::default());
         let mut wiring = parts(Rc::clone(&services), Rc::default());
-        wiring.session_factory = Rc::new(TestTerminalSessionFactory::new(records.clone()));
-        wiring.adapters.local_server =
-            crate::ui::launch_testing::presenting(Rc::clone(&wiring.session_factory));
+        wiring.adapters.local_server = crate::ui::launch_testing::presenting(Rc::new(
+            TestTerminalSessionFactory::new(records.clone()),
+        ));
         let host = Rc::new(HostComposition::new(wiring).unwrap());
         let original = cx.update(|cx| {
             let original = start_application(cx, &host).unwrap();
@@ -1910,9 +1868,9 @@ mod runtime_tests {
         let records = TestTerminalSessionRecords::default();
         let services = Rc::new(RecordingServices::default());
         let mut wiring = parts(Rc::clone(&services), Rc::default());
-        wiring.session_factory = Rc::new(TestTerminalSessionFactory::new(records.clone()));
-        wiring.adapters.local_server =
-            crate::ui::launch_testing::presenting(Rc::clone(&wiring.session_factory));
+        wiring.adapters.local_server = crate::ui::launch_testing::presenting(Rc::new(
+            TestTerminalSessionFactory::new(records.clone()),
+        ));
         let host = HostComposition::new(wiring).unwrap();
         cx.update(|cx| {
             start_application(cx, &host).unwrap();
@@ -2704,15 +2662,21 @@ mod runtime_tests {
         use crate::terminal::testing::{TestTerminalSessionFactory, TestTerminalSessionRecords};
         let records = TestTerminalSessionRecords::default();
         let mut wiring = parts(Rc::default(), Rc::default());
-        wiring.session_factory = Rc::new(TestTerminalSessionFactory::new(records.clone()));
-        wiring.adapters.local_server =
-            crate::ui::launch_testing::presenting(Rc::clone(&wiring.session_factory));
+        wiring.adapters.local_server = crate::ui::launch_testing::presenting(Rc::new(
+            TestTerminalSessionFactory::new(records.clone()),
+        ));
         let application_quit = Rc::new(
             crate::platform::application_quit::testing::RecordingApplicationQuitAdapter::default(),
         );
         wiring.adapters.application_quit = application_quit.clone();
         // Desktop-owned work alone decides whether quitting ends anything.
         wiring.adapters.local_server = crate::ui::launch_testing::unanswered();
+        cx.update(|cx| {
+            crate::ui::use_desktop_sessions(
+                Rc::new(TestTerminalSessionFactory::new(records.clone())),
+                cx,
+            )
+        });
         let host = HostComposition::new(wiring).unwrap();
         let (running, idle) = cx.update(|cx| {
             let running = start_application(cx, &host).unwrap();

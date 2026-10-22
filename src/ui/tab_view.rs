@@ -6,57 +6,29 @@ use super::chrome_geometry::concentric_outset;
 use super::chrome_icons::{IconRole, InteractiveIconRole};
 use super::chrome_typography::{ChromeTextStyleExt as _, ChromeTypography, TextRole};
 use super::drag_and_drop::{DragPreview, DragSession, drag_release_observer, grab_point};
-use super::pane_lifecycle::{PaneConstruction, RemoteHierarchyLifecycle};
+use super::pane_lifecycle::PaneConstruction;
 use super::pane_motion::{PaneFrames, PaneMotion};
 use super::terminal_status::{
     StatusColors, StatusGlyph, TerminalProgress, reported_glyph_is_drawable, reported_title,
 };
-use crate::domain::PinnedDirectory;
-use crate::domain::remote_workspace::RemoteRestartBatch;
 use crate::repository_status::presentation::{HeadGlyph, RepositoryCaption, RepositoryMark};
 use crate::terminal::metadata::CurrentDirectory;
 use crate::ui::appearance::gpui_color;
 use std::collections::BTreeMap;
 use std::ops::RangeInclusive;
 
-use thiserror::Error;
-
 use super::terminal_focus::{TerminalFocusBlocker, TerminalFocusCoordinator, TerminalProductFocus};
 use super::{
     ClosePane, FocusNextPane, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp,
-    FocusPreviousPane, PaneOrigin, PreparedRemotePaneRestart, RemoteChildLaunchUnavailable,
-    RemotePaneLifecycleError, ShowRepositoryStatus, SplitDown, SplitRight, TERMINAL_KEY_CONTEXT,
-    TerminalPane, TerminalPaneEvent, TogglePaneZoom,
+    FocusPreviousPane, PaneOrigin, ShowRepositoryStatus, SplitDown, SplitRight,
+    TERMINAL_KEY_CONTEXT, TerminalPane, TerminalPaneEvent, TogglePaneZoom,
 };
 
-#[derive(Debug, Error)]
-/// A typed rejection while coordinating Remote lifecycle across one Tab's Pane hierarchy.
-pub(crate) enum RemoteTabViewLifecycleError {
-    #[error("Pane {pane_id} cannot change remote Terminal Session lifecycle: {source}")]
-    Pane {
-        pane_id: PaneId,
-        #[source]
-        source: RemotePaneLifecycleError,
-    },
-    #[error("the prepared restart belongs to Tab {prepared}, not Tab {current}")]
-    TabChanged { prepared: TabId, current: TabId },
-    #[error("Pane {0} changed after remote restart preparation")]
-    PaneChanged(PaneId),
-}
-
-/// Move-only restart reservations for every Pane in one unchanged Tab hierarchy.
-pub(crate) struct PreparedTabViewRemoteRestart {
-    tab_id: TabId,
-    panes: RemoteRestartBatch<(PaneId, Entity<TerminalPane>, PreparedRemotePaneRestart)>,
-}
 use crate::domain::{
     ClosePaneOutcome, FocusDirection, PaneEdge, PaneId, PaneNodeRef, PaneSize, PaneTreeRef,
     SplitAxis, SplitId, Tab, TabId, WorkspaceId, ZoomState,
 };
-use crate::terminal::{
-    NativeServiceOrigin, NativeServiceStatus, PreparedWorkspaceTerminalLaunch,
-    WorkspaceTerminalSessionFactory,
-};
+use crate::terminal::{NativeServiceOrigin, NativeServiceStatus, WorkspaceTerminalSessionFactory};
 use gpui::prelude::*;
 use gpui::{
     AnyElement, App, Bounds, Context, DefiniteLength, Entity, EventEmitter, FocusHandle,
@@ -516,7 +488,6 @@ pub(crate) struct TabView {
     /// The layout revision the caption controls last rendered for.
     revealed_layout_revision: u64,
     close_tab_requested: bool,
-    remote_lifecycle: RemoteHierarchyLifecycle,
     /// The Tab's own focus in the Tab bar, where assistive technology can rest on it.
     tab_focus: FocusHandle,
     /// The server Tab this Tab presents, when a SpaceTerm Server owns it.
@@ -534,24 +505,18 @@ impl TabView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let prepared_launch = match session_factory.prepare_child_launch() {
-            Ok(prepared_launch) => prepared_launch,
-            Err(error) => panic!("test TabView channel preparation failed: {error}"),
-        };
-        Self::new_with_prepared_launch(
+        Self::with_pane_construction(
             tab_id,
             session_factory,
-            prepared_launch,
             PaneConstruction::testing(),
             window,
             cx,
         )
     }
 
-    pub(crate) fn new_with_prepared_launch(
+    pub(crate) fn with_pane_construction(
         tab_id: TabId,
         session_factory: WorkspaceTerminalSessionFactory,
-        prepared_launch: PreparedWorkspaceTerminalLaunch,
         pane_construction: PaneConstruction,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -572,7 +537,6 @@ impl TabView {
             Self::create_terminal(
                 pane_id,
                 session_factory.clone(),
-                prepared_launch,
                 pane_construction.clone(),
                 window,
                 cx,
@@ -610,7 +574,6 @@ impl TabView {
             pane_layout_revision: 0,
             revealed_layout_revision: 0,
             close_tab_requested: false,
-            remote_lifecycle: RemoteHierarchyLifecycle::default(),
             tab_focus: cx.focus_handle(),
             shared: None,
             directory_recovery: None,
@@ -621,13 +584,11 @@ impl TabView {
     fn create_terminal(
         pane_id: PaneId,
         session_factory: WorkspaceTerminalSessionFactory,
-        prepared_launch: PreparedWorkspaceTerminalLaunch,
         pane_construction: PaneConstruction,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Entity<TerminalPane> {
-        let terminal =
-            cx.new(|cx| pane_construction.create(session_factory, prepared_launch, window, cx));
+        let terminal = cx.new(|cx| pane_construction.create(session_factory, window, cx));
         cx.subscribe_in(
             &terminal,
             window,
@@ -761,6 +722,7 @@ impl TabView {
         self.tab.id()
     }
 
+    #[cfg(test)]
     pub(crate) fn pane_count(&self) -> usize {
         self.tab.pane_count()
     }
@@ -806,10 +768,6 @@ impl TabView {
         self.tab
             .panes_with_ids()
             .map(|(id, terminal)| (id, terminal.read(cx)))
-    }
-
-    pub(crate) fn set_pinned_directory(&mut self, directory: Option<PinnedDirectory>) {
-        self.session_factory.set_pinned_directory(directory);
     }
 
     pub(crate) fn tab_focus(&self) -> &FocusHandle {
@@ -918,164 +876,8 @@ impl TabView {
         }
     }
 
-    /// Atomically marks every Pane in this Tab disconnected for one generation. All Panes are
-    /// prevalidated before any mutation.
-    pub(crate) fn disconnect_remote(
-        &mut self,
-        generation: u64,
-        cx: &mut Context<Self>,
-    ) -> Result<(), RemoteTabViewLifecycleError> {
-        self.can_disconnect_remote(generation, cx)?;
-        for (_, terminal) in self.tab.panes_with_ids() {
-            terminal.update(cx, |terminal, cx| {
-                terminal
-                    .disconnect_remote(generation, cx)
-                    .expect("prevalidated remote disconnect must remain legal")
-            });
-        }
-        self.remote_lifecycle.disconnect(generation);
-        self.sync_terminal_focus(cx);
-        Ok(())
-    }
-
-    /// Prevalidates a hierarchy-wide disconnect without mutating any Pane.
-    pub(crate) fn can_disconnect_remote(
-        &self,
-        generation: u64,
-        cx: &App,
-    ) -> Result<(), RemoteTabViewLifecycleError> {
-        for (pane_id, terminal) in self.tab.panes_with_ids() {
-            terminal
-                .read(cx)
-                .can_disconnect_remote(generation)
-                .map_err(|source| RemoteTabViewLifecycleError::Pane { pane_id, source })?;
-        }
-        Ok(())
-    }
-
-    /// Binds one already-reserved launch to every existing Pane without mutating the hierarchy. Any
-    /// failure drops the aggregate token and leaves all Panes disconnected.
-    pub(crate) fn prepare_remote_restart(
-        &self,
-        session_factory: WorkspaceTerminalSessionFactory,
-        generation: u64,
-        prepared_launches: Vec<PreparedWorkspaceTerminalLaunch>,
-        cx: &App,
-    ) -> Result<PreparedTabViewRemoteRestart, RemoteTabViewLifecycleError> {
-        if self.tab.pane_count() != prepared_launches.len() {
-            return Err(RemoteTabViewLifecycleError::PaneChanged(
-                self.tab.focused_pane_id(),
-            ));
-        }
-        let mut panes = Vec::with_capacity(self.tab.pane_count());
-        for ((pane_id, terminal), prepared_launch) in
-            self.tab.panes_with_ids().zip(prepared_launches)
-        {
-            let prepared = terminal
-                .read(cx)
-                .prepare_remote_restart(session_factory.clone(), generation, prepared_launch)
-                .map_err(|source| RemoteTabViewLifecycleError::Pane { pane_id, source })?;
-            panes.push((pane_id, terminal.clone(), prepared));
-        }
-        Ok(PreparedTabViewRemoteRestart {
-            tab_id: self.tab.id(),
-            panes: RemoteRestartBatch::new(panes),
-        })
-    }
-
-    /// Revalidates every prepared Pane restart against the current Tab hierarchy.
-    pub(crate) fn can_commit_remote_restart(
-        &self,
-        prepared: &PreparedTabViewRemoteRestart,
-        cx: &App,
-    ) -> Result<(), RemoteTabViewLifecycleError> {
-        if self.tab.id() != prepared.tab_id {
-            return Err(RemoteTabViewLifecycleError::TabChanged {
-                prepared: prepared.tab_id,
-                current: self.tab.id(),
-            });
-        }
-        prepared.panes.validate(
-            self.tab.pane_count(),
-            || RemoteTabViewLifecycleError::PaneChanged(self.tab.focused_pane_id()),
-            |(pane_id, terminal, pane_restart)| {
-                self.validate_restart_pane(*pane_id, terminal, pane_restart, cx)
-            },
-        )
-    }
-
-    fn validate_restart_pane(
-        &self,
-        pane_id: PaneId,
-        terminal: &Entity<TerminalPane>,
-        pane_restart: &PreparedRemotePaneRestart,
-        cx: &App,
-    ) -> Result<(), RemoteTabViewLifecycleError> {
-        let Some(current) = self.tab.pane(pane_id) else {
-            return Err(RemoteTabViewLifecycleError::PaneChanged(pane_id));
-        };
-        if current.entity_id() != terminal.entity_id() {
-            return Err(RemoteTabViewLifecycleError::PaneChanged(pane_id));
-        }
-        terminal
-            .read(cx)
-            .can_commit_remote_restart(pane_restart)
-            .map_err(|source| RemoteTabViewLifecycleError::Pane { pane_id, source })?;
-        Ok(())
-    }
-
-    /// Commits every prevalidated Pane restart in place after aggregate preparation succeeds. A
-    /// later startup failure belongs to its Pane rather than rolling back committed siblings.
-    pub(crate) fn commit_remote_restart(
-        &mut self,
-        prepared: PreparedTabViewRemoteRestart,
-        session_factory: WorkspaceTerminalSessionFactory,
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) -> Result<(), RemoteTabViewLifecycleError> {
-        if self.tab.id() != prepared.tab_id {
-            return Err(RemoteTabViewLifecycleError::TabChanged {
-                prepared: prepared.tab_id,
-                current: self.tab.id(),
-            });
-        }
-        prepared.panes.commit(
-            self.tab.pane_count(),
-            || RemoteTabViewLifecycleError::PaneChanged(self.tab.focused_pane_id()),
-            cx,
-            |(pane_id, terminal, pane_restart), cx| {
-                self.validate_restart_pane(*pane_id, terminal, pane_restart, cx)
-            },
-            |(pane_id, terminal, pane_restart), cx| {
-                terminal.update(cx, |terminal, cx| {
-                    terminal
-                        .commit_remote_restart(pane_restart, window, cx)
-                        .unwrap_or_else(|error| {
-                            panic!("prevalidated Pane {pane_id} restart commit failed: {error}")
-                        })
-                });
-            },
-        )?;
-        self.session_factory = session_factory;
-        self.remote_lifecycle.restarted();
-        self.sync_terminal_focus(cx);
-        cx.emit(TabViewEvent::PresentationChanged {
-            tab_id: self.tab.id(),
-        });
-        cx.notify();
-        Ok(())
-    }
-
     pub(crate) const fn focused_pane_id(&self) -> PaneId {
         self.tab.focused_pane_id()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn pane_entity_ids(&self) -> Vec<(PaneId, gpui::EntityId)> {
-        self.tab
-            .panes_with_ids()
-            .map(|(pane_id, terminal)| (pane_id, terminal.entity_id()))
-            .collect()
     }
 
     #[cfg(test)]
@@ -1104,37 +906,6 @@ impl TabView {
         let mut signature = String::new();
         encode(self.tab.root(), &mut signature);
         signature
-    }
-
-    #[cfg(test)]
-    pub(crate) const fn remote_disconnected_generation(&self) -> Option<u64> {
-        self.remote_lifecycle.disconnected_generation()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn focused_terminal_remote_state(&self, cx: &App) -> (bool, bool) {
-        self.tab
-            .pane(self.tab.focused_pane_id())
-            .map(|terminal| {
-                let terminal = terminal.read(cx);
-                terminal.remote_session_state()
-            })
-            .unwrap_or((false, false))
-    }
-
-    #[cfg(test)]
-    pub(crate) fn terminal_restart_states(
-        &self,
-        cx: &App,
-    ) -> Vec<(PaneId, bool, Option<&'static str>)> {
-        self.tab
-            .panes_with_ids()
-            .map(|(pane_id, terminal)| {
-                let terminal = terminal.read(cx);
-                let (session_attached, failure_operation) = terminal.restart_state();
-                (pane_id, session_attached, failure_operation)
-            })
-            .collect()
     }
 
     #[cfg(test)]
@@ -1231,108 +1002,11 @@ impl TabView {
             self.split_shared(target_pane_id, axis, window, cx);
             return;
         }
-        if self.remote_lifecycle.disconnected_generation().is_some() {
-            cx.emit(RemoteChildLaunchUnavailable::ConnectionUnavailable);
-            return;
-        }
         let Some(target_size) = self.split_target_size(target_pane_id, pane_gap(cx)) else {
             eprintln!("cannot split Pane {target_pane_id} without valid measured bounds");
             return;
         };
-        let session_factory = match self
-            .session_factory
-            .for_source_directory(self.current_directory(target_pane_id, cx))
-        {
-            Ok(factory) => factory,
-            Err(error) => {
-                let detail = format!(
-                    "Cannot create a Pane because {error}. Restore the directory or change the pinned directory."
-                );
-                let view = cx.weak_entity();
-                let window_handle = window.window_handle();
-                let _ = Alert::new(
-                    ModalId::new("pane-starting-directory-unavailable"),
-                    "Starting directory unavailable",
-                    "Starting Directory Unavailable",
-                    detail,
-                    vec![ModalAction::new(
-                        (),
-                        "OK",
-                        ModalActionRole::Cancel,
-                        "pane-start-error-ok",
-                    )],
-                )
-                .intent(AlertIntent::Warning)
-                .present(window, cx, move |_, cx| {
-                    let _ = window_handle.update(cx, |_, window, cx| {
-                        let _ = view.update(cx, |view, cx| view.focus(window, cx));
-                    });
-                });
-                return;
-            }
-        };
-        if let Some(revalidation) = session_factory.revalidate_remote_child_launch() {
-            let child_launch_generation = self.remote_lifecycle.begin_child_launch();
-            cx.spawn_in(window, async move |view, cx| {
-                let revalidation = revalidation.await;
-                let _ = view.update_in(cx, |view, window, cx| {
-                    if view.remote_lifecycle.disconnected_generation().is_some() {
-                        cx.emit(RemoteChildLaunchUnavailable::Cancelled);
-                        return;
-                    }
-                    if !view
-                        .remote_lifecycle
-                        .is_current_child_launch(child_launch_generation)
-                    {
-                        cx.emit(RemoteChildLaunchUnavailable::Stale);
-                        return;
-                    }
-                    if let Err(error) = revalidation {
-                        cx.emit(RemoteChildLaunchUnavailable::from(error));
-                        return;
-                    }
-                    let prepared_launch = match session_factory.prepare_child_launch() {
-                        Ok(prepared_launch) => prepared_launch,
-                        Err(_) => {
-                            cx.emit(RemoteChildLaunchUnavailable::ConnectionUnavailable);
-                            return;
-                        }
-                    };
-                    let Some(current_size) = view.split_target_size(target_pane_id, pane_gap(cx))
-                    else {
-                        return;
-                    };
-                    if current_size != target_size {
-                        return;
-                    }
-                    view.split_pane_with_prepared_launch(
-                        target_pane_id,
-                        axis,
-                        target_size,
-                        prepared_launch,
-                        window,
-                        cx,
-                    );
-                });
-            })
-            .detach();
-            return;
-        }
-        let prepared_launch = match session_factory.prepare_child_launch() {
-            Ok(prepared_launch) => prepared_launch,
-            Err(_) => {
-                cx.emit(RemoteChildLaunchUnavailable::ConnectionUnavailable);
-                return;
-            }
-        };
-        self.split_pane_with_prepared_launch(
-            target_pane_id,
-            axis,
-            target_size,
-            prepared_launch,
-            window,
-            cx,
-        );
+        self.split_pane_measured(target_pane_id, axis, target_size, window, cx);
     }
 
     fn split_target_size(&self, pane_id: PaneId, gap: f32) -> Option<PaneSize> {
@@ -1558,12 +1232,11 @@ impl TabView {
             .then_some((target_pane_id, edge))
     }
 
-    fn split_pane_with_prepared_launch(
+    fn split_pane_measured(
         &mut self,
         target_pane_id: PaneId,
         axis: SplitAxis,
         target_size: PaneSize,
-        prepared_launch: PreparedWorkspaceTerminalLaunch,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -1573,14 +1246,7 @@ impl TabView {
         let result = self
             .tab
             .split_pane(target_pane_id, axis, target_size, gap, |new_pane_id| {
-                Self::create_terminal(
-                    new_pane_id,
-                    session_factory,
-                    prepared_launch,
-                    pane_construction,
-                    window,
-                    cx,
-                )
+                Self::create_terminal(new_pane_id, session_factory, pane_construction, window, cx)
             });
 
         match result {
@@ -2510,8 +2176,7 @@ impl TabView {
                 .source
                 .and_then(|source| shared.local_pane(source))
                 .unwrap_or_else(|| self.tab.root_pane_id());
-            let Some((session_factory, prepared_launch, state)) = shared.sessions().open(pane.id)
-            else {
+            let Some((session_factory, state)) = shared.sessions().open(pane.id) else {
                 continue;
             };
             let pane_construction = shared.sessions().panes().clone();
@@ -2520,14 +2185,7 @@ impl TabView {
                 Axis::Down => SplitAxis::Vertical,
             };
             let inserted = self.tab.insert_shared_pane(source, axis, |pane_id| {
-                Self::create_terminal(
-                    pane_id,
-                    session_factory,
-                    prepared_launch,
-                    pane_construction,
-                    window,
-                    cx,
-                )
+                Self::create_terminal(pane_id, session_factory, pane_construction, window, cx)
             });
             match inserted {
                 Ok(pane_id) => {
@@ -3346,7 +3004,6 @@ impl TabView {
 }
 
 impl EventEmitter<TabViewEvent> for TabView {}
-impl EventEmitter<RemoteChildLaunchUnavailable> for TabView {}
 
 fn collect_pane_order(tree: PaneTreeRef<'_>, panes: &mut Vec<PaneId>) {
     match tree.node() {
@@ -4679,8 +4336,6 @@ mod tests {
     use std::path::PathBuf;
     use std::rc::Rc;
     use std::sync::Arc;
-    use std::sync::Mutex;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     use gpui::{
         Modifiers, MouseButton, ScrollDelta, ScrollWheelEvent, TestAppContext, TouchPhase,
@@ -4689,16 +4344,13 @@ mod tests {
 
     use super::*;
     use crate::appearance::Color;
-    use crate::ssh::command::ValidatedRemoteShellCommand;
     use crate::terminal::testing::{
         RecordedCommand, TestTerminalSessionFactory, TestTerminalSessionRecords,
     };
     use crate::terminal::{
-        ScreenSnapshot, ScrollbarSnapshot, TerminalSessionChannelProvider,
-        TerminalSessionChannelRevalidationError, TerminalSessionChannelUnavailable,
-        TerminalSessionEvent, TerminalSessionExit, TerminalSessionFactory,
+        ScreenSnapshot, ScrollbarSnapshot, TerminalSessionEvent, TerminalSessionExit,
+        TerminalSessionFactory,
     };
-    use crate::ui::RemoteChildLaunchUnavailable;
 
     struct CaptionSegmentFixture {
         text: &'static str,
@@ -4809,78 +4461,7 @@ mod tests {
         }
     }
 
-    struct RemoteLaunchEventHarness {
-        view: Entity<TabView>,
-        events: Rc<RefCell<Vec<RemoteChildLaunchUnavailable>>>,
-    }
-
-    impl Render for RemoteLaunchEventHarness {
-        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-            self.view.clone()
-        }
-    }
-
-    struct RevalidatingTerminalSessionChannelProvider {
-        grant: AtomicBool,
-        revalidations: AtomicUsize,
-        preparations: AtomicUsize,
-        revalidation_error: Mutex<Option<TerminalSessionChannelRevalidationError>>,
-        command_context: crate::ssh::testing::SshConnectionFixture,
-    }
-
-    impl RevalidatingTerminalSessionChannelProvider {
-        fn new(destination: crate::domain::SshDestination) -> Self {
-            Self {
-                grant: AtomicBool::new(true),
-                revalidations: AtomicUsize::new(0),
-                preparations: AtomicUsize::new(0),
-                revalidation_error: Mutex::new(None),
-                command_context: crate::ssh::testing::SshConnectionFixture::new(destination),
-            }
-        }
-
-        fn fail_revalidation_with(&self, error: Option<TerminalSessionChannelRevalidationError>) {
-            *self.revalidation_error.lock().unwrap() = error;
-        }
-    }
-
-    impl TerminalSessionChannelProvider for RevalidatingTerminalSessionChannelProvider {
-        fn is_ready(&self) -> bool {
-            true
-        }
-
-        fn revalidate(
-            &self,
-            _directory: crate::domain::RemoteDirectory,
-            _expected_identity: Option<crate::domain::RemoteDirectoryIdentity>,
-        ) -> gpui::Task<Result<(), TerminalSessionChannelRevalidationError>> {
-            self.revalidations.fetch_add(1, Ordering::AcqRel);
-            self.grant.store(false, Ordering::Release);
-            let error = *self.revalidation_error.lock().unwrap();
-            if error.is_none() {
-                self.grant.store(true, Ordering::Release);
-            }
-            gpui::Task::ready(error.map_or(Ok(()), Err))
-        }
-
-        fn prepare(
-            &self,
-            _directory: &crate::domain::RemoteDirectory,
-        ) -> Result<
-            crate::ssh::command::PreparedSshTerminalSessionChannelCommand,
-            TerminalSessionChannelUnavailable,
-        > {
-            if !self.grant.swap(false, Ordering::AcqRel) {
-                return Err(TerminalSessionChannelUnavailable);
-            }
-            self.preparations.fetch_add(1, Ordering::AcqRel);
-            Ok(self.command_context.prepare_terminal_session_channel(
-                ValidatedRemoteShellCommand::new("exec /bin/zsh -l".to_owned()).unwrap(),
-            ))
-        }
-    }
-
-    /// A desktop-owned Tab's Panes, which production Remote Workspaces own.
+    /// A desktop-owned Tab's Panes over a scripted terminal.
     fn test_session_factory() -> WorkspaceTerminalSessionFactory {
         desktop_session_factory(Rc::new(
             TestTerminalSessionFactory::new(TestTerminalSessionRecords::default())
@@ -4888,70 +4469,16 @@ mod tests {
         ))
     }
 
-    /// Desktop-owned Panes over `terminal`, whose children each receive a fresh channel.
+    /// Desktop-owned Panes over `terminal`.
     fn desktop_session_factory(
         terminal: Rc<dyn TerminalSessionFactory>,
     ) -> WorkspaceTerminalSessionFactory {
-        let destination = crate::domain::SshDestination::new("tester@remote".to_owned()).unwrap();
-        let command_context = Arc::new(crate::ssh::testing::SshConnectionFixture::new(
-            destination.clone(),
-        ));
-        WorkspaceTerminalSessionFactory::new_remote(
+        WorkspaceTerminalSessionFactory::new_local(
             terminal,
             crate::domain::ValidatedLocalDirectory::new(
                 PathBuf::from("/missing/local/home-is-not-a-workspace"),
                 crate::domain::LocalDirectoryIdentity::for_test(71074),
             ),
-            crate::terminal::metadata::RemoteTerminalMetadataContext::new(
-                destination,
-                crate::domain::RemoteDirectory::new("~/project".to_owned()).unwrap(),
-            ),
-            crate::domain::RemoteDirectoryIdentity::new("/home/tester/project".to_owned()).unwrap(),
-            "project on remote".to_owned(),
-            Arc::new(move || {
-                Ok(command_context.prepare_terminal_session_channel(
-                    ValidatedRemoteShellCommand::new("exec /bin/zsh -l".to_owned()).unwrap(),
-                ))
-            }),
-        )
-    }
-
-    fn remote_test_session_factory(
-        records: TestTerminalSessionRecords,
-    ) -> WorkspaceTerminalSessionFactory {
-        let destination = crate::domain::SshDestination::new("tester@remote".to_owned()).unwrap();
-        let command_context = Arc::new(crate::ssh::testing::SshConnectionFixture::new(
-            destination.clone(),
-        ));
-        remote_test_session_factory_with_provider(
-            records,
-            destination,
-            Arc::new(move || {
-                Ok(command_context.prepare_terminal_session_channel(
-                    ValidatedRemoteShellCommand::new("exec /bin/zsh -l".to_owned()).unwrap(),
-                ))
-            }),
-        )
-    }
-
-    fn remote_test_session_factory_with_provider(
-        records: TestTerminalSessionRecords,
-        destination: crate::domain::SshDestination,
-        provider: Arc<dyn TerminalSessionChannelProvider>,
-    ) -> WorkspaceTerminalSessionFactory {
-        WorkspaceTerminalSessionFactory::new_remote(
-            Rc::new(TestTerminalSessionFactory::new(records)),
-            crate::domain::ValidatedLocalDirectory::new(
-                PathBuf::from("/missing/local/home-is-not-a-workspace"),
-                crate::domain::LocalDirectoryIdentity::for_test(71073),
-            ),
-            crate::terminal::metadata::RemoteTerminalMetadataContext::new(
-                destination,
-                crate::domain::RemoteDirectory::new("~/project".to_owned()).unwrap(),
-            ),
-            crate::domain::RemoteDirectoryIdentity::new("/home/tester/project".to_owned()).unwrap(),
-            "project on remote".to_owned(),
-            provider,
         )
     }
 
@@ -4968,255 +4495,6 @@ mod tests {
         });
         cx.run_until_parked();
     }
-
-    fn remote_view_with_events(
-        session_factory: WorkspaceTerminalSessionFactory,
-        cx: &mut TestAppContext,
-    ) -> (
-        Entity<TabView>,
-        Rc<RefCell<Vec<RemoteChildLaunchUnavailable>>>,
-        &mut VisualTestContext,
-    ) {
-        cx.update(crate::ui::init)
-            .expect("UI initialization should succeed");
-        let events = Rc::new(RefCell::new(Vec::new()));
-        let recorded_events = Rc::clone(&events);
-        let (harness, cx) = cx.add_window_view(move |window, cx| {
-            let view = cx.new(|cx| TabView::new(TabId::new(1), session_factory, window, cx));
-            cx.subscribe(
-                &view,
-                move |_, _, event: &RemoteChildLaunchUnavailable, _| {
-                    recorded_events.borrow_mut().push(*event);
-                },
-            )
-            .detach();
-            RemoteLaunchEventHarness { view, events }
-        });
-        let (view, events) = harness.read_with(cx, |harness, _| {
-            (harness.view.clone(), Rc::clone(&harness.events))
-        });
-        cx.run_until_parked();
-        (view, events, cx)
-    }
-
-    #[gpui::test]
-    fn remote_split_should_emit_each_typed_revalidation_failure_without_mutation(
-        cx: &mut TestAppContext,
-    ) {
-        let records = TestTerminalSessionRecords::default();
-        let destination = crate::domain::SshDestination::new("tester@remote".to_owned()).unwrap();
-        let provider = Arc::new(RevalidatingTerminalSessionChannelProvider::new(
-            destination.clone(),
-        ));
-        let session_factory = remote_test_session_factory_with_provider(
-            records.clone(),
-            destination,
-            Arc::clone(&provider) as Arc<dyn TerminalSessionChannelProvider>,
-        );
-        let (view, events, cx) = remote_view_with_events(session_factory, cx);
-        let before = view.read_with(cx, |view, _| {
-            (
-                view.pane_count(),
-                view.focused_pane_id(),
-                view.layout_signature(),
-            )
-        });
-
-        for error in [
-            TerminalSessionChannelRevalidationError::ConnectionUnavailable,
-            TerminalSessionChannelRevalidationError::DirectoryUnavailable,
-            TerminalSessionChannelRevalidationError::IdentityChanged,
-        ] {
-            provider.fail_revalidation_with(Some(error));
-            split_test_pane(&view, before.1, SplitAxis::Horizontal, cx);
-        }
-
-        assert_eq!(
-            events.borrow().as_slice(),
-            [
-                RemoteChildLaunchUnavailable::ConnectionUnavailable,
-                RemoteChildLaunchUnavailable::DirectoryUnavailable,
-                RemoteChildLaunchUnavailable::IdentityChanged,
-            ]
-        );
-        assert_eq!(
-            view.read_with(cx, |view, _| {
-                (
-                    view.pane_count(),
-                    view.focused_pane_id(),
-                    view.layout_signature(),
-                )
-            }),
-            before
-        );
-        assert_eq!(records.starts().len(), 1);
-    }
-
-    #[gpui::test]
-    fn superseded_and_cancelled_remote_splits_should_emit_once_without_mutation(
-        cx: &mut TestAppContext,
-    ) {
-        let records = TestTerminalSessionRecords::default();
-        let destination = crate::domain::SshDestination::new("tester@remote".to_owned()).unwrap();
-        let provider = Arc::new(RevalidatingTerminalSessionChannelProvider::new(
-            destination.clone(),
-        ));
-        let session_factory = remote_test_session_factory_with_provider(
-            records.clone(),
-            destination,
-            Arc::clone(&provider) as Arc<dyn TerminalSessionChannelProvider>,
-        );
-        let (view, events, cx) = remote_view_with_events(session_factory, cx);
-        let before = view.read_with(cx, |view, _| {
-            (
-                view.pane_count(),
-                view.focused_pane_id(),
-                view.layout_signature(),
-            )
-        });
-
-        cx.update(|window, cx| {
-            view.update(cx, |view, cx| {
-                view.split_pane(before.1, SplitAxis::Horizontal, window, cx);
-                view.remote_lifecycle.begin_child_launch();
-            });
-        });
-        cx.run_until_parked();
-
-        cx.update(|window, cx| {
-            view.update(cx, |view, cx| {
-                view.split_pane(before.1, SplitAxis::Horizontal, window, cx);
-                view.disconnect_remote(1, cx).unwrap();
-            });
-        });
-        cx.run_until_parked();
-
-        assert_eq!(
-            events.borrow().as_slice(),
-            [
-                RemoteChildLaunchUnavailable::Stale,
-                RemoteChildLaunchUnavailable::Cancelled,
-            ]
-        );
-        assert_eq!(
-            view.read_with(cx, |view, _| {
-                (
-                    view.pane_count(),
-                    view.focused_pane_id(),
-                    view.layout_signature(),
-                )
-            }),
-            before
-        );
-        assert_eq!(records.starts().len(), 1);
-    }
-
-    #[gpui::test]
-    fn remote_split_skips_local_workspace_validation_and_preserves_launch_context(
-        cx: &mut TestAppContext,
-    ) {
-        cx.update(crate::ui::init)
-            .expect("UI initialization should succeed");
-        let records = TestTerminalSessionRecords::default();
-        let session_factory = remote_test_session_factory(records.clone());
-        let (view, cx) = cx
-            .add_window_view(|window, cx| TabView::new(TabId::new(1), session_factory, window, cx));
-        cx.run_until_parked();
-
-        split_test_pane(&view, PaneId::new(1), SplitAxis::Horizontal, cx);
-
-        assert_eq!(view.read_with(cx, |view, _| view.pane_count()), 2);
-        assert_eq!(records.starts().len(), 2);
-        assert!(records.starts().iter().all(|start| {
-            start.remote_launch_plan().is_some_and(|plan| {
-                plan.destination().as_str() == "tester@remote"
-                    && plan.remote_directory().as_str() == "~/project"
-            })
-        }));
-    }
-
-    #[gpui::test]
-    fn remote_split_should_revalidate_before_mutating_the_pane_tree(cx: &mut TestAppContext) {
-        cx.update(crate::ui::init)
-            .expect("UI initialization should succeed");
-        let records = TestTerminalSessionRecords::default();
-        let destination = crate::domain::SshDestination::new("tester@remote".to_owned()).unwrap();
-        let provider = Arc::new(RevalidatingTerminalSessionChannelProvider::new(
-            destination.clone(),
-        ));
-        let session_factory = remote_test_session_factory_with_provider(
-            records.clone(),
-            destination,
-            Arc::clone(&provider) as Arc<dyn TerminalSessionChannelProvider>,
-        );
-        let (view, cx) = cx
-            .add_window_view(|window, cx| TabView::new(TabId::new(1), session_factory, window, cx));
-        cx.run_until_parked();
-        let focused = view.read_with(cx, |view, _| view.focused_pane_id());
-
-        provider.fail_revalidation_with(Some(
-            TerminalSessionChannelRevalidationError::IdentityChanged,
-        ));
-        split_test_pane(&view, focused, SplitAxis::Horizontal, cx);
-
-        assert_eq!(view.read_with(cx, |view, _| view.pane_count()), 1);
-        assert_eq!(
-            view.read_with(cx, |view, _| view.focused_pane_id()),
-            focused
-        );
-        assert_eq!(records.starts().len(), 1);
-        assert_eq!(provider.preparations.load(Ordering::Acquire), 1);
-        assert_eq!(provider.revalidations.load(Ordering::Acquire), 1);
-
-        provider.fail_revalidation_with(None);
-        split_test_pane(&view, focused, SplitAxis::Horizontal, cx);
-
-        assert_eq!(view.read_with(cx, |view, _| view.pane_count()), 2);
-        assert_eq!(records.starts().len(), 2);
-        assert_eq!(provider.preparations.load(Ordering::Acquire), 2);
-        assert_eq!(provider.revalidations.load(Ordering::Acquire), 2);
-    }
-
-    #[gpui::test]
-    fn remote_split_should_leave_hierarchy_unchanged_when_terminal_session_channel_reservation_fails(
-        cx: &mut TestAppContext,
-    ) {
-        cx.update(crate::ui::init)
-            .expect("UI initialization should succeed");
-        let records = TestTerminalSessionRecords::default();
-        let destination = crate::domain::SshDestination::new("tester@remote".to_owned()).unwrap();
-        let command_context = Arc::new(crate::ssh::testing::SshConnectionFixture::new(
-            destination.clone(),
-        ));
-        let preparations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let provider = {
-            let preparations = Arc::clone(&preparations);
-            Arc::new(move || {
-                if preparations.fetch_add(1, std::sync::atomic::Ordering::AcqRel) == 0 {
-                    Ok(command_context.prepare_terminal_session_channel(
-                        ValidatedRemoteShellCommand::new("exec /bin/zsh -l".to_owned()).unwrap(),
-                    ))
-                } else {
-                    Err(TerminalSessionChannelUnavailable)
-                }
-            })
-        };
-        let session_factory =
-            remote_test_session_factory_with_provider(records.clone(), destination, provider);
-        let (view, cx) = cx
-            .add_window_view(|window, cx| TabView::new(TabId::new(1), session_factory, window, cx));
-        cx.run_until_parked();
-
-        split_test_pane(&view, PaneId::new(1), SplitAxis::Horizontal, cx);
-
-        assert_eq!(
-            view.read_with(cx, |view, _| (view.pane_count(), view.focused_pane_id())),
-            (1, PaneId::new(1))
-        );
-        assert_eq!(records.starts().len(), 1);
-        assert_eq!(preparations.load(std::sync::atomic::Ordering::Acquire), 2);
-    }
-
     fn four_pane_view(cx: &mut TestAppContext) -> (Entity<TabView>, &mut VisualTestContext) {
         cx.update(crate::ui::init)
             .expect("UI initialization should succeed");
@@ -6110,10 +5388,7 @@ mod tests {
             view.pane_attention.insert(PaneId::new(1), 2);
         });
 
-        assert_eq!(
-            view.read_with(cx, |view, _| view.tab_title()),
-            "• project on remote · project"
-        );
+        assert_eq!(view.read_with(cx, |view, _| view.tab_title()), "• Terminal");
         assert_eq!(
             view.read_with(cx, |view, _| view.pane_attention.clone()),
             BTreeMap::from([(PaneId::new(1), 2)])
@@ -6397,7 +5672,6 @@ mod tests {
 
         cx.update(crate::ui::init).unwrap();
         let factory = test_session_factory();
-        let launch = factory.prepare_child_launch().unwrap();
         let construction = PaneConstruction::new(
             Rc::new(crate::terminal::GpuiTerminalKeyInputAdapterFactory::default()),
             Rc::new(crate::platform::accesskit_terminal_accessibility::AccessKitTerminalAccessibilityAdapterFactory),
@@ -6405,14 +5679,7 @@ mod tests {
             crate::ui::pane_lifecycle::PaneLifecycleDependencies::testing(),
         );
         let (view, cx) = cx.add_window_view(|window, cx| {
-            TabView::new_with_prepared_launch(
-                TabId::new(1),
-                factory,
-                launch,
-                construction,
-                window,
-                cx,
-            )
+            TabView::with_pane_construction(TabId::new(1), factory, construction, window, cx)
         });
         cx.update(|window, cx| {
             window.activate_window();
@@ -8980,83 +8247,6 @@ mod tests {
     fn leaked(selector: String) -> &'static str {
         selector.leak()
     }
-    fn report_current_directory(
-        records: &TestTerminalSessionRecords,
-        session: usize,
-        generation: u64,
-        directory: &str,
-        remote: bool,
-    ) {
-        let mut screen = crate::terminal::ScreenSnapshot::from_test_parts_at(
-            Arc::from([]),
-            crate::terminal::ScrollbarSnapshot::default(),
-            "terminal",
-            generation,
-        );
-        let metadata = Arc::make_mut(&mut Arc::make_mut(&mut screen).metadata);
-        metadata.directory.path = Arc::from(directory);
-        if remote {
-            metadata.context = crate::terminal::metadata::TerminalMetadataContext::Remote(
-                crate::terminal::metadata::RemoteTerminalMetadataContext::new(
-                    crate::domain::SshDestination::new("tester@remote".into()).unwrap(),
-                    crate::domain::RemoteDirectory::new(directory.into()).unwrap(),
-                ),
-            );
-        }
-        records
-            .event_sender(session)
-            .unwrap()
-            .try_send(TerminalSessionEvent::Screen(screen))
-            .unwrap();
-    }
-
-    #[gpui::test]
-    fn split_should_inherit_target_directory_and_capture_it_before_remote_wait(
-        cx: &mut TestAppContext,
-    ) {
-        cx.update(crate::ui::init).unwrap();
-        let records = TestTerminalSessionRecords::default();
-        let factory = remote_test_session_factory(records.clone());
-        let (view, cx) =
-            cx.add_window_view(|window, cx| TabView::new(TabId::new(1), factory, window, cx));
-        cx.run_until_parked();
-        report_current_directory(&records, 1, 1, "/srv/frontend", true);
-        cx.run_until_parked();
-        split_test_pane(&view, PaneId::new(1), SplitAxis::Horizontal, cx);
-        report_current_directory(&records, 2, 1, "/srv/backend", true);
-        cx.run_until_parked();
-        cx.update(|window, cx| {
-            view.update(cx, |view, cx| {
-                view.split_pane(PaneId::new(1), SplitAxis::Vertical, window, cx)
-            })
-        });
-        report_current_directory(&records, 1, 2, "/srv/later", true);
-        cx.run_until_parked();
-        let starts = records.starts();
-        assert_eq!(
-            starts[1]
-                .remote_launch_plan()
-                .unwrap()
-                .remote_directory()
-                .as_str(),
-            "/srv/frontend"
-        );
-        assert_eq!(
-            starts[2]
-                .remote_launch_plan()
-                .unwrap()
-                .remote_directory()
-                .as_str(),
-            "/srv/frontend"
-        );
-        assert_eq!(
-            view.read_with(cx, |view, cx| view.current_directory(PaneId::new(2), cx)),
-            Some(CurrentDirectory::Remote(
-                crate::domain::RemoteDirectory::new("/srv/backend".into()).unwrap()
-            ))
-        );
-    }
-
     #[gpui::test]
     fn split_resize_handles_move_to_the_offset_assistive_technology_sets(cx: &mut TestAppContext) {
         use gpui::accesskit::{Action, ActionData};

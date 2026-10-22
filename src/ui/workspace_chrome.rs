@@ -324,23 +324,22 @@ impl WorkspaceChromeStatusHosts {
     }
 }
 
-/// The one status the collapsed Workspace identity presents: a Remote Workspace's connection.
+/// The one status the collapsed Workspace identity presents: the connection to the server on
+/// another computer that owns the Workspace.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum WorkspaceChromeStatus {
     Connected,
     Reconnecting,
     Disconnected,
-    Closing,
     Failed,
 }
 
 impl WorkspaceChromeStatus {
     #[cfg(any(test, feature = "developer-tools"))]
-    pub(super) const ALL: [Self; 5] = [
+    pub(super) const ALL: [Self; 4] = [
         Self::Connected,
         Self::Reconnecting,
         Self::Disconnected,
-        Self::Closing,
         Self::Failed,
     ];
 
@@ -349,7 +348,6 @@ impl WorkspaceChromeStatus {
             RemoteConnectionPhase::Connected => Self::Connected,
             RemoteConnectionPhase::Reconnecting => Self::Reconnecting,
             RemoteConnectionPhase::Disconnected => Self::Disconnected,
-            RemoteConnectionPhase::Closing => Self::Closing,
             RemoteConnectionPhase::Failed => Self::Failed,
         })
     }
@@ -359,7 +357,6 @@ impl WorkspaceChromeStatus {
             Self::Connected => "Connected remote",
             Self::Reconnecting => "Reconnecting",
             Self::Disconnected => "Disconnected",
-            Self::Closing => "Closing",
             Self::Failed => "Connection failed",
         }
     }
@@ -369,7 +366,6 @@ impl WorkspaceChromeStatus {
             Self::Connected => "workspace-switcher-status-connected",
             Self::Reconnecting => "workspace-switcher-status-reconnecting",
             Self::Disconnected => "workspace-switcher-status-disconnected",
-            Self::Closing => "workspace-switcher-status-closing",
             Self::Failed => "workspace-switcher-status-failed",
         }
     }
@@ -379,7 +375,7 @@ impl WorkspaceChromeStatus {
         match self {
             Self::Connected => IconName::Check,
             Self::Reconnecting => IconName::RotateCw,
-            Self::Disconnected | Self::Closing => IconName::Minus,
+            Self::Disconnected => IconName::Minus,
             Self::Failed => IconName::CircleAlert,
         }
     }
@@ -388,7 +384,7 @@ impl WorkspaceChromeStatus {
         match self {
             Self::Connected => colors.success,
             Self::Reconnecting => colors.info,
-            Self::Disconnected | Self::Closing => colors.icon_muted,
+            Self::Disconnected => colors.icon_muted,
             Self::Failed => colors.error,
         }
     }
@@ -740,10 +736,6 @@ mod tests {
                 RemoteConnectionPhase::Disconnected,
                 WorkspaceChromeStatus::Disconnected,
             ),
-            (
-                RemoteConnectionPhase::Closing,
-                WorkspaceChromeStatus::Closing,
-            ),
             (RemoteConnectionPhase::Failed, WorkspaceChromeStatus::Failed),
         ] {
             assert_eq!(WorkspaceChromeStatus::resolve(Some(phase)), Some(status));
@@ -763,7 +755,6 @@ mod tests {
             (WorkspaceChromeStatus::Connected, "Connected remote"),
             (WorkspaceChromeStatus::Reconnecting, "Reconnecting"),
             (WorkspaceChromeStatus::Disconnected, "Disconnected"),
-            (WorkspaceChromeStatus::Closing, "Closing"),
             (WorkspaceChromeStatus::Failed, "Connection failed"),
         ] {
             assert_eq!(

@@ -78,6 +78,17 @@ impl DiscoveredSshHost {
         &self.alias
     }
 
+    /// A host a test's SSH configuration declares once, by `alias`.
+    #[cfg(test)]
+    pub(crate) fn configured(alias: &str) -> Self {
+        Self {
+            alias: SshHostAlias::new(alias.to_owned()).expect("a valid test alias"),
+            provenance: None,
+            ambiguous: false,
+            direct_target: None,
+        }
+    }
+
     #[cfg(test)]
     pub(crate) const fn provenance(&self) -> Option<&HostConfigProvenance> {
         self.provenance.as_ref()

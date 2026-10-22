@@ -13,13 +13,18 @@ use std::{
 
 pub(crate) struct ServerDirectorySource {
     server: LocalServer,
-    original: PathBuf,
+    /// A directory whose nearest available ancestor the picker opens at, instead of home.
+    original: Option<PathBuf>,
+    /// The other computer's name, for a server that runs on one.
+    machine: Option<String>,
+    selection_label: &'static str,
     available: Rc<dyn Fn() -> bool>,
     initial: Rc<std::cell::RefCell<Option<PickerPath>>>,
     executor: gpui::BackgroundExecutor,
     home: Rc<std::cell::RefCell<Option<PathBuf>>>,
 }
 impl ServerDirectorySource {
+    /// Chooses a replacement for `original`, starting at its nearest available ancestor.
     pub(crate) fn new(
         server: LocalServer,
         executor: gpui::BackgroundExecutor,
@@ -28,7 +33,28 @@ impl ServerDirectorySource {
     ) -> Self {
         Self {
             server,
-            original,
+            original: Some(original),
+            machine: None,
+            selection_label: "Choose",
+            available,
+            initial: Rc::default(),
+            executor,
+            home: Rc::default(),
+        }
+    }
+    /// Browses the server's directories from its home, naming `machine` when the server runs on
+    /// another computer.
+    pub(crate) fn browsing(
+        server: LocalServer,
+        executor: gpui::BackgroundExecutor,
+        machine: Option<String>,
+        available: Rc<dyn Fn() -> bool>,
+    ) -> Self {
+        Self {
+            server,
+            original: None,
+            machine,
+            selection_label: "Open",
             available,
             initial: Rc::default(),
             executor,
@@ -104,7 +130,7 @@ impl Drop for CancelRead {
 }
 impl DirectorySource for ServerDirectorySource {
     fn machine_name(&self) -> Option<&str> {
-        None
+        self.machine.as_deref()
     }
     fn allows_creation(&self) -> bool {
         false
@@ -113,14 +139,15 @@ impl DirectorySource for ServerDirectorySource {
         self.initial.borrow().clone()
     }
     fn selection_label(&self) -> &'static str {
-        "Choose"
+        self.selection_label
     }
     fn discover_home(&self) -> SourceFuture<PickerPath> {
         let read = self.run(Operation::Home);
         let home = Rc::clone(&self.home);
-        let ancestor = self.run(Operation::Ancestor {
-            path: self.original.clone(),
-        });
+        let ancestor = self
+            .original
+            .clone()
+            .map(|path| self.run(Operation::Ancestor { path }));
         let initial = Rc::clone(&self.initial);
         Box::pin(async move {
             match read.await? {
@@ -130,7 +157,9 @@ impl DirectorySource for ServerDirectorySource {
                     )
                     .map_err(|_| DirectorySourceError::Other)?;
                     *home.borrow_mut() = Some(path);
-                    if let Ok(Value::Directory(path)) = ancestor.await {
+                    if let Some(ancestor) = ancestor
+                        && let Ok(Value::Directory(path)) = ancestor.await
+                    {
                         *initial.borrow_mut() = path.to_str().and_then(|s| {
                             PickerPath::new(format!("{}/", s.trim_end_matches('/'))).ok()
                         });

@@ -1,4 +1,4 @@
-//! The Directory Picker's source for a connected SSH Destination.
+//! A scripted machine for Directory Picker tests, standing in for another computer's server.
 use std::sync::Arc;
 
 use gpui::Task;
@@ -7,27 +7,15 @@ use super::{
     DirectoryListing, DirectorySelection, DirectorySource, DirectorySourceError, ExactPathState,
     PickerPath, SourceFuture,
 };
-use crate::domain::{PinnedDirectory, RemoteDirectory, RemoteDirectoryIdentity};
-use crate::ssh::remote_account::RemoteWorkspaceAccount;
+use crate::domain::RemoteDirectory;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum RemoteDirectoryProviderError {
-    ConnectionLost,
-    /// The server refused a session on a Control Connection that is still live.
-    SessionUnavailable,
-    Missing,
-    NotDirectory,
-    PermissionDenied,
-    UnsupportedLoginShell,
-    InvalidResponse,
-    Other,
-}
+/// Each scripted answer fails as a source would.
+pub(super) type RemoteDirectoryProviderError = DirectorySourceError;
 
-/// The connected-SSH boundary. Every path crossing it is a remote string type.
-pub(crate) trait RemoteDirectoryProvider: Send + Sync {
-    fn discover_account(
-        &self,
-    ) -> Task<Result<RemoteWorkspaceAccount, RemoteDirectoryProviderError>>;
+/// The scripted machine's answers. Every path crossing it is the other machine's string.
+pub(super) trait RemoteDirectoryProvider: Send + Sync {
+    /// The home directory's absolute path.
+    fn discover_account(&self) -> Task<Result<String, RemoteDirectoryProviderError>>;
 
     fn list_directories(
         &self,
@@ -47,18 +35,18 @@ pub(crate) trait RemoteDirectoryProvider: Send + Sync {
     fn validate_physical_identity(
         &self,
         directory: RemoteDirectory,
-    ) -> Task<Result<RemoteDirectoryIdentity, RemoteDirectoryProviderError>>;
+    ) -> Task<Result<String, RemoteDirectoryProviderError>>;
 }
 
-/// Reads one SSH Destination's directories through its connected provider.
-pub(crate) struct RemoteDirectorySource {
+/// Reads the scripted machine named `host`. A selection is that machine's validated path, as a
+/// server's is.
+pub(super) struct RemoteDirectorySource {
     provider: Arc<dyn RemoteDirectoryProvider + Send + Sync>,
     host: String,
 }
 
 impl RemoteDirectorySource {
-    /// Creates a source for the machine `host` names.
-    pub(crate) fn new(
+    pub(super) fn new(
         provider: Arc<dyn RemoteDirectoryProvider + Send + Sync>,
         host: &str,
     ) -> Self {
@@ -76,11 +64,9 @@ impl DirectorySource for RemoteDirectorySource {
 
     fn discover_home(&self) -> SourceFuture<PickerPath> {
         let account = self.provider.discover_account();
-        Box::pin(async move {
-            let account = account.await.map_err(source_error)?;
-            PickerPath::new(account.home_identity().as_str().to_owned())
-                .map_err(|_| DirectorySourceError::Other)
-        })
+        Box::pin(
+            async move { PickerPath::new(account.await?).map_err(|_| DirectorySourceError::Other) },
+        )
     }
 
     fn list_directories(&self, directory: PickerPath) -> SourceFuture<DirectoryListing> {
@@ -109,14 +95,8 @@ impl DirectorySource for RemoteDirectorySource {
             Ok(directory) => directory,
             Err(error) => return Box::pin(async move { Err(error) }),
         };
-        let identity = self.provider.validate_physical_identity(directory.clone());
-        Box::pin(async move {
-            let identity = identity.await.map_err(source_error)?;
-            Ok(DirectorySelection::Pin(PinnedDirectory::Remote {
-                directory,
-                identity,
-            }))
-        })
+        let identity = self.provider.validate_physical_identity(directory);
+        Box::pin(async move { Ok(DirectorySelection::Server(identity.await?.into())) })
     }
 }
 
@@ -125,23 +105,5 @@ fn remote_directory(directory: PickerPath) -> Result<RemoteDirectory, DirectoryS
 }
 
 fn resolve<T: 'static>(task: Task<Result<T, RemoteDirectoryProviderError>>) -> SourceFuture<T> {
-    Box::pin(async move { task.await.map_err(source_error) })
-}
-
-const fn source_error(error: RemoteDirectoryProviderError) -> DirectorySourceError {
-    match error {
-        RemoteDirectoryProviderError::ConnectionLost => DirectorySourceError::ConnectionLost,
-        RemoteDirectoryProviderError::SessionUnavailable => {
-            DirectorySourceError::SessionUnavailable
-        }
-        RemoteDirectoryProviderError::Missing => DirectorySourceError::Missing,
-        RemoteDirectoryProviderError::NotDirectory => DirectorySourceError::NotDirectory,
-        RemoteDirectoryProviderError::PermissionDenied => DirectorySourceError::PermissionDenied,
-        RemoteDirectoryProviderError::UnsupportedLoginShell => {
-            DirectorySourceError::UnsupportedLoginShell
-        }
-        RemoteDirectoryProviderError::InvalidResponse | RemoteDirectoryProviderError::Other => {
-            DirectorySourceError::Other
-        }
-    }
+    Box::pin(task)
 }

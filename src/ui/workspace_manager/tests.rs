@@ -1,7 +1,7 @@
 use crate::directory_selection::GpuiDirectorySelection;
 use crate::domain::RemoteConnectionPhase;
-use crate::ssh::remote_account::RemoteWorkspaceAccount;
 use crate::terminal::GpuiTerminalKeyInputAdapterFactory;
+use crate::terminal::TerminalSessionFactory;
 use crate::ui::drag_and_drop::finish_slides;
 use crate::ui::workspace_frame::WorkspaceFrame;
 use crate::ui::workspace_sidebar::SIDEBAR_ROW_SELECTION_INSET_Y;
@@ -11,11 +11,9 @@ use crate::ui::{
 use gpui::MouseButton;
 use gpui::px;
 use std::cell::RefCell;
-use std::collections::VecDeque;
 use std::fs;
-use std::path::Path;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use gpui::{
@@ -129,180 +127,6 @@ fn sidebar_should_follow_the_local_root_in_background_and_promote_on_close(
         identity,
         ("child".to_owned(), PathBuf::from("/other/child"))
     );
-}
-
-#[gpui::test]
-fn sidebar_should_follow_remote_root_across_tabs_pins_and_custom_names(cx: &mut TestAppContext) {
-    use crate::domain::CurrentDirectory;
-    let (manager, records, cx) = workspace_manager(cx);
-    let (completion, _, _, _) = remote_completion("deploy@staging", "~/", "/home/tester", true);
-    click_new_workspace_menu("new-workspace-menu-create-remote", cx);
-    let flow = manager.read_with(cx, |manager, _| {
-        manager.remote_workspace_flow.clone().unwrap()
-    });
-    emit_remote_workspace_completion(&flow, completion, cx);
-    cx.simulate_keystrokes("cmd-t");
-    cx.run_until_parked();
-    assert_eq!(records.starts().len(), 3);
-    records.report_directory(
-        3,
-        Some(CurrentDirectory::Remote(
-            RemoteDirectory::new("/srv/other".into()).unwrap(),
-        )),
-    );
-    records.report_directory(
-        2,
-        Some(CurrentDirectory::Remote(
-            RemoteDirectory::new("/srv/api".into()).unwrap(),
-        )),
-    );
-    cx.run_until_parked();
-    assert_eq!(
-        manager.read_with(cx, |manager, _| manager
-            .workspaces
-            .active()
-            .name()
-            .to_owned()),
-        "api"
-    );
-    cx.update(|window, cx| {
-        manager.update(cx, |manager, cx| {
-            manager.apply_directory_pin(
-                WorkspaceId::new(2),
-                Some(PinnedDirectory::Remote {
-                    directory: RemoteDirectory::new("/srv/pinned".into()).unwrap(),
-                    identity: crate::domain::RemoteDirectoryIdentity::new("/srv/pinned".into())
-                        .unwrap(),
-                }),
-                window,
-                cx,
-            )
-        })
-    });
-    records.report_directory(
-        2,
-        Some(CurrentDirectory::Remote(
-            RemoteDirectory::new("/srv/latest".into()).unwrap(),
-        )),
-    );
-    cx.run_until_parked();
-    assert_eq!(
-        manager.read_with(cx, |manager, _| manager
-            .workspaces
-            .active()
-            .name()
-            .to_owned()),
-        "pinned"
-    );
-    cx.update(|window, cx| {
-        manager.update(cx, |manager, cx| {
-            manager.apply_directory_pin(WorkspaceId::new(2), None, window, cx)
-        })
-    });
-    assert_eq!(
-        manager.read_with(cx, |manager, _| manager
-            .workspaces
-            .active()
-            .name()
-            .to_owned()),
-        "latest"
-    );
-
-    manager.update(cx, |manager, _| {
-        manager
-            .workspaces
-            .rename_workspace(WorkspaceId::new(2), "Release".into())
-            .unwrap()
-    });
-    records
-        .event_sender(2)
-        .unwrap()
-        .try_send(TerminalSessionEvent::Exited(TerminalSessionExit::Success))
-        .unwrap();
-    cx.run_until_parked();
-    let identity = manager.read_with(cx, |manager, _| {
-        let workspace = manager.workspaces.active();
-        (
-            workspace.name().to_owned(),
-            workspace
-                .remote_display_directory()
-                .unwrap()
-                .as_str()
-                .to_owned(),
-        )
-    });
-    assert_eq!(identity, ("Release".to_owned(), "/srv/other".to_owned()));
-}
-
-#[gpui::test]
-fn sidebar_rows_should_keep_the_directory_and_pin_below_name_and_leave_the_machine_to_its_heading(
-    cx: &mut TestAppContext,
-) {
-    let (manager, _, cx) = workspace_manager(cx);
-    click_new_workspace_menu("new-workspace-menu-create-remote", cx);
-    let flow = manager.read_with(cx, |manager, _| {
-        manager.remote_workspace_flow.clone().unwrap()
-    });
-    let (completion, _, _, _) =
-        remote_completion("deploy@staging-production", "~/", "/home/tester", true);
-    emit_remote_workspace_completion(&flow, completion, cx);
-    cx.update(|window, cx| {
-        manager.update(cx, |manager, cx| {
-            manager
-                .workspaces
-                .rename_workspace(WorkspaceId::new(2), "Production".into())
-                .unwrap();
-            manager.apply_directory_pin(
-                WorkspaceId::new(2),
-                Some(PinnedDirectory::Remote {
-                    directory: RemoteDirectory::new("/srv/very/long/path/to/application".into())
-                        .unwrap(),
-                    identity: crate::domain::RemoteDirectoryIdentity::new(
-                        "/srv/very/long/path/to/application".into(),
-                    )
-                    .unwrap(),
-                }),
-                window,
-                cx,
-            );
-            manager.set_sidebar_layout(true, px(420.0), window, cx);
-        })
-    });
-    cx.run_until_parked();
-    let name = cx.debug_bounds("workspace-row-name-2").unwrap();
-    let path = cx.debug_bounds("workspace-row-path-2").unwrap();
-    let pin = cx.debug_bounds("workspace-row-pin-2").unwrap();
-    // The machine's heading names it, so its row doesn't repeat it.
-    assert!(
-        cx.debug_bounds("machine-heading-deploy@staging-production")
-            .is_some()
-    );
-    assert!(cx.debug_bounds("workspace-machine-2").is_none());
-    assert!(path.top() >= name.bottom());
-    assert!(pin.right() <= path.left());
-    cx.update(|window, cx| {
-        manager.update(cx, |manager, cx| {
-            manager
-                .workspaces
-                .rename_workspace(
-                    WorkspaceId::new(2),
-                    "A very long production workspace name".into(),
-                )
-                .unwrap();
-            manager.set_sidebar_layout(true, px(WORKSPACE_SIDEBAR_MINIMUM_WIDTH), window, cx);
-        })
-    });
-    cx.run_until_parked();
-    let row = cx.debug_bounds("workspace-row-2-active").unwrap();
-    let name = cx.debug_bounds("workspace-row-name-2").unwrap();
-    // Canvas children removed this frame can leave historical GPUI debug bounds behind.
-    // The name occupying all available width verifies the machine and its gap are gone.
-    assert_eq!(name.right(), row.right() - row_trailing_padding(cx));
-    let path = cx.debug_bounds("workspace-row-path-2").unwrap();
-    let pin = cx.debug_bounds("workspace-row-pin-2").unwrap();
-    assert!(path.right() <= row.right());
-    assert!(pin.right() <= path.left());
-    assert_eq!(row.size.height, px(SIDEBAR_ROW_HEIGHT));
 }
 
 #[gpui::test]
@@ -441,83 +265,6 @@ fn sidebar_rows_contain_semantic_text_in_both_densities(cx: &mut TestAppContext)
 }
 
 #[test]
-fn remote_home_labels_should_ignore_trailing_separators_without_changing_tooltip_paths() {
-    let location = WorkspaceLocation::Remote {
-        key: RemoteWorkspaceTarget::new(
-            crate::domain::SshDestination::new("build".into()).unwrap(),
-            crate::domain::RemoteDirectoryIdentity::new("/home/tester".into()).unwrap(),
-        ),
-        remote_user: crate::domain::RemoteUser::new("tester".into()).unwrap(),
-        remote_directory: RemoteDirectory::new("~/".into()).unwrap(),
-        remote_home_identity: crate::domain::RemoteDirectoryIdentity::new("/home/tester".into())
-            .unwrap(),
-        connection_state: RemoteConnectionState::connected(1),
-    };
-    for (path, expected) in [
-        ("/home/tester/", "~"),
-        ("/home/tester///", "~"),
-        ("~///", "~"),
-        ("/home/tester/src/", "~/src/"),
-        ("/home/tester-other/", "/home/tester-other/"),
-        ("/", "/"),
-    ] {
-        let directory = RemoteDirectory::new(path.into()).unwrap();
-        assert_eq!(
-            directory_labels(&location, None, Some(&directory), Path::new("/Users/local")),
-            (expected.to_owned(), format!("tester@build:{path}")),
-        );
-    }
-}
-
-#[test]
-fn remote_directory_labels_should_include_account_destination_and_compact_home() {
-    let location = WorkspaceLocation::Remote {
-        key: RemoteWorkspaceTarget::new(
-            crate::domain::SshDestination::new("build-01".into()).unwrap(),
-            crate::domain::RemoteDirectoryIdentity::new("/home/tester/src".into()).unwrap(),
-        ),
-        remote_user: crate::domain::RemoteUser::new("tester".into()).unwrap(),
-        remote_directory: RemoteDirectory::new("/home/tester/src".into()).unwrap(),
-        remote_home_identity: crate::domain::RemoteDirectoryIdentity::new("/home/tester".into())
-            .unwrap(),
-        connection_state: RemoteConnectionState::connected(1),
-    };
-    let directory = RemoteDirectory::new("/home/tester/src".into()).unwrap();
-
-    assert_eq!(
-        directory_labels(&location, None, Some(&directory), Path::new("/Users/local")),
-        (
-            "~/src".to_owned(),
-            "tester@build-01:/home/tester/src".to_owned(),
-        )
-    );
-}
-
-#[test]
-fn remote_directory_labels_should_preserve_an_explicit_destination_user() {
-    let location = WorkspaceLocation::Remote {
-        key: RemoteWorkspaceTarget::new(
-            crate::domain::SshDestination::new("admin@build-01".into()).unwrap(),
-            crate::domain::RemoteDirectoryIdentity::new("/srv/project".into()).unwrap(),
-        ),
-        remote_user: crate::domain::RemoteUser::new("tester".into()).unwrap(),
-        remote_directory: RemoteDirectory::new("/srv/project".into()).unwrap(),
-        remote_home_identity: crate::domain::RemoteDirectoryIdentity::new("/home/tester".into())
-            .unwrap(),
-        connection_state: RemoteConnectionState::connected(1),
-    };
-    let directory = RemoteDirectory::new("/srv/project".into()).unwrap();
-
-    assert_eq!(
-        directory_labels(&location, None, Some(&directory), Path::new("/Users/local")),
-        (
-            "/srv/project".to_owned(),
-            "admin@build-01:/srv/project".to_owned(),
-        )
-    );
-}
-
-#[test]
 fn sidebar_toggle_should_describe_the_action_for_each_visibility_state() {
     let (visible_icon, visible_label) = sidebar_toggle_presentation(true);
     assert_eq!(
@@ -549,548 +296,15 @@ fn remote_connection_phases_have_expected_status_labels() {
         remote_connection_status(RemoteConnectionPhase::Failed),
         Some("Connection failed")
     );
-    assert_eq!(
-        remote_connection_status(RemoteConnectionPhase::Closing),
-        Some("Closing…")
-    );
 }
 
-type RemoteCompletionFixture = (
-    RemoteWorkspaceFlowCompletion,
-    Arc<AtomicUsize>,
-    Arc<AtomicUsize>,
-    Arc<AtomicUsize>,
-    Arc<AtomicBool>,
-    async_channel::Sender<crate::ssh::live_connection::ControlConnectionTerminalState>,
-);
 use crate::directory_selection::ScriptedDirectorySelection;
 use crate::platform::window_movement::RecordingOperatingSystemWindowDragPlatform;
-use crate::ssh::askpass::prompt::{AskPassPromptKind, AskPassRequest, AskPassResult};
-use crate::ssh::command::ValidatedRemoteShellCommand;
-use crate::ssh::destination::SshHostAlias;
-use crate::ssh::host_config::HostDiscovery;
-use crate::ssh::managed_hosts::ManagedSshHost;
 use crate::terminal::testing::{
     RecordedCommand, TestTerminalSessionFactory, TestTerminalSessionRecords,
 };
 use crate::terminal::{TerminalSessionEvent, TerminalSessionExit};
-use crate::ui::askpass_dialog::GpuiAskPassPresenter;
-use crate::ui::directory_picker::{
-    DirectoryListing, ExactPathState, RemoteDirectoryProvider, RemoteDirectoryProviderError,
-};
-use crate::ui::remote_workspace_flow::{
-    ControlConnectionOwner, RemoteWorkspaceAliasPin, RemoteWorkspaceAliasPinError,
-    RemoteWorkspaceConnectContext, RemoteWorkspaceFlowBackendError, RemoteWorkspaceFlowStage,
-};
-use crate::ui::ssh_host_form::ManagedHostFormBackendError;
-
-#[derive(Default)]
-struct TestRemoteWorkspaceFlowBackend {
-    connections: Mutex<
-        VecDeque<gpui::Task<Result<ConnectedControlConnection, RemoteWorkspaceFlowBackendError>>>,
-    >,
-    connect_calls: AtomicUsize,
-}
-
-impl TestRemoteWorkspaceFlowBackend {
-    fn with_connections(
-        connections: impl IntoIterator<
-            Item = gpui::Task<Result<ConnectedControlConnection, RemoteWorkspaceFlowBackendError>>,
-        >,
-    ) -> Arc<Self> {
-        Arc::new(Self {
-            connections: Mutex::new(connections.into_iter().collect()),
-            connect_calls: AtomicUsize::new(0),
-        })
-    }
-}
-
-impl RemoteWorkspaceFlowBackend for TestRemoteWorkspaceFlowBackend {
-    fn discover_hosts(&self) -> HostDiscovery {
-        HostDiscovery::default()
-    }
-
-    fn save_managed_host(
-        &self,
-        _: ManagedSshHost,
-    ) -> gpui::Task<Result<(), ManagedHostFormBackendError>> {
-        gpui::Task::ready(Ok(()))
-    }
-
-    fn connect(
-        &self,
-        _: crate::domain::SshDestination,
-        _: RemoteWorkspaceConnectContext,
-    ) -> gpui::Task<Result<ConnectedControlConnection, RemoteWorkspaceFlowBackendError>> {
-        self.connect_calls.fetch_add(1, Ordering::AcqRel);
-        self.connections
-            .lock()
-            .unwrap()
-            .pop_front()
-            .unwrap_or_else(|| {
-                gpui::Task::ready(Err(RemoteWorkspaceFlowBackendError::ConnectionFailed))
-            })
-    }
-}
-
-struct TestRemoteWorkspaceFlowBackendFactory {
-    backend: Arc<TestRemoteWorkspaceFlowBackend>,
-}
-
-impl RemoteWorkspaceFlowBackendFactory for TestRemoteWorkspaceFlowBackendFactory {
-    fn create(
-        &self,
-        _: &Window,
-        _: &mut App,
-    ) -> Result<Arc<dyn RemoteWorkspaceFlowBackend>, RemoteWorkspaceFlowBackendError> {
-        Ok(self.backend.clone())
-    }
-}
-
-struct UnavailableTestRemoteWorkspaceFlowBackendFactory {
-    create_calls: Arc<AtomicUsize>,
-}
-
-impl RemoteWorkspaceFlowBackendFactory for UnavailableTestRemoteWorkspaceFlowBackendFactory {
-    fn unavailable_reason(&self) -> Option<String> {
-        Some("OpenSSH 8.2 or later is required".to_owned())
-    }
-
-    fn create(
-        &self,
-        _: &Window,
-        _: &mut App,
-    ) -> Result<Arc<dyn RemoteWorkspaceFlowBackend>, RemoteWorkspaceFlowBackendError> {
-        self.create_calls.fetch_add(1, Ordering::AcqRel);
-        Err(RemoteWorkspaceFlowBackendError::ConnectionFailed)
-    }
-}
-
-struct FailingTestRemoteWorkspaceFlowBackendFactory {
-    create_calls: Arc<AtomicUsize>,
-}
-
-impl RemoteWorkspaceFlowBackendFactory for FailingTestRemoteWorkspaceFlowBackendFactory {
-    fn create(
-        &self,
-        _: &Window,
-        _: &mut App,
-    ) -> Result<Arc<dyn RemoteWorkspaceFlowBackend>, RemoteWorkspaceFlowBackendError> {
-        self.create_calls.fetch_add(1, Ordering::AcqRel);
-        Err(RemoteWorkspaceFlowBackendError::ConnectionFailed)
-    }
-}
-
-fn test_remote_backend_factory() -> Arc<dyn RemoteWorkspaceFlowBackendFactory> {
-    Arc::new(TestRemoteWorkspaceFlowBackendFactory {
-        backend: Arc::new(TestRemoteWorkspaceFlowBackend::default()),
-    })
-}
-
-struct TestRemoteProvider {
-    account_available: bool,
-    identity: Result<crate::domain::RemoteDirectoryIdentity, RemoteDirectoryProviderError>,
-}
-
-impl TestRemoteProvider {
-    fn failing() -> Self {
-        Self {
-            account_available: false,
-            identity: Err(RemoteDirectoryProviderError::Other),
-        }
-    }
-
-    fn connected(identity: crate::domain::RemoteDirectoryIdentity) -> Self {
-        Self {
-            account_available: true,
-            identity: Ok(identity),
-        }
-    }
-
-    fn directory_unavailable() -> Self {
-        Self {
-            account_available: true,
-            identity: Err(RemoteDirectoryProviderError::PermissionDenied),
-        }
-    }
-}
-
-impl RemoteDirectoryProvider for TestRemoteProvider {
-    fn discover_account(
-        &self,
-    ) -> gpui::Task<Result<RemoteWorkspaceAccount, RemoteDirectoryProviderError>> {
-        if !self.account_available {
-            return gpui::Task::ready(Err(RemoteDirectoryProviderError::Other));
-        }
-        gpui::Task::ready(Ok(test_remote_account()))
-    }
-
-    fn list_directories(
-        &self,
-        _: RemoteDirectory,
-    ) -> gpui::Task<Result<DirectoryListing, RemoteDirectoryProviderError>> {
-        gpui::Task::ready(Ok(DirectoryListing::new(Vec::new())))
-    }
-
-    fn probe_exact_path(
-        &self,
-        _: RemoteDirectory,
-    ) -> gpui::Task<Result<ExactPathState, RemoteDirectoryProviderError>> {
-        gpui::Task::ready(Ok(ExactPathState::ReadableDirectory))
-    }
-
-    fn create_directory_recursively(
-        &self,
-        _: RemoteDirectory,
-    ) -> gpui::Task<Result<(), RemoteDirectoryProviderError>> {
-        gpui::Task::ready(Err(RemoteDirectoryProviderError::Other))
-    }
-
-    fn validate_physical_identity(
-        &self,
-        _: RemoteDirectory,
-    ) -> gpui::Task<Result<crate::domain::RemoteDirectoryIdentity, RemoteDirectoryProviderError>>
-    {
-        gpui::Task::ready(self.identity.clone())
-    }
-}
-
-struct BlockingRemoteProvider {
-    account:
-        Mutex<Option<gpui::Task<Result<RemoteWorkspaceAccount, RemoteDirectoryProviderError>>>>,
-    identity: Mutex<
-        Option<
-            gpui::Task<
-                Result<crate::domain::RemoteDirectoryIdentity, RemoteDirectoryProviderError>,
-            >,
-        >,
-    >,
-    account_calls: Arc<AtomicUsize>,
-    identity_calls: Arc<AtomicUsize>,
-}
-
-impl RemoteDirectoryProvider for BlockingRemoteProvider {
-    fn discover_account(
-        &self,
-    ) -> gpui::Task<Result<RemoteWorkspaceAccount, RemoteDirectoryProviderError>> {
-        self.account_calls.fetch_add(1, Ordering::AcqRel);
-        self.account
-            .lock()
-            .unwrap()
-            .take()
-            .unwrap_or_else(|| gpui::Task::ready(Err(RemoteDirectoryProviderError::Other)))
-    }
-
-    fn list_directories(
-        &self,
-        _: RemoteDirectory,
-    ) -> gpui::Task<Result<DirectoryListing, RemoteDirectoryProviderError>> {
-        gpui::Task::ready(Err(RemoteDirectoryProviderError::Other))
-    }
-
-    fn probe_exact_path(
-        &self,
-        _: RemoteDirectory,
-    ) -> gpui::Task<Result<ExactPathState, RemoteDirectoryProviderError>> {
-        gpui::Task::ready(Err(RemoteDirectoryProviderError::Other))
-    }
-
-    fn create_directory_recursively(
-        &self,
-        _: RemoteDirectory,
-    ) -> gpui::Task<Result<(), RemoteDirectoryProviderError>> {
-        gpui::Task::ready(Err(RemoteDirectoryProviderError::Other))
-    }
-
-    fn validate_physical_identity(
-        &self,
-        _: RemoteDirectory,
-    ) -> gpui::Task<Result<crate::domain::RemoteDirectoryIdentity, RemoteDirectoryProviderError>>
-    {
-        self.identity_calls.fetch_add(1, Ordering::AcqRel);
-        self.identity
-            .lock()
-            .unwrap()
-            .take()
-            .unwrap_or_else(|| gpui::Task::ready(Err(RemoteDirectoryProviderError::Other)))
-    }
-}
-
-fn test_remote_account() -> RemoteWorkspaceAccount {
-    RemoteWorkspaceAccount::from_validated_login_shell(
-        "tester".to_owned(),
-        crate::domain::RemoteDirectoryIdentity::new("/home/tester".to_owned()).unwrap(),
-        crate::ssh::command::ValidatedRemoteLoginShell::new("/bin/zsh".to_owned()).unwrap(),
-    )
-    .unwrap()
-}
-
-struct TestTerminalSessionChannelProvider {
-    connection: crate::ssh::testing::SshConnectionFixture,
-    preparations: Arc<AtomicUsize>,
-    revalidations: Arc<AtomicUsize>,
-    revalidation_tasks: Mutex<
-        VecDeque<gpui::Task<Result<(), crate::terminal::TerminalSessionChannelRevalidationError>>>,
-    >,
-    available: Arc<AtomicBool>,
-}
-
-impl crate::terminal::TerminalSessionChannelProvider for TestTerminalSessionChannelProvider {
-    fn is_ready(&self) -> bool {
-        self.available.load(Ordering::Acquire)
-    }
-
-    fn revalidate(
-        &self,
-        _: RemoteDirectory,
-        _: Option<crate::domain::RemoteDirectoryIdentity>,
-    ) -> gpui::Task<Result<(), crate::terminal::TerminalSessionChannelRevalidationError>> {
-        self.revalidations.fetch_add(1, Ordering::AcqRel);
-        self.revalidation_tasks
-            .lock()
-            .unwrap()
-            .pop_front()
-            .unwrap_or_else(|| gpui::Task::ready(Ok(())))
-    }
-
-    fn prepare(
-        &self,
-        _: &RemoteDirectory,
-    ) -> Result<
-        crate::ssh::command::PreparedSshTerminalSessionChannelCommand,
-        crate::terminal::TerminalSessionChannelUnavailable,
-    > {
-        self.preparations.fetch_add(1, Ordering::AcqRel);
-        if !self.available.load(Ordering::Acquire) {
-            return Err(crate::terminal::TerminalSessionChannelUnavailable);
-        }
-        Ok(self.connection.prepare_terminal_session_channel(
-            ValidatedRemoteShellCommand::new("exec /bin/zsh -l".to_owned()).unwrap(),
-        ))
-    }
-}
-
-struct TestControlConnectionOwner {
-    closes: Arc<AtomicUsize>,
-    channels: Arc<dyn crate::terminal::TerminalSessionChannelProvider>,
-    lifecycle: Option<crate::ssh::live_connection::ControlConnectionObserver>,
-    _lifecycle_senders:
-        Vec<async_channel::Sender<crate::ssh::live_connection::ControlConnectionTerminalState>>,
-    alias: Option<crate::ssh::alias_usage::ActiveSshAliasLease>,
-    alias_pin_error: bool,
-}
-
-impl ControlConnectionOwner for TestControlConnectionOwner {
-    fn acquire_workspace_alias_pin(
-        &self,
-    ) -> Result<Option<RemoteWorkspaceAliasPin>, RemoteWorkspaceAliasPinError> {
-        if self.alias_pin_error {
-            return Err(RemoteWorkspaceAliasPinError);
-        }
-        self.alias
-            .as_ref()
-            .map(|alias| {
-                alias
-                    .try_duplicate()
-                    .map(RemoteWorkspaceAliasPin::new)
-                    .map_err(|_| RemoteWorkspaceAliasPinError)
-            })
-            .transpose()
-    }
-
-    fn bind_terminal_session_channels(
-        &self,
-        _: &crate::ssh::command::ValidatedRemoteLoginShell,
-    ) -> Result<
-        Arc<dyn crate::terminal::TerminalSessionChannelProvider>,
-        RemoteWorkspaceFlowBackendError,
-    > {
-        Ok(Arc::clone(&self.channels))
-    }
-
-    fn take_lifecycle_observer(
-        &mut self,
-    ) -> Option<crate::ssh::live_connection::ControlConnectionObserver> {
-        self.lifecycle.take()
-    }
-
-    fn close(&mut self) {
-        self.closes.fetch_add(1, Ordering::AcqRel);
-        self.alias.take();
-    }
-}
-
-fn remote_completion(
-    destination: &str,
-    directory: &str,
-    physical: &str,
-    available: bool,
-) -> (
-    RemoteWorkspaceFlowCompletion,
-    Arc<AtomicUsize>,
-    Arc<AtomicUsize>,
-    Arc<AtomicBool>,
-) {
-    let (completion, closes, preparations, _, availability, _) =
-        remote_completion_with_revalidation(
-            destination,
-            directory,
-            physical,
-            available,
-            gpui::Task::ready(Ok(())),
-        );
-    (completion, closes, preparations, availability)
-}
-
-fn remote_completion_with_revalidation(
-    destination: &str,
-    directory: &str,
-    physical: &str,
-    available: bool,
-    revalidation: gpui::Task<Result<(), crate::terminal::TerminalSessionChannelRevalidationError>>,
-) -> RemoteCompletionFixture {
-    remote_completion_with_provider(
-        destination,
-        directory,
-        physical,
-        available,
-        revalidation,
-        Arc::new(TestRemoteProvider::failing()),
-    )
-}
-
-fn remote_completion_with_provider(
-    destination: &str,
-    directory: &str,
-    physical: &str,
-    available: bool,
-    revalidation: gpui::Task<Result<(), crate::terminal::TerminalSessionChannelRevalidationError>>,
-    provider: Arc<dyn RemoteDirectoryProvider>,
-) -> RemoteCompletionFixture {
-    let destination = crate::domain::SshDestination::new(destination.to_owned()).unwrap();
-    let directory = RemoteDirectory::new(directory.to_owned()).unwrap();
-    let physical = crate::domain::RemoteDirectoryIdentity::new(physical.to_owned()).unwrap();
-    let preparations = Arc::new(AtomicUsize::new(0));
-    let revalidations = Arc::new(AtomicUsize::new(0));
-    let availability = Arc::new(AtomicBool::new(available));
-    let channels: Arc<dyn crate::terminal::TerminalSessionChannelProvider> =
-        Arc::new(TestTerminalSessionChannelProvider {
-            connection: crate::ssh::testing::SshConnectionFixture::new(destination.clone()),
-            preparations: Arc::clone(&preparations),
-            revalidations: Arc::clone(&revalidations),
-            revalidation_tasks: Mutex::new(VecDeque::from([revalidation])),
-            available: Arc::clone(&availability),
-        });
-    let closes = Arc::new(AtomicUsize::new(0));
-    let (runtime_lifecycle_sender, runtime_lifecycle) =
-        crate::ssh::live_connection::ControlConnectionObserver::controlled();
-    let (control_connection_lifecycle_sender, control_connection_lifecycle) =
-        crate::ssh::live_connection::ControlConnectionObserver::controlled();
-    let control_connection = ConnectedControlConnection::new(
-        Box::new(TestControlConnectionOwner {
-            closes: Arc::clone(&closes),
-            channels: Arc::clone(&channels),
-            lifecycle: Some(control_connection_lifecycle),
-            _lifecycle_senders: vec![
-                runtime_lifecycle_sender.clone(),
-                control_connection_lifecycle_sender,
-            ],
-            alias: None,
-            alias_pin_error: false,
-        }),
-        provider,
-    );
-    let account = test_remote_account();
-    (
-        crate::ui::remote_workspace_flow::completion(
-            control_connection,
-            destination,
-            directory,
-            physical,
-            account,
-            channels,
-            runtime_lifecycle,
-        ),
-        closes,
-        preparations,
-        revalidations,
-        availability,
-        runtime_lifecycle_sender,
-    )
-}
-
-fn remote_completion_with_active_alias() -> (
-    RemoteWorkspaceFlowCompletion,
-    crate::ssh::alias_usage::ActiveSshAliasRegistry,
-    SshHostAlias,
-    Arc<AtomicUsize>,
-    async_channel::Sender<crate::ssh::live_connection::ControlConnectionTerminalState>,
-) {
-    remote_completion_with_active_alias_pin_failure(false)
-}
-
-fn remote_completion_with_active_alias_pin_failure(
-    alias_pin_error: bool,
-) -> (
-    RemoteWorkspaceFlowCompletion,
-    crate::ssh::alias_usage::ActiveSshAliasRegistry,
-    SshHostAlias,
-    Arc<AtomicUsize>,
-    async_channel::Sender<crate::ssh::live_connection::ControlConnectionTerminalState>,
-) {
-    let registry = crate::ssh::alias_usage::ActiveSshAliasRegistry::default();
-    let alias = SshHostAlias::new("work".to_owned()).unwrap();
-    let lease = registry.acquire(alias.clone()).unwrap();
-    let destination = crate::domain::SshDestination::new("work".to_owned()).unwrap();
-    let directory = RemoteDirectory::new("~/src".to_owned()).unwrap();
-    let physical =
-        crate::domain::RemoteDirectoryIdentity::new("/home/tester/src".to_owned()).unwrap();
-    let preparations = Arc::new(AtomicUsize::new(0));
-    let revalidations = Arc::new(AtomicUsize::new(0));
-    let channels: Arc<dyn crate::terminal::TerminalSessionChannelProvider> =
-        Arc::new(TestTerminalSessionChannelProvider {
-            connection: crate::ssh::testing::SshConnectionFixture::new(destination.clone()),
-            preparations,
-            revalidations,
-            revalidation_tasks: Mutex::new(VecDeque::from([gpui::Task::ready(Ok(()))])),
-            available: Arc::new(AtomicBool::new(true)),
-        });
-    let closes = Arc::new(AtomicUsize::new(0));
-    let (runtime_lifecycle_sender, runtime_lifecycle) =
-        crate::ssh::live_connection::ControlConnectionObserver::controlled();
-    let (control_connection_lifecycle_sender, control_connection_lifecycle) =
-        crate::ssh::live_connection::ControlConnectionObserver::controlled();
-    let control_connection = ConnectedControlConnection::new(
-        Box::new(TestControlConnectionOwner {
-            closes: Arc::clone(&closes),
-            channels: Arc::clone(&channels),
-            lifecycle: Some(control_connection_lifecycle),
-            _lifecycle_senders: vec![
-                runtime_lifecycle_sender.clone(),
-                control_connection_lifecycle_sender,
-            ],
-            alias: Some(lease),
-            alias_pin_error,
-        }),
-        Arc::new(TestRemoteProvider::failing()),
-    );
-    let account = test_remote_account();
-    (
-        crate::ui::remote_workspace_flow::completion(
-            control_connection,
-            destination,
-            directory,
-            physical,
-            account,
-            channels,
-            runtime_lifecycle,
-        ),
-        registry,
-        alias,
-        closes,
-        runtime_lifecycle_sender,
-    )
-}
+use crate::ui::remote_workspace_flow::RemoteWorkspaceFlowStage;
 
 #[gpui::test]
 fn native_service_factory_reaches_initial_and_new_hierarchy(cx: &mut TestAppContext) {
@@ -1124,7 +338,7 @@ fn native_service_factory_reaches_initial_and_new_hierarchy(cx: &mut TestAppCont
             std::env::temp_dir(),
             WorkspaceManagerAdapters {
                 native_services,
-                ..workspace_adapters(test_remote_backend_factory())
+                ..workspace_adapters()
             },
             SidebarState::Expanded,
             window,
@@ -1170,7 +384,7 @@ fn accessibility_factory_reaches_initial_and_new_workspaces_tabs_and_split_panes
             std::env::temp_dir(),
             WorkspaceManagerAdapters {
                 accessibility: factory.clone(),
-                ..workspace_adapters(test_remote_backend_factory())
+                ..workspace_adapters()
             },
             SidebarState::Expanded,
             window,
@@ -1204,9 +418,7 @@ fn accessibility_factory_reaches_initial_and_new_workspaces_tabs_and_split_panes
     );
 }
 
-fn workspace_adapters(
-    remote_workspace: Arc<dyn RemoteWorkspaceFlowBackendFactory>,
-) -> WorkspaceManagerAdapters {
+fn workspace_adapters() -> WorkspaceManagerAdapters {
     WorkspaceManagerAdapters {
         local_filesystem: LocalFilesystemAuthority::testing(),
         key_input: Rc::new(GpuiTerminalKeyInputAdapterFactory::default()),
@@ -1217,7 +429,6 @@ fn workspace_adapters(
         lifecycle: PaneLifecycleDependencies::testing(),
         directory_selection: Rc::new(GpuiDirectorySelection),
         window_drag: Rc::new(RecordingOperatingSystemWindowDragPlatform::default()),
-        remote_workspace,
         local_server: crate::ui::launch_testing::unanswered(),
     }
 }
@@ -1237,10 +448,20 @@ fn new_desktop_workspace(cx: &mut VisualTestContext) {
     cx.run_until_parked();
 }
 
+/// The Terminal Sessions desktop-owned test Workspaces present.
+struct DesktopSessions(Rc<dyn TerminalSessionFactory>);
+
+impl gpui::Global for DesktopSessions {}
+
+/// Makes `session_factory` run the Panes of every desktop-owned test Workspace presented later.
+pub(crate) fn use_desktop_sessions(session_factory: Rc<dyn TerminalSessionFactory>, cx: &mut App) {
+    cx.set_global(DesktopSessions(session_factory));
+}
+
 /// A Workspace Window presenting one desktop-owned Workspace at `home_directory`.
 ///
-/// Production desktop-owned Workspaces are Remote Workspaces; these tests exercise the window's
-/// own behavior around any desktop-owned Workspace without opening an SSH connection.
+/// Production Workspaces all belong to a SpaceTerm Server; these tests exercise the window's own
+/// behavior around a Workspace whose Panes run in `session_factory`, without a server.
 fn new_desktop_manager(
     session_factory: Rc<dyn TerminalSessionFactory>,
     home_directory: PathBuf,
@@ -1249,14 +470,9 @@ fn new_desktop_manager(
     window: &mut Window,
     cx: &mut Context<WorkspaceManager>,
 ) -> WorkspaceManager {
-    let mut manager = WorkspaceManager::new_with_adapters(
-        session_factory,
-        home_directory,
-        adapters,
-        sidebar,
-        window,
-        cx,
-    );
+    use_desktop_sessions(session_factory, cx);
+    let mut manager =
+        WorkspaceManager::new_with_adapters(home_directory, adapters, sidebar, window, cx);
     manager.present_desktop_workspace(window, cx);
     manager
 }
@@ -1270,15 +486,18 @@ impl WorkspaceManager {
     ) -> WorkspaceId {
         let directory = ValidatedLocalDirectory::new(
             self.local_home_directory_path.clone(),
-            self.local_home_identity.clone(),
+            crate::domain::LocalDirectoryIdentity::for_test(0),
         );
-        let session_factory = WorkspaceTerminalSessionFactory::new_local(
-            Rc::clone(&self.session_factory),
-            directory.clone(),
+        let sessions = cx.try_global::<DesktopSessions>().map_or_else(
+            || {
+                Rc::new(TestTerminalSessionFactory::new(
+                    TestTerminalSessionRecords::default(),
+                )) as Rc<dyn TerminalSessionFactory>
+            },
+            |sessions| Rc::clone(&sessions.0),
         );
-        let prepared_launch = session_factory
-            .prepare_child_launch()
-            .expect("a local launch reserves no channel");
+        let session_factory =
+            WorkspaceTerminalSessionFactory::new_local(sessions, directory.clone());
         let sidebar_visible = self.sidebar.read(cx).layout().visible;
         let sidebar_width = self.sidebar.read(cx).layout().width;
         let window_drag = Rc::clone(&self.operating_system_window_drag_platform);
@@ -1287,9 +506,8 @@ impl WorkspaceManager {
         let workspace_id = self
             .workspaces
             .create_local_workspace(directory, |workspace_id, _| {
-                Self::create_tab_manager_with_prepared_launch(
+                Self::create_tab_manager(
                     session_factory,
-                    prepared_launch,
                     TabManagerCreation {
                         workspace_id,
                         sidebar_visible,
@@ -1322,6 +540,19 @@ fn workspace_manager(
     TestTerminalSessionRecords,
     &mut VisualTestContext,
 ) {
+    // A usable OpenSSH, whose hosts all wait for the person, so remote creation is offered.
+    cx.update(install_waiting_ssh_servers);
+    workspace_manager_without_ssh(cx)
+}
+
+/// A Workspace Window on a computer without a usable OpenSSH, so the desktop has no SSH registry.
+fn workspace_manager_without_ssh(
+    cx: &mut TestAppContext,
+) -> (
+    Entity<WorkspaceManager>,
+    TestTerminalSessionRecords,
+    &mut VisualTestContext,
+) {
     cx.update(crate::ui::init)
         .expect("UI initialization should succeed");
     let records = TestTerminalSessionRecords::default();
@@ -1331,7 +562,7 @@ fn workspace_manager(
         new_desktop_manager(
             session_factory,
             std::env::temp_dir(),
-            workspace_adapters(test_remote_backend_factory()),
+            workspace_adapters(),
             SidebarState::Expanded,
             window,
             cx,
@@ -1380,7 +611,7 @@ fn workspace_manager_with_application_actions(
         new_desktop_manager(
             session_factory,
             std::env::temp_dir(),
-            workspace_adapters(test_remote_backend_factory()),
+            workspace_adapters(),
             SidebarState::Expanded,
             window,
             cx,
@@ -1393,119 +624,6 @@ fn workspace_manager_with_application_actions(
     cx.run_until_parked();
     (manager, records, application_quit, cx)
 }
-
-fn workspace_manager_with_remote_backend(
-    backend: Arc<TestRemoteWorkspaceFlowBackend>,
-    cx: &mut TestAppContext,
-) -> (
-    Entity<WorkspaceManager>,
-    TestTerminalSessionRecords,
-    &mut VisualTestContext,
-) {
-    cx.update(crate::ui::init)
-        .expect("UI initialization should succeed");
-    let records = TestTerminalSessionRecords::default();
-    let session_factory: Rc<dyn TerminalSessionFactory> =
-        Rc::new(TestTerminalSessionFactory::new(records.clone()).with_fallback_title("zsh"));
-    let factory: Arc<dyn RemoteWorkspaceFlowBackendFactory> =
-        Arc::new(TestRemoteWorkspaceFlowBackendFactory { backend });
-    let (manager, cx) = cx.add_window_view(move |window, cx| {
-        new_desktop_manager(
-            session_factory,
-            std::env::temp_dir(),
-            workspace_adapters(factory),
-            SidebarState::Expanded,
-            window,
-            cx,
-        )
-    });
-    cx.update(|window, cx| {
-        manager.update(cx, |manager, cx| manager.focus(window, cx));
-    });
-    cx.run_until_parked();
-    (manager, records, cx)
-}
-
-fn reconnect_control_connection(
-    destination: &str,
-    physical: &str,
-) -> (
-    ConnectedControlConnection,
-    Arc<AtomicUsize>,
-    Arc<AtomicUsize>,
-    Arc<AtomicUsize>,
-    async_channel::Sender<crate::ssh::live_connection::ControlConnectionTerminalState>,
-) {
-    let physical = crate::domain::RemoteDirectoryIdentity::new(physical.to_owned()).unwrap();
-    reconnect_control_connection_with_provider(
-        destination,
-        Arc::new(TestRemoteProvider::connected(physical)),
-    )
-}
-
-fn reconnect_control_connection_with_provider(
-    destination: &str,
-    provider: Arc<dyn RemoteDirectoryProvider>,
-) -> (
-    ConnectedControlConnection,
-    Arc<AtomicUsize>,
-    Arc<AtomicUsize>,
-    Arc<AtomicUsize>,
-    async_channel::Sender<crate::ssh::live_connection::ControlConnectionTerminalState>,
-) {
-    reconnect_control_connection_with_provider_and_revalidation(
-        destination,
-        provider,
-        VecDeque::new(),
-    )
-}
-
-fn reconnect_control_connection_with_provider_and_revalidation(
-    destination: &str,
-    provider: Arc<dyn RemoteDirectoryProvider>,
-    revalidation_tasks: VecDeque<
-        gpui::Task<Result<(), crate::terminal::TerminalSessionChannelRevalidationError>>,
-    >,
-) -> (
-    ConnectedControlConnection,
-    Arc<AtomicUsize>,
-    Arc<AtomicUsize>,
-    Arc<AtomicUsize>,
-    async_channel::Sender<crate::ssh::live_connection::ControlConnectionTerminalState>,
-) {
-    let destination = crate::domain::SshDestination::new(destination.to_owned()).unwrap();
-    let preparations = Arc::new(AtomicUsize::new(0));
-    let revalidations = Arc::new(AtomicUsize::new(0));
-    let channels: Arc<dyn crate::terminal::TerminalSessionChannelProvider> =
-        Arc::new(TestTerminalSessionChannelProvider {
-            connection: crate::ssh::testing::SshConnectionFixture::new(destination.clone()),
-            preparations: Arc::clone(&preparations),
-            revalidations: Arc::clone(&revalidations),
-            revalidation_tasks: Mutex::new(revalidation_tasks),
-            available: Arc::new(AtomicBool::new(true)),
-        });
-    let closes = Arc::new(AtomicUsize::new(0));
-    let (lifecycle_sender, lifecycle) =
-        crate::ssh::live_connection::ControlConnectionObserver::controlled();
-    (
-        ConnectedControlConnection::new(
-            Box::new(TestControlConnectionOwner {
-                closes: Arc::clone(&closes),
-                channels,
-                lifecycle: Some(lifecycle),
-                _lifecycle_senders: vec![lifecycle_sender.clone()],
-                alias: None,
-                alias_pin_error: false,
-            }),
-            provider,
-        ),
-        closes,
-        preparations,
-        revalidations,
-        lifecycle_sender,
-    )
-}
-
 fn workspace_manager_with_operating_system_window_drag_platform(
     cx: &mut TestAppContext,
 ) -> (
@@ -1526,7 +644,7 @@ fn workspace_manager_with_operating_system_window_drag_platform(
             std::env::temp_dir(),
             WorkspaceManagerAdapters {
                 window_drag: injected_platform,
-                ..workspace_adapters(test_remote_backend_factory())
+                ..workspace_adapters()
             },
             SidebarState::Expanded,
             window,
@@ -1563,7 +681,7 @@ fn workspace_manager_with_directory_selection(
             std::env::temp_dir(),
             WorkspaceManagerAdapters {
                 directory_selection,
-                ..workspace_adapters(test_remote_backend_factory())
+                ..workspace_adapters()
             },
             SidebarState::Expanded,
             window,
@@ -1641,93 +759,6 @@ fn open_workspace_switcher_for_creation(cx: &mut VisualTestContext) {
     cx.simulate_keystrokes("f r e s h space w o r k s p a c e");
     cx.run_until_parked();
 }
-
-fn open_remote_workspace_flow(
-    manager: &Entity<WorkspaceManager>,
-    cx: &mut VisualTestContext,
-) -> Entity<RemoteWorkspaceFlow> {
-    open_workspace_switcher_for_creation(cx);
-    let count = manager.read_with(cx, |manager, _| manager.workspaces.len());
-    cx.simulate_keystrokes("space");
-    for digit in count.to_string().chars() {
-        cx.simulate_keystrokes(&digit.to_string());
-    }
-    cx.run_until_parked();
-    click("workspace-switcher-create-remote", cx);
-    manager.read_with(cx, |manager, _| {
-        manager
-            .remote_workspace_flow
-            .as_ref()
-            .expect("Remote Workspace must create its flow")
-            .clone()
-    })
-}
-
-fn emit_remote_workspace_completion(
-    flow: &Entity<RemoteWorkspaceFlow>,
-    completion: RemoteWorkspaceFlowCompletion,
-    cx: &mut VisualTestContext,
-) {
-    cx.update(|_, cx| {
-        flow.update(cx, |flow, cx| {
-            crate::ui::remote_workspace_flow::emit_completion(flow, completion, cx);
-        });
-    });
-    cx.run_until_parked();
-}
-
-fn create_disconnected_remote_workspace(
-    manager: &Entity<WorkspaceManager>,
-    cx: &mut VisualTestContext,
-) -> WorkspaceId {
-    let flow = open_remote_workspace_flow(manager, cx);
-    let (completion, _, _, _, _, lifecycle) = remote_completion_with_revalidation(
-        "work",
-        "~/src",
-        "/home/tester/src",
-        true,
-        gpui::Task::ready(Ok(())),
-    );
-    emit_remote_workspace_completion(&flow, completion, cx);
-    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_id());
-    lifecycle
-        .try_send(ControlConnectionTerminalState::Closed)
-        .unwrap();
-    cx.run_until_parked();
-    workspace_id
-}
-
-fn install_remote_completion_directly(
-    manager: &Entity<WorkspaceManager>,
-    completion: RemoteWorkspaceFlowCompletion,
-    cx: &mut VisualTestContext,
-) {
-    cx.update(|window, cx| {
-        manager.update(cx, |manager, cx| {
-            let terminal_factory = WorkspaceTerminalSessionFactory::new_remote(
-                Rc::clone(&manager.session_factory),
-                ValidatedLocalDirectory::new(
-                    manager.local_home_directory_path.clone(),
-                    manager.local_home_identity.clone(),
-                ),
-                RemoteTerminalMetadataContext::new(
-                    completion.destination().clone(),
-                    completion.initial_directory().clone(),
-                )
-                .with_machine(remote_machine(completion.account())),
-                completion.physical_directory().clone(),
-                completion.account().login_shell().name().to_owned(),
-                completion.terminal_session_channels(),
-            );
-            let prepared = terminal_factory.prepare_child_launch().unwrap();
-            manager
-                .try_create_remote_workspace(completion, terminal_factory, prepared, window, cx)
-                .unwrap_or_else(|_| panic!("direct Remote Workspace installation failed"));
-        });
-    });
-    cx.run_until_parked();
-}
-
 #[gpui::test]
 fn application_rtl_locale_installation_should_mirror_production_modal_footer(
     cx: &mut TestAppContext,
@@ -1741,7 +772,7 @@ fn application_rtl_locale_installation_should_mirror_production_modal_footer(
         new_desktop_manager(
             session_factory,
             std::env::temp_dir(),
-            workspace_adapters(test_remote_backend_factory()),
+            workspace_adapters(),
             SidebarState::Expanded,
             window,
             cx,
@@ -1985,7 +1016,7 @@ fn simultaneous_modals_should_block_and_restore_terminal_input_focus_per_operati
         new_desktop_manager(
             first_factory,
             PathBuf::from("/Users/first"),
-            workspace_adapters(test_remote_backend_factory()),
+            workspace_adapters(),
             SidebarState::Expanded,
             window,
             cx,
@@ -1995,7 +1026,7 @@ fn simultaneous_modals_should_block_and_restore_terminal_input_focus_per_operati
         new_desktop_manager(
             second_factory,
             PathBuf::from("/Users/second"),
-            workspace_adapters(test_remote_backend_factory()),
+            workspace_adapters(),
             SidebarState::Expanded,
             window,
             cx,
@@ -2333,16 +1364,12 @@ fn top_combo_box_unavailable_remote_should_reject_acceptance_and_keep_terminal_i
     let records = TestTerminalSessionRecords::default();
     let session_factory: Rc<dyn TerminalSessionFactory> =
         Rc::new(TestTerminalSessionFactory::new(records.clone()).with_fallback_title("zsh"));
-    let create_calls = Arc::new(AtomicUsize::new(0));
-    let factory: Arc<dyn RemoteWorkspaceFlowBackendFactory> =
-        Arc::new(UnavailableTestRemoteWorkspaceFlowBackendFactory {
-            create_calls: Arc::clone(&create_calls),
-        });
+    // No SSH registry is installed, as on a computer without a usable OpenSSH.
     let (manager, cx) = cx.add_window_view(move |window, cx| {
         new_desktop_manager(
             session_factory,
             std::env::temp_dir(),
-            workspace_adapters(factory),
+            workspace_adapters(),
             SidebarState::Expanded,
             window,
             cx,
@@ -2362,7 +1389,6 @@ fn top_combo_box_unavailable_remote_should_reject_acceptance_and_keep_terminal_i
         cx.update(|window, cx| {
             let manager = manager.read(cx);
             (
-                create_calls.load(Ordering::Acquire),
                 window_combo_box_is_open(window, cx),
                 manager.remote_workspace_flow.is_none(),
                 manager.terminal_focus_blocker(window, cx),
@@ -2377,7 +1403,6 @@ fn top_combo_box_unavailable_remote_should_reject_acceptance_and_keep_terminal_i
             )
         }),
         (
-            0,
             true,
             true,
             Some(TerminalFocusBlocker::CommandPalette),
@@ -2413,7 +1438,6 @@ fn top_combo_box_unavailable_remote_should_reject_acceptance_and_keep_terminal_i
     cx.simulate_keystrokes("cmd-shift-n");
     cx.simulate_keystrokes("cmd-shift-o");
     cx.run_until_parked();
-    assert_eq!(create_calls.load(Ordering::Acquire), 0);
     assert!(manager.read_with(cx, |manager, _| manager.remote_workspace_flow.is_none()));
     assert_eq!(records.starts().len(), 1);
 }
@@ -2525,1758 +1549,6 @@ fn replacing_the_ssh_host_picker_should_release_terminal_input_and_allow_reopeni
 }
 
 #[gpui::test]
-fn deactivated_remote_creation_should_restore_actions_after_releasing_its_flow(
-    cx: &mut TestAppContext,
-) {
-    let pending_account = cx.executor().spawn(async { std::future::pending().await });
-    let provider = Arc::new(BlockingRemoteProvider {
-        account: Mutex::new(Some(pending_account)),
-        identity: Mutex::new(None),
-        account_calls: Arc::new(AtomicUsize::new(0)),
-        identity_calls: Arc::new(AtomicUsize::new(0)),
-    });
-    let (control_connection, closes, _, _, _) =
-        reconnect_control_connection_with_provider("work", provider);
-    let backend = TestRemoteWorkspaceFlowBackend::with_connections([gpui::Task::ready(Ok(
-        control_connection,
-    ))]);
-    let (manager, _, cx) = workspace_manager_with_remote_backend(backend, cx);
-    cx.update(|window, _| window.activate_window());
-    cx.run_until_parked();
-    let flow = open_remote_workspace_flow(&manager, cx);
-    cx.update(|window, cx| {
-        flow.update(cx, |flow, cx| {
-            crate::ui::remote_workspace_flow::select_host_destination(
-                flow,
-                crate::domain::SshDestination::new("work".to_owned()).unwrap(),
-                window,
-                cx,
-            );
-        });
-    });
-    cx.run_until_parked();
-    assert_eq!(
-        flow.read_with(cx, |flow, _| flow.stage()),
-        RemoteWorkspaceFlowStage::PreparingHome
-    );
-
-    cx.deactivate_window();
-    cx.run_until_parked();
-
-    assert_eq!(closes.load(Ordering::Acquire), 1);
-    assert_eq!(
-        flow.read_with(cx, |flow, _| flow.stage()),
-        RemoteWorkspaceFlowStage::Cancelled
-    );
-    assert!(manager.read_with(cx, |manager, _| manager.remote_workspace_flow.is_none()));
-    assert_eq!(
-        cx.update(|window, cx| manager.read(cx).terminal_focus_blocker(window, cx)),
-        None
-    );
-    assert!(manager.read_with(cx, |manager, _| {
-        manager.remote_workspace_focus_restore_pending
-    }));
-
-    let cancelled_flow_id = flow.entity_id();
-    drop(flow);
-    cx.update(|window, _| window.activate_window());
-    cx.run_until_parked();
-
-    assert!(manager.read_with(cx, |manager, _| {
-        !manager.remote_workspace_focus_restore_pending
-    }));
-    assert!(cx.update(|window, cx| {
-        manager
-            .read(cx)
-            .workspaces
-            .active()
-            .payload()
-            .read(cx)
-            .focused_terminal_is_focused(window, cx)
-    }));
-    assert!(cx.update(|window, cx| { window.is_action_available(&NewWorkspace, cx) }));
-
-    open_workspace_switcher_for_creation(cx);
-    assert!(cx.update(|window, cx| { window_combo_box_is_open(window, cx) }));
-    cx.update(|window, cx| {
-        manager.update(cx, |manager, cx| {
-            manager.remote_workspace_focus_restore_pending = true;
-            manager.restore_remote_workspace_focus_after_activation(window, cx);
-        });
-    });
-    assert!(cx.update(|window, cx| {
-        let manager = manager.read(cx);
-        !manager.remote_workspace_focus_restore_pending
-            && window_combo_box_is_open(window, cx)
-            && !manager
-                .workspaces
-                .active()
-                .payload()
-                .read(cx)
-                .focused_terminal_is_focused(window, cx)
-    }));
-    click("workspace-switcher-create-remote", cx);
-    let reopened = manager.read_with(cx, |manager, _| {
-        manager
-            .remote_workspace_flow
-            .as_ref()
-            .expect("Remote Workspace should create a fresh flow")
-            .clone()
-    });
-    assert_ne!(reopened.entity_id(), cancelled_flow_id);
-}
-
-#[gpui::test]
-fn backend_construction_failure_should_disable_remote_instead_of_leaving_an_inert_source(
-    cx: &mut TestAppContext,
-) {
-    cx.update(crate::ui::init)
-        .expect("UI initialization should succeed");
-    let records = TestTerminalSessionRecords::default();
-    let session_factory: Rc<dyn TerminalSessionFactory> =
-        Rc::new(TestTerminalSessionFactory::new(records).with_fallback_title("zsh"));
-    let create_calls = Arc::new(AtomicUsize::new(0));
-    let factory: Arc<dyn RemoteWorkspaceFlowBackendFactory> =
-        Arc::new(FailingTestRemoteWorkspaceFlowBackendFactory {
-            create_calls: Arc::clone(&create_calls),
-        });
-    let (manager, cx) = cx.add_window_view(move |window, cx| {
-        new_desktop_manager(
-            session_factory,
-            std::env::temp_dir(),
-            workspace_adapters(factory),
-            SidebarState::Expanded,
-            window,
-            cx,
-        )
-    });
-    cx.update(|window, cx| manager.update(cx, |manager, cx| manager.focus(window, cx)));
-    cx.run_until_parked();
-
-    open_workspace_switcher_for_creation(cx);
-    click("workspace-switcher-create-remote", cx);
-    cx.run_until_parked();
-
-    assert_eq!(create_calls.load(Ordering::Acquire), 1);
-    assert!(cx.update(|window, cx| window_combo_box_is_open(window, cx)));
-    assert!(manager.read_with(cx, |manager, _| manager.remote_workspace_flow.is_none()));
-    assert_eq!(
-        cx.update(|window, cx| manager.read(cx).terminal_focus_blocker(window, cx)),
-        Some(TerminalFocusBlocker::CommandPalette)
-    );
-}
-
-#[gpui::test]
-fn remote_completion_should_create_exact_metadata_launch_and_owned_runtime(
-    cx: &mut TestAppContext,
-) {
-    let (manager, records, cx) = workspace_manager(cx);
-    let flow = open_remote_workspace_flow(&manager, cx);
-    let (completion, closes, preparations, revalidations, _, _) =
-        remote_completion_with_revalidation(
-            "deploy@work",
-            "~/src",
-            "/home/tester/src",
-            true,
-            gpui::Task::ready(Ok(())),
-        );
-
-    emit_remote_workspace_completion(&flow, completion, cx);
-
-    let (workspace_id, destination, directory, physical, runtime_count, has_alias_pin) = manager
-        .read_with(cx, |manager, _| {
-            let workspace = manager.workspaces.active();
-            (
-                workspace.id(),
-                workspace
-                    .remote_workspace_key()
-                    .expect("active Workspace must be remote")
-                    .destination()
-                    .as_str()
-                    .to_owned(),
-                workspace
-                    .remote_starting_directory()
-                    .expect("Remote Workspace preserves typed spelling")
-                    .as_str()
-                    .to_owned(),
-                workspace
-                    .remote_workspace_key()
-                    .unwrap()
-                    .physical_directory()
-                    .as_str()
-                    .to_owned(),
-                manager.remote_workspace_runtimes.len(),
-                manager
-                    .remote_workspace_runtimes
-                    .get(&workspace.id())
-                    .is_some_and(|runtime| runtime.alias_pin.is_some()),
-            )
-        });
-    let starts = records.starts();
-    let remote = starts
-        .last()
-        .and_then(|start| start.remote_launch_plan())
-        .expect("initial Remote Pane must use a remote launch plan");
-    assert_eq!(
-        (destination.as_str(), directory.as_str(), physical.as_str()),
-        ("deploy@work", "~/src", "/home/tester/src")
-    );
-    assert_eq!(runtime_count, 1);
-    assert!(
-        !has_alias_pin,
-        "a raw SSH destination must not own an alias pin"
-    );
-    assert_eq!(revalidations.load(Ordering::Acquire), 1);
-    assert_eq!(preparations.load(Ordering::Acquire), 1);
-    assert_eq!(closes.load(Ordering::Acquire), 0);
-    assert_eq!(remote.destination().as_str(), "deploy@work");
-    assert_eq!(remote.remote_directory().as_str(), "~/src");
-    assert_eq!(remote.local_home().path(), std::env::temp_dir());
-
-    cx.update(|window, cx| {
-        manager.update(cx, |manager, cx| {
-            manager.close_workspace(workspace_id, window, cx)
-        });
-    });
-    cx.run_until_parked();
-    assert_eq!(closes.load(Ordering::Acquire), 1);
-    assert_eq!(
-        manager.read_with(cx, |manager, _| manager.remote_workspace_runtimes.len()),
-        0
-    );
-}
-
-#[gpui::test]
-fn completed_flow_event_should_transfer_runtime_acknowledge_and_focus_remote_workspace(
-    cx: &mut TestAppContext,
-) {
-    let (manager, records, cx) = workspace_manager(cx);
-    let flow = open_remote_workspace_flow(&manager, cx);
-    let (completion, closes, preparations, _) =
-        remote_completion("work", "~/src", "/home/tester/src", true);
-
-    emit_remote_workspace_completion(&flow, completion, cx);
-
-    let state = cx.update(|window, cx| {
-        let manager = manager.read(cx);
-        (
-            manager.workspaces.len(),
-            manager.remote_workspace_flow.is_none(),
-            manager.remote_workspace_runtimes.len(),
-            manager.terminal_focus_blocker(window, cx),
-            manager
-                .workspaces
-                .active()
-                .payload()
-                .read(cx)
-                .focused_terminal_is_focused(window, cx),
-        )
-    });
-    assert_eq!(state, (2, true, 1, None, true));
-    assert_eq!(records.starts().len(), 2);
-    assert_eq!(preparations.load(Ordering::Acquire), 1);
-    assert_eq!(closes.load(Ordering::Acquire), 0);
-    assert_eq!(
-        flow.read_with(cx, |flow, _| flow.stage()),
-        RemoteWorkspaceFlowStage::Completed
-    );
-}
-
-#[gpui::test]
-fn closed_remote_control_connection_should_preserve_workspace_and_block_its_pane(
-    cx: &mut TestAppContext,
-) {
-    let (manager, records, cx) = workspace_manager(cx);
-    let flow = open_remote_workspace_flow(&manager, cx);
-    let (completion, closes, _, _, _, lifecycle) = remote_completion_with_revalidation(
-        "work",
-        "~/src",
-        "/home/tester/src",
-        true,
-        gpui::Task::ready(Ok(())),
-    );
-    emit_remote_workspace_completion(&flow, completion, cx);
-    let (workspace_id, tab_manager, view) = manager.read_with(cx, |manager, cx| {
-        let workspace = manager.workspaces.active();
-        let tab_manager = workspace.payload().clone();
-        let view = tab_manager.read(cx).active_tab_view();
-        (workspace.id(), tab_manager, view)
-    });
-    let starts_before_disconnect = records.starts().len();
-
-    lifecycle
-        .try_send(ControlConnectionTerminalState::Closed)
-        .unwrap();
-    cx.run_until_parked();
-    redraw(cx);
-
-    assert_eq!(
-        manager.read_with(cx, |manager, _| manager
-            .workspaces
-            .workspace(workspace_id)
-            .unwrap()
-            .remote_connection_state()),
-        Some(RemoteConnectionState::disconnected(1))
-    );
-    assert_eq!(closes.load(Ordering::Acquire), 1);
-    assert_eq!(records.starts().len(), starts_before_disconnect);
-    assert_eq!(
-        manager.read_with(cx, |manager, _| manager
-            .workspaces
-            .workspace(workspace_id)
-            .unwrap()
-            .payload()
-            .entity_id()),
-        tab_manager.entity_id()
-    );
-    assert_eq!(
-        tab_manager.read_with(cx, |manager, _| manager.active_tab_view().entity_id()),
-        view.entity_id()
-    );
-    assert_eq!(
-        view.read_with(cx, |host, cx| (
-            host.remote_disconnected_generation(),
-            host.focused_terminal_remote_state(cx),
-            host.pane_count(),
-        )),
-        (Some(1), (true, true), 1)
-    );
-    let status_selector: &'static str =
-        Box::leak(format!("workspace-row-remote-status-{}", workspace_id.get()).into_boxed_str());
-    assert!(cx.debug_bounds(status_selector).is_some());
-
-    cx.simulate_keystrokes("cmd-b");
-    redraw(cx);
-    assert!(
-        cx.debug_bounds("workspace-switcher-status-disconnected")
-            .is_some(),
-        "the collapsed identity must keep the Active Remote Workspace's disconnected state visible"
-    );
-    let label = cx
-        .debug_bounds("workspace-chip-label")
-        .expect("collapsed identity name");
-    let dot = cx
-        .debug_bounds("workspace-switcher-status-disconnected")
-        .expect("disconnected status dot");
-    let switcher = cx
-        .debug_bounds("workspace-switcher")
-        .expect("collapsed Workspace switcher");
-    assert!(
-        dot.left() >= label.right() && dot.right() <= switcher.right(),
-        "the status dot must trail the name inside the collapsed switcher"
-    );
-    assert!(
-        (dot.center().y - label.center().y).abs() <= px(1.0),
-        "the status dot must sit on the name's vertical center"
-    );
-    cx.simulate_keystrokes("cmd-b");
-    redraw(cx);
-
-    cx.simulate_keystrokes("cmd-t");
-    cx.run_until_parked();
-    assert_eq!(records.starts().len(), starts_before_disconnect);
-    assert_eq!(view.read_with(cx, |host, _| host.pane_count()), 1);
-}
-
-#[gpui::test]
-fn workspace_menu_should_offer_reconnect_only_after_disconnect_or_failure(cx: &mut TestAppContext) {
-    let backend = Arc::new(TestRemoteWorkspaceFlowBackend::default());
-    let (manager, _, cx) = workspace_manager_with_remote_backend(backend.clone(), cx);
-    let flow = open_remote_workspace_flow(&manager, cx);
-    let (completion, _, _, _, _, lifecycle) = remote_completion_with_revalidation(
-        "work",
-        "~/src",
-        "/home/tester/src",
-        true,
-        gpui::Task::ready(Ok(())),
-    );
-    emit_remote_workspace_completion(&flow, completion, cx);
-    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_id());
-    let row_selector: &'static str =
-        Box::leak(format!("workspace-row-{}-active", workspace_id.get()).into_boxed_str());
-    redraw(cx);
-
-    right_click(row_selector, cx);
-    assert!(
-        cx.debug_bounds("workspace-menu-row-reconnect").is_none(),
-        "Connected Workspaces must not show an unavailable Reconnect action"
-    );
-    assert_eq!(backend.connect_calls.load(Ordering::Acquire), 0);
-    assert_eq!(
-        manager.read_with(cx, |manager, _| manager
-            .workspaces
-            .workspace(workspace_id)
-            .unwrap()
-            .remote_connection_state()),
-        Some(RemoteConnectionState::connected(1))
-    );
-    cx.simulate_keystrokes("escape");
-
-    lifecycle
-        .try_send(ControlConnectionTerminalState::Closed)
-        .unwrap();
-    cx.run_until_parked();
-    redraw(cx);
-    right_click(row_selector, cx);
-    click("workspace-menu-row-reconnect", cx);
-
-    assert_eq!(backend.connect_calls.load(Ordering::Acquire), 1);
-    assert_eq!(
-        manager.read_with(cx, |manager, _| manager
-            .workspaces
-            .workspace(workspace_id)
-            .unwrap()
-            .remote_connection_state()),
-        Some(RemoteConnectionState::failed(2))
-    );
-    click("modal-action-remote-workspace-reconnect-error-ok", cx);
-    redraw(cx);
-    click("toggle-sidebar-button", cx);
-    assert!(
-        cx.debug_bounds("workspace-switcher-status-failed")
-            .is_some(),
-        "the collapsed identity must keep the Active Remote Workspace's failed state visible"
-    );
-    click("toggle-sidebar-button", cx);
-    redraw(cx);
-    right_click(row_selector, cx);
-    click("workspace-menu-row-reconnect", cx);
-    assert_eq!(backend.connect_calls.load(Ordering::Acquire), 2);
-}
-
-#[gpui::test]
-fn reconnect_authentication_should_promote_queued_askpass_and_restore_progress_after_close(
-    cx: &mut TestAppContext,
-) {
-    let (_connection_sender, connection_receiver) = async_channel::bounded(1);
-    let pending = cx.update(|cx| {
-        cx.background_executor()
-            .spawn(async move { connection_receiver.recv().await.unwrap() })
-    });
-    let backend = TestRemoteWorkspaceFlowBackend::with_connections([pending]);
-    let (manager, _, cx) = workspace_manager_with_remote_backend(backend, cx);
-    let workspace_id = create_disconnected_remote_workspace(&manager, cx);
-    let outcomes = Rc::new(RefCell::new(Vec::new()));
-    let askpass = cx.update(|window, cx| {
-        manager.update(cx, |manager, cx| {
-            manager.start_remote_workspace_reconnect(workspace_id, window, cx)
-        });
-        let askpass = cx.new(|_| GpuiAskPassPresenter::default());
-        let captured = Rc::clone(&outcomes);
-        askpass
-            .update(cx, |presenter, cx| {
-                presenter.present(
-                    55,
-                    AskPassRequest::new(
-                        "root@example.test's password:".to_owned(),
-                        AskPassPromptKind::Secret,
-                    )
-                    .unwrap(),
-                    Box::new(move |result| {
-                        captured
-                            .borrow_mut()
-                            .push(matches!(result, AskPassResult::Cancelled));
-                    }),
-                    window,
-                    cx,
-                )
-            })
-            .unwrap();
-        askpass
-    });
-    cx.run_until_parked();
-    let original = manager.read_with(cx, |manager, _| {
-        manager
-            .remote_workspace_reconnect
-            .as_ref()
-            .and_then(|attempt| attempt.progress.as_ref())
-            .map(ProgressDialogHandle::presentation_id)
-            .unwrap()
-    });
-    assert!(cx.debug_bounds("ssh-askpass-secret-input").is_none());
-
-    cx.update(|window, cx| {
-        manager.update(cx, |manager, cx| {
-            assert!(manager.apply_remote_workspace_reconnect_progress(
-                workspace_id,
-                2,
-                RemoteWorkspaceConnectionProgress::Authenticating,
-                window,
-                cx,
-            ));
-        });
-    });
-    cx.run_until_parked();
-    assert!(cx.debug_bounds("ssh-askpass-secret-input").is_some());
-    assert!(manager.read_with(cx, |manager, _| {
-        manager
-            .remote_workspace_reconnect
-            .as_ref()
-            .is_some_and(|attempt| attempt.progress.is_none())
-    }));
-
-    cx.update(|window, cx| {
-        askpass.update(cx, |presenter, cx| presenter.cancel_owner(55, window, cx));
-    });
-    cx.run_until_parked();
-    assert_eq!(outcomes.borrow().as_slice(), [true]);
-    cx.update(|window, cx| {
-        manager.update(cx, |manager, cx| {
-            assert!(manager.apply_remote_workspace_reconnect_progress(
-                workspace_id,
-                2,
-                RemoteWorkspaceConnectionProgress::Connecting,
-                window,
-                cx,
-            ));
-        });
-    });
-    cx.run_until_parked();
-    let restored = manager.read_with(cx, |manager, _| {
-        manager
-            .remote_workspace_reconnect
-            .as_ref()
-            .and_then(|attempt| attempt.progress.as_ref())
-            .map(ProgressDialogHandle::presentation_id)
-            .unwrap()
-    });
-    assert_ne!(restored, original);
-
-    click("modal-action-remote-workspace-reconnect-cancel", cx);
-    assert!(manager.read_with(cx, |manager, _| {
-        manager.remote_workspace_reconnect.is_none()
-    }));
-}
-
-#[gpui::test]
-fn reconnect_should_atomically_restart_the_same_workspace_tab_and_pane(cx: &mut TestAppContext) {
-    let (new_control_connection, new_closes, new_preparations, new_revalidations, _new_lifecycle) =
-        reconnect_control_connection("work", "/home/tester/src");
-    let backend = TestRemoteWorkspaceFlowBackend::with_connections([gpui::Task::ready(Ok(
-        new_control_connection,
-    ))]);
-    let (manager, records, cx) = workspace_manager_with_remote_backend(backend.clone(), cx);
-    let flow = open_remote_workspace_flow(&manager, cx);
-    let (completion, old_closes, _, _, _, old_lifecycle) = remote_completion_with_revalidation(
-        "work",
-        "~/src",
-        "/home/tester/src",
-        true,
-        gpui::Task::ready(Ok(())),
-    );
-    emit_remote_workspace_completion(&flow, completion, cx);
-    let (workspace_id, tab_manager, view, starts_before_reconnect) =
-        manager.read_with(cx, |manager, cx| {
-            let workspace = manager.workspaces.active();
-            let tab_manager = workspace.payload().clone();
-            let view = tab_manager.read(cx).active_tab_view();
-            (workspace.id(), tab_manager, view, records.starts().len())
-        });
-
-    old_lifecycle
-        .try_send(ControlConnectionTerminalState::Closed)
-        .unwrap();
-    cx.run_until_parked();
-    cx.update(|window, cx| {
-        manager.update(cx, |manager, cx| {
-            manager.start_remote_workspace_reconnect(workspace_id, window, cx)
-        });
-    });
-    cx.run_until_parked();
-
-    assert_eq!(backend.connect_calls.load(Ordering::Acquire), 1);
-    assert_eq!(old_closes.load(Ordering::Acquire), 1);
-    assert_eq!(new_closes.load(Ordering::Acquire), 0);
-    assert_eq!(new_revalidations.load(Ordering::Acquire), 1);
-    assert_eq!(new_preparations.load(Ordering::Acquire), 1);
-    assert_eq!(records.starts().len(), starts_before_reconnect + 1);
-    assert_eq!(
-        manager.read_with(cx, |manager, _| manager
-            .workspaces
-            .workspace(workspace_id)
-            .unwrap()
-            .remote_connection_state()),
-        Some(RemoteConnectionState::connected(2))
-    );
-    assert_eq!(
-        manager.read_with(cx, |manager, _| manager
-            .workspaces
-            .workspace(workspace_id)
-            .unwrap()
-            .payload()
-            .entity_id()),
-        tab_manager.entity_id()
-    );
-    assert_eq!(
-        tab_manager.read_with(cx, |manager, _| manager.active_tab_view().entity_id()),
-        view.entity_id()
-    );
-    assert_eq!(
-        view.read_with(cx, |host, cx| (
-            host.remote_disconnected_generation(),
-            host.focused_terminal_remote_state(cx),
-            host.pane_count(),
-        )),
-        (None, (false, true), 1)
-    );
-
-    manager.update(cx, |manager, cx| {
-        manager.handle_remote_workspace_terminal(
-            workspace_id,
-            1,
-            ControlConnectionTerminalState::Failed,
-            cx,
-        )
-    });
-    assert_eq!(
-        manager.read_with(cx, |manager, _| manager
-            .workspaces
-            .workspace(workspace_id)
-            .unwrap()
-            .remote_connection_state()),
-        Some(RemoteConnectionState::connected(2))
-    );
-
-    assert_eq!(new_closes.load(Ordering::Acquire), 0);
-}
-
-#[gpui::test]
-fn reconnect_should_consume_a_terminal_state_published_before_observer_installation(
-    cx: &mut TestAppContext,
-) {
-    let (new_control_connection, new_closes, _, _, new_lifecycle) =
-        reconnect_control_connection("work", "/home/tester/src");
-    new_lifecycle
-        .try_send(ControlConnectionTerminalState::Failed)
-        .unwrap();
-    let backend = TestRemoteWorkspaceFlowBackend::with_connections([gpui::Task::ready(Ok(
-        new_control_connection,
-    ))]);
-    let (manager, _, cx) = workspace_manager_with_remote_backend(backend, cx);
-    let flow = open_remote_workspace_flow(&manager, cx);
-    let (completion, _, _, _, _, old_lifecycle) = remote_completion_with_revalidation(
-        "work",
-        "~/src",
-        "/home/tester/src",
-        true,
-        gpui::Task::ready(Ok(())),
-    );
-    emit_remote_workspace_completion(&flow, completion, cx);
-    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_id());
-    old_lifecycle
-        .try_send(ControlConnectionTerminalState::Closed)
-        .unwrap();
-    cx.run_until_parked();
-
-    cx.update(|window, cx| {
-        manager.update(cx, |manager, cx| {
-            manager.start_remote_workspace_reconnect(workspace_id, window, cx)
-        });
-    });
-    cx.run_until_parked();
-
-    assert_eq!(
-        manager.read_with(cx, |manager, _| manager
-            .workspaces
-            .workspace(workspace_id)
-            .unwrap()
-            .remote_connection_state()),
-        Some(RemoteConnectionState::disconnected(2))
-    );
-    assert_eq!(new_closes.load(Ordering::Acquire), 1);
-}
-
-#[gpui::test]
-fn reconnect_identity_change_should_keep_final_presentation_and_show_typed_alert(
-    cx: &mut TestAppContext,
-) {
-    let (mut text_context, rendered_text) = RecordingRenderedText::context(cx);
-    let cx = &mut text_context;
-    let (new_control_connection, new_closes, new_preparations, new_revalidations, _) =
-        reconnect_control_connection("work", "/home/tester/replaced");
-    let backend = TestRemoteWorkspaceFlowBackend::with_connections([gpui::Task::ready(Ok(
-        new_control_connection,
-    ))]);
-    let (manager, records, cx) = workspace_manager_with_remote_backend(backend, cx);
-    let flow = open_remote_workspace_flow(&manager, cx);
-    let (completion, _, _, _, _, old_lifecycle) = remote_completion_with_revalidation(
-        "work",
-        "~/src",
-        "/home/tester/src",
-        true,
-        gpui::Task::ready(Ok(())),
-    );
-    emit_remote_workspace_completion(&flow, completion, cx);
-    let (workspace_id, view, starts) = manager.read_with(cx, |manager, cx| {
-        let workspace = manager.workspaces.active();
-        (
-            workspace.id(),
-            workspace.payload().read(cx).active_tab_view(),
-            records.starts().len(),
-        )
-    });
-    old_lifecycle
-        .try_send(ControlConnectionTerminalState::Closed)
-        .unwrap();
-    cx.run_until_parked();
-
-    cx.update(|window, cx| {
-        manager.update(cx, |manager, cx| {
-            manager.start_remote_workspace_reconnect(workspace_id, window, cx)
-        });
-    });
-    cx.run_until_parked();
-    redraw(cx);
-
-    assert_eq!(
-        manager.read_with(cx, |manager, _| manager
-            .workspaces
-            .workspace(workspace_id)
-            .unwrap()
-            .remote_connection_state()),
-        Some(RemoteConnectionState::disconnected(2))
-    );
-    assert_eq!(new_closes.load(Ordering::Acquire), 1);
-    assert_eq!(new_preparations.load(Ordering::Acquire), 0);
-    assert_eq!(new_revalidations.load(Ordering::Acquire), 0);
-    assert_eq!(records.starts().len(), starts);
-    assert_eq!(
-        view.read_with(cx, |host, cx| host.focused_terminal_remote_state(cx)),
-        (true, true)
-    );
-    assert!(
-        cx.debug_bounds("modal-action-remote-workspace-reconnect-error-ok")
-            .is_some()
-    );
-    assert_eq!(
-        remote_workspace_reconnect_error_content(
-            &RemoteWorkspaceReconnectFailure::IdentityChanged
-        ),
-        Some((
-            "Remote Directory Changed",
-            "The selected remote path now resolves to a different directory. Reopen the Remote Workspace to review it.".to_owned()
-        ))
-    );
-    assert_rendered_text(
-        "modal-header-title",
-        "Remote Directory Changed",
-        &rendered_text,
-        cx,
-    );
-}
-
-#[gpui::test]
-fn reconnect_directory_unavailable_should_remain_disconnected_with_actionable_alert(
-    cx: &mut TestAppContext,
-) {
-    let (mut text_context, rendered_text) = RecordingRenderedText::context(cx);
-    let cx = &mut text_context;
-    let (new_control_connection, new_closes, _, _, _) = reconnect_control_connection_with_provider(
-        "work",
-        Arc::new(TestRemoteProvider::directory_unavailable()),
-    );
-    let backend = TestRemoteWorkspaceFlowBackend::with_connections([gpui::Task::ready(Ok(
-        new_control_connection,
-    ))]);
-    let (manager, _, cx) = workspace_manager_with_remote_backend(backend, cx);
-    let flow = open_remote_workspace_flow(&manager, cx);
-    let (completion, _, _, _, _, old_lifecycle) = remote_completion_with_revalidation(
-        "work",
-        "~/src",
-        "/home/tester/src",
-        true,
-        gpui::Task::ready(Ok(())),
-    );
-    emit_remote_workspace_completion(&flow, completion, cx);
-    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_id());
-    old_lifecycle
-        .try_send(ControlConnectionTerminalState::Closed)
-        .unwrap();
-    cx.run_until_parked();
-
-    cx.update(|window, cx| {
-        manager.update(cx, |manager, cx| {
-            manager.start_remote_workspace_reconnect(workspace_id, window, cx)
-        });
-    });
-    cx.run_until_parked();
-    redraw(cx);
-
-    assert_eq!(
-        manager.read_with(cx, |manager, _| manager
-            .workspaces
-            .workspace(workspace_id)
-            .unwrap()
-            .remote_connection_state()),
-        Some(RemoteConnectionState::disconnected(2))
-    );
-    assert_eq!(new_closes.load(Ordering::Acquire), 1);
-    assert!(
-        cx.debug_bounds("modal-action-remote-workspace-reconnect-error-ok")
-            .is_some()
-    );
-    assert_eq!(
-        remote_workspace_reconnect_error_content(
-            &RemoteWorkspaceReconnectFailure::DirectoryUnavailable
-        ),
-        Some((
-            "Remote Directory Unavailable",
-            "SpaceTerm can’t access the selected remote directory. Check its permissions or reopen the Remote Workspace.".to_owned()
-        ))
-    );
-    assert_rendered_text(
-        "modal-header-title",
-        "Remote Directory Unavailable",
-        &rendered_text,
-        cx,
-    );
-}
-
-#[test]
-fn reconnect_connection_detail_should_reach_the_transient_alert_content() {
-    let detail =
-        TransientSshErrorOutput::from_untrusted_bytes(b"ssh: Permission denied (publickey).")
-            .unwrap();
-    let failure = RemoteWorkspaceReconnectFailure::ConnectionFailed {
-        detail: Some(detail),
-    };
-    assert_eq!(
-        format!("{failure:?}"),
-        "ConnectionFailed { detail: Some(TransientSshErrorOutput(<redacted>)) }"
-    );
-    assert_eq!(
-        remote_workspace_reconnect_error_content(&failure),
-        Some((
-            "Couldn’t Reconnect",
-            "SpaceTerm couldn’t restore the remote connection. OpenSSH reported:\n\nssh: Permission denied (publickey)."
-                .to_owned(),
-        ))
-    );
-}
-
-#[gpui::test]
-fn hierarchy_change_between_restart_prepare_and_commit_should_fail_with_typed_alert(
-    cx: &mut TestAppContext,
-) {
-    let (mut new_control_connection, new_closes, _, _, _) =
-        reconnect_control_connection("work", "/home/tester/src");
-    let (pending_sender, pending_receiver) = async_channel::bounded(1);
-    let pending = cx.update(|cx| {
-        cx.background_executor()
-            .spawn(async move { pending_receiver.recv().await.unwrap() })
-    });
-    let backend = TestRemoteWorkspaceFlowBackend::with_connections([pending]);
-    let (manager, records, cx) = workspace_manager_with_remote_backend(backend, cx);
-    let flow = open_remote_workspace_flow(&manager, cx);
-    let (completion, _, _, _, _, lifecycle) = remote_completion_with_revalidation(
-        "work",
-        "~/src",
-        "/home/tester/src",
-        true,
-        gpui::Task::ready(Ok(())),
-    );
-    emit_remote_workspace_completion(&flow, completion, cx);
-    redraw(cx);
-    cx.simulate_keystrokes("cmd-d");
-    cx.run_until_parked();
-    let (workspace_id, tab_manager, starts) = manager.read_with(cx, |manager, _| {
-        let workspace = manager.workspaces.active();
-        (
-            workspace.id(),
-            workspace.payload().clone(),
-            records.starts().len(),
-        )
-    });
-    assert_eq!(
-        tab_manager.read_with(cx, |manager, cx| manager.aggregate_counts(cx)),
-        (1, 2)
-    );
-
-    lifecycle
-        .try_send(ControlConnectionTerminalState::Closed)
-        .unwrap();
-    cx.run_until_parked();
-    cx.update(|window, cx| {
-        manager.update(cx, |manager, cx| {
-            manager.start_remote_workspace_reconnect(workspace_id, window, cx)
-        });
-    });
-    cx.run_until_parked();
-    let account = test_remote_account();
-    let channels = new_control_connection
-        .bind_terminal_session_channels(account.login_shell())
-        .unwrap();
-    let prepared_lifecycle = new_control_connection.take_lifecycle_observer().unwrap();
-    let factory = manager.read_with(cx, |manager, _| {
-        WorkspaceTerminalSessionFactory::new_remote(
-            Rc::clone(&manager.session_factory),
-            ValidatedLocalDirectory::new(
-                manager.local_home_directory_path.clone(),
-                manager.local_home_identity.clone(),
-            ),
-            RemoteTerminalMetadataContext::new(
-                crate::domain::SshDestination::new("work".into()).unwrap(),
-                RemoteDirectory::new("~/src".into()).unwrap(),
-            )
-            .with_machine(remote_machine(&account)),
-            crate::domain::RemoteDirectoryIdentity::new("/home/tester/src".into()).unwrap(),
-            account.login_shell().name().to_owned(),
-            channels,
-        )
-    });
-    let preparation = tab_manager.update(cx, |manager, cx| {
-        manager.prepare_remote_restart(factory, 2, cx)
-    });
-    let prepared = Rc::new(RefCell::new(None));
-    let result = prepared.clone();
-    cx.update(|_, cx| {
-        cx.spawn(async move |_| {
-            *result.borrow_mut() = Some(preparation.await);
-        })
-        .detach()
-    });
-    cx.run_until_parked();
-    let restart = prepared
-        .borrow_mut()
-        .take()
-        .expect("real restart preparation must complete")
-        .unwrap();
-    assert_eq!(
-        tab_manager.read_with(cx, |manager, cx| manager.aggregate_counts(cx)),
-        (1, 2)
-    );
-    cx.update(|window, cx| {
-        tab_manager
-            .read(cx)
-            .active_tab_view()
-            .update(cx, |host, cx| {
-                host.close_pane_authorized(host.focused_pane_id(), window, cx);
-            })
-    });
-    cx.run_until_parked();
-    cx.update(|window, cx| {
-        manager.update(cx, |manager, cx| {
-            manager.finish_remote_workspace_reconnect(
-                workspace_id,
-                2,
-                Ok(PreparedRemoteWorkspaceReconnect {
-                    control_connection: new_control_connection,
-                    lifecycle: prepared_lifecycle,
-                    restart,
-                    remote_user: account.remote_user().clone(),
-                }),
-                window,
-                cx,
-            )
-        })
-    });
-    // A cancelled task drops its future only when the executor runs it.
-    cx.run_until_parked();
-    drop(pending_sender);
-    cx.run_until_parked();
-    redraw(cx);
-
-    assert_eq!(
-        manager.read_with(cx, |manager, _| manager
-            .workspaces
-            .workspace(workspace_id)
-            .unwrap()
-            .remote_connection_state()),
-        Some(RemoteConnectionState::failed(2))
-    );
-    assert_eq!(new_closes.load(Ordering::Acquire), 1);
-    assert_eq!(records.starts().len(), starts);
-    assert_eq!(
-        tab_manager.read_with(cx, |manager, cx| manager.aggregate_counts(cx)),
-        (1, 1)
-    );
-    assert!(
-        cx.debug_bounds("modal-action-remote-workspace-reconnect-error-ok")
-            .is_some()
-    );
-}
-
-#[gpui::test]
-fn reconnect_cancel_should_be_single_flight_and_close_late_success_without_resurrection(
-    cx: &mut TestAppContext,
-) {
-    let (late_control_connection, late_closes, _, _, _) =
-        reconnect_control_connection("work", "/home/tester/src");
-    let (sender, receiver) = async_channel::bounded(1);
-    let pending = cx.update(|cx| {
-        cx.background_executor()
-            .spawn(async move { receiver.recv().await.unwrap() })
-    });
-    let backend = TestRemoteWorkspaceFlowBackend::with_connections([pending]);
-    let (manager, _, cx) = workspace_manager_with_remote_backend(backend.clone(), cx);
-    let flow = open_remote_workspace_flow(&manager, cx);
-    let (completion, _, _, _, _, lifecycle) = remote_completion_with_revalidation(
-        "work",
-        "~/src",
-        "/home/tester/src",
-        true,
-        gpui::Task::ready(Ok(())),
-    );
-    emit_remote_workspace_completion(&flow, completion, cx);
-    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_id());
-    lifecycle
-        .try_send(ControlConnectionTerminalState::Closed)
-        .unwrap();
-    cx.run_until_parked();
-
-    cx.update(|window, cx| {
-        manager.update(cx, |manager, cx| {
-            manager.start_remote_workspace_reconnect(workspace_id, window, cx);
-            manager.start_remote_workspace_reconnect(workspace_id, window, cx);
-        });
-    });
-    cx.run_until_parked();
-    redraw(cx);
-    assert_eq!(backend.connect_calls.load(Ordering::Acquire), 1);
-    assert_eq!(
-        manager.read_with(cx, |manager, _| manager
-            .workspaces
-            .workspace(workspace_id)
-            .unwrap()
-            .remote_connection_state()),
-        Some(RemoteConnectionState::reconnecting(2))
-    );
-
-    click("modal-action-remote-workspace-reconnect-cancel", cx);
-    assert_eq!(
-        manager.read_with(cx, |manager, _| manager
-            .workspaces
-            .workspace(workspace_id)
-            .unwrap()
-            .remote_connection_state()),
-        Some(RemoteConnectionState::disconnected(2))
-    );
-    assert!(manager.read_with(cx, |manager, _| {
-        manager.remote_workspace_reconnect.is_none()
-    }));
-
-    assert!(sender.try_send(Ok(late_control_connection)).is_err());
-    cx.run_until_parked();
-    assert_eq!(late_closes.load(Ordering::Acquire), 1);
-    assert_eq!(
-        manager.read_with(cx, |manager, _| manager
-            .workspaces
-            .workspace(workspace_id)
-            .unwrap()
-            .remote_connection_state()),
-        Some(RemoteConnectionState::disconnected(2))
-    );
-}
-
-#[gpui::test]
-fn cancelling_while_account_discovery_is_blocked_should_close_control_connection_immediately(
-    cx: &mut TestAppContext,
-) {
-    let (account_sender, account_receiver) = async_channel::bounded(1);
-    let account_task = cx.update(|cx| {
-        cx.background_executor()
-            .spawn(async move { account_receiver.recv().await.unwrap() })
-    });
-    let account_calls = Arc::new(AtomicUsize::new(0));
-    let provider: Arc<dyn RemoteDirectoryProvider> = Arc::new(BlockingRemoteProvider {
-        account: Mutex::new(Some(account_task)),
-        identity: Mutex::new(Some(gpui::Task::ready(Ok(
-            crate::domain::RemoteDirectoryIdentity::new("/home/tester/src".to_owned()).unwrap(),
-        )))),
-        account_calls: Arc::clone(&account_calls),
-        identity_calls: Arc::new(AtomicUsize::new(0)),
-    });
-    let (control_connection, closes, _, _, _) =
-        reconnect_control_connection_with_provider("work", provider);
-    let backend = TestRemoteWorkspaceFlowBackend::with_connections([gpui::Task::ready(Ok(
-        control_connection,
-    ))]);
-    let (manager, _, cx) = workspace_manager_with_remote_backend(backend, cx);
-    let workspace_id = create_disconnected_remote_workspace(&manager, cx);
-
-    cx.update(|window, cx| {
-        manager.update(cx, |manager, cx| {
-            manager.start_remote_workspace_reconnect(workspace_id, window, cx)
-        });
-    });
-    cx.run_until_parked();
-    redraw(cx);
-    assert_eq!(account_calls.load(Ordering::Acquire), 1);
-    assert_eq!(closes.load(Ordering::Acquire), 0);
-
-    click("modal-action-remote-workspace-reconnect-cancel", cx);
-
-    assert_eq!(closes.load(Ordering::Acquire), 1);
-    assert!(account_sender.is_closed());
-    assert_eq!(
-        manager.read_with(cx, |manager, _| manager
-            .workspaces
-            .workspace(workspace_id)
-            .unwrap()
-            .remote_connection_state()),
-        Some(RemoteConnectionState::disconnected(2))
-    );
-}
-
-#[gpui::test]
-fn closing_workspace_while_identity_validation_is_blocked_should_close_control_connection_immediately(
-    cx: &mut TestAppContext,
-) {
-    let (identity_sender, identity_receiver) = async_channel::bounded(1);
-    let identity_task = cx.update(|cx| {
-        cx.background_executor()
-            .spawn(async move { identity_receiver.recv().await.unwrap() })
-    });
-    let identity_calls = Arc::new(AtomicUsize::new(0));
-    let provider: Arc<dyn RemoteDirectoryProvider> = Arc::new(BlockingRemoteProvider {
-        account: Mutex::new(Some(gpui::Task::ready(Ok(test_remote_account())))),
-        identity: Mutex::new(Some(identity_task)),
-        account_calls: Arc::new(AtomicUsize::new(0)),
-        identity_calls: Arc::clone(&identity_calls),
-    });
-    let (control_connection, closes, _, _, _) =
-        reconnect_control_connection_with_provider("work", provider);
-    let backend = TestRemoteWorkspaceFlowBackend::with_connections([gpui::Task::ready(Ok(
-        control_connection,
-    ))]);
-    let (manager, _, cx) = workspace_manager_with_remote_backend(backend, cx);
-    let workspace_id = create_disconnected_remote_workspace(&manager, cx);
-    cx.update(|window, cx| {
-        manager.update(cx, |manager, cx| {
-            manager.start_remote_workspace_reconnect(workspace_id, window, cx)
-        });
-    });
-    cx.run_until_parked();
-    assert_eq!(identity_calls.load(Ordering::Acquire), 1);
-    assert_eq!(closes.load(Ordering::Acquire), 0);
-
-    cx.update(|window, cx| {
-        manager.update(cx, |manager, cx| {
-            manager.close_workspace(workspace_id, window, cx)
-        });
-    });
-    cx.run_until_parked();
-
-    assert_eq!(closes.load(Ordering::Acquire), 1);
-    assert!(identity_sender.is_closed());
-    assert!(manager.read_with(cx, |manager, _| {
-        manager.workspaces.workspace(workspace_id).is_none()
-    }));
-}
-
-#[gpui::test]
-fn application_cleanup_while_restart_preparation_is_blocked_should_abort_and_close_control_connection(
-    cx: &mut TestAppContext,
-) {
-    let (revalidation_sender, revalidation_receiver) = async_channel::bounded(1);
-    let revalidation_task = cx.update(|cx| {
-        cx.background_executor()
-            .spawn(async move { revalidation_receiver.recv().await.unwrap() })
-    });
-    let provider: Arc<dyn RemoteDirectoryProvider> = Arc::new(TestRemoteProvider::connected(
-        crate::domain::RemoteDirectoryIdentity::new("/home/tester/src".to_owned()).unwrap(),
-    ));
-    let (control_connection, closes, _, revalidations, _) =
-        reconnect_control_connection_with_provider_and_revalidation(
-            "work",
-            provider,
-            VecDeque::from([revalidation_task]),
-        );
-    let backend = TestRemoteWorkspaceFlowBackend::with_connections([gpui::Task::ready(Ok(
-        control_connection,
-    ))]);
-    let (manager, _, cx) = workspace_manager_with_remote_backend(backend, cx);
-    let workspace_id = create_disconnected_remote_workspace(&manager, cx);
-    cx.update(|window, cx| {
-        manager.update(cx, |manager, cx| {
-            manager.start_remote_workspace_reconnect(workspace_id, window, cx)
-        });
-    });
-    cx.run_until_parked();
-    assert_eq!(revalidations.load(Ordering::Acquire), 1);
-    assert_eq!(closes.load(Ordering::Acquire), 0);
-
-    manager.update(cx, |manager, _| manager.close_remote_runtimes());
-    cx.run_until_parked();
-
-    assert_eq!(closes.load(Ordering::Acquire), 1);
-    assert!(revalidation_sender.is_closed());
-    assert!(manager.read_with(cx, |manager, _| {
-        manager.remote_workspace_reconnect.is_none()
-    }));
-    assert_ne!(
-        manager.read_with(cx, |manager, _| manager
-            .workspaces
-            .workspace(workspace_id)
-            .unwrap()
-            .remote_connection_state()),
-        Some(RemoteConnectionState::connected(2))
-    );
-}
-
-#[gpui::test]
-fn authentication_cancelled_reconnect_should_return_to_disconnected_without_error_alert(
-    cx: &mut TestAppContext,
-) {
-    let backend = TestRemoteWorkspaceFlowBackend::with_connections([gpui::Task::ready(Err(
-        RemoteWorkspaceFlowBackendError::AuthenticationCancelled,
-    ))]);
-    let (manager, _, cx) = workspace_manager_with_remote_backend(backend, cx);
-    let flow = open_remote_workspace_flow(&manager, cx);
-    let (completion, _, _, _, _, lifecycle) = remote_completion_with_revalidation(
-        "work",
-        "~/src",
-        "/home/tester/src",
-        true,
-        gpui::Task::ready(Ok(())),
-    );
-    emit_remote_workspace_completion(&flow, completion, cx);
-    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_id());
-    lifecycle
-        .try_send(ControlConnectionTerminalState::Closed)
-        .unwrap();
-    cx.run_until_parked();
-
-    cx.update(|window, cx| {
-        manager.update(cx, |manager, cx| {
-            manager.start_remote_workspace_reconnect(workspace_id, window, cx)
-        });
-    });
-    cx.run_until_parked();
-    redraw(cx);
-
-    assert_eq!(
-        manager.read_with(cx, |manager, _| manager
-            .workspaces
-            .workspace(workspace_id)
-            .unwrap()
-            .remote_connection_state()),
-        Some(RemoteConnectionState::disconnected(2))
-    );
-    assert!(
-        cx.debug_bounds("modal-action-remote-workspace-reconnect-error-ok")
-            .is_none()
-    );
-}
-
-#[gpui::test]
-fn bounded_connection_detail_should_survive_reconnect_into_the_failure_alert(
-    cx: &mut TestAppContext,
-) {
-    let (mut text_context, rendered_text) = RecordingRenderedText::context(cx);
-    let cx = &mut text_context;
-    let detail = crate::ssh::process::TransientSshErrorOutput::from_untrusted_bytes(
-        b"ssh: Permission denied (publickey).",
-    )
-    .unwrap();
-    let backend = TestRemoteWorkspaceFlowBackend::with_connections([gpui::Task::ready(Err(
-        RemoteWorkspaceFlowBackendError::ConnectionFailedWithDetail(detail),
-    ))]);
-    let (manager, _, cx) = workspace_manager_with_remote_backend(backend, cx);
-    let workspace_id = create_disconnected_remote_workspace(&manager, cx);
-
-    cx.update(|window, cx| {
-        manager.update(cx, |manager, cx| {
-            manager.start_remote_workspace_reconnect(workspace_id, window, cx)
-        });
-    });
-    cx.run_until_parked();
-    redraw(cx);
-
-    assert_eq!(
-        manager.read_with(cx, |manager, _| manager
-            .workspaces
-            .workspace(workspace_id)
-            .unwrap()
-            .remote_connection_state()),
-        Some(RemoteConnectionState::failed(2))
-    );
-    assert!(
-        cx.debug_bounds("modal-action-remote-workspace-reconnect-error-ok")
-            .is_some()
-    );
-    assert_rendered_text(
-        "modal-alert-message",
-        "SpaceTerm couldn’t restore the remote connection. OpenSSH reported:\n\nssh: Permission denied (publickey).",
-        &rendered_text,
-        cx,
-    );
-}
-
-#[gpui::test]
-fn closing_workspace_during_reconnect_should_close_late_control_connection_and_prevent_resurrection(
-    cx: &mut TestAppContext,
-) {
-    let (late_control_connection, late_closes, _, _, _) =
-        reconnect_control_connection("work", "/home/tester/src");
-    let (sender, receiver) = async_channel::bounded(1);
-    let pending = cx.update(|cx| {
-        cx.background_executor()
-            .spawn(async move { receiver.recv().await.unwrap() })
-    });
-    let backend = TestRemoteWorkspaceFlowBackend::with_connections([pending]);
-    let (manager, _, cx) = workspace_manager_with_remote_backend(backend, cx);
-    let flow = open_remote_workspace_flow(&manager, cx);
-    let (completion, _, _, _, _, lifecycle) = remote_completion_with_revalidation(
-        "work",
-        "~/src",
-        "/home/tester/src",
-        true,
-        gpui::Task::ready(Ok(())),
-    );
-    emit_remote_workspace_completion(&flow, completion, cx);
-    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_id());
-    lifecycle
-        .try_send(ControlConnectionTerminalState::Closed)
-        .unwrap();
-    cx.run_until_parked();
-    cx.update(|window, cx| {
-        manager.update(cx, |manager, cx| {
-            manager.start_remote_workspace_reconnect(workspace_id, window, cx);
-            manager.close_workspace(workspace_id, window, cx);
-        });
-    });
-    cx.run_until_parked();
-    assert!(manager.read_with(cx, |manager, _| {
-        manager.workspaces.workspace(workspace_id).is_none()
-    }));
-
-    assert!(sender.try_send(Ok(late_control_connection)).is_err());
-    cx.run_until_parked();
-    assert_eq!(late_closes.load(Ordering::Acquire), 1);
-    assert!(manager.read_with(cx, |manager, _| {
-        manager.workspaces.workspace(workspace_id).is_none()
-    }));
-}
-
-#[gpui::test]
-fn remote_child_identity_failure_preserves_connection_and_restores_focus_after_alert(
-    cx: &mut TestAppContext,
-) {
-    let (manager, _, cx) = workspace_manager(cx);
-    let flow = open_remote_workspace_flow(&manager, cx);
-    let (completion, _, _, _) = remote_completion("work", "~/src", "/home/tester/src", true);
-    emit_remote_workspace_completion(&flow, completion, cx);
-    let (workspace_id, tab_manager) = manager.read_with(cx, |manager, _| {
-        let workspace = manager.workspaces.active();
-        (workspace.id(), workspace.payload().clone())
-    });
-
-    tab_manager.update(cx, |_, cx| {
-        cx.emit(RemoteChildLaunchUnavailable::IdentityChanged)
-    });
-    cx.run_until_parked();
-    redraw(cx);
-
-    assert_eq!(
-        manager.read_with(cx, |manager, _| manager
-            .workspaces
-            .workspace(workspace_id)
-            .unwrap()
-            .remote_connection_state()),
-        Some(RemoteConnectionState::connected(1))
-    );
-    assert!(!cx.update(|window, cx| {
-        tab_manager
-            .read(cx)
-            .focused_terminal_has_input_focus(window, cx)
-    }));
-    assert!(
-        cx.debug_bounds("modal-action-remote-workspace-reconnect-error-ok")
-            .is_some()
-    );
-    click("modal-action-remote-workspace-reconnect-error-ok", cx);
-    assert!(
-        cx.update(|window, cx| { tab_manager.read(cx).focused_terminal_is_focused(window, cx) })
-    );
-}
-
-#[gpui::test]
-fn failed_flow_activation_should_close_connection_and_offer_retry(cx: &mut TestAppContext) {
-    let (manager, records, cx) = workspace_manager(cx);
-    let flow = open_remote_workspace_flow(&manager, cx);
-    let (completion, closes, preparations, _) =
-        remote_completion("work", "~/src", "/home/tester/src", false);
-
-    emit_remote_workspace_completion(&flow, completion, cx);
-
-    let state = cx.update(|window, cx| {
-        let manager = manager.read(cx);
-        (
-            manager.workspaces.len(),
-            manager.remote_workspace_runtimes.len(),
-            manager.remote_workspace_flow.is_some(),
-            flow.read(cx).stage(),
-            manager.terminal_focus_blocker(window, cx),
-        )
-    });
-    assert_eq!(
-        state,
-        (
-            1,
-            0,
-            true,
-            RemoteWorkspaceFlowStage::ConnectionError,
-            Some(TerminalFocusBlocker::Modal),
-        )
-    );
-    assert_eq!(records.starts().len(), 1);
-    assert_eq!(preparations.load(Ordering::Acquire), 0);
-    assert_eq!(closes.load(Ordering::Acquire), 1);
-}
-
-#[gpui::test]
-fn remote_revalidation_failures_should_close_completion_without_mutation(cx: &mut TestAppContext) {
-    let (manager, records, cx) = workspace_manager(cx);
-
-    for error in [
-        crate::terminal::TerminalSessionChannelRevalidationError::ConnectionUnavailable,
-        crate::terminal::TerminalSessionChannelRevalidationError::DirectoryUnavailable,
-        crate::terminal::TerminalSessionChannelRevalidationError::IdentityChanged,
-    ] {
-        let flow = open_remote_workspace_flow(&manager, cx);
-        let (completion, closes, preparations, revalidations, _, _) =
-            remote_completion_with_revalidation(
-                "work",
-                "~/src",
-                "/home/tester/src",
-                true,
-                gpui::Task::ready(Err(error)),
-            );
-
-        emit_remote_workspace_completion(&flow, completion, cx);
-
-        assert_eq!(
-            manager.read_with(cx, |manager, _| (
-                manager.workspaces.len(),
-                manager.remote_workspace_runtimes.len(),
-            )),
-            (1, 0)
-        );
-        assert_eq!(records.starts().len(), 1);
-        assert_eq!(revalidations.load(Ordering::Acquire), 1);
-        assert_eq!(preparations.load(Ordering::Acquire), 0);
-        assert_eq!(closes.load(Ordering::Acquire), 1);
-        assert_eq!(
-            flow.read_with(cx, |flow, _| flow.stage()),
-            RemoteWorkspaceFlowStage::ConnectionError
-        );
-
-        cx.update(|window, cx| {
-            flow.update(cx, |flow, cx| {
-                crate::ui::remote_workspace_flow::cancel(flow, window, cx);
-            });
-        });
-        cx.run_until_parked();
-        assert_eq!(closes.load(Ordering::Acquire), 1);
-    }
-}
-
-#[gpui::test]
-fn cancelled_initial_revalidation_should_close_immediately_without_late_resurrection(
-    cx: &mut TestAppContext,
-) {
-    let (manager, records, cx) = workspace_manager(cx);
-    let (sender, receiver) = async_channel::bounded(1);
-    let delayed_revalidation = cx.update(|_, cx| {
-        cx.background_executor()
-            .spawn(async move { receiver.recv().await.unwrap() })
-    });
-    let (stale, stale_closes, stale_preparations, stale_revalidations, _, _) =
-        remote_completion_with_revalidation(
-            "work",
-            "~/stale",
-            "/home/tester/stale",
-            true,
-            delayed_revalidation,
-        );
-    let first_flow = open_remote_workspace_flow(&manager, cx);
-    emit_remote_workspace_completion(&first_flow, stale, cx);
-    assert_eq!(stale_revalidations.load(Ordering::Acquire), 1);
-
-    cx.update(|window, cx| {
-        first_flow.update(cx, |flow, cx| {
-            crate::ui::remote_workspace_flow::cancel(flow, window, cx);
-        });
-    });
-    cx.run_until_parked();
-    assert_eq!(
-        manager.read_with(cx, |manager, _| manager.workspaces.len()),
-        1
-    );
-    assert_eq!(stale_preparations.load(Ordering::Acquire), 0);
-    assert_eq!(stale_closes.load(Ordering::Acquire), 1);
-    assert!(sender.try_send(Ok(())).is_err());
-
-    let (current, current_closes, current_preparations, _) =
-        remote_completion("work", "~/current", "/home/tester/current", true);
-    let current_flow = open_remote_workspace_flow(&manager, cx);
-    assert_ne!(current_flow, first_flow);
-    emit_remote_workspace_completion(&current_flow, current, cx);
-    assert_eq!(
-        manager.read_with(cx, |manager, _| manager.workspaces.len()),
-        2
-    );
-    assert_eq!(current_preparations.load(Ordering::Acquire), 1);
-    assert_eq!(current_closes.load(Ordering::Acquire), 0);
-
-    assert_eq!(
-        manager.read_with(cx, |manager, _| manager.workspaces.len()),
-        2
-    );
-    assert_eq!(records.starts().len(), 2);
-    assert_eq!(stale_preparations.load(Ordering::Acquire), 0);
-    assert_eq!(current_closes.load(Ordering::Acquire), 0);
-}
-
-#[gpui::test]
-fn matching_remote_destinations_should_create_independent_workspaces(cx: &mut TestAppContext) {
-    let (manager, records, cx) = workspace_manager(cx);
-    let (first, first_closes, first_preparations, _) =
-        remote_completion("work", "~/src", "/home/tester/src", true);
-    let (duplicate, duplicate_closes, duplicate_preparations, _) =
-        remote_completion("work", "/home/tester/src", "/home/tester/src", true);
-
-    let first_flow = open_remote_workspace_flow(&manager, cx);
-    emit_remote_workspace_completion(&first_flow, first, cx);
-    let duplicate_flow = open_remote_workspace_flow(&manager, cx);
-    emit_remote_workspace_completion(&duplicate_flow, duplicate, cx);
-
-    let state = manager.read_with(cx, |manager, _| {
-        (
-            manager.workspaces.len(),
-            manager
-                .workspaces
-                .active()
-                .remote_starting_directory()
-                .unwrap()
-                .as_str()
-                .to_owned(),
-            manager.remote_workspace_runtimes.len(),
-        )
-    });
-    assert_eq!(state, (3, "/home/tester/src".to_owned(), 2));
-    assert_eq!(records.starts().len(), 3);
-    assert_eq!(first_preparations.load(Ordering::Acquire), 1);
-    assert_eq!(duplicate_preparations.load(Ordering::Acquire), 1);
-    assert_eq!(first_closes.load(Ordering::Acquire), 0);
-    assert_eq!(duplicate_closes.load(Ordering::Acquire), 0);
-}
-
-#[gpui::test]
-fn independent_workspace_creation_during_revalidation_should_preserve_both_launches(
-    cx: &mut TestAppContext,
-) {
-    let (manager, records, cx) = workspace_manager(cx);
-    let (sender, receiver) = async_channel::bounded(1);
-    let pending_revalidation = cx.update(|_, cx| {
-        cx.background_executor()
-            .spawn(async move { receiver.recv().await.unwrap() })
-    });
-    let (pending, pending_closes, pending_preparations, pending_revalidations, _, _) =
-        remote_completion_with_revalidation(
-            "work",
-            "~/src",
-            "/home/tester/src",
-            true,
-            pending_revalidation,
-        );
-    let (winner, winner_closes, winner_preparations, _) =
-        remote_completion("work", "/home/tester/src", "/home/tester/src", true);
-    let flow = open_remote_workspace_flow(&manager, cx);
-    emit_remote_workspace_completion(&flow, pending, cx);
-    assert_eq!(pending_revalidations.load(Ordering::Acquire), 1);
-
-    install_remote_completion_directly(&manager, winner, cx);
-    assert_eq!(winner_preparations.load(Ordering::Acquire), 1);
-    sender.try_send(Ok(())).unwrap();
-    cx.run_until_parked();
-
-    assert_eq!(
-        manager.read_with(cx, |manager, _| (
-            manager.workspaces.len(),
-            manager.remote_workspace_runtimes.len(),
-            manager
-                .workspaces
-                .active()
-                .remote_starting_directory()
-                .map(|directory| directory.as_str().to_owned()),
-        )),
-        (3, 2, Some("~/src".to_owned()))
-    );
-    assert_eq!(records.starts().len(), 3);
-    assert_eq!(pending_preparations.load(Ordering::Acquire), 1);
-    assert_eq!(pending_closes.load(Ordering::Acquire), 0);
-    assert_eq!(winner_closes.load(Ordering::Acquire), 0);
-    assert!(manager.read_with(cx, |manager, _| manager.remote_workspace_flow.is_none()));
-    assert_eq!(
-        flow.read_with(cx, |flow, _| flow.stage()),
-        RemoteWorkspaceFlowStage::Completed
-    );
-}
-
-#[gpui::test]
-fn remote_workspace_close_should_release_active_alias_after_runtime_cleanup(
-    cx: &mut TestAppContext,
-) {
-    let (manager, _, cx) = workspace_manager(cx);
-    let (completion, aliases, alias, closes, _) = remote_completion_with_active_alias();
-    assert!(aliases.is_active(&alias));
-
-    let flow = open_remote_workspace_flow(&manager, cx);
-    emit_remote_workspace_completion(&flow, completion, cx);
-    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_id());
-    assert!(aliases.is_active(&alias));
-    assert_eq!(closes.load(Ordering::Acquire), 0);
-    assert!(manager.read_with(cx, |manager, _| {
-        manager
-            .remote_workspace_runtimes
-            .get(&workspace_id)
-            .is_some_and(|runtime| runtime.alias_pin.is_some())
-    }));
-
-    cx.update(|window, cx| {
-        manager.update(cx, |manager, cx| {
-            manager.close_workspace(workspace_id, window, cx)
-        });
-    });
-    cx.run_until_parked();
-
-    assert_eq!(closes.load(Ordering::Acquire), 1);
-    assert!(!aliases.is_active(&alias));
-}
-
-#[gpui::test]
-fn managed_alias_should_remain_immutable_after_master_loss_and_during_reconnect(
-    cx: &mut TestAppContext,
-) {
-    let (connection_sender, connection_receiver) = async_channel::bounded(1);
-    let connection = cx.update(|cx| {
-        cx.background_executor()
-            .spawn(async move { connection_receiver.recv().await.unwrap() })
-    });
-    let backend = TestRemoteWorkspaceFlowBackend::with_connections([connection]);
-    let (manager, _, cx) = workspace_manager_with_remote_backend(backend, cx);
-    let (completion, aliases, alias, closes, lifecycle) = remote_completion_with_active_alias();
-    let flow = open_remote_workspace_flow(&manager, cx);
-    emit_remote_workspace_completion(&flow, completion, cx);
-    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_id());
-
-    assert!(aliases.begin_mutation([alias.clone()]).is_err());
-    lifecycle
-        .try_send(ControlConnectionTerminalState::Closed)
-        .unwrap();
-    cx.run_until_parked();
-
-    assert_eq!(closes.load(Ordering::Acquire), 1);
-    assert!(aliases.is_active(&alias));
-    assert!(aliases.begin_mutation([alias.clone()]).is_err());
-
-    cx.update(|window, cx| {
-        manager.update(cx, |manager, cx| {
-            manager.start_remote_workspace_reconnect(workspace_id, window, cx)
-        });
-    });
-    cx.run_until_parked();
-    assert_eq!(
-        manager.read_with(cx, |manager, _| manager
-            .workspaces
-            .workspace(workspace_id)
-            .unwrap()
-            .remote_connection_state()),
-        Some(RemoteConnectionState::reconnecting(2))
-    );
-    assert!(aliases.begin_mutation([alias.clone()]).is_err());
-
-    cx.update(|window, cx| {
-        manager.update(cx, |manager, cx| {
-            manager.close_workspace(workspace_id, window, cx)
-        });
-    });
-    cx.run_until_parked();
-
-    assert!(connection_sender.is_closed());
-    assert!(!aliases.is_active(&alias));
-    assert!(aliases.begin_mutation([alias]).is_ok());
-}
-
-#[gpui::test]
-fn failed_workspace_alias_pin_should_return_activation_without_leaking_authority(
-    cx: &mut TestAppContext,
-) {
-    let (manager, _, cx) = workspace_manager(cx);
-    let (completion, aliases, alias, closes, _) =
-        remote_completion_with_active_alias_pin_failure(true);
-    let flow = open_remote_workspace_flow(&manager, cx);
-
-    emit_remote_workspace_completion(&flow, completion, cx);
-
-    assert_eq!(
-        manager.read_with(cx, |manager, _| (
-            manager.workspaces.len(),
-            manager.remote_workspace_runtimes.len(),
-            manager.remote_workspace_flow.is_some(),
-        )),
-        (1, 0, true)
-    );
-    assert_eq!(closes.load(Ordering::Acquire), 1);
-    assert!(!aliases.is_active(&alias));
-    assert_eq!(
-        flow.read_with(cx, |flow, _| flow.stage()),
-        RemoteWorkspaceFlowStage::ConnectionError
-    );
-
-    cx.update(|window, cx| {
-        flow.update(cx, |flow, cx| {
-            crate::ui::remote_workspace_flow::cancel(flow, window, cx);
-        });
-    });
-    cx.run_until_parked();
-
-    assert_eq!(closes.load(Ordering::Acquire), 1);
-    assert!(!aliases.is_active(&alias));
-    assert!(aliases.begin_mutation([alias]).is_ok());
-}
-
-#[gpui::test]
-fn repeated_remote_runtime_cleanup_closes_once(cx: &mut TestAppContext) {
-    let (manager, _, cx) = workspace_manager(cx);
-    let (completion, closes, _, _) = remote_completion("work", "~/src", "/home/tester/src", true);
-    let flow = open_remote_workspace_flow(&manager, cx);
-    emit_remote_workspace_completion(&flow, completion, cx);
-
-    manager.update(cx, |manager, _| manager.close_remote_runtimes());
-    manager.update(cx, |manager, _| manager.close_remote_runtimes());
-
-    assert_eq!(closes.load(Ordering::Acquire), 1);
-}
-
-#[gpui::test]
-fn unavailable_initial_terminal_session_channel_should_close_completion_and_offer_retry(
-    cx: &mut TestAppContext,
-) {
-    let (manager, records, cx) = workspace_manager(cx);
-    let flow = open_remote_workspace_flow(&manager, cx);
-    let (completion, closes, preparations, availability) =
-        remote_completion("work", "~/src", "/home/tester/src", false);
-
-    emit_remote_workspace_completion(&flow, completion, cx);
-    assert_eq!(
-        manager.read_with(cx, |manager, _| manager.workspaces.len()),
-        1
-    );
-    assert_eq!(records.starts().len(), 1);
-    assert_eq!(preparations.load(Ordering::Acquire), 0);
-    assert_eq!(closes.load(Ordering::Acquire), 1);
-
-    availability.store(true, Ordering::Release);
-    assert_eq!(
-        flow.read_with(cx, |flow, _| flow.stage()),
-        RemoteWorkspaceFlowStage::ConnectionError
-    );
-}
-
-#[gpui::test]
 fn failed_pin_activation_should_report_the_error_without_changing_the_hierarchy(
     cx: &mut TestAppContext,
 ) {
@@ -4355,168 +1627,6 @@ fn confirm_directory_picker_path(path: &str, cx: &mut VisualTestContext) {
     cx.run_until_parked();
     cx.simulate_keystrokes("cmd-enter");
     cx.run_until_parked();
-}
-
-#[gpui::test]
-fn open_remote_directory_should_start_the_remote_flow_at_a_chosen_directory(
-    cx: &mut TestAppContext,
-) {
-    let (manager, _, cx) = workspace_manager(cx);
-    cx.simulate_keystrokes("cmd-shift-o");
-    cx.run_until_parked();
-    let flow = manager
-        .read_with(cx, |manager, _| manager.remote_workspace_flow.clone())
-        .expect("Open Remote Directory should present the Remote Workspace flow");
-    assert_eq!(
-        flow.read_with(cx, |flow, _| (
-            flow.stage(),
-            crate::ui::remote_workspace_flow::start(flow)
-        )),
-        (
-            RemoteWorkspaceFlowStage::HostSelection,
-            RemoteWorkspaceStart::ChosenDirectory
-        )
-    );
-}
-
-#[gpui::test]
-fn open_remote_directory_should_return_to_the_picker_after_a_failed_launch_and_then_create(
-    cx: &mut TestAppContext,
-) {
-    let provider = Arc::new(TestRemoteProvider::connected(
-        crate::domain::RemoteDirectoryIdentity::new("/home/tester/src".to_owned()).unwrap(),
-    ));
-    let (control_connection, closes, _, _, _) =
-        reconnect_control_connection_with_provider_and_revalidation(
-            "work",
-            provider,
-            VecDeque::from([gpui::Task::ready(Err(
-                crate::terminal::TerminalSessionChannelRevalidationError::DirectoryUnavailable,
-            ))]),
-        );
-    let backend = TestRemoteWorkspaceFlowBackend::with_connections([gpui::Task::ready(Ok(
-        control_connection,
-    ))]);
-    let (manager, records, cx) = workspace_manager_with_remote_backend(backend, cx);
-    cx.update(|window, _| window.activate_window());
-    cx.run_until_parked();
-    cx.simulate_keystrokes("cmd-shift-o");
-    cx.run_until_parked();
-    let flow = manager.read_with(cx, |manager, _| {
-        manager.remote_workspace_flow.clone().unwrap()
-    });
-    cx.update(|window, cx| {
-        flow.update(cx, |flow, cx| {
-            crate::ui::remote_workspace_flow::select_host_destination(
-                flow,
-                crate::domain::SshDestination::new("work".to_owned()).unwrap(),
-                window,
-                cx,
-            );
-        });
-    });
-    cx.run_until_parked();
-    assert_eq!(
-        flow.read_with(cx, |flow, _| flow.stage()),
-        RemoteWorkspaceFlowStage::ChoosingDirectory
-    );
-
-    confirm_directory_picker_path("~/src/", cx);
-
-    assert_eq!(
-        flow.read_with(cx, |flow, _| flow.stage()),
-        RemoteWorkspaceFlowStage::ChoosingDirectory
-    );
-    assert!(cx.debug_bounds("command-palette-panel").is_some());
-    assert_eq!(
-        manager.read_with(cx, |manager, _| manager.workspaces.len()),
-        1
-    );
-    assert_eq!(closes.load(Ordering::Acquire), 0);
-
-    confirm_directory_picker_path("~/src/", cx);
-
-    manager.read_with(cx, |manager, _| {
-        assert_eq!(manager.workspaces.len(), 2);
-        assert!(manager.remote_workspace_flow.is_none());
-        match manager.workspaces.active().pinned_directory() {
-            Some(PinnedDirectory::Remote {
-                directory,
-                identity,
-            }) => {
-                assert_eq!(directory.as_str(), "~/src/");
-                assert_eq!(identity.as_str(), "/home/tester/src");
-            }
-            other => panic!("expected a Remote Pinned Directory, got {other:?}"),
-        }
-    });
-    assert!(cx.debug_bounds("command-palette-panel").is_none());
-    assert_eq!(records.starts().len(), 2);
-    assert_eq!(closes.load(Ordering::Acquire), 0);
-    assert!(cx.update(|window, cx| {
-        manager
-            .read(cx)
-            .workspaces
-            .active()
-            .payload()
-            .read(cx)
-            .focused_terminal_is_focused(window, cx)
-    }));
-}
-
-#[gpui::test]
-fn open_remote_directory_should_pin_the_new_workspace_and_reuse_it_for_the_same_directory(
-    cx: &mut TestAppContext,
-) {
-    let (manager, records, cx) = workspace_manager(cx);
-    let mut closes = Vec::new();
-    for _ in 0..2 {
-        cx.update(|window, cx| {
-            manager.update(cx, |manager, cx| {
-                assert!(manager.activate_workspace(WorkspaceId::new(1), window, cx));
-            })
-        });
-        let flow = open_remote_workspace_flow(&manager, cx);
-        let (completion, completion_closes, _, _) =
-            remote_completion("work", "~/src", "/home/tester/src", true);
-        emit_remote_workspace_completion(
-            &flow,
-            crate::ui::remote_workspace_flow::pinned(completion),
-            cx,
-        );
-        closes.push(completion_closes);
-    }
-
-    manager.read_with(cx, |manager, _| {
-        assert_eq!(manager.workspaces.len(), 2);
-        assert_eq!(manager.workspaces.active_id(), WorkspaceId::new(2));
-        assert!(manager.remote_workspace_flow.is_none());
-        assert_eq!(manager.remote_workspace_runtimes.len(), 1);
-        match manager.workspaces.active().pinned_directory() {
-            Some(PinnedDirectory::Remote {
-                directory,
-                identity,
-            }) => {
-                assert_eq!(directory.as_str(), "~/src");
-                assert_eq!(identity.as_str(), "/home/tester/src");
-            }
-            other => panic!("expected a Remote Pinned Directory, got {other:?}"),
-        }
-    });
-    let starts = records.starts();
-    assert_eq!(starts.len(), 2);
-    assert_eq!(
-        starts
-            .last()
-            .unwrap()
-            .remote_launch_plan()
-            .unwrap()
-            .remote_directory()
-            .as_str(),
-        "~/src"
-    );
-    assert_eq!(closes[0].load(Ordering::Acquire), 0);
-    assert_eq!(closes[1].load(Ordering::Acquire), 1);
 }
 
 #[gpui::test]
@@ -7604,33 +4714,6 @@ fn collapsed_workspace_switcher_should_open_from_each_part_without_dragging(
 }
 
 #[gpui::test]
-fn collapsed_remote_switcher_should_show_the_name_without_a_workspace_icon(
-    cx: &mut TestAppContext,
-) {
-    let (manager, _, cx) = workspace_manager(cx);
-    let flow = open_remote_workspace_flow(&manager, cx);
-    let (completion, _, _, _) = remote_completion("work", "~", "/home/tester", true);
-    emit_remote_workspace_completion(&flow, completion, cx);
-    click("toggle-sidebar-button", cx);
-
-    assert!(cx.debug_bounds("workspace-chip-icon").is_none());
-    let switcher_icon = cx.debug_bounds("workspace-switcher-icon").unwrap();
-    let label = cx.debug_bounds("workspace-chip-label").unwrap();
-    assert_eq!(label.left() - switcher_icon.right(), px(8.0));
-    let chrome = cx.debug_bounds("workspace-top-chrome").unwrap();
-    assert_eq!(cx.debug_bounds("tab-bar").unwrap().left(), chrome.right());
-    assert_eq!(
-        cx.debug_bounds("workspace-sidebar-resize-handle-divider")
-            .unwrap()
-            .center()
-            .x,
-        chrome.right()
-    );
-    click("workspace-chip-label", cx);
-    assert!(cx.update(|window, cx| window_combo_box_is_open(window, cx)));
-}
-
-#[gpui::test]
 fn collapsed_chrome_geometry_survives_combo_box_theme_replacement(cx: &mut TestAppContext) {
     use spaceterm_ui::{ComboBoxMetrics, ComboBoxPaint, ComboBoxTheme};
 
@@ -9534,147 +6617,6 @@ mod unix_adapter_tests {
 }
 
 #[gpui::test]
-fn remote_pin_change_and_unpin_should_preserve_terminal_sessions_and_source_directory(
-    cx: &mut TestAppContext,
-) {
-    let (manager, records, cx) = workspace_manager(cx);
-    let provider = Arc::new(TestRemoteProvider::connected(
-        crate::domain::RemoteDirectoryIdentity::new("/srv/physical".into()).unwrap(),
-    ));
-    let (completion, closes, _, _, _, _) = remote_completion_with_provider(
-        "work",
-        "~",
-        "/home/tester",
-        true,
-        gpui::Task::ready(Ok(())),
-        provider,
-    );
-    let flow = open_remote_workspace_flow(&manager, cx);
-    emit_remote_workspace_completion(&flow, completion, cx);
-    for (directory, count) in [("/srv/frontend", 2), ("/srv/backend", 3)] {
-        cx.update(|window, cx| {
-            manager.update(cx, |manager, cx| {
-                manager.apply_directory_pin(
-                    WorkspaceId::new(2),
-                    Some(PinnedDirectory::Remote {
-                        directory: RemoteDirectory::new(directory.into()).unwrap(),
-                        identity: crate::domain::RemoteDirectoryIdentity::new(
-                            "/srv/physical".into(),
-                        )
-                        .unwrap(),
-                    }),
-                    window,
-                    cx,
-                )
-            })
-        });
-        cx.run_until_parked();
-        assert_eq!(records.starts().len(), count);
-        cx.simulate_keystrokes("cmd-t");
-        cx.run_until_parked();
-        assert_eq!(
-            records
-                .starts()
-                .last()
-                .unwrap()
-                .remote_launch_plan()
-                .unwrap()
-                .remote_directory()
-                .as_str(),
-            directory
-        );
-    }
-    cx.update(|window, cx| {
-        manager.update(cx, |manager, cx| {
-            manager.apply_directory_pin(WorkspaceId::new(2), None, window, cx);
-        })
-    });
-    assert_eq!(records.starts().len(), 4);
-    cx.simulate_keystrokes("cmd-t");
-    cx.run_until_parked();
-    assert_eq!(
-        records
-            .starts()
-            .last()
-            .unwrap()
-            .remote_launch_plan()
-            .unwrap()
-            .remote_directory()
-            .as_str(),
-        "/srv/backend"
-    );
-    assert!(records.dropped_session_ids().is_empty());
-    assert_eq!(closes.load(Ordering::Acquire), 0);
-}
-
-#[gpui::test]
-fn directory_picker_should_pin_its_target_and_keep_the_connection(cx: &mut TestAppContext) {
-    let (manager, records, cx) = workspace_manager(cx);
-    let provider = Arc::new(TestRemoteProvider::connected(
-        crate::domain::RemoteDirectoryIdentity::new("/home/tester".into()).unwrap(),
-    ));
-    let (completion, closes, _, _, _, _) = remote_completion_with_provider(
-        "work",
-        "~",
-        "/home/tester",
-        true,
-        gpui::Task::ready(Ok(())),
-        provider,
-    );
-    let flow = open_remote_workspace_flow(&manager, cx);
-    emit_remote_workspace_completion(&flow, completion, cx);
-    cx.update(|window, cx| {
-        manager.update(cx, |manager, cx| {
-            manager.choose_pin_directory(WorkspaceId::new(2), window, cx)
-        })
-    });
-    cx.run_until_parked();
-    cx.simulate_keystrokes("cmd-shift-n");
-    cx.run_until_parked();
-    assert!(manager.read_with(cx, |manager, _| manager.remote_workspace_flow.is_none()));
-    click("directory-picker-confirm", cx);
-    assert!(manager.read_with(cx, |manager, _| {
-        manager
-            .workspaces
-            .workspace(WorkspaceId::new(1))
-            .unwrap()
-            .pinned_directory()
-            .is_none()
-    }));
-    assert_eq!(
-        manager.read_with(cx, |manager, _| {
-            match manager
-                .workspaces
-                .workspace(WorkspaceId::new(2))
-                .unwrap()
-                .pinned_directory()
-            {
-                Some(PinnedDirectory::Remote { directory, .. }) => {
-                    Some(directory.as_str().to_owned())
-                }
-                _ => None,
-            }
-        }),
-        Some("~/".to_owned())
-    );
-    assert_eq!(records.starts().len(), 2);
-    assert_eq!(closes.load(Ordering::Acquire), 0);
-    assert_eq!(
-        manager.read_with(cx, |manager, _| manager.remote_workspace_runtimes.len()),
-        1
-    );
-    assert!(cx.update(|window, cx| {
-        manager
-            .read(cx)
-            .workspaces
-            .active()
-            .payload()
-            .read(cx)
-            .focused_terminal_is_focused(window, cx)
-    }));
-}
-
-#[gpui::test]
 fn unavailable_home_should_allow_closing_a_workspace_without_replacement(cx: &mut TestAppContext) {
     let (manager, records, cx) = workspace_manager(cx);
     new_desktop_workspace(cx);
@@ -9695,28 +6637,6 @@ fn unavailable_home_should_allow_closing_a_workspace_without_replacement(cx: &mu
     });
     assert_eq!(records.session_count(), 2);
     assert_eq!(records.dropped_session_ids(), vec![2]);
-}
-
-#[gpui::test]
-fn workspace_switcher_should_list_local_and_remote_workspaces_and_activate_remote(
-    cx: &mut TestAppContext,
-) {
-    let (manager, _, cx) = workspace_manager(cx);
-    let flow = open_remote_workspace_flow(&manager, cx);
-    let (completion, _, _, _) = remote_completion("work", "~", "/home/tester", true);
-    emit_remote_workspace_completion(&flow, completion, cx);
-    cx.simulate_keystrokes("ctrl-1");
-    cx.run_until_parked();
-    open_workspace_switcher(cx);
-    assert!(cx.debug_bounds("workspace-switcher-result-1").is_some());
-    assert!(cx.debug_bounds("workspace-switcher-result-2").is_some());
-    cx.simulate_keystrokes("f r e s h enter");
-    cx.run_until_parked();
-    assert_eq!(
-        manager.read_with(cx, |manager, _| manager.workspaces.active_id()),
-        WorkspaceId::new(2)
-    );
-    assert!(!cx.update(|window, cx| window_combo_box_is_open(window, cx)));
 }
 
 #[gpui::test]
@@ -9880,79 +6800,6 @@ fn sidebar_remote_creation_should_open_host_selection_and_restore_focus_on_cance
 }
 
 #[gpui::test]
-fn creation_shortcut_should_accept_remote_switcher_name_instead_of_highlight(
-    cx: &mut TestAppContext,
-) {
-    let (manager, records, cx) = workspace_manager(cx);
-    open_workspace_switcher_for_creation(cx);
-    cx.simulate_keystrokes("end home");
-    cx.run_until_parked();
-    let local_row = cx.debug_bounds("workspace-switcher-create-local").unwrap();
-    let remote_row = cx.debug_bounds("workspace-switcher-create-remote").unwrap();
-    cx.update(|window, _| {
-        let quads = window.painted_quads();
-        let background = |bounds: gpui::Bounds<Pixels>| quads.iter().find(|quad| quad.bounds == bounds.scale(window.scale_factor())).map(|quad| quad.background);
-        assert_ne!(background(local_row), background(remote_row), "keyboard highlight must visibly distinguish the Local creation row before the Remote shortcut");
-    });
-    cx.simulate_keystrokes("cmd-shift-n");
-    cx.run_until_parked();
-    let flow = manager
-        .read_with(cx, |manager, _| manager.remote_workspace_flow.clone())
-        .expect("remote shortcut should open setup");
-    assert!(cx.update(|window, cx| flow.read(cx).owns_first_responder(window, cx)));
-    let (completion, _, _, _) = remote_completion("work", "~", "/home/tester", true);
-    emit_remote_workspace_completion(&flow, completion, cx);
-    manager.read_with(cx, |manager, _| {
-        assert_eq!(manager.workspaces.active().name(), "fresh workspace");
-        assert_eq!(manager.workspaces.len(), 2);
-    });
-    assert_eq!(records.starts().len(), 2);
-}
-
-#[gpui::test]
-fn switcher_should_preserve_explicit_remote_names_across_destinations(cx: &mut TestAppContext) {
-    let (manager, records, cx) = workspace_manager(cx);
-    new_desktop_workspace(cx);
-    manager.update(cx, |manager, cx| {
-        let workspace_id = manager.workspaces.active_id();
-        manager
-            .workspaces
-            .rename_workspace(workspace_id, "fresh workspace".to_owned())
-            .unwrap();
-        cx.notify();
-    });
-    for (destination, expected) in [
-        ("work", "fresh workspace"),
-        ("work", "fresh workspace"),
-        ("other", "fresh workspace"),
-        ("work", "fresh workspace"),
-    ] {
-        open_workspace_switcher_for_creation(cx);
-        // The matching Workspaces push the creation rows below the switcher's visible rows.
-        cx.simulate_keystrokes("cmd-shift-n");
-        cx.run_until_parked();
-        let flow = manager.read_with(cx, |manager, _| {
-            manager.remote_workspace_flow.clone().unwrap()
-        });
-        let (completion, _, _, _) = remote_completion(destination, "~", "/home/tester", true);
-        emit_remote_workspace_completion(&flow, completion, cx);
-        assert_eq!(
-            manager.read_with(cx, |manager, _| manager
-                .workspaces
-                .active()
-                .name()
-                .to_owned()),
-            expected
-        );
-    }
-    assert_eq!(
-        manager.read_with(cx, |manager, _| manager.workspaces.len()),
-        6
-    );
-    assert_eq!(records.starts().len(), 6);
-}
-
-#[gpui::test]
 fn creation_shortcut_should_open_remote_setup_without_reusing_cancelled_query(
     cx: &mut TestAppContext,
 ) {
@@ -9988,27 +6835,6 @@ fn creation_shortcut_should_open_remote_setup_without_reusing_cancelled_query(
             .read(cx)
             .focused_terminal_is_focused(window, cx)
     }));
-}
-
-#[gpui::test]
-fn creation_shortcut_should_use_automatic_remote_name_for_blank_input(cx: &mut TestAppContext) {
-    let (manager, _, cx) = workspace_manager(cx);
-    open_workspace_switcher(cx);
-    cx.simulate_keystrokes("space cmd-shift-n");
-    cx.run_until_parked();
-    let flow = manager.read_with(cx, |manager, _| {
-        manager.remote_workspace_flow.clone().unwrap()
-    });
-    let (completion, _, _, _) = remote_completion("work", "~", "/home/tester", true);
-    emit_remote_workspace_completion(&flow, completion, cx);
-    assert_eq!(
-        manager.read_with(cx, |manager, _| manager
-            .workspaces
-            .active()
-            .name()
-            .to_owned()),
-        "Default (2)"
-    );
 }
 
 #[gpui::test]
@@ -11106,7 +7932,7 @@ fn workspace_manager_with_terminal_nodes(
             std::env::temp_dir(),
             WorkspaceManagerAdapters {
                 accessibility: Rc::new(AccessKitTerminalAccessibilityAdapterFactory),
-                ..workspace_adapters(test_remote_backend_factory())
+                ..workspace_adapters()
             },
             SidebarState::Expanded,
             window,
@@ -11920,7 +8746,8 @@ impl MachineGroupsHarness {
         use crate::ui::shared_workspaces::testing::{ScriptedEdits, ScriptedPanes};
         use crate::ui::shared_workspaces::{SharedEditSource, SharedPaneSessions};
 
-        let (manager, _records, cx) = workspace_manager(cx);
+        // A test installs the SSH registry its machines need.
+        let (manager, _records, cx) = workspace_manager_without_ssh(cx);
         let local = Rc::new(ScriptedEdits::new(Some(machine_inventory(1, &[]))));
         cx.update(|window, cx| {
             manager.update(cx, |manager, cx| {
@@ -12607,29 +9434,6 @@ fn a_machine_headings_server_settings_should_select_its_server(cx: &mut TestAppC
         selected,
         ["Servers", "penguin"],
         "Settings presents the Servers section with the heading's server selected"
-    );
-}
-
-/// A machine with only native Remote Workspaces has no presented SSH server, so its heading offers
-/// no Connect that would set one up there and no Disconnect, whatever the registry reports for its
-/// destination.
-#[gpui::test]
-fn a_machine_with_only_remote_workspaces_should_offer_no_connection_controls(
-    cx: &mut TestAppContext,
-) {
-    let (harness, cx) = MachineGroupsHarness::new(cx);
-    // The registry reads "work" as an inactive host, whose status alone would offer Connect.
-    let (_connections, _connects) = waiting_ssh_registry(cx);
-    create_disconnected_remote_workspace(&harness.manager, cx);
-    redraw(cx);
-
-    assert!(
-        cx.debug_bounds("machine-heading-work").is_some(),
-        "the machine still heads its Workspaces"
-    );
-    assert!(
-        cx.debug_bounds("machine-heading-work-menu").is_none(),
-        "no SSH server is saved or presented there, so its heading offers nothing"
     );
 }
 
@@ -15052,6 +11856,156 @@ mod shared_repositories {
         )
     }
 
+    /// Presents `initial` as the Workspaces of penguin's SSH server, whose writer accepts Worktree
+    /// writes and records each Worktree read it is asked.
+    fn ssh_harness(
+        cx: &mut TestAppContext,
+        initial: Inventory,
+    ) -> (
+        Harness,
+        Rc<ScriptedEdits>,
+        Arc<crate::ui::server_worktrees::testing::ScriptedReads>,
+        &mut VisualTestContext,
+    ) {
+        let (manager, _records, cx) = workspace_manager(cx);
+        let edits = Rc::new(ScriptedEdits::new(Some(initial)));
+        edits.set_worktree_writes(true);
+        let reads = crate::ui::server_worktrees::testing::ScriptedReads::new("~/{branch}");
+        let penguin = crate::domain::SshDestination::new("penguin".to_owned()).unwrap();
+        let session_factory = WorkspaceTerminalSessionFactory::new_local(
+            Rc::new(
+                TestTerminalSessionFactory::new(TestTerminalSessionRecords::default())
+                    .server_backed(),
+            ),
+            crate::terminal::testing::test_local_directory(std::env::temp_dir()),
+        );
+        cx.update(|window, cx| {
+            crate::ui::server_worktrees::testing::present_ssh(
+                &penguin,
+                Rc::clone(&edits),
+                Arc::clone(&reads),
+                cx,
+            );
+            manager.update(cx, |manager, cx| {
+                let key = manager.present_server_workspaces(
+                    ServerOrigin::Ssh(penguin),
+                    SharedEditSource::new(Rc::clone(&edits) as Rc<_>),
+                    SharedPaneSessions::with_opener(
+                        ScriptedPanes::new(session_factory) as Rc<_>,
+                        &PaneConstruction::testing(),
+                    ),
+                    window,
+                    cx,
+                );
+                manager.sync_shared_workspaces(key, window, cx);
+            });
+        });
+        cx.run_until_parked();
+        let shared = manager
+            .read_with(cx, |manager, _| {
+                manager
+                    .workspaces
+                    .iter()
+                    .map(|workspace| workspace.id())
+                    .find(|id| manager.is_shared_workspace(*id))
+            })
+            .expect("penguin's Workspace joins the sidebar");
+        (
+            Harness {
+                manager,
+                edits: Rc::clone(&edits),
+                shared,
+            },
+            edits,
+            reads,
+            cx,
+        )
+    }
+
+    /// An SSH server's Workspace offers New Worktree and Remove Worktree, because that server
+    /// runs Git on its own computer.
+    #[gpui::test]
+    fn an_ssh_server_workspace_should_offer_worktree_writes_through_its_server(
+        cx: &mut TestAppContext,
+    ) {
+        let (harness, _, _, cx) = ssh_harness(cx, published(1, "main", true));
+        let row = harness.row(cx);
+        let section = row
+            .worktrees
+            .expect("the repository discloses its Worktrees");
+        let removals: Vec<_> = section.rows().map(|row| row.removal).collect();
+
+        assert!(
+            row.creates_worktrees,
+            "New Worktree reaches penguin's server"
+        );
+        assert_eq!(
+            removals,
+            vec![WorktreeRemoval::Main, WorktreeRemoval::Allowed]
+        );
+    }
+
+    /// New Worktree and Remove Worktree on an SSH server's Workspace ask that server, over its
+    /// own route, about its own paths. This computer's server is never asked and no client-local
+    /// Git or filesystem check runs on the other computer's paths.
+    #[gpui::test]
+    fn ssh_server_worktree_operations_should_read_only_through_that_server(
+        cx: &mut TestAppContext,
+    ) {
+        use spaceterm_server::worktree::Read;
+
+        let (harness, edits, reads, cx) = ssh_harness(cx, published(1, "main", true));
+        let feature = harness
+            .row(cx)
+            .worktrees
+            .and_then(|section| {
+                section
+                    .rows()
+                    .find(|row| row.name.as_ref() == "app-feature")
+                    .map(|row| row.worktree_id)
+            })
+            .expect("the feature Worktree has a row");
+
+        cx.update(|window, cx| {
+            harness.manager.update(cx, |manager, cx| {
+                assert!(manager.new_worktree(harness.shared, window, cx));
+                manager.request_server_worktree_removal(harness.shared, feature, window, cx);
+            })
+        });
+        cx.run_until_parked();
+
+        let mut asked: Vec<_> = reads
+            .reads()
+            .into_iter()
+            .map(|read| match read {
+                Read::Context { root } => format!("context {}", root.display()),
+                Read::CheckRemoval { root, path } => {
+                    format!("check {} {}", root.display(), path.display())
+                }
+                other => format!("{other:?}"),
+            })
+            .collect();
+        asked.sort();
+        assert_eq!(
+            asked,
+            vec![
+                format!("check {MAIN_ROOT} {FEATURE_ROOT}"),
+                format!("context {MAIN_ROOT}"),
+            ]
+        );
+        assert!(
+            cx.update(|_, cx| cx
+                .try_global::<crate::ui::server_worktrees::Client>()
+                .is_none()),
+            "this computer's server writer is never created for penguin's Worktrees"
+        );
+        assert_eq!(
+            edits.submitted(),
+            Vec::new(),
+            "nothing is written before review"
+        );
+    }
+
     /// The server reads Git for a Workspace nobody is looking at, and a new reading reaches its
     /// row and every Pane even though its organization revision never changes.
     #[gpui::test]
@@ -15828,6 +12782,61 @@ mod shared_repositories {
 #[path = "launch_tests.rs"]
 mod launch_tests;
 
+/// This computer's SSH configuration, naming the hosts a test lists and saving nothing.
+struct ConfiguredHosts(Vec<&'static str>);
+
+impl crate::ui::ssh_servers::SshHostSource for ConfiguredHosts {
+    fn discover(&self) -> crate::ssh::host_config::HostDiscovery {
+        crate::ssh::host_config::HostDiscovery {
+            hosts: self
+                .0
+                .iter()
+                .map(|alias| crate::ssh::host_config::DiscoveredSshHost::configured(alias))
+                .collect(),
+            issues: Vec::new(),
+        }
+    }
+
+    fn add_managed_host(
+        &self,
+        _: crate::ssh::managed_hosts::ManagedSshHost,
+    ) -> Result<(), crate::ui::ssh_host_form::ManagedHostFormBackendError> {
+        Ok(())
+    }
+}
+
+/// Installs the desktop's SSH registry for a computer with a usable OpenSSH and no configured
+/// hosts. Every connection waits for the person to sign in.
+fn install_waiting_ssh_servers(cx: &mut App) {
+    install_ssh_servers(
+        crate::ssh::server_connection::SshServerConnections::new(
+            Arc::new(ConnectsOnceThen {
+                route: Arc::new(AtomicBool::new(true)),
+                attempts: AtomicUsize::new(0),
+                requested: AtomicUsize::new(0),
+                first_succeeds: false,
+                later: || {
+                    crate::ssh::server_connection::SshConnectFailure::NeedsPerson(
+                        crate::ssh::server_connection::InteractionReason::Authentication,
+                    )
+                },
+            }),
+            Arc::new(RememberedConnections::default()),
+        ),
+        Vec::new(),
+        cx,
+    );
+}
+
+/// Installs `connections` as the desktop's SSH registry, whose SSH configuration names `hosts`.
+fn install_ssh_servers(
+    connections: crate::ssh::server_connection::SshServerConnections,
+    hosts: Vec<&'static str>,
+    cx: &mut App,
+) {
+    crate::ui::ssh_servers::install(connections, Some(Arc::new(ConfiguredHosts(hosts))), cx);
+}
+
 /// Saved connections remembered in memory, as the private record keeps them.
 #[derive(Default)]
 struct RememberedConnections(Mutex<Vec<crate::ssh::server_connection::RetainedSshConnection>>);
@@ -16020,6 +13029,211 @@ fn a_presented_server_stopped_after_connecting_should_offer_disconnect(cx: &mut 
         "Stopped",
         cx,
     );
+}
+
+/// An SSH registry whose "penguin" connects on the first request, and the counts it keeps.
+fn connecting_penguin(
+    cx: &mut VisualTestContext,
+) -> (
+    crate::ssh::server_connection::SshServerConnections,
+    Arc<ConnectsOnceThen>,
+    crate::domain::SshDestination,
+) {
+    let backend = Arc::new(ConnectsOnceThen {
+        route: Arc::new(AtomicBool::new(true)),
+        attempts: AtomicUsize::new(0),
+        requested: AtomicUsize::new(0),
+        first_succeeds: true,
+        later: || crate::ssh::server_connection::SshConnectFailure::Stopped(None),
+    });
+    let connections = crate::ssh::server_connection::SshServerConnections::new(
+        backend.clone(),
+        Arc::new(RememberedConnections::default()),
+    );
+    let installed = connections.clone();
+    cx.update(|_, cx| install_ssh_servers(installed, vec!["penguin"], cx));
+    (
+        connections,
+        backend,
+        crate::domain::SshDestination::new("penguin".to_owned()).unwrap(),
+    )
+}
+
+/// Choosing an SSH host in New Remote Workspace connects to that account's SpaceTerm Server as
+/// Connect in Settings does, then asks that server, and no other, for the Workspace.
+#[gpui::test]
+fn new_remote_workspace_should_create_the_workspace_on_the_chosen_ssh_server(
+    cx: &mut TestAppContext,
+) {
+    use spaceterm_server::hierarchy::Mutation;
+
+    let (harness, cx) = MachineGroupsHarness::new(cx);
+    let (connections, backend, penguin) = connecting_penguin(cx);
+    // The window presents penguin's server once it connects, as its registry binding would.
+    let (_, penguin_edits) = harness.present_ssh("penguin", &[], cx);
+
+    cx.simulate_keystrokes("cmd-shift-n");
+    cx.run_until_parked();
+    cx.simulate_input("penguin");
+    cx.simulate_keystrokes("enter");
+    wait_until(|| !penguin_edits.submitted().is_empty(), cx);
+
+    assert!(connections.server(&penguin).is_some());
+    assert_eq!(backend.requested.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        penguin_edits.submitted(),
+        vec![Mutation::CreateWorkspace {
+            name: String::new(),
+            directory: None,
+        }]
+    );
+    assert_eq!(
+        harness.local.submitted(),
+        Vec::new(),
+        "this computer's server is asked for nothing"
+    );
+    assert!(
+        harness
+            .manager
+            .read_with(cx, |manager, _| manager.remote_workspace_flow.is_none())
+    );
+}
+
+/// A host whose server is already connected is reused: the flow asks SSH for nothing more.
+#[gpui::test]
+fn new_remote_workspace_should_reuse_a_connected_server_without_connecting_again(
+    cx: &mut TestAppContext,
+) {
+    let (harness, cx) = MachineGroupsHarness::new(cx);
+    let (connections, backend, penguin) = connecting_penguin(cx);
+    connections.connect(penguin.clone());
+    wait_until(|| connections.server(&penguin).is_some(), cx);
+    let (_, penguin_edits) = harness.present_ssh("penguin", &[], cx);
+
+    cx.simulate_keystrokes("cmd-shift-n");
+    cx.run_until_parked();
+    cx.simulate_input("penguin");
+    cx.simulate_keystrokes("enter");
+    wait_until(|| !penguin_edits.submitted().is_empty(), cx);
+
+    assert_eq!(
+        backend.requested.load(Ordering::SeqCst),
+        1,
+        "one Connect only"
+    );
+}
+
+/// A directory the flow chose on penguin's server is the new Workspace's pin there. Choosing a
+/// directory one of that server's Workspaces is already pinned to opens that Workspace instead.
+#[gpui::test]
+fn open_remote_directory_should_pin_on_its_server_and_reuse_a_workspace_pinned_there(
+    cx: &mut TestAppContext,
+) {
+    use crate::ui::remote_workspace_flow::{RemoteWorkspaceChoice, RemoteWorkspaceFlowEvent};
+    use spaceterm_server::hierarchy::Mutation;
+
+    let (harness, cx) = MachineGroupsHarness::new(cx);
+    let (connections, _backend, penguin) = connecting_penguin(cx);
+    connections.connect(penguin.clone());
+    wait_until(|| connections.server(&penguin).is_some(), cx);
+    let (_, penguin_edits) = harness.present_ssh("penguin", &[("Far", 7)], cx);
+    let mut inventory = machine_inventory(harness.next_revision(), &[("Far", 7)]);
+    inventory.workspaces[0].pinned_directory = Some(PathBuf::from("/srv/app"));
+    penguin_edits.set_inventory(inventory);
+    let complete = |directory: &str, cx: &mut VisualTestContext| {
+        cx.simulate_keystrokes("cmd-shift-o");
+        cx.run_until_parked();
+        let flow = harness
+            .manager
+            .read_with(cx, |manager, _| manager.remote_workspace_flow.clone())
+            .expect("Open Remote Directory opens the flow");
+        let choice = RemoteWorkspaceChoice {
+            destination: penguin.clone(),
+            directory: Some(PathBuf::from(directory)),
+        };
+        cx.update(|_, cx| {
+            flow.update(cx, |_, cx| {
+                cx.emit(RemoteWorkspaceFlowEvent::Completed(choice))
+            });
+        });
+        cx.run_until_parked();
+    };
+    cx.update(|window, cx| {
+        harness.manager.update(cx, |manager, cx| {
+            let key = manager
+                .shared
+                .key_of(&ServerOrigin::Ssh(penguin.clone()))
+                .unwrap();
+            manager.sync_shared_workspaces(key, window, cx);
+        })
+    });
+    cx.run_until_parked();
+
+    complete("/srv/app", cx);
+    let pinned = harness.manager.read_with(cx, |manager, _| {
+        let active = manager.workspaces.active_workspace_id()?;
+        (manager.machine(active) == Some(machine_groups::Machine::Ssh(penguin.clone())))
+            .then(|| manager.workspaces.active().name().to_owned())
+    });
+    assert_eq!(pinned.as_deref(), Some("Far"), "the pinned Workspace opens");
+    assert_eq!(penguin_edits.submitted(), Vec::new());
+
+    complete("/srv/other", cx);
+    assert_eq!(
+        penguin_edits.submitted(),
+        vec![Mutation::CreateWorkspace {
+            name: String::new(),
+            directory: Some(PathBuf::from("/srv/other")),
+        }]
+    );
+    assert_eq!(harness.local.submitted(), Vec::new());
+}
+
+/// A direct network server's heading creates a Workspace on that server, and only there, so a
+/// paired server reached without SSH takes new work too.
+#[gpui::test]
+fn a_direct_server_heading_should_create_a_workspace_on_that_server(cx: &mut TestAppContext) {
+    use crate::ui::shared_workspaces::testing::{ScriptedEdits, ScriptedPanes};
+    use crate::ui::shared_workspaces::{DirectServer, SharedEditSource, SharedPaneSessions};
+    use spaceterm_server::hierarchy::Mutation;
+
+    let (harness, cx) = MachineGroupsHarness::new(cx);
+    let edits = Rc::new(ScriptedEdits::new(Some(machine_inventory(
+        harness.next_revision(),
+        &[],
+    ))));
+    cx.update(|window, cx| {
+        harness.manager.update(cx, |manager, cx| {
+            let key = manager.present_server_workspaces(
+                ServerOrigin::Direct(DirectServer {
+                    route: [9; 32],
+                    name: "Studio".into(),
+                }),
+                SharedEditSource::new(Rc::clone(&edits) as Rc<_>),
+                SharedPaneSessions::with_opener(
+                    ScriptedPanes::new(MachineGroupsHarness::session_factory()) as Rc<_>,
+                    &PaneConstruction::testing(),
+                ),
+                window,
+                cx,
+            );
+            manager.sync_shared_workspaces(key, window, cx);
+        })
+    });
+    cx.run_until_parked();
+    redraw(cx);
+
+    right_click("machine-heading-Studio", cx);
+    click("machine-menu-new-workspace", cx);
+
+    assert_eq!(
+        edits.submitted(),
+        vec![Mutation::CreateWorkspace {
+            name: String::new(),
+            directory: None,
+        }]
+    );
+    assert_eq!(harness.local.submitted(), Vec::new());
 }
 
 /// After relaunch, a Saved Connection SpaceTerm keeps trying heads the Workspace Window while it

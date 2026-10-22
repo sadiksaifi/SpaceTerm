@@ -7,27 +7,24 @@
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::Arc;
 use std::time::Instant;
 
 use gpui::{App, AppContext as _, Context, Entity, EventEmitter, Global, Task};
 
-use crate::domain::RemoteDirectory;
 use crate::repository_status::local_read::LocalRepositoryReader;
 use crate::repository_status::pull_request::{PullRequestQuery, pull_request_query};
 use crate::repository_status::pull_request_lookup::{GitHubCliLookup, GitHubHosts};
-use crate::repository_status::remote_read::{remote_change_summary, remote_probe_outcome};
 use crate::repository_status::scheduler::{
     CountTicket, Interest, InterestId, ProbeTicket, RepositoryEffect, RepositoryScheduler,
     SchedulerUpdate, SourceDirectory,
 };
 use crate::repository_status::tool_check::check_tools;
 use crate::repository_status::{
-    ChangeSummary, GitHubCliStatus, GitToolStatus, ProbeOutcome, PullRequest, PullRequestError,
-    RemoteMachineKey, RemoteRepositoryReader, RepositoryKey, RepositoryMachine,
-    RepositoryMarkerReader, RepositoryProgramRunner, RepositoryReadError, RepositoryRoot,
-    RepositoryStatusPreferences, RepositoryToolDiscovery, RepositoryView, RepositoryWatch,
-    RepositoryWatcher,
+    ChangeSummary, GitHubCliStatus, GitToolStatus, PullRequest, PullRequestError, RepositoryKey,
+    RepositoryMachine, RepositoryMarkerReader, RepositoryProgramRunner, RepositoryReadError,
+    RepositoryRoot, RepositoryStatusPreferences, RepositoryToolDiscovery, RepositoryView,
+    RepositoryWatch, RepositoryWatcher,
 };
 use crate::settings::Settings;
 use crate::ssh::cancellation::SshCancellationToken;
@@ -65,75 +62,6 @@ pub(crate) fn thread_spawner() -> ReadSpawner {
             .spawn(work)
             .is_ok()
     })
-}
-
-/// Remote repository readers by machine. Each Control Connection lends its reader for as long as
-/// it holds the lease; any lent reader serves its machine.
-#[derive(Clone, Default)]
-pub(crate) struct RemoteRepositoryReaders(Arc<Mutex<ReaderTable>>);
-
-/// A lent reader and the lease owner that lent it.
-type LentReader = (u64, Arc<dyn RemoteRepositoryReader>);
-
-#[derive(Default)]
-struct ReaderTable {
-    next_owner: u64,
-    readers: HashMap<RemoteMachineKey, Vec<LentReader>>,
-}
-
-impl RemoteRepositoryReaders {
-    pub(crate) fn lend(
-        &self,
-        machine: RemoteMachineKey,
-        reader: Arc<dyn RemoteRepositoryReader>,
-    ) -> RemoteReaderLease {
-        let mut table = self.0.lock().unwrap_or_else(PoisonError::into_inner);
-        table.next_owner += 1;
-        let owner = table.next_owner;
-        table
-            .readers
-            .entry(machine.clone())
-            .or_default()
-            .push((owner, reader));
-        RemoteReaderLease {
-            readers: self.clone(),
-            machine,
-            owner,
-        }
-    }
-
-    fn reader(&self, machine: &RemoteMachineKey) -> Option<Arc<dyn RemoteRepositoryReader>> {
-        self.0
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .readers
-            .get(machine)
-            .and_then(|readers| readers.first())
-            .map(|(_, reader)| Arc::clone(reader))
-    }
-}
-
-/// Withdraws a lent reader when dropped.
-pub(crate) struct RemoteReaderLease {
-    readers: RemoteRepositoryReaders,
-    machine: RemoteMachineKey,
-    owner: u64,
-}
-
-impl Drop for RemoteReaderLease {
-    fn drop(&mut self) {
-        let mut table = self
-            .readers
-            .0
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        if let Some(readers) = table.readers.get_mut(&self.machine) {
-            readers.retain(|(owner, _)| *owner != self.owner);
-            if readers.is_empty() {
-                table.readers.remove(&self.machine);
-            }
-        }
-    }
 }
 
 /// The Panes and sidebar rows whose [`RepositoryStatusStore::view`] changed.
@@ -230,7 +158,6 @@ pub(crate) struct RepositoryStatusStore {
     adapters: RepositoryStatusAdapters,
     spawn: ReadSpawner,
     tools: ToolState,
-    remote_readers: RemoteRepositoryReaders,
     watches: HashMap<RepositoryKey, Box<dyn RepositoryWatch>>,
     watch_events: async_channel::Sender<RepositoryKey>,
     /// Each count in flight and the token that stops it once nothing presents its repository.
@@ -284,7 +211,6 @@ impl RepositoryStatusStore {
             adapters,
             spawn,
             tools: ToolState::default(),
-            remote_readers: RemoteRepositoryReaders::default(),
             watches: HashMap::new(),
             watch_events,
             counts: HashMap::new(),
@@ -512,11 +438,6 @@ impl RepositoryStatusStore {
         self.preferences
     }
 
-    /// The readers Control Connections lend to Repository Status.
-    pub(crate) fn remote_readers(&self) -> RemoteRepositoryReaders {
-        self.remote_readers.clone()
-    }
-
     fn set_preferences(
         &mut self,
         preferences: RepositoryStatusPreferences,
@@ -586,23 +507,6 @@ impl RepositoryStatusStore {
                         cx,
                     );
                 }
-                (RepositoryMachine::Remote(machine), SourceDirectory::Remote(directory)) => {
-                    let reader = self.remote_reader(&machine);
-                    let cancellation = self.probe_cancellation(&ticket);
-                    self.read(
-                        move || remote_probe(reader, &directory, &cancellation),
-                        move |store, result, cx| {
-                            store.probes.remove(&ticket);
-                            let result = result.unwrap_or(Err(RepositoryReadError::Unavailable));
-                            let update =
-                                store
-                                    .scheduler
-                                    .probe_finished(ticket, result, Instant::now());
-                            store.apply(update, cx);
-                        },
-                        cx,
-                    );
-                }
                 _ => {
                     let update = self.scheduler.probe_finished(
                         ticket,
@@ -640,20 +544,6 @@ impl RepositoryStatusStore {
                                 reader
                                     .count(&root, fsmonitor, &cancellation)
                                     .map(|summary| summary.changes)
-                            })
-                        }
-                        (RepositoryMachine::Remote(machine), RepositoryRoot::Remote(root)) => {
-                            let reader = self.remote_reader(machine);
-                            let root = Arc::clone(root);
-                            let cancellation = cancellation.clone();
-                            Box::new(move || {
-                                let reader =
-                                    reader.ok_or(RepositoryReadError::ConnectionUnavailable)?;
-                                remote_change_summary(&reader.count(
-                                    &root,
-                                    fsmonitor,
-                                    &cancellation,
-                                )?)
                             })
                         }
                         _ => Box::new(|| Err(RepositoryReadError::InvalidResponse)),
@@ -807,10 +697,6 @@ impl RepositoryStatusStore {
         None
     }
 
-    fn remote_reader(&self, machine: &RemoteMachineKey) -> Option<Arc<dyn RemoteRepositoryReader>> {
-        self.remote_readers.reader(machine)
-    }
-
     fn check_tools(&mut self, cx: &mut Context<Self>) {
         if self.tools.checking {
             return;
@@ -928,17 +814,6 @@ impl RepositoryStatusStore {
 }
 
 const TOOL_CHECK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
-
-fn remote_probe(
-    reader: Option<Arc<dyn RemoteRepositoryReader>>,
-    directory: &str,
-    cancellation: &SshCancellationToken,
-) -> Result<ProbeOutcome, RepositoryReadError> {
-    let reader = reader.ok_or(RepositoryReadError::ConnectionUnavailable)?;
-    let remote = RemoteDirectory::new(directory.to_owned())
-        .map_err(|_| RepositoryReadError::InvalidResponse)?;
-    remote_probe_outcome(reader.probe(&remote, cancellation)?, directory)
-}
 
 #[cfg(test)]
 mod server_pull_request_tests {

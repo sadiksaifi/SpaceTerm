@@ -310,9 +310,8 @@ mod development {
             let counts = manager.worktree_tab_counts();
             let active = manager.active_worktree();
             let inventory = self.shared_inventory(workspace_id);
-            // Worktree writes reach only the account-local server.
-            let worktree_writes = self.is_local_server_workspace(workspace_id)
-                && crate::ui::server_worktrees::available(cx);
+            // The owning server runs Git for its Workspace, on its own computer.
+            let worktree_writes = self.owner_writes_worktrees(workspace_id, cx);
             let current =
                 inventory.map(|inventory| RepositoryIdentity::new(inventory.main_root.clone()));
             // `listed` says whether the repository the Workspace reads lists the Worktree now.
