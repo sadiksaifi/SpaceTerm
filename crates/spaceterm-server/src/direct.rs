@@ -255,6 +255,8 @@ pub struct DirectConnection {
     paired: PairedDevice,
 }
 impl DirectConnection {
+    /// Connects to the literal IP endpoint advertised by an explicitly enabled policy.
+    /// TLS, HTTP and device admission are bounded; this operation never runs a DNS resolver.
     pub fn connect(
         endpoint: &str,
         paired: &PairedDevice,

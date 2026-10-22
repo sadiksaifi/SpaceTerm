@@ -6,7 +6,7 @@ use rustls::{
 };
 use std::{
     io::{Read, Write},
-    net::{TcpStream, ToSocketAddrs},
+    net::{SocketAddr, TcpStream},
     os::{
         fd::{AsRawFd, RawFd},
         unix::net::UnixStream,
@@ -121,7 +121,7 @@ impl rustls::client::danger::ServerCertVerifier for Pinned {
     }
 }
 
-pub(super) fn validate_endpoint(endpoint: &str) -> Result<(String, u16), DirectError> {
+pub(super) fn validate_endpoint(endpoint: &str) -> Result<SocketAddr, DirectError> {
     if endpoint.len() > 1024 {
         return Err(DirectError::InvalidAddress);
     }
@@ -138,27 +138,17 @@ pub(super) fn validate_endpoint(endpoint: &str) -> Result<(String, u16), DirectE
         .ok_or(DirectError::InvalidAddress)?
         .trim_start_matches('[')
         .trim_end_matches(']')
-        .to_owned();
-    Ok((host, uri.port_u16().unwrap_or(443)))
+        .parse()
+        .map_err(|_| DirectError::InvalidAddress)?;
+    Ok(SocketAddr::new(host, uri.port_u16().unwrap_or(443)))
 }
 pub(super) fn connect(endpoint: &str, pin: &ServerPin) -> Result<Ws, DirectError> {
-    let (host, port) = validate_endpoint(endpoint)?;
-    // DNS does not grant authority: every address is fenced by the retained TLS certificate.
-    let addresses = (host.as_str(), port)
-        .to_socket_addrs()
-        .map_err(|_| DirectError::Transport)?;
+    // Invitations advertise the same concrete IP policy the owner enabled. A synchronous
+    // resolver would introduce an unbounded native wait outside the connection deadline.
+    let address = validate_endpoint(endpoint)?;
     let deadline = Instant::now() + HANDSHAKE_LIMIT;
-    let mut tcp = None;
-    for address in addresses.take(8) {
-        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
-            break;
-        };
-        if let Ok(stream) = TcpStream::connect_timeout(&address, remaining) {
-            tcp = Some(stream);
-            break;
-        }
-    }
-    let tcp = tcp.ok_or(DirectError::Transport)?;
+    let tcp = TcpStream::connect_timeout(&address, HANDSHAKE_LIMIT)
+        .map_err(|_| DirectError::Transport)?;
     tcp.set_nonblocking(true)
         .map_err(|_| DirectError::Transport)?;
     let mismatch = Arc::new(AtomicBool::new(false));
