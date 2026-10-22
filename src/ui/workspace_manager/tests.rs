@@ -11744,11 +11744,11 @@ mod shared_repositories {
                 commit: Some("abc1234".into()),
                 upstream: None,
                 operation: None,
-                changes: ChangeSummary {
+                changes: Ok(ChangeSummary {
                     total: ChangeTotal::Exact(1),
                     modified: 1,
                     ..ChangeSummary::default()
-                },
+                }),
                 pull_request: None,
             }),
             worktrees: Some(WorktreeInventory {

@@ -147,12 +147,13 @@ impl ServerRepositories {
                 if facts.failure.is_some()
                     && let Some(old) = old
                 {
-                    facts
-                        .repository
-                        .clone_from(&self.snapshot.directories[old].repository);
-                    facts
-                        .worktrees
-                        .clone_from(&self.snapshot.directories[old].worktrees);
+                    let previous = &self.snapshot.directories[old];
+                    if facts.repository.is_none() {
+                        facts.repository.clone_from(&previous.repository);
+                    }
+                    if facts.worktrees.is_none() {
+                        facts.worktrees.clone_from(&previous.worktrees);
+                    }
                 }
                 if old.is_some_and(|old| self.snapshot.directories[old] == facts)
                     && self.snapshot.git == git
@@ -390,8 +391,8 @@ fn read(
                     return Err(RepositoryReadError::InvalidResponse);
                 };
                 let changes = repository
-                    .count(root, probe.config.fsmonitor, &cancellation)?
-                    .changes;
+                    .count(root, probe.config.fsmonitor, &cancellation)
+                    .map(|summary| summary.changes);
                 facts.repository = Some(Repository {
                     root: root.clone(),
                     pull_request: policy::pull_request::pull_request_query(

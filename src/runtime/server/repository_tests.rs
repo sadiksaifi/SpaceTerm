@@ -64,6 +64,105 @@ pub(super) fn git_facts(
         std::thread::sleep(Duration::from_millis(20));
     }
 }
+
+#[test]
+fn count_failure_keeps_current_branch_upstream_pull_request_and_worktree_facts() {
+    assert_count_failure_keeps_facts(false);
+}
+
+#[test]
+fn count_timeout_keeps_current_branch_upstream_pull_request_and_worktree_facts() {
+    assert_count_failure_keeps_facts(true);
+}
+
+fn assert_count_failure_keeps_facts(timeout: bool) {
+    use spaceterm_server::repository::{RepositoryHead, RepositoryReadError};
+    let git = GitFixture::new();
+    std::fs::write(git.0.join(".gitattributes"), "tracked.txt filter=broken\n").unwrap();
+    std::fs::write(git.0.join("tracked.txt"), "before\n").unwrap();
+    git.git(&["add", "."]);
+    git.git(&[
+        "-c",
+        "user.name=Fixture",
+        "-c",
+        "user.email=fixture@example.invalid",
+        "commit",
+        "-m",
+        "tracked",
+    ]);
+    git.git(&[
+        "remote",
+        "add",
+        "origin",
+        "https://github.com/owner/example.git",
+    ]);
+    git.git(&["update-ref", "refs/remotes/origin/main", "HEAD"]);
+    git.git(&["config", "branch.main.remote", "origin"]);
+    git.git(&["config", "branch.main.merge", "refs/heads/main"]);
+    let mut prototype = host();
+    prototype.directory = git.0.clone();
+    let mut host = SharedWorkspaceHost::new(prototype);
+    create_shared(&mut host, 1);
+    git_facts(&mut host, &git.0, |facts| facts.repository.is_some());
+    // Fail only the expensive change read after a successful earlier publication.
+    let filter = if timeout {
+        std::fs::write(
+            git.0.join(".git/timeout-filter"),
+            "sleep 30\necho finished > .git/filter-finished\ncat\n",
+        )
+        .unwrap();
+        "/bin/sh .git/timeout-filter"
+    } else {
+        "false"
+    };
+    git.git(&["config", "filter.broken.clean", filter]);
+    git.git(&["config", "filter.broken.required", "true"]);
+    git.git(&["branch", "-m", "feature"]);
+    std::fs::write(git.0.join("tracked.txt"), "after!\n").unwrap();
+    let current = git_facts(&mut host, &git.0, |facts| {
+        facts
+            .repository
+            .as_ref()
+            .is_some_and(|repository| repository.head == RepositoryHead::Branch("feature".into()))
+    });
+    let facts = current
+        .repositories
+        .as_ref()
+        .unwrap()
+        .directories
+        .iter()
+        .find(|facts| facts.directory == git.0)
+        .unwrap();
+    assert_eq!(facts.failure, None);
+    let repository = facts.repository.as_ref().unwrap();
+    assert_eq!(
+        repository.changes,
+        Err(if timeout {
+            RepositoryReadError::TimedOut
+        } else {
+            RepositoryReadError::Unavailable
+        })
+    );
+    assert_eq!(
+        repository.upstream.as_ref().unwrap().name.as_ref(),
+        "origin/main"
+    );
+    assert_eq!(
+        repository
+            .pull_request
+            .as_ref()
+            .unwrap()
+            .head_branch
+            .as_ref(),
+        "feature"
+    );
+    assert_eq!(
+        facts.worktrees.as_ref().unwrap().worktrees[0].head,
+        spaceterm_server::repository::WorktreeHead::Branch("feature".into())
+    );
+    host.shutdown().unwrap();
+    assert!(!git.0.join(".git/filter-finished").exists());
+}
 #[test]
 fn shared_git_reads_publish_external_changes_to_two_clients_and_retain_worktree_membership() {
     use spaceterm_server::hierarchy::Mutation;
@@ -124,10 +223,11 @@ fn shared_git_reads_publish_external_changes_to_two_clients_and_retain_worktree_
     ));
     std::fs::write(tree.join("external"), "changed externally").unwrap();
     let changed = git_facts(&mut host, &tree, |facts| {
-        facts
-            .repository
-            .as_ref()
-            .is_some_and(|repo| repo.changes.total == ChangeTotal::Exact(1))
+        facts.repository.as_ref().is_some_and(|repo| {
+            repo.changes
+                .as_ref()
+                .is_ok_and(|changes| changes.total == ChangeTotal::Exact(1))
+        })
     });
     let tab_id = changed
         .workspaces

@@ -255,7 +255,7 @@ impl RepositoryPopover {
         };
         let changes = match &status.changes {
             ChangeState::Known(changes) => Some(popover_changes(changes)),
-            ChangeState::NotCounted | ChangeState::Counting => None,
+            ChangeState::NotCounted | ChangeState::Counting | ChangeState::Unavailable(_) => None,
         };
         Some(Self {
             name: sanitize_for_display(name.unwrap_or(&root), MAXIMUM_NAME_CHARS),
@@ -421,6 +421,10 @@ fn caption_detail(status: &RepositoryStatus) -> Option<CaptionDetail> {
             text: "counting…".to_owned(),
             dimmed: true,
         }),
+        ChangeState::Unavailable(_) => Some(CaptionDetail {
+            text: "Changes unavailable".to_owned(),
+            dimmed: true,
+        }),
         ChangeState::Known(changes) => match changes.total {
             ChangeTotal::Exact(0) | ChangeTotal::AtLeast(0) => None,
             ChangeTotal::Exact(total) => Some(detail(plural(total, "change"))),
@@ -495,6 +499,7 @@ fn accessible_label(status: &RepositoryStatus, now: Instant) -> String {
         match &status.changes {
             ChangeState::NotCounted => {}
             ChangeState::Counting => parts.push("counting changes".to_owned()),
+            ChangeState::Unavailable(_) => parts.push("changes unavailable".to_owned()),
             ChangeState::Known(changes) => match changes.total {
                 ChangeTotal::Exact(0) => parts.push("no changes".to_owned()),
                 ChangeTotal::Exact(total) => parts.push(plural(total, "change")),
@@ -537,6 +542,9 @@ fn footer(status: &RepositoryStatus, now: Instant) -> String {
         Freshness::LastKnown { as_of } => format!("Last known {}", age_text(as_of, now)),
         Freshness::Current if status.changes == ChangeState::Counting => {
             "Counting changes…".to_owned()
+        }
+        Freshness::Current if matches!(status.changes, ChangeState::Unavailable(_)) => {
+            "Couldn't count changes".to_owned()
         }
         Freshness::Current => format!("Updated {}", age_text(status.read_at, now)),
     }
@@ -1110,6 +1118,33 @@ mod tests {
         assert_eq!(footer(failed.clone()), "Last known 3 minutes ago");
         let popover = RepositoryPopover::from_view(&view(failed), later).unwrap();
         assert!(popover.dimmed);
+    }
+
+    #[test]
+    fn unavailable_changes_keep_the_current_branch_upstream_and_pull_request_visible() {
+        let now = Instant::now();
+        let mut repository = status(
+            main_branch(),
+            ChangeState::Unavailable(RepositoryReadError::TimedOut),
+            now,
+        );
+        repository.upstream = upstream(2, 1);
+        repository.pull_request = Some(pull_request(false));
+        let caption = caption(repository.clone(), now);
+        assert_eq!(caption.branch, "main");
+        assert_eq!(caption.detail.as_ref().unwrap().text, "Changes unavailable");
+        assert!(caption.detail.as_ref().unwrap().dimmed);
+        assert!(!caption.dimmed);
+        assert!(caption.accessible_label.contains("changes unavailable"));
+        assert!(!caption.accessible_label.contains("no changes"));
+        assert_eq!(caption.divergence.as_deref(), Some("↑2 ↓1"));
+        let popover = RepositoryPopover::from_view(&view(repository), now).unwrap();
+        assert_eq!(popover.branch, "main");
+        assert!(popover.pull_request.is_some());
+        assert!(popover.upstream.is_some());
+        assert!(popover.changes.is_none());
+        assert_eq!(popover.footer, "Couldn't count changes");
+        assert!(!popover.dimmed);
     }
 
     #[test]

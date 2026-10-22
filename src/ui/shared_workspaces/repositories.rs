@@ -183,7 +183,10 @@ impl SharedRepositories {
             commit: repository.commit.clone(),
             upstream: repository.upstream.clone(),
             operation: repository.operation,
-            changes: ChangeState::Known(repository.changes.clone()),
+            changes: match &repository.changes {
+                Ok(changes) => ChangeState::Known(changes.clone()),
+                Err(error) => ChangeState::Unavailable(*error),
+            },
             freshness,
             read_at,
             pull_request,
@@ -253,11 +256,11 @@ mod tests {
             commit: Some("abc1234".into()),
             upstream: None,
             operation: None,
-            changes: ChangeSummary {
+            changes: Ok(ChangeSummary {
                 total: ChangeTotal::Exact(2),
                 modified: 2,
                 ..ChangeSummary::default()
-            },
+            }),
             pull_request: Some(PullRequestQuery {
                 repository: GitHubRepository {
                     host: "github.com".into(),
@@ -418,6 +421,69 @@ mod tests {
         );
         assert_eq!(status(&offline).read_failure, None);
         assert_eq!(status(&current).freshness, Freshness::Current);
+    }
+
+    #[test]
+    fn decoded_count_failure_keeps_fresh_facts_and_client_pull_request_lookup() {
+        let now = Instant::now();
+        let mut repositories = SharedRepositories::default();
+        repositories.accept(
+            Some(&snapshot(1, vec![facts(Some(repository("main")), None)])),
+            now,
+        );
+        for error in [
+            RepositoryReadError::Unavailable,
+            RepositoryReadError::TimedOut,
+        ] {
+            let mut current = repository("feature");
+            current.changes = Err(error);
+            current.upstream = Some(spaceterm_server::repository::Upstream {
+                name: "origin/main".into(),
+                divergence: Some(spaceterm_server::repository::Divergence {
+                    ahead: 2,
+                    behind: 1,
+                }),
+            });
+            let mut directory = facts(Some(current), None);
+            directory.worktrees = Some(WorktreeInventory {
+                main_root: "/srv/app".into(),
+                current: Some(0),
+                worktrees: vec![WorktreeRecord {
+                    root: "/srv/app".into(),
+                    head: WorktreeHead::Branch("feature".into()),
+                    locked: false,
+                    missing: false,
+                }],
+            });
+            let revision = if error == RepositoryReadError::Unavailable {
+                2
+            } else {
+                3
+            };
+            let decoded: Snapshot = serde_json::from_slice(
+                &serde_json::to_vec(&snapshot(revision, vec![directory])).unwrap(),
+            )
+            .unwrap();
+            assert!(repositories.accept(Some(&decoded), now));
+            let keys = repositories.pull_request_keys();
+            assert_eq!(keys[0].query.head_branch.as_ref(), "feature");
+            assert_eq!(keys[0].upstream.as_deref(), Some("origin/main"));
+            let presented = present(&repositories, RepositoryStatusPreferences::default(), true);
+            let status = status(&presented);
+            assert_eq!(status.changes, ChangeState::Unavailable(error));
+            assert_eq!(status.head, RepositoryHead::Branch("feature".into()));
+            assert_eq!(status.freshness, Freshness::Current);
+            assert_eq!(status.read_failure, None);
+            assert_eq!(status.pull_request.as_ref().unwrap().number, 7);
+            assert_eq!(
+                repositories
+                    .worktrees(Path::new("/srv/app/src"))
+                    .unwrap()
+                    .worktrees[0]
+                    .head,
+                WorktreeHead::Branch("feature".into())
+            );
+        }
     }
 
     #[test]
