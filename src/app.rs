@@ -2797,9 +2797,11 @@ mod runtime_tests {
         let coordinator = Rc::new(ApplicationQuitCoordinator {
             adapter: Rc::downgrade(&adapter),
             state: RefCell::new(ApplicationQuitCoordinatorState::WaitingForSettings),
+            status_area: StatusAreaName::MenuBar,
+            exit_ends_sessions: false,
         });
 
-        let decision = cx.update(|cx| coordinator.request(cx));
+        let decision = cx.update(|cx| coordinator.request(ApplicationQuitRequest::Dismissal, cx));
 
         assert_eq!(decision, ApplicationQuitDecision::Cancel);
         assert!(!cx.has_pending_prompt());
@@ -2813,6 +2815,8 @@ mod runtime_tests {
         let coordinator = Rc::new(ApplicationQuitCoordinator {
             adapter: Rc::downgrade(&adapter),
             state: RefCell::new(ApplicationQuitCoordinatorState::WaitingForSettings),
+            status_area: StatusAreaName::MenuBar,
+            exit_ends_sessions: false,
         });
 
         cx.update(|cx| {
