@@ -2,7 +2,15 @@
 
 The desktop and local server use your operating-system account's authority. They do not pair or open a credential store. Independent clients retain nonsecret identities so their views, attachments and Pane control survive relaunch. [ADR 0027](adr/0027-trust-paired-clients-equally.md) owns the trust decision.
 
-Normal desktop launch connects to the account-local server and presents its retained Workspaces in the main Workspace Window. Closing client windows and quitting the client leave server-owned terminal programs running; [ADR 0049](adr/0049-own-status-controls-in-the-desktop-client.md) defines the client and status-menu lifetime. A deliberately stopped server stays stopped until the person chooses Start. Settings > Servers retains service management. The `server:*` mise tasks exercise the Development identity; status never starts a server.
+Installed Preflight and Release desktop launch connects to the account-local server and presents its retained Workspaces in the main Workspace Window. Closing client windows and quitting the client leave server-owned terminal programs running; [ADR 0049](adr/0049-own-status-controls-in-the-desktop-client.md) defines the client and status-menu lifetime. A deliberately stopped server stays stopped until the person chooses Start. Settings > Servers retains service management. The `server:*` mise tasks select the Development identity unless their help asks for an identity; status never starts a server.
+
+## Running current Development source
+
+Run `mise run development` to build and start the client and a foreground Development Server from the current source, including uncommitted edits. This workflow needs no production signing credentials, signed Server Candidate, prior Server installation or service registration. It keeps the existing protocol and server-owned Workspaces. [ADR 0030](adr/0030-start-servers-at-boot-independently-of-clients.md) owns this lifetime exception.
+
+The command owns the run through a private connection to the client and an input pipe to its foreground Server; it does not recover process ownership from saved PIDs. Ctrl+C, termination or complete client exit ends its client, Server and Terminal Sessions and removes its runtime resources. Closing client windows leaves the run available in the status area. Development Settings and Workspace organization remain for the next run; retained Panes start fresh shells on first use. A conflicting Server remains untouched. End its owning run or explicitly manage its installed service before retrying; never delete a socket or signal a saved PID to bypass ownership checks.
+
+Installed Preflight exercises the persistent service lifecycle. `mise run preflight:install:macos` or `mise run preflight:install:linux` builds, verifies and installs it without production signing credentials. Preflight Server Candidates use separate nonproduction trust; Release rejects those signatures. Production release trust and service policy remain separate from the foreground Development workflow.
 
 ## Controls without the desktop
 
@@ -20,11 +28,11 @@ For Preflight, use "SpaceTerm Preflight" for both the macOS app and executable n
 
 ## Server artifacts for desktop startup
 
-The desktop startup adapter in [src/local_startup.rs](../src/local_startup.rs) prepares or reuses the account service on a worker. Existing service policy selects the approved installation. Launch does not select a newer artifact or reverse Stop.
+For installed applications, the desktop startup adapter in [src/local_startup.rs](../src/local_startup.rs) prepares or reuses the account service on a worker. Existing service policy selects the approved installation. Launch does not select a newer artifact or reverse Stop.
 
 Fresh service setup requires an independently signed server archive and signature for the desktop's application identity and native target. The signed manifest declares its protocol major and capabilities. The client requires major 1 and `workspace_policy`; client and server versions and commits may differ. Packaged candidates carry this pair in their resources. Signing happens during candidate preparation, never during app launch.
 
-Source builds must supply both `SPACETERM_SERVER_ARCHIVE` and `SPACETERM_SERVER_SIGNATURE` when compiling and launching a client that offers a server candidate. Prepare an artifact with `mise run server:package --identity spaceterm-development` using the existing signing inputs, then point those variables at its archive and adjacent `.sig` file. Compilation pins the complete archive SHA256. A client compiled without a pair has no candidate until rebuilt, even if a pair appears at launch. Existing approved service policy needs neither variable. A sibling `spaceterm-server` executable is never an approved retained service runtime.
+The default Development command does not use a Server Candidate. Explicit source clients that exercise installed service startup must supply both `SPACETERM_SERVER_ARCHIVE` and `SPACETERM_SERVER_SIGNATURE` when compiling and launching. Prepare an artifact with `mise run server:package --identity spaceterm-development`, then point those variables at its archive and adjacent `.sig` file. Compilation pins the complete archive SHA256. A client compiled without a pair has no candidate until rebuilt, even if a pair appears at launch. Existing approved service policy needs neither variable. A sibling `spaceterm-server` executable is never an approved retained service runtime.
 
 Packaging prepares the signed server before compiling the desktop. The same variables can select an existing signed pair without recompressing it or matching its version to the client. Package verification compares the embedded archive with the digest reported by the desktop's `--build-info`. A running client refuses a different archive placed at its installation path and asks for a client restart.
 
