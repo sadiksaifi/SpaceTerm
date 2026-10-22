@@ -574,11 +574,14 @@ mod development {
         }
     }
 
-    /// What one shared Workspace's row and chrome present. Every value here is server data: it
-    /// names no directory this client may read, so it is displayed and never acted on.
+    /// One Workspace's presented server metadata and its local creation binding.
+    /// Directory values grant no local filesystem authority.
     #[derive(Clone, Debug, Eq, PartialEq)]
     pub(crate) struct SharedWorkspaceFacts {
         pub(crate) server: Id,
+        /// The server has published this identity. A refused provisional creation removes its
+        /// row without dismissing the empty window that must explain the refusal.
+        pub(crate) confirmed: bool,
         pub(crate) name: String,
         pub(crate) name_version: u64,
         pub(crate) pin_version: u64,
@@ -597,6 +600,7 @@ mod development {
                 .map_or_else(PathBuf::new, |pane| pane.presented_directory().to_owned());
             Self {
                 server: workspace.id,
+                confirmed: true,
                 name: workspace.name.clone(),
                 name_version: workspace.name_version,
                 pin_version: workspace.pin_version,
@@ -1818,6 +1822,36 @@ mod development {
         pub(crate) fn poll(&mut self) -> SharedPoll {
             let snapshot = self.edits.snapshot();
             let mut poll = SharedPoll::default();
+            if let Some(inventory) = snapshot
+                .inventory
+                .as_ref()
+                .filter(|inventory| self.revision != Some(inventory.revision))
+            {
+                // A new client's first view presents the server's first Workspace. Retained
+                // choices, including a deliberately empty view, always win.
+                let initial = inventory.workspaces.first().map(|workspace| workspace.id);
+                match self.attachments.initialize(&inventory, initial) {
+                    Ok(true) => poll.initial = initial,
+                    Ok(false) => {}
+                    Err(error) => {
+                        self.attachment_error = Some(error);
+                        return poll;
+                    }
+                }
+                // A waiting draft whose Workspace the server no longer has can never be asked
+                // again, so it reports the removal instead of waiting for a mapping.
+                if let Some(pending) = self.conflict.as_ref()
+                    && !inventory
+                        .workspaces
+                        .iter()
+                        .any(|workspace| workspace.id == pending.workspace)
+                {
+                    self.conflict = None;
+                    self.refusal = Some(SharedRefusal::Missing);
+                }
+                self.revision = Some(inventory.revision);
+                poll.changed = true;
+            }
             let completed = self.edits.pending.borrow_mut().take_completions();
             for completion in completed {
                 self.consumed = Some(completion.outcome.sequence);
@@ -1880,36 +1914,6 @@ mod development {
                     .repositories
                     .accept(inventory.repositories.as_ref(), std::time::Instant::now())
             {
-                poll.changed = true;
-            }
-            if let Some(inventory) = snapshot
-                .inventory
-                .as_ref()
-                .filter(|inventory| self.revision != Some(inventory.revision))
-            {
-                // A new client's first view presents the server's first Workspace. Retained
-                // choices, including a deliberately empty view, always win.
-                let initial = inventory.workspaces.first().map(|workspace| workspace.id);
-                match self.attachments.initialize(&inventory, initial) {
-                    Ok(true) => poll.initial = initial,
-                    Ok(false) => {}
-                    Err(error) => {
-                        self.attachment_error = Some(error);
-                        return poll;
-                    }
-                }
-                // A waiting draft whose Workspace the server no longer has can never be asked
-                // again, so it reports the removal instead of waiting for a mapping.
-                if let Some(pending) = self.conflict.as_ref()
-                    && !inventory
-                        .workspaces
-                        .iter()
-                        .any(|workspace| workspace.id == pending.workspace)
-                {
-                    self.conflict = None;
-                    self.refusal = Some(SharedRefusal::Missing);
-                }
-                self.revision = Some(inventory.revision);
                 poll.changed = true;
             }
             if let Some(inventory) = snapshot.inventory {
@@ -2023,7 +2027,8 @@ mod development {
                 {
                     continue;
                 }
-                let facts = SharedWorkspaceFacts::from_server(workspace);
+                let mut facts = SharedWorkspaceFacts::from_server(workspace);
+                facts.confirmed = !self.edits.provisional(workspace.id);
                 match self.local(workspace.id) {
                     Some(local) => plan.push(SharedWorkspacePlan::Update { local, facts }),
                     None => plan.push(SharedWorkspacePlan::Create { facts }),

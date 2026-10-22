@@ -4282,6 +4282,11 @@ impl WorkspaceManager {
             cx.notify();
             return;
         }
+        let confirmed = self
+            .shared
+            .owning(workspace_id)
+            .and_then(|shared| shared.facts(workspace_id))
+            .is_some_and(|facts| facts.confirmed);
         if let Some(shared) = self.shared.owning_mut(workspace_id) {
             shared.forget(workspace_id);
         }
@@ -4295,7 +4300,7 @@ impl WorkspaceManager {
         // client's publication is nobody's request for a Pane; this client's own Kill Workspace
         // is, as a local close is.
         self.close_workspace_activating(workspace_id, own, window, cx);
-        self.close_empty_after_shared_removal = true;
+        self.close_empty_after_shared_removal |= confirmed;
         // The keyboard that was in the removed Workspace rests in the Workspace that takes its
         // place, without asking the server for a Pane there. Typing anywhere else, such as in
         // the sidebar, stays where it is.

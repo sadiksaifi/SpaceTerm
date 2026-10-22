@@ -1751,6 +1751,37 @@ mod edits {
     }
 
     #[test]
+    fn an_accepted_workspace_creation_retains_its_authoritative_attachment() {
+        let (mut shared, edits) = shared(Some(root_only()));
+        shared.poll();
+        bind(&mut shared, &root_only());
+        shared.create_workspace("Logs".to_owned(), None);
+        shared.poll();
+        let mut published = root_only();
+        let mut created = published.workspaces[0].clone();
+        let target = [21; 32];
+        created.id = target;
+        created.root_tab = [22; 32];
+        created.tabs[0].id = [22; 32];
+        created.tabs[0].root_pane = [23; 32];
+        created.tabs[0].panes[0].id = [23; 32];
+        published.revision += 1;
+        published.workspaces.push(created);
+        edits.set_inventory(published);
+        edits.answer(Outcome::Accepted { target });
+        let poll = shared.poll();
+        assert!(
+            shared
+                .plan(poll.inventory.as_ref().expect("accepted inventory"))
+                .iter()
+                .any(|step| {
+                    matches!(step, SharedWorkspacePlan::Create { facts } if facts.server == target)
+                }),
+            "the accepted Workspace remains attached after provisional binding"
+        );
+    }
+
+    #[test]
     fn a_draft_started_before_a_publication_should_submit_the_version_it_began_with() {
         let (mut shared, edits) = shared(Some(root_only()));
         bind(&mut shared, &root_only());

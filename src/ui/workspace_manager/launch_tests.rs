@@ -1212,6 +1212,50 @@ fn accept_creation(harness: &LaunchHarness, pinned: Option<PathBuf>, cx: &mut Vi
     sync(harness, cx);
 }
 
+#[gpui::test]
+fn a_refused_first_workspace_creation_keeps_the_window_and_its_notice(cx: &mut TestAppContext) {
+    let empty = Inventory {
+        revision: 1,
+        repositories: None,
+        close: None,
+        workspaces: Vec::new(),
+    };
+    let (harness, cx) = launch_harness_with(vec![ready()], ScriptedEdits::new(Some(empty)), [], cx);
+    cx.run_until_parked();
+    sync(&harness, cx);
+    assert_eq!(harness.workspace_count(cx), 0);
+    cx.dispatch_action(crate::ui::NewWorkspace);
+    cx.run_until_parked();
+    assert_eq!(
+        harness.workspace_count(cx),
+        1,
+        "creation appears before acknowledgement"
+    );
+    harness
+        .edits
+        .answer(spaceterm_server::hierarchy::Outcome::Limit);
+    sync(&harness, cx);
+    assert_eq!(
+        cx.windows().len(),
+        1,
+        "a refused creation must leave its empty window open"
+    );
+    assert_eq!(harness.workspace_count(cx), 0);
+    let action = cx
+        .debug_bounds("modal-action-shared-workspace-refused-ok")
+        .expect("the refusal remains readable");
+    cx.simulate_click(action.center(), Modifiers::none());
+    cx.run_until_parked();
+    cx.dispatch_action(crate::ui::NewWorkspace);
+    cx.run_until_parked();
+    assert_eq!(
+        created_names(&harness).len(),
+        2,
+        "the empty window remains usable after dismissal"
+    );
+    assert_eq!(harness.workspace_count(cx), 1);
+}
+
 fn active_server_workspace(
     harness: &LaunchHarness,
     cx: &mut VisualTestContext,
