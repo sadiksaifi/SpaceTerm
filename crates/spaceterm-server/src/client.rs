@@ -110,12 +110,10 @@ impl LocalServer {
     }
     /// What other clients call this one while it controls a Pane.
     fn client_name(&self) -> crate::pane::control::ClientName {
-        match (self.computer.computer_name(), &self.development) {
-            (Some(computer), Some(development)) => format!("{computer} ({development})").into(),
-            (Some(computer), None) => computer.into(),
-            (None, Some(development)) => development.as_str().into(),
-            (None, None) => "".into(),
-        }
+        crate::pane::control::ClientName::for_computer(
+            self.computer.as_ref(),
+            self.development.as_deref(),
+        )
     }
     fn server_id(&self) -> Result<[u8; 32], ServerError> {
         if let Some(direct) = &self.direct {
