@@ -3049,7 +3049,7 @@ impl WorkspaceManager {
             .get_mut(key)
             .and_then(super::shared_workspaces::SharedWorkspaces::take_refusal)
         {
-            Self::present_shared_refusal(refusal, window, cx);
+            self.present_shared_refusal(refusal, window, cx);
         }
         if let Some((server_target, local)) = self
             .shared
@@ -3622,7 +3622,7 @@ impl WorkspaceManager {
                 return true;
             }
             Err(SharedCloseUnavailable::Missing) => {
-                Self::present_shared_refusal(
+                self.present_shared_refusal(
                     super::shared_workspaces::SharedRefusal::Missing,
                     window,
                     cx,
@@ -3850,7 +3850,7 @@ impl WorkspaceManager {
                 );
             }
             SharedCloseState::Missing => {
-                Self::present_shared_close_missing(&review.approval, window, cx);
+                self.present_shared_close_missing(&review.approval, window, cx);
             }
         }
         cx.notify();
@@ -3886,7 +3886,7 @@ impl WorkspaceManager {
         }
         match state {
             SharedCloseState::Missing => {
-                Self::present_shared_close_missing(&review.approval, window, cx);
+                self.present_shared_close_missing(&review.approval, window, cx);
             }
             _ => self.present_shared_close_changed(
                 review.approval.changed_title(),
@@ -3899,8 +3899,7 @@ impl WorkspaceManager {
 
     /// Explains that what a close would end changed after it was approved or shown, so nothing
     /// was closed. Review opens a fresh confirmation of what the server holds now; nothing asks
-    /// again on its own. A refusal can arrive while a person types in the sidebar, so the notice
-    /// returns the keyboard to that draft when it closes.
+    /// again on its own.
     fn present_shared_close_changed(
         &mut self,
         title: &'static str,
@@ -3930,48 +3929,74 @@ impl WorkspaceManager {
         ));
         let manager = cx.weak_entity();
         let window_handle = window.window_handle();
-        let sidebar = self.sidebar.clone();
-        let held_rename = sidebar.update(cx, |sidebar, _| sidebar.hold_rename_for_modal(window));
-        let release_sidebar = sidebar.downgrade();
-        let release_rename = move |window: &mut Window, cx: &mut App| {
-            let _ = release_sidebar.update(cx, |sidebar, cx| {
-                sidebar.release_rename_hold(window, cx);
-            });
-        };
-        let result = Alert::new(
+        let alert = Alert::new(
             ModalId::new("shared-close-changed"),
             title,
             title,
             message,
             actions,
         )
-        .intent(AlertIntent::Warning)
-        .present(window, cx, move |outcome, cx| {
-            let reviewed = matches!(
-                outcome,
-                AlertOutcome::Activated {
-                    action_id: true,
-                    ..
-                }
-            );
-            let _ = window_handle.update(cx, |_, window, cx| {
-                if held_rename {
-                    // The modal returns focus as it next draws, so the hold ends after that frame.
-                    window.on_next_frame(move |window, _| window.on_next_frame(release_rename));
-                }
-                if let Some(target) = target.filter(|_| reviewed) {
+        .intent(AlertIntent::Warning);
+        let result = self.present_outcome_notice(
+            alert,
+            move |outcome, cx| {
+                let reviewed = matches!(
+                    outcome,
+                    AlertOutcome::Activated {
+                        action_id: true,
+                        ..
+                    }
+                );
+                let Some(target) = target.filter(|_| reviewed) else {
+                    return;
+                };
+                let _ = window_handle.update(cx, |_, window, cx| {
                     let _ = manager.update(cx, |manager, cx| {
                         manager.request_close(target, window, cx);
                     });
-                }
-            });
-        });
+                });
+            },
+            window,
+            cx,
+        );
         if let Err(error) = result {
-            if held_rename {
-                sidebar.update(cx, |sidebar, cx| sidebar.release_rename_hold(window, cx));
-            }
             eprintln!("failed to present the changed shared close: {error}");
         }
+    }
+
+    /// Presents a notice about an earlier operation's outcome. A person may be typing in the
+    /// sidebar by the time it arrives, so the notice returns the keyboard to that draft when it
+    /// closes rather than ending it.
+    fn present_outcome_notice<A: Clone + Eq + 'static>(
+        &mut self,
+        alert: Alert<A>,
+        on_result: impl FnOnce(AlertOutcome<A>, &mut App) + 'static,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<spaceterm_ui::ModalPresentationHandle, spaceterm_ui::ModalPresentationError> {
+        let sidebar = self.sidebar.clone();
+        let held = sidebar.update(cx, |sidebar, _| sidebar.hold_rename_for_modal(window));
+        let release = sidebar.downgrade();
+        let window_handle = window.window_handle();
+        let result = alert.present(window, cx, move |outcome, cx| {
+            if held {
+                let _ = window_handle.update(cx, |_, window, _| {
+                    // The modal returns focus as it next draws, so the hold ends after that frame.
+                    window.on_next_frame(move |window, _| {
+                        window.on_next_frame(move |window, cx| {
+                            let _ = release.update(cx, |sidebar, cx| {
+                                sidebar.release_rename_hold(window, cx);
+                            });
+                        });
+                    });
+                });
+            }
+            on_result(outcome, cx);
+        });
+        if held && result.is_err() {
+            sidebar.update(cx, |sidebar, cx| sidebar.release_rename_hold(window, cx));
+        }
+        result
     }
 
     /// Presents a close the server refused because what it would end changed first. Review is
@@ -3995,11 +4020,12 @@ impl WorkspaceManager {
 
     /// Explains that another client already removed what a close confirmation named.
     fn present_shared_close_missing(
+        &mut self,
         approval: &super::shared_workspaces::SharedCloseApproval,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let _ = Alert::new(
+        let alert = Alert::new(
             ModalId::new("shared-close-missing"),
             approval.missing_title(),
             approval.missing_title(),
@@ -4011,8 +4037,8 @@ impl WorkspaceManager {
                 SHARED_CLOSE_DISMISS_SELECTOR,
             )],
         )
-        .intent(AlertIntent::Informational)
-        .present(window, cx, |_, _| {});
+        .intent(AlertIntent::Informational);
+        let _ = self.present_outcome_notice(alert, |_, _| {}, window, cx);
     }
 
     /// Presents a refused same-field edit: the server's value, the draft it rejected, and the
@@ -4036,7 +4062,7 @@ impl WorkspaceManager {
         );
         let owner = cx.weak_entity();
         let window_handle = window.window_handle();
-        let result = Alert::new(
+        let alert = Alert::new(
             ModalId::new("shared-workspace-conflict"),
             "Change not applied",
             conflict.field.title(),
@@ -4057,23 +4083,28 @@ impl WorkspaceManager {
                 ),
             ],
         )
-        .intent(AlertIntent::Warning)
-        .present(window, cx, move |outcome, cx| {
-            if !matches!(
-                outcome,
-                AlertOutcome::Activated {
-                    action_id: true,
-                    ..
+        .intent(AlertIntent::Warning);
+        let result = self.present_outcome_notice(
+            alert,
+            move |outcome, cx| {
+                if !matches!(
+                    outcome,
+                    AlertOutcome::Activated {
+                        action_id: true,
+                        ..
+                    }
+                ) {
+                    return;
                 }
-            ) {
-                return;
-            }
-            let _ = window_handle.update(cx, |_, window, cx| {
-                let _ = owner.update(cx, |manager, cx| {
-                    manager.retry_shared_edit(&conflict, window, cx);
+                let _ = window_handle.update(cx, |_, window, cx| {
+                    let _ = owner.update(cx, |manager, cx| {
+                        manager.retry_shared_edit(&conflict, window, cx);
+                    });
                 });
-            });
-        });
+            },
+            window,
+            cx,
+        );
         if let Err(error) = result {
             eprintln!("failed to present the shared change conflict: {error}");
         }
@@ -4099,11 +4130,12 @@ impl WorkspaceManager {
 
     /// Presents a shared edit the server refused for a reason no retry repairs.
     fn present_shared_refusal(
+        &mut self,
         refusal: super::shared_workspaces::SharedRefusal,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let _ = Alert::new(
+        let alert = Alert::new(
             ModalId::new("shared-workspace-refused"),
             "Change not applied",
             refusal.title(),
@@ -4115,8 +4147,8 @@ impl WorkspaceManager {
                 "shared-workspace-refused-ok",
             )],
         )
-        .intent(AlertIntent::Warning)
-        .present(window, cx, |_, _| {});
+        .intent(AlertIntent::Warning);
+        let _ = self.present_outcome_notice(alert, |_, _| {}, window, cx);
     }
 
     /// Explains a shared edit this client could not submit. Nothing was sent, and nothing waits.

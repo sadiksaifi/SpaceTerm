@@ -84,6 +84,72 @@ fn a_refused_workspace_close_restores_its_views_without_overwriting_newer_focus(
     assert!(shared_close_rename_is_focused(&harness, cx));
 }
 
+/// A disconnect discards an edit still queued behind one the server has not answered. Its notice
+/// arrives while a person types a newer rename, which an offline server would refuse, so the
+/// draft stays open and unsent beneath the notice and takes the keyboard back after it.
+#[gpui::test]
+fn a_disconnect_notice_keeps_a_newer_rename_draft_and_its_focus(cx: &mut TestAppContext) {
+    use spaceterm_server::hierarchy::Mutation;
+
+    let (harness, cx) = shared_close_harness(cx);
+    cx.update(|window, cx| {
+        harness.manager.update(cx, |manager, cx| {
+            for name in ["Logs", "Notes"] {
+                assert!(manager.rename_shared_workspace(
+                    SHARED_WORKSPACE_ROW,
+                    name,
+                    Some(0),
+                    window,
+                    cx
+                ));
+            }
+        });
+    });
+    assert_eq!(
+        harness.edits.submitted().len(),
+        1,
+        "the second edit waits behind the first"
+    );
+    right_click("workspace-row-2-active", cx);
+    click("workspace-menu-row-rename", cx);
+    cx.simulate_keystrokes("d r a f t");
+    cx.run_until_parked();
+
+    harness.edits.set_connected(false);
+    harness.sync(cx);
+    assert!(
+        cx.debug_bounds("modal-action-shared-workspace-refused-ok")
+            .is_some(),
+        "the discarded edit is explained"
+    );
+    click("modal-action-shared-workspace-refused-ok", cx);
+
+    assert!(shared_close_rename_is_focused(&harness, cx));
+    let draft = cx.update(|_, cx| {
+        harness
+            .manager
+            .read(cx)
+            .sidebar
+            .read(cx)
+            .rename_input()
+            .map(|input| input.read(cx).value().to_owned())
+    });
+    assert_eq!(draft.as_deref(), Some("draft"));
+    assert!(
+        cx.debug_bounds("modal-action-shared-workspace-unavailable-ok")
+            .is_none(),
+        "the unsent draft is not refused"
+    );
+    assert_eq!(
+        harness.edits.submitted(),
+        vec![Mutation::RenameWorkspace {
+            workspace: SHARED_CLOSE_WORKSPACE,
+            version: 0,
+            name: "Logs".to_owned(),
+        }]
+    );
+}
+
 #[gpui::test]
 fn close_frames_hide_retired_pane_status_and_completion_preserves_sidebar_editing(
     cx: &mut TestAppContext,
