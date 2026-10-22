@@ -3668,6 +3668,12 @@ impl WorkspaceManager {
         let Some(generation) = self.close_confirmation.begin(target) else {
             return true;
         };
+        // The confirmation takes the keyboard, so whether the closing Workspace held it is read
+        // before it opens.
+        let held_keyboard = self
+            .workspaces
+            .workspace(workspace_id)
+            .is_some_and(|entry| entry.payload().read(cx).holds_keyboard(window, cx));
         let mut alert = Alert::new(
             ModalId::new("shared-close-confirmation"),
             approval.title(),
@@ -3703,7 +3709,14 @@ impl WorkspaceManager {
                 }
             );
             let _ = window_handle.update(cx, |manager, window, cx| {
-                manager.settle_shared_close(generation, target, confirmed, window, cx);
+                manager.settle_shared_close(
+                    generation,
+                    target,
+                    confirmed,
+                    held_keyboard,
+                    window,
+                    cx,
+                );
             });
         });
         match presented {
@@ -3800,11 +3813,16 @@ impl WorkspaceManager {
 
     /// Settles a shared close confirmation. A confirmed close asks the server to end exactly what
     /// the confirmation showed, and only while that is still what this client last read.
+    ///
+    /// An approved close hides what it ends at once. When the closing Workspace held the keyboard
+    /// before the confirmation took it, the keyboard moves to what remains, as a close that needs
+    /// no confirmation does. The confirmation would otherwise return it to a Pane that is gone.
     fn settle_shared_close(
         &mut self,
         generation: u64,
         target: CloseTarget,
         confirmed: bool,
+        held_keyboard: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -3829,9 +3847,8 @@ impl WorkspaceManager {
         };
         match shared.close_state(&review.approval) {
             SharedCloseState::Current => {
-                if let SharedSubmission::Refused(reason) =
-                    shared.close(review.approval, review.target)
-                {
+                let submission = shared.close(review.approval, review.target);
+                if let SharedSubmission::Refused(reason) = submission {
                     Self::show_shared_refusal(
                         Self::shared_close_operation(target),
                         reason,
@@ -3840,6 +3857,9 @@ impl WorkspaceManager {
                     );
                 }
                 self.sync_shared_workspaces(key, window, cx);
+                if held_keyboard && submission == SharedSubmission::Submitted {
+                    self.focus(window, cx);
+                }
             }
             SharedCloseState::Changed => {
                 self.present_shared_close_changed(
