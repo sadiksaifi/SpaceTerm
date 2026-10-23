@@ -22,6 +22,7 @@ use super::settings_window::SettingsWindow;
 use crate::desktop_profile::{DesktopPresentation, DesktopWording};
 use crate::updates::policy::UpdateStage;
 use crate::updates::{ApplicationUpdates, UpdateError, UpdateNotice, UpdateService, UpdateState};
+use server_rows::{ServerNeed, ServerUpdateAction, ServerUpdateRow};
 
 actions!(spaceterm, [CheckForUpdates, OpenReleaseNotes]);
 
@@ -610,7 +611,7 @@ fn retry_install(cx: &mut App) {
     }
 }
 
-/// The glyph that leads the Updates menu trigger while the client has a step in progress.
+/// The glyph that leads the update pill.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum ControlGlyph {
     Download,
@@ -620,16 +621,16 @@ enum ControlGlyph {
     Warning,
 }
 
-/// How far the trigger reaches for attention after the user has put an update off.
+/// How far the pill reaches for attention after the user has put an update off.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ControlReminder {
-    /// The glyph takes the accent paint even where it would otherwise stay quiet.
+    /// The pill takes the primary paint even where it would otherwise stay quiet.
     Gentle,
-    /// The glyph takes the warning paint and the status says the update is overdue.
+    /// The pill takes the warning paint and glyph, and the status says the update is overdue.
     Overdue,
 }
 
-/// What activating the client's command row does.
+/// What activating the client's pill or command row does.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ControlCommand {
     Download,
@@ -639,14 +640,16 @@ enum ControlCommand {
     RetryInstall,
 }
 
-/// One frame of the client's pending update in the Updates menu. It has no dismiss affordance and
-/// stays while an update is pending.
+/// One frame of the client's pending update in the pill and the Updates menu. It has no dismiss
+/// affordance and stays while an update is pending.
 #[derive(Clone, Debug, PartialEq)]
 struct ControlPresentation {
     /// Progress or a problem, shown as a status row above the command.
     status: Option<SharedString>,
     /// The command row's title, or the state itself while no command applies.
     label: SharedString,
+    /// The pill's compact step and version.
+    pill: SharedString,
     glyph: ControlGlyph,
     prominent: bool,
     command: Option<ControlCommand>,
@@ -662,13 +665,22 @@ impl ControlPresentation {
         cancelling: bool,
         wording: DesktopWording,
     ) -> Option<Self> {
-        let control = |status: Option<String>, label: String, glyph, prominent, command| Self {
-            status: status.map(SharedString::from),
-            label: label.into(),
-            glyph,
-            prominent,
-            command,
-            reminder: None,
+        let control = |step: &str,
+                       version: &str,
+                       status: Option<String>,
+                       label: String,
+                       glyph,
+                       prominent,
+                       command| {
+            Self {
+                status: status.map(SharedString::from),
+                label: label.into(),
+                pill: format!("{step} {version}").into(),
+                glyph,
+                prominent,
+                command,
+                reminder: None,
+            }
         };
         const STOP: &str = "Stop Download…";
         let presentation = match state {
@@ -676,6 +688,8 @@ impl ControlPresentation {
             UpdateState::Idle => {
                 let version = pending_version?;
                 control(
+                    "Download",
+                    version,
                     None,
                     format!("Download SpaceTerm {version}"),
                     ControlGlyph::Download,
@@ -686,6 +700,8 @@ impl ControlPresentation {
             UpdateState::Checking => {
                 let version = pending_version?;
                 control(
+                    "Checking",
+                    version,
                     None,
                     format!("Checking for SpaceTerm {version}"),
                     ControlGlyph::Activity,
@@ -696,6 +712,8 @@ impl ControlPresentation {
             UpdateState::Failed { error } => {
                 let version = pending_version?;
                 control(
+                    "Retry",
+                    version,
                     Some(failure_message(*error, wording)),
                     format!("Try Downloading SpaceTerm {version} Again"),
                     ControlGlyph::Warning,
@@ -704,6 +722,8 @@ impl ControlPresentation {
                 )
             }
             UpdateState::Available { version } => control(
+                "Download",
+                version,
                 None,
                 format!("Download SpaceTerm {version}"),
                 ControlGlyph::Download,
@@ -714,6 +734,8 @@ impl ControlPresentation {
                 if cancelling =>
             {
                 control(
+                    "Stopping",
+                    version,
                     None,
                     format!("Stopping the Download of SpaceTerm {version}"),
                     ControlGlyph::Activity,
@@ -728,6 +750,8 @@ impl ControlPresentation {
             } if *total > 0 => {
                 let fraction = (*received as f64 / *total as f64).clamp(0.0, 1.0);
                 control(
+                    "Downloading",
+                    version,
                     Some(format!(
                         "Downloading SpaceTerm {version}, {}%",
                         (fraction * 100.0).floor()
@@ -739,13 +763,18 @@ impl ControlPresentation {
                 )
             }
             UpdateState::Downloading { version, .. } => control(
+                "Downloading",
+                version,
                 Some(format!("Downloading SpaceTerm {version}")),
                 STOP.to_owned(),
                 ControlGlyph::Activity,
                 false,
                 Some(ControlCommand::OfferStop),
             ),
+            // Verification finishes the download from the user's point of view.
             UpdateState::Verifying { version } => control(
+                "Downloading",
+                version,
                 Some(format!("Verifying SpaceTerm {version}")),
                 STOP.to_owned(),
                 ControlGlyph::Activity,
@@ -754,6 +783,8 @@ impl ControlPresentation {
             ),
             // The confirmation follows, so the title ends in an ellipsis.
             UpdateState::Ready { version } => control(
+                "Install",
+                version,
                 None,
                 format!("Restart to Install SpaceTerm {version}…"),
                 ControlGlyph::Restart,
@@ -762,6 +793,8 @@ impl ControlPresentation {
             ),
             // The install was confirmed. Reaching this state visibly means the quit was cancelled.
             UpdateState::Installing { version } => control(
+                "Installing",
+                version,
                 None,
                 format!("Restart to Finish Installing SpaceTerm {version}"),
                 ControlGlyph::Restart,
@@ -796,10 +829,146 @@ impl ControlPresentation {
     }
 }
 
+/// The paint family of the pill. Each tone resolves to theme tokens.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PillTone {
+    /// An action the user should take now.
+    Primary,
+    /// Progress or information.
+    Neutral,
+    /// An overdue update or a server that needs attention.
+    Warning,
+}
+
+/// What activating the pill's leading part does.
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum PillCommand {
+    /// The client's step, or nothing while the client's update works on its own.
+    Client(Option<ControlCommand>),
+    /// One server's existing Settings journey.
+    Server(ServerUpdateAction),
+    /// The pill has no leading part, so it opens the Updates menu.
+    Menu,
+}
+
+/// The title bar update pill. It appears only while something asks for action, and its chevron
+/// opens the Updates menu, which keeps every row.
+#[derive(Clone, Debug, PartialEq)]
+enum UpdatePill {
+    /// The client's step leads. `servers` counts servers that also ask for action.
+    Client {
+        step: ControlPresentation,
+        servers: usize,
+    },
+    /// One server's update or attention leads.
+    Server {
+        name: SharedString,
+        detail: SharedString,
+        action: ServerUpdateAction,
+    },
+    /// Several servers ask for action. Updates happen one server at a time, so the menu chooses.
+    Servers(usize),
+}
+
+impl UpdatePill {
+    /// Servers ask for action only through typed needs, never through offline or unknown status.
+    fn resolve(client: Option<ControlPresentation>, servers: &[ServerUpdateRow]) -> Option<Self> {
+        let mut asking = servers.iter().filter_map(|row| {
+            row.action
+                .as_ref()
+                .filter(|action| action.need().is_some())
+                .map(|action| (row, action))
+        });
+        let count = asking.clone().count();
+        if let Some(step) = client {
+            return Some(Self::Client {
+                step,
+                servers: count,
+            });
+        }
+        match count {
+            0 => None,
+            1 => asking.next().map(|(row, action)| Self::Server {
+                name: row.label.clone(),
+                detail: row.detail.clone(),
+                action: action.clone(),
+            }),
+            count => Some(Self::Servers(count)),
+        }
+    }
+
+    fn label(&self) -> SharedString {
+        match self {
+            Self::Client { step, .. } => step.pill.clone(),
+            Self::Server { action, .. } => match action.need() {
+                Some(ServerNeed::Attention) => "Server Needs Attention".into(),
+                _ => "Update Server".into(),
+            },
+            Self::Servers(count) => format!("Update {count} Servers").into(),
+        }
+    }
+
+    /// The full sentence behind the compact label, for the tooltip and assistive technology.
+    fn description(&self) -> SharedString {
+        match self {
+            Self::Client { step, servers } => {
+                let step = step.status.clone().unwrap_or_else(|| step.label.clone());
+                match servers {
+                    0 => step,
+                    1 => format!("{step}. A server also needs action in the Updates menu.").into(),
+                    count => {
+                        format!("{step}. {count} servers also need action in the Updates menu.")
+                            .into()
+                    }
+                }
+            }
+            Self::Server { name, detail, .. } => format!("{name}: {detail}").into(),
+            Self::Servers(count) => format!("{count} servers need action").into(),
+        }
+    }
+
+    fn tone(&self) -> PillTone {
+        match self {
+            Self::Client { step, .. } if step.reminder == Some(ControlReminder::Overdue) => {
+                PillTone::Warning
+            }
+            Self::Client { step, .. } if step.prominent => PillTone::Primary,
+            Self::Server { action, .. } if action.need() == Some(ServerNeed::Attention) => {
+                PillTone::Warning
+            }
+            _ => PillTone::Neutral,
+        }
+    }
+
+    fn glyph(&self) -> Option<ControlGlyph> {
+        match self {
+            Self::Client { step, .. } => Some(step.glyph),
+            Self::Server { action, .. } if action.need() == Some(ServerNeed::Attention) => {
+                Some(ControlGlyph::Warning)
+            }
+            _ => None,
+        }
+    }
+
+    fn command(&self) -> PillCommand {
+        match self {
+            Self::Client { step, .. } => PillCommand::Client(step.command),
+            Self::Server { action, .. } => PillCommand::Server(action.clone()),
+            Self::Servers(_) => PillCommand::Menu,
+        }
+    }
+
+    /// Whether the chevron carries a dot for servers waiting behind the client's step.
+    fn marked(&self) -> bool {
+        matches!(self, Self::Client { servers, .. } if *servers > 0)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::appearance::{Appearance, builtin_chrome_base};
+    use crate::ui::MachineTarget;
 
     const PENDING: Option<&str> = Some("0.4.2");
 
@@ -955,6 +1124,197 @@ mod tests {
             assert_eq!(presentation.prominent, prominent, "{state:?}");
             assert_eq!(presentation.command, command, "{state:?}");
         }
+    }
+
+    fn server(name: &str, action: ServerUpdateAction) -> ServerUpdateRow {
+        ServerUpdateRow {
+            label: format!("{name} · account 501").into(),
+            detail: "status".into(),
+            action: Some(action),
+        }
+    }
+
+    fn ssh(name: &str) -> crate::domain::SshDestination {
+        crate::domain::SshDestination::new(name.to_owned()).unwrap()
+    }
+
+    /// Offline, unknown, unauthorized, and up-to-date servers keep their rows in the menu only.
+    fn quiet_servers() -> Vec<ServerUpdateRow> {
+        vec![
+            server("local", ServerUpdateAction::Settings(MachineTarget::Local)),
+            server(
+                "offline",
+                ServerUpdateAction::Settings(MachineTarget::Ssh(ssh("offline"))),
+            ),
+            server(
+                "paired",
+                ServerUpdateAction::Settings(MachineTarget::Direct([7; 32])),
+            ),
+        ]
+    }
+
+    fn pill(
+        client: Option<UpdateState>,
+        reminder: Option<UpdateStage>,
+        servers: &[ServerUpdateRow],
+    ) -> Option<(String, PillTone, Option<ControlGlyph>, PillCommand)> {
+        let client = client
+            .and_then(|state| resolve(state))
+            .map(|presentation| presentation.remind(reminder));
+        UpdatePill::resolve(client, servers).map(|pill| {
+            (
+                pill.label().to_string(),
+                pill.tone(),
+                pill.glyph(),
+                pill.command(),
+            )
+        })
+    }
+
+    #[test]
+    fn pill_should_hide_until_the_client_or_a_server_asks_for_action() {
+        assert_eq!(pill(None, None, &quiet_servers()), None);
+        assert_eq!(pill(Some(UpdateState::UpToDate), None, &[]), None);
+    }
+
+    #[test]
+    fn pill_should_name_the_clients_next_step_in_its_tone() {
+        let downloading = UpdateState::Downloading {
+            version: version(),
+            received: 1,
+            total: 4,
+        };
+        let cases = [
+            (
+                UpdateState::Available { version: version() },
+                None,
+                "Download 0.4.2",
+                PillTone::Primary,
+                ControlGlyph::Download,
+                Some(ControlCommand::Download),
+            ),
+            (
+                downloading,
+                None,
+                "Downloading 0.4.2",
+                PillTone::Neutral,
+                ControlGlyph::Progress(0.25),
+                Some(ControlCommand::OfferStop),
+            ),
+            (
+                UpdateState::Verifying { version: version() },
+                None,
+                "Downloading 0.4.2",
+                PillTone::Neutral,
+                ControlGlyph::Activity,
+                Some(ControlCommand::OfferStop),
+            ),
+            (
+                UpdateState::Ready { version: version() },
+                None,
+                "Install 0.4.2",
+                PillTone::Primary,
+                ControlGlyph::Restart,
+                Some(ControlCommand::RequestInstall),
+            ),
+            (
+                UpdateState::Ready { version: version() },
+                Some(UpdateStage::Overdue),
+                "Install 0.4.2",
+                PillTone::Warning,
+                ControlGlyph::Warning,
+                Some(ControlCommand::RequestInstall),
+            ),
+            // An overdue update that is not downloaded yet still names the step that works.
+            (
+                UpdateState::Available { version: version() },
+                Some(UpdateStage::Overdue),
+                "Download 0.4.2",
+                PillTone::Warning,
+                ControlGlyph::Warning,
+                Some(ControlCommand::Download),
+            ),
+            (
+                UpdateState::Failed {
+                    error: UpdateError::Download,
+                },
+                None,
+                "Retry 0.4.2",
+                PillTone::Neutral,
+                ControlGlyph::Warning,
+                Some(ControlCommand::RetryDownload),
+            ),
+        ];
+        for (state, reminder, label, tone, glyph, command) in cases {
+            assert_eq!(
+                pill(Some(state.clone()), reminder, &quiet_servers()),
+                Some((
+                    label.to_owned(),
+                    tone,
+                    Some(glyph),
+                    PillCommand::Client(command)
+                )),
+                "{state:?} {reminder:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn pill_should_lead_with_one_server_and_open_the_menu_for_several() {
+        let update = server("macbookpro", ServerUpdateAction::Ssh(ssh("macbookpro")));
+        let attention = server(
+            "penguin",
+            ServerUpdateAction::Review(MachineTarget::Ssh(ssh("penguin"))),
+        );
+        let with = |row: &ServerUpdateRow| {
+            let mut servers = quiet_servers();
+            servers.push(row.clone());
+            servers
+        };
+
+        assert_eq!(
+            pill(None, None, &with(&update)),
+            Some((
+                "Update Server".to_owned(),
+                PillTone::Neutral,
+                None,
+                PillCommand::Server(ServerUpdateAction::Ssh(ssh("macbookpro")))
+            ))
+        );
+        assert_eq!(
+            pill(None, None, &with(&attention)),
+            Some((
+                "Server Needs Attention".to_owned(),
+                PillTone::Warning,
+                Some(ControlGlyph::Warning),
+                PillCommand::Server(ServerUpdateAction::Review(MachineTarget::Ssh(ssh(
+                    "penguin"
+                ))))
+            ))
+        );
+        let mut both = with(&update);
+        both.push(attention.clone());
+        assert_eq!(
+            pill(None, None, &both),
+            Some((
+                "Update 2 Servers".to_owned(),
+                PillTone::Neutral,
+                None,
+                PillCommand::Menu
+            ))
+        );
+
+        // The client's step leads, and the chevron marks the servers waiting in the menu.
+        let ready = UpdateState::Ready { version: version() };
+        let client = |servers: &[ServerUpdateRow]| {
+            UpdatePill::resolve(resolve(ready.clone()), servers).map(|pill| pill.marked())
+        };
+        assert_eq!(client(&both), Some(true));
+        assert_eq!(client(&quiet_servers()), Some(false));
+        assert_eq!(
+            pill(Some(ready.clone()), None, &both).map(|pill| pill.0),
+            Some("Install 0.4.2".to_owned())
+        );
     }
 
     #[test]
@@ -1178,7 +1538,7 @@ mod tests {
         updates.update(cx, |updates, cx| updates.download(cx));
         adapter.emit(UpdateEvent::Ready);
         cx.run_until_parked();
-        let (_, cx) = cx.add_window_view(|_, cx| UpdateControl::new(cx));
+        let (_, cx) = cx.add_window_view(UpdateControl::new);
         cx.run_until_parked();
         assert!(cx.debug_bounds("update-control").is_some());
 
@@ -1206,15 +1566,15 @@ mod tests {
         );
     }
 
-    /// The menu stays reachable without a client update, so each server's row stays reachable.
-    #[gpui::test]
-    fn updates_menu_should_stay_one_trigger_with_or_without_a_client_update(
+    /// Installs the update service with automatic downloads off, so each step waits for the user.
+    fn manual_updates(
         cx: &mut gpui::TestAppContext,
+    ) -> (
+        std::rc::Rc<crate::updates::testing::RecordingAdapter>,
+        Entity<ApplicationUpdates>,
     ) {
         use crate::settings::storage::testing::MemoryStorage;
-        use crate::updates::UpdateEvent;
         use crate::updates::testing::RecordingAdapter;
-        use spaceterm_ui::a11y_testing::{A11yTree, node_id};
 
         let adapter = std::rc::Rc::new(RecordingAdapter::available());
         cx.update(|cx| ApplicationUpdates::install(adapter.clone(), cx));
@@ -1225,42 +1585,85 @@ mod tests {
         document.updates.automatic_downloads = false;
         let settings = crate::settings::Settings::load(MemoryStorage::with_document(&document));
         updates.update(cx, |updates, _| updates.attach_settings(settings));
-        let (_, cx) = cx.add_window_view(|_, cx| UpdateControl::new(cx));
-        let id = node_id(A11yTree::read(cx).node("Updates"));
+        (adapter, updates)
+    }
+
+    /// The pill hides while nothing asks for action, then splits into the step and the Updates
+    /// menu behind its chevron.
+    #[gpui::test]
+    fn pill_should_appear_with_a_step_and_keep_the_updates_menu_behind_its_chevron(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::updates::UpdateEvent;
+        use spaceterm_ui::a11y_testing::A11yTree;
+
+        let (adapter, updates) = manual_updates(cx);
+        let (_, cx) = cx.add_window_view(UpdateControl::new);
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("update-control").is_none());
+        assert!(cx.debug_bounds("update-control-menu").is_none());
 
         updates.update(cx, |updates, cx| updates.check(false, cx));
         adapter.emit(UpdateEvent::Available(version()));
         cx.run_until_parked();
-        assert_eq!(node_id(A11yTree::read(cx).node("Updates")), id);
+        let step = cx.debug_bounds("update-control").expect("the step shows");
+        let chevron = cx
+            .debug_bounds("update-control-menu")
+            .expect("the chevron shows");
+        assert_eq!(
+            chevron.left(),
+            step.right(),
+            "the pill's parts did not join"
+        );
+        assert_eq!(chevron.size.height, step.size.height);
+        let tree = A11yTree::read(cx);
+        tree.node("Download 0.4.2");
+        tree.node("Updates");
+    }
+
+    #[gpui::test]
+    fn pressing_the_step_downloads_without_opening_the_updates_menu(cx: &mut gpui::TestAppContext) {
+        use crate::updates::UpdateEvent;
+
+        let (adapter, updates) = manual_updates(cx);
+        updates.update(cx, |updates, cx| updates.check(false, cx));
+        adapter.emit(UpdateEvent::Available(version()));
+        cx.run_until_parked();
+        let (_, visual) = cx.add_window_view(UpdateControl::new);
+        visual.update(|window, _| window.activate_window());
+        visual.run_until_parked();
+        let step = visual.debug_bounds("update-control").unwrap().center();
+        visual.simulate_click(step, gpui::Modifiers::none());
+        visual.run_until_parked();
+        assert!(visual.debug_bounds("update-client-command").is_none());
+        assert_eq!(adapter.downloads.get(), 1);
+        updates.read_with(visual, |updates, _| {
+            assert!(matches!(updates.state(), UpdateState::Downloading { .. }));
+        });
+        assert!(
+            visual.debug_bounds("update-control").is_some(),
+            "the pill stays while the download runs"
+        );
     }
 
     #[gpui::test]
     fn choosing_the_client_row_downloads_once_after_the_updates_menu_closes(
         cx: &mut gpui::TestAppContext,
     ) {
-        use crate::settings::storage::testing::MemoryStorage;
         use crate::updates::UpdateEvent;
-        use crate::updates::testing::RecordingAdapter;
 
-        let adapter = std::rc::Rc::new(RecordingAdapter::available());
-        cx.update(|cx| ApplicationUpdates::install(adapter.clone(), cx));
-        cx.update(crate::ui::init)
-            .expect("UI initialization should succeed");
-        let updates = cx.update(|cx| service(cx).unwrap());
-        let mut document = crate::settings::SettingsDocument::default();
-        document.updates.automatic_downloads = false;
-        let settings = crate::settings::Settings::load(MemoryStorage::with_document(&document));
-        updates.update(cx, |updates, _| updates.attach_settings(settings));
+        let (adapter, updates) = manual_updates(cx);
         updates.update(cx, |updates, cx| updates.check(false, cx));
         adapter.emit(UpdateEvent::Available(version()));
         cx.run_until_parked();
-        let (_, visual) = cx.add_window_view(|_, cx| UpdateControl::new(cx));
+        let (_, visual) = cx.add_window_view(UpdateControl::new);
         visual.update(|window, _| window.activate_window());
         visual.run_until_parked();
-        let trigger = visual.debug_bounds("update-control").unwrap().center();
-        visual.simulate_click(trigger, gpui::Modifiers::none());
+        let chevron = visual.debug_bounds("update-control-menu").unwrap().center();
+        visual.simulate_click(chevron, gpui::Modifiers::none());
         visual.run_until_parked();
         assert_eq!(adapter.downloads.get(), 0, "opening admits no download");
+        assert!(visual.debug_bounds("update-server-0-status").is_some());
         let row = visual
             .debug_bounds("update-client-command")
             .unwrap()
