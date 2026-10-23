@@ -17,7 +17,7 @@
 //! truthful unconfirmed outcome.
 
 use std::sync::{Arc, Mutex, Weak};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use spaceterm_server::service::maintenance::{
     Action, MaintenanceFacts, OperationKind, OperationOutcome, OperationResolution, PreparedChange,
@@ -124,6 +124,9 @@ pub(crate) struct RemoteOperationEntry {
     /// machine: retiring by machine destroys whichever record happens to be listed first.
     pub operation: Option<[u8; 32]>,
     pub state: RemoteOperationState,
+    /// When fresh service facts or a completed outcome were validated in this process.
+    /// Copied with state; snapshot reads, acknowledgement and retained recovery never renew it.
+    pub observed_at: Option<Instant>,
 }
 
 /// What the Servers surface asks of the owner. Reading never reaches a host; every other method
@@ -291,6 +294,7 @@ struct Entry {
     target: Option<MaintenanceTarget>,
     /// The facts the last validated read found, which a description needing no change returns to.
     facts: Option<MaintenanceFacts>,
+    observed_at: Option<Instant>,
     submitted: Option<Submitted>,
     /// The original this entry last held, kept after the record is retired so a step offered on
     /// the entry still names the entry rather than the machine.
@@ -313,6 +317,13 @@ enum Work {
     Submit(OperationSubmission),
     /// Reads an already-submitted original's validated outcome.
     Resolve([u8; 32]),
+}
+
+/// A submission can report fresh completion. Resolving an original reports its retained history.
+#[derive(Clone, Copy)]
+enum OutcomeSource {
+    Submission,
+    Resolution,
 }
 
 /// One exchange this owner admitted. Its generation fences every later report, so a result from
@@ -442,6 +453,7 @@ impl SshServerOperations {
                     state: RemoteOperationState::Unread,
                     target: None,
                     facts: None,
+                    observed_at: None,
                     submitted: None,
                     retired: None,
                     removed: false,
@@ -561,6 +573,7 @@ impl RemoteServerOperations for SshServerOperations {
                             .map(|submitted| submitted.operation)
                             .or(entry.retired),
                         state: entry.state.clone(),
+                        observed_at: entry.observed_at,
                     })
                     .collect()
             })
@@ -995,6 +1008,7 @@ fn adopt(state: &mut State, record: RetainedRemoteOperation) -> Option<(Admitted
                 state: RemoteOperationState::Unread,
                 target: None,
                 facts: None,
+                observed_at: None,
                 submitted: None,
                 retired: None,
                 removed: record.removed,
@@ -1012,6 +1026,9 @@ fn adopt(state: &mut State, record: RetainedRemoteOperation) -> Option<(Admitted
     let entry = &mut state.entries[index];
     entry.generation = generation;
     entry.removed = record.removed;
+    // A retained outcome describes the original's history, not a new observation. An entry
+    // reused during recovery must not lend its prior read's timestamp to that outcome.
+    entry.observed_at = None;
     entry.target = Some(record.target);
     entry.submitted = Some(Submitted {
         operation: record.operation,
@@ -1233,7 +1250,7 @@ fn run(
     };
     match work {
         Work::Read => match backend.observe(&target, authority, &cancellation, &progress) {
-            Ok(facts) => read(&inner, &destination, generation, facts),
+            Ok(facts) => read(&inner, &destination, generation, facts, Instant::now()),
             Err(failure) => settle(&inner, &destination, generation, failure),
         },
         Work::SetAutomaticStart(enabled) => {
@@ -1252,7 +1269,7 @@ fn run(
                     backend.set_automatic_start(&target, enabled, &cancellation, &progress)
                 });
             match result {
-                Ok(facts) => read(&inner, &destination, generation, facts),
+                Ok(facts) => read(&inner, &destination, generation, facts, Instant::now()),
                 Err(failure) => {
                     update(&inner, &destination, generation, |state, index| {
                         let entry = &mut state.entries[index];
@@ -1322,6 +1339,7 @@ fn run(
                     &cancellation,
                     &progress,
                     outcome,
+                    OutcomeSource::Resolution,
                 ),
                 // The service holds no record of the original, so nothing can ever resolve it.
                 Err(SshMaintenanceFailure::Forgotten) => forget(
@@ -1360,8 +1378,10 @@ fn describe(
         Ok(facts) => facts,
         Err(failure) => return settle(inner, destination, generation, failure),
     };
+    let observed_at = Instant::now();
     update(inner, destination, generation, |state, index| {
         state.entries[index].facts = Some(facts.clone());
+        state.entries[index].observed_at = Some(observed_at);
     });
     let prepared = match request {
         RemoteMaintenanceRequest::Service(action) => backend
@@ -1376,7 +1396,7 @@ fn describe(
     };
     match prepared {
         // The artifact this client holds is already the approved build, so nothing changes.
-        Ok(None) => read(inner, destination, generation, facts),
+        Ok(None) => read(inner, destination, generation, facts, observed_at),
         Ok(Some(change)) => {
             update(inner, destination, generation, |state, index| {
                 let handle = next_handle(state);
@@ -1461,6 +1481,7 @@ fn submit(
             cancellation,
             progress,
             outcome,
+            OutcomeSource::Submission,
         ),
         Err(failure) if reached_no_effect(failure) => {
             forget(
@@ -1527,6 +1548,7 @@ fn await_outcome(
     cancellation: &SshCancellationToken,
     progress: &super::server_maintenance::MaintenanceProgress<'_>,
     mut outcome: OperationOutcome,
+    source: OutcomeSource,
 ) {
     let mut attempt = 0;
     while outcome.resolution == OperationResolution::Admitted {
@@ -1576,10 +1598,18 @@ fn await_outcome(
             SshMaintenanceFailure::Unconfirmed,
         );
     };
+    let observed_at = match source {
+        OutcomeSource::Submission => Some(Instant::now()),
+        OutcomeSource::Resolution => None,
+    };
     let resolved = update(inner, destination, generation, |state, index| {
         let handle = next_handle(state);
         let entry = &mut state.entries[index];
         entry.running = false;
+        if matches!(&retained, RetainedOutcome::Completed { status, build } if status.is_some() || build.is_some())
+        {
+            entry.observed_at = observed_at;
+        }
         // The operation moved the server on from the observation its description bound, so the
         // facts the row returns to once the result is acknowledged are the ones the service
         // validated, not the ones it described against.
@@ -1653,11 +1683,13 @@ fn read(
     destination: &SshDestination,
     generation: u64,
     facts: MaintenanceFacts,
+    observed_at: Instant,
 ) {
     update(inner, destination, generation, |state, index| {
         let entry = &mut state.entries[index];
         entry.running = false;
         entry.facts = Some(facts.clone());
+        entry.observed_at = Some(observed_at);
         entry.state = RemoteOperationState::Read(Box::new(facts));
     });
 }
@@ -2623,12 +2655,20 @@ mod tests {
         owner.set_automatic_start(&destination(), true);
         eventually(|| matches!(owner.state(&destination()), RemoteOperationState::Read(_)));
         eventually(|| script.releases.load(Ordering::SeqCst) == 1);
+        let observed_at = owner.entries()[0]
+            .observed_at
+            .expect("the new connection observed its service");
         release.send_blocking(()).unwrap();
         eventually(|| script.releases.load(Ordering::SeqCst) == 2);
         let RemoteOperationState::Read(actual) = owner.state(&destination()) else {
             panic!("old reply replaced the new connection's state")
         };
         assert_eq!(*actual, facts());
+        assert_eq!(
+            owner.entries()[0].observed_at,
+            Some(observed_at),
+            "a removed connection's late reply cannot rejuvenate the new connection's facts"
+        );
         assert_eq!(owner.entries().len(), 1);
         assert_eq!(
             script
@@ -2765,6 +2805,11 @@ mod tests {
         owner.resume_retained();
         owner.resume_retained();
         resolved(owner.as_ref());
+        assert_eq!(
+            owner.entries()[0].observed_at,
+            None,
+            "resolving a reloaded original reports its history without observing current service facts"
+        );
         std::thread::sleep(Duration::from_millis(30));
         assert_eq!(
             *reopened.resolved.lock().unwrap(),

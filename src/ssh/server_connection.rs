@@ -133,6 +133,8 @@ pub(crate) enum RemoteConnectionStatus {
         facts: SshServerFacts,
         /// When the observation finished, which the result describes rather than the present.
         at: std::time::SystemTime,
+        /// Monotonic ordering with validated maintenance observations in this client process.
+        observed_at: Instant,
     },
     Paused {
         reason: ContinuityChange,
@@ -694,6 +696,7 @@ impl SshServerConnections {
                                     availability: observation.availability,
                                     facts: observation.facts,
                                     at: std::time::SystemTime::now(),
+                                    observed_at: Instant::now(),
                                 }
                             };
                         });
