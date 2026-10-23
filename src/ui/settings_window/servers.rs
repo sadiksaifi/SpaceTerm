@@ -1376,7 +1376,8 @@ impl SettingsWindow {
     }
 
     /// Whether the service row can take `action` now. One service action runs at a time, and a
-    /// change waits for the connection row to finish.
+    /// change waits for the connection row to finish. A change to automatic start owns the row's
+    /// task until it finishes, so even a passive read waits; the change reports the status.
     fn server_service_ready(&self, action: ServiceAction) -> bool {
         // One server operation runs at a time across the Servers rows.
         let others_working = self.local_server_working()
@@ -1387,6 +1388,7 @@ impl SettingsWindow {
         self.server_service.as_ref().is_some_and(|row| {
             row.control.is_ok()
                 && row.state.working.is_none()
+                && !row.automatic_start.working
                 && !(action.changes_service() && others_working)
         })
     }
