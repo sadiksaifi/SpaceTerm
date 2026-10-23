@@ -400,6 +400,9 @@ pub(crate) struct TabManager {
         TabId,
         crate::domain::tab_collection::ParkedTab<Entity<TabView>>,
     >,
+    /// The Active Tab this client's just-submitted shared close ends, when the keyboard rested
+    /// in this strip as the person asked for it. The next reconciliation takes it.
+    shared_close_keyboard: Option<TabId>,
     #[cfg(test)]
     rendered_window_active: bool,
     #[cfg(test)]
@@ -482,6 +485,7 @@ impl TabManager {
             close_workspace_requested: false,
             shared: None,
             parked_shared_tabs: std::collections::BTreeMap::new(),
+            shared_close_keyboard: None,
             #[cfg(test)]
             rendered_window_active: window.is_window_active(),
             #[cfg(test)]
@@ -712,7 +716,6 @@ impl TabManager {
         self.tabs.root_tab().read(cx).automatic_directory(cx)
     }
 
-    #[cfg(test)]
     pub(crate) fn active_terminal_identity(&self, cx: &App) -> (TabId, PaneId) {
         let tab_id = self.tabs.active_tab_id();
         let pane_id = self.tabs.active_tab().read(cx).focused_pane_id();
@@ -2690,6 +2693,7 @@ impl TabManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        let close_keyboard = std::mem::take(&mut self.shared_close_keyboard);
         let Some(shared) = self.shared.as_mut() else {
             return false;
         };
@@ -2736,7 +2740,7 @@ impl TabManager {
             };
             changed |= view.update(cx, |view, cx| view.reconcile_shared(tab, window, cx));
         }
-        changed |= self.remove_absent_shared_tabs(workspace, removal, window, cx);
+        changed |= self.remove_absent_shared_tabs(workspace, removal, close_keyboard, window, cx);
         let retired = self
             .parked_shared_tabs
             .keys()
@@ -2772,15 +2776,34 @@ impl TabManager {
         changed
     }
 
+    /// Records, right after this client submits a shared close, whether the keyboard rested in
+    /// this strip when the person asked for it, read before any Close Confirmation took it.
+    ///
+    /// Only a close that ends every Pane of the Active Tab counts, so another client's removal of
+    /// the Active Tab never borrows a close of some other Tab. The reconciliation that removes
+    /// that Tab, whether the server's answer arrived yet or not, opens the Tab that takes its
+    /// place, as a local close does. Every reconciliation clears the record, so a later
+    /// publication or the close's own settlement selects nothing.
+    pub(crate) fn prepare_shared_close_keyboard(&mut self, held_keyboard: bool, cx: &App) {
+        let closes_active =
+            held_keyboard && self.active && self.tabs.active_tab().read(cx).shared_closing();
+        self.shared_close_keyboard = closes_active.then(|| self.tabs.active_tab_id());
+    }
+
     /// Removes the Tabs the server no longer has.
     ///
     /// The server already removed them, so this needs no confirmation here. An inactive Tab's
     /// Panes may never have connected, so membership alone decides this rather than a Terminal
     /// Session reporting its own end.
+    ///
+    /// `close_keyboard` is [`Self::prepare_shared_close_keyboard`]'s record. When this
+    /// reconciliation removes that Tab, the Tab that takes its place opens once, after every
+    /// removal, so no Pane of a Tab closing alongside it is selected.
     fn remove_absent_shared_tabs(
         &mut self,
         workspace: &spaceterm_server::hierarchy::Workspace,
         removal: super::shared_workspaces::SharedRemoval,
+        close_keyboard: Option<TabId>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
@@ -2797,6 +2820,7 @@ impl TabManager {
                     .is_some_and(|server| !workspace.tabs.iter().any(|tab| tab.id == server))
             })
             .collect();
+        let opens_successor = close_keyboard.is_some_and(|closed| absent.contains(&closed));
         let mut removed = false;
         for tab_id in absent {
             let optimistic = self
@@ -2817,14 +2841,17 @@ impl TabManager {
                         self.tabs
                             .active_tab()
                             .update(cx, |view, cx| view.activate_without_focus(cx));
-                        if held_keyboard {
+                        if held_keyboard && !opens_successor {
                             self.focus(window, cx);
                         }
                     }
                     self.sync_terminal_focus_blocker(cx);
                 }
             } else {
-                self.close_tab_activating(tab_id, own && held_keyboard, window, cx);
+                // The server's answer can arrive before this reconciliation, so the closed Tab
+                // leaves here without being parked; its successor still opens once below.
+                let activate_next = own && held_keyboard && !opens_successor;
+                self.close_tab_activating(tab_id, activate_next, window, cx);
             }
             // Another client's close asks the server for no Pane here, but the keyboard that was
             // in the Tab it removed still needs a place, so it rests in the Active Tab's Focused
@@ -2833,6 +2860,13 @@ impl TabManager {
                 self.focus(window, cx);
             }
             removed = true;
+        }
+        // The person's close opens the Tab that takes its place, which selects its Focused Pane
+        // and so starts a retained shell there.
+        if opens_successor && self.active && !self.close_workspace_requested {
+            self.tabs
+                .active_tab()
+                .update(cx, |view, cx| view.open_focused_pane(window, cx));
         }
         removed
     }

@@ -22,11 +22,11 @@
 pub(crate) use development::testing;
 pub(crate) use development::{
     DirectServer, POLL_INTERVAL, SharedAcceptance, SharedAttachmentFailure, SharedCloseApproval,
-    SharedCloseReview, SharedCloseState, SharedCloseUnavailable, SharedEditSource,
-    SharedPaneSessions, SharedPanes, SharedRefusal, SharedRefusalReason, SharedRemoval,
-    SharedRowStatus, SharedSubmission, SharedTabs, SharedWorkspaceConflict, SharedWorkspaceEdits,
-    SharedWorkspaceFacts, SharedWorkspaceHost, SharedWorkspacePlan, SharedWorkspaces,
-    presenting_window, shared_close_changed_title,
+    SharedCloseIntent, SharedCloseReview, SharedCloseState, SharedCloseUnavailable,
+    SharedEditSource, SharedPaneSessions, SharedPanes, SharedRefusal, SharedRefusalReason,
+    SharedRemoval, SharedRowStatus, SharedSubmission, SharedTabs, SharedWorkspaceConflict,
+    SharedWorkspaceEdits, SharedWorkspaceFacts, SharedWorkspaceHost, SharedWorkspacePlan,
+    SharedWorkspaces, presenting_window, shared_close_changed_title,
 };
 
 #[path = "shared_workspaces/repositories.rs"]
@@ -1654,6 +1654,21 @@ mod development {
                 && (self.saved_views.is_some() || self.retained_views.is_none())
         }
 
+        /// Waits for exact creation identities before capturing any destructive approval.
+        pub(crate) fn defer_close(
+            &self,
+            intent: SharedCloseIntent,
+        ) -> Result<bool, SharedRefusalReason> {
+            if !self.edits.edits.availability().0 {
+                return Err(SharedRefusalReason::Offline);
+            }
+            self.edits.pending.borrow_mut().defer_close(intent)
+        }
+
+        pub(crate) fn take_close_intent(&self) -> Option<SharedCloseIntent> {
+            self.edits.pending.borrow_mut().take_close_intent()
+        }
+
         /// Captures what closing `target` ends, as the server reported it last. The capture is
         /// what a person reviews and what a confirmed close submits; nothing rebuilds it later.
         pub(crate) fn close_approval(
@@ -2417,6 +2432,14 @@ mod development {
         Changed,
         /// Another client already removed the target.
         Missing,
+    }
+
+    /// An unapproved close waiting for the exact provisional creation it names.
+    pub(crate) struct SharedCloseIntent {
+        pub(crate) server: ServerCloseTarget,
+        pub(crate) local: CloseTarget,
+        /// The initiating keyboard owner, before any confirmation or later navigation.
+        pub(crate) keyboard: Option<gpui::FocusHandle>,
     }
 
     /// One shared close confirmation on screen: its Close Confirmation generation, the local

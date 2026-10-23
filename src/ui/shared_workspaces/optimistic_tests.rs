@@ -84,6 +84,18 @@ impl DelayedServer {
         result
     }
 
+    /// Another client's accepted close removes `tab`, and the server publishes the result.
+    fn remove_tab_elsewhere(&self, tab: Id) {
+        let mut delivery = self.0.borrow_mut();
+        delivery.server.inventory.revision += 1;
+        delivery.server.inventory.workspaces[0]
+            .tabs
+            .retain(|candidate| candidate.id != tab);
+        let inventory = live_inventory(&delivery.server);
+        delivery.server.inventory.close.clone_from(&inventory.close);
+        delivery.snapshot.inventory = Some(inventory);
+    }
+
     fn rename_elsewhere(&self, workspace: Id, name: &str) {
         let mut delivery = self.0.borrow_mut();
         let sequence = delivery.server.next_sequence(OTHER_DEVICE);
@@ -900,6 +912,34 @@ fn project_window(harness: &WindowHarness, cx: &mut VisualTestContext) {
     });
     cx.run_until_parked();
 }
+
+/// Submits this client's close of the local Tab `tab_id`, then records, as the Workspace Window
+/// does, that the keyboard rested in the strip when the person asked for it.
+fn close_own_tab(harness: &WindowHarness, tab_id: TabId, cx: &mut VisualTestContext) {
+    let tab = harness
+        .manager
+        .read_with(cx, |manager, _| manager.shared_server_tab(tab_id))
+        .unwrap();
+    let workspace = harness.server.inventory().workspaces[0].id;
+    let target = spaceterm_server::hierarchy::CloseTarget::Tab { workspace, tab };
+    let approval = harness.model.borrow().close_approval(target).unwrap();
+    assert_eq!(
+        harness.model.borrow_mut().close(
+            approval,
+            crate::close_confirmation::CloseTarget::Tab {
+                workspace_id: first_workspace_id(),
+                tab_id,
+            }
+        ),
+        SharedSubmission::Submitted
+    );
+    cx.update(|_, cx| {
+        harness.manager.update(cx, |manager, cx| {
+            manager.prepare_shared_close_keyboard(true, cx);
+        });
+    });
+}
+
 fn local_view(
     harness: &WindowHarness,
     cx: &mut VisualTestContext,
@@ -1212,6 +1252,131 @@ fn optimistic_tab_close_ack_keeps_later_find_focus(cx: &mut TestAppContext) {
             .manager
             .read_with(cx, |manager, _| manager.tab_ids().len()),
         1
+    );
+}
+
+/// Closing the Active Tab onto a Pane whose shell already runs opens that Pane as a local close
+/// does. Its Terminal Session stays the one it had, and the keyboard reaches its terminal.
+#[gpui::test]
+fn closing_the_active_tab_onto_a_running_pane_keeps_its_session_and_keyboard(
+    cx: &mut TestAppContext,
+) {
+    let (harness, cx) = window_harness(cx);
+    let survivor_id = harness.server.inventory().workspaces[0].tabs[0].root_pane;
+    let survivor = harness.panes.pane(survivor_id);
+    survivor.reconnect();
+    let survivor_view = local_view(&harness, cx);
+    click("create-tab-button", cx);
+    harness.server.finish(true, true);
+    project_window(&harness, cx);
+    cx.executor()
+        .advance_clock(crate::ui::shared_workspaces::POLL_INTERVAL * 3);
+    cx.run_until_parked();
+    let opened = harness.panes.opened().len();
+    close_own_tab(&harness, local_view(&harness, cx).0, cx);
+    project_window(&harness, cx);
+
+    assert_eq!(
+        local_view(&harness, cx),
+        survivor_view,
+        "the survivor becomes the Active Tab"
+    );
+    assert!(
+        cx.update(|window, cx| harness
+            .manager
+            .read(cx)
+            .focused_terminal_has_input_focus(window, cx)),
+        "the keyboard reaches the survivor's terminal"
+    );
+    assert_eq!(
+        harness.panes.opened().len(),
+        opened,
+        "no Pane subscribes again"
+    );
+    assert!(
+        std::sync::Arc::ptr_eq(&harness.panes.pane(survivor_id), &survivor),
+        "the survivor keeps the connection to its running Terminal Session"
+    );
+    assert_eq!(
+        survivor.restored_starts(),
+        0,
+        "nothing starts a fresh shell"
+    );
+    assert_eq!(survivor.take_overs(), 0, "nothing takes the Pane over");
+}
+
+/// The server can publish its answer to this client's close before the window reconciles the
+/// close. The dormant Tab that takes the closed Tab's place still opens, once.
+#[gpui::test]
+fn an_answer_published_before_the_close_reconciles_still_opens_the_successor_once(
+    cx: &mut TestAppContext,
+) {
+    let (harness, cx) = window_harness(cx);
+    let successor_view = local_view(&harness, cx);
+    let successor = harness
+        .panes
+        .pane(harness.server.inventory().workspaces[0].tabs[0].root_pane);
+    successor.set(DevelopmentPaneStatus::Restored);
+    click("create-tab-button", cx);
+    harness.server.finish(true, true);
+    project_window(&harness, cx);
+    let before = successor.selections();
+
+    close_own_tab(&harness, local_view(&harness, cx).0, cx);
+    assert!(matches!(
+        harness.server.finish(true, true).outcome,
+        Outcome::Accepted { .. }
+    ));
+    project_window(&harness, cx);
+
+    assert_eq!(local_view(&harness, cx), successor_view);
+    assert_eq!(
+        successor.selections(),
+        before + 1,
+        "the person's close opens the Tab that takes its place"
+    );
+    project_window(&harness, cx);
+    assert_eq!(
+        successor.selections(),
+        before + 1,
+        "a later reconciliation selects nothing more"
+    );
+}
+
+/// This client closes an inactive Tab while another client removes the Active Tab. The Tab that
+/// takes the Active Tab's place follows another client's change, so nothing selects its Pane.
+#[gpui::test]
+fn another_clients_removal_of_the_active_tab_beside_an_own_close_selects_nothing(
+    cx: &mut TestAppContext,
+) {
+    let (harness, cx) = window_harness(cx);
+    let own_target = local_view(&harness, cx).0;
+    for _ in 0..2 {
+        click("create-tab-button", cx);
+        harness.server.finish(true, true);
+        project_window(&harness, cx);
+    }
+    cx.dispatch_action(crate::ui::PreviousTab);
+    cx.run_until_parked();
+    let removed = local_view(&harness, cx).0;
+    let removed_server = harness
+        .manager
+        .read_with(cx, |manager, _| manager.shared_server_tab(removed))
+        .unwrap();
+    let successor = harness
+        .panes
+        .pane(harness.server.inventory().workspaces[0].tabs[2].root_pane);
+    let before = successor.selections();
+
+    close_own_tab(&harness, own_target, cx);
+    harness.server.remove_tab_elsewhere(removed_server);
+    project_window(&harness, cx);
+
+    assert_ne!(local_view(&harness, cx).0, removed);
+    assert_eq!(
+        successor.selections(),
+        before,
+        "another client's removal asks the server for no Pane here"
     );
 }
 

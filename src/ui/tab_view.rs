@@ -2474,6 +2474,15 @@ impl TabView {
         }
     }
 
+    /// Whether this client's own pending close ends every Pane this Tab presents.
+    pub(crate) fn shared_closing(&self) -> bool {
+        self.shared.as_ref().is_some_and(|shared| {
+            self.tab
+                .panes_with_ids()
+                .all(|(pane_id, _)| shared.closing(pane_id))
+        })
+    }
+
     /// Whether this Tab presents the server Pane.
     pub(crate) fn holds_shared_pane(&self, server: spaceterm_server::hierarchy::Id) -> bool {
         self.shared

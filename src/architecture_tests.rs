@@ -662,6 +662,11 @@ fn every_native_suite_mount_requires_test_target_and_feature_gates() {
 }
 
 fn shared_presentation_violation(source: &str) -> Option<&'static str> {
+    let source = source
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n");
     [
         "⌘",
         "⇧",
@@ -700,7 +705,15 @@ fn shared_ui_and_failure_presentation_contain_no_host_shortcuts_or_wording() {
         }
         let source = std::fs::read_to_string(&path).unwrap();
         let production = source.split(TEST_MODULE).next().unwrap();
-        if let Some(forbidden) = shared_presentation_violation(production) {
+        // Server cards name the remote operating system independently of the client's host.
+        let production = if path == root.join("ui/settings_window/server_card.rs") {
+            production
+                .replace("\"macOS\"", "\"\"")
+                .replace("\"Linux\"", "\"\"")
+        } else {
+            production.to_owned()
+        };
+        if let Some(forbidden) = shared_presentation_violation(&production) {
             panic!("{} contains host presentation {forbidden}", path.display());
         }
     }
