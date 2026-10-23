@@ -581,6 +581,8 @@ fn after_disconnect_the_card_presents_the_facts_last_observed(cx: &mut TestAppCo
 /// approved build is `version`. Every step it is asked for does nothing.
 struct HeldRead {
     facts: MaintenanceFacts,
+    /// When the read was observed, which a later Check Status outdates.
+    observed_at: std::time::Instant,
     changes: (async_channel::Sender<()>, async_channel::Receiver<()>),
 }
 
@@ -613,6 +615,7 @@ impl HeldRead {
                 }),
                 activation: None,
             },
+            observed_at: std::time::Instant::now(),
             changes: async_channel::unbounded(),
         }
     }
@@ -633,6 +636,7 @@ impl RemoteServerOperations for HeldRead {
             removed: false,
             operation: None,
             state: self.read(),
+            observed_at: Some(self.observed_at),
         }]
     }
 

@@ -520,6 +520,7 @@ mod tests {
                 starts_automatically: false,
             },
             at: std::time::SystemTime::UNIX_EPOCH,
+            observed_at: std::time::Instant::now(),
         };
         assert_eq!(
             ssh_status(&checked),

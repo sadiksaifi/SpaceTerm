@@ -276,6 +276,7 @@ impl RemoteServerOperations for ScriptedOperations {
                 removed: held.removed,
                 operation: Some(held.operation),
                 state: held.state.clone(),
+                observed_at: None,
             })
             .collect();
         // The owner orders by destination and keeps the order it holds one destination's entries

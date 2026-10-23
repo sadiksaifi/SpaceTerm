@@ -9752,6 +9752,7 @@ impl crate::ssh::server_operations::RemoteServerOperations for ScriptedMaintenan
                     removed: false,
                     operation: Some([index as u8 + 1; 32]),
                     state: state.clone(),
+                    observed_at: None,
                 },
             )
             .collect()

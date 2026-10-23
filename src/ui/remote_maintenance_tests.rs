@@ -823,6 +823,7 @@ fn an_observation_decides_what_is_offered_before_any_read() {
         availability,
         facts: facts(),
         at: std::time::SystemTime::UNIX_EPOCH,
+        observed_at: std::time::Instant::now(),
     };
 
     let service = observed("penguin", &connected, MaintenanceRow::Service)
