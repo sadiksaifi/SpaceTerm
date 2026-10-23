@@ -2399,9 +2399,8 @@ fn row_layout(row: SettingsRowId) -> FormRowLayout {
     match row {
         SettingsRowId::TerminalTheme
         | SettingsRowId::InstalledThemes
-        | SettingsRowId::AllServers
-        | SettingsRowId::AddServer
         | SettingsRowId::SettingsFile => FormRowLayout::Full,
+        SettingsRowId::AllServers | SettingsRowId::AddServer => FormRowLayout::Items,
         _ => FormRowLayout::Beside,
     }
 }

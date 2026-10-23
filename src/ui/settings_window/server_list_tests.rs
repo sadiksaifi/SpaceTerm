@@ -1772,3 +1772,55 @@ fn end_all_sessions_is_unavailable_on_a_server_without_it(cx: &mut TestAppContex
     );
     assert!(bravo.submitted().is_empty());
 }
+
+fn bounds(selector: &str, cx: &mut VisualTestContext) -> gpui::Bounds<gpui::Pixels> {
+    let selector: &'static str = Box::leak(selector.to_owned().into_boxed_str());
+    cx.debug_bounds(selector)
+        .unwrap_or_else(|| panic!("{selector} was not rendered"))
+}
+
+#[gpui::test]
+fn all_servers_rows_keep_the_edges_and_insets_of_the_rows_around_them(cx: &mut TestAppContext) {
+    let servers = open_servers(true, &["penguin"], cx);
+    let cx = servers.cx;
+    let status = super::super::catalog::SettingsRowId::ServerStatus
+        .descriptor()
+        .selector;
+    let label = bounds(&format!("{status}-label"), cx);
+    let control = bounds("settings-server-status", cx);
+    let row = bounds(status, cx);
+
+    for index in 0..2 {
+        let item = format!("{}-{index}", super::LIST_SELECTOR);
+        assert_eq!(
+            bounds(&format!("{item}-indicator"), cx).left(),
+            label.left(),
+            "a listed server's status should start on the labels' edge"
+        );
+        assert_eq!(
+            bounds(&format!("{item}-check"), cx).right(),
+            control.right(),
+            "a listed server's checkmark should end on the controls' edge"
+        );
+        assert_eq!(
+            bounds(&item, cx).size.height,
+            row.size.height,
+            "a listed server should be as tall as a described row"
+        );
+    }
+    assert_eq!(
+        bounds(&format!("{}-1", super::LIST_SELECTOR), cx).top(),
+        bounds(&format!("{}-0", super::LIST_SELECTOR), cx).bottom(),
+        "listed servers should meet at a separator, as a card's rows do"
+    );
+    assert_eq!(
+        bounds(&format!("{}-icon", super::ADD_SERVER_SELECTOR), cx).left(),
+        label.left(),
+        "Add Server's plus should start on the labels' edge"
+    );
+    assert_eq!(
+        bounds(&format!("{}-disclosure", super::PICKER_SELECTOR), cx).right(),
+        control.right(),
+        "the picker's chevron should end on the controls' edge"
+    );
+}

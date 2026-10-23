@@ -8,7 +8,7 @@
 //! reaches no computer and asks for no credential.
 
 use gpui::prelude::*;
-use gpui::{AnyElement, App, Context, KeyDownEvent, SharedString, Window, accesskit, div, px};
+use gpui::{AnyElement, App, Context, KeyDownEvent, SharedString, Window, accesskit, div};
 use spaceterm_ui::{
     ComboBox, ComboBoxCommand, ComboBoxCopy, ComboBoxItem, Icon, IconName, ProgressRing,
     ProgressSize, ProgressState,
@@ -23,9 +23,9 @@ use crate::domain::SshDestination;
 use crate::server_context::ServerKey;
 use crate::ssh::server_connection::RemoteConnectionStatus;
 use crate::ui::appearance::{ChromeAppearance, gpui_color};
-use crate::ui::chrome_geometry::RadiusRole;
 use crate::ui::chrome_icons::IconRole;
 use crate::ui::chrome_typography::{ChromeTextStyleExt as _, TextRole};
+use crate::ui::sidebar_window::form::{row_insets, row_separator};
 
 pub(super) const PICKER_SELECTOR: &str = "settings-server-picker";
 pub(super) const LIST_SELECTOR: &str = "settings-all-servers";
@@ -516,6 +516,7 @@ impl SettingsWindow {
         )
         .ghost_trigger()
         .hug(true)
+        .flush(true)
         .accessibility_description(hint)
         .copy(ComboBoxCopy::new(
             "Search servers",
@@ -631,26 +632,26 @@ impl SettingsWindow {
                 .on_click(cx.listener(move |settings, _, _, cx| {
                     settings.select_server(pressed.clone(), cx);
                 }))
+                .relative()
                 .flex()
                 .flex_row()
                 .items_center()
-                .gap(appearance.spacing(10.0))
+                .gap(appearance.spacing(ITEM_GAP))
                 .w_full()
-                .px(appearance.spacing(8.0))
-                .py(appearance.spacing(6.0))
-                .rounded(RadiusRole::Control.pixels())
+                .map(|item| row_insets(item, appearance))
                 .cursor_default()
                 .when(
                     is_selected && focused && window.last_input_was_keyboard(),
                     |item| item.bg(gpui_color(card.row_hover_background)),
                 )
                 .hover(|item| item.bg(gpui_color(card.row_hover_background)))
+                .when(index > 0, |item| item.child(row_separator(appearance)))
                 .child(
-                    div()
-                        .flex_none()
-                        .w(appearance.spacing(16.0))
-                        .flex()
-                        .justify_center()
+                    leading_slot(appearance)
+                        .debug_selector({
+                            let selector = format!("{selector}-indicator");
+                            move || selector.clone()
+                        })
                         .child(indicator),
                 )
                 .child(
@@ -659,6 +660,7 @@ impl SettingsWindow {
                         .flex_col()
                         .flex_1()
                         .min_w_0()
+                        .gap(appearance.spacing(2.0))
                         .child(
                             div()
                                 .truncate()
@@ -683,14 +685,14 @@ impl SettingsWindow {
                 )
                 .child(
                     div()
+                        .debug_selector(move || format!("{selector}-check"))
                         .flex_none()
-                        .w(appearance.spacing(16.0))
+                        .flex()
+                        .justify_end()
+                        .w(row_glyph(appearance))
                         .text_color(gpui_color(card.text_accent))
                         .when(is_selected, |mark| {
-                            mark.child(Icon::inherited(
-                                IconName::Check,
-                                appearance.icons.metrics(IconRole::Row).glyph_size,
-                            ))
+                            mark.child(Icon::inherited(IconName::Check, row_glyph(appearance)))
                         }),
                 )
         });
@@ -704,7 +706,6 @@ impl SettingsWindow {
             .flex()
             .flex_col()
             .w_full()
-            .gap(px(2.0))
             .children(items)
             .into_any_element()
     }
@@ -753,24 +754,16 @@ impl SettingsWindow {
             .flex()
             .flex_row()
             .items_center()
-            .gap(appearance.spacing(10.0))
+            .gap(appearance.spacing(ITEM_GAP))
             .w_full()
-            .px(appearance.spacing(8.0))
-            .py(appearance.spacing(6.0))
-            .rounded(RadiusRole::Control.pixels())
+            .map(|row| row_insets(row, appearance))
             .cursor_default()
             .hover(|row| row.bg(gpui_color(card.row_hover_background)))
             .child(
-                div()
-                    .flex_none()
-                    .w(appearance.spacing(16.0))
-                    .flex()
-                    .justify_center()
+                leading_slot(appearance)
+                    .debug_selector(|| format!("{ADD_SERVER_SELECTOR}-icon"))
                     .text_color(gpui_color(card.text_accent))
-                    .child(Icon::inherited(
-                        IconName::Plus,
-                        appearance.icons.metrics(IconRole::Row).glyph_size,
-                    )),
+                    .child(Icon::inherited(IconName::Plus, row_glyph(appearance))),
             )
             .child(
                 div()
@@ -778,6 +771,7 @@ impl SettingsWindow {
                     .flex_col()
                     .flex_1()
                     .min_w_0()
+                    .gap(appearance.spacing(2.0))
                     .child(
                         div()
                             .chrome_text(appearance.typography.style(TextRole::Body))
@@ -793,6 +787,25 @@ impl SettingsWindow {
             )
             .into_any_element()
     }
+}
+
+/// The space between a list row's status, its text, and its checkmark.
+const ITEM_GAP: f32 = 8.0;
+
+/// The size of the glyphs a list row leads and ends with.
+fn row_glyph(appearance: &ChromeAppearance) -> gpui::Pixels {
+    appearance.icons.metrics(IconRole::Row).glyph_size
+}
+
+/// The column a list row's status dot or plus starts in, on the card's row edge so it lines up
+/// with the labels of the rows around it.
+fn leading_slot(appearance: &ChromeAppearance) -> gpui::Div {
+    div()
+        .flex_none()
+        .w(row_glyph(appearance))
+        .flex()
+        .items_center()
+        .justify_start()
 }
 
 /// What Add Server does, under its label in the All Servers list.

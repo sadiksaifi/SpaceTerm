@@ -1057,6 +1057,7 @@ pub struct ComboBox<I: Clone + Eq + 'static, C: Clone + Eq + 'static = NoComboBo
     menu_with_filter_header: bool,
     full_width: bool,
     hug: bool,
+    flush: bool,
     trigger_surface: TriggerSurface,
     trigger_leading: Option<IconBuilder>,
     input_leading: Option<InputIconBuilder>,
@@ -1130,6 +1131,7 @@ impl<I: Clone + Eq + 'static, C: Clone + Eq + 'static> ComboBox<I, C> {
             menu_with_filter_header: false,
             full_width: false,
             hug: false,
+            flush: false,
             trigger_surface: TriggerSurface::Standard,
             trigger_leading: None,
             input_leading: None,
@@ -1213,6 +1215,14 @@ impl<I: Clone + Eq + 'static, C: Clone + Eq + 'static> ComboBox<I, C> {
     /// reads as values rather than as fields. The popup keeps its own width either way.
     pub fn hug(mut self, hug: bool) -> Self {
         self.hug = hug;
+        self
+    }
+
+    /// Hangs a text trigger's padding and border outside its layout box, so its value and chevron
+    /// line up with the text and controls around it. Its hover surface and focus ring extend past
+    /// that edge. Use it with a ghost or bare trigger, whose resting state draws no bezel.
+    pub fn flush(mut self, flush: bool) -> Self {
+        self.flush = flush;
         self
     }
 
@@ -2629,9 +2639,13 @@ impl<I: Clone + Eq + 'static, C: Clone + Eq + 'static> RenderOnce for ComboBox<I
             trigger.into_any_element()
         };
 
+        let flush = self.flush && text_trigger;
         div()
             .relative()
             .min_w_0()
+            .when(flush, |root| {
+                root.mx(-(metrics.horizontal_padding + metrics.border_width))
+            })
             .when(fill_parent, |root| root.w_full())
             .when(icon_trigger, |root| {
                 root.size(metrics.icon_trigger_size).flex_shrink_0()

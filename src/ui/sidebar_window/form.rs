@@ -104,6 +104,30 @@ pub(crate) enum FormRowLayout {
     /// Content spanning the row with no label of its own, for content that presents itself, such
     /// as a preview or a gallery.
     Full,
+    /// Content made of rows of its own, such as a list, reaching the card's edges. Each of its
+    /// rows keeps the inset a row carries through [`row_insets`] and, after the first, draws
+    /// [`row_separator`], so they read as rows of the card.
+    Items,
+}
+
+/// The inset a card's row keeps on every side, for rows an [`FormRowLayout::Items`] row draws.
+pub(crate) fn row_insets<E: Styled>(item: E, appearance: &ChromeAppearance) -> E {
+    item.px(row_horizontal_padding(appearance))
+        .py(row_vertical_inset(appearance))
+}
+
+/// The hairline a card draws above each of its rows after the first. It starts at the row's
+/// inset and runs to the card's edge. Its row must be positioned relative.
+pub(crate) fn row_separator(appearance: &ChromeAppearance) -> gpui::Div {
+    div()
+        .absolute()
+        .top_0()
+        .left(row_horizontal_padding(appearance))
+        .right_0()
+        .h(px(HAIRLINE))
+        .bg(gpui_color(
+            appearance.separator(spaceterm_ui::ControlHost::Card),
+        ))
 }
 
 /// One titled run of related rows. An empty title draws no heading.
@@ -155,32 +179,22 @@ impl FormGroup {
         let card_selector = format!("{selector}-card");
         let card_background = settings.surface(SettingsSurfaceRole::Card).paint;
         let card_edge = settings.card_edge();
-        let row_separator = settings.separator(SettingsSurfaceRole::Card);
         let row_inset = row_horizontal_padding(appearance);
         let separator_selector = card_selector.clone();
         let footnote_selector = format!("{selector}-footnote");
-        let rows = self
-            .rows
-            .into_iter()
-            .enumerate()
-            .map(|(index, row)| {
-                let separator_selector = separator_selector.clone();
-                div().relative().w_full().child(row).when(index > 0, |row| {
-                    row.child(
-                        div()
-                            .debug_selector(move || {
-                                format!("{separator_selector}-separator-{index}")
-                            })
-                            .absolute()
-                            .top_0()
-                            .left(row_inset)
-                            .right_0()
-                            .h(px(HAIRLINE))
-                            .bg(gpui_color(row_separator)),
-                    )
+        let rows =
+            self.rows
+                .into_iter()
+                .enumerate()
+                .map(|(index, row)| {
+                    let separator_selector = separator_selector.clone();
+                    div().relative().w_full().child(row).when(index > 0, |row| {
+                        row.child(row_separator(appearance).debug_selector(move || {
+                            format!("{separator_selector}-separator-{index}")
+                        }))
+                    })
                 })
-            })
-            .collect::<Vec<_>>();
+                .collect::<Vec<_>>();
         div()
             .debug_selector(move || selector.clone())
             .flex()
@@ -374,7 +388,8 @@ impl FormRow {
         );
         let reset_slot_width = reset_slot_width(appearance);
         let above = self.layout == FormRowLayout::Above;
-        let full = self.layout == FormRowLayout::Full;
+        let items = self.layout == FormRowLayout::Items;
+        let full = self.layout == FormRowLayout::Full || items;
         let description_selector = format!("{selector}-description");
         let caption_color = match self.tone {
             CaptionTone::Guidance => secondary,
@@ -519,7 +534,11 @@ impl FormRow {
             );
         // A row whose content takes the whole width has no label column to stack guidance in, so
         // it keeps its own line underneath.
-        let trailing_caption = self.description.filter(|_| above || full).map(caption);
+        let trailing_caption = self
+            .description
+            .filter(|_| above || full)
+            .map(caption)
+            .map(|caption| caption.when(items, |caption| row_insets(caption, appearance)));
         let row_selector = self.selector.clone();
         div()
             .debug_selector(move || row_selector.to_string())
@@ -530,11 +549,13 @@ impl FormRow {
             // A row that can't be used now reads as unavailable at a glance; its group's footnote
             // says why.
             .when(self.dimmed, |row| row.opacity(0.45))
-            .px(row_horizontal_padding(appearance))
-            .py(if full {
-                row_horizontal_padding(appearance)
-            } else {
-                row_vertical_inset(appearance)
+            // Items carry the row inset themselves, so their fills reach the card's edges.
+            .when(!items, |row| {
+                row.px(row_horizontal_padding(appearance)).py(if full {
+                    row_horizontal_padding(appearance)
+                } else {
+                    row_vertical_inset(appearance)
+                })
             })
             .when(self.highlighted, |row| {
                 row.bg(gpui_color(highlighted_row_background(appearance)))
