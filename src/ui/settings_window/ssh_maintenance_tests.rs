@@ -22,14 +22,14 @@ use crate::settings::storage::testing::MemoryStorage;
 use crate::ssh::cancellation::SshCancellationToken;
 use crate::ssh::server_connection::{
     ConnectMode, ConnectProgress, ConnectedSshServer, ContinuityChange, InteractionReason,
-    RemoteConnectionStatus, RetainedSshConnection, ServerAvailability, SshConnectBackend,
-    SshConnectFailure, SshConnectionIntentStore, SshIntentStoreError, SshServerConnections,
-    SshServerContinuity, SshServerFacts, SshServerObservation,
+    RemoteConnectionStatus, RetainedSshConnection, ServerAvailability, ServerCandidate,
+    SshConnectBackend, SshConnectFailure, SshConnectionIntentStore, SshIntentStoreError,
+    SshServerConnections, SshServerContinuity, SshServerFacts, SshServerObservation,
 };
 use crate::ssh::server_maintenance::{MaintenancePhase, SshMaintenanceFailure, SubmittedKind};
 use crate::ssh::server_operations::{
     RemoteMaintenanceRequest, RemoteOperationEntry, RemoteOperationHandle, RemoteOperationState,
-    RemoteServerOperations, RetainedOutcome,
+    RemoteServerOperations, RemoteUpdateOffer, RetainedOutcome,
 };
 use crate::ui::appearance_runtime;
 use crate::ui::settings_window::SettingsWindow;
@@ -105,6 +105,16 @@ struct Held {
     /// listing differ only by this, so a step that retires a record must carry it.
     operation: [u8; 32],
     state: RemoteOperationState,
+    /// What the last verified read found about updating the server, reported with the state.
+    offer: RemoteUpdateOffer,
+}
+
+/// A verified server archive newer than the approved 1.4.0, as a verified read finds it.
+fn available() -> RemoteUpdateOffer {
+    RemoteUpdateOffer::Available(ServerCandidate {
+        version: "1.5.0".to_owned(),
+        digest: build("1.5.0", 'b').digest,
+    })
 }
 
 /// An owner whose states the test sets and whose calls it counts. Describing a change answers
@@ -152,6 +162,7 @@ impl ScriptedOperations {
                     removed: false,
                     operation,
                     state,
+                    offer: RemoteUpdateOffer::Unchecked,
                 })
             }
         }
@@ -184,6 +195,7 @@ impl ScriptedOperations {
             removed: false,
             operation: [base + offset as u8 + 1; 32],
             state,
+            offer: RemoteUpdateOffer::Unchecked,
         }));
         drop(states);
         self.publish();
@@ -199,6 +211,20 @@ impl ScriptedOperations {
             .filter(|held| held.destination == destination)
         {
             held.removed = true;
+        }
+        self.publish();
+    }
+
+    /// Reports what a verified read found about updating one server, beside its state.
+    fn offer(&self, destination: &str, offer: RemoteUpdateOffer) {
+        for held in self
+            .states
+            .lock()
+            .expect("states")
+            .iter_mut()
+            .filter(|held| held.destination == destination)
+        {
+            held.offer = offer.clone();
         }
         self.publish();
     }
@@ -277,6 +303,7 @@ impl RemoteServerOperations for ScriptedOperations {
                 operation: Some(held.operation),
                 state: held.state.clone(),
                 observed_at: None,
+                update_offer: held.offer.clone(),
             })
             .collect();
         // The owner orders by destination and keeps the order it holds one destination's entries
@@ -301,12 +328,14 @@ impl RemoteServerOperations for ScriptedOperations {
             .map_or(RemoteOperationState::Unread, |held| held.state.clone())
     }
 
+    /// A verified read reports the service and the verified build SpaceTerm could install.
     fn refresh(&self, destination: &SshDestination) {
         self.record(Call::Refresh);
         self.set(
             destination.as_str(),
             RemoteOperationState::Read(Box::new(facts(status(true, true, false)))),
         );
+        self.offer(destination.as_str(), available());
     }
 
     /// Changes only whether the service starts on its own. Whether it runs, and a deliberate
@@ -907,6 +936,38 @@ fn only_start_reverses_a_deliberate_stop(cx: &mut TestAppContext) {
     );
 }
 
+/// Update Server is offered only when a verified read found a newer verified build than the one
+/// the server approved, and its badge names that build. Otherwise Check Now reads again.
+#[gpui::test]
+fn only_a_verified_newer_build_offers_update_server(cx: &mut TestAppContext) {
+    let servers = open_maintenance(cx);
+    servers.operations.set(
+        "penguin",
+        RemoteOperationState::Read(Box::new(facts(status(true, true, false)))),
+    );
+    for offer in [
+        RemoteUpdateOffer::Unchecked,
+        RemoteUpdateOffer::Unavailable,
+        RemoteUpdateOffer::UpToDate,
+    ] {
+        servers.operations.offer("penguin", offer.clone());
+        servers.cx.run_until_parked();
+
+        assert!(!rendered(VERSION_UPDATE, servers.cx), "{offer:?}");
+        assert!(rendered(CHECK_NOW, servers.cx), "{offer:?}");
+    }
+
+    servers.operations.offer("penguin", available());
+    servers.cx.run_until_parked();
+
+    assert!(rendered(VERSION_UPDATE, servers.cx));
+    assert!(
+        explains("1.5.0 available", servers.cx),
+        "the badge names the verified build, not this SpaceTerm's version"
+    );
+    assert!(servers.operations.calls().is_empty());
+}
+
 /// An update names both exact versions, ends the Sessions it warns about, and is confirmed once.
 #[gpui::test]
 fn updating_names_both_versions_and_asks_once(cx: &mut TestAppContext) {
@@ -915,6 +976,7 @@ fn updating_names_both_versions_and_asks_once(cx: &mut TestAppContext) {
         "penguin",
         RemoteOperationState::Read(Box::new(facts(status(true, true, false)))),
     );
+    servers.operations.offer("penguin", available());
     servers.cx.run_until_parked();
 
     click(VERSION_UPDATE, servers.cx);
@@ -1041,6 +1103,7 @@ fn assistive_technology_hears_the_machine_each_step_acts_on(cx: &mut TestAppCont
         "penguin",
         RemoteOperationState::Read(Box::new(facts(status(true, true, false)))),
     );
+    servers.operations.offer("penguin", available());
     servers.cx.run_until_parked();
 
     let tree = A11yTree::read(servers.cx);
@@ -1387,9 +1450,11 @@ fn an_observed_server_offers_its_steps_before_any_maintenance_read(cx: &mut Test
             "{offered} should be offered"
         );
     }
-    for offered in [CHECK_NOW, VERSION_UPDATE] {
-        assert!(rendered(offered, servers.cx), "{offered} should be offered");
-    }
+    assert!(rendered(CHECK_NOW, servers.cx));
+    assert!(
+        !rendered(VERSION_UPDATE, servers.cx),
+        "an observed connection has no verified read, so nothing proves an update is newer"
+    );
     assert!(!rendered("settings-ssh-server-service-start", servers.cx));
     assert!(
         servers.operations.calls().is_empty(),

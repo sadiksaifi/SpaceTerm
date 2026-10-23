@@ -9707,6 +9707,8 @@ struct ScriptedMaintenance {
     /// The destination this owner holds its entries for.
     destination: crate::domain::SshDestination,
     states: Mutex<Vec<crate::ssh::server_operations::RemoteOperationState>>,
+    /// What the last verified read found about updating the server, reported with each state.
+    offer: Mutex<crate::ssh::server_operations::RemoteUpdateOffer>,
     calls: Mutex<Vec<String>>,
     changes: (async_channel::Sender<()>, async_channel::Receiver<()>),
 }
@@ -9720,6 +9722,7 @@ impl ScriptedMaintenance {
             destination: crate::domain::SshDestination::new(destination.to_owned())
                 .expect("destination"),
             states: Mutex::new(vec![state]),
+            offer: Mutex::new(crate::ssh::server_operations::RemoteUpdateOffer::Unchecked),
             calls: Mutex::new(Vec::new()),
             changes: async_channel::unbounded(),
         })
@@ -9753,6 +9756,7 @@ impl crate::ssh::server_operations::RemoteServerOperations for ScriptedMaintenan
                     operation: Some([index as u8 + 1; 32]),
                     state: state.clone(),
                     observed_at: None,
+                    update_offer: self.offer.lock().unwrap().clone(),
                 },
             )
             .collect()
@@ -9874,7 +9878,7 @@ fn remote_maintenance(
 /// can start a server that was stopped.
 #[gpui::test]
 fn a_machine_heading_should_offer_the_steps_its_server_state_allows(cx: &mut TestAppContext) {
-    use crate::ssh::server_operations::RemoteOperationState;
+    use crate::ssh::server_operations::{RemoteOperationState, RemoteUpdateOffer};
 
     let (harness, cx) = MachineGroupsHarness::new(cx);
     let (operations, _connections) = remote_maintenance(
@@ -9882,6 +9886,12 @@ fn a_machine_heading_should_offer_the_steps_its_server_state_allows(cx: &mut Tes
         "penguin",
         cx,
     );
+    // The verified read found a newer verified build than the one the server approved.
+    *operations.offer.lock().unwrap() =
+        RemoteUpdateOffer::Available(crate::ssh::server_connection::ServerCandidate {
+            version: "1.5.0".to_owned(),
+            digest: "b".repeat(64),
+        });
     harness.present_ssh("penguin", &[], cx);
     redraw(cx);
 
@@ -9911,11 +9921,25 @@ fn a_machine_heading_should_offer_the_steps_its_server_state_allows(cx: &mut Tes
     cx.simulate_keystrokes("escape");
     cx.run_until_parked();
 
+    *operations.states.lock().unwrap() = vec![RemoteOperationState::Read(Box::new(remote_facts(
+        true, false,
+    )))];
+    *operations.offer.lock().unwrap() = RemoteUpdateOffer::UpToDate;
+    redraw(cx);
+    right_click("machine-heading-penguin", cx);
+    let up_to_date = cx.debug_bounds("machine-menu-update").is_some();
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+
     assert_eq!(running, [true, true, true, true, false]);
     assert_eq!(
         stopped,
         [true, true, false, false],
         "only Start reverses a deliberate Stop"
+    );
+    assert!(
+        !up_to_date,
+        "a server already running the verified build has nothing to update"
     );
     assert!(
         operations.calls().is_empty(),
