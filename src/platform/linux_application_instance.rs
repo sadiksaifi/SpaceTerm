@@ -18,6 +18,16 @@ impl Application {
             .map(str::to_owned);
         self.events.activate(token);
     }
+
+    fn open(&self, uris: Vec<String>, platform_data: HashMap<String, OwnedValue>) {
+        if let Some(link) = uris
+            .into_iter()
+            .find(|uri| crate::invitation_links::is_pairing_link(uri))
+        {
+            self.events.open_invitation(link);
+            self.activate(platform_data);
+        }
+    }
 }
 
 /// How a launch treats an instance that already owns the application name.
@@ -43,12 +53,24 @@ impl InstanceLaunch {
 }
 
 /// A bus outage leaves source builds usable. Only a confirmed forwarded activation exits.
+#[cfg(test)]
 pub(super) fn forward_if_secondary(
     bus: &SessionBus,
     identity: ApplicationIdentity,
     launch: InstanceLaunch,
     events: DesktopEventSender,
     token: Option<String>,
+) -> Result<bool, SessionBusError> {
+    forward_launch_if_secondary(bus, identity, launch, events, token, None)
+}
+
+pub(super) fn forward_launch_if_secondary(
+    bus: &SessionBus,
+    identity: ApplicationIdentity,
+    launch: InstanceLaunch,
+    events: DesktopEventSender,
+    token: Option<String>,
+    invitation: Option<String>,
 ) -> Result<bool, SessionBusError> {
     bus.query(move |connection| {
         let name = identity.application_id();
@@ -87,9 +109,12 @@ pub(super) fn forward_if_secondary(
             "org.freedesktop.Application",
         )
         .map_err(SessionBusError::from)?;
-        proxy
-            .call::<_, _, ()>("Activate", &(data,))
-            .map_err(SessionBusError::from)?;
+        if let Some(link) = invitation {
+            proxy.call::<_, _, ()>("Open", &(vec![link], data))
+        } else {
+            proxy.call::<_, _, ()>("Activate", &(data,))
+        }
+        .map_err(SessionBusError::from)?;
         Ok(true)
     })
 }

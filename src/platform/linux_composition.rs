@@ -17,7 +17,7 @@ pub(crate) fn main() {
         .ok()
         .or_else(|| std::env::var("DESKTOP_STARTUP_ID").ok());
     if let Some(bus) = &bus
-        && super::linux_application_instance::forward_if_secondary(
+        && super::linux_application_instance::forward_launch_if_secondary(
             bus,
             identity,
             super::linux_application_instance::InstanceLaunch::from_arguments(
@@ -25,6 +25,7 @@ pub(crate) fn main() {
             ),
             events.clone(),
             token,
+            crate::invitation_links::from_arguments(std::env::args_os().skip(1)),
         )
         .unwrap_or(false)
     {

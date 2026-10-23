@@ -1,7 +1,8 @@
 [Desktop Entry]
 Type=Application
 Name=SpaceTerm Development
-Exec={exec}
+Exec={exec} %u
+MimeType=x-scheme-handler/spaceterm;
 Icon={icon}
 Terminal=false
 StartupNotify=true

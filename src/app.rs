@@ -1412,6 +1412,21 @@ pub(crate) fn run(host: HostComposition) -> Result<(), RuntimeError> {
     let host = Rc::new(host);
     let reopened_host = Rc::clone(&host);
     let application = gpui_platform::application().with_assets(spaceterm_ui::EmbeddedAssets);
+    // Platform callbacks may precede initial Workspace creation. Hold one transient delivery
+    // until startup finishes, then use the same sheet as every explicit Add Server entry.
+    let (invitations, pending_invitations) = async_channel::bounded(1);
+    if let Some(link) = crate::invitation_links::from_arguments(std::env::args_os().skip(1)) {
+        let _ = invitations.try_send(link);
+    }
+    application.on_open_urls(move |urls| {
+        if let Some(link) = urls
+            .into_iter()
+            .find(|url| crate::invitation_links::is_pairing_link(url))
+        {
+            let _ = invitations.try_send(link);
+        }
+    });
+    let pending_invitations = Rc::new(RefCell::new(Some(pending_invitations)));
     application.on_reopen(move |cx| {
         leave_menu_only(cx);
         restore_default_window(cx, &reopened_host);
@@ -1432,6 +1447,20 @@ pub(crate) fn run(host: HostComposition) -> Result<(), RuntimeError> {
                         if let Err(error) = open_initial_workspace(cx, &host) {
                             reported_failure.set(Some(error));
                             cx.quit();
+                        } else if let Some(receiver) = pending_invitations.borrow_mut().take() {
+                            cx.spawn(async move |cx| {
+                                while let Ok(link) = receiver.recv().await {
+                                    cx.update(|cx| {
+                                        leave_menu_only(cx);
+                                        crate::ui::settings_window::open_add_server(
+                                            Some(link),
+                                            None,
+                                            cx,
+                                        );
+                                    });
+                                }
+                            })
+                            .detach();
                         }
                     }),
                     cx,

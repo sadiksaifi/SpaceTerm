@@ -52,6 +52,8 @@ mod domain;
 #[cfg(feature = "desktop")]
 mod host_fonts;
 #[cfg(feature = "desktop")]
+mod invitation_links;
+#[cfg(feature = "desktop")]
 mod keybindings;
 mod platform;
 #[cfg_attr(

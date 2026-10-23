@@ -18,6 +18,17 @@
 	<string>6.0</string>
 	<key>CFBundleName</key>
 	<string>SpaceTerm Preflight</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>SpaceTerm invitation</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>spaceterm</string>
+			</array>
+		</dict>
+	</array>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>LSApplicationCategoryType</key>
