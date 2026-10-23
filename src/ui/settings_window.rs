@@ -83,8 +83,8 @@ use crate::ui::sidebar_window::{
 };
 
 use crate::ui::sidebar_window::form::{
-    FormGroup, FormRow, FormRowLayout, Stepper, action_button, reset_button, row_horizontal_inset,
-    section_heading,
+    CaptionTone, FormGroup, FormRow, FormRowLayout, Stepper, action_button, reset_button,
+    row_horizontal_inset, section_heading,
 };
 use catalog::SettingsRowId;
 pub(crate) use catalog::SettingsSectionId;
@@ -1483,8 +1483,8 @@ impl SettingsWindow {
         .matched_indices(matched_indices)
         .highlighted(highlighted)
         .dimmed(self.row_dimmed(row));
-        if let Some((description, error)) = self.server_row_text(row, cx) {
-            rendered = rendered.description(description).error(error);
+        if let Some((description, message)) = self.server_row_text(row, cx) {
+            rendered = rendered.description(description).message(message);
         } else if row == SettingsRowId::UpdateStatus {
             rendered = rendered.description(self.update_status(cx).summary);
         } else if let Some(permission) = permission_access::row_permission(row) {
@@ -2440,20 +2440,23 @@ impl SettingsWindow {
         &self,
         row: SettingsRowId,
         cx: &App,
-    ) -> Option<(SharedString, Option<SharedString>)> {
+    ) -> Option<(SharedString, Option<(SharedString, CaptionTone)>)> {
+        let error = |message: Option<SharedString>| message.map(|text| (text, CaptionTone::Error));
         Some(match row {
-            SettingsRowId::ServerStatus => (self.status_description(cx), self.status_error()),
-            SettingsRowId::ServerVersion => (self.version_description(cx), None),
-            SettingsRowId::ServerAutoStart => {
-                (self.auto_start_description(), self.auto_start_error())
-            }
+            SettingsRowId::ServerStatus => (self.status_description(cx), self.status_message()),
+            SettingsRowId::ServerVersion => (self.version_description(cx), self.version_message()),
+            SettingsRowId::ServerAutoStart => (
+                self.auto_start_description(),
+                error(self.auto_start_error()),
+            ),
             SettingsRowId::EndAllSessions => (
                 SharedString::new_static("Ending them keeps the server and its Workspaces."),
-                self.end_all_sessions_error(),
+                self.end_all_sessions_error()
+                    .map(|text| (text, self.end_all_sessions_caption().1)),
             ),
             SettingsRowId::NetworkAccess => (
                 self.network_access_description(),
-                self.network_access_error(),
+                error(self.network_access_error()),
             ),
             SettingsRowId::PairedDevices => (
                 SharedString::new_static(

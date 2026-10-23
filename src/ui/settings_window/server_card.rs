@@ -539,40 +539,69 @@ impl SettingsWindow {
         server_selection::facts(&self.selected_server()?.key(), cx)
     }
 
-    /// Why the selected server refused, failed or can't be reached, under its Status.
-    pub(super) fn status_error(&self) -> Option<SharedString> {
+    /// What the selected server's Status reports under its control: a refusal or failure, work
+    /// underway, or a result that waits for the person. A plain state needs no words.
+    pub(super) fn status_message(&self) -> Option<(SharedString, CaptionTone)> {
+        let attention = |text: SharedString, tone: CaptionTone, attention: bool| {
+            (attention || tone != CaptionTone::Guidance).then_some((text, tone))
+        };
         match self.selected_server()? {
             ServerChoice::Local => {
-                let service = self.server_service_presentation();
-                if let Some(service) = service
-                    .as_ref()
-                    .filter(|service| service.tone == CaptionTone::Error)
-                {
-                    return Some(service.explanation.clone());
-                }
-                self.local_server_presentation()
-                    .filter(|local| local.tone == CaptionTone::Error)
-                    .map(|local| local.explanation)
+                let service = self.server_service_presentation().and_then(|service| {
+                    let busy = service.working.is_some() || service.authorization.is_some();
+                    attention(service.explanation, service.tone, busy)
+                });
+                service.or_else(|| {
+                    let local = self.local_server_presentation()?;
+                    attention(local.explanation, local.tone, false)
+                })
             }
             ServerChoice::Ssh(destination) => {
-                let status = self.ssh_servers.as_ref()?.connections.status(&destination);
-                let connection = crate::ui::ssh_servers::present(&status);
-                if connection.tone == CaptionTone::Error {
-                    return Some(connection.explanation);
-                }
-                self.maintenance_presentation(MaintenanceRow::Service)
-                    .filter(|maintenance| maintenance.tone == CaptionTone::Error)
-                    .map(|maintenance| maintenance.explanation)
+                let maintenance = self
+                    .maintenance_presentation(MaintenanceRow::Service)
+                    .and_then(|maintenance| {
+                        let waiting = maintenance_waits(&maintenance);
+                        attention(maintenance.explanation, maintenance.tone, waiting)
+                    });
+                maintenance.or_else(|| {
+                    let status = self.ssh_servers.as_ref()?.connections.status(&destination);
+                    let connection = crate::ui::ssh_servers::present(&status);
+                    attention(connection.explanation, connection.tone, false)
+                })
             }
-            ServerChoice::Direct(route) => self.direct_problem().or_else(|| {
-                let (_, status, name) = self
-                    .saved_direct_servers()
-                    .into_iter()
-                    .find(|(saved, _, _)| *saved == route)?;
-                let presentation = crate::ui::direct_servers::present(status, &name);
-                (presentation.tone == CaptionTone::Error)
-                    .then(|| SharedString::from(presentation.explanation))
-            }),
+            ServerChoice::Direct(route) => self
+                .direct_problem()
+                .map(|problem| (problem, CaptionTone::Error))
+                .or_else(|| {
+                    let (_, status, name) = self
+                        .saved_direct_servers()
+                        .into_iter()
+                        .find(|(saved, _, _)| *saved == route)?;
+                    let presentation = crate::ui::direct_servers::present(status, &name);
+                    attention(
+                        SharedString::from(presentation.explanation),
+                        presentation.tone,
+                        false,
+                    )
+                }),
+        }
+    }
+
+    /// What the selected server's Version reports under its control while an update runs, waits
+    /// for the person or didn't finish.
+    pub(super) fn version_message(&self) -> Option<(SharedString, CaptionTone)> {
+        match self.selected_server()? {
+            ServerChoice::Local => {
+                let update = self.server_update_presentation()?;
+                (update.working || update.tone != CaptionTone::Guidance)
+                    .then_some((update.explanation, update.tone))
+            }
+            ServerChoice::Ssh(_) => {
+                let update = self.maintenance_presentation(MaintenanceRow::Update)?;
+                (maintenance_waits(&update) || update.tone != CaptionTone::Guidance)
+                    .then_some((update.explanation, update.tone))
+            }
+            ServerChoice::Direct(_) => None,
         }
     }
 
@@ -1487,6 +1516,7 @@ impl SettingsWindow {
                 ProgressState::Indeterminate,
             )
             .size(ProgressSize::Compact)
+            .debug_selector(format!("{VERSION_SELECTOR}-progress"))
             .into_any_element()
         });
         let buttons = view.actions.into_iter().map(|step| {
@@ -1664,6 +1694,24 @@ fn status_step_consequence(step: &StatusStep) -> Option<&'static str> {
         StatusStep::Local(action) => action.consequence(),
         _ => None,
     }
+}
+
+/// Whether a maintenance row reports work underway or a result that waits for the person.
+fn maintenance_waits(
+    presentation: &crate::ui::remote_maintenance::MaintenancePresentation,
+) -> bool {
+    presentation.working
+        || presentation.actions.iter().any(|action| {
+            matches!(
+                action,
+                RemoteAction::Acknowledge
+                    | RemoteAction::Discard
+                    | RemoteAction::Dismiss
+                    | RemoteAction::CheckAgain
+                    | RemoteAction::Finish
+                    | RemoteAction::Cancel
+            )
+        })
 }
 
 /// The label a Status step reads by.

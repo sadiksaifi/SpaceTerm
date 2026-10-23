@@ -257,8 +257,9 @@ pub(crate) struct FormRow {
     selector: SharedString,
     label: SharedString,
     description: Option<SharedString>,
-    /// Why the control's value can't be used, shown under the control.
-    error: Option<SharedString>,
+    /// What the control reports, shown under it in the color its tone selects: a validation
+    /// error, or what a step the row offers did or still needs.
+    message: Option<(SharedString, CaptionTone)>,
     /// The row can't be used now. Its group's footnote says why.
     dimmed: bool,
     separate_example: bool,
@@ -280,7 +281,7 @@ impl FormRow {
             selector: selector.into(),
             label: label.into(),
             description: None,
-            error: None,
+            message: None,
             dimmed: false,
             separate_example: false,
             tone: CaptionTone::Guidance,
@@ -318,8 +319,14 @@ impl FormRow {
 
     /// Shows a validation error directly under the control, right-aligned in the destructive
     /// color. The description under the label stays.
-    pub(crate) fn error(mut self, error: Option<SharedString>) -> Self {
-        self.error = error;
+    pub(crate) fn error(self, error: Option<SharedString>) -> Self {
+        self.message(error.map(|error| (error, CaptionTone::Error)))
+    }
+
+    /// Shows what the control reports directly under it, right-aligned, in the color `tone`
+    /// selects. An error is announced as an alert.
+    pub(crate) fn message(mut self, message: Option<(SharedString, CaptionTone)>) -> Self {
+        self.message = message;
         self
     }
 
@@ -543,19 +550,28 @@ impl FormRow {
                             .when(above || full, |content| content.w_full())
                             .child(self.control),
                     )
-                    .children(self.error.map(|error| {
-                        let error_selector = format!("{selector}-error");
+                    .children(self.message.map(|(message, tone)| {
+                        let message_selector = format!("{selector}-message");
+                        let text_selector = format!("{selector}-message-text");
+                        let color = match tone {
+                            CaptionTone::Guidance => colors.text_muted,
+                            CaptionTone::Warning => colors.warning,
+                            CaptionTone::Error => colors.error,
+                        };
                         div()
-                            .id(SharedString::from(error_selector.clone()))
-                            .debug_selector(move || error_selector.clone())
-                            .role(accesskit::Role::Alert)
-                            .aria_label(error.clone())
+                            .id(SharedString::from(message_selector.clone()))
+                            .debug_selector(move || message_selector.clone())
+                            .when(tone == CaptionTone::Error, |message_box| {
+                                message_box
+                                    .role(accesskit::Role::Alert)
+                                    .aria_label(message.clone())
+                            })
                             .max_w(appearance.spacing(PROSE_MEASURE * 0.6))
                             .text_align(gpui::TextAlign::Right)
                             .chrome_text(appearance.typography.style(TextRole::Secondary))
-                            .text_color(gpui_color(colors.error))
+                            .text_color(gpui_color(color))
                             .whitespace_normal()
-                            .child(error)
+                            .child(Text::new(SharedString::from(text_selector).into(), message))
                     })),
             );
         // A row whose content takes the whole width has no label column to stack guidance in, so
