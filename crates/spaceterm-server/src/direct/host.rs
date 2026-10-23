@@ -208,6 +208,33 @@ impl State {
             connection,
         })
     }
+    fn note_connection(&mut self, peer: &Peer<'_>) -> Result<(), DirectError> {
+        self.authorized_peer(peer)?;
+        let Some(now) = wire::now()
+            .ok()
+            .filter(|time| *time <= storage::MAX_CONNECTION_TIME)
+        else {
+            return Ok(());
+        };
+        let device = self
+            .record
+            .devices
+            .iter_mut()
+            .find(|device| device.info.pairing == peer.device.pairing)
+            .ok_or(DirectError::AuthenticationRefused)?;
+        if device
+            .info
+            .last_connected_at_unix_seconds
+            .is_some_and(|previous| previous >= now)
+        {
+            return Ok(());
+        }
+        device.info.last_connected_at_unix_seconds = Some(now);
+        // This locked snapshot changes metadata only. A failed metadata write must
+        // not fence existing connections, rotate exposure, or change authority.
+        let _ = self.store.save(&self.record);
+        Ok(())
+    }
     fn expire(&mut self) -> Result<(), DirectError> {
         let now = wire::now()?;
         self.invitations.retain(|v| v.expires > now);
@@ -345,6 +372,7 @@ impl State {
                     client: crypto::random()?,
                     name: claim.device_name.clone(),
                     public_key: claim.device_public_key,
+                    last_connected_at_unix_seconds: None,
                 };
                 let mut next = self.record.clone();
                 next.devices.push(storage::Device {
@@ -785,6 +813,10 @@ pub(crate) fn serve(
         )?
     };
     let (_, client, name) = crate::protocol::admit_direct_server(&mut bridge, &paired)?;
+    state
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .note_connection(&peer)?;
     crate::host::serve_admitted(&mut bridge, client, name, Some(peer), &environment)?;
     bridge.finish_reply()?;
     Ok(())
@@ -792,6 +824,9 @@ pub(crate) fn serve(
 
 #[cfg(test)]
 mod network_tests;
+
+#[cfg(test)]
+mod connection_time_tests;
 
 #[cfg(test)]
 mod tests {

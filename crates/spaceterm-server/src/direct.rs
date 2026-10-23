@@ -137,6 +137,9 @@ pub struct DeviceInfo {
     pub client: [u8; 32],
     pub name: ClientName,
     pub public_key: [u8; 32],
+    /// Last fully admitted connection, in Unix seconds through year 9999.
+    /// `None` means no connection time has been observed.
+    pub last_connected_at_unix_seconds: Option<u64>,
 }
 impl DeviceInfo {
     pub fn fingerprint(&self) -> String {

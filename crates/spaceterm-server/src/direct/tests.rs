@@ -777,6 +777,95 @@ fn a_revoked_credential_can_repeat_only_its_exact_original_without_affecting_a_n
 }
 
 #[test]
+fn only_a_fully_admitted_device_updates_its_retained_last_connection_time() {
+    fn devices(fixture: &Fixture) -> Vec<DeviceInfo> {
+        let ManagementReply::Devices(devices) = fixture.management(Management::Devices).unwrap()
+        else {
+            panic!()
+        };
+        devices
+    }
+    let mut fixture = Fixture::new();
+    fixture.enable();
+    let credential = DeviceCredential::generate().unwrap();
+    let target = fixture.enroll(&credential);
+    // Reusing a key on a separate pairing must not share connection metadata.
+    let untouched = fixture.enroll(&credential);
+    let mut expected = devices(&fixture);
+    assert!(
+        expected
+            .iter()
+            .all(|device| device.last_connected_at_unix_seconds.is_none())
+    );
+    let endpoint = fixture.endpoint();
+    let wrong_key = DeviceCredential::generate().unwrap();
+    let server = fixture.serve_next();
+    assert!(matches!(
+        DirectConnection::connect(&endpoint, &target, &wrong_key),
+        Err(DirectError::AuthenticationRefused)
+    ));
+    server.join().unwrap().unwrap();
+
+    let server = fixture.serve_next();
+    let mut connection = DirectConnection::connect(&endpoint, &target, &credential).unwrap();
+    assert!(
+        crate::protocol::admit_transport(
+            &mut connection,
+            (&untouched.client, &"Spoofed".into()),
+            &target.pin.server,
+            &target.pin.build,
+            &[1],
+        )
+        .is_err()
+    );
+    drop(connection);
+    assert_eq!(
+        server.join().unwrap(),
+        Err(ServerError::AuthenticationRefused)
+    );
+    assert_eq!(devices(&fixture), expected);
+
+    let before = wire::now().unwrap();
+    let server = fixture.serve_next();
+    let mut connection = DirectConnection::connect(&endpoint, &target, &credential).unwrap();
+    crate::protocol::admit_transport(
+        &mut connection,
+        (&target.client, &"Admitted device".into()),
+        &target.pin.server,
+        &target.pin.build,
+        &[1],
+    )
+    .unwrap();
+    let mut protocol = crate::protocol::Wire::terminal(&mut connection).unwrap();
+    protocol
+        .write(&crate::pane::Request::Direct(Management::Devices))
+        .unwrap();
+    let crate::pane::Reply::Direct(Ok(ManagementReply::Devices(observed))) =
+        protocol.read().unwrap()
+    else {
+        panic!()
+    };
+    let timestamp = observed
+        .iter()
+        .find(|device| device.pairing == target.pairing)
+        .unwrap()
+        .last_connected_at_unix_seconds
+        .unwrap();
+    assert!((before..=wire::now().unwrap()).contains(&timestamp));
+    expected
+        .iter_mut()
+        .find(|device| device.pairing == target.pairing)
+        .unwrap()
+        .last_connected_at_unix_seconds = Some(timestamp);
+    assert_eq!(observed, expected);
+    drop(connection);
+    let _ = server.join().unwrap();
+    fixture.state.lock().unwrap().stop();
+    fixture.state = host::State::open(&fixture.paths).unwrap();
+    assert_eq!(devices(&fixture), expected);
+}
+
+#[test]
 fn wss_validates_the_actual_pin_and_refuses_a_spoofed_terminal_client_identity() {
     let fixture = Fixture::new();
     fixture.enable();
