@@ -63,12 +63,15 @@ impl PendingEdits {
 
     pub fn push(
         &mut self,
-        mutation: Mutation,
+        mut mutation: Mutation,
         reply: Option<Reply>,
     ) -> Result<(), SharedRefusalReason> {
         if self.full() {
             return Err(SharedRefusalReason::Pending);
         }
+        // Observation can resolve a dependency before this edit arrives. Own its canonical
+        // identity now, before binding retires the view's alias while acknowledgement waits.
+        remap(&mut mutation, |id| self.canonical(id));
         let new_id = || -> Result<Id, SharedRefusalReason> {
             let mut id = [0; 32];
             getrandom::fill(&mut id).map_err(|_| SharedRefusalReason::Value)?;

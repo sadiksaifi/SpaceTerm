@@ -179,11 +179,12 @@ fn sessions() -> (
     SharedPaneSessions,
     Rc<ScriptedPanes>,
     WorkspaceTerminalSessionFactory,
+    crate::terminal::testing::TestTerminalSessionRecords,
 ) {
-    let factory: Rc<dyn TerminalSessionFactory> =
-        Rc::new(crate::terminal::testing::TestTerminalSessionFactory::new(
-            crate::terminal::testing::TestTerminalSessionRecords::default(),
-        ));
+    let records = crate::terminal::testing::TestTerminalSessionRecords::default();
+    let factory: Rc<dyn TerminalSessionFactory> = Rc::new(
+        crate::terminal::testing::TestTerminalSessionFactory::new(records.clone()),
+    );
     let factory = WorkspaceTerminalSessionFactory::new_local(
         factory,
         crate::terminal::testing::test_local_directory(PathBuf::from("/tmp/spaceterm-optimistic")),
@@ -193,12 +194,12 @@ fn sessions() -> (
         Rc::clone(&panes) as Rc<dyn SharedPaneOpener>,
         &PaneConstruction::testing(),
     );
-    (sessions, panes, factory)
+    (sessions, panes, factory, records)
 }
 
 fn model(server: &Rc<DelayedServer>) -> (SharedEditSource, SharedWorkspaces) {
     let source = SharedEditSource::new(Rc::clone(server) as Rc<dyn SharedWorkspaceEdits>);
-    let (sessions, _, _) = sessions();
+    let (sessions, _, _, _) = sessions();
     let mut model = SharedWorkspaces::new(source.clone(), sessions);
     let inventory = model.poll().inventory.unwrap();
     model.register(
@@ -853,6 +854,7 @@ struct WindowHarness {
     source: SharedEditSource,
     panes: Rc<ScriptedPanes>,
     model: RefCell<SharedWorkspaces>,
+    records: crate::terminal::testing::TestTerminalSessionRecords,
 }
 fn window_harness(cx: &mut TestAppContext) -> (WindowHarness, &mut VisualTestContext) {
     cx.update(crate::ui::init).unwrap();
@@ -861,7 +863,7 @@ fn window_harness(cx: &mut TestAppContext) -> (WindowHarness, &mut VisualTestCon
     let workspace = &inventory.workspaces[0];
     let root = &workspace.tabs[0];
     let source = SharedEditSource::new(Rc::clone(&server) as Rc<dyn SharedWorkspaceEdits>);
-    let (sessions, panes, factory) = sessions();
+    let (sessions, panes, factory, records) = sessions();
     let (_, state) = panes.open(root.root_pane).unwrap();
     let mut model = SharedWorkspaces::new(source.clone(), sessions.clone());
     model.poll();
@@ -892,6 +894,7 @@ fn window_harness(cx: &mut TestAppContext) -> (WindowHarness, &mut VisualTestCon
             source,
             panes,
             model: RefCell::new(model),
+            records,
         },
         cx,
     )
@@ -987,6 +990,326 @@ fn optimistic_pending_tab_split_and_later_navigation_keep_the_frame_and_keyboard
     assert_eq!(local_view(&harness, cx), navigated);
     assert_eq!(cx.update(|window, cx| window.focused(cx)), focus);
     assert!(cx.debug_bounds("shared-tab-unavailable-ok").is_none());
+    let inventory = harness.server.inventory();
+    let created = inventory.workspaces[0].tabs.last().unwrap();
+    for pane in &created.panes {
+        assert_eq!(
+            harness.panes.pane(pane.id).created_starts(),
+            1,
+            "both the new Tab and its split retain startup after navigation"
+        );
+    }
+}
+
+#[gpui::test]
+fn optimistic_tab_created_after_commit_before_ack_keeps_its_bound_source(cx: &mut TestAppContext) {
+    let (harness, cx) = window_harness(cx);
+    cx.dispatch_action(crate::ui::CreateTab);
+    let committed = harness.server.finish(false, true);
+    assert!(matches!(committed.outcome, Outcome::Accepted { .. }));
+    let bound_source = harness.server.inventory().workspaces[0].tabs[1].root_pane;
+    // The worker published accepted membership, but its original is still awaiting ack. The
+    // next key event observes that outcome before the regular window membership poll binds it.
+    cx.dispatch_action(crate::ui::CreateTab);
+    assert_eq!(
+        harness.server.dispatched().len(),
+        1,
+        "a queued dependent waits for the original acknowledgement"
+    );
+    assert_eq!(
+        harness.server.finish(true, true),
+        committed,
+        "settlement must acknowledge the original creation identity"
+    );
+    project_window(&harness, cx);
+    let dependent = harness.server.finish(true, true);
+    assert!(
+        matches!(dependent.outcome, Outcome::Accepted { .. }),
+        "a committed source Pane still on the server must not produce refusal: {:?}",
+        dependent.outcome
+    );
+    assert_eq!(
+        dependent.mutation,
+        Mutation::CreateTab {
+            workspace: harness.server.inventory().workspaces[0].id,
+            source: Some(bound_source),
+        },
+        "binding may retire the view alias only after queued intent owns its canonical source"
+    );
+    project_window(&harness, cx);
+    cx.dispatch_action(crate::ui::CreateTab);
+    assert!(matches!(
+        harness.server.finish(true, true).outcome,
+        Outcome::Accepted { .. }
+    ));
+    project_window(&harness, cx);
+    assert_eq!(harness.server.inventory().workspaces[0].tabs.len(), 4);
+    assert!(harness.model.borrow_mut().take_refusal().is_none());
+}
+
+#[gpui::test]
+fn optimistic_rapid_tabs_keep_each_start_intent_after_later_navigation(cx: &mut TestAppContext) {
+    let (harness, cx) = window_harness(cx);
+    for _ in 0..15 {
+        cx.dispatch_action(crate::ui::CreateTab);
+    }
+    cx.dispatch_action(crate::ui::PreviousTab);
+    let selected = local_view(&harness, cx);
+    let focus = cx.update(|window, cx| window.focused(cx));
+    for _ in 0..15 {
+        harness.server.finish(true, true);
+        project_window(&harness, cx);
+        for pane in harness.panes.opened() {
+            pane.admitted();
+            assert_eq!(
+                crate::ui::server_pane::ServerPaneConnection::status(pane.as_ref()),
+                crate::terminal::server_session::DevelopmentPaneStatus::Connecting,
+                "hidden admission must release capacity without fabricating a first screen"
+            );
+        }
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(16));
+        cx.run_until_parked();
+    }
+    let inventory = harness.server.inventory();
+    assert_eq!(inventory.workspaces[0].tabs.len(), 16);
+    assert_eq!(
+        harness.records.starts().len(),
+        16,
+        "all hidden accepted Tabs start their presentation worker without revisiting"
+    );
+    for tab in &inventory.workspaces[0].tabs[1..] {
+        assert_eq!(
+            harness.panes.pane(tab.root_pane).created_starts(),
+            1,
+            "each accepted creation retains one startup request even after focus moves"
+        );
+    }
+    assert_eq!(local_view(&harness, cx), selected);
+    assert_eq!(cx.update(|window, cx| window.focused(cx)), focus);
+}
+
+#[gpui::test]
+fn readiness_reserves_foreground_start_capacity_during_a_hidden_creation_burst(
+    cx: &mut TestAppContext,
+) {
+    let (harness, cx) = window_harness(cx);
+    for _ in 0..15 {
+        cx.dispatch_action(crate::ui::CreateTab);
+    }
+    cx.dispatch_action(crate::ui::ActivateTab1);
+    for _ in 0..15 {
+        harness.server.finish(true, true);
+        project_window(&harness, cx);
+    }
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(16));
+    cx.run_until_parked();
+    assert_eq!(
+        harness.records.starts().len(),
+        4,
+        "only three hidden startups may occupy the pipeline beside the existing Root Pane"
+    );
+    cx.dispatch_action(crate::ui::ActivateTab9);
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(16));
+    cx.run_until_parked();
+    assert_eq!(
+        harness.records.starts().len(),
+        5,
+        "the newly selected Pane uses the reserved foreground slot"
+    );
+    cx.dispatch_action(crate::ui::PreviousTab);
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(16));
+    cx.run_until_parked();
+    assert_eq!(
+        harness.records.starts().len(),
+        5,
+        "navigation never bypasses four already admitted startups"
+    );
+}
+
+#[gpui::test]
+fn readiness_hidden_split_uses_current_window_geometry_without_resize_on_first_visit(
+    cx: &mut TestAppContext,
+) {
+    use crate::terminal::testing::RecordedCommand;
+    let (harness, cx) = window_harness(cx);
+    click("create-tab-button", cx);
+    click("pane-split-down-1", cx);
+    cx.dispatch_action(crate::ui::PreviousTab);
+    cx.simulate_resize(gpui::size(gpui::px(1001.0), gpui::px(701.0)));
+    cx.run_until_parked();
+    for _ in 0..2 {
+        harness.server.finish(true, true);
+        project_window(&harness, cx);
+        for pane in harness.panes.opened() {
+            pane.reconnect();
+        }
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(16));
+        cx.run_until_parked();
+    }
+    assert_eq!(
+        harness.records.starts().len(),
+        3,
+        "the new Tab and split must start while their Tab is hidden"
+    );
+    let starts = harness.records.starts();
+    assert_eq!(
+        starts[1].geometry.grid().cols,
+        starts[2].geometry.grid().cols
+    );
+    assert!(
+        starts[1]
+            .geometry
+            .grid()
+            .rows
+            .abs_diff(starts[2].geometry.grid().rows)
+            <= 1
+    );
+    let new_sessions = [starts[1].session_id, starts[2].session_id];
+    let resizes_before = harness
+        .records
+        .commands()
+        .iter()
+        .filter(|call| {
+            new_sessions.contains(&call.session_id)
+                && matches!(call.command, RecordedCommand::Resize(_))
+        })
+        .count();
+    cx.dispatch_action(crate::ui::NextTab);
+    cx.run_until_parked();
+    let resizes_after = harness
+        .records
+        .commands()
+        .iter()
+        .filter(|call| {
+            new_sessions.contains(&call.session_id)
+                && matches!(call.command, RecordedCommand::Resize(_))
+        })
+        .count();
+    assert_eq!(
+        resizes_after, resizes_before,
+        "first visible prepaint must reuse the hidden startup grid, without SIGWINCH"
+    );
+}
+
+/// Accepts a new hidden Tab with three side-by-side Panes whose restored layout is wider than
+/// the stage once the window narrows, optionally zooming its Focused Pane first.
+fn accept_hidden_layout_wider_than_the_stage(
+    harness: &WindowHarness,
+    zoomed: bool,
+    cx: &mut VisualTestContext,
+) {
+    cx.simulate_resize(gpui::size(gpui::px(1600.0), gpui::px(900.0)));
+    cx.run_until_parked();
+    click("create-tab-button", cx);
+    for _ in 0..2 {
+        cx.dispatch_action(crate::ui::SplitRight);
+        cx.run_until_parked();
+    }
+    if zoomed {
+        cx.dispatch_action(crate::ui::TogglePaneZoom);
+        cx.run_until_parked();
+    }
+    cx.dispatch_action(crate::ui::PreviousTab);
+    cx.simulate_resize(gpui::size(gpui::px(460.0), gpui::px(600.0)));
+    cx.run_until_parked();
+    for _ in 0..3 {
+        harness.server.finish(true, true);
+        project_window(harness, cx);
+        for pane in harness.panes.opened() {
+            pane.reconnect();
+        }
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(16));
+        cx.run_until_parked();
+    }
+    assert_eq!(
+        harness.server.inventory().workspaces[0].tabs[1].panes.len(),
+        3
+    );
+}
+
+fn resizes(harness: &WindowHarness) -> usize {
+    use crate::terminal::testing::RecordedCommand;
+    harness
+        .records
+        .commands()
+        .iter()
+        .filter(|call| matches!(call.command, RecordedCommand::Resize(_)))
+        .count()
+}
+
+#[gpui::test]
+fn readiness_starts_visible_panes_of_a_restored_layout_wider_than_the_stage(
+    cx: &mut TestAppContext,
+) {
+    let (harness, cx) = window_harness(cx);
+    accept_hidden_layout_wider_than_the_stage(&harness, false, cx);
+    assert_eq!(
+        harness.records.starts().len(),
+        1,
+        "a hidden layout the stage cannot hold has no validated geometry to start from"
+    );
+    cx.dispatch_action(crate::ui::NextTab);
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(16));
+    cx.run_until_parked();
+    assert_eq!(
+        harness.records.starts().len(),
+        4,
+        "every Pane the first visit draws starts from its rendered allocation"
+    );
+    let resizes_before = resizes(&harness);
+    cx.update(|window, _| window.refresh());
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(16));
+    cx.run_until_parked();
+    assert_eq!(
+        resizes(&harness),
+        resizes_before,
+        "the started grid already matches the drawn allocation"
+    );
+}
+
+#[gpui::test]
+fn readiness_starts_a_zoomed_pane_that_fits_although_its_restored_layout_does_not(
+    cx: &mut TestAppContext,
+) {
+    let (harness, cx) = window_harness(cx);
+    accept_hidden_layout_wider_than_the_stage(&harness, true, cx);
+    assert_eq!(
+        harness.records.starts().len(),
+        2,
+        "the hidden Zoomed Pane fills the stage, so the stage validates its geometry"
+    );
+    let resizes_before = resizes(&harness);
+    cx.dispatch_action(crate::ui::NextTab);
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(16));
+    cx.run_until_parked();
+    assert_eq!(
+        harness.records.starts().len(),
+        2,
+        "Panes beneath the Zoomed Pane are not drawn and their restored layout does not fit"
+    );
+    assert_eq!(
+        resizes(&harness),
+        resizes_before,
+        "the first visit draws the Zoomed Pane at the grid it started with"
+    );
+    cx.dispatch_action(crate::ui::TogglePaneZoom);
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(16));
+    cx.run_until_parked();
+    assert_eq!(
+        harness.records.starts().len(),
+        4,
+        "restoring the layout starts every drawn Pane from its rendered allocation"
+    );
 }
 
 #[gpui::test]

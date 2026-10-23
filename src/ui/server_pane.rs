@@ -862,6 +862,17 @@ mod connection {
     pub(crate) trait ServerPaneConnection: Send + Sync {
         fn status(&self) -> DevelopmentPaneStatus;
 
+        /// Whether the original presentation admission still occupies a startup slot. Receiving
+        /// a screen is a separate input barrier and may wait while this Pane is hidden.
+        fn startup_pending(&self) -> bool {
+            matches!(
+                self.status(),
+                DevelopmentPaneStatus::Connecting
+                    | DevelopmentPaneStatus::TakingOver
+                    | DevelopmentPaneStatus::Reconnecting
+            )
+        }
+
         /// Who controlled the Pane when the server last offered Take Over, if it ever did.
         fn controller(&self) -> Option<Controller>;
 
@@ -878,6 +889,10 @@ mod connection {
 
         /// Asks the server for this Pane, which starts or acquires only this Pane.
         fn select(&self);
+
+        /// Starts this client's exact new Pane after membership binds, without acquiring control
+        /// or authorizing a retained shell after a server restart.
+        fn start_created(&self) {}
 
         /// Asks for a reconnection attempt now instead of at the next automatic one.
         fn retry(&self);
@@ -919,6 +934,10 @@ mod connection {
             Self::status(self)
         }
 
+        fn startup_pending(&self) -> bool {
+            Self::startup_pending(self)
+        }
+
         fn controller(&self) -> Option<Controller> {
             Self::controller(self)
         }
@@ -933,6 +952,10 @@ mod connection {
 
         fn select(&self) {
             Self::select(self);
+        }
+
+        fn start_created(&self) {
+            Self::start_created(self);
         }
 
         fn retry(&self) {

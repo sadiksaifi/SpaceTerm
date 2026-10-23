@@ -38,13 +38,22 @@ pub(crate) enum DevelopmentPaneStatus {
     Ended,
     Failed(ServerError),
 }
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Admission {
+    Pending,
+    Waiting,
+    Granted,
+}
 pub(crate) struct DevelopmentPaneState {
     status: Mutex<DevelopmentPaneStatus>,
+    /// Admission settles before a hidden Pane receives its input-enabling screen.
+    admission: Mutex<Admission>,
     /// Who controlled the Pane when the server last offered Take Over.
     controller: Mutex<Option<pane::control::Controller>>,
     session_dormant: AtomicBool,
     retry: AtomicBool,
     selected: AtomicBool,
+    created_start: AtomicBool,
     take_over: AtomicBool,
     start_restored: AtomicBool,
     connection_recovery: Arc<Mutex<recovery::Recovery>>,
@@ -64,6 +73,7 @@ pub(crate) struct DevelopmentPaneState {
     accessibility_demand: AtomicBool,
     client_effects: Mutex<std::collections::VecDeque<ClientEffectRequest>>,
     presentable: AtomicBool,
+    preparation: AtomicBool,
     /// Whether the server's route reported a deliberate stop since this Pane last connected.
     /// The Pane then waits for an explicit retry instead of reconnecting on its own.
     server_stopped: AtomicBool,
@@ -73,10 +83,12 @@ impl DevelopmentPaneState {
     fn new() -> Self {
         Self {
             status: Mutex::new(DevelopmentPaneStatus::Connecting),
+            admission: Mutex::new(Admission::Pending),
             controller: Mutex::default(),
             session_dormant: AtomicBool::new(false),
             retry: AtomicBool::new(false),
             selected: AtomicBool::new(false),
+            created_start: AtomicBool::new(false),
             take_over: AtomicBool::new(false),
             start_restored: AtomicBool::new(false),
             connection_recovery: Arc::default(),
@@ -95,6 +107,7 @@ impl DevelopmentPaneState {
             accessibility_demand: AtomicBool::new(false),
             client_effects: Mutex::new(std::collections::VecDeque::new()),
             presentable: AtomicBool::new(true),
+            preparation: AtomicBool::new(false),
             server_stopped: AtomicBool::new(false),
             wake: schedule::Wake::default(),
             effect_authority: {
@@ -107,6 +120,13 @@ impl DevelopmentPaneState {
 
     pub(crate) fn status(&self) -> DevelopmentPaneStatus {
         *self.status.lock().unwrap_or_else(|e| e.into_inner())
+    }
+    pub(crate) fn startup_pending(&self) -> bool {
+        *self.admission.lock().unwrap_or_else(|e| e.into_inner()) == Admission::Pending
+            || self.start_unconfirmed()
+    }
+    fn admission(&self, admission: Admission) {
+        *self.admission.lock().unwrap_or_else(|e| e.into_inner()) = admission;
     }
     /// Who controlled the Pane when the server last offered Take Over, if it ever did.
     pub(crate) fn controller(&self) -> Option<pane::control::Controller> {
@@ -145,9 +165,19 @@ impl DevelopmentPaneState {
     pub(crate) fn connection_generation(&self) -> u64 {
         self.connected_epoch.load(Ordering::Acquire)
     }
+    /// A bound creation requests one start under the creator's existing control grant.
+    pub(crate) fn start_created(&self) {
+        if !self.start_unconfirmed() {
+            self.created_start.store(true, Ordering::Release);
+            self.wake.notify();
+        }
+    }
+
     pub(crate) fn select(&self) {
         let status = self.status.lock().unwrap_or_else(|e| e.into_inner());
         if !self.start_unconfirmed()
+            && (*status != DevelopmentPaneStatus::Connecting
+                || *self.admission.lock().unwrap_or_else(|e| e.into_inner()) != Admission::Granted)
             && matches!(
                 *status,
                 DevelopmentPaneStatus::Connecting
@@ -367,6 +397,14 @@ impl DevelopmentPaneState {
             } else {
                 DevelopmentPaneStatus::Failed(error)
             };
+        }
+        if !retryable
+            || !matches!(
+                error,
+                ServerError::Protocol | ServerError::NotRunning | ServerError::ActivationUnresolved
+            )
+        {
+            self.admission(Admission::Waiting);
         }
         retryable
     }
@@ -1587,6 +1625,7 @@ fn present(
                 )?;
                 let now = std::time::Instant::now();
                 cadence.set_visible(state.presentable.load(Ordering::Acquire), now);
+                cadence.set_preparation(state.preparation.load(Ordering::Acquire));
                 if changes && let Some(visible) = cadence.take_demand() {
                     expect_unchanged(send(
                         &presenter,
@@ -1938,6 +1977,11 @@ fn encode_key(k: KeyInput) -> pane::Key {
     }
 }
 impl TerminalSessionHandle for PresentationHandle {
+    fn set_preparation_demand(&self, prepare: bool) {
+        if self.state.preparation.swap(prepare, Ordering::AcqRel) != prepare {
+            self.state.wake.notify();
+        }
+    }
     fn accessibility_selection_sender(&self) -> Option<super::AccessibilitySelectionSender> {
         let state = Arc::clone(&self.state);
         let input = self.input.clone();

@@ -51,6 +51,7 @@ mod terminal_focus;
 mod terminal_graphics;
 mod terminal_ime;
 mod terminal_pane;
+mod terminal_readiness;
 mod terminal_status;
 mod terminal_symbols;
 pub(crate) mod updates;

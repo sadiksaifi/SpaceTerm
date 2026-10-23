@@ -48,6 +48,7 @@ pub(super) fn exchange(
             .unwrap_or_else(|e| e.into_inner())
             .begin_start(boot)?;
         state.directory_busy.store(true, Ordering::Release);
+        state.admission(Admission::Pending);
     }
     let result = exchange(request).and_then(|reply| {
         if matches!(&reply, Reply::Restored { pane, .. } if *pane != pane_id) {
@@ -63,6 +64,9 @@ pub(super) fn exchange(
             .unwrap_or_else(|e| e.into_inner())
             .started(&result);
         state.directory_busy.store(false, Ordering::Release);
+        if result.is_err() && !state.start_unconfirmed() {
+            state.admission(Admission::Waiting);
+        }
     }
     let reply = result?;
     state
@@ -121,6 +125,18 @@ impl ClaimWorker<'_> {
                 other => other,
             })?,
         };
+        // Creation grants no control acquisition. Only the first authenticated observation of a
+        // fresh, creator-controlled Pane can consume this intent. Reconnect never rearms it.
+        let created_start = state.created_start.swap(false, Ordering::AcqRel)
+            && matches!(
+                &reply,
+                Reply::Restored {
+                    fresh: true,
+                    session_ended: false,
+                    ..
+                }
+            );
+        let mut created_start = created_start && !state.start_unconfirmed();
         while matches!(reply, Reply::Restored { .. } | Reply::Takeover { .. }) {
             let mut dormant = false;
             while let Reply::Restored {
@@ -155,6 +171,7 @@ impl ClaimWorker<'_> {
                 state
                     .session_dormant
                     .store(session_ended, Ordering::Release);
+                state.admission(Admission::Waiting);
                 state.set(if unavailable {
                     DevelopmentPaneStatus::Failed(ServerError::DirectoryUnavailable)
                 } else if session_ended {
@@ -174,10 +191,12 @@ impl ClaimWorker<'_> {
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .take();
-                if repair.is_some()
-                    || state.start_restored.swap(false, Ordering::AcqRel)
-                    || state.selected.swap(false, Ordering::AcqRel)
-                {
+                // These requests authorize the same first use. Consume them together even
+                // when creation or repair already supplies that authorization.
+                let created = std::mem::take(&mut created_start);
+                let start_restored = state.start_restored.swap(false, Ordering::AcqRel);
+                let selected = state.selected.swap(false, Ordering::AcqRel);
+                if created || repair.is_some() || start_restored || selected {
                     grant_size = *size.lock().unwrap_or_else(|e| e.into_inner());
                     let update = appearance.lock().unwrap_or_else(|e| e.into_inner()).clone();
                     grant_appearance = Some(update.generation);
@@ -261,12 +280,14 @@ impl ClaimWorker<'_> {
                     discard_presentation();
                 }
                 state.offered_take_over(controller.clone(), session_ended);
+                state.admission(Admission::Waiting);
                 if !alive.load(Ordering::Acquire)
                     || attachment.as_ref().is_some_and(|permit| !permit.active())
                 {
                     return Ok(None);
                 }
                 if state.take_over.swap(false, Ordering::AcqRel) {
+                    state.admission(Admission::Pending);
                     state.set(DevelopmentPaneStatus::TakingOver);
                     grant_size = *size.lock().unwrap_or_else(|e| e.into_inner());
                     let update = appearance.lock().unwrap_or_else(|e| e.into_inner()).clone();
@@ -296,6 +317,16 @@ impl ClaimWorker<'_> {
         let Reply::Attached { lease } = reply else {
             return Err(ServerError::Protocol);
         };
+        // A selection made while the admitting request was in flight selected this running
+        // shell. It cannot authorize another shell after a later server restart.
+        {
+            // Serialize with selection of a Connecting placeholder, including a selection
+            // made after admission but before the first hidden screen arrives.
+            let _status = state.status.lock().unwrap_or_else(|e| e.into_inner());
+            state.admission(Admission::Granted);
+            state.selected.store(false, Ordering::Release);
+            state.start_restored.store(false, Ordering::Release);
+        }
         Ok(Some(Granted {
             lease,
             size: grant_size,
@@ -346,6 +377,247 @@ mod tests {
             directory_unavailable: false,
             session_ended: false,
         }
+    }
+
+    #[test]
+    fn fifteen_hidden_creation_grants_release_startup_without_a_screen() {
+        use spaceterm_server::{hierarchy::Mutation, pane::PaneService as _};
+
+        let mut host = crate::runtime::directory_testing::terminal_host();
+        host.prepare_initial_organization().unwrap();
+        let Reply::Inventory { inventory, .. } = host.request([1; 32], [1; 32], Request::Inventory)
+        else {
+            panic!("fixture inventory unavailable");
+        };
+        let workspace = inventory.workspaces[0].id;
+        let mut observations = Vec::new();
+        for sequence in 1..=15 {
+            assert!(matches!(
+                host.request(
+                    [1; 32],
+                    [1; 32],
+                    Request::Mutate {
+                        sequence,
+                        mutation: Mutation::CreateTab {
+                            workspace,
+                            source: None
+                        },
+                    }
+                ),
+                Reply::Outcome(_)
+            ));
+            let Reply::Inventory { inventory, .. } =
+                host.request([1; 32], [1; 32], Request::Inventory)
+            else {
+                panic!("new Tab inventory unavailable");
+            };
+            let pane = inventory.workspaces[0].tabs.last().unwrap().root_pane;
+            let state = DevelopmentPaneState::new();
+            state.start_created();
+            let grant = ClaimWorker {
+                state: &state,
+                pane_id: pane,
+                alive: &AtomicBool::new(true),
+                attachment: &None,
+                size: &Mutex::new(PaneSize {
+                    columns: 80,
+                    rows: 24,
+                    cell_width: 8,
+                    cell_height: 16,
+                }),
+                appearance: &Mutex::new(TerminalAppearanceUpdate::builtin().unwrap()),
+                directory_recovery: true,
+                attached_session: &mut false,
+                takeover: &mut false,
+                paste_unconfirmed: &mut false,
+            }
+            .run(
+                |request| {
+                    exchange(&state, pane, request, |request| {
+                        Ok(host.request([1; 32], [1; 32], request.clone()))
+                    })
+                },
+                || {},
+            )
+            .unwrap()
+            .unwrap();
+            assert!(matches!(
+                host.request(
+                    [1; 32],
+                    [1; 32],
+                    Request::PresentationDemand {
+                        lease: grant.lease,
+                        visible: false
+                    }
+                ),
+                Reply::Unchanged
+            ));
+            let poll = host.request(
+                [1; 32],
+                [1; 32],
+                Request::PollChanges {
+                    lease: grant.lease,
+                    base: None,
+                },
+            );
+            observations.push((
+                state.startup_pending(),
+                state.status(),
+                state.interactive_input(),
+                matches!(poll, Reply::Screen(_) | Reply::ScreenChanges(_)),
+            ));
+        }
+        // Stop every fixture PTY before any assertion can fail.
+        host.shutdown().unwrap();
+        assert_eq!(observations.len(), 15);
+        for (pending, status, input, screen) in observations {
+            assert!(!screen, "hidden lifecycle polls supply no screen");
+            assert_eq!(status, DevelopmentPaneStatus::Connecting);
+            assert_eq!(input, crate::terminal::InteractiveInput::Pending);
+            assert!(
+                !pending,
+                "an authenticated creation grant releases the startup slot before a screen"
+            );
+        }
+    }
+
+    #[test]
+    fn never_visited_hidden_pane_prepares_current_rows_without_visible_cadence() {
+        use crate::terminal::geometry::{BackingScale, CellGridSize, LogicalCellSize};
+        use spaceterm_server::pane::PaneService as _;
+
+        let mut host = crate::runtime::directory_testing::terminal_host();
+        host.prepare_initial_organization().unwrap();
+        let Reply::Inventory { inventory, .. } = host.request([1; 32], [1; 32], Request::Inventory)
+        else {
+            panic!("fixture inventory unavailable")
+        };
+        let pane = inventory.workspaces[0].tabs[0].root_pane;
+        let geometry = TerminalGeometry::from_grid(
+            CellGridSize::new(80, 24),
+            LogicalCellSize::new(8.0, 16.0),
+            BackingScale::ONE,
+        );
+        let state = Arc::new(DevelopmentPaneState::new());
+        state.start_created();
+        let (input, _receiver) = mpsc::sync_channel(1);
+        let handle = PresentationHandle {
+            input,
+            state: Arc::clone(&state),
+            alive: Arc::new(AtomicBool::new(true)),
+            size: Arc::new(Mutex::new(pane_size(geometry))),
+            appearance: Arc::new(Mutex::new(TerminalAppearanceUpdate::builtin().unwrap())),
+            geometry: Mutex::new(geometry),
+        };
+        handle.set_presentable(false);
+        let grant = ClaimWorker {
+            state: &state,
+            pane_id: pane,
+            alive: &handle.alive,
+            attachment: &None,
+            size: &handle.size,
+            appearance: &handle.appearance,
+            directory_recovery: true,
+            attached_session: &mut false,
+            takeover: &mut false,
+            paste_unconfirmed: &mut false,
+        }
+        .run(
+            |request| {
+                exchange(&state, pane, request, |request| {
+                    Ok(host.request([1; 32], [1; 32], request.clone()))
+                })
+            },
+            || {},
+        )
+        .unwrap()
+        .unwrap();
+        let lease = grant.lease;
+        // Fixture output is produced through the server's real PTY. The client remains hidden
+        // and never receives an input-enabling screen or a forced Connected status.
+        for key in [
+            KeyInput::text_input("printf '\\033[2J\\033[HHIDDEN-PREPARED\\r\\n'"),
+            KeyInput {
+                physical_key: PhysicalKey::Enter,
+                logical_key: "enter".into(),
+                text: None,
+                ..KeyInput::text_input("")
+            },
+        ] {
+            assert!(matches!(
+                host.request(
+                    [1; 32],
+                    [1; 32],
+                    Request::Key {
+                        lease,
+                        key: encode_key(key),
+                    }
+                ),
+                Reply::Unchanged
+            ));
+        }
+        handle.set_preparation_demand(true);
+        let start = std::time::Instant::now();
+        let mut cadence = schedule::Cadence::new(start, false);
+        // Read the same demand inputs that the production presentation worker uses.
+        cadence.set_preparation(state.preparation.load(Ordering::Acquire));
+        let mut prepared = false;
+        let mut decoder = pane::presentation::ScreenDecoder::default();
+        while start.elapsed() < Duration::from_secs(3) {
+            if let Some(visible) = cadence.take_demand() {
+                assert!(matches!(
+                    host.request(
+                        [1; 32],
+                        [1; 32],
+                        Request::PresentationDemand { lease, visible }
+                    ),
+                    Reply::Unchanged
+                ));
+            }
+            let now = std::time::Instant::now();
+            if cadence.poll_due(now) {
+                let reply = host.request(
+                    [1; 32],
+                    [1; 32],
+                    Request::PollChanges {
+                        lease,
+                        base: decoder.baseline(),
+                    },
+                );
+                if let Reply::Screen(screen) = decoder.apply(reply).unwrap() {
+                    prepared = screen.rows.iter().any(|row| {
+                        row.iter()
+                            .map(|cell| cell.text.as_str())
+                            .collect::<String>()
+                            .trim_end()
+                            == "HIDDEN-PREPARED"
+                    });
+                    if prepared {
+                        break;
+                    }
+                }
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        handle.set_preparation_demand(false);
+        cadence.set_preparation(state.preparation.load(Ordering::Acquire));
+        let withdrawn = cadence.take_demand();
+        host.shutdown().unwrap();
+        assert!(
+            prepared,
+            "bounded preparation demand must supply real hidden output rows"
+        );
+        assert!(!state.presentable.load(Ordering::Acquire));
+        assert!(
+            !cadence.visible(),
+            "preparation must not enable graphics fetching or visible cadence"
+        );
+        assert_eq!(withdrawn, Some(false));
+        assert!(cadence.deadline() >= start + Duration::from_millis(250));
+        assert_eq!(
+            state.interactive_input(),
+            crate::terminal::InteractiveInput::Pending
+        );
     }
 
     #[test]
@@ -423,6 +695,152 @@ mod tests {
                 assert_eq!(granted.lease.connection, [1; 32]);
                 host.shutdown().unwrap();
             }
+        }
+    }
+
+    #[test]
+    fn creation_starts_only_a_fresh_controlled_pane_and_never_rearms_on_reconnect() {
+        let state = DevelopmentPaneState::new();
+        state.start_created();
+        let mut starts = 0;
+        let result = run_claim(&state, |request| match request {
+            Request::SelectPane {
+                explicit: false, ..
+            } => {
+                let mut reply = restored(1);
+                if let Reply::Restored { fresh, .. } = &mut reply {
+                    *fresh = true;
+                }
+                Ok(reply)
+            }
+            Request::StartRestored { .. } => {
+                starts += 1;
+                Err(ServerError::Protocol)
+            }
+            other => panic!("creation must not acquire control: {other:?}"),
+        });
+        assert!(matches!(result, Err(ServerError::Protocol)));
+        assert_eq!(starts, 1);
+        assert!(state.start_unconfirmed());
+        assert!(
+            state.startup_pending(),
+            "an unconfirmed original still occupies its slot"
+        );
+        state.connection_failed(ServerError::Protocol, false);
+        let mut observations = 0;
+        let _ = run_claim(&state, |request| {
+            observations += 1;
+            assert!(matches!(
+                request,
+                Request::SelectPane {
+                    explicit: false,
+                    ..
+                }
+            ));
+            if observations == 1 {
+                Ok(restored(1))
+            } else {
+                Err(ServerError::Stopped)
+            }
+        });
+        assert_eq!(starts, 1);
+        assert!(!state.created_start.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn creation_and_selection_are_consumed_together_before_a_later_server_restart() {
+        let state = DevelopmentPaneState::new();
+        state.start_created();
+        state.select();
+        let lease = Lease {
+            server: [1; 32],
+            session: [5; 32],
+            control: [6; 32],
+            connection: [7; 32],
+        };
+        let granted = run_claim(&state, |request| match request {
+            Request::SelectPane {
+                explicit: false, ..
+            } => {
+                let mut reply = restored(1);
+                if let Reply::Restored { fresh, .. } = &mut reply {
+                    *fresh = true;
+                }
+                Ok(reply)
+            }
+            Request::StartRestored { .. } => {
+                state.select();
+                Ok(Reply::Attached { lease })
+            }
+            other => panic!("unexpected request {other:?}"),
+        })
+        .unwrap();
+        assert!(granted.is_some());
+        // A hidden grant has not received a screen yet. Reselecting its Connecting placeholder
+        // selects the admitted shell and cannot authorize first use after a later restart.
+        assert_eq!(state.status(), DevelopmentPaneStatus::Connecting);
+        state.select();
+        let mut observations = 0;
+        let _ = run_claim(&state, |request| {
+            assert!(
+                matches!(
+                    request,
+                    Request::SelectPane {
+                        explicit: false,
+                        ..
+                    }
+                ),
+                "the selection coalesced with creation must not start work after restart: {request:?}"
+            );
+            observations += 1;
+            if observations == 1 {
+                Ok(restored(2))
+            } else {
+                Err(ServerError::Stopped)
+            }
+        });
+        assert!(!state.selected.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn creation_intent_does_not_start_retained_or_taken_over_work() {
+        for taken_over in [false, true] {
+            let state = DevelopmentPaneState::new();
+            state.start_created();
+            let mut observations = 0;
+            let _ = run_claim(&state, |request| {
+                assert!(
+                    matches!(
+                        request,
+                        Request::SelectPane {
+                            explicit: false,
+                            ..
+                        }
+                    ),
+                    "creation must neither start retained work nor acquire control"
+                );
+                observations += 1;
+                if observations > 1 {
+                    assert!(
+                        !state.startup_pending(),
+                        "waiting for first use or Take Over must release the startup slot"
+                    );
+                    return Err(ServerError::Stopped);
+                }
+                Ok(if taken_over {
+                    Reply::Takeover {
+                        target: pane::PaneTarget {
+                            server: [1; 32],
+                            session: [2; 32],
+                        },
+                        controller: pane::control::Controller::Nobody,
+                        session_ended: false,
+                    }
+                } else {
+                    restored(1)
+                })
+            });
+            assert!(!state.created_start.load(Ordering::Acquire));
         }
     }
 
@@ -600,6 +1018,10 @@ mod tests {
         assert!(
             !state.start_unconfirmed(),
             "a typed refusal settles the fresh request"
+        );
+        assert!(
+            !state.startup_pending(),
+            "definite refusal releases startup admission"
         );
     }
 

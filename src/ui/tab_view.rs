@@ -591,6 +591,8 @@ impl TabView {
         cx: &mut Context<Self>,
     ) -> Entity<TerminalPane> {
         let terminal = cx.new(|cx| pane_construction.create(session_factory, window, cx));
+        let readiness = super::terminal_readiness::Readiness::for_window(window, cx);
+        readiness.register(&terminal, cx.entity().downgrade(), pane_id);
         cx.subscribe_in(
             &terminal,
             window,
@@ -1466,6 +1468,78 @@ impl TabView {
         }
     }
 
+    pub(crate) fn readiness_navigation(
+        &self,
+        workspace: gpui::EntityId,
+        tab: gpui::EntityId,
+        order: usize,
+        active: bool,
+        cx: &App,
+    ) {
+        if let Some(terminal) = self.tab.pane(self.tab.root_pane_id()) {
+            terminal
+                .read(cx)
+                .readiness()
+                .navigation(workspace, tab, order, active);
+        }
+    }
+
+    /// The allocation a hidden Pane would be drawn at on the current stage, with this client's own
+    /// layout and the visible caption and gap rules. A hidden Tab's last measurement never
+    /// authorizes startup, and a layout the stage cannot hold has no allocation until it is
+    /// drawn. A drawn Pane starts from its rendered allocation instead.
+    pub(crate) fn readiness_allocation(
+        &self,
+        pane_id: PaneId,
+        size: gpui::Size<Pixels>,
+        cx: &App,
+    ) -> Option<Bounds<Pixels>> {
+        if self
+            .shared
+            .as_ref()
+            .is_some_and(|shared| shared.closing(pane_id))
+        {
+            return None;
+        }
+        let appearance = super::appearance::chrome(cx);
+        // Match the minimum render applies: a Zoomed Pane fills the stage alone, while the Panes
+        // beneath it return to their restored layout when it unzooms.
+        let minimum = match self.tab.zoom_state() {
+            ZoomState::Zoomed(zoomed) if zoomed == pane_id => self.tab.minimum_pane_size(),
+            _ => self.tab.minimum_size(pane_gap(cx)).ok()?,
+        };
+        if f32::from(size.width) < minimum.width() || f32::from(size.height) < minimum.height() {
+            return None;
+        }
+        let mut places = BTreeMap::new();
+        let bounds = Bounds::new(Point::default(), size);
+        lay_out_panes(self.tab.root(), bounds, pane_gap(cx), &mut places);
+        if let ZoomState::Zoomed(zoomed) = self.tab.zoom_state() {
+            places.insert(zoomed, bounds);
+        }
+        let place = places.get(&pane_id)?;
+        let frame = super::workspace_frame::WorkspaceFrame::for_appearance(appearance, cx);
+        if f32::from(place.size.width) < minimum_pane_width(appearance)
+            || place.size.height < appearance.caption_height() + frame.pane_radius() + px(4.0)
+        {
+            return None;
+        }
+        // Keep fractional layout extents, as visible layout does. Rounding each split edge
+        // independently changes fitted backing dimensions and would send a second resize.
+        let left = place.left();
+        let top = place.top() + appearance.caption_height();
+        let right = place.right();
+        let bottom = place.bottom();
+        Some(Bounds::from_corners(point(left, top), point(right, bottom)))
+    }
+
+    pub(crate) fn readiness_starting(&self, pane_id: PaneId) -> bool {
+        self.shared
+            .as_ref()
+            .and_then(|shared| shared.view(pane_id))
+            .is_some_and(|view| view.connection().startup_pending())
+    }
+
     fn sync_terminal_focus(&mut self, cx: &mut Context<Self>) {
         let focused_terminal_id = self
             .tab
@@ -2221,10 +2295,9 @@ impl TabView {
                             .unwrap_or_else(|| cx.focus_handle());
                         shared.register(pane_id, pane.id, state, focus);
                     }
-                    // Binding supplies membership. Only the focus still on this provisional Pane
-                    // asks for first use; sidebar, Find, chooser and later navigation keep focus.
+                    // Startup intent survives binding independently of keyboard ownership.
+                    // Only the still-focused provisional Pane restores keyboard focus.
                     if self.active && self.tab.focused_pane_id() == pane_id && held_keyboard {
-                        self.select_shared_pane(pane_id);
                         self.focus(window, cx);
                     }
                     changed = true;
@@ -2739,9 +2812,7 @@ impl TabView {
         let Some(shared) = self.shared.as_ref().filter(|shared| shared.reachable()) else {
             return;
         };
-        if let Some(view) = shared.view(pane_id) {
-            view.select();
-        }
+        shared.select(pane_id);
     }
 
     fn forget_shared_pane(&mut self, pane_id: PaneId) {

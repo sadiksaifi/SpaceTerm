@@ -631,6 +631,9 @@ pub trait TerminalSessionHandle {
         None
     }
     fn set_presentable(&self, _presentable: bool) {}
+    /// Requests current screen rows for bounded hidden CPU preparation. This grants no focus
+    /// or drawing authority and does not change the hidden output-check cadence.
+    fn set_preparation_demand(&self, _prepare: bool) {}
     fn update_appearance(&self, update: TerminalAppearanceUpdate);
 }
 
