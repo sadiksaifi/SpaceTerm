@@ -586,17 +586,25 @@ struct HeldRead {
 
 impl HeldRead {
     fn approving(version: &str) -> Self {
+        Self::reporting(
+            version,
+            ServiceStatus {
+                installed: true,
+                enabled: true,
+                running: true,
+                stopped: false,
+            },
+        )
+    }
+
+    /// A read that found the service in `status`, such as stopped from here.
+    fn reporting(version: &str, status: ServiceStatus) -> Self {
         Self {
             facts: MaintenanceFacts {
                 server: [2; 32],
                 account: 501,
                 build: "spaceterm-development".to_owned(),
-                status: ServiceStatus {
-                    installed: true,
-                    enabled: true,
-                    running: true,
-                    stopped: false,
-                },
+                status,
                 startup: ServiceStartup::AtLogin,
                 approved: Some(RemoteBuild {
                     version: version.to_owned(),
@@ -743,6 +751,57 @@ fn the_picker_tells_apart_servers_that_share_a_name(cx: &mut TestAppContext) {
             .is_some_and(|description| description.contains("192.168.1.11:9231")),
         "the closed picker says which studio it shows, got {:?}",
         picker["aria"]["description"]
+    );
+}
+
+/// A read found the server stopped. Someone started it elsewhere, and Check Status, asked for
+/// later, finds it running. The later report is what the card says and what SpaceTerm keeps.
+#[gpui::test]
+fn a_later_check_status_replaces_an_earlier_read(cx: &mut TestAppContext) {
+    let stopped = ServiceStatus {
+        installed: true,
+        enabled: true,
+        running: false,
+        stopped: true,
+    };
+    let operations: Arc<dyn RemoteServerOperations> =
+        Arc::new(HeldRead::reporting("1.3.0", stopped));
+    let servers = open_servers_saved(true, &["penguin"], false, Some(operations), None, cx);
+    select("penguin", servers.cx);
+    assert!(
+        A11yTree::read(servers.cx)
+            .find("penguin: Stopped")
+            .is_some(),
+        "the read is all SpaceTerm knows at first"
+    );
+
+    click("settings-ssh-server-check", servers.cx);
+    let connections = servers.connections.clone();
+    settle(servers.cx, |_| {
+        matches!(
+            connections.status(&destination("penguin")),
+            RemoteConnectionStatus::Checked { .. }
+        )
+    });
+    servers.cx.run_until_parked();
+
+    assert!(
+        A11yTree::read(servers.cx)
+            .find("penguin: Running \u{b7} not connected")
+            .is_some(),
+        "the later check says the server runs"
+    );
+    assert!(version_reads("1.4.0", servers.cx));
+    let retained = servers.cx.update(|_, cx| {
+        super::super::server_selection::facts(&ServerChoice::Ssh(destination("penguin")).key(), cx)
+    });
+    assert_eq!(
+        retained.map(|facts| (facts.status, facts.version)),
+        Some((
+            crate::server_context::ObservedServerStatus::Running,
+            Some("1.4.0".to_owned())
+        )),
+        "SpaceTerm keeps the later report"
     );
 }
 
