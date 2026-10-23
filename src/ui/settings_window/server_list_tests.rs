@@ -879,6 +879,35 @@ fn a_later_read_replaces_an_earlier_check_status(cx: &mut TestAppContext) {
     );
 }
 
+/// The Version row's announcement, such as "Version 1.4.0, 1.5.0 available".
+fn version_announcement(cx: &mut VisualTestContext) -> Option<String> {
+    A11yTree::read(cx)
+        .with_role("Status")
+        .into_iter()
+        .filter_map(|node| node["aria"]["label"].as_str())
+        .find(|label| label.starts_with("Version "))
+        .map(str::to_owned)
+}
+
+/// A read names the build approved on penguin but no verified candidate, so SpaceTerm knows of
+/// no update. The Version row neither says one is available nor offers Update Server.
+#[gpui::test]
+fn an_ssh_server_without_a_verified_candidate_claims_no_update(cx: &mut TestAppContext) {
+    let operations: Arc<dyn RemoteServerOperations> = Arc::new(HeldRead::approving("1.3.0"));
+    let servers = open_servers_saved(true, &["penguin"], false, Some(operations), None, cx);
+    select("penguin", servers.cx);
+
+    let announcement = version_announcement(servers.cx);
+    assert!(
+        announcement
+            .as_deref()
+            .is_some_and(|label| label.starts_with("Version 1.3.0")
+                && !label.contains("available")),
+        "the approved build shows with no update claimed, got {announcement:?}"
+    );
+    assert!(!rendered("settings-server-version-update", servers.cx));
+}
+
 struct RecordingMovement;
 
 impl crate::platform::window_movement::WindowMovementFactory for RecordingMovement {

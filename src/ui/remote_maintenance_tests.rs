@@ -142,6 +142,49 @@ fn a_running_server_offers_the_steps_that_ask_before_ending_its_work() {
     );
 }
 
+/// SpaceTerm offers Update Server only for a verified candidate it knows differs from the
+/// approved build. A connection or Check Status, and a read that verified no candidate, know of
+/// none, so the update row neither offers an update nor says one is available.
+#[test]
+fn no_update_is_offered_without_a_verified_candidate() {
+    use crate::ssh::server_connection::{RemoteConnectionStatus, SshServerFacts};
+
+    let connected = RemoteConnectionStatus::Connected {
+        protocol_major: 1,
+        facts: SshServerFacts {
+            platform: ("Example OS".to_owned(), "x86_64".to_owned()),
+            version: Some("1.4.0".to_owned()),
+            starts_automatically: true,
+        },
+    };
+    let observed_update = observed("penguin", &connected, MaintenanceRow::Update);
+    assert!(
+        observed_update
+            .as_ref()
+            .is_none_or(|update| !update.actions.contains(&RemoteAction::Update)),
+        "a connection verifies no candidate, got {observed_update:?}"
+    );
+    assert!(
+        !observed_menu_actions(&connected).contains(&RemoteAction::Update),
+        "a heading's menu offers no update a read hasn't verified"
+    );
+
+    for service in [status(true, true, false), status(true, false, true)] {
+        let read = RemoteOperationState::Read(Box::new(facts(service)));
+        let update = update("penguin", &read);
+        assert!(
+            !update.actions.contains(&RemoteAction::Update),
+            "a read without a verified candidate offers no update, got {:?}",
+            update.actions
+        );
+        assert!(
+            !update.explanation.contains("transfers"),
+            "nor describes one, got {:?}",
+            update.explanation
+        );
+    }
+}
+
 /// Installing a first server belongs to Connect, which explains what it does on that computer.
 /// Maintenance offers no step for a machine with no server, and nothing to update.
 #[test]
