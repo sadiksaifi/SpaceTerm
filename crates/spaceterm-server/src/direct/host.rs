@@ -54,9 +54,16 @@ pub(crate) struct State {
     uncertain: bool,
     generation: [u8; 32],
     released: std::collections::BTreeSet<[u8; 32]>,
+    network: Arc<dyn network::Adapter>,
 }
 impl State {
     pub(crate) fn open(paths: &crate::host::Paths) -> Result<Shared, DirectError> {
+        Self::open_with_network(paths, Arc::new(network::Native))
+    }
+    fn open_with_network(
+        paths: &crate::host::Paths,
+        network: Arc<dyn network::Adapter>,
+    ) -> Result<Shared, DirectError> {
         let store = storage::Store::open(paths)?;
         let record = store.load()?;
         let pin = store.pin(&record)?;
@@ -72,6 +79,7 @@ impl State {
             uncertain: false,
             generation: crypto::random()?,
             released: Default::default(),
+            network,
         };
         state.listen();
         Ok(Arc::new(Mutex::new(state)))
@@ -207,23 +215,32 @@ impl State {
             .retain(|v| v.claim.expires_at_unix_seconds > now);
         Ok(())
     }
-    fn status(&self) -> DirectStatus {
+    fn server_name() -> String {
         let mut name = [0u8; 256];
         // SAFETY: gethostname writes at most the supplied byte length.
-        let server_name = if unsafe { libc::gethostname(name.as_mut_ptr().cast(), name.len()) } == 0
-        {
+        if unsafe { libc::gethostname(name.as_mut_ptr().cast(), name.len()) } == 0 {
             let count = name.iter().position(|b| *b == 0).unwrap_or(name.len());
             ClientName::from(String::from_utf8_lossy(&name[..count]).into_owned())
                 .as_str()
                 .to_owned()
         } else {
             String::new()
+        }
+    }
+    fn status(&self) -> DirectStatus {
+        let network = network::snapshot(self.network.as_ref());
+        let listener = match (&self.listener_state, &network) {
+            (ListenerState::Listening { addr }, Ok(snapshot)) if !snapshot.contains(&addr.ip()) => {
+                ListenerState::Failed(DirectError::InvalidAddress)
+            }
+            _ => self.listener_state.clone(),
         };
         DirectStatus {
             pin: self.pin.clone(),
             policy: self.record.policy.clone(),
-            server_name,
-            listener: self.listener_state.clone(),
+            server_name: Self::server_name(),
+            listener,
+            network_addresses: network.map(|snapshot| snapshot.addresses),
         }
     }
     pub(crate) fn manage(
@@ -262,7 +279,8 @@ impl State {
                 ManagementReply::Status(self.status())
             }
             Management::Invite => {
-                let endpoint = match self.listener_state {
+                let status = self.status();
+                let endpoint = match status.listener {
                     ListenerState::Listening { addr } => format!("wss://{addr}/spaceterm"),
                     _ => return Err(DirectError::Disabled),
                 };
@@ -274,7 +292,7 @@ impl State {
                     id: crypto::random()?,
                     endpoint,
                     pin: self.pin.clone(),
-                    server_name: self.status().server_name,
+                    server_name: status.server_name,
                     token: crypto::random()?,
                     expires: wire::now()? + wire::INVITATION_SECONDS,
                 };
@@ -455,7 +473,7 @@ impl State {
             return Err(DirectError::Disabled);
         }
         let nonce = crypto::random()?;
-        let server_name = self.status().server_name;
+        let server_name = Self::server_name();
         let proof = crypto::sign(
             &self.record.key,
             &wire::transcript(
@@ -771,6 +789,9 @@ pub(crate) fn serve(
     bridge.finish_reply()?;
     Ok(())
 }
+
+#[cfg(test)]
+mod network_tests;
 
 #[cfg(test)]
 mod tests {

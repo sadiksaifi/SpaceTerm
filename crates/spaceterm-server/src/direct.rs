@@ -2,13 +2,14 @@
 //! Native credential access and connection persistence belong to the calling client.
 use crate::{ServerError, pane::control::ClientName};
 use serde::{Deserialize, Serialize};
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 pub use wire::{Management, ManagementReply};
 pub const DEFAULT_PORT: u16 = 9231;
 
 mod client;
 mod crypto;
 pub(crate) mod host;
+mod network;
 mod storage;
 #[cfg(test)]
 pub(crate) mod tests;
@@ -72,6 +73,17 @@ pub struct DirectStatus {
     pub policy: Option<NetworkPolicy>,
     pub server_name: String,
     pub listener: ListenerState,
+    /// Fresh observations from the machine that owns this server.
+    pub network_addresses: Result<NetworkAddresses, DirectError>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NetworkAddresses {
+    /// Sorted concrete addresses on active interfaces. Empty means none are usable.
+    pub available: Vec<IpAddr>,
+    /// A routing-table source address, present only when it is also available.
+    pub suggested: Option<IpAddr>,
 }
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum ListenerState {
