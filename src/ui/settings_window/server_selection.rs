@@ -251,6 +251,9 @@ fn ensure(cx: &mut App) {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
+    use std::rc::Rc;
+
     use super::*;
     use crate::platform::app_directories::AppDirectoryEnvironment;
     use crate::platform::testing::{RecordingFilesystem, resolve_app_paths};
@@ -301,6 +304,77 @@ mod tests {
                 cx.update_global::<ServerSelection, _>(|selection, _| selection.publish(snapshot));
             }
         });
+    }
+
+    /// Counts the notifications the window's observer of the selection receives.
+    fn count_notifications(cx: &mut gpui::TestAppContext) -> (Rc<Cell<usize>>, gpui::Subscription) {
+        let notified = Rc::new(Cell::new(0));
+        let counter = Rc::clone(&notified);
+        let observer = cx.update(|cx| {
+            cx.observe_global::<ServerSelection>(move |_| counter.set(counter.get() + 1))
+        });
+        (notified, observer)
+    }
+
+    fn observed(observed_at: u64) -> LastKnownFacts {
+        LastKnownFacts {
+            observed_at,
+            machine: Some("Studio".to_owned()),
+            ..LastKnownFacts::default()
+        }
+    }
+
+    /// The window records observations whenever the selection notifies it, so a refused
+    /// observation or an unchanged inventory that notified would make it record again forever.
+    #[gpui::test]
+    fn observations_and_inventories_that_change_nothing_notify_no_one(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            reconcile(vec![ServerKey::Local, studio()], cx);
+            remember(studio(), observed(20), cx);
+        });
+        let (notified, _observer) = count_notifications(cx);
+
+        cx.update(|cx| {
+            // Older than what the selection holds, as after the clock moves back.
+            remember(studio(), observed(10), cx);
+            remember(studio(), observed(20), cx);
+            remember(ServerKey::Ssh("gone".to_owned()), observed(30), cx);
+            reconcile(vec![ServerKey::Local, studio()], cx);
+        });
+        assert_eq!(notified.get(), 0, "nothing changed, so nothing is told");
+
+        cx.update(|cx| remember(studio(), observed(30), cx));
+        assert_eq!(
+            notified.get(),
+            1,
+            "a newer observation still tells the window"
+        );
+    }
+
+    #[gpui::test]
+    fn a_snapshot_that_changes_nothing_notifies_no_one(cx: &mut gpui::TestAppContext) {
+        let mut worker = Delayed::install(cx);
+        cx.update(|cx| {
+            reconcile(vec![ServerKey::Local, studio()], cx);
+            remember(studio(), observed(10), cx);
+        });
+        let earlier = worker.retain();
+        cx.update(|cx| remember(studio(), observed(20), cx));
+        let latest = worker.retain();
+        let (notified, _observer) = count_notifications(cx);
+
+        arrive(earlier, cx);
+        assert_eq!(notified.get(), 0, "a late snapshot presents nothing");
+        arrive(latest, cx);
+
+        assert_eq!(
+            notified.get(),
+            0,
+            "the latest snapshot holds what the window already presents"
+        );
+        assert_eq!(cx.update(|cx| facts(&studio(), cx)), Some(observed(20)));
     }
 
     #[gpui::test]
