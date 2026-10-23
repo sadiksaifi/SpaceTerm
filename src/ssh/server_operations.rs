@@ -30,7 +30,8 @@ use super::server_connection::{
 };
 use super::server_maintenance::{
     MaintenanceAuthority, MaintenancePhase, MaintenanceTarget, OperationSubmission,
-    SshMaintenanceBackend, SshMaintenanceFailure, SubmittedKind,
+    RemoteMaintenanceObservation, RemoteUpdateOffer, SshMaintenanceBackend, SshMaintenanceFailure,
+    SubmittedKind,
 };
 use crate::domain::SshDestination;
 
@@ -127,6 +128,8 @@ pub(crate) struct RemoteOperationEntry {
     /// When fresh service facts or a completed outcome were validated in this process.
     /// Copied with state; snapshot reads, acknowledgement and retained recovery never renew it.
     pub observed_at: Option<Instant>,
+    /// Verified against these observed facts; snapshot reads perform no candidate verification.
+    pub update_offer: RemoteUpdateOffer,
 }
 
 /// What the Servers surface asks of the owner. Reading never reaches a host; every other method
@@ -295,6 +298,7 @@ struct Entry {
     /// The facts the last validated read found, which a description needing no change returns to.
     facts: Option<MaintenanceFacts>,
     observed_at: Option<Instant>,
+    update_offer: RemoteUpdateOffer,
     submitted: Option<Submitted>,
     /// The original this entry last held, kept after the record is retired so a step offered on
     /// the entry still names the entry rather than the machine.
@@ -454,6 +458,7 @@ impl SshServerOperations {
                     target: None,
                     facts: None,
                     observed_at: None,
+                    update_offer: RemoteUpdateOffer::Unchecked,
                     submitted: None,
                     retired: None,
                     removed: false,
@@ -574,6 +579,7 @@ impl RemoteServerOperations for SshServerOperations {
                             .or(entry.retired),
                         state: entry.state.clone(),
                         observed_at: entry.observed_at,
+                        update_offer: entry.update_offer.clone(),
                     })
                     .collect()
             })
@@ -1009,6 +1015,7 @@ fn adopt(state: &mut State, record: RetainedRemoteOperation) -> Option<(Admitted
                 target: None,
                 facts: None,
                 observed_at: None,
+                update_offer: RemoteUpdateOffer::Unchecked,
                 submitted: None,
                 retired: None,
                 removed: record.removed,

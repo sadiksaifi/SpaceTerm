@@ -28,7 +28,7 @@ use super::cancellation::SshCancellationToken;
 use super::process::{CapturedProcessOutput, SshProcessAdapter};
 use super::server_connection::{
     ConnectMode, ContinuityChange, IncompatibilityKind, InteractionReason, RefusalKind,
-    SshConnectFailure, SshServerContinuity, UnavailableKind,
+    ServerCandidate, SshConnectFailure, SshServerContinuity, UnavailableKind,
 };
 use super::server_process::{
     NativeRoute, NativeSshConnectBackend, RouteClaim, SshDispatchFailure, VerifiedArtifact,
@@ -59,6 +59,25 @@ const DISPATCH: Duration = Duration::from_secs(120);
 pub(crate) struct MaintenanceTarget {
     pub destination: SshDestination,
     pub continuity: SshServerContinuity,
+}
+
+/// The update this client's verified artifact offers against one observed approved installation.
+#[derive(Clone, Debug, Default)]
+pub(crate) enum RemoteUpdateOffer {
+    #[default]
+    Unchecked,
+    /// No suitable verified candidate can be offered against the observed installation.
+    Unavailable,
+    /// The verified whole archive is already the approved installation.
+    UpToDate,
+    Available(ServerCandidate),
+}
+
+/// One validated account read and its locally verified update offer, produced on the worker.
+#[derive(Clone, Debug)]
+pub(crate) struct RemoteMaintenanceObservation {
+    pub facts: MaintenanceFacts,
+    pub update_offer: RemoteUpdateOffer,
 }
 
 /// How much authority one exchange may acquire.
@@ -161,7 +180,7 @@ pub(crate) trait SshMaintenanceBackend: Send + Sync {
         authority: MaintenanceAuthority,
         cancellation: &SshCancellationToken,
         progress: &MaintenanceProgress<'_>,
-    ) -> Result<MaintenanceFacts, SshMaintenanceFailure>;
+    ) -> Result<RemoteMaintenanceObservation, SshMaintenanceFailure>;
 
     /// Describes one destructive action and returns the service's confirmation for the exact
     /// observation it describes. Changes nothing.
