@@ -8,7 +8,7 @@
 //!
 //! The operations block, so callers run them on the background executor. Their results are
 //! presentation values: fingerprints are already formatted, names are labels the device chose,
-//! and failures carry only a typed classification. An invitation's text lives only in the value
+//! and failures carry only a typed classification. An invitation's link lives only in the value
 //! that shows it, which never prints, persists or logs it.
 
 use std::net::SocketAddr;
@@ -18,11 +18,11 @@ use zeroize::Zeroizing;
 
 use crate::local_server::LocalServer;
 use crate::local_server::direct::{
-    ClaimId, DeviceInfo, DirectError, DirectStatus, Invitation, ListenerState, NetworkPolicy,
-    PairingClaim, PairingId,
+    ClaimId, ComparisonCode, DeviceInfo, DirectError, DirectStatus, Invitation, ListenerState,
+    NetworkAddresses, NetworkPolicy, PairingClaim, PairingId,
 };
 
-/// Whether a server listens for direct network connections, and the identity devices verify.
+/// Whether a server listens for direct network connections, and where it could.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct AccessState {
     /// The server's name, which every step that changes its access names.
@@ -30,8 +30,9 @@ pub(crate) struct AccessState {
     /// The address the owner chose, which the server keeps across restarts. `None` is off.
     pub(crate) policy: Option<SocketAddr>,
     pub(crate) listener: Listener,
-    /// The server's own fingerprint, which a joining device shows beside its approval wait.
-    pub(crate) server_fingerprint: SharedString,
+    /// The addresses the server can listen at, as the server read them from its own machine.
+    /// `None` means the server couldn't read them.
+    pub(crate) addresses: Option<NetworkAddresses>,
 }
 
 /// What the server's direct network listener is doing now, as distinct from what was chosen.
@@ -39,6 +40,8 @@ pub(crate) struct AccessState {
 pub(crate) enum Listener {
     Off,
     Listening(SocketAddr),
+    /// The chosen address is no longer on the server's machine, such as after a Wi-Fi change.
+    AddressGone,
     /// The owner turned access on and the server could not listen at that address.
     Failed,
 }
@@ -50,6 +53,9 @@ pub(crate) struct Device {
     /// The name the device gave itself. It labels the device and proves nothing.
     pub(crate) name: SharedString,
     pub(crate) fingerprint: SharedString,
+    /// When the server last admitted a connection from the device, in Unix seconds. `None` means
+    /// it never connected.
+    pub(crate) last_connected_at: Option<u64>,
 }
 
 /// One device asking to pair through an open invitation, as the server validated its claim.
@@ -58,17 +64,28 @@ pub(crate) struct Claim {
     /// The exact claim the person sees, which approval sends back unchanged.
     pub(crate) claim: PairingClaim,
     pub(crate) id: ClaimId,
+    /// The name the device gave itself. It labels the device and proves nothing.
     pub(crate) name: SharedString,
-    pub(crate) fingerprint: SharedString,
+    /// The code the device shows too, derived from this claim's authenticated exchange. The
+    /// person compares it and never types it.
+    pub(crate) code: ComparisonCode,
     pub(crate) expires_at: u64,
 }
 
-/// An open invitation. Its text is shown while the Pair Device dialog is open and copied only
-/// when the person asks, so this value has no `Debug` and the text is wiped when it drops.
+/// An open invitation. Its link is shown while Invite Device is open and copied only when the
+/// person asks, so this value has no `Debug` and the link is wiped when it drops.
 pub(crate) struct OpenInvitation {
     pub(crate) id: ClaimId,
     pub(crate) text: Zeroizing<String>,
     pub(crate) expires_at: u64,
+}
+
+impl OpenInvitation {
+    /// Whether `claim` used this invitation. A claim expires when the invitation it used does,
+    /// so their expiry identifies the invitation.
+    pub(crate) fn claimed_by(&self, claim: &Claim) -> bool {
+        claim.expires_at == self.expires_at
+    }
 }
 
 /// Why a direct network operation didn't happen. Each kind reads one way to the person.
@@ -163,9 +180,10 @@ fn access_state(status: DirectStatus) -> AccessState {
         listener: match status.listener {
             ListenerState::Off => Listener::Off,
             ListenerState::Listening { addr } => Listener::Listening(addr),
+            ListenerState::Failed(DirectError::InvalidAddress) => Listener::AddressGone,
             ListenerState::Failed(_) => Listener::Failed,
         },
-        server_fingerprint: status.pin.fingerprint().into(),
+        addresses: status.network_addresses.ok(),
     }
 }
 
@@ -181,7 +199,7 @@ fn claim(claim: PairingClaim) -> Claim {
     Claim {
         id: claim.id,
         name: claim.device_name.as_str().to_owned().into(),
-        fingerprint: claim.device_fingerprint().into(),
+        code: claim.comparison_code(),
         expires_at: claim.expires_at_unix_seconds,
         claim,
     }
@@ -192,6 +210,7 @@ fn device(device: DeviceInfo) -> Device {
         fingerprint: device.fingerprint().into(),
         name: device.name.as_str().to_owned().into(),
         pairing: device.pairing,
+        last_connected_at: device.last_connected_at_unix_seconds,
     }
 }
 
@@ -245,8 +264,8 @@ impl AccessFailure {
                  192.168.1.20, optionally followed by a port."
             ),
             Self::Disabled => format!(
-                "Turn on direct network access for \u{201C}{server}\u{201D} before pairing a \
-                 device."
+                "Allow other devices to connect to \u{201C}{server}\u{201D} before inviting \
+                 one."
             ),
             Self::Capacity => format!(
                 "The server on \u{201C}{server}\u{201D} already has as many devices or \
@@ -257,20 +276,21 @@ impl AccessFailure {
                  nothing changed."
             ),
             Self::InvitationEnded => {
-                "This invitation can\u{2019}t be used any more. Create a new one to pair a device."
+                "This invitation can\u{2019}t be used any more. Create a new one to invite a \
+                 device."
                     .to_owned()
             }
             Self::ClaimExpired => {
-                "That request expired before your answer arrived, so the device isn\u{2019}t \
-                 paired."
+                "The invitation expired before your answer arrived, so the device can\u{2019}t \
+                 connect."
                     .to_owned()
             }
             Self::ClaimDecided => {
-                "Someone using another SpaceTerm answered that request first.".to_owned()
+                "Someone using another SpaceTerm answered that device first.".to_owned()
             }
             Self::ClaimChanged => {
-                "That request no longer matches the device and server shown, so SpaceTerm \
-                 refused it. The device isn\u{2019}t paired."
+                "The device\u{2019}s request changed after you saw it, so SpaceTerm refused it. \
+                 The device can\u{2019}t connect."
                     .to_owned()
             }
             Self::Refused => format!(
@@ -292,6 +312,26 @@ pub(crate) fn this_computers_address() -> Option<std::net::IpAddr> {
     (!address.is_unspecified() && !address.is_loopback()).then_some(address)
 }
 
+/// A comparison code as both screens show it: two groups of three digits, such as "042 917".
+pub(crate) fn code_text(code: ComparisonCode) -> SharedString {
+    let digits = code.to_string();
+    let (first, second) = digits.split_at(digits.len() / 2);
+    format!("{first} {second}").into()
+}
+
+/// A comparison code as assistive technology reads it: one digit at a time.
+pub(crate) fn code_speech(code: ComparisonCode) -> SharedString {
+    let digits = code.to_string();
+    let mut speech = String::with_capacity(digits.len() * 2);
+    for (index, digit) in digits.chars().enumerate() {
+        if index > 0 {
+            speech.push(' ');
+        }
+        speech.push(digit);
+    }
+    speech.into()
+}
+
 /// How long until `expires_at`, in whole seconds, as of `now`. Both are Unix seconds.
 pub(crate) fn remaining(expires_at: u64, now: u64) -> u64 {
     expires_at.saturating_sub(now)
@@ -307,4 +347,93 @@ pub(crate) fn unix_now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_secs())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::local_server::direct::ServerPin;
+
+    fn claim_with_exchange(prefix: [u8; 4]) -> PairingClaim {
+        let mut exchange_hash = [0; 32];
+        exchange_hash[..4].copy_from_slice(&prefix);
+        PairingClaim {
+            id: [1; 32],
+            server: [2; 32],
+            device_public_key: [3; 32],
+            device_name: "MacBook".into(),
+            expires_at_unix_seconds: 1_000,
+            exchange_hash,
+        }
+    }
+
+    fn status(listener: ListenerState) -> DirectStatus {
+        DirectStatus {
+            pin: ServerPin {
+                build: "1.0.0".to_owned(),
+                server: [2; 32],
+                public_key: [4; 32],
+                certificate: [5; 32],
+            },
+            policy: NetworkPolicy::parse("192.168.1.20").ok(),
+            server_name: "studio".to_owned(),
+            listener,
+            network_addresses: Ok(NetworkAddresses {
+                available: vec!["192.168.1.21".parse().expect("an address")],
+                suggested: None,
+            }),
+        }
+    }
+
+    #[test]
+    fn a_comparison_code_keeps_its_leading_zero_in_two_groups_of_three() {
+        // 0x00003039 is 12345.
+        let code = claim(claim_with_exchange([0, 0, 0x30, 0x39])).code;
+
+        assert_eq!(code_text(code).as_ref(), "012 345");
+    }
+
+    #[test]
+    fn a_comparison_code_is_spoken_one_digit_at_a_time() {
+        let code = claim(claim_with_exchange([0, 0, 0x30, 0x39])).code;
+
+        assert_eq!(code_speech(code).as_ref(), "0 1 2 3 4 5");
+    }
+
+    #[test]
+    fn a_listening_address_the_server_no_longer_has_reads_as_gone() {
+        let state = access_state(status(ListenerState::Failed(DirectError::InvalidAddress)));
+
+        assert_eq!(state.listener, Listener::AddressGone);
+    }
+
+    #[test]
+    fn a_listener_that_failed_otherwise_reads_as_failed() {
+        let state = access_state(status(ListenerState::Failed(DirectError::Transport)));
+
+        assert_eq!(state.listener, Listener::Failed);
+    }
+
+    #[test]
+    fn addresses_the_server_couldnt_read_are_unknown_rather_than_empty() {
+        let mut unread = status(ListenerState::Off);
+        unread.network_addresses = Err(DirectError::Transport);
+
+        assert_eq!(access_state(unread).addresses, None);
+    }
+
+    #[test]
+    fn an_invitation_recognizes_only_claims_that_expire_with_it() {
+        let invitation = OpenInvitation {
+            id: [7; 32],
+            text: Zeroizing::new("spaceterm://pair/test".to_owned()),
+            expires_at: 1_000,
+        };
+        let ours = claim(claim_with_exchange([0; 4]));
+        let mut other = claim_with_exchange([0; 4]);
+        other.expires_at_unix_seconds = 1_001;
+
+        assert!(invitation.claimed_by(&ours));
+        assert!(!invitation.claimed_by(&claim(other)));
+    }
 }
