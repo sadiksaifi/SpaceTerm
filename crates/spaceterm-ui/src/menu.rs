@@ -23,8 +23,8 @@ use crate::anchored_placement::{constrain_anchored_size, place_adjacent, place_a
 use crate::button::{ButtonStyle, JoinedEdge, resolve_button_style};
 use crate::leading_columns::{LeadingColumnMetrics, LeadingColumns};
 use crate::{
-    Button, ButtonActivation, ButtonShape, ButtonSize, ButtonVariant, FloatingRole, FloatingShell,
-    Icon, IconName,
+    Button, ButtonActivation, ButtonShape, ButtonSize, ButtonVariant, ButtonVariantStyle,
+    FloatingRole, FloatingShell, Icon, IconName,
 };
 
 const KEY_CONTEXT: &str = "SpaceTermMenu";
@@ -796,6 +796,7 @@ pub struct Menu<A: Clone + 'static> {
     label: SharedString,
     leading_icon: Option<TriggerIconBuilder>,
     icon_trigger: bool,
+    button: Option<(ButtonVariant, ButtonSize, ButtonShape)>,
 }
 
 impl<A: Clone + 'static> Menu<A> {
@@ -811,11 +812,24 @@ impl<A: Clone + 'static> Menu<A> {
             label,
             leading_icon: None,
             icon_trigger: false,
+            button: None,
         }
     }
 
     pub fn leading_icon(mut self, build: impl Fn(Rgba) -> AnyElement + 'static) -> Self {
         self.leading_icon = Some(Rc::new(build));
+        self
+    }
+
+    /// Paints the trigger as a button of `variant`, `size`, and `shape` that ends in the
+    /// disclosure, for a menu that stands in for a [`ComboButton`] with no primary command.
+    pub fn button_trigger(
+        mut self,
+        variant: ButtonVariant,
+        size: ButtonSize,
+        shape: ButtonShape,
+    ) -> Self {
+        self.button = Some((variant, size, shape));
         self
     }
 
@@ -831,11 +845,25 @@ impl<A: Clone + 'static> Menu<A> {
 }
 
 impl<A: Clone + 'static> RenderOnce for Menu<A> {
-    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+    fn render(mut self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let style = menu_style(self.core.size, cx);
         let enabled = self.core.is_enabled();
-        let (foreground, disclosure_foreground) =
-            trigger_foregrounds(menu_trigger_paint(cx), enabled);
+        let button = self
+            .button
+            .map(|(variant, size, shape)| resolve_button_style(variant, size, shape, cx));
+        let (foreground, disclosure_foreground) = match button {
+            Some(button) => {
+                let paint = if enabled {
+                    button.normal
+                } else {
+                    button.disabled
+                };
+                (paint.icon_color(), paint.icon_color())
+            }
+            None => trigger_foregrounds(menu_trigger_paint(cx), enabled),
+        };
+        self.core.button_segment = button.map(|button| (button, ButtonTrigger::Whole));
+        let gap = button.map_or(style.metrics.gap, |button| button.gap);
         let icon_offset = menu_icon_offset(style, window, cx);
         let disclosure_selector = self
             .core
@@ -849,7 +877,7 @@ impl<A: Clone + 'static> RenderOnce for Menu<A> {
             .flex()
             .items_center()
             .when(fill_parent_width, |content| content.flex_1().min_w_0())
-            .gap(style.metrics.gap)
+            .gap(gap)
             .when_some(self.leading_icon, |content, icon| {
                 content.child(
                     div()
@@ -1248,6 +1276,8 @@ pub struct ComboButton<A: Clone + 'static> {
     variant: ButtonVariant,
     size: ButtonSize,
     shape: ButtonShape,
+    contextual_style: Option<(ButtonVariantStyle, Rgba)>,
+    menu_indicator: Option<Box<dyn FnOnce(Rgba) -> AnyElement>>,
 }
 
 impl<A: Clone + 'static> ComboButton<A> {
@@ -1274,12 +1304,60 @@ impl<A: Clone + 'static> ComboButton<A> {
             variant: ButtonVariant::default(),
             size: ButtonSize::default(),
             shape: ButtonShape::default(),
+            contextual_style: None,
+            menu_indicator: None,
         }
     }
 
     pub fn variant(mut self, variant: ButtonVariant) -> Self {
         self.variant = variant;
         self.button = self.button.variant(variant);
+        self
+    }
+
+    /// Supplies complete paints for both segments, resolved for a contextual meaning such as a
+    /// warning. See [`Button::contextual_style`].
+    pub fn contextual_style(mut self, style: ButtonVariantStyle, focus_border: Rgba) -> Self {
+        self.contextual_style = Some((style, focus_border));
+        self.button = self.button.contextual_style(style, focus_border);
+        self
+    }
+
+    /// Adds leading noninteractive content to the primary segment, rendered with its foreground.
+    pub fn leading(mut self, build: impl FnOnce(Rgba) -> AnyElement + 'static) -> Self {
+        self.button = self.button.leading(build);
+        self
+    }
+
+    pub fn tooltip(mut self, tooltip: crate::Tooltip) -> Self {
+        self.button = self.button.tooltip(tooltip);
+        self
+    }
+
+    /// Names the menu segment for assistive technology instead of "{label} Options".
+    pub fn menu_label(mut self, label: impl Into<SharedString>) -> Self {
+        self.menu.accessibility_name = label.into();
+        self
+    }
+
+    pub fn menu_size(mut self, size: MenuSize) -> Self {
+        self.menu.size = size;
+        self
+    }
+
+    /// Marks the menu segment with noninteractive content at the disclosure's trailing top
+    /// corner, rendered with the segment's icon color, for a menu that holds more to act on.
+    pub fn menu_indicator(mut self, build: impl FnOnce(Rgba) -> AnyElement + 'static) -> Self {
+        self.menu_indicator = Some(Box::new(build));
+        self
+    }
+
+    /// Handles the menu's exact open and closed lifecycle transitions.
+    pub fn on_menu_lifecycle(
+        mut self,
+        handler: impl Fn(&MenuLifecycleEvent, &mut App) + 'static,
+    ) -> Self {
+        self.menu.on_lifecycle = Some(Rc::new(handler));
         self
     }
 
@@ -1372,7 +1450,10 @@ impl<A: Clone + 'static> RenderOnce for ComboButton<A> {
             }
             .into_any_element();
         }
-        let style = resolve_button_style(self.variant, self.size, self.shape, cx);
+        let mut style = resolve_button_style(self.variant, self.size, self.shape, cx);
+        if let Some((paints, focus_border)) = self.contextual_style {
+            style = style.contextual(paints, focus_border);
+        }
         let paint = if self.menu.is_enabled() {
             style.normal
         } else {
@@ -1404,13 +1485,27 @@ impl<A: Clone + 'static> RenderOnce for ComboButton<A> {
                             }),
                     ),
             )
-            .child(Icon::new(
-                IconName::ChevronDown,
-                icon_size,
-                paint.icon_color(),
-            ))
+            .child(
+                div()
+                    .relative()
+                    .child(Icon::new(
+                        IconName::ChevronDown,
+                        icon_size,
+                        paint.icon_color(),
+                    ))
+                    .when_some(self.menu_indicator, |disclosure, build| {
+                        disclosure.child(
+                            div()
+                                .debug_selector(|| "combo-button-menu-indicator".to_owned())
+                                .absolute()
+                                .top_0()
+                                .right_0()
+                                .child(build(paint.icon_color())),
+                        )
+                    }),
+            )
             .into_any_element();
-        self.menu.button_segment = Some(style);
+        self.menu.button_segment = Some((style, ButtonTrigger::Segment));
         let focus_handle = self.focus_handle.unwrap_or_else(|| {
             let focus_id =
                 ElementId::NamedChild(std::sync::Arc::new(self.id.clone()), "focus".into());
@@ -1506,6 +1601,15 @@ macro_rules! control_builders {
 }
 use control_builders;
 
+/// Which button a menu trigger paints as.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ButtonTrigger {
+    /// The square menu segment joined to a combo button's primary segment.
+    Segment,
+    /// A whole button whose label and disclosure open the menu.
+    Whole,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum TriggerKind {
     Menu,
@@ -1528,8 +1632,9 @@ struct MenuControl<A> {
     fill_parent_height: bool,
     preserve_trigger_cursor: bool,
     debug_selector: Option<String>,
-    /// Paints the trigger as the menu segment of a combo button instead of a menu trigger.
-    button_segment: Option<ButtonStyle>,
+    /// Paints the trigger as a button, or as the menu segment of a combo button, instead of a
+    /// menu trigger.
+    button_segment: Option<(ButtonStyle, ButtonTrigger)>,
     on_activate: Option<TypedActivationHandler<A>>,
     on_lifecycle: Option<MenuLifecycleHandler>,
     on_context_open: Option<ContextOpenHandler>,
@@ -1853,8 +1958,12 @@ impl<A: Clone + 'static> MenuControl<A> {
         };
         trigger = trigger.child(hover.tracker());
         let mut ring = None;
-        if let Some(style) = self.button_segment {
-            let corner_radii = JoinedEdge::Leading.corner_radii(style.corner_radius);
+        if let Some((style, part)) = self.button_segment {
+            let corner_radii = match part {
+                ButtonTrigger::Segment => JoinedEdge::Leading,
+                ButtonTrigger::Whole => JoinedEdge::None,
+            }
+            .corner_radii(style.corner_radius);
             ring = (enabled && focused).then(|| {
                 crate::focus_ring(
                     ring_id,
@@ -1875,13 +1984,26 @@ impl<A: Clone + 'static> MenuControl<A> {
             trigger = trigger
                 .flex()
                 .items_center()
-                .size(style.height)
+                .rounded_tl(corner_radii.top_left)
                 .rounded_tr(corner_radii.top_right)
                 .rounded_br(corner_radii.bottom_right)
+                .rounded_bl(corner_radii.bottom_left)
                 .border(style.border_width)
-                .border_l(px(0.0))
                 .border_color(paint.border())
                 .bg(paint.background());
+            trigger = match part {
+                ButtonTrigger::Segment => trigger.size(style.height).border_l(px(0.0)),
+                ButtonTrigger::Whole => trigger
+                    .flex_shrink_0()
+                    .h(style.height)
+                    .px(style.horizontal_padding)
+                    .shadow(paint.shadow().layers())
+                    .shadow_outside_only()
+                    .text_color(paint.foreground())
+                    .text_size(style.font_size)
+                    .line_height(gpui::relative(style.single_line_height))
+                    .font(font.clone()),
+            };
         } else if self.kind != TriggerKind::Context {
             let paint = menu_trigger_paint(cx);
             let (trigger_border, focus_ring) = trigger_edges(paint, enabled, focused);
@@ -3975,6 +4097,81 @@ mod tests {
             trigger_edges(paint.focus_border(rgba(0)), true, true),
             (border, None),
             "an inactive presentation must not submit a transparent focus primitive"
+        );
+    }
+
+    #[gpui::test]
+    fn a_button_menu_matches_the_capsule_combo_button_it_stands_in_for(cx: &mut TestAppContext) {
+        struct Capsules;
+        impl Render for Capsules {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div()
+                    .p(px(16.0))
+                    .flex()
+                    .flex_col()
+                    .items_start()
+                    .gap(px(8.0))
+                    .child(
+                        ComboButton::new("split", "Install", vec![MenuEntry::action("Open", ())])
+                            .size(ButtonSize::Small)
+                            .shape(ButtonShape::Capsule)
+                            .menu_indicator(|color| {
+                                div().size(px(4.0)).bg(color).into_any_element()
+                            })
+                            .debug_selector("split")
+                            .on_menu_activate(|_, _, _| {}),
+                    )
+                    .child(
+                        Menu::new(
+                            "whole",
+                            "Update 2 Servers",
+                            vec![MenuEntry::action("Open", ())],
+                        )
+                        .button_trigger(
+                            ButtonVariant::Secondary,
+                            ButtonSize::Small,
+                            ButtonShape::Capsule,
+                        )
+                        .debug_selector("whole")
+                        .on_activate(|_, _, _| {}),
+                    )
+            }
+        }
+        cx.update(super::init);
+        cx.set_global(test_theme());
+        let paint = crate::ButtonPaint::new(rgba(0x252530ff), rgba(0xcdcdcdff), rgba(0x00000000));
+        let variant = ButtonVariantStyle::new(paint, paint, paint, paint);
+        let metrics = crate::button::ButtonMetrics::new(px(22.0));
+        cx.set_global(crate::button::ButtonTheme::new(
+            crate::button::ButtonVariants::new(
+                variant, variant, variant, variant, variant, variant, variant,
+            ),
+            crate::button::ButtonSizes::new(metrics, metrics, metrics, metrics),
+            rgba(0x405065ff),
+        ));
+        let (_, cx) = cx.add_window_view(|_, _| Capsules);
+        cx.run_until_parked();
+        let primary = cx.debug_bounds("split").unwrap();
+        let segment = cx.debug_bounds("split-menu").unwrap();
+        let indicator = cx.debug_bounds("combo-button-menu-indicator").unwrap();
+        let whole = cx.debug_bounds("whole").unwrap();
+
+        assert_eq!(whole.size.height, primary.size.height);
+        assert_ne!(
+            whole.size.height,
+            test_theme().sizes.resolve(MenuSize::Regular).trigger_height,
+            "a button menu must not take the menu trigger's height"
+        );
+        assert!(
+            segment.contains(&indicator.origin) && indicator.top() < segment.center().y,
+            "the indicator must mark the menu segment's upper half: {indicator:?} in {segment:?}"
+        );
+
+        cx.simulate_click(whole.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(
+            cx.update(|window, cx| window_menu_is_open(window, cx)),
+            "the whole button must open its menu"
         );
     }
 
