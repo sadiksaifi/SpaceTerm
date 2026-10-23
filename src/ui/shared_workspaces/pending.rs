@@ -1,8 +1,8 @@
 //! The client's bounded connected intent, separate from the transport's durable Original Operation.
-use super::development::{SharedAcceptance, SharedRefusalReason};
+use super::development::{SharedAcceptance, SharedCloseIntent, SharedRefusalReason};
 use crate::terminal::shared_workspace::SharedWorkspaceSnapshot;
 use spaceterm_server::hierarchy::{
-    Axis, Id, Inventory, Mutation, Outcome, Pane, RetainedOutcome, Tab, Workspace,
+    Axis, CloseTarget, Id, Inventory, Mutation, Outcome, Pane, RetainedOutcome, Tab, Workspace,
 };
 use spaceterm_server::worktree::Operation;
 use std::collections::{BTreeMap, VecDeque};
@@ -35,6 +35,7 @@ pub(super) struct Completion {
 pub(super) struct PendingEdits {
     edits: VecDeque<Edit>,
     completed: VecDeque<Completion>,
+    close_intents: VecDeque<SharedCloseIntent>,
     /// Delivered outcomes keep admission capacity while their rejected drafts await review.
     unread_conflicts: usize,
     presentations: VecDeque<SharedAcceptance>,
@@ -45,7 +46,8 @@ pub(super) struct PendingEdits {
 
 impl PendingEdits {
     pub fn full(&self) -> bool {
-        self.edits.len() + self.completed.len() + self.unread_conflicts >= CAPACITY
+        self.edits.len() + self.completed.len() + self.close_intents.len() + self.unread_conflicts
+            >= CAPACITY
     }
     pub fn has_pending(&self) -> bool {
         !self.edits.is_empty()
@@ -124,6 +126,39 @@ impl PendingEdits {
             .iter()
             .filter_map(|edit| edit.creation)
             .any(|ids| ids.workspace == Some(id) || ids.tab == Some(id) || ids.pane == id)
+    }
+
+    /// Retains an unapproved close only while its exact target depends on creation.
+    pub fn defer_close(&mut self, intent: SharedCloseIntent) -> Result<bool, SharedRefusalReason> {
+        if self
+            .close_intents
+            .iter()
+            .any(|pending| pending.server == intent.server)
+        {
+            return Ok(true);
+        }
+        if !close_references(intent.server)
+            .iter()
+            .any(|id| self.provisional(*id))
+        {
+            return Ok(false);
+        }
+        if self.full() {
+            return Err(SharedRefusalReason::Pending);
+        }
+        self.close_intents.push_back(intent);
+        Ok(true)
+    }
+
+    pub fn take_close_intent(&mut self) -> Option<SharedCloseIntent> {
+        let intent = self.close_intents.front()?;
+        if close_references(intent.server)
+            .iter()
+            .any(|id| self.provisional(*id))
+        {
+            return None;
+        }
+        self.close_intents.pop_front()
     }
 
     pub fn closing_workspace(&self, workspace: Id, inventory: Option<&Inventory>) -> bool {
@@ -259,6 +294,33 @@ impl PendingEdits {
                 aliases.get(&id).copied().unwrap_or(id)
             });
         }
+        // Only an unapproved intent follows creation identities. Approved Close mutations
+        // remain immutable, including the Sessions and control grants they name.
+        for intent in &mut self.close_intents {
+            let id = |id| aliases.get(&id).copied().unwrap_or(id);
+            intent.server = match intent.server {
+                CloseTarget::Pane {
+                    workspace,
+                    tab,
+                    pane,
+                } => CloseTarget::Pane {
+                    workspace: id(workspace),
+                    tab: id(tab),
+                    pane: id(pane),
+                },
+                CloseTarget::Tab { workspace, tab } => CloseTarget::Tab {
+                    workspace: id(workspace),
+                    tab: id(tab),
+                },
+                CloseTarget::Workspace { workspace } => CloseTarget::Workspace {
+                    workspace: id(workspace),
+                },
+                CloseTarget::Worktree { workspace, tab } => CloseTarget::Worktree {
+                    workspace: id(workspace),
+                    tab: id(tab),
+                },
+            };
+        }
         for presentation in &mut self.presentations {
             remap(&mut presentation.mutation, |id| {
                 aliases.get(&id).copied().unwrap_or(id)
@@ -293,12 +355,19 @@ impl PendingEdits {
                 true
             }
         });
+        self.close_intents.retain(|intent| {
+            !close_references(intent.server)
+                .iter()
+                .any(|id| rejected.contains(id))
+        });
         self.presentations
             .retain(|event| !rejected.contains(&event.target));
     }
 
     pub fn disconnect(&mut self) {
         let before = self.edits.len();
+        let had_close_intents = !self.close_intents.is_empty();
+        self.close_intents.clear();
         self.edits.retain(|edit| {
             if edit.dispatched {
                 return true;
@@ -308,7 +377,7 @@ impl PendingEdits {
             }
             false
         });
-        if self.edits.len() != before {
+        if self.edits.len() != before || had_close_intents {
             self.presentations.retain(|event| {
                 self.edits
                     .iter()
@@ -346,6 +415,20 @@ impl PendingEdits {
             project(&mut inventory, &edit.mutation, edit.creation);
         }
         inventory
+    }
+}
+
+fn close_references(target: CloseTarget) -> Vec<Id> {
+    match target {
+        CloseTarget::Pane {
+            workspace,
+            tab,
+            pane,
+        } => vec![workspace, tab, pane],
+        CloseTarget::Tab { workspace, tab } | CloseTarget::Worktree { workspace, tab } => {
+            vec![workspace, tab]
+        }
+        CloseTarget::Workspace { workspace } => vec![workspace],
     }
 }
 

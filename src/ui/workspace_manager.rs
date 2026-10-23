@@ -3007,6 +3007,9 @@ impl WorkspaceManager {
             self.report_client_view_error(window, cx);
             return;
         }
+        // Binding a provisional Pane may replace its focus handle during reconciliation. Read
+        // keyboard ownership first, so that replacement cannot erase the initiating close intent.
+        let keyboard_before_reconciliation = window.focused(cx);
         let Some(poll) = self
             .shared
             .get_mut(key)
@@ -3067,6 +3070,19 @@ impl WorkspaceManager {
             self.present_stale_shared_close(server_target, local, window, cx);
         }
         self.revalidate_shared_close(key, window, cx);
+        if !spaceterm_ui::window_modal_is_open(window, cx)
+            && self.close_confirmation.pending().is_none()
+            && let Some(intent) = self.shared.get(key).and_then(|shared| shared.take_close_intent())
+            // The local presentation must still name the exact creation this intent followed.
+            && self.shared_close_target(intent.local, cx) == Some(intent.server)
+        {
+            let held_keyboard = intent.keyboard.is_some()
+                && intent.keyboard == keyboard_before_reconciliation
+                && self.close_target_is_active(intent.local, cx);
+            self.shared_close_keyboard.reviewed = Some(held_keyboard);
+            self.request_shared_close(intent.local, window, cx);
+            self.shared_close_keyboard.reviewed = None;
+        }
         // Each server's reading may present the Worktree it created or change the one under
         // review; both look up their own Workspace's server.
         self.open_created_server_worktree(window, cx);
@@ -3598,7 +3614,9 @@ impl WorkspaceManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        use super::shared_workspaces::{SharedCloseReview, SharedCloseUnavailable};
+        use super::shared_workspaces::{
+            SharedCloseIntent, SharedCloseReview, SharedCloseUnavailable,
+        };
 
         let workspace_id = match target {
             CloseTarget::Workspace(workspace_id)
@@ -3634,6 +3652,18 @@ impl WorkspaceManager {
         let Some(shared) = self.shared.owning(workspace_id) else {
             return true;
         };
+        match shared.defer_close(SharedCloseIntent {
+            server: server_target,
+            local: target,
+            keyboard: held_keyboard.then(|| window.focused(cx)).flatten(),
+        }) {
+            Ok(true) => return true,
+            Ok(false) => {}
+            Err(reason) => {
+                Self::show_shared_refusal(Self::shared_close_operation(target), reason, window, cx);
+                return true;
+            }
+        }
         let approval = match shared.close_approval(server_target) {
             Ok(approval) => approval,
             Err(SharedCloseUnavailable::Edits(reason)) => {
@@ -3678,6 +3708,9 @@ impl WorkspaceManager {
                 .map(|shared| shared.close(approval, target));
             if let Some(SharedSubmission::Refused(reason)) = submission {
                 Self::show_shared_refusal(Self::shared_close_operation(target), reason, window, cx);
+            }
+            if submission == Some(SharedSubmission::Submitted) {
+                self.prepare_shared_close_keyboard(target, held_keyboard, cx);
             }
             if let Some(key) = key {
                 self.sync_shared_workspaces(key, window, cx);
@@ -3758,6 +3791,42 @@ impl WorkspaceManager {
             }
         }
         true
+    }
+
+    fn prepare_shared_close_keyboard(
+        &self,
+        target: CloseTarget,
+        held_keyboard: bool,
+        cx: &mut App,
+    ) {
+        if let Some(entry) =
+            close_target_workspace(target).and_then(|id| self.workspaces.workspace(id))
+        {
+            entry.payload().update(cx, |manager, _| {
+                manager.prepare_shared_close_keyboard(held_keyboard);
+            });
+        }
+    }
+
+    /// Later navigation wins over the keyboard intent of a deferred close.
+    fn close_target_is_active(&self, target: CloseTarget, cx: &App) -> bool {
+        let Some(workspace_id) = close_target_workspace(target) else {
+            return false;
+        };
+        if self.workspaces.active_workspace_id() != Some(workspace_id) {
+            return false;
+        }
+        let Some(entry) = self.workspaces.workspace(workspace_id) else {
+            return false;
+        };
+        let active = entry.payload().read(cx).active_terminal_identity(cx);
+        match target {
+            CloseTarget::Tab { tab_id, .. } => active.0 == tab_id,
+            CloseTarget::Pane {
+                tab_id, pane_id, ..
+            } => active == (tab_id, pane_id),
+            _ => true,
+        }
     }
 
     /// What a refused shared close says it did not do.
@@ -3881,6 +3950,9 @@ impl WorkspaceManager {
                         window,
                         cx,
                     );
+                }
+                if submission == SharedSubmission::Submitted {
+                    self.prepare_shared_close_keyboard(target, held_keyboard, cx);
                 }
                 self.sync_shared_workspaces(key, window, cx);
                 let rename_removed = renaming && !self.sidebar.read(cx).is_renaming();

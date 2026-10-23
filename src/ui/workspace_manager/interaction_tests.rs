@@ -697,3 +697,412 @@ fn an_idle_own_tab_on_an_older_server_requires_explicit_confirmation(cx: &mut Te
             if confirmation.own_controls.is_none()
     ));
 }
+
+const PENDING_CLOSE_TAB: [u8; 32] = [80; 32];
+const PENDING_CLOSE_PANE: [u8; 32] = [81; 32];
+
+fn pending_close_inventory() -> spaceterm_server::hierarchy::Inventory {
+    shared_close_inventory(
+        2,
+        &[
+            (
+                SHARED_CLOSE_ROOT_TAB,
+                &[
+                    (SHARED_CLOSE_ROOT_PANE, Some([31; 32])),
+                    (SHARED_CLOSE_SPLIT_PANE, Some([32; 32])),
+                ],
+            ),
+            (SHARED_CLOSE_SECOND_TAB, &[(SHARED_CLOSE_SECOND_PANE, None)]),
+            (PENDING_CLOSE_TAB, &[(PENDING_CLOSE_PANE, Some([82; 32]))]),
+        ],
+    )
+}
+
+#[gpui::test]
+fn closing_a_pending_tab_waits_for_its_creation_then_reviews_authoritative_sessions(
+    cx: &mut TestAppContext,
+) {
+    use spaceterm_server::hierarchy::{CloseTarget, Mutation, Outcome};
+    let (harness, cx) = shared_close_harness(cx);
+    click("create-tab-button", cx);
+    cx.dispatch_action(crate::ui::CloseTab);
+    redraw(cx);
+    assert!(
+        cx.debug_bounds("modal-action-shared-workspace-refused-ok")
+            .is_none(),
+        "a provisional Tab is awaiting creation, not removed by another client"
+    );
+    assert!(
+        cx.debug_bounds("modal-action-shared-close-confirm")
+            .is_none()
+    );
+    assert_eq!(harness.edits.submitted().len(), 1);
+
+    harness.edits.answer(Outcome::Accepted {
+        target: PENDING_CLOSE_TAB,
+    });
+    harness.publish(pending_close_inventory(), cx);
+    assert!(
+        cx.debug_bounds("modal-action-shared-close-confirm")
+            .is_some(),
+        "the exact created Tab must be reviewed using the Session the server reports"
+    );
+    assert!(harness.closes().is_empty());
+    click("modal-action-shared-close-confirm", cx);
+    assert_eq!(
+        harness.closes(),
+        [shared_close_mutation(
+            CloseTarget::Tab {
+                workspace: SHARED_CLOSE_WORKSPACE,
+                tab: PENDING_CLOSE_TAB
+            },
+            &[(PENDING_CLOSE_PANE, Some([82; 32]))],
+            SharedCloseRemoves::Tab,
+        )]
+    );
+    harness.sync(cx);
+    assert_eq!(
+        harness.closes().len(),
+        1,
+        "settlement must not submit a duplicate close"
+    );
+    assert!(matches!(
+        harness.edits.submitted()[0],
+        Mutation::CreateTab { .. }
+    ));
+}
+
+#[gpui::test]
+fn a_pending_tab_close_preserves_later_tab_selection_and_terminal_find(cx: &mut TestAppContext) {
+    use spaceterm_server::hierarchy::{CloseTarget, Outcome};
+    let (harness, cx) = shared_close_harness(cx);
+    click("create-tab-button", cx);
+    cx.dispatch_action(crate::ui::CloseTab);
+    redraw(cx);
+    cx.dispatch_action(crate::ui::ActivateTab1);
+    cx.dispatch_action(crate::ui::OpenTerminalFind);
+    redraw(cx);
+    let find_focus = cx.update(|window, cx| window.focused(cx).expect("Find holds the keyboard"));
+    let selected = harness.manager.read_with(cx, |manager, cx| {
+        manager
+            .workspaces
+            .active()
+            .payload()
+            .read(cx)
+            .active_terminal_identity(cx)
+    });
+
+    harness.edits.answer(Outcome::Accepted {
+        target: PENDING_CLOSE_TAB,
+    });
+    harness.publish(pending_close_inventory(), cx);
+    click("modal-action-shared-close-confirm", cx);
+    assert_eq!(
+        harness.closes(),
+        [shared_close_mutation(
+            CloseTarget::Tab {
+                workspace: SHARED_CLOSE_WORKSPACE,
+                tab: PENDING_CLOSE_TAB
+            },
+            &[(PENDING_CLOSE_PANE, Some([82; 32]))],
+            SharedCloseRemoves::Tab,
+        )]
+    );
+    assert_eq!(
+        harness.manager.read_with(cx, |manager, cx| {
+            manager
+                .workspaces
+                .active()
+                .payload()
+                .read(cx)
+                .active_terminal_identity(cx)
+        }),
+        selected,
+        "closing the original target must preserve the Tab selected afterwards"
+    );
+    assert!(cx.update(|window, _| find_focus.is_focused(window)));
+}
+
+#[gpui::test]
+fn a_refused_creation_discards_its_pending_close_without_targeting_a_surviving_tab(
+    cx: &mut TestAppContext,
+) {
+    use spaceterm_server::hierarchy::Outcome;
+    let (harness, cx) = shared_close_harness(cx);
+    click("create-tab-button", cx);
+    cx.dispatch_action(crate::ui::CloseTab);
+    redraw(cx);
+    harness.edits.answer(Outcome::Limit);
+    harness.sync(cx);
+    assert!(harness.closes().is_empty());
+    assert!(
+        cx.debug_bounds("modal-action-shared-close-confirm")
+            .is_none()
+    );
+    assert_eq!(shared_close_counts(&harness, cx), (2, 3));
+}
+
+#[gpui::test]
+fn disconnect_during_creation_cancels_the_unapproved_close_and_keeps_the_original_creation(
+    cx: &mut TestAppContext,
+) {
+    use spaceterm_server::hierarchy::Outcome;
+    let (harness, cx) = shared_close_harness(cx);
+    click("create-tab-button", cx);
+    cx.dispatch_action(crate::ui::CloseTab);
+    redraw(cx);
+    let original = harness.edits.submitted();
+    harness.edits.set_connected(false);
+    harness.sync(cx);
+    assert_eq!(harness.edits.submitted(), original);
+    click("modal-action-shared-workspace-refused-ok", cx);
+    harness.edits.set_connected(true);
+    harness.edits.answer(Outcome::Accepted {
+        target: PENDING_CLOSE_TAB,
+    });
+    harness.publish(pending_close_inventory(), cx);
+    assert_eq!(
+        harness.edits.submitted(),
+        original,
+        "reconnection resolves the admitted creation without resubmitting it or its cancelled close"
+    );
+    assert!(
+        cx.debug_bounds("modal-action-shared-close-confirm")
+            .is_none()
+    );
+}
+
+#[gpui::test]
+fn an_unresolved_creation_outcome_blocks_its_close_until_that_same_creation_settles(
+    cx: &mut TestAppContext,
+) {
+    use spaceterm_server::hierarchy::Outcome;
+    let (harness, cx) = shared_close_harness(cx);
+    click("create-tab-button", cx);
+    cx.dispatch_action(crate::ui::CloseTab);
+    redraw(cx);
+    let original = harness.edits.submitted();
+    // Publishing membership alone cannot settle a lost creation reply or authorize its close.
+    harness.publish(pending_close_inventory(), cx);
+    harness.edits.answer(Outcome::Pending);
+    harness.sync(cx);
+    harness.sync(cx);
+    assert_eq!(harness.edits.submitted(), original);
+    assert!(
+        cx.debug_bounds("modal-action-shared-close-confirm")
+            .is_none()
+    );
+    harness.edits.answer(Outcome::Accepted {
+        target: PENDING_CLOSE_TAB,
+    });
+    harness.sync(cx);
+    assert_eq!(harness.edits.submitted(), original);
+    assert!(
+        cx.debug_bounds("modal-action-shared-close-confirm")
+            .is_some()
+    );
+}
+
+#[gpui::test]
+fn changed_session_facts_after_pending_creation_require_explicit_review_again(
+    cx: &mut TestAppContext,
+) {
+    use spaceterm_server::hierarchy::Outcome;
+    let (harness, cx) = shared_close_harness(cx);
+    click("create-tab-button", cx);
+    cx.dispatch_action(crate::ui::CloseTab);
+    redraw(cx);
+    harness.edits.answer(Outcome::Accepted {
+        target: PENDING_CLOSE_TAB,
+    });
+    harness.publish(pending_close_inventory(), cx);
+    let mut changed = pending_close_inventory();
+    changed
+        .close
+        .as_mut()
+        .unwrap()
+        .sessions
+        .iter_mut()
+        .find(|pane| pane.id == PENDING_CLOSE_PANE)
+        .unwrap()
+        .session = Some([83; 32]);
+    harness.publish(changed, cx);
+    assert!(
+        cx.debug_bounds("modal-action-shared-close-confirm")
+            .is_none()
+    );
+    assert!(
+        cx.debug_bounds("modal-action-shared-close-review")
+            .is_some()
+    );
+    assert!(
+        harness.closes().is_empty(),
+        "changed facts never renew destructive consent"
+    );
+}
+
+#[gpui::test]
+fn confirming_a_tab_close_opens_the_replacement_dormant_pane_once(cx: &mut TestAppContext) {
+    use crate::terminal::server_session::DevelopmentPaneStatus;
+    use spaceterm_server::hierarchy::Outcome;
+    let (harness, cx) = shared_close_harness(cx);
+    let replacement = harness.panes.pane(SHARED_CLOSE_SECOND_PANE);
+    replacement.set(DevelopmentPaneStatus::Restored);
+    settle_shared_panes(cx);
+    assert_eq!(replacement.selections(), 0);
+    cx.dispatch_action(crate::ui::CloseTab);
+    redraw(cx);
+    click("modal-action-shared-close-confirm", cx);
+    assert_eq!(
+        replacement.selections(),
+        1,
+        "confirmation preserves the initiating keyboard intent and opens the Focused Pane"
+    );
+    harness.edits.answer(Outcome::Accepted {
+        target: SHARED_CLOSE_ROOT_TAB,
+    });
+    harness.publish(
+        shared_close_inventory(
+            2,
+            &[(SHARED_CLOSE_SECOND_TAB, &[(SHARED_CLOSE_SECOND_PANE, None)])],
+        ),
+        cx,
+    );
+    assert_eq!(
+        replacement.selections(),
+        1,
+        "settlement must not repeat first-use selection"
+    );
+}
+
+#[gpui::test]
+fn directly_closing_a_tab_opens_the_replacement_dormant_pane_once(cx: &mut TestAppContext) {
+    use crate::terminal::server_session::DevelopmentPaneStatus;
+    use spaceterm_server::hierarchy::ConfirmedControl;
+    let (harness, cx) = shared_close_harness(cx);
+    let mut idle = shared_close_inventory(
+        2,
+        &[
+            (SHARED_CLOSE_ROOT_TAB, &[(SHARED_CLOSE_ROOT_PANE, None)]),
+            (SHARED_CLOSE_SECOND_TAB, &[(SHARED_CLOSE_SECOND_PANE, None)]),
+        ],
+    );
+    idle.close.as_mut().unwrap().controls = Some(vec![ConfirmedControl {
+        pane: SHARED_CLOSE_ROOT_PANE,
+        session: None,
+        owner: [1; 32],
+        epoch: 1,
+    }]);
+    harness.publish(idle, cx);
+    let replacement = harness.panes.pane(SHARED_CLOSE_SECOND_PANE);
+    replacement.set(DevelopmentPaneStatus::Restored);
+    settle_shared_panes(cx);
+    assert_eq!(replacement.selections(), 0);
+    cx.dispatch_action(crate::ui::CloseTab);
+    redraw(cx);
+    assert!(
+        cx.debug_bounds("modal-action-shared-close-confirm")
+            .is_none()
+    );
+    assert_eq!(harness.closes().len(), 1);
+    assert_eq!(
+        replacement.selections(),
+        1,
+        "direct close opens the replacement without another keypress"
+    );
+}
+
+#[gpui::test]
+fn a_changed_control_grant_refuses_the_original_direct_close_without_renewing_it(
+    cx: &mut TestAppContext,
+) {
+    use spaceterm_server::hierarchy::{ConfirmedControl, Mutation, Outcome};
+    let (harness, cx) = shared_close_harness(cx);
+    let mut idle = shared_close_inventory(
+        2,
+        &[
+            (SHARED_CLOSE_ROOT_TAB, &[(SHARED_CLOSE_ROOT_PANE, None)]),
+            (SHARED_CLOSE_SECOND_TAB, &[(SHARED_CLOSE_SECOND_PANE, None)]),
+        ],
+    );
+    let grant = ConfirmedControl {
+        pane: SHARED_CLOSE_ROOT_PANE,
+        session: None,
+        owner: [1; 32],
+        epoch: 1,
+    };
+    idle.close.as_mut().unwrap().controls = Some(vec![grant.clone()]);
+    harness.publish(idle.clone(), cx);
+    cx.dispatch_action(crate::ui::CloseTab);
+    redraw(cx);
+    let original = harness.closes();
+    assert!(
+        matches!(&original[..], [Mutation::Close { confirmation, .. }]
+        if confirmation.own_controls.as_deref() == Some(&[grant]))
+    );
+    idle.close.as_mut().unwrap().controls.as_mut().unwrap()[0].epoch = 2;
+    // The server rejects admission against the changed grant even with unchanged membership
+    // and Session facts. The client restores the exact target and waits for explicit Review.
+    harness.edits.answer(Outcome::StaleConfirmation);
+    harness.publish(idle, cx);
+    assert_eq!(harness.closes(), original);
+    assert!(
+        cx.debug_bounds("modal-action-shared-close-review")
+            .is_some()
+    );
+    assert!(
+        cx.debug_bounds("modal-action-shared-close-confirm")
+            .is_none()
+    );
+    harness.sync(cx);
+    assert_eq!(harness.closes(), original);
+}
+
+#[gpui::test]
+fn a_close_in_a_creation_burst_follows_only_the_last_requested_tab(cx: &mut TestAppContext) {
+    use spaceterm_server::hierarchy::{CloseTarget, Outcome};
+    let (harness, cx) = shared_close_harness(cx);
+    for _ in 0..3 {
+        click("create-tab-button", cx);
+    }
+    cx.dispatch_action(crate::ui::CloseTab);
+    redraw(cx);
+    let mut authority = shared_close_published();
+    for index in 0..3u8 {
+        let id = [80 + 2 * index; 32];
+        let pane = [81 + 2 * index; 32];
+        let mut created = pending_close_inventory();
+        let mut tab = created.workspaces[0].tabs.pop().unwrap();
+        tab.id = id;
+        tab.root_pane = pane;
+        tab.panes[0].id = pane;
+        authority.workspaces[0].tabs.push(tab);
+        authority.close.as_mut().unwrap().sessions.push(
+            spaceterm_server::hierarchy::ConfirmedPane {
+                id: pane,
+                session: None,
+            },
+        );
+        authority.revision += 1;
+        harness.edits.answer(Outcome::Accepted { target: id });
+        harness.publish(authority.clone(), cx);
+        assert!(harness.closes().is_empty());
+        assert_eq!(
+            cx.debug_bounds("modal-action-shared-close-confirm")
+                .is_some(),
+            index == 2
+        );
+    }
+    click("modal-action-shared-close-confirm", cx);
+    assert_eq!(
+        harness.closes(),
+        [shared_close_mutation(
+            CloseTarget::Tab {
+                workspace: SHARED_CLOSE_WORKSPACE,
+                tab: [84; 32]
+            },
+            &[([85; 32], None)],
+            SharedCloseRemoves::Tab,
+        )]
+    );
+}
