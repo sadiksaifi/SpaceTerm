@@ -460,6 +460,54 @@ fn optimistic_rapid_identical_actions_keep_distinct_server_identities_and_result
 }
 
 #[test]
+fn optimistic_split_preserves_published_repository_and_close_control_facts() {
+    use spaceterm_server::hierarchy::ConfirmedControl;
+    let server = DelayedServer::new();
+    let workspace = server.inventory().workspaces[0].id;
+    let tab = server.inventory().workspaces[0].tabs[0].clone();
+    let control = ConfirmedControl {
+        pane: tab.root_pane,
+        session: None,
+        owner: DEVICE,
+        epoch: 7,
+    };
+    {
+        let mut delivery = server.0.borrow_mut();
+        delivery.server.present_repository_directory(
+            tab.root_pane,
+            std::path::PathBuf::from("/server/protected-repository"),
+        );
+        delivery.server.inventory.close.as_mut().unwrap().controls = Some(vec![control.clone()]);
+        delivery.snapshot.inventory = Some(live_inventory(&delivery.server));
+    }
+    let (source, mut model) = model(&server);
+    assert_eq!(
+        source.submit(Mutation::SplitPane {
+            workspace,
+            tab: tab.id,
+            source: tab.root_pane,
+            axis: Axis::Right,
+        }),
+        SharedSubmission::Submitted
+    );
+    for inventory in [source.presentation_inventory().unwrap(), {
+        server.finish(true, true);
+        model.poll().inventory.unwrap()
+    }] {
+        let decoded: Inventory =
+            serde_json::from_slice(&serde_json::to_vec(&inventory).unwrap()).unwrap();
+        let panes = &decoded.workspaces[0].tabs[0].panes;
+        assert_eq!(panes.len(), 2);
+        assert_eq!(
+            panes[0].repository_directory(),
+            std::path::Path::new("/server/protected-repository")
+        );
+        assert_eq!(panes[1].repository_directory, None);
+        assert_eq!(decoded.close.unwrap().controls, Some(vec![control.clone()]));
+    }
+}
+
+#[test]
 fn optimistic_split_of_a_pending_tab_dispatches_only_after_its_real_parent_exists() {
     let server = DelayedServer::new();
     let (source, mut model) = model(&server);

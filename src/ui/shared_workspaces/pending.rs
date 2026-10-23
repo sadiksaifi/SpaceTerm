@@ -407,6 +407,7 @@ fn new_pane(id: Id, source: Option<Id>, axis: Axis, directory: std::path::PathBu
         axis,
         starting_directory: directory,
         current_directory: None,
+        repository_directory: None,
         presentation: None,
         confirmed_directory: None,
         creator: None,
