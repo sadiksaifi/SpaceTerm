@@ -10,6 +10,7 @@ pub(crate) fn shortcuts() -> Vec<SystemReserved> {
         ("shift-cmd-z", Redo),
         ("cmd-a", SelectAll),
         ("cmd-,", Settings),
+        ("cmd-shift-p", CommandPalette),
         ("cmd-q", Quit),
         ("cmd-h", Hide),
         ("alt-cmd-h", HideOthers),

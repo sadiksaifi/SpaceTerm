@@ -5,10 +5,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use gpui::prelude::*;
-use gpui::{AnyElement, Context, ElementId, SharedString, Task, Window, accesskit, div};
+use gpui::{Context, SharedString, Task, Window};
 use spaceterm_ui::{
-    Alert, AlertIntent, AlertOutcome, Button, Menu, MenuEntry, ModalAction, ModalActionEmphasis,
-    ModalActionIntent, ModalActionRole, ModalId, ProgressRing, ProgressSize, ProgressState,
+    Alert, AlertIntent, AlertOutcome, ModalAction, ModalActionEmphasis, ModalActionIntent,
+    ModalActionRole, ModalId,
 };
 
 use super::SettingsWindow;
@@ -19,13 +19,8 @@ use crate::local_server::service::{
     LingerAuthorization, RetainedInstallation, Service, ServiceStatus, control,
 };
 use crate::local_server::{AuthenticatedStatus, LocalServer, ServerError};
-use crate::ui::appearance::ChromeAppearance;
 use crate::ui::direct_access::DirectAccessControl;
-use crate::ui::sidebar_window::form::{CaptionTone, action_button, badge};
-
-pub(super) const CONTROL_SELECTOR: &str = "settings-local-server-control";
-pub(super) const PROGRESS_SELECTOR: &str = "settings-local-server-progress";
-pub(super) const CHECK_SELECTOR: &str = "settings-local-server-check";
+use crate::ui::sidebar_window::form::CaptionTone;
 
 /// The blocking local server check the section runs on the background executor. The Workspace
 /// Window sets up and starts the server; this row only reports how it answers.
@@ -74,12 +69,9 @@ impl LocalServerControl for DevelopmentRunServer {
 }
 
 /// The Servers section's description while a Development run owns the local server.
-pub(super) const DEVELOPMENT_RUN_DESCRIPTION: &str = "The SpaceTerm servers that run your \
-                                                       Workspaces\u{2019} terminals. This \
-                                                       Development run owns the server on this \
-                                                       computer, which ends with its Terminal \
-                                                       Sessions when the run ends. Select a \
-                                                       server to see its connection and settings.";
+pub(super) const DEVELOPMENT_RUN_DESCRIPTION: &str = "Servers run your Workspaces and their \
+                                                       Terminal Sessions. This Development \
+                                                       run\u{2019}s server ends when the run ends.";
 
 impl LocalServerControl for LocalServer {
     fn worktree_server(&self) -> Option<LocalServer> {
@@ -129,6 +121,9 @@ pub(super) trait ServerServiceControl: Send + Sync {
     /// Runs only from the person's confirmed authorization step. A cancelled or refused
     /// authorization returns an error and changes nothing.
     fn authorize_startup(&self) -> Result<(), ServerError>;
+    /// Changes only whether the server starts on its own at login or boot. A deliberate Stop
+    /// stays in force. Enabling it at boot may need [`Self::authorize_startup`] first.
+    fn set_automatic_start(&self, enabled: bool) -> Result<ServiceStatus, ServerError>;
 }
 
 impl ServerServiceControl for Service {
@@ -168,6 +163,10 @@ impl ServerServiceControl for Service {
         // The desktop asks through pkexec for the one fixed loginctl command, for this account
         // only. No SpaceTerm code runs as root.
         Service::enable_linger(self, LingerAuthorization::Desktop)
+    }
+
+    fn set_automatic_start(&self, enabled: bool) -> Result<ServiceStatus, ServerError> {
+        Service::set_automatic_start(self, enabled)
     }
 }
 
@@ -273,6 +272,15 @@ impl LocalServerRow {
         self.control
             .as_ref()
             .map_or(ServerLifetime::Independent, |control| control.lifetime())
+    }
+
+    /// What SpaceTerm last learned about the server. A server that could not be resolved reads as
+    /// that failure.
+    pub(super) fn current_status(&self) -> LocalServerStatus {
+        match &self.control {
+            Err(error) => LocalServerStatus::Failed(*error),
+            Ok(_) => self.status,
+        }
     }
 
     #[cfg(test)]
@@ -543,8 +551,6 @@ pub(crate) const MISSING_CAPABILITY: &str = "The server for your account doesn\u
 const STOPPED_GUIDANCE: &str = "You stopped the server. It stays stopped, even after you \
                                 restart the computer, until you start it.";
 
-pub(super) const SERVICE_CONTROL_SELECTOR: &str = "settings-server-service-control";
-pub(super) const SERVICE_PROGRESS_SELECTOR: &str = "settings-server-service-progress";
 pub(super) const SERVICE_CHECK_SELECTOR: &str = "settings-server-service-check";
 pub(super) const INSTALL_SELECTOR: &str = "settings-server-service-install";
 /// Prefixes each build in Install's menu, followed by its position.
@@ -598,7 +604,7 @@ impl ServiceAction {
         }
     }
 
-    const fn selector(self) -> &'static str {
+    pub(super) const fn selector(self) -> &'static str {
         match self {
             Self::Check => SERVICE_CHECK_SELECTOR,
             Self::Install => INSTALL_SELECTOR,
@@ -614,7 +620,7 @@ impl ServiceAction {
     /// The element identity of the slot the button occupies. Install, Start, Stop, Check, and the
     /// authorization steps share the leading slot, so keyboard focus stays on it when one replaces
     /// another.
-    const fn slot(self) -> &'static str {
+    pub(super) const fn slot(self) -> &'static str {
         match self {
             Self::Check
             | Self::Install
@@ -629,7 +635,7 @@ impl ServiceAction {
 
     /// What the button does beyond its name, for assistive technology. Install names its build
     /// where the row renders it.
-    const fn consequence(self) -> Option<&'static str> {
+    pub(super) const fn consequence(self) -> Option<&'static str> {
         match self {
             Self::Stop => Some("Ends the server's Terminal Sessions. SpaceTerm asks first."),
             Self::Restart => Some("Ends the server's Terminal Sessions. SpaceTerm asks first."),
@@ -880,6 +886,11 @@ pub(super) struct InstallChoice {
 }
 
 impl InstallChoice {
+    /// The verified build's directory, which Install installs.
+    pub(super) fn directory(&self) -> &Path {
+        &self.directory
+    }
+
     /// Names each build by version and abbreviated commit. Two builds of one commit and version
     /// also name their package, so no two choices read alike.
     pub(super) fn of(installations: &[RetainedInstallation]) -> Vec<Self> {
@@ -1166,10 +1177,18 @@ fn authorization_caption(
     )
 }
 
+/// A change to automatic start and why the last one didn't take effect.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(super) struct AutomaticStart {
+    pub(super) working: bool,
+    pub(super) failure: Option<ServerError>,
+}
+
 /// Presents the offered service and owns passive reads.
 pub(super) struct ServerServiceRow {
     control: Result<Arc<dyn ServerServiceControl>, ServerError>,
     pub(super) state: ServiceState,
+    pub(super) automatic_start: AutomaticStart,
     /// The window owns passive reads; admitted changes belong to LocalServerOperations.
     _operation: Option<Task<()>>,
 }
@@ -1185,6 +1204,7 @@ impl ServerServiceRow {
                 startup,
                 ..ServiceState::default()
             },
+            automatic_start: AutomaticStart::default(),
             _operation: None,
         }
     }
@@ -1356,7 +1376,8 @@ impl SettingsWindow {
     }
 
     /// Whether the service row can take `action` now. One service action runs at a time, and a
-    /// change waits for the connection row to finish.
+    /// change waits for the connection row to finish. A change to automatic start owns the row's
+    /// task until it finishes, so even a passive read waits; the change reports the status.
     fn server_service_ready(&self, action: ServiceAction) -> bool {
         // One server operation runs at a time across the Servers rows.
         let others_working = self.local_server_working()
@@ -1367,6 +1388,7 @@ impl SettingsWindow {
         self.server_service.as_ref().is_some_and(|row| {
             row.control.is_ok()
                 && row.state.working.is_none()
+                && !row.automatic_start.working
                 && !(action.changes_service() && others_working)
         })
     }
@@ -1469,6 +1491,129 @@ impl SettingsWindow {
             AuthorizedRequest::Start => None,
         };
         self.run_service_operation(action, installation, cx);
+    }
+
+    /// Turns automatic start on or off for this account's server. On a desktop that starts it at
+    /// boot, turning it on may need lingering, which SpaceTerm explains and asks for first; only
+    /// the person's confirmation asks the operating system for a password.
+    pub(super) fn set_local_automatic_start(
+        &mut self,
+        enabled: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.change_automatic_start(enabled, false, window.window_handle(), cx);
+    }
+
+    fn change_automatic_start(
+        &mut self,
+        enabled: bool,
+        authorize: bool,
+        window: gpui::AnyWindowHandle,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(row) = self.server_service.as_mut() else {
+            return;
+        };
+        let Ok(control) = row.control.as_ref().map(Arc::clone) else {
+            return;
+        };
+        if row.automatic_start.working || row.state.working.is_some() {
+            return;
+        }
+        row.automatic_start = AutomaticStart {
+            working: true,
+            failure: None,
+        };
+        let changed = cx.background_spawn(async move {
+            if authorize {
+                control.authorize_startup()?;
+            }
+            control.set_automatic_start(enabled)
+        });
+        row._operation = Some(cx.spawn(async move |settings, cx| {
+            let changed = changed.await;
+            let _ = settings.update(cx, |settings, cx| {
+                let Some(row) = settings.server_service.as_mut() else {
+                    return;
+                };
+                row.automatic_start.working = false;
+                match changed {
+                    Ok(status) => row.state.status = Some(status),
+                    // Only the person's confirmation asks for a password, once per change.
+                    Err(ServerError::AuthorizationRequired) if enabled && !authorize => {
+                        settings.confirm_automatic_start_authorization(window, cx);
+                    }
+                    Err(error) => row.automatic_start.failure = Some(error),
+                }
+                cx.notify();
+            });
+        }));
+        cx.notify();
+    }
+
+    /// Explains lingering before the operating system asks for an administrator password, so the
+    /// server can start at boot. Cancelling leaves automatic start off. The alert opens once the
+    /// current update finishes, since the answer that needs it arrives inside one.
+    fn confirm_automatic_start_authorization(
+        &mut self,
+        handle: gpui::AnyWindowHandle,
+        cx: &mut Context<Self>,
+    ) {
+        let owner = cx.weak_entity();
+        cx.defer(move |cx| {
+            let presenting = owner.clone();
+            let _ = handle.update(cx, move |_, window, cx| {
+                // An alert belongs to the entity presenting it, so Settings presents it.
+                let _ = presenting.update(cx, |_, cx| {
+                    let result = Alert::new(
+                    ModalId::new("settings-server-auto-start-authorize"),
+                    "Start the Server at Boot",
+                    "Start the Server at Boot",
+                    "Let your account\u{2019}s services start at boot and keep running after you \
+                     log out?",
+                    vec![
+                        ModalAction::new(
+                            true,
+                            "Authorize\u{2026}",
+                            ModalActionRole::Affirmative,
+                            AUTHORIZE_CONFIRM_SELECTOR,
+                        )
+                        .with_emphasis(ModalActionEmphasis::Prominent),
+                        ModalAction::new(
+                            false,
+                            "Cancel",
+                            ModalActionRole::Cancel,
+                            AUTHORIZE_CANCEL_SELECTOR,
+                        ),
+                    ],
+                )
+                .intent(AlertIntent::Warning)
+                .detail(
+                    "Your computer asks for an administrator password to turn on lingering for \
+                     your account. Lingering applies to every service your account runs. If you \
+                     cancel, nothing changes.",
+                )
+                .present(window, cx, move |outcome, cx| {
+                    if !matches!(
+                        outcome,
+                        AlertOutcome::Activated {
+                            action_id: true,
+                            ..
+                        }
+                    ) {
+                        return;
+                    }
+                    let _ = owner.update(cx, |settings, cx| {
+                        settings.change_automatic_start(true, true, handle, cx);
+                    });
+                });
+                    if result.is_err() {
+                        eprintln!("failed to present the automatic start authorization");
+                    }
+                });
+            });
+        });
     }
 
     /// Installs the build the person chose. Only a build the last read verified and listed is
@@ -1668,161 +1813,6 @@ impl SettingsWindow {
             eprintln!("failed to present the SpaceTerm server service confirmation");
         }
     }
-
-    /// The service's state badge, or progress while an action runs, and its steps.
-    pub(super) fn render_server_service(
-        &mut self,
-        appearance: &ChromeAppearance,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let Some(presentation) = self.server_service_presentation() else {
-            return div().into_any_element();
-        };
-        let state_selector = presentation.state_selector;
-        let state = if presentation.working.is_some() {
-            ProgressRing::new(
-                SERVICE_PROGRESS_SELECTOR,
-                presentation.state,
-                ProgressState::Indeterminate,
-            )
-            .size(ProgressSize::Compact)
-            .debug_selector(SERVICE_PROGRESS_SELECTOR)
-            .into_any_element()
-        } else {
-            div()
-                .debug_selector(move || state_selector.to_owned())
-                .child(badge(state_selector, presentation.state, appearance))
-                .into_any_element()
-        };
-        // Assistive technology announces the state when it changes, as a status.
-        let state = div()
-            .id("settings-server-service-state")
-            .role(accesskit::Role::Status)
-            .aria_label(SharedString::new_static(presentation.state))
-            .child(state);
-        // The steps stay enabled while an action runs. A disabled button gives up keyboard focus,
-        // and the leading slot keeps it as Stop gives way to Start. A step taken meanwhile is
-        // ignored, and the status says why.
-        let owner = cx.weak_entity();
-        let install_choices = presentation.install_choices;
-        // The authorization step names the build it installs, as Install does.
-        let authorized_build = match presentation.authorization.map(|pending| pending.request) {
-            Some(AuthorizedRequest::Install(directory)) => install_choices
-                .iter()
-                .find(|choice| choice.directory == directory)
-                .map(|choice| choice.label.clone()),
-            _ => None,
-        };
-        let actions = presentation.actions.iter().map(|&action| {
-            let owner = owner.clone();
-            // Several verified builds make Install a menu of them, so the person names the build
-            // before anything is installed.
-            if action == ServiceAction::Install && install_choices.len() > 1 {
-                let entries = install_choices
-                    .iter()
-                    .enumerate()
-                    .map(|(index, choice)| {
-                        MenuEntry::action(choice.label.clone(), choice.directory.clone())
-                            .debug_selector(format!("{INSTALL_CHOICE_SELECTOR}-{index}"))
-                    })
-                    .collect();
-                return Menu::new(ElementId::from(action.slot()), action.label(), entries)
-                    .debug_selector(action.selector())
-                    .on_activate(move |activation, _, cx| {
-                        let installation = activation.action().clone();
-                        let _ = owner.update(cx, |settings, cx| {
-                            settings.install_server_service(installation, cx);
-                        });
-                    })
-                    .into_any_element();
-            }
-            let consequence = match (action, install_choices.as_slice(), &authorized_build) {
-                (ServiceAction::Install, [only], _) => {
-                    Some(SharedString::from(format!("Installs {}.", only.label)))
-                }
-                (ServiceAction::AuthorizeInstall, _, Some(build)) => {
-                    Some(SharedString::from(format!(
-                        "SpaceTerm explains the change first. Your computer then asks for an \
-                         administrator password, and SpaceTerm installs {build} and starts the \
-                         server."
-                    )))
-                }
-                _ => action.consequence().map(SharedString::new_static),
-            };
-            Button::new(ElementId::from(action.slot()), action.label())
-                .variant(spaceterm_ui::ButtonVariant::Outline)
-                .size(spaceterm_ui::ButtonSize::Regular)
-                .tab_stop(true)
-                .debug_selector(action.selector())
-                .when_some(consequence, |button, consequence| {
-                    button.accessibility_description(consequence)
-                })
-                .on_activate(move |_, window, cx| {
-                    let _ = owner.update(cx, |settings, cx| {
-                        settings.request_server_service(action, window, cx);
-                    });
-                })
-                .into_any_element()
-        });
-        div()
-            .debug_selector(|| SERVICE_CONTROL_SELECTOR.to_owned())
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(appearance.spacing(8.0))
-            .child(state)
-            .children(actions)
-            .into_any_element()
-    }
-
-    /// The state badge, or progress while an action runs, and the step beside it.
-    pub(super) fn render_local_server(
-        &mut self,
-        appearance: &ChromeAppearance,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let Some(presentation) = self.local_server_presentation() else {
-            return div().into_any_element();
-        };
-        let state_selector = presentation.state_selector;
-        let state = if presentation.working {
-            ProgressRing::new(
-                PROGRESS_SELECTOR,
-                presentation.state,
-                ProgressState::Indeterminate,
-            )
-            .size(ProgressSize::Compact)
-            .debug_selector(PROGRESS_SELECTOR)
-            .into_any_element()
-        } else {
-            div()
-                .debug_selector(move || state_selector.to_owned())
-                .child(badge(state_selector, presentation.state, appearance))
-                .into_any_element()
-        };
-        // A service change checks the connection when it finishes, so the check waits for it.
-        let service_changing = self.server_changing();
-        let owner = cx.weak_entity();
-        let check = presentation.check.then(|| {
-            action_button(
-                CHECK_SELECTOR,
-                "Check Now",
-                !presentation.working && !service_changing,
-                move |_, cx| {
-                    let _ = owner.update(cx, |settings, cx| settings.check_local_server(cx));
-                },
-            )
-        });
-        div()
-            .debug_selector(|| CONTROL_SELECTOR.to_owned())
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(appearance.spacing(8.0))
-            .child(state)
-            .children(check)
-            .into_any_element()
-    }
 }
 
 /// A local server whose answers a test sets and whose operations it counts.
@@ -1884,6 +1874,7 @@ pub(super) mod testing {
         Restart,
         Uninstall,
         AuthorizeStartup,
+        SetAutomaticStart(bool),
     }
 
     /// What the operating system's authorization prompt does when the service asks.
@@ -2062,6 +2053,30 @@ pub(super) mod testing {
                 }
                 Prompt::Cancel => Err(ServerError::AuthorizationRequired),
             }
+        }
+
+        fn set_automatic_start(&self, enabled: bool) -> Result<ServiceStatus, ServerError> {
+            self.calls
+                .lock()
+                .expect("calls")
+                .push(ServiceCall::SetAutomaticStart(enabled));
+            if let Some(error) = self.refusal.lock().expect("refusal").take() {
+                return Err(error);
+            }
+            // Starting at boot needs lingering, as the Linux service does.
+            if enabled
+                && self.startup == ServiceStartup::AtBoot
+                && !*self.authorized.lock().expect("authorized")
+            {
+                return Err(ServerError::AuthorizationRequired);
+            }
+            let mut status = self.status.lock().expect("status");
+            let changed = ServiceStatus {
+                enabled,
+                ..(*status).unwrap_or(not_installed())
+            };
+            *status = Ok(changed);
+            Ok(changed)
         }
     }
 

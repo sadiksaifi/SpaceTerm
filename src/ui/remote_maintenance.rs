@@ -25,7 +25,8 @@ use crate::ssh::server_connection::{
 };
 use crate::ssh::server_maintenance::{MaintenancePhase, SshMaintenanceFailure, SubmittedKind};
 use crate::ssh::server_operations::{
-    RemoteMaintenanceRequest, RemoteOperationState, RetainedOutcome,
+    RemoteMaintenanceRequest, RemoteOperationEntry, RemoteOperationState, RemoteUpdateOffer,
+    RetainedOutcome,
 };
 use crate::ui::settings_window::server_update::UpdateAction;
 use crate::ui::settings_window::servers::{ServiceAction, ServicePhase};
@@ -250,9 +251,21 @@ pub(crate) fn present(
     row: MaintenanceRow,
     asked: Option<RemoteMaintenanceRequest>,
 ) -> MaintenancePresentation {
+    present_offered(machine, state, row, asked, &RemoteUpdateOffer::Unchecked)
+}
+
+/// One row's presentation, with what the read of `state` found about updating: `offer` decides
+/// whether a read offers Update Server, and names the candidate it would install.
+pub(crate) fn present_offered(
+    machine: &str,
+    state: &RemoteOperationState,
+    row: MaintenanceRow,
+    asked: Option<RemoteMaintenanceRequest>,
+    offer: &RemoteUpdateOffer,
+) -> MaintenancePresentation {
     match state {
         RemoteOperationState::Unread => unread(machine, row),
-        RemoteOperationState::Read(facts) => read(machine, facts, row),
+        RemoteOperationState::Read(facts) => read(machine, facts, row, offer),
         state => {
             if owning_row(state, asked) == row {
                 submitted(machine, state, row)
@@ -280,6 +293,7 @@ pub(crate) fn present_machine(
     states: &[RemoteOperationState],
     row: MaintenanceRow,
     asked: Option<RemoteMaintenanceRequest>,
+    offer: &RemoteUpdateOffer,
 ) -> MaintenancePresentation {
     // Each original is reported by the row whose journey the person asked for, as a single
     // original is, so two originals on different journeys each read in their own row.
@@ -295,7 +309,7 @@ pub(crate) fn present_machine(
         .or_else(|| (!owned.is_empty()).then_some(0));
     let Some(reported) = reported else {
         let state = states.first().unwrap_or(&RemoteOperationState::Unread);
-        return present(machine, state, row, asked);
+        return present_offered(machine, state, row, asked, offer);
     };
     let waiting: Vec<&SubmittedKind> = owned
         .iter()
@@ -303,7 +317,7 @@ pub(crate) fn present_machine(
         .filter(|(index, _)| *index != reported)
         .filter_map(|(_, state)| held(state))
         .collect();
-    let presentation = present(machine, owned[reported], row, asked);
+    let presentation = present_offered(machine, owned[reported], row, asked, offer);
     if waiting.is_empty() {
         return presentation;
     }
@@ -370,8 +384,9 @@ fn listed(kinds: &[&SubmittedKind]) -> String {
 pub(crate) fn menu_actions_for(
     states: &[RemoteOperationState],
     asked: Option<RemoteMaintenanceRequest>,
+    offer: &RemoteUpdateOffer,
 ) -> Vec<RemoteAction> {
-    let offered = |row| present_machine("", states, row, asked).actions;
+    let offered = |row| present_machine("", states, row, asked, offer).actions;
     let mut actions = Vec::new();
     for action in menu_order(
         offered(MaintenanceRow::Service)
@@ -383,6 +398,19 @@ pub(crate) fn menu_actions_for(
         }
     }
     actions
+}
+
+/// What the read among `entries` found about updating. The offer belongs to the read it came
+/// with, so any other state knows of none.
+pub(crate) fn read_update_offer<'a>(
+    entries: impl IntoIterator<Item = &'a RemoteOperationEntry>,
+) -> RemoteUpdateOffer {
+    entries
+        .into_iter()
+        .find(|entry| matches!(entry.state, RemoteOperationState::Read(_)))
+        .map_or(RemoteUpdateOffer::Unchecked, |entry| {
+            entry.update_offer.clone()
+        })
 }
 
 fn menu_order(actions: impl Iterator<Item = RemoteAction>) -> Vec<RemoteAction> {
@@ -533,10 +561,15 @@ fn unread(machine: &str, row: MaintenanceRow) -> MaintenancePresentation {
 }
 
 /// What the last validated read found, in the row that reports it.
-fn read(machine: &str, facts: &MaintenanceFacts, row: MaintenanceRow) -> MaintenancePresentation {
+fn read(
+    machine: &str,
+    facts: &MaintenanceFacts,
+    row: MaintenanceRow,
+    offer: &RemoteUpdateOffer,
+) -> MaintenancePresentation {
     match row {
         MaintenanceRow::Service => read_service(machine, facts),
-        MaintenanceRow::Update => read_update(machine, facts),
+        MaintenanceRow::Update => read_update(machine, facts, offer),
     }
 }
 
@@ -604,7 +637,11 @@ fn service_actions(status: ServiceStatus) -> Vec<RemoteAction> {
     actions
 }
 
-fn read_update(machine: &str, facts: &MaintenanceFacts) -> MaintenancePresentation {
+fn read_update(
+    machine: &str,
+    facts: &MaintenanceFacts,
+    offer: &RemoteUpdateOffer,
+) -> MaintenancePresentation {
     if let Some(activation) = facts
         .activation
         .as_ref()
@@ -613,28 +650,67 @@ fn read_update(machine: &str, facts: &MaintenanceFacts) -> MaintenancePresentati
     {
         return presentation;
     }
-    update_offer(machine, facts.status, facts.approved.as_ref())
+    update_offer(machine, facts.status, facts.approved.as_ref(), offer)
 }
 
-/// The Update Server offer for one observed service state.
+/// The Update Server offer for one observed service state. Only a verified candidate that differs
+/// from the approved build is an update; SpaceTerm claims none it hasn't verified.
 fn update_offer(
     machine: &str,
     status: ServiceStatus,
     approved: Option<&RemoteBuild>,
+    offer: &RemoteUpdateOffer,
 ) -> MaintenancePresentation {
-    if !status.installed {
-        let (explanation, tone) = guidance(format!(
-            "{machine} has no SpaceTerm server for this account, so there is nothing to update."
-        ));
-        return MaintenancePresentation {
-            state: None,
-            state_selector: selector(MaintenanceRow::Update, "available"),
+    let quiet = |state: Option<&'static str>, name: &str, explanation: String| {
+        let (explanation, tone) = guidance(explanation);
+        MaintenancePresentation {
+            state,
+            state_selector: selector(MaintenanceRow::Update, name),
             explanation,
             tone,
             actions: Vec::new(),
             working: false,
-        };
+        }
+    };
+    if !status.installed {
+        return quiet(
+            None,
+            "available",
+            format!(
+                "{machine} has no SpaceTerm server for this account, so there is nothing to \
+                 update."
+            ),
+        );
     }
+    let candidate = match offer {
+        RemoteUpdateOffer::Available(candidate) => candidate,
+        RemoteUpdateOffer::UpToDate => {
+            return quiet(
+                Some("Up to Date"),
+                "current",
+                format!("{machine} runs the server version SpaceTerm includes."),
+            );
+        }
+        RemoteUpdateOffer::Unavailable => {
+            return quiet(
+                None,
+                "unavailable",
+                format!(
+                    "This SpaceTerm has no verified server version for {machine}, so it offers \
+                     no update."
+                ),
+            );
+        }
+        RemoteUpdateOffer::Unchecked => {
+            return quiet(
+                None,
+                "unchecked",
+                format!(
+                    "Choose Check Now to see whether SpaceTerm has a newer server for {machine}."
+                ),
+            );
+        }
+    };
     let approved = approved
         .map(|approved| format!("Version {} is approved on {machine}. ", build(approved)))
         .unwrap_or_default();
@@ -649,8 +725,9 @@ fn update_offer(
         "The server isn\u{2019}t running, so updating ends no Terminal Sessions.".to_owned()
     };
     let (explanation, tone) = guidance(format!(
-        "{approved}Update Server transfers the exact verified server version SpaceTerm includes, \
-         then asks before it replaces the approved one. {effect}"
+        "{approved}Update Server transfers the verified server version {} that SpaceTerm \
+         includes, then asks before it replaces the approved one. {effect}",
+        candidate.version
     ));
     MaintenancePresentation {
         state: None,
@@ -705,7 +782,10 @@ pub(crate) fn observed(
                 working: false,
             }
         }
-        MaintenanceRow::Update => update_offer(machine, status, None),
+        // A connection verifies no candidate, so only a read can find an update.
+        MaintenanceRow::Update => {
+            update_offer(machine, status, None, &RemoteUpdateOffer::Unchecked)
+        }
     })
 }
 

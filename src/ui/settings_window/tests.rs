@@ -2381,9 +2381,18 @@ fn assert_the_footer_closes_only_the_content_column(
         let sidebar = cx.debug_bounds("settings-sidebar").unwrap();
         let footer = cx.debug_bounds("settings-footer").unwrap();
         let status = cx.debug_bounds("settings-save-status").unwrap();
-        let heading = cx
-            .debug_bounds(leaked_owned(format!("{}-heading", section.selector())))
+        // The heading ends on the content gutter. On Servers and Git the server picker sits
+        // beside it and ends on the gutter instead.
+        let gutter = cx
+            .debug_bounds(super::server_list::PICKER_SELECTOR)
+            .or_else(|| cx.debug_bounds(leaked_owned(format!("{}-heading", section.selector()))))
             .unwrap();
+        assert_eq!(
+            cx.debug_bounds(super::server_list::PICKER_SELECTOR)
+                .is_some(),
+            matches!(section, SettingsSectionId::Servers | SettingsSectionId::Git),
+            "only Servers and Git present the server picker, not {section:?}"
+        );
         assert_eq!(
             sidebar.bottom(),
             surface.bottom(),
@@ -2396,7 +2405,7 @@ fn assert_the_footer_closes_only_the_content_column(
         );
         assert_eq!(
             status.right(),
-            heading.right(),
+            gutter.right(),
             "the save status should end on the content gutter in {section:?}"
         );
     }
@@ -2692,34 +2701,16 @@ fn rendered_control_selector(row: SettingsRowId) -> Option<String> {
             SettingsRowId::GitTool => "settings-row-git-tool-control",
             SettingsRowId::GitHubCli => "settings-row-github-cli-control",
             SettingsRowId::ServerWorktreeLocation => "settings-server-worktree-location-frame",
-            SettingsRowId::LocalServer => "settings-local-server-control",
-            SettingsRowId::ServerService => "settings-server-service-control",
-            SettingsRowId::ServerUpdate => "settings-server-update-control",
-            SettingsRowId::ServerList => "settings-server-list",
+            SettingsRowId::ServerStatus => "settings-server-status",
+            SettingsRowId::ServerVersion => "settings-server-version",
+            SettingsRowId::ServerAutoStart => "settings-server-auto-start",
             SettingsRowId::EndAllSessions => "settings-server-end-all-sessions",
-            SettingsRowId::ServerConnection => "settings-row-server-connection-value",
-            // The fixture's local server offers no direct network operations, so both rows
-            // present their value alone.
-            SettingsRowId::DirectNetworkAccess => "settings-row-direct-network-access-value",
-            SettingsRowId::DirectNetworkPairing => "settings-row-direct-network-pairing-value",
-            // The fixture installs no SSH server registry or operations owner, so the SSH rows
-            // are absent.
-            SettingsRowId::SshConnect
-            | SettingsRowId::SshServerStatus
-            | SettingsRowId::SshServerService
-            | SettingsRowId::SshServerUpdate
-            | SettingsRowId::SshServerVersion
-            | SettingsRowId::SshServerPlatform
-            | SettingsRowId::SshServerCompatibility
-            | SettingsRowId::SshServerStartup
-            | SettingsRowId::RemoveServer
-            // No connection was removed, so nothing is kept for one.
-            | SettingsRowId::RemovedServerOperations
-            // The fixture installs no direct registry, so the direct route rows are absent.
-            | SettingsRowId::JoinInvitation
-            | SettingsRowId::PendingUnpairs
-            | SettingsRowId::DirectServerStatus
-            | SettingsRowId::UnpairThisDevice => return None,
+            // The fixture's local server offers no network operations, so the switch is shown
+            // unavailable and Devices waits for access to be on.
+            SettingsRowId::NetworkAccess => "settings-network-access",
+            SettingsRowId::PairedDevices => return None,
+            // The list and its add action span the card, with no control column.
+            SettingsRowId::AllServers | SettingsRowId::AddServer => return None,
             // The fixture installs no update service, so this row presents no action control.
             SettingsRowId::UpdateStatus => return None,
             SettingsRowId::AutomaticUpdateDownloads => "settings-automatic-update-downloads",
@@ -4206,7 +4197,9 @@ fn git_switches_save_reset_and_hiding_repository_status_locks_pull_requests(
 }
 
 #[gpui::test]
-fn git_tool_rows_follow_the_reported_tool_status(cx: &mut TestAppContext) {
+fn the_github_cli_row_follows_this_computer_and_the_git_row_only_its_server(
+    cx: &mut TestAppContext,
+) {
     use crate::repository_status::{GitHubCliStatus, GitToolStatus, ToolVersion};
     use crate::ui::repository_status_store::RepositoryTools;
 
@@ -4230,11 +4223,15 @@ fn git_tool_rows_follow_the_reported_tool_status(cx: &mut TestAppContext) {
     });
     cx.run_until_parked();
 
-    assert!(cx.debug_bounds("settings-git-tool-state-ready").is_some());
     assert!(
         cx.debug_bounds("settings-github-cli-state-signed-out")
-            .is_some()
+            .is_some(),
+        "the GitHub CLI row follows this computer's tools"
     );
+    // The Git row reports the selected server's Git, which only that server answers. This
+    // computer's Git never stands in for it.
+    assert!(cx.debug_bounds("settings-git-tool-state-unknown").is_some());
+    assert!(cx.debug_bounds("settings-git-tool-state-ready").is_none());
 }
 
 #[gpui::test]
@@ -4836,24 +4833,33 @@ fn a_search_that_orders_a_group_apart_should_still_show_it_as_one_card(cx: &mut 
     let (window, _harness, cx) = open_settings(cx);
     select_section(SettingsSectionId::Git, cx);
     let _ = A11yTree::read(cx);
-    // Ordered by match, these rows alternate between the Repository Status and Pull Requests
-    // groups. Two cards for one group would publish the same accessibility node twice.
-    set_query(&window, "s", cx);
+    // "re" matches Repository Status, Show Pull Requests and New Worktree Location at the start
+    // of a word, and GitHub CLI and Git only inside one, so ordered by match a group's rows come
+    // apart. Two cards for one group would publish the same accessibility node twice.
+    set_query(&window, "re", cx);
     let rows = cx.update(|_, cx| window.read(cx).rows_for(SettingsSectionId::Git));
     let groups: Vec<_> = rows.iter().map(|row| row.descriptor().group).collect();
-    assert_eq!(
-        groups,
-        [
-            "Repository Status",
-            "Pull Requests",
-            "Pull Requests",
-            "Repository Status",
-        ]
+    let mut runs = groups.clone();
+    runs.dedup();
+    let distinct: std::collections::BTreeSet<_> = groups.iter().collect();
+    assert!(
+        runs.len() > distinct.len(),
+        "the query should order a group apart, got {groups:?}"
     );
 
     let tree = A11yTree::read(cx);
-    assert!(tree.find("Show Repository Status").is_some());
-    assert!(tree.find("Show Pull Requests").is_some());
+    for label in [
+        "Show Repository Status",
+        "Show Pull Requests",
+        "GitHub CLI",
+        "New Worktree Location",
+    ] {
+        // Each row publishes its visible label as a Label.
+        assert!(
+            tree.find_text(label).is_some(),
+            "{label} should be presented"
+        );
+    }
 }
 
 fn open_settings_presenting_background_images(

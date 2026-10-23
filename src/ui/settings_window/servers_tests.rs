@@ -12,14 +12,14 @@ use super::testing::{
 };
 use super::{
     AUTHORIZE_CANCEL_SELECTOR, AUTHORIZE_CONFIRM_SELECTOR, AUTHORIZE_INSTALL_SELECTOR,
-    AUTHORIZE_START_SELECTOR, AuthorizationPrompt, AuthorizedRequest, CHECK_SELECTOR,
-    CONTROL_SELECTOR, INSTALL_CHOICE_SELECTOR, INSTALL_SELECTOR, InstallChoice, LocalServerControl,
-    LocalServerPresentation, LocalServerStatus, OfferedLocalServer, OfferedServer,
-    RESTART_CANCEL_SELECTOR, RESTART_CONFIRM_SELECTOR, RESTART_SELECTOR, SERVICE_CHECK_SELECTOR,
-    SERVICE_CONTROL_SELECTOR, START_SERVICE_SELECTOR, STOP_CANCEL_SELECTOR, STOP_CONFIRM_SELECTOR,
-    STOP_SELECTOR, ServerServiceControl, ServiceAction, ServiceConfirmation, ServicePresentation,
-    ServiceStartup, ServiceState, UNINSTALL_CANCEL_SELECTOR, UNINSTALL_CONFIRM_SELECTOR,
-    UNINSTALL_SELECTOR, present, present_service,
+    AUTHORIZE_START_SELECTOR, AuthorizationPrompt, AuthorizedRequest, INSTALL_CHOICE_SELECTOR,
+    INSTALL_SELECTOR, InstallChoice, LocalServerControl, LocalServerPresentation,
+    LocalServerStatus, OfferedLocalServer, OfferedServer, RESTART_CANCEL_SELECTOR,
+    RESTART_CONFIRM_SELECTOR, RESTART_SELECTOR, SERVICE_CHECK_SELECTOR, START_SERVICE_SELECTOR,
+    STOP_CANCEL_SELECTOR, STOP_CONFIRM_SELECTOR, STOP_SELECTOR, ServerServiceControl,
+    ServiceAction, ServiceConfirmation, ServicePresentation, ServiceStartup, ServiceState,
+    UNINSTALL_CANCEL_SELECTOR, UNINSTALL_CONFIRM_SELECTOR, UNINSTALL_SELECTOR, present,
+    present_service,
 };
 use crate::appearance::Appearance;
 use crate::local_server::ServerError;
@@ -28,12 +28,20 @@ use crate::platform::window_movement::RecordingOperatingSystemWindowDragPlatform
 use crate::settings::SettingsDocument;
 use crate::settings::storage::testing::MemoryStorage;
 use crate::ui::appearance_runtime;
+use crate::ui::settings_window::server_card::{
+    AUTO_START_SELECTOR, MENU_SELECTOR, STATUS_SELECTOR,
+};
+use crate::ui::settings_window::server_list::ServerChoice;
 use crate::ui::settings_window::{SettingsSectionId, SettingsWindow};
+use crate::ui::sidebar_window::SidebarOwner;
 use crate::ui::sidebar_window::form::CaptionTone;
 
 const NAVIGATION_SELECTOR: &str = "settings-navigation-settings-section-servers";
-const ROW_SELECTOR: &str = "settings-row-local-server";
-const SERVICE_ROW_SELECTOR: &str = "settings-row-server-service";
+const ROW_SELECTOR: &str = "settings-row-server-status";
+/// Only a server a service runs starts on its own, so only it offers this row.
+const SERVICE_ROW_SELECTOR: &str = "settings-row-server-auto-start";
+/// The confirmation Install asks before it installs a verified build.
+const INSTALL_CONFIRM_SELECTOR: &str = "settings-server-install-confirm";
 
 const EVERY_ERROR: [ServerError; 19] = [
     ServerError::NotSetUp,
@@ -136,6 +144,28 @@ fn presentation(
 
 fn rendered(selector: &'static str, cx: &mut VisualTestContext) -> bool {
     cx.debug_bounds(selector).is_some()
+}
+
+/// What the card's Status row says about this computer's server.
+fn status(window: &Entity<SettingsWindow>, cx: &mut VisualTestContext) -> String {
+    window.read_with(cx, |settings, _| {
+        settings
+            .server_state(&ServerChoice::Local)
+            .state
+            .to_string()
+    })
+}
+
+/// Chooses `selector` from the Status row's ⋯ menu.
+fn choose(selector: &'static str, cx: &mut VisualTestContext) {
+    click(MENU_SELECTOR, cx);
+    click(selector, cx);
+}
+
+/// Installs the build Install offers, confirming what installing does.
+fn install(cx: &mut VisualTestContext) {
+    click(INSTALL_SELECTOR, cx);
+    click_modal(INSTALL_CONFIRM_SELECTOR, cx);
 }
 
 fn service_presentation(
@@ -267,7 +297,10 @@ fn a_development_run_server_is_described_as_ending_with_the_run(cx: &mut TestApp
             settings.local_server_presentation(),
         )
     });
-    assert!(description.contains("ends with its Terminal Sessions when the run ends"));
+    assert!(
+        description.contains("server ends when the run ends"),
+        "got {description:?}"
+    );
     assert!(!description.contains("keep running after SpaceTerm quits"));
     let presentation = presentation.expect("the local server is presented");
     assert_eq!(presentation.state, "Connected");
@@ -287,7 +320,10 @@ fn an_installed_server_keeps_running_after_spaceterm_quits(cx: &mut TestAppConte
     let description = window.read_with(cx, |settings, cx| {
         settings.section_description(SettingsSectionId::Servers, cx)
     });
-    assert!(description.contains("keep running after SpaceTerm quits"));
+    assert_eq!(
+        description,
+        "Servers run your Workspaces and their Terminal Sessions."
+    );
 }
 
 #[gpui::test]
@@ -321,14 +357,14 @@ fn presenting_servers_checks_the_connection_without_setting_up(cx: &mut TestAppC
     for selector in [
         "settings-section-servers",
         ROW_SELECTOR,
-        CONTROL_SELECTOR,
-        "settings-local-server-state-not-set-up",
-        CHECK_SELECTOR,
+        STATUS_SELECTOR,
+        SERVICE_CHECK_SELECTOR,
     ] {
         assert!(rendered(selector, cx), "{selector} should render");
     }
+    assert_eq!(status(&window, cx), "Not installed");
     let row = cx.debug_bounds(ROW_SELECTOR).expect("row bounds");
-    let control = cx.debug_bounds(CONTROL_SELECTOR).expect("control bounds");
+    let control = cx.debug_bounds(STATUS_SELECTOR).expect("control bounds");
     assert!(row.contains(&control.origin) && control.right() <= row.right());
     assert_eq!(presentation(&window, cx).tone, CaptionTone::Guidance);
 
@@ -336,8 +372,13 @@ fn presenting_servers_checks_the_connection_without_setting_up(cx: &mut TestAppC
     click(NAVIGATION_SELECTOR, cx);
     assert_eq!(server.refreshes(), 1);
 
-    // Returning from another section checks again.
+    // Git shows the same server picker, so moving between them reads nothing more.
     click("settings-navigation-settings-section-git", cx);
+    click(NAVIGATION_SELECTOR, cx);
+    assert_eq!(server.refreshes(), 1);
+
+    // Returning from a section without the picker checks again.
+    click("settings-navigation-settings-section-interface", cx);
     click(NAVIGATION_SELECTOR, cx);
     assert_eq!(server.refreshes(), 2);
 }
@@ -347,13 +388,13 @@ fn check_now_shows_the_authenticated_status(cx: &mut TestAppContext) {
     let server = ScriptedServer::new(Err(ServerError::NotRunning));
     let (window, cx) = open_settings(offered(&server), cx);
     click(NAVIGATION_SELECTOR, cx);
-    assert!(rendered("settings-local-server-state-not-running", cx));
+    assert_eq!(status(&window, cx), "Not running");
     server.answer_refresh(Ok(connected(2)));
 
-    click(CHECK_SELECTOR, cx);
+    click(SERVICE_CHECK_SELECTOR, cx);
 
     assert_eq!(server.refreshes(), 2);
-    assert!(rendered("settings-local-server-state-connected", cx));
+    assert_eq!(status(&window, cx), "Running");
     let presented = presentation(&window, cx);
     assert_eq!(presented.state, "Connected");
     assert!(presented.explanation.contains("Protocol version 2"));
@@ -387,7 +428,7 @@ fn the_progress_indicator_replaces_the_badge_while_an_action_runs(cx: &mut TestA
     let server = ScriptedServer::new(Err(ServerError::NotSetUp));
     let (window, cx) = open_settings(offered(&server), cx);
     click(NAVIGATION_SELECTOR, cx);
-    assert!(!rendered("settings-local-server-progress-track", cx));
+    assert!(!rendered("settings-server-status-progress-track", cx));
 
     window.update(cx, |settings, cx| {
         settings.check_local_server(cx);
@@ -397,7 +438,7 @@ fn the_progress_indicator_replaces_the_badge_while_an_action_runs(cx: &mut TestA
         window.draw(cx).clear(cx);
     });
 
-    assert!(rendered("settings-local-server-progress-track", cx));
+    assert!(rendered("settings-server-status-progress-track", cx));
 }
 
 #[gpui::test]
@@ -414,7 +455,7 @@ fn settings_search_reveals_the_local_server_and_checks_it_once(cx: &mut TestAppC
         SettingsSectionId::Servers
     );
     assert_eq!(server.refreshes(), 1);
-    assert!(rendered("settings-local-server-state-connected", cx));
+    assert_eq!(status(&window, cx), "Running");
 }
 
 #[gpui::test]
@@ -430,14 +471,17 @@ fn an_unresolved_server_explains_itself_and_offers_nothing(cx: &mut TestAppConte
 
     click(NAVIGATION_SELECTOR, cx);
 
-    assert!(rendered("settings-local-server-state-unavailable", cx));
+    assert_eq!(status(&window, cx), "Unavailable");
     let presented = presentation(&window, cx);
     assert!(!presented.check);
     assert_eq!(
         presented.explanation.as_ref(),
         ServerError::StorageUnavailable.to_string()
     );
-    assert!(!rendered(CHECK_SELECTOR, cx), "checking resolves nothing");
+    assert!(
+        !rendered(SERVICE_CHECK_SELECTOR, cx),
+        "checking resolves nothing"
+    );
 }
 
 #[gpui::test]
@@ -672,18 +716,12 @@ fn presenting_servers_reads_the_service_without_changing_it(cx: &mut TestAppCont
         vec![ServiceCall::Status, ServiceCall::RetainedInstallations]
     );
     assert!(service.changes().is_empty());
-    for selector in [
-        SERVICE_ROW_SELECTOR,
-        SERVICE_CONTROL_SELECTOR,
-        "settings-server-service-state-not-installed",
-        INSTALL_SELECTOR,
-    ] {
+    for selector in [ROW_SELECTOR, STATUS_SELECTOR, INSTALL_SELECTOR] {
         assert!(rendered(selector, cx), "{selector} should render");
     }
-    let row = cx.debug_bounds(SERVICE_ROW_SELECTOR).expect("row bounds");
-    let control = cx
-        .debug_bounds(SERVICE_CONTROL_SELECTOR)
-        .expect("control bounds");
+    assert_eq!(status(&window, cx), "Not installed");
+    let row = cx.debug_bounds(ROW_SELECTOR).expect("row bounds");
+    let control = cx.debug_bounds(STATUS_SELECTOR).expect("control bounds");
     assert!(row.contains(&control.origin) && control.right() <= row.right());
     assert_eq!(
         service_presentation(&window, cx).actions,
@@ -765,13 +803,18 @@ fn one_verified_build_installs_from_install_and_checks_the_connection(cx: &mut T
     let checks = server.refreshes();
 
     click(INSTALL_SELECTOR, cx);
+    assert!(
+        service.changes().is_empty(),
+        "Install says what installing does first"
+    );
+    click_modal(INSTALL_CONFIRM_SELECTOR, cx);
 
     assert!(!cx.did_prompt_for_paths(), "Install asks for no folder");
     assert_eq!(
         service.changes(),
         vec![ServiceCall::Install(build.directory)]
     );
-    assert!(rendered("settings-server-service-state-running", cx));
+    assert_eq!(status(&window, cx), "Running");
     assert_eq!(service_presentation(&window, cx).state, "Running");
     assert_eq!(server.refreshes(), checks + 1);
 }
@@ -798,6 +841,7 @@ fn several_verified_builds_are_chosen_from_installs_menu(cx: &mut TestAppContext
     assert!(!cx.did_prompt_for_paths(), "Install asks for no folder");
     let second = Box::leak(format!("{INSTALL_CHOICE_SELECTOR}-1").into_boxed_str());
     click(second, cx);
+    click_modal(INSTALL_CONFIRM_SELECTOR, cx);
 
     assert_eq!(
         service.changes(),
@@ -868,7 +912,7 @@ fn a_refused_installation_explains_itself_and_offers_install_again(cx: &mut Test
     let (window, _server, service, cx) = open_servers_with_service(Ok(not_installed()), cx);
     service.refuse_next(ServerError::RuntimeUnavailable);
 
-    click(INSTALL_SELECTOR, cx);
+    install(cx);
 
     let presented = service_presentation(&window, cx);
     assert_eq!(presented.state, "Not Installed");
@@ -884,7 +928,7 @@ fn a_refused_installation_explains_itself_and_offers_install_again(cx: &mut Test
 fn stop_asks_first_and_cancelling_leaves_the_server_running(cx: &mut TestAppContext) {
     let (window, _server, service, cx) = open_servers_with_service(Ok(running()), cx);
 
-    click(STOP_SELECTOR, cx);
+    choose(STOP_SELECTOR, cx);
     assert!(alert_open(STOP_CONFIRM_SELECTOR, cx));
     assert!(service.changes().is_empty(), "Stop waits for confirmation");
 
@@ -899,11 +943,11 @@ fn a_confirmed_stop_stays_stopped_and_offers_start(cx: &mut TestAppContext) {
     let (window, server, service, cx) = open_servers_with_service(Ok(running()), cx);
     server.answer_refresh(Err(ServerError::Stopped));
 
-    click(STOP_SELECTOR, cx);
+    choose(STOP_SELECTOR, cx);
     click_modal(STOP_CONFIRM_SELECTOR, cx);
 
     assert_eq!(service.changes(), vec![ServiceCall::Stop]);
-    assert!(rendered("settings-server-service-state-stopped", cx));
+    assert_eq!(status(&window, cx), "Stopped");
     assert!(rendered(START_SERVICE_SELECTOR, cx));
     let presented = service_presentation(&window, cx);
     assert_eq!(
@@ -911,7 +955,13 @@ fn a_confirmed_stop_stays_stopped_and_offers_start(cx: &mut TestAppContext) {
         vec![ServiceAction::Start, ServiceAction::Uninstall]
     );
     // The connection is checked afresh and offers no step that could reverse the Stop.
-    assert!(rendered("settings-local-server-state-stopped", cx));
+    assert!(matches!(
+        window.read_with(cx, |settings, _| settings
+            .local_server
+            .as_ref()
+            .map(|row| row.status())),
+        Some(LocalServerStatus::Failed(ServerError::Stopped))
+    ));
     assert!(!presentation(&window, cx).check);
 }
 
@@ -925,19 +975,19 @@ fn start_restores_a_stopped_server_without_asking(cx: &mut TestAppContext) {
     assert_eq!(service.changes(), vec![ServiceCall::Start]);
     assert_eq!(service_presentation(&window, cx).state, "Running");
     assert_eq!(server.refreshes(), checks + 1);
-    assert!(rendered("settings-local-server-state-connected", cx));
+    assert_eq!(status(&window, cx), "Running");
 }
 
 #[gpui::test]
 fn restart_asks_first_then_restarts(cx: &mut TestAppContext) {
     let (window, _server, service, cx) = open_servers_with_service(Ok(running()), cx);
 
-    click(RESTART_SELECTOR, cx);
+    choose(RESTART_SELECTOR, cx);
     assert!(alert_open(RESTART_CONFIRM_SELECTOR, cx));
     click_modal(RESTART_CANCEL_SELECTOR, cx);
     assert!(service.changes().is_empty());
 
-    click(RESTART_SELECTOR, cx);
+    choose(RESTART_SELECTOR, cx);
     click_modal(RESTART_CONFIRM_SELECTOR, cx);
 
     assert_eq!(service.changes(), vec![ServiceCall::Restart]);
@@ -948,12 +998,12 @@ fn restart_asks_first_then_restarts(cx: &mut TestAppContext) {
 fn uninstall_asks_first_then_offers_install_again(cx: &mut TestAppContext) {
     let (window, _server, service, cx) = open_servers_with_service(Ok(stopped()), cx);
 
-    click(UNINSTALL_SELECTOR, cx);
+    choose(UNINSTALL_SELECTOR, cx);
     assert!(alert_open(UNINSTALL_CONFIRM_SELECTOR, cx));
     click_modal(UNINSTALL_CANCEL_SELECTOR, cx);
     assert!(service.changes().is_empty());
 
-    click(UNINSTALL_SELECTOR, cx);
+    choose(UNINSTALL_SELECTOR, cx);
     click_modal(UNINSTALL_CONFIRM_SELECTOR, cx);
 
     assert_eq!(service.changes(), vec![ServiceCall::Uninstall]);
@@ -984,7 +1034,7 @@ fn uninstall_asks_first_then_offers_install_again(cx: &mut TestAppContext) {
             ServiceCall::Install(build.directory)
         ]
     );
-    assert!(rendered("settings-server-service-state-stopped", cx));
+    assert_eq!(status(&window, cx), "Stopped");
     assert_eq!(
         service_presentation(&window, cx).actions,
         vec![ServiceAction::Start, ServiceAction::Uninstall]
@@ -1018,7 +1068,7 @@ fn a_service_change_waits_for_the_connection_and_the_reverse(cx: &mut TestAppCon
 #[gpui::test]
 fn the_progress_indicator_replaces_the_service_badge_while_an_action_runs(cx: &mut TestAppContext) {
     let (window, _server, _service, cx) = open_servers_with_service(Ok(stopped()), cx);
-    assert!(!rendered("settings-server-service-progress-track", cx));
+    assert!(!rendered("settings-server-status-progress-track", cx));
 
     window.update(cx, |settings, cx| {
         settings.run_server_service(ServiceAction::Start, cx);
@@ -1028,7 +1078,8 @@ fn the_progress_indicator_replaces_the_service_badge_while_an_action_runs(cx: &m
         window.draw(cx).clear(cx);
     });
 
-    assert!(rendered("settings-server-service-progress-track", cx));
+    assert!(rendered("settings-server-status-progress-track", cx));
+    assert_eq!(status(&window, cx), "Starting\u{2026}");
     let presented = service_presentation(&window, cx);
     assert_eq!(presented.state, "Starting");
     assert_eq!(presented.working, Some(ServiceAction::Start));
@@ -1051,7 +1102,7 @@ fn an_unresolved_service_explains_itself_and_offers_nothing(cx: &mut TestAppCont
     let presented = service_presentation(&window, cx);
     assert_eq!(presented.state, "Unknown");
     assert!(presented.actions.is_empty());
-    for selector in [SERVICE_CHECK_SELECTOR, INSTALL_SELECTOR, STOP_SELECTOR] {
+    for selector in [SERVICE_CHECK_SELECTOR, INSTALL_SELECTOR, MENU_SELECTOR] {
         assert!(!rendered(selector, cx), "{selector} should not be offered");
     }
 }
@@ -1068,7 +1119,7 @@ fn settings_search_reaches_the_service(cx: &mut TestAppContext) {
         window.read_with(cx, |settings, _| settings.active_section),
         SettingsSectionId::Servers
     );
-    assert!(rendered("settings-server-service-state-running", cx));
+    assert_eq!(status(&window, cx), "Running");
 }
 
 #[gpui::test]
@@ -1091,7 +1142,7 @@ fn settings_search_reaches_the_service_by_its_startup_names(cx: &mut TestAppCont
 }
 
 #[gpui::test]
-fn assistive_technology_hears_the_service_state_and_what_each_step_does(cx: &mut TestAppContext) {
+fn assistive_technology_hears_the_server_state_and_stop_asks_first(cx: &mut TestAppContext) {
     use gpui::accesskit::Action;
     use spaceterm_ui::a11y_testing::{A11yTree, perform};
 
@@ -1100,18 +1151,17 @@ fn assistive_technology_hears_the_service_state_and_what_each_step_does(cx: &mut
     assert!(
         tree.with_role("Status")
             .iter()
-            .any(|status| status["aria"]["label"] == "Running")
-    );
-    let stop = tree.node("Stop Server");
-    assert_eq!(stop["aria"]["role"], "Button");
-    assert_eq!(
-        stop["aria"]["description"],
-        "Ends the server's Terminal Sessions. SpaceTerm asks first."
+            .any(|status| status["aria"]["label"]
+                .as_str()
+                .is_some_and(|label| label.ends_with(": Running"))),
+        "the Status row announces the server and its state"
     );
 
-    // Activating Stop from assistive technology asks first, with Cancel focused, so Escape keeps
-    // the server running.
-    perform(cx, stop, Action::Click);
+    // Stop lives in the Status menu. Choosing it from assistive technology asks first, with
+    // Cancel focused, so Escape keeps the server running.
+    click(MENU_SELECTOR, cx);
+    let tree = A11yTree::read(cx);
+    perform(cx, tree.node("Stop Server"), Action::Click);
     cx.run_until_parked();
     assert!(alert_open(STOP_CONFIRM_SELECTOR, cx));
     let tree = A11yTree::read(cx);
@@ -1122,7 +1172,7 @@ fn assistive_technology_hears_the_service_state_and_what_each_step_does(cx: &mut
     cx.simulate_keystrokes("escape");
     cx.run_until_parked();
     assert!(service.changes().is_empty());
-    assert_eq!(service_presentation(&window, cx).state, "Running");
+    assert_eq!(status(&window, cx), "Running");
 }
 
 #[gpui::test]
@@ -1130,7 +1180,7 @@ fn assistive_technology_hears_which_build_install_installs(cx: &mut TestAppConte
     use spaceterm_ui::a11y_testing::A11yTree;
 
     let (_window, _server, _service, cx) = open_servers_with_service(Ok(not_installed()), cx);
-    let install = A11yTree::read(cx).node("Install").clone();
+    let install = A11yTree::read(cx).node("Install\u{2026}").clone();
 
     assert_eq!(install["aria"]["role"], "Button");
     assert_eq!(
@@ -1140,34 +1190,17 @@ fn assistive_technology_hears_which_build_install_installs(cx: &mut TestAppConte
 }
 
 #[gpui::test]
-fn keyboard_focus_stays_on_the_leading_step_when_stop_gives_way_to_start(cx: &mut TestAppContext) {
-    use spaceterm_ui::a11y_testing::A11yTree;
+fn the_status_menu_offers_stopping_only_a_running_server(cx: &mut TestAppContext) {
+    let (_window, _server, _service, cx) = open_servers_with_service(Ok(stopped()), cx);
 
-    let (_window, _server, service, cx) = open_servers_with_service(Ok(running()), cx);
-    let tree = A11yTree::read(cx);
-    let stop = tree.node("Stop Server");
-    spaceterm_ui::a11y_testing::perform(cx, stop, gpui::accesskit::Action::Focus);
-    cx.run_until_parked();
-    assert_eq!(
-        A11yTree::read(cx)
-            .focused()
-            .map(|node| node["aria"]["label"].clone()),
-        Some("Stop Server".into())
-    );
-    // A button activates when Return is released.
-    cx.simulate_keystrokes("enter");
-    cx.simulate_event(gpui::KeyUpEvent {
-        keystroke: gpui::Keystroke::parse("enter").expect("keystroke"),
-    });
-    cx.run_until_parked();
-    assert!(alert_open(STOP_CONFIRM_SELECTOR, cx));
-    click_modal(STOP_CONFIRM_SELECTOR, cx);
-    assert_eq!(service.changes(), vec![ServiceCall::Stop]);
+    click(MENU_SELECTOR, cx);
+    let tree = spaceterm_ui::a11y_testing::A11yTree::read(cx);
 
-    let tree = A11yTree::read(cx);
-    assert_eq!(
-        tree.focused().map(|node| node["aria"]["label"].clone()),
-        Some("Start Server".into())
+    assert_eq!(tree.node("Stop Server")["aria"]["disabled"], true);
+    assert_eq!(tree.node("Restart Server")["aria"]["disabled"], true);
+    assert_ne!(
+        tree.node("Uninstall Server\u{2026}")["aria"]["disabled"],
+        true
     );
 }
 
@@ -1265,14 +1298,11 @@ fn a_boot_installation_waits_for_explained_authorization_then_installs_its_build
     click(NAVIGATION_SELECTOR, cx);
     let build = retained("1.4.0", 'a').directory;
 
-    click(INSTALL_SELECTOR, cx);
+    install(cx);
 
     // The refusal asks the operating system nothing by itself.
     assert_eq!(service.changes(), vec![ServiceCall::Install(build.clone())]);
-    assert!(rendered(
-        "settings-server-service-state-authorization-required",
-        cx
-    ));
+    assert_eq!(status(&window, cx), "Needs authorization");
     let presented = service_presentation(&window, cx);
     assert_eq!(presented.state, "Authorization Required");
     assert_eq!(presented.tone, CaptionTone::Warning);
@@ -1300,7 +1330,7 @@ fn a_boot_installation_waits_for_explained_authorization_then_installs_its_build
             ServiceCall::Install(build),
         ]
     );
-    assert!(rendered("settings-server-service-state-running", cx));
+    assert_eq!(status(&window, cx), "Running");
     let presented = service_presentation(&window, cx);
     assert_eq!(presented.authorization, None);
     assert!(
@@ -1349,7 +1379,7 @@ fn cancelling_the_operating_systems_prompt_changes_nothing_and_keeps_the_stop(
     assert!(!presentation(&window, cx).check);
 
     // Presenting the section again only reads. The Stop stands until an explicit Start.
-    click("settings-navigation-settings-section-git", cx);
+    click("settings-navigation-settings-section-interface", cx);
     click(NAVIGATION_SELECTOR, cx);
     assert_eq!(
         service.changes(),
@@ -1381,7 +1411,7 @@ fn a_stopped_boot_service_reinstalls_stopped_and_only_start_asks_for_authorizati
     };
     let build = retained("1.4.0", 'a').directory;
 
-    click(INSTALL_SELECTOR, cx);
+    install(cx);
 
     // Installing keeps the Stop, so it starts nothing and needs no authorization.
     assert_eq!(service.changes(), vec![ServiceCall::Install(build.clone())]);
@@ -1412,7 +1442,7 @@ fn a_boot_service_restart_refused_after_stopping_offers_to_authorize_and_start(
     let (window, cx) = open_settings(offered_with_service(&server, &service), cx);
     click(NAVIGATION_SELECTOR, cx);
 
-    click(RESTART_SELECTOR, cx);
+    choose(RESTART_SELECTOR, cx);
     click_modal(RESTART_CONFIRM_SELECTOR, cx);
 
     assert_eq!(service.changes(), vec![ServiceCall::Restart]);
@@ -1460,11 +1490,11 @@ fn assistive_technology_hears_the_authorization_step_and_escape_leaves_it_unaske
 
     let tree = A11yTree::read(cx);
     // The status announces why the server did not start.
-    assert!(
-        tree.with_role("Status")
-            .iter()
-            .any(|status| status["aria"]["label"] == "Authorization Required")
-    );
+    assert!(tree.with_role("Status").iter().any(|status| {
+        status["aria"]["label"]
+            .as_str()
+            .is_some_and(|label| label.ends_with(": Needs authorization"))
+    }));
     let authorize = tree.node("Authorize and Start\u{2026}");
     assert_eq!(authorize["aria"]["role"], "Button");
     assert_eq!(
@@ -1600,4 +1630,59 @@ fn an_admitted_start_notifies_a_waiting_workspace_after_settings_closes(cx: &mut
         ["run", "run"],
         "completion wakes the existing launch and never issues another Start"
     );
+}
+
+/// Whether the Start automatically switch reads as on, as assistive technology hears it.
+fn starts_automatically(cx: &mut VisualTestContext) -> bool {
+    spaceterm_ui::a11y_testing::A11yTree::read(cx)
+        .with_role("Switch")
+        .iter()
+        .find(|switch| switch["aria"]["label"] == "Start automatically")
+        .expect("the Start automatically switch is rendered")["aria"]["toggled"]
+        == "True"
+}
+
+/// Start automatically owns its change until the change finishes. Leaving Servers and coming
+/// back while the change is still queued asks for a passive read, which waits rather than taking
+/// the change's place, so the switch shows the change's result and works again without reopening
+/// Settings.
+#[gpui::test]
+fn a_passive_read_waits_for_an_automatic_start_change(cx: &mut TestAppContext) {
+    let server = ScriptedServer::new(Ok(connected(2)));
+    let service = ScriptedService::new(Ok(running()));
+    let (window, cx) = open_settings(offered_with_service(&server, &service), cx);
+    click(NAVIGATION_SELECTOR, cx);
+    assert!(starts_automatically(cx));
+
+    // The switch asks for the change, then the person visits Interface and returns to Servers,
+    // all before the change's work runs.
+    cx.update(|presenting, cx| {
+        window.update(cx, |settings, cx| {
+            settings.set_local_automatic_start(false, presenting, cx);
+            settings.select_section(SettingsSectionId::Interface, cx);
+            settings.select_section(SettingsSectionId::Servers, cx);
+        });
+    });
+    cx.run_until_parked();
+
+    assert_eq!(
+        service.changes(),
+        [ServiceCall::SetAutomaticStart(false)],
+        "the change runs to completion"
+    );
+    assert!(
+        !starts_automatically(cx),
+        "the switch shows the change's result"
+    );
+
+    click(AUTO_START_SELECTOR, cx);
+    assert_eq!(
+        service.changes(),
+        [
+            ServiceCall::SetAutomaticStart(false),
+            ServiceCall::SetAutomaticStart(true)
+        ],
+        "the switch works again without reopening Settings"
+    );
+    assert!(starts_automatically(cx));
 }

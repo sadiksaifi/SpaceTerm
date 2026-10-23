@@ -59,6 +59,7 @@ pub enum ServiceStartup {
 #[serde(deny_unknown_fields)]
 pub struct ServiceStatus {
     pub installed: bool,
+    /// The automatic-start preference, retained independently of deliberate Stop.
     pub enabled: bool,
     pub running: bool,
     pub stopped: bool,
@@ -77,6 +78,8 @@ pub struct RetainedInstallation {
 struct State {
     installation: String,
     stopped: bool,
+    #[serde(default = "automatic_start_default")]
+    automatic_start: bool,
     installed: bool,
     #[serde(default)]
     removing: bool,
@@ -84,6 +87,10 @@ struct State {
     run: Option<Run>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     activation: Option<activation::Operation>,
+}
+
+fn automatic_start_default() -> bool {
+    true
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -107,7 +114,9 @@ trait Supervisor: Send + Sync {
     fn install(&self, runtime: &Path) -> Result<(), ServerError>;
     fn prepare_start(&self) -> Result<(), ServerError>;
     fn start(&self) -> Result<(), ServerError>;
-    fn disable(&self) -> Result<(), ServerError>;
+    fn stop(&self) -> Result<(), ServerError>;
+    /// Change startup activation only. Never stop, start or unregister the service.
+    fn set_automatic_start(&self, enabled: bool) -> Result<(), ServerError>;
     fn uninstall(&self, runtime: &Path) -> Result<(), ServerError>;
     fn running(&self) -> Result<bool, ServerError>;
     /// Replace only the admitted old definition or finish its exact already-published replacement.
@@ -146,6 +155,36 @@ impl Service {
     /// Explicitly authorize Linux boot startup for this account. This does not start a server.
     pub fn enable_linger(&self, authorization: LingerAuthorization) -> Result<(), ServerError> {
         self.supervisor.enable_linger(authorization)
+    }
+    /// Change only automatic startup using owning-account host authority.
+    /// A deliberate Stop remains in force until explicit Start, regardless of this preference.
+    /// Linux requires confirmed linger before automatic startup can be enabled.
+    pub fn set_automatic_start(&self, enabled: bool) -> Result<ServiceStatus, ServerError> {
+        let (data, _) = self.read()?.ok_or(ServerError::NotInstalled)?;
+        let _operation = data.lock("service.lock", false)?;
+        let _intent = data.lock("service-intent.lock", false)?;
+        let mut state = Self::state(&data)?.ok_or(ServerError::NotInstalled)?;
+        if state
+            .activation
+            .as_ref()
+            .is_some_and(|operation| !operation.settled())
+        {
+            return Err(ServerError::ActivationUnresolved);
+        }
+        if !state.installed {
+            return Err(ServerError::NotInstalled);
+        }
+        self.snapshot(&state)?;
+        if enabled {
+            self.supervisor.prepare_start()?;
+        }
+        // Retain the requested policy before changing native activation. A failed call may be
+        // retried with the same value without dispatching any service lifecycle action.
+        state.automatic_start = enabled;
+        data.write_json(c"service.json", &state)?;
+        self.supervisor
+            .set_automatic_start(enabled && !state.stopped)?;
+        self.snapshot(&state)
     }
     pub fn status(&self) -> Result<ServiceStatus, ServerError> {
         self.recover_activation()?;
@@ -269,6 +308,7 @@ impl Service {
         let mut state = previous.unwrap_or(State {
             installation: digest.to_owned(),
             stopped: false,
+            automatic_start: true,
             installed: false,
             removing: false,
             run: None,
@@ -292,7 +332,7 @@ impl Service {
         data.write_json(c"service.json", &state)?;
         drop(instance);
         if state.stopped {
-            self.supervisor.disable()?;
+            self.supervisor.stop()?;
         } else {
             self.start_locked(data, &mut state, false)?;
         }
@@ -429,6 +469,7 @@ impl Service {
         let result = self
             .supervisor
             .start()
+            .and_then(|()| self.supervisor.set_automatic_start(state.automatic_start))
             .and_then(|()| self.wait_running(true));
         if result.is_err() {
             let _intent = data.lock("service-intent.lock", false)?;
@@ -453,7 +494,7 @@ impl Service {
         }
         self.supervisor
             .check(&self.runtime(state), state.removing)?;
-        self.supervisor.disable()?;
+        self.supervisor.stop()?;
         self.wait_running(false)?;
         let deadline = Instant::now() + Duration::from_secs(15);
         loop {
@@ -567,7 +608,7 @@ impl Service {
         }
         Ok(ServiceStatus {
             installed: state.installed,
-            enabled: state.installed && !state.stopped,
+            enabled: state.installed && state.automatic_start,
             stopped: state.stopped,
             running,
         })
@@ -874,6 +915,7 @@ mod tests {
         stop_data: Option<PathBuf>,
         running: std::sync::Arc<std::sync::atomic::AtomicBool>,
         allow_stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        automatic_start: std::sync::atomic::AtomicBool,
         checks: std::sync::atomic::AtomicUsize,
         running_checks: std::sync::atomic::AtomicUsize,
     }
@@ -894,12 +936,18 @@ mod tests {
             panic!("unexpected OS call")
         }
         fn prepare_start(&self) -> Result<(), ServerError> {
-            panic!("unexpected OS call")
+            assert!(self.stop_data.is_some(), "unexpected OS call");
+            Ok(())
+        }
+        fn set_automatic_start(&self, enabled: bool) -> Result<(), ServerError> {
+            self.automatic_start
+                .store(enabled, std::sync::atomic::Ordering::Relaxed);
+            Ok(())
         }
         fn start(&self) -> Result<(), ServerError> {
             panic!("unexpected OS call")
         }
-        fn disable(&self) -> Result<(), ServerError> {
+        fn stop(&self) -> Result<(), ServerError> {
             let data = Directory::open(
                 self.stop_data.as_deref().expect("unexpected OS call"),
                 false,
@@ -911,6 +959,7 @@ mod tests {
             if !self.allow_stop.load(std::sync::atomic::Ordering::Relaxed) {
                 return Err(ServerError::ServiceUnavailable);
             }
+            self.set_automatic_start(false)?;
             self.running
                 .store(false, std::sync::atomic::Ordering::Relaxed);
             Ok(())
@@ -950,6 +999,7 @@ mod tests {
                 &State {
                     installation: "a".repeat(64),
                     stopped: false,
+                    automatic_start: true,
                     installed: true,
                     removing: false,
                     run: None,
@@ -963,6 +1013,90 @@ mod tests {
     impl Drop for Fixture {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+    #[test]
+    fn automatic_start_changes_preserve_the_running_server_and_its_retained_state() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+        let fixture = Fixture::new();
+        let supervisor = Arc::new(TestSupervisor {
+            stop_data: Some(fixture.paths.data.clone()),
+            running: Arc::new(AtomicBool::new(true)),
+            ..Default::default()
+        });
+        let service = Service::new(
+            fixture.paths.clone(),
+            fixture.paths.identity.clone(),
+            supervisor.clone(),
+        );
+        let data = Directory::open(&fixture.paths.data, false).unwrap();
+        let mut original = Service::state(&data).unwrap().unwrap();
+        original.run = Some(Run {
+            boot: "retained-boot".into(),
+            token: [7; 32],
+        });
+        data.write_json(c"service.json", &original).unwrap();
+        let identity = std::fs::read(fixture.paths.data.join("identity.json")).unwrap();
+        let controller = control::Controller::new(service.clone());
+        for enabled in [false, true, false] {
+            let status = controller.set_automatic_start(enabled).unwrap();
+            assert_eq!(
+                status,
+                ServiceStatus {
+                    installed: true,
+                    enabled,
+                    running: true,
+                    stopped: false
+                }
+            );
+            let mut expected = original.clone();
+            expected.automatic_start = enabled;
+            assert_eq!(Service::state(&data).unwrap().unwrap(), expected);
+            assert_eq!(
+                std::fs::read(fixture.paths.data.join("identity.json")).unwrap(),
+                identity
+            );
+            assert_eq!(supervisor.automatic_start.load(Ordering::Relaxed), enabled);
+        }
+        assert!(service.passive_status().unwrap().running);
+    }
+
+    #[test]
+    fn automatic_start_changes_never_reverse_stop_and_stop_keeps_the_preference() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+        let fixture = Fixture::new();
+        let supervisor = Arc::new(TestSupervisor {
+            stop_data: Some(fixture.paths.data.clone()),
+            allow_stop: Arc::new(AtomicBool::new(true)),
+            ..Default::default()
+        });
+        let service = Service::new(
+            fixture.paths.clone(),
+            fixture.paths.identity.clone(),
+            supervisor.clone(),
+        );
+        let stopped = service.stop().unwrap();
+        assert!(stopped.enabled && stopped.stopped && !stopped.running);
+        for enabled in [false, true] {
+            let status = service.set_automatic_start(enabled).unwrap();
+            assert_eq!(
+                status,
+                ServiceStatus {
+                    installed: true,
+                    enabled,
+                    running: false,
+                    stopped: true
+                }
+            );
+            assert!(!supervisor.automatic_start.load(Ordering::Relaxed));
+            assert_eq!(service.connect(), Err(ServerError::Stopped));
+            assert_eq!(check_start(&fixture.paths), Err(ServerError::Stopped));
         }
     }
     #[cfg(feature = "client")]
@@ -1180,7 +1314,7 @@ mod tests {
         allow_stop.store(true, Ordering::Relaxed);
         let retry = control.prepare(Action::Stop).unwrap();
         let status = control.confirm(retry).unwrap();
-        assert!(status.stopped && !status.running && !status.enabled);
+        assert!(status.stopped && !status.running && status.enabled);
     }
     #[test]
     fn foreground_start_cannot_bypass_the_approved_service_runtime() {
@@ -1289,6 +1423,7 @@ mod tests {
             authorizations: AtomicUsize,
             installs: AtomicUsize,
             starts: AtomicUsize,
+            automatic_start: AtomicBool,
             observed_running: AtomicBool,
             disable_gate: Mutex<Option<DisableGate>>,
             disable_fails: AtomicBool,
@@ -1303,6 +1438,7 @@ mod tests {
                     authorizations: AtomicUsize::new(0),
                     installs: AtomicUsize::new(0),
                     starts: AtomicUsize::new(0),
+                    automatic_start: AtomicBool::new(false),
                     observed_running: AtomicBool::new(false),
                     disable_gate: Mutex::new(None),
                     disable_fails: AtomicBool::new(false),
@@ -1385,7 +1521,12 @@ mod tests {
                 self.spawn_host(Duration::ZERO);
                 Ok(())
             }
-            fn disable(&self) -> Result<(), ServerError> {
+            fn set_automatic_start(&self, enabled: bool) -> Result<(), ServerError> {
+                self.automatic_start.store(enabled, Ordering::Relaxed);
+                Ok(())
+            }
+            fn stop(&self) -> Result<(), ServerError> {
+                self.set_automatic_start(false)?;
                 if let Some(gate) = self.disable_gate.lock().unwrap().take() {
                     gate.entered.send(()).unwrap();
                     gate.proceed.recv_timeout(Duration::from_secs(5)).unwrap();
@@ -1444,6 +1585,49 @@ mod tests {
                     runtime::test_support::VERSION,
                 )
                 .map(|v| v.directory)
+        }
+
+        #[test]
+        fn automatic_start_and_explicit_start_preserve_registration_and_require_linger() {
+            let fixture = Fixture::new();
+            fresh(&fixture);
+            let supervisor = AccountSupervisor::new(fixture.paths.clone());
+            let service = supervisor.service();
+            runtime::test_support::with_artifact(
+                &fixture.root.join("artifact"),
+                &fixture.paths.identity,
+                |archive, signature| {
+                    let installation = provision(&service, archive, signature).unwrap();
+                    service.install(&installation).unwrap();
+                    service.set_automatic_start(false).unwrap();
+                    assert_eq!(
+                        supervisor.registered.lock().unwrap().as_ref(),
+                        Some(&installation)
+                    );
+                    let stopped = service.stop().unwrap();
+                    assert!(stopped.stopped && !stopped.enabled && !stopped.running);
+                    supervisor.authorized.store(false, Ordering::Relaxed);
+                    assert_eq!(
+                        service.set_automatic_start(true),
+                        Err(ServerError::AuthorizationRequired)
+                    );
+                    assert_eq!(service.passive_status().unwrap(), stopped);
+                    supervisor.authorized.store(true, Ordering::Relaxed);
+                    let enabled = service.set_automatic_start(true).unwrap();
+                    assert!(enabled.enabled && enabled.stopped && !enabled.running);
+                    assert!(!supervisor.automatic_start.load(Ordering::Relaxed));
+                    service.set_automatic_start(false).unwrap();
+                    let started = service.start().unwrap();
+                    assert!(started.running && !started.stopped && !started.enabled);
+                    assert!(!supervisor.automatic_start.load(Ordering::Relaxed));
+                    assert_eq!(
+                        supervisor.registered.lock().unwrap().as_ref(),
+                        Some(&installation)
+                    );
+                    assert_eq!(supervisor.installs.load(Ordering::Relaxed), 1);
+                    assert_eq!(supervisor.starts.load(Ordering::Relaxed), 2);
+                },
+            );
         }
 
         #[test]
@@ -1967,6 +2151,7 @@ mod tests {
                                 .to_owned(),
                             installed: true,
                             stopped: false,
+                            automatic_start: true,
                             removing: false,
                             run: None,
                             activation: None,
@@ -2098,6 +2283,7 @@ mod tests {
                     installation: "a".repeat(64),
                     installed: true,
                     stopped: false,
+                    automatic_start: true,
                     removing: true,
                     run: None,
                     activation: None,

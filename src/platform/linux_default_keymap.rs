@@ -278,6 +278,11 @@ fn fixed_bindings() -> Vec<KeyBinding> {
             Some(TERMINAL_KEY_CONTEXT),
         ),
         KeyBinding::new("ctrl-,", crate::ui::settings_window::OpenSettings, None),
+        KeyBinding::new(
+            "ctrl-shift-p",
+            crate::ui::application_commands::OpenCommandPalette,
+            None,
+        ),
         KeyBinding::new("ctrl-shift-q", DismissApplication, None),
         KeyBinding::new("ctrl-shift-m", MinimizeWindow, None),
         KeyBinding::new("f11", ToggleFullScreen, None),
@@ -685,21 +690,24 @@ mod tests {
     }
 
     #[test]
-    fn linux_application_palette_chord_can_be_assigned_to_a_command() {
+    fn linux_application_palette_chord_keeps_overrides_inactive_without_losing_them() {
         let profile = profile();
         let shortcut = crate::keybindings::Shortcut::parse("ctrl-shift-p").unwrap();
-        assert!(profile.fixed_bindings().iter().all(|binding| {
+        assert!(profile.fixed_bindings().iter().any(|binding| {
             binding
                 .match_keystrokes(&[gpui::Keystroke::parse("ctrl-shift-p").unwrap()])
-                .is_none()
+                .is_some()
         }));
-        let mut preferences = KeybindingPreferences::default();
-        profile
-            .assign(&mut preferences, Command::CreateTab, Some(shortcut.clone()))
-            .unwrap();
+        let preferences: KeybindingPreferences =
+            serde_json::from_str(r#"{"create_tab":"ctrl-shift-p"}"#).unwrap();
         assert_eq!(
-            profile.resolve(&preferences).shortcut(Command::CreateTab),
-            Some(&shortcut)
+            profile
+                .resolve(&preferences)
+                .inactive_override(Command::CreateTab),
+            Some(crate::keybindings::Reservation::System(
+                crate::keybindings::SystemReservation::CommandPalette,
+            ))
         );
+        assert_eq!(preferences.get(Command::CreateTab), Some(&Some(shortcut)));
     }
 }

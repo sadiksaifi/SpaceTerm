@@ -1743,7 +1743,7 @@ pub(crate) mod testing {
 
     /// The locator and transfer scripts as compact markers, so a test reads exactly what the
     /// client asked of the approved installation.
-    struct FakeBootstrap;
+    pub(crate) struct FakeBootstrap;
     impl SshServerBootstrap for FakeBootstrap {
         fn key_public(&self, _: &std::path::Path) -> Option<super::super::command::SshCommandSpec> {
             None

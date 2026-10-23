@@ -1,6 +1,6 @@
 # End All Sessions from the selected server's Settings
 
-Offer "End All Sessions..." in Settings, under Servers and the selected server, alongside Stop Server. Confirmation names the selected server and states that its live Terminal Sessions end for every client and their terminal output and Scrollback are cleared, while the server and its saved Workspace, Tab, and Pane organization remain. Repository files and Git Worktree directories remain on disk.
+Offer "End All…" in the selected server's Terminal Sessions row in Settings > Servers, disabled when no Terminal Sessions are running. Confirmation names the selected server and states that its live Terminal Sessions end for every client and their terminal output and Scrollback are cleared, while the server and its saved Workspace, Tab, and Pane organization remain. Repository files and Git Worktree directories remain on disk.
 
 End All Sessions preserves each Pane's control grant, including a disconnected client's grant. An unclaimed Pane remains unclaimed. Invoking the action gives its client no additional control; acquisition and takeover still follow [ADR 0022](0022-give-one-client-control-of-each-pane.md).
 

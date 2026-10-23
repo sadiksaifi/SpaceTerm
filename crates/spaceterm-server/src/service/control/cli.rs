@@ -23,6 +23,7 @@ pub enum Error {
 enum Request {
     Status,
     Start,
+    AutomaticStart(bool),
     EnableLinger,
     Update {
         installation: PathBuf,
@@ -49,6 +50,12 @@ impl Request {
         match (command.to_str(), options) {
             (Some("service-status"), []) => Ok(Self::Status),
             (Some("service-start"), []) => Ok(Self::Start),
+            (Some("service-automatic-start"), [value]) if value == "on" => {
+                Ok(Self::AutomaticStart(true))
+            }
+            (Some("service-automatic-start"), [value]) if value == "off" => {
+                Ok(Self::AutomaticStart(false))
+            }
             (Some("service-enable-linger"), []) => Ok(Self::EnableLinger),
             (Some("service-recover-update"), []) => Ok(Self::RecoverUpdate),
             (Some("service-update"), [installation, rest @ ..])
@@ -105,6 +112,7 @@ pub fn run(identity: &str, args: &[OsString], output: &mut impl Write) -> Result
     let status = match request {
         Request::Status => controller.status()?,
         Request::Start => controller.start()?,
+        Request::AutomaticStart(enabled) => controller.set_automatic_start(enabled)?,
         Request::EnableLinger => {
             controller.enable_linger(LingerAuthorization::Terminal)?;
             writeln!(
@@ -270,7 +278,8 @@ pub fn help(identity: &str) -> String {
     format!(
         "Service controls (no desktop or display required):\n\
            service-status IDENTITY                     Read status without starting the server\n\
-           service-start IDENTITY                      Start explicitly and restore automatic startup\n\
+           service-start IDENTITY                      Start explicitly and clear deliberate Stop\n\
+           service-automatic-start IDENTITY on|off      Change automatic startup without ending Sessions\n\
            service-stop IDENTITY [--confirm]            Stop and suspend automatic startup\n\
            service-restart IDENTITY [--confirm]         Restart the approved installation\n\
            service-uninstall IDENTITY [--confirm]       Remove service registration\n\
@@ -321,6 +330,29 @@ mod tests {
     use std::os::unix::ffi::OsStringExt;
 
     const IDENTITY: &str = "spaceterm-development";
+
+    #[test]
+    fn automatic_start_accepts_only_an_explicit_policy_and_compiled_identity() {
+        for (value, enabled) in [("on", true), ("off", false)] {
+            let args = ["service-automatic-start", IDENTITY, value].map(OsString::from);
+            assert_eq!(
+                Request::parse(IDENTITY, &args),
+                Ok(Request::AutomaticStart(enabled))
+            );
+        }
+        for args in [
+            vec!["service-automatic-start", IDENTITY],
+            vec!["service-automatic-start", IDENTITY, "true"],
+            vec!["service-automatic-start", "spaceterm", "on"],
+            vec!["service-automatic-start", IDENTITY, "off", "--confirm"],
+        ] {
+            let args: Vec<_> = args.into_iter().map(OsString::from).collect();
+            assert_eq!(
+                run(IDENTITY, &args, &mut Vec::new()),
+                Err(Error::Server(ServerError::Protocol))
+            );
+        }
+    }
 
     #[test]
     fn update_confirmation_requires_an_exact_snapshot_and_compiled_identity() {

@@ -2614,6 +2614,37 @@ fn a_command_that_starts_a_group_should_be_separated_from_the_commands_before_it
 }
 
 #[gpui::test]
+fn a_choice_that_starts_a_group_should_be_separated_only_while_the_list_is_unfiltered(
+    cx: &mut TestAppContext,
+) {
+    let choices = vec![
+        ComboBoxItem::new(1, "This Mac").debug_selector("local"),
+        ComboBoxItem::new(2, "penguin")
+            .starts_group()
+            .debug_selector("penguin"),
+        ComboBoxItem::new(3, "pearl").debug_selector("pearl"),
+    ];
+    let (_, _, _, cx) = combo_box_window(cx, Some(1), choices, false);
+    open_by_pointer(cx);
+
+    let local = cx.debug_bounds("local").unwrap();
+    let separator = cx
+        .debug_bounds("penguin-group-separator")
+        .expect("a choice that starts a group must draw a separator before it");
+    assert!(local.bottom() <= separator.top());
+    assert!(cx.debug_bounds("pearl-group-separator").is_none());
+
+    cx.simulate_keystrokes("p e");
+    cx.run_until_parked();
+
+    assert!(cx.debug_bounds("penguin").is_some());
+    assert!(
+        cx.debug_bounds("penguin-group-separator").is_none(),
+        "a ranked list mixes groups, so it draws no choice dividers"
+    );
+}
+
+#[gpui::test]
 fn repaired_provisional_item_should_be_revealed_after_a_long_model_update(cx: &mut TestAppContext) {
     let (root, _, _, cx) = combo_box_window(cx, Some(1), long_items(), false);
     open_by_pointer(cx);

@@ -3,6 +3,7 @@ use crate::{host::Paths, storage::Directory};
 
 pub(super) const MAX_DEVICES: usize = 256;
 pub(super) const MAX_REVOCATIONS: usize = 512;
+pub(super) const MAX_CONNECTION_TIME: u64 = 253_402_300_799;
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -100,6 +101,10 @@ impl Store {
                 || device.info.client == [0; 32]
                 || device.info.public_key == [0; 32]
                 || device.claim == [0; 32]
+                || device
+                    .info
+                    .last_connected_at_unix_seconds
+                    .is_some_and(|time| time > MAX_CONNECTION_TIME)
                 || !claims.insert(device.claim)
                 || !ids.insert(device.info.pairing)
                 || !clients.insert(device.info.client)

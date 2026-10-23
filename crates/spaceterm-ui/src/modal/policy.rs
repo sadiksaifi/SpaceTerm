@@ -133,7 +133,10 @@ impl ModalDesktopPolicy {
                 count: alert.actions.len(),
             });
         }
-        let facts = validate_actions(&alert.actions.iter().collect::<Vec<_>>())?;
+        let facts = validate_actions(
+            &alert.actions.iter().collect::<Vec<_>>(),
+            DefaultAvailability::Fixed,
+        )?;
         validate_alert_dismissal(&alert.actions, facts.safe_cancel)?;
         self.alert_initial_focus(&alert.actions)
             .ok_or(ModalValidationError::MissingSafeDismissal)?;
@@ -149,7 +152,9 @@ impl ModalDesktopPolicy {
             validate_description(description)?;
         }
         let actions = dialog.actions.iter().collect::<Vec<_>>();
-        let facts = validate_actions(&actions)?;
+        // A Dialog's caller can make its default available later, as a form does once it is
+        // filled in.
+        let facts = validate_actions(&actions, DefaultAvailability::Changeable)?;
         validate_dialog_dismissal(&dialog.actions, facts.safe_cancel)?;
 
         if let DialogInitialFocus::Action(action_id) = &dialog.initial_focus {
@@ -176,7 +181,7 @@ impl ModalDesktopPolicy {
         match &progress.cancellation {
             ProgressCancellation::Cancellable(action) => {
                 let actions = [action];
-                validate_actions(&actions)?;
+                validate_actions(&actions, DefaultAvailability::Fixed)?;
                 if !is_cancel_capability(action.role(), action.intent()) || action.is_default() {
                     return Err(ModalValidationError::InvalidProgressCancelAction);
                 }
@@ -242,6 +247,12 @@ impl ModalDesktopPolicy {
         } else {
             DefaultActionPresentation::None
         }
+    }
+
+    /// The default action whether or not it is available now. Return activates it only while it
+    /// is available.
+    pub(super) fn default_action<A>(&self, actions: &[ModalAction<A>]) -> Option<usize> {
+        actions.iter().position(ModalAction::is_default)
     }
 
     pub(super) fn return_action<A>(&self, actions: &[ModalAction<A>]) -> Option<usize> {
@@ -352,8 +363,18 @@ fn validate_modal_header(
     )
 }
 
+/// Whether a modal's caller can change which actions are available after presenting it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DefaultAvailability {
+    /// The actions stay as presented, so an unavailable default could never be chosen.
+    Fixed,
+    /// The caller can make an unavailable default available later.
+    Changeable,
+}
+
 fn validate_actions<A: Eq>(
     actions: &[&ModalAction<A>],
+    availability: DefaultAvailability,
 ) -> Result<ActionFacts, ModalValidationError> {
     let mut default = None;
     let mut cancel = None;
@@ -397,7 +418,7 @@ fn validate_actions<A: Eq>(
                     duplicate: index,
                 });
             }
-            if !action.is_enabled() {
+            if !action.is_enabled() && availability == DefaultAvailability::Fixed {
                 return Err(ModalValidationError::DisabledDefaultAction { index });
             }
             if action.role() == ModalActionRole::Cancel {

@@ -348,7 +348,7 @@ install_linux() {
     entry="$data_home/applications/$application_id.desktop"
     while IFS= read -r line || [ -n "$line" ]; do
         case "$line" in
-            Exec=*) printf 'Exec=%s\n' "$exec" ;;
+            Exec=*) printf 'Exec=%s %%u\n' "$exec" ;;
             *) printf '%s\n' "$line" ;;
         esac
     done <"$target/share/applications/$application_id.desktop" >"$staging/entry"

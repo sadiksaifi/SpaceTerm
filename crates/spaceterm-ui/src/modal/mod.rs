@@ -433,7 +433,8 @@ pub enum ModalValidationError {
         /// Index of the duplicate Cancel action in caller order.
         duplicate: usize,
     },
-    /// A disabled action was designated as default.
+    /// A disabled action was designated as default in an Alert or ProgressDialog, whose actions
+    /// stay as presented. A Dialog's default may start disabled.
     DisabledDefaultAction {
         /// Index of the disabled default action in caller order.
         index: usize,
@@ -546,8 +547,8 @@ impl Error for ModalStaleGenerationError {}
 
 /// Typed error returned by a retained modal update handle.
 ///
-/// It distinguishes invalid bounded content, unavailable cancellation capability, stale
-/// presentation identity, stale update ordering, authoritative closure, and caller or
+/// It distinguishes invalid bounded content, unavailable cancellation capability, an unknown
+/// action, stale presentation identity, stale update ordering, authoritative closure, and caller or
 /// Operating-System Window removal.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ModalUpdateError {
@@ -564,6 +565,8 @@ pub enum ModalUpdateError {
     Invalid(ModalValidationError),
     /// The presentation was created without typed cancellation capability.
     CancellationNotSupported,
+    /// The presentation has no action with this identity.
+    UnknownAction,
     /// The presentation has already reached a terminal outcome.
     Closed,
     /// The caller owner or its Operating-System Window was removed.

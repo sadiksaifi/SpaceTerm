@@ -1,23 +1,28 @@
-//! Pair Device: one invitation, and the answer to each device that claims it.
+//! Invite Device: one invitation link for another device, and the person's answer when a device
+//! uses it.
 //!
-//! The dialog opens a single-use invitation on the selected server and shows it while the dialog
-//! stays open. The person passes it to the other device themselves; Copy is the only way it
-//! reaches the clipboard. Each device that claims the invitation appears with the name it gave
-//! itself and its fingerprint, and pairs only when the person approves that exact claim. Closing
-//! the dialog withdraws the invitation, so nothing the dialog showed can be used afterwards.
+//! The sheet opens a single-use invitation on the selected server and shows its link as a QR code
+//! for phones and as text to Copy for computers. Copy is the only way the link reaches the
+//! clipboard. The first device that uses the link replaces the sheet with "Allow <device>?",
+//! which shows the code both screens derive from the authenticated exchange, and the device pairs
+//! only when the person allows that exact claim. Closing Invite Device withdraws the invitation,
+//! which also refuses a claim nobody answered, so nothing it showed can be used afterwards.
 
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, App, ClipboardItem, Context, ElementId, EventEmitter, SharedString, Task, Window,
-    accesskit, div,
+    AnyElement, AnyWindowHandle, App, Bounds, ClipboardItem, Context, ElementId, Entity, Rgba,
+    SharedString, Task, Window, accesskit, canvas, div, fill, point, px, size,
 };
+use qrcodegen::{QrCode, QrCodeEcc};
 use spaceterm_ui::{
-    Button, ButtonSize, ButtonVariant, Dialog, DialogCloseDecision, DialogInitialFocus,
-    DialogOutcome, DialogSize, ModalAction, ModalActionRole, ModalId, ProgressRing, ProgressSize,
-    ProgressState,
+    Button, ButtonSize, ButtonVariant, Dialog, DialogActionRequest, DialogCloseDecision,
+    DialogInitialFocus, DialogOutcome, DialogPendingCompletion, DialogSize, Icon, IconName,
+    ModalAction, ModalActionEmphasis, ModalActionRole, ModalCloseReason, ModalId, ProgressRing,
+    ProgressSize, ProgressState,
 };
 
 use crate::local_server::direct::ClaimId;
@@ -25,220 +30,434 @@ use crate::ui::appearance::gpui_color;
 use crate::ui::chrome_geometry::RadiusRole;
 use crate::ui::chrome_typography::{ChromeTextStyleExt as _, TextRole};
 use crate::ui::direct_access::{
-    AccessFailure, Claim, Device, DirectAccessControl, OpenInvitation, countdown, remaining,
-    unix_now,
+    AccessFailure, Claim, Device, DirectAccessControl, OpenInvitation, code_speech, code_text,
+    countdown, remaining, unix_now,
 };
 
-pub(crate) const MODAL_ID: &str = "pair-device";
-pub(crate) const DONE_SELECTOR: &str = "pair-device-done";
-pub(crate) const INVITATION_SELECTOR: &str = "pair-device-invitation";
-pub(crate) const COPY_SELECTOR: &str = "pair-device-copy";
-pub(crate) const RENEW_SELECTOR: &str = "pair-device-renew";
-pub(crate) const CLAIM_SELECTOR: &str = "pair-device-claim";
-pub(crate) const APPROVE_SELECTOR: &str = "pair-device-approve";
-pub(crate) const REJECT_SELECTOR: &str = "pair-device-reject";
+pub(crate) const MODAL_ID: &str = "invite-device";
+pub(crate) const ALLOW_MODAL_ID: &str = "invite-device-allow";
+pub(crate) const DONE_SELECTOR: &str = "invite-device-done";
+pub(crate) const RENEW_SELECTOR: &str = "invite-device-renew";
+pub(crate) const ALLOW_SELECTOR: &str = "invite-device-allow";
+pub(crate) const DONT_ALLOW_SELECTOR: &str = "invite-device-dont-allow";
+pub(crate) const QR_SELECTOR: &str = "invite-device-qr";
+pub(crate) const LINK_SELECTOR: &str = "invite-device-link";
+pub(crate) const COPY_SELECTOR: &str = "invite-device-copy";
+pub(crate) const STATUS_SELECTOR: &str = "invite-device-status";
+pub(crate) const CODE_SELECTOR: &str = "invite-device-code";
 /// How often an open invitation looks for claims and its countdown repaints.
 const POLL: Duration = Duration::from_secs(1);
-/// How long Copy reads "Copied" after the person copies the invitation.
+/// How long Copy reads "Copied" after the person copies the link.
 const COPIED_FEEDBACK: Duration = Duration::from_secs(2);
+/// The QR code's side, quiet zone included, which a phone reads from an arm's length.
+const QR_EXTENT: f32 = 208.0;
+/// The light margin, in modules, that QR readers need around the code.
+const QR_QUIET_ZONE: i32 = 4;
+/// QR readers expect dark modules on a light ground in every appearance.
+const QR_DARK: Rgba = Rgba {
+    r: 0.0,
+    g: 0.0,
+    b: 0.0,
+    a: 1.0,
+};
+const QR_LIGHT: Rgba = Rgba {
+    r: 1.0,
+    g: 1.0,
+    b: 1.0,
+    a: 1.0,
+};
 
+/// The sheet's actions.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum PairAction {
+enum SheetAction {
     Done,
+    NewInvitation,
+}
+
+/// The person's answer to a device that used the invitation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Answer {
+    DontAllow,
+    Allow,
 }
 
 /// Where the invitation stands.
-enum Invitation {
+enum Stage {
     Opening,
-    Open(OpenInvitation),
-    /// The invitation's time ran out, or the server ended it, before any device paired.
-    Ended,
-    /// A device paired, which used the invitation.
-    Paired(Device),
+    Waiting {
+        invitation: OpenInvitation,
+        /// The link as a QR code, or `None` when the link is too long for one.
+        code: Option<Rc<QrCode>>,
+    },
+    /// A device used the invitation and the person is deciding whether it may connect.
+    Asking {
+        invitation: ClaimId,
+        expires_at: u64,
+        claim: Box<Claim>,
+    },
+    /// The person allowed the device and the server is pairing it.
+    Allowing(SharedString),
+    Allowed(Device),
+    /// The person didn't allow the device.
+    Declined(SharedString),
+    /// The invitation's time ran out, or the server ended it, before a device paired.
+    Expired,
     Failed(AccessFailure),
+    Closed,
 }
 
-/// A device the person paired in this dialog.
-pub(crate) struct DevicePaired;
+/// What Invite Device presents for a stage. Each surface has its own title and actions.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Surface {
+    /// The invitation, or the work of making or answering one, with Done.
+    Sheet,
+    /// The invitation can't be used, with New Invitation as the primary action.
+    Ended,
+    /// A device paired, with Done.
+    Allowed,
+    /// "Allow <device>?", with Don't Allow and Allow.
+    Asking,
+}
 
-/// The Pair Device dialog's body, owned by the dialog for as long as it is open.
-pub(crate) struct PairDevice {
+impl Stage {
+    fn surface(&self) -> Option<Surface> {
+        match self {
+            Self::Opening | Self::Waiting { .. } | Self::Allowing(_) => Some(Surface::Sheet),
+            Self::Declined(_) | Self::Expired | Self::Failed(_) => Some(Surface::Ended),
+            Self::Allowed(_) => Some(Surface::Allowed),
+            Self::Asking { .. } => Some(Surface::Asking),
+            Self::Closed => None,
+        }
+    }
+
+    /// The invitation this stage still holds open on the server.
+    fn open_invitation(&self) -> Option<ClaimId> {
+        match self {
+            Self::Waiting { invitation, .. } => Some(invitation.id),
+            Self::Asking { invitation, .. } => Some(*invitation),
+            _ => None,
+        }
+    }
+
+    fn expires_at(&self) -> Option<u64> {
+        match self {
+            Self::Waiting { invitation, .. } => Some(invitation.expires_at),
+            Self::Asking { expires_at, .. } => Some(*expires_at),
+            _ => None,
+        }
+    }
+}
+
+/// Invite Device's content and state. It is the body of each surface it presents, and lives as
+/// long as one of them is open.
+pub(crate) struct InviteDevice {
     control: Arc<dyn DirectAccessControl>,
     server: SharedString,
-    server_fingerprint: SharedString,
-    invitation: Invitation,
-    claims: Vec<Claim>,
-    /// The claim whose answer the server is deciding. One answer is asked at a time.
-    answering: Option<ClaimId>,
-    /// Why the latest answer didn't take effect.
-    problem: Option<AccessFailure>,
-    copied: bool,
+    window: AnyWindowHandle,
+    /// Tells the presenting view about a device the person allowed, even after Invite Device
+    /// closes, so its device list stays current.
+    on_paired: Rc<dyn Fn(&mut App)>,
+    stage: Stage,
+    /// The surface on screen, if any.
+    shown: Option<Surface>,
+    /// Counts presented surfaces, so the result of one this sheet replaced lands nowhere.
+    surface: u64,
     /// Counts invitations, so a result for a replaced one lands nowhere.
     generation: u64,
+    copied: bool,
     _poll: Option<Task<()>>,
-    _work: Option<Task<()>>,
     _copied: Option<Task<()>>,
 }
 
-impl EventEmitter<DevicePaired> for PairDevice {}
-
-impl PairDevice {
-    /// Opens an invitation on `control`'s server and presents it in `window` until the person
-    /// closes the dialog. `on_paired` hears of each device the person pairs here, in the
-    /// presenting entity's own update.
+impl InviteDevice {
+    /// Opens an invitation on `control`'s server and presents Invite Device in `window` until the
+    /// person closes it. `on_paired` hears of each device the person allows, in the presenting
+    /// entity's own update.
     pub(crate) fn present<T: 'static>(
         control: Arc<dyn DirectAccessControl>,
         server: SharedString,
-        server_fingerprint: SharedString,
         on_paired: impl Fn(&mut T, &mut Context<T>) + 'static,
-        window: &Window,
+        window: &mut Window,
         cx: &mut Context<T>,
     ) -> bool {
-        let body = cx.new(|cx| {
-            let mut body = Self {
-                control,
-                server: server.clone(),
-                server_fingerprint,
-                invitation: Invitation::Opening,
-                claims: Vec::new(),
-                answering: None,
-                problem: None,
-                copied: false,
-                generation: 0,
-                _poll: None,
-                _work: None,
-                _copied: None,
-            };
-            body.open_invitation(cx);
-            body
+        let owner = cx.weak_entity();
+        let on_paired: Rc<dyn Fn(&mut App)> = Rc::new(move |cx: &mut App| {
+            let _ = owner.update(cx, |owner, cx| on_paired(owner, cx));
         });
-        cx.subscribe(&body, move |owner, _, _: &DevicePaired, cx| {
-            on_paired(owner, cx)
+        let body = cx.new(|cx: &mut Context<Self>| {
+            // Invite Device ends with its window too, and the invitation it holds ends with it.
+            cx.on_release(|body: &mut Self, cx: &mut App| body.withdraw_open(cx))
+                .detach();
+            Self {
+                control,
+                server,
+                window: window.window_handle(),
+                on_paired,
+                stage: Stage::Opening,
+                shown: None,
+                surface: 0,
+                generation: 0,
+                copied: false,
+                _poll: None,
+                _copied: None,
+            }
+        });
+        body.update(cx, |body, cx| {
+            body.open_invitation(window, cx);
+            body.shown.is_some()
         })
-        .detach();
-        // The dialog lets go of its body as it closes, so its result keeps the body to withdraw
-        // the invitation it shows.
-        let closing = body.clone();
-        let dialog = Dialog::new(
-            ModalId::new(MODAL_ID),
-            format!("Pair a device with {server}"),
-            "Pair Device",
-            vec![ModalAction::new(
-                PairAction::Done,
-                "Done",
-                ModalActionRole::Cancel,
-                DONE_SELECTOR,
-            )],
-            DialogInitialFocus::Action(PairAction::Done),
-        )
-        .description(format!(
-            "Another computer can ask to pair with \u{201C}{server}\u{201D} using this \
-             invitation. It connects only after you approve it here."
-        ))
-        .size(DialogSize::Wide)
-        .body(body);
-        dialog
-            .present(
-                window,
-                cx,
-                |_, _, _| DialogCloseDecision::Allow,
-                move |_: DialogOutcome<PairAction>, cx| {
-                    closing.update(cx, |body, cx| body.close(cx));
-                },
-            )
+    }
+
+    /// Runs `update` on `body` in the window it presents in. Answers false when that window is
+    /// gone.
+    fn in_window(
+        body: &Entity<Self>,
+        cx: &mut App,
+        update: impl FnOnce(&mut Self, &mut Window, &mut Context<Self>),
+    ) -> bool {
+        let window = body.read(cx).window;
+        window
+            .update(cx, |_, window, cx| {
+                body.update(cx, |body, cx| update(body, window, cx));
+            })
             .is_ok()
     }
 
-    /// Asks the server for a fresh invitation, forgetting the previous one and its claims.
-    fn open_invitation(&mut self, cx: &mut Context<Self>) {
-        self.withdraw_open(cx);
-        self.generation = self.generation.wrapping_add(1);
-        let generation = self.generation;
-        self.invitation = Invitation::Opening;
-        self.claims.clear();
-        self.answering = None;
-        self.problem = None;
-        self.copied = false;
-        self._poll = None;
-        let control = Arc::clone(&self.control);
-        self._work = Some(cx.spawn(async move |body, cx| {
-            let opened = cx
-                .background_executor()
-                .spawn(async move { control.invite() })
-                .await;
-            let _ = body.update(cx, |body, cx| {
-                if body.generation != generation {
-                    // A replaced request still opened an invitation, so end it at once.
-                    if let Ok(invitation) = opened {
-                        body.withdraw(invitation.id, cx);
-                    }
-                    return;
-                }
-                body.invitation = match opened {
-                    Ok(invitation) => Invitation::Open(invitation),
-                    Err(failure) => Invitation::Failed(failure),
-                };
-                body.follow_claims(cx);
-                cx.notify();
-            });
-        }));
+    /// Presents the surface the stage needs, replacing the one on screen when it differs.
+    fn show(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(surface) = self.stage.surface() else {
+            return;
+        };
+        if self.shown == Some(surface) {
+            cx.notify();
+            return;
+        }
+        let replace = self.shown.is_some();
+        self.surface = self.surface.wrapping_add(1);
+        let presented = match surface {
+            Surface::Asking => self.present_question(replace, window, cx),
+            _ => self.present_sheet(surface, replace, window, cx),
+        };
+        if presented {
+            self.shown = Some(surface);
+        } else {
+            self.shown = None;
+            self.close(cx);
+        }
         cx.notify();
     }
 
-    /// Reads the claims on the open invitation each second, and ends it when its time runs out.
-    fn follow_claims(&mut self, cx: &mut Context<Self>) {
-        if !matches!(self.invitation, Invitation::Open(_)) {
+    fn present_sheet(
+        &self,
+        surface: Surface,
+        replace: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let shown = self.surface;
+        let mut actions = vec![ModalAction::new(
+            SheetAction::Done,
+            "Done",
+            ModalActionRole::Cancel,
+            DONE_SELECTOR,
+        )];
+        let mut focus = SheetAction::Done;
+        if surface == Surface::Ended {
+            actions.push(
+                ModalAction::new(
+                    SheetAction::NewInvitation,
+                    "New Invitation",
+                    ModalActionRole::Affirmative,
+                    RENEW_SELECTOR,
+                )
+                .with_emphasis(ModalActionEmphasis::Prominent)
+                .default_action(true),
+            );
+            focus = SheetAction::NewInvitation;
+        }
+        let title = format!("Invite a Device to {}", self.server);
+        let dialog = Dialog::new(
+            ModalId::new(MODAL_ID),
+            title.clone(),
+            title,
+            actions,
+            DialogInitialFocus::Action(focus),
+        )
+        .description("Scan the code with a phone, or send the link to another computer.")
+        .size(DialogSize::Regular)
+        .body(cx.entity());
+        let renewing = cx.entity();
+        let on_action = move |request: DialogActionRequest<SheetAction>,
+                              _: DialogPendingCompletion,
+                              cx: &mut App| {
+            match request.action_id() {
+                SheetAction::Done => DialogCloseDecision::Allow,
+                // The sheet stays, and shows the new invitation once the person asked for it.
+                SheetAction::NewInvitation => {
+                    let renewing = renewing.clone();
+                    cx.defer(move |cx| {
+                        Self::in_window(&renewing, cx, |body, window, cx| {
+                            body.open_invitation(window, cx);
+                        });
+                    });
+                    DialogCloseDecision::Deny {
+                        first_invalid: None,
+                    }
+                }
+            }
+        };
+        let closing = cx.entity();
+        let on_result = move |_: DialogOutcome<SheetAction>, cx: &mut App| {
+            closing.update(cx, |body, cx| {
+                if body.surface == shown {
+                    body.shown = None;
+                    body.close(cx);
+                }
+            });
+        };
+        if replace {
+            dialog
+                .replace_active(window, cx, on_action, on_result, |_, _| {})
+                .is_ok()
+        } else {
+            dialog.present(window, cx, on_action, on_result).is_ok()
+        }
+    }
+
+    /// Asks the person whether the device that used the invitation may connect.
+    fn present_question(&self, replace: bool, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Stage::Asking { claim, .. } = &self.stage else {
+            return false;
+        };
+        let shown = self.surface;
+        let device = claim.name.clone();
+        let dialog = Dialog::new(
+            ModalId::new(ALLOW_MODAL_ID),
+            format!("Allow {device}?"),
+            format!("Allow \u{201C}{device}\u{201D}?"),
+            vec![
+                ModalAction::new(
+                    Answer::DontAllow,
+                    "Don\u{2019}t Allow",
+                    ModalActionRole::Cancel,
+                    DONT_ALLOW_SELECTOR,
+                ),
+                ModalAction::new(
+                    Answer::Allow,
+                    "Allow",
+                    ModalActionRole::Affirmative,
+                    ALLOW_SELECTOR,
+                )
+                .with_emphasis(ModalActionEmphasis::Prominent)
+                .default_action(true),
+            ],
+            DialogInitialFocus::Action(Answer::Allow),
+        )
+        .description(format!(
+            "It gets full access to \u{201C}{}\u{201D}, including its Workspaces and Terminal \
+             Sessions.",
+            self.server
+        ))
+        .size(DialogSize::Compact)
+        .body(cx.entity());
+        let answering = cx.entity();
+        let on_result = move |outcome: DialogOutcome<Answer>, cx: &mut App| {
+            let current = answering.read(cx).surface == shown;
+            if !current {
+                // Invite Device replaced the question itself, such as when the invitation expired.
+                return;
+            }
+            answering.update(cx, |body, _| body.shown = None);
+            let answer = match outcome {
+                DialogOutcome::Completed { action_id, .. } => Some(action_id),
+                DialogOutcome::Dismissed(ModalCloseReason::Cancelled) => Some(Answer::DontAllow),
+                // Nobody answered, so the device stays out.
+                DialogOutcome::Dismissed(_) | DialogOutcome::ProgrammaticallyCompleted => None,
+            };
+            let answered = answer.is_some_and(|answer| {
+                Self::in_window(&answering, cx, |body, window, cx| match answer {
+                    Answer::Allow => body.allow(window, cx),
+                    Answer::DontAllow => body.decline(window, cx),
+                })
+            });
+            if !answered {
+                answering.update(cx, |body, cx| body.close(cx));
+            }
+        };
+        let on_action = |_: DialogActionRequest<Answer>,
+                         _: DialogPendingCompletion,
+                         _: &mut App| { DialogCloseDecision::Allow };
+        if replace {
+            dialog
+                .replace_active(window, cx, on_action, on_result, |_, _| {})
+                .is_ok()
+        } else {
+            dialog.present(window, cx, on_action, on_result).is_ok()
+        }
+    }
+
+    /// Asks the server for a fresh invitation, withdrawing the previous one.
+    fn open_invitation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.withdraw_open(cx);
+        self.generation = self.generation.wrapping_add(1);
+        let generation = self.generation;
+        self.stage = Stage::Opening;
+        self.copied = false;
+        self._copied = None;
+        self.show(window, cx);
+        if self.shown.is_none() {
             return;
         }
-        let generation = self.generation;
         let control = Arc::clone(&self.control);
-        self._poll = Some(cx.spawn(async move |body, cx| {
-            loop {
-                let expired = body
-                    .update(cx, |body, cx| {
-                        let Invitation::Open(invitation) = &body.invitation else {
-                            return true;
-                        };
-                        if remaining(invitation.expires_at, unix_now()) == 0 {
-                            body.withdraw_open(cx);
-                            body.invitation = Invitation::Ended;
-                            body.claims.clear();
-                            cx.notify();
-                            return true;
-                        }
-                        // The countdown moves even when no claim does.
-                        cx.notify();
-                        false
-                    })
-                    .unwrap_or(true);
-                if expired {
-                    return;
+        self._poll = Some(cx.spawn_in(window, async move |body, cx| {
+            let reading = Arc::clone(&control);
+            let opened = cx
+                .background_executor()
+                .spawn(async move { reading.invite() })
+                .await;
+            let opened = body.update_in(cx, |body, window, cx| {
+                if body.generation != generation {
+                    // A replaced request still opened an invitation, so end it at once.
+                    if let Ok(invitation) = &opened {
+                        body.withdraw(invitation.id, cx);
+                    }
+                    return false;
                 }
-                let reading = Arc::clone(&control);
-                let claims = cx
-                    .background_executor()
-                    .spawn(async move { reading.claims() })
-                    .await;
-                let ended = body
-                    .update(cx, |body, cx| {
-                        if body.generation != generation {
-                            return true;
-                        }
-                        match claims {
-                            Ok(claims) => body.claims = claims,
-                            Err(AccessFailure::InvitationEnded) => {
-                                body.invitation = Invitation::Ended;
-                                body.claims.clear();
-                            }
-                            // A missed reading leaves the claims shown; the next one replaces
-                            // them.
-                            Err(_) => {}
-                        }
-                        cx.notify();
-                        !matches!(body.invitation, Invitation::Open(_))
+                body.stage = match opened {
+                    Ok(invitation) => {
+                        let code = QrCode::encode_text(&invitation.text, QrCodeEcc::Medium)
+                            .ok()
+                            .map(Rc::new);
+                        Stage::Waiting { invitation, code }
+                    }
+                    Err(failure) => Stage::Failed(failure),
+                };
+                body.show(window, cx);
+                matches!(body.stage, Stage::Waiting { .. })
+            });
+            if !matches!(opened, Ok(true)) {
+                return;
+            }
+            loop {
+                let read = body
+                    .update_in(cx, |body, window, cx| body.tick(generation, window, cx))
+                    .unwrap_or(false);
+                if read {
+                    let reading = Arc::clone(&control);
+                    let claims = cx
+                        .background_executor()
+                        .spawn(async move { reading.claims() })
+                        .await;
+                    let _ = body.update_in(cx, |body, window, cx| {
+                        body.receive(generation, claims, window, cx);
+                    });
+                }
+                let open = body
+                    .update(cx, |body, _| {
+                        body.generation == generation && body.stage.expires_at().is_some()
                     })
-                    .unwrap_or(true);
-                if ended {
+                    .unwrap_or(false);
+                if !open {
                     return;
                 }
                 cx.background_executor().timer(POLL).await;
@@ -246,79 +465,139 @@ impl PairDevice {
         }));
     }
 
-    /// Pairs the device that made `claim`, exactly as the person saw it.
-    fn approve(&mut self, claim: ClaimId, cx: &mut Context<Self>) {
-        if self.answering.is_some() {
+    /// Ends an invitation whose time ran out and repaints the countdown otherwise. Answers whether
+    /// to look for claims.
+    fn tick(&mut self, generation: u64, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if self.generation != generation {
+            return false;
+        }
+        let Some(expires_at) = self.stage.expires_at() else {
+            return false;
+        };
+        if remaining(expires_at, unix_now()) == 0 {
+            self.expire(window, cx);
+            return false;
+        }
+        cx.notify();
+        matches!(self.stage, Stage::Waiting { .. })
+    }
+
+    /// Asks the person about the first device that used this invitation.
+    fn receive(
+        &mut self,
+        generation: u64,
+        claims: Result<Vec<Claim>, AccessFailure>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.generation != generation {
             return;
         }
-        let Some(shown) = self.claims.iter().find(|shown| shown.id == claim).cloned() else {
+        let Stage::Waiting { invitation, .. } = &self.stage else {
             return;
         };
-        self.answering = Some(claim);
-        self.problem = None;
-        let generation = self.generation;
-        let control = Arc::clone(&self.control);
-        self._work = Some(cx.spawn(async move |body, cx| {
-            let approved = cx
-                .background_executor()
-                .spawn(async move { control.approve(&shown.claim) })
-                .await;
-            let _ = body.update(cx, |body, cx| {
-                if body.generation != generation {
+        match claims {
+            Ok(claims) => {
+                let Some(claim) = claims
+                    .into_iter()
+                    .find(|claim| invitation.claimed_by(claim))
+                else {
                     return;
-                }
-                body.answering = None;
-                match approved {
-                    Ok(device) => {
-                        body._poll = None;
-                        body.claims.clear();
-                        body.invitation = Invitation::Paired(device);
-                        cx.emit(DevicePaired);
-                    }
-                    Err(failure) => {
-                        body.claims.retain(|shown| shown.id != claim);
-                        body.problem = Some(failure);
-                    }
-                }
-                cx.notify();
-            });
-        }));
-        cx.notify();
+                };
+                // The link has done its work, so the state that held it drops and wipes it.
+                self.stage = Stage::Asking {
+                    invitation: invitation.id,
+                    expires_at: invitation.expires_at,
+                    claim: Box::new(claim),
+                };
+                self.copied = false;
+                self._copied = None;
+                self.show(window, cx);
+            }
+            Err(AccessFailure::InvitationEnded) => self.expire(window, cx),
+            // A missed reading changes nothing; the next one looks again.
+            Err(_) => {}
+        }
     }
 
-    /// Refuses `claim`. The invitation stays open for another device until its time runs out.
-    fn reject(&mut self, claim: ClaimId, cx: &mut Context<Self>) {
-        if self.answering.is_some() {
+    fn expire(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.withdraw_open(cx);
+        self.stage = Stage::Expired;
+        self.show(window, cx);
+    }
+
+    /// Pairs the device that made the claim, exactly as the person saw it.
+    fn allow(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !matches!(self.stage, Stage::Asking { .. }) {
             return;
         }
-        self.answering = Some(claim);
-        self.problem = None;
+        let Stage::Asking {
+            invitation, claim, ..
+        } = std::mem::replace(&mut self.stage, Stage::Closed)
+        else {
+            return;
+        };
+        self.stage = Stage::Allowing(claim.name.clone());
+        self.show(window, cx);
         let generation = self.generation;
         let control = Arc::clone(&self.control);
-        self._work = Some(cx.spawn(async move |body, cx| {
-            let rejected = cx
+        let on_paired = Rc::clone(&self.on_paired);
+        // The answer is the person's decision, so it completes and reaches the device list even
+        // when Invite Device closes first.
+        cx.spawn_in(window, async move |body, cx| {
+            let approved = cx
                 .background_executor()
-                .spawn(async move { control.reject(claim) })
+                .spawn(async move {
+                    let approved = control.approve(&claim.claim);
+                    // The invitation is used either way; withdrawing it frees its place.
+                    let _ = control.withdraw(invitation);
+                    approved
+                })
                 .await;
-            let _ = body.update(cx, |body, cx| {
+            if approved.is_ok() {
+                let _ = cx.update(|_, cx| on_paired(cx));
+            }
+            let _ = body.update_in(cx, |body, window, cx| {
                 if body.generation != generation {
                     return;
                 }
-                body.answering = None;
-                body.claims.retain(|shown| shown.id != claim);
-                if let Err(failure) = rejected {
-                    body.problem = Some(failure);
-                }
-                cx.notify();
+                body.stage = match approved {
+                    Ok(device) => Stage::Allowed(device),
+                    Err(failure) => Stage::Failed(failure),
+                };
+                body.show(window, cx);
             });
-        }));
-        cx.notify();
+        })
+        .detach();
     }
 
-    /// Puts the invitation on the clipboard because the person asked. Nothing else writes it
-    /// there.
+    /// Refuses the device that made the claim. The invitation is used, so it ends too.
+    fn decline(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !matches!(self.stage, Stage::Asking { .. }) {
+            return;
+        }
+        let Stage::Asking {
+            invitation, claim, ..
+        } = std::mem::replace(&mut self.stage, Stage::Closed)
+        else {
+            return;
+        };
+        self.stage = Stage::Declined(claim.name.clone());
+        self.show(window, cx);
+        let control = Arc::clone(&self.control);
+        let id = claim.id;
+        // Withdrawing the invitation also refuses its claim if the refusal didn't arrive.
+        cx.background_executor()
+            .spawn(async move {
+                let _ = control.reject(id);
+                let _ = control.withdraw(invitation);
+            })
+            .detach();
+    }
+
+    /// Puts the link on the clipboard because the person asked. Nothing else writes it there.
     fn copy(&mut self, cx: &mut Context<Self>) {
-        let Invitation::Open(invitation) = &self.invitation else {
+        let Stage::Waiting { invitation, .. } = &self.stage else {
             return;
         };
         cx.write_to_clipboard(ClipboardItem::new_string(invitation.text.to_string()));
@@ -333,10 +612,10 @@ impl PairDevice {
         cx.notify();
     }
 
-    /// Ends the open invitation, if any. Its text is wiped when the state that held it drops.
+    /// Ends the invitation the stage holds open, if any, which also refuses an unanswered claim.
     fn withdraw_open(&self, cx: &App) {
-        if let Invitation::Open(invitation) = &self.invitation {
-            self.withdraw(invitation.id, cx);
+        if let Some(invitation) = self.stage.open_invitation() {
+            self.withdraw(invitation, cx);
         }
     }
 
@@ -350,286 +629,739 @@ impl PairDevice {
             .detach();
     }
 
+    /// Ends Invite Device after its surface closed. A pairing already allowed still completes,
+    /// and an invitation still being opened is withdrawn once it arrives.
     fn close(&mut self, cx: &mut Context<Self>) {
         self.withdraw_open(cx);
         self.generation = self.generation.wrapping_add(1);
-        self.invitation = Invitation::Ended;
-        self.claims.clear();
-        self._poll = None;
-        self._work = None;
+        self.stage = Stage::Closed;
+        self.copied = false;
         self._copied = None;
         cx.notify();
     }
 }
 
-impl Render for PairDevice {
+/// Paints `code` as sharp dark modules on a light square with its quiet zone.
+fn qr_code(code: Rc<QrCode>) -> impl IntoElement {
+    canvas(
+        |_, _, _| {},
+        move |bounds, _, window, _| {
+            let modules = code.size() + QR_QUIET_ZONE * 2;
+            let scale = window.scale_factor();
+            let extent = f32::from(bounds.size.width).min(f32::from(bounds.size.height));
+            // Whole device pixels per module keep every edge sharp, which readers need.
+            let module_pixels = ((extent * scale) / modules as f32).floor().max(1.0);
+            let module = px(module_pixels / scale);
+            let side = module * modules as f32;
+            let inset = ((extent - f32::from(side)) / 2.0 * scale).floor() / scale;
+            let origin = bounds.origin + point(px(inset), px(inset));
+            window.paint_quad(fill(Bounds::new(origin, size(side, side)), QR_LIGHT));
+            for y in 0..code.size() {
+                let mut x = 0;
+                while x < code.size() {
+                    if !code.get_module(x, y) {
+                        x += 1;
+                        continue;
+                    }
+                    let start = x;
+                    while x < code.size() && code.get_module(x, y) {
+                        x += 1;
+                    }
+                    let at = origin
+                        + point(
+                            module * (start + QR_QUIET_ZONE) as f32,
+                            module * (y + QR_QUIET_ZONE) as f32,
+                        );
+                    let run = size(module * (x - start) as f32, module);
+                    window.paint_quad(fill(Bounds::new(at, run), QR_DARK));
+                }
+            }
+        },
+    )
+    .size(px(QR_EXTENT))
+}
+
+impl Render for InviteDevice {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let appearance = super::appearance::shared_chrome(cx);
         let colors = appearance.host_colors(spaceterm_ui::ControlHost::Floating);
-        // Text that assistive technology reads needs an identity, which its order supplies.
-        let texts = std::cell::Cell::new(0_usize);
-        let readable = |text: SharedString| {
-            let index = texts.get();
-            texts.set(index + 1);
-            gpui::Text::new(
-                ElementId::from(SharedString::from(format!("{MODAL_ID}-text-{index}"))),
-                text,
-            )
+        let readable = |id: &'static str, text: SharedString| {
+            gpui::Text::new(ElementId::from(SharedString::new_static(id)), text)
         };
-        let secondary = |text: SharedString| {
+        let secondary = |id: &'static str, text: SharedString| {
             div()
                 .chrome_text(appearance.typography.style(TextRole::Secondary))
                 .text_color(gpui_color(colors.text_secondary))
                 .whitespace_normal()
-                .child(readable(text))
+                .text_center()
+                .child(readable(id, text))
         };
-        let owner = cx.weak_entity();
-        let invitation: AnyElement = match &self.invitation {
-            Invitation::Opening => ProgressRing::new(
-                "pair-device-opening",
-                "Creating an invitation\u{2026}",
-                ProgressState::Indeterminate,
+        let emphasized = |id: &'static str, text: SharedString| {
+            div()
+                .chrome_text(appearance.typography.style(TextRole::BodyEmphasis))
+                .text_color(gpui_color(colors.text))
+                .whitespace_normal()
+                .text_center()
+                .child(readable(id, text))
+        };
+        // A status names what changed once, so assistive technology announces it.
+        let status = |content: AnyElement| {
+            div()
+                .id(STATUS_SELECTOR)
+                .debug_selector(|| STATUS_SELECTOR.to_owned())
+                .role(accesskit::Role::Status)
+                .flex()
+                .flex_col()
+                .items_center()
+                .gap(appearance.spacing(4.0))
+                .child(content)
+        };
+        let progress = |id: &'static str, label: SharedString| {
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .justify_center()
+                .gap(appearance.spacing(6.0))
+                .child(
+                    ProgressRing::new(id, label.clone(), ProgressState::Indeterminate)
+                        .size(ProgressSize::Compact),
+                )
+                .child(secondary("invite-device-progress-label", label))
+        };
+        let qr_tile = |content: AnyElement| {
+            div()
+                .size(px(QR_EXTENT))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(RadiusRole::Control.pixels())
+                .overflow_hidden()
+                .child(content)
+        };
+        let content: AnyElement = match &self.stage {
+            Stage::Opening => qr_tile(
+                progress(
+                    "invite-device-opening",
+                    "Creating an invitation\u{2026}".into(),
+                )
+                .into_any_element(),
             )
-            .size(ProgressSize::Compact)
             .into_any_element(),
-            Invitation::Open(open) => {
-                let left = remaining(open.expires_at, unix_now());
-                let copy = {
-                    let owner = owner.clone();
-                    Button::new(COPY_SELECTOR, if self.copied { "Copied" } else { "Copy" })
-                        .variant(ButtonVariant::Outline)
-                        .size(ButtonSize::Regular)
-                        .tab_stop(true)
-                        .debug_selector(COPY_SELECTOR)
-                        .accessibility_description("Copy the invitation to the clipboard")
-                        .on_activate(move |_, _, cx| {
-                            let _ = owner.update(cx, |body, cx| body.copy(cx));
-                        })
+            Stage::Waiting { invitation, code } => {
+                let left = remaining(invitation.expires_at, unix_now());
+                let owner = cx.weak_entity();
+                let copy = Button::new(COPY_SELECTOR, if self.copied { "Copied" } else { "Copy" })
+                    .variant(ButtonVariant::Outline)
+                    .size(ButtonSize::Regular)
+                    .tab_stop(true)
+                    .debug_selector(COPY_SELECTOR)
+                    .accessibility_description("Copy the invitation link")
+                    .on_activate(move |_, _, cx| {
+                        let _ = owner.update(cx, |body, cx| body.copy(cx));
+                    });
+                let qr = match code {
+                    Some(code) => div()
+                        .id(QR_SELECTOR)
+                        .debug_selector(|| QR_SELECTOR.to_owned())
+                        // The code is named and never described, so assistive technology keeps no
+                        // copy of the link it carries.
+                        .role(accesskit::Role::Image)
+                        .aria_label("QR code of the invitation link")
+                        .child(qr_tile(qr_code(Rc::clone(code)).into_any_element()))
+                        .into_any_element(),
+                    None => secondary(
+                        "invite-device-no-qr",
+                        "This link is too long for a QR code. Copy it instead.".into(),
+                    )
+                    .into_any_element(),
                 };
+                let link = div()
+                    .id(LINK_SELECTOR)
+                    .debug_selector(|| LINK_SELECTOR.to_owned())
+                    // The link is shown to read and Copy, and never published as accessible text,
+                    // so assistive technology and its recordings keep no copy of it.
+                    .role(accesskit::Role::Group)
+                    .aria_label("Invitation link, available to Copy")
+                    .flex_1()
+                    .min_w_0()
+                    .px(appearance.spacing(8.0))
+                    .py(appearance.spacing(4.0))
+                    .rounded(RadiusRole::Control.pixels())
+                    .border_1()
+                    .border_color(gpui_color(colors.input_border))
+                    .bg(gpui_color(colors.input_background))
+                    .chrome_text(appearance.typography.style(TextRole::Body))
+                    .text_color(gpui_color(colors.input_text))
+                    .truncate()
+                    .child(SharedString::from(invitation.text.to_string()));
+                // The sheet's width bounds the column and its link row. A centered column
+                // otherwise takes its content's width, and the link has no place to break, so it
+                // would push Copy out of the sheet.
                 div()
+                    .w_full()
+                    .min_w_0()
                     .flex()
                     .flex_col()
-                    .gap(appearance.spacing(6.0))
+                    .items_center()
+                    .gap(appearance.spacing(12.0))
+                    .child(qr)
                     .child(
                         div()
-                            .id(INVITATION_SELECTOR)
-                            .debug_selector(|| INVITATION_SELECTOR.to_owned())
-                            // The invitation is shown to read and Copy, and never published as
-                            // accessible text, so assistive technology and its recordings keep no
-                            // copy of it.
-                            .role(accesskit::Role::Group)
-                            .aria_label("Invitation, available to Copy")
-                            .p(appearance.spacing(10.0))
-                            .rounded(RadiusRole::Control.pixels())
-                            .border_1()
-                            .border_color(gpui_color(colors.input_border))
-                            .bg(gpui_color(colors.input_background))
-                            .chrome_text(appearance.typography.style(TextRole::Body))
-                            .text_color(gpui_color(colors.input_text))
-                            .whitespace_normal()
-                            .child(SharedString::from(open.text.to_string())),
+                            .w_full()
+                            .min_w_0()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(appearance.spacing(8.0))
+                            .child(link)
+                            // Copy keeps its own width; the link gives up what the row lacks.
+                            .child(div().flex_none().child(copy)),
                     )
                     .child(
                         div()
                             .flex()
                             .flex_row()
                             .items_center()
-                            .gap(appearance.spacing(8.0))
-                            .child(copy)
-                            .child(secondary(SharedString::from(format!(
-                                "Expires in {}. It works once.",
-                                countdown(left)
-                            )))),
+                            .gap(appearance.spacing(6.0))
+                            .child(
+                                ProgressRing::new(
+                                    "invite-device-waiting",
+                                    "Waiting for a device",
+                                    ProgressState::Indeterminate,
+                                )
+                                .size(ProgressSize::Compact),
+                            )
+                            .child(secondary(
+                                "invite-device-countdown",
+                                format!("Waiting \u{00B7} expires in {}", countdown(left)).into(),
+                            )),
                     )
-                    .child(secondary(SharedString::from(
-                        "On the other computer, open SpaceTerm Settings, choose Servers, then \
-                         Join with Invitation and paste it.",
-                    )))
                     .into_any_element()
             }
-            Invitation::Ended | Invitation::Failed(_) => {
-                let explanation = match &self.invitation {
-                    Invitation::Failed(failure) => failure.explanation(&self.server),
-                    _ => "This invitation can\u{2019}t be used any more.".to_owned(),
-                };
-                let renew = {
-                    let owner = owner.clone();
-                    Button::new(RENEW_SELECTOR, "New Invitation")
-                        .variant(ButtonVariant::Outline)
-                        .size(ButtonSize::Regular)
-                        .tab_stop(true)
-                        .debug_selector(RENEW_SELECTOR)
-                        .on_activate(move |_, _, cx| {
-                            let _ = owner.update(cx, |body, cx| body.open_invitation(cx));
-                        })
-                };
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(appearance.spacing(8.0))
-                    .child(div().flex_1().child(secondary(explanation.into())))
-                    .child(renew)
-                    .into_any_element()
-            }
-            Invitation::Paired(device) => div()
-                .id("pair-device-paired")
-                .role(accesskit::Role::Status)
+            Stage::Asking { claim, .. } => div()
                 .flex()
                 .flex_col()
-                .gap(appearance.spacing(4.0))
-                .child(
-                    div()
-                        .chrome_text(appearance.typography.style(TextRole::BodyEmphasis))
-                        .text_color(gpui_color(colors.text))
-                        .child(gpui::Text::new(
-                            ElementId::from("pair-device-paired-text"),
-                            SharedString::from(format!(
-                                "\u{201C}{}\u{201D} is paired with \u{201C}{}\u{201D}.",
-                                device.name, self.server
-                            )),
-                        )),
-                )
-                .child(secondary(SharedString::from(format!(
-                    "It can connect now. Device fingerprint {}.",
-                    device.fingerprint
-                ))))
-                .into_any_element(),
-        };
-        let claims = self.claims.iter().enumerate().map(|(index, claim)| {
-            let answering = self.answering.is_some();
-            let this = self.answering == Some(claim.id);
-            let id = claim.id;
-            let approve = {
-                let owner = owner.clone();
-                Button::new(
-                    ElementId::from(SharedString::from(format!("{APPROVE_SELECTOR}-{index}"))),
-                    "Approve",
-                )
-                .variant(ButtonVariant::Primary)
-                .size(ButtonSize::Regular)
-                .tab_stop(true)
-                .disabled(answering)
-                .debug_selector(format!("{APPROVE_SELECTOR}-{index}"))
-                .accessibility_description(SharedString::from(format!(
-                    "Pair {} with {}",
-                    claim.name, self.server
-                )))
-                .on_activate(move |_, _, cx| {
-                    let _ = owner.update(cx, |body, cx| body.approve(id, cx));
-                })
-            };
-            let reject = {
-                let owner = owner.clone();
-                Button::new(
-                    ElementId::from(SharedString::from(format!("{REJECT_SELECTOR}-{index}"))),
-                    "Reject",
-                )
-                .variant(ButtonVariant::Outline)
-                .size(ButtonSize::Regular)
-                .tab_stop(true)
-                .disabled(answering)
-                .debug_selector(format!("{REJECT_SELECTOR}-{index}"))
-                .accessibility_description(SharedString::from(format!(
-                    "Refuse the request from {}",
-                    claim.name
-                )))
-                .on_activate(move |_, _, cx| {
-                    let _ = owner.update(cx, |body, cx| body.reject(id, cx));
-                })
-            };
-            div()
-                .id(ElementId::from(SharedString::from(format!(
-                    "{CLAIM_SELECTOR}-{index}"
-                ))))
-                .debug_selector(move || format!("{CLAIM_SELECTOR}-{index}"))
-                .role(accesskit::Role::Group)
-                .aria_label(SharedString::from(format!("Request from {}", claim.name)))
-                .flex()
-                .flex_row()
                 .items_center()
                 .gap(appearance.spacing(8.0))
-                .p(appearance.spacing(10.0))
-                .rounded(RadiusRole::Control.pixels())
-                .border_1()
-                .border_color(gpui_color(colors.border))
+                .child(secondary(
+                    "invite-device-compare",
+                    format!(
+                        "Allow only if \u{201C}{}\u{201D} shows this code.",
+                        claim.name
+                    )
+                    .into(),
+                ))
                 .child(
                     div()
-                        .flex_1()
-                        .min_w_0()
-                        .flex()
-                        .flex_col()
-                        .gap(appearance.spacing(2.0))
-                        .child(
-                            div()
-                                .chrome_text(appearance.typography.style(TextRole::BodyEmphasis))
-                                .text_color(gpui_color(colors.text))
-                                .truncate()
-                                .child(readable(claim.name.clone())),
-                        )
-                        .child(secondary(SharedString::from(format!(
-                            "Device fingerprint {}",
-                            claim.fingerprint
-                        ))))
-                        .child(secondary(SharedString::from(format!(
-                            "The request expires in {}.",
-                            countdown(remaining(claim.expires_at, unix_now()))
-                        ))))
-                        .child(secondary(SharedString::from(format!(
-                            "Asks to pair with \u{201C}{}\u{201D}, fingerprint {}",
-                            self.server, self.server_fingerprint
-                        )))),
+                        .id(CODE_SELECTOR)
+                        .debug_selector(|| CODE_SELECTOR.to_owned())
+                        .role(accesskit::Role::Label)
+                        .aria_label("Code")
+                        .aria_value(code_speech(claim.code))
+                        .chrome_text(appearance.typography.style(TextRole::Title))
+                        .text_color(gpui_color(colors.text))
+                        .child(code_text(claim.code)),
                 )
-                .when(this, |row| {
-                    row.child(
-                        ProgressRing::new(
-                            SharedString::from(format!("{CLAIM_SELECTOR}-{index}-progress")),
-                            "Answering\u{2026}",
-                            ProgressState::Indeterminate,
+                .into_any_element(),
+            Stage::Allowing(name) => progress(
+                "invite-device-allowing",
+                format!("Allowing \u{201C}{name}\u{201D}\u{2026}").into(),
+            )
+            .into_any_element(),
+            Stage::Allowed(device) => status(
+                div()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap(appearance.spacing(6.0))
+                    .child(Icon::new(
+                        IconName::Check,
+                        px(28.0),
+                        gpui_color(colors.success),
+                    ))
+                    .child(emphasized(
+                        "invite-device-allowed",
+                        format!(
+                            "\u{201C}{}\u{201D} can now connect to \u{201C}{}\u{201D}.",
+                            device.name, self.server
                         )
-                        .size(ProgressSize::Compact),
-                    )
-                })
-                .child(reject)
-                .child(approve)
-        });
-        let waiting = matches!(self.invitation, Invitation::Open(_)) && self.claims.is_empty();
-        // A request waits on the person and expires, so it leads the dialog, where it is in
-        // view without scrolling. The invitation that brought it follows.
+                        .into(),
+                    ))
+                    .into_any_element(),
+            )
+            .into_any_element(),
+            Stage::Declined(name) => status(
+                div()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap(appearance.spacing(4.0))
+                    .child(emphasized(
+                        "invite-device-declined",
+                        format!("\u{201C}{name}\u{201D} wasn\u{2019}t allowed.").into(),
+                    ))
+                    .child(secondary(
+                        "invite-device-declined-detail",
+                        "Create a new invitation to invite a device.".into(),
+                    ))
+                    .into_any_element(),
+            )
+            .into_any_element(),
+            Stage::Expired => status(
+                div()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap(appearance.spacing(4.0))
+                    .child(emphasized("invite-device-expired", "Expired".into()))
+                    .child(secondary(
+                        "invite-device-expired-detail",
+                        "This invitation can\u{2019}t be used any more.".into(),
+                    ))
+                    .into_any_element(),
+            )
+            .into_any_element(),
+            Stage::Failed(failure) => status(
+                div()
+                    .chrome_text(appearance.typography.style(TextRole::Secondary))
+                    .text_color(gpui_color(colors.error))
+                    .whitespace_normal()
+                    .text_center()
+                    .child(readable(
+                        "invite-device-failed",
+                        failure.explanation(&self.server).into(),
+                    ))
+                    .into_any_element(),
+            )
+            .into_any_element(),
+            Stage::Closed => div().into_any_element(),
+        };
         div()
             .flex()
             .flex_col()
-            .gap(appearance.spacing(12.0))
-            .when(!self.claims.is_empty(), |body| {
-                body.child(secondary(SharedString::from(
-                    "The name is what the device calls itself. Approve only a request you \
-                     expect.",
-                )))
-                .children(claims)
+            .items_center()
+            .w_full()
+            .py(appearance.spacing(4.0))
+            .child(content)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex;
+
+    use gpui::{KeyUpEvent, Keystroke, Modifiers, TestAppContext, VisualTestContext};
+    use spaceterm_ui::ModalLayer;
+    use spaceterm_ui::a11y_testing::A11yTree;
+    use zeroize::Zeroizing;
+
+    use super::*;
+    use crate::local_server::direct::{NetworkPolicy, PairingClaim};
+    use crate::ui::direct_access::AccessState;
+
+    const SERVER: &str = "studio";
+    const LINK: &str = "spaceterm://pair/test-invitation";
+
+    /// A server's invitation operations as the test scripts them, recording what Invite Device
+    /// asked of it.
+    struct ScriptedServer {
+        /// When each invitation the server opens expires, in Unix seconds. Every invitation
+        /// shares it, as invitations opened in the same second do.
+        expires_at: Mutex<u64>,
+        /// The link each invitation the server opens carries.
+        link: Mutex<String>,
+        invitations: Mutex<Vec<(ClaimId, u64)>>,
+        claims: Mutex<Vec<Claim>>,
+        approved: Mutex<Vec<ClaimId>>,
+        rejected: Mutex<Vec<ClaimId>>,
+        withdrawn: Mutex<Vec<ClaimId>>,
+    }
+
+    impl ScriptedServer {
+        /// A server whose invitations last `lifetime` seconds from now.
+        fn new(lifetime: u64) -> Arc<Self> {
+            Arc::new(Self {
+                expires_at: Mutex::new(unix_now() + lifetime),
+                link: Mutex::new(LINK.to_owned()),
+                invitations: Mutex::default(),
+                claims: Mutex::default(),
+                approved: Mutex::default(),
+                rejected: Mutex::default(),
+                withdrawn: Mutex::default(),
             })
-            .child(invitation)
-            .when(waiting, |body| {
-                body.child(
-                    div()
-                        .id("pair-device-waiting")
-                        .role(accesskit::Role::Status)
-                        .child(secondary(SharedString::from(
-                            "Waiting for a device to use this invitation\u{2026}",
-                        ))),
-                )
+        }
+
+        fn invitation(&self) -> (ClaimId, u64) {
+            *self
+                .invitations
+                .lock()
+                .expect("invitations")
+                .last()
+                .expect("an invitation")
+        }
+
+        /// Opens an invitation the way another client's Invite Device does.
+        fn invite_elsewhere(&self) -> ClaimId {
+            self.invite().expect("an invitation").id
+        }
+
+        fn expiry(&self, invitation: ClaimId) -> u64 {
+            self.invitations
+                .lock()
+                .expect("invitations")
+                .iter()
+                .find(|(id, _)| *id == invitation)
+                .map(|(_, expires_at)| *expires_at)
+                .expect("an invitation the server opened")
+        }
+
+        /// A device named `name` claims `invitation`, with an exchange whose hash starts with
+        /// `exchange`.
+        fn claim(&self, id: u8, name: &str, exchange: [u8; 4], invitation: ClaimId) {
+            let mut exchange_hash = [0; 32];
+            exchange_hash[..4].copy_from_slice(&exchange);
+            let claim = PairingClaim {
+                id: [id; 32],
+                invitation_id: invitation,
+                server: [1; 32],
+                device_public_key: [id; 32],
+                device_name: name.into(),
+                expires_at_unix_seconds: self.expiry(invitation),
+                exchange_hash,
+            };
+            self.claims.lock().expect("claims").push(Claim {
+                id: claim.id,
+                name: name.to_owned().into(),
+                code: claim.comparison_code(),
+                claim,
+            });
+        }
+    }
+
+    impl DirectAccessControl for ScriptedServer {
+        fn status(&self) -> Result<AccessState, AccessFailure> {
+            Err(AccessFailure::Unreachable)
+        }
+
+        fn set_policy(&self, _: Option<NetworkPolicy>) -> Result<AccessState, AccessFailure> {
+            Err(AccessFailure::Refused)
+        }
+
+        fn invite(&self) -> Result<OpenInvitation, AccessFailure> {
+            let mut invitations = self.invitations.lock().expect("invitations");
+            let id = [u8::try_from(invitations.len() + 1).expect("few invitations"); 32];
+            let expires_at = *self.expires_at.lock().expect("expiry");
+            invitations.push((id, expires_at));
+            Ok(OpenInvitation {
+                id,
+                text: Zeroizing::new(self.link.lock().expect("link").clone()),
+                expires_at,
             })
-            .when_some(self.problem, |body, problem| {
-                body.child(
-                    div()
-                        .id("pair-device-problem")
-                        .role(accesskit::Role::Alert)
-                        .chrome_text(appearance.typography.style(TextRole::Secondary))
-                        .text_color(gpui_color(colors.error))
-                        .whitespace_normal()
-                        .child(readable(SharedString::from(
-                            problem.explanation(&self.server),
-                        ))),
-                )
+        }
+
+        fn withdraw(&self, invitation: ClaimId) -> Result<(), AccessFailure> {
+            self.withdrawn.lock().expect("withdrawn").push(invitation);
+            Ok(())
+        }
+
+        fn claims(&self) -> Result<Vec<Claim>, AccessFailure> {
+            Ok(self.claims.lock().expect("claims").clone())
+        }
+
+        fn approve(&self, claim: &PairingClaim) -> Result<Device, AccessFailure> {
+            self.approved.lock().expect("approved").push(claim.id);
+            Ok(Device {
+                pairing: [9; 32],
+                name: claim.device_name.as_str().to_owned().into(),
+                fingerprint: SharedString::default(),
+                last_connected_at: None,
             })
+        }
+
+        fn reject(&self, claim: ClaimId) -> Result<(), AccessFailure> {
+            self.rejected.lock().expect("rejected").push(claim);
+            Ok(())
+        }
+
+        fn devices(&self) -> Result<Vec<Device>, AccessFailure> {
+            Ok(Vec::new())
+        }
+    }
+
+    /// The view that presents Invite Device, counting the devices it hears were paired.
+    struct Host {
+        paired: usize,
+    }
+
+    impl Render for Host {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            ModalLayer::new(div().size_full())
+        }
+    }
+
+    fn invite<'a>(
+        server: &Arc<ScriptedServer>,
+        cx: &'a mut TestAppContext,
+    ) -> (Entity<Host>, &'a mut VisualTestContext) {
+        cx.update(crate::ui::init)
+            .expect("UI initialization should succeed");
+        let (host, cx) = cx.add_window_view(|_, _| Host { paired: 0 });
+        let control: Arc<dyn DirectAccessControl> = Arc::clone(server) as _;
+        cx.update(|window, cx| {
+            window.activate_window();
+            host.update(cx, |_, cx| {
+                assert!(InviteDevice::present(
+                    control,
+                    SERVER.into(),
+                    |host: &mut Host, _| host.paired += 1,
+                    window,
+                    cx,
+                ));
+            });
+        });
+        cx.run_until_parked();
+        (host, cx)
+    }
+
+    /// Lets the invitation look for claims once more.
+    fn poll(cx: &mut VisualTestContext) {
+        cx.executor().advance_clock(POLL);
+        cx.run_until_parked();
+    }
+
+    fn click(selector: &str, cx: &mut VisualTestContext) {
+        let selector: &'static str = Box::leak(selector.to_owned().into_boxed_str());
+        let position = cx
+            .debug_bounds(selector)
+            .unwrap_or_else(|| panic!("{selector} was not rendered"))
+            .center();
+        cx.simulate_mouse_move(position, None, Modifiers::none());
+        cx.simulate_click(position, Modifiers::none());
+        cx.run_until_parked();
+    }
+
+    fn shown(selector: &str, cx: &mut VisualTestContext) -> bool {
+        let selector: &'static str = Box::leak(selector.to_owned().into_boxed_str());
+        cx.debug_bounds(selector).is_some()
+    }
+
+    /// Presses Return the way a keyboard does. A focused button acts when the key comes back
+    /// up, so a key-down alone leaves the focused action unpressed.
+    fn press_return(cx: &mut VisualTestContext) {
+        cx.simulate_keystrokes("enter");
+        cx.simulate_event(KeyUpEvent {
+            keystroke: Keystroke::parse("enter").expect("Return parses"),
+        });
+        cx.run_until_parked();
+    }
+
+    /// The selector the modal gives an action.
+    fn action(selector: &str) -> String {
+        format!("modal-action-{selector}")
+    }
+
+    /// Whether any Label the window publishes contains `text`.
+    fn says(text: &str, cx: &mut VisualTestContext) -> bool {
+        A11yTree::read(cx).with_role("Label").iter().any(|node| {
+            node["aria"]["value"]
+                .as_str()
+                .is_some_and(|value| value.contains(text))
+        })
+    }
+
+    #[gpui::test]
+    fn copy_puts_the_exact_link_on_the_clipboard_only_when_the_person_asks(
+        cx: &mut TestAppContext,
+    ) {
+        let server = ScriptedServer::new(300);
+        let (_, cx) = invite(&server, cx);
+        assert_eq!(
+            cx.read_from_clipboard().and_then(|item| item.text()),
+            None,
+            "showing an invitation never overwrites the clipboard"
+        );
+
+        click(COPY_SELECTOR, cx);
+
+        assert_eq!(
+            cx.read_from_clipboard().and_then(|item| item.text()),
+            Some(LINK.to_owned())
+        );
+    }
+
+    #[gpui::test]
+    fn a_real_length_link_leaves_copy_in_view_and_usable(cx: &mut TestAppContext) {
+        // A real invitation is about a thousand characters of unbroken base64url.
+        let link = format!(
+            "spaceterm://pair/{}",
+            "eyJzY2hlbWEiOjEsImlkIjpbMTIsMzQsNTYsNzgsOTAsMTIs".repeat(20)
+        );
+        assert!(link.len() > 950);
+        let server = ScriptedServer::new(300);
+        *server.link.lock().expect("link") = link.clone();
+        let (_, cx) = invite(&server, cx);
+
+        let viewport = cx
+            .debug_bounds("modal-body-viewport")
+            .expect("Invite Device shows its body");
+        let field = cx.debug_bounds(LINK_SELECTOR).expect("the link shows");
+        let copy = cx.debug_bounds(COPY_SELECTOR).expect("Copy shows");
+        assert!(copy.size.width > px(0.0), "Copy has room: {copy:?}");
+        assert!(
+            viewport.left() <= field.left() && field.right() <= copy.left(),
+            "the link ends before Copy: {field:?}, {copy:?}"
+        );
+        assert!(
+            copy.right() <= viewport.right(),
+            "Copy is inside the sheet: {copy:?} within {viewport:?}"
+        );
+
+        click(COPY_SELECTOR, cx);
+
+        assert_eq!(
+            cx.read_from_clipboard().and_then(|item| item.text()),
+            Some(link),
+            "Copy takes the whole link, not what the field has room to show"
+        );
+    }
+
+    #[gpui::test]
+    fn the_qr_code_is_named_for_assistive_technology_without_its_link(cx: &mut TestAppContext) {
+        let server = ScriptedServer::new(300);
+        let (_, cx) = invite(&server, cx);
+
+        let tree = A11yTree::read(cx);
+
+        assert!(tree.find("QR code of the invitation link").is_some());
+        assert!(!says(LINK, cx), "no published text carries the link");
+    }
+
+    #[gpui::test]
+    fn a_device_using_the_invitation_is_asked_about_with_its_comparison_code(
+        cx: &mut TestAppContext,
+    ) {
+        let server = ScriptedServer::new(300);
+        let (_, cx) = invite(&server, cx);
+
+        let (invitation, _) = server.invitation();
+        // An exchange hash starting 00 00 30 39 derives 12345.
+        server.claim(3, "MacBook", [0, 0, 0x30, 0x39], invitation);
+        poll(cx);
+
+        let tree = A11yTree::read(cx);
+        let code = tree.node("Code");
+        assert_eq!(code["aria"]["value"], "0 1 2 3 4 5");
+    }
+
+    #[gpui::test]
+    fn return_allows_exactly_the_device_shown_and_its_presenter_hears_of_it(
+        cx: &mut TestAppContext,
+    ) {
+        let server = ScriptedServer::new(300);
+        let (host, cx) = invite(&server, cx);
+        let (ours, _) = server.invitation();
+        let theirs = server.invite_elsewhere();
+        server.claim(4, "Elsewhere", [0; 4], theirs);
+        server.claim(3, "MacBook", [0; 4], ours);
+        poll(cx);
+
+        press_return(cx);
+
+        assert_eq!(*server.approved.lock().expect("approved"), vec![[3; 32]]);
+        assert_eq!(host.read_with(cx, |host, _| host.paired), 1);
+        assert!(says(
+            "\u{201C}MacBook\u{201D} can now connect to \u{201C}studio\u{201D}.",
+            cx
+        ));
+    }
+
+    #[gpui::test]
+    fn escape_refuses_the_device_and_ends_the_used_invitation(cx: &mut TestAppContext) {
+        let server = ScriptedServer::new(300);
+        let (_, cx) = invite(&server, cx);
+        let (invitation, _) = server.invitation();
+        server.claim(3, "MacBook", [0; 4], invitation);
+        poll(cx);
+
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+
+        assert!(server.approved.lock().expect("approved").is_empty());
+        assert_eq!(*server.rejected.lock().expect("rejected"), vec![[3; 32]]);
+        assert_eq!(
+            *server.withdrawn.lock().expect("withdrawn"),
+            vec![invitation]
+        );
+        assert!(
+            shown(&action(RENEW_SELECTOR), cx),
+            "New Invitation is offered"
+        );
+    }
+
+    #[gpui::test]
+    fn a_claim_on_another_invitation_with_the_same_expiry_asks_nothing(cx: &mut TestAppContext) {
+        let server = ScriptedServer::new(300);
+        let (_, cx) = invite(&server, cx);
+        let (ours, _) = server.invitation();
+        let theirs = server.invite_elsewhere();
+        assert_eq!(server.expiry(ours), server.expiry(theirs));
+
+        server.claim(4, "Elsewhere", [0; 4], theirs);
+        poll(cx);
+
+        assert!(!shown(&action(ALLOW_SELECTOR), cx));
+        assert!(shown(COPY_SELECTOR, cx), "the invitation stays open");
+    }
+
+    #[gpui::test]
+    fn done_withdraws_the_invitation_so_nobody_can_use_it(cx: &mut TestAppContext) {
+        let server = ScriptedServer::new(300);
+        let (_, cx) = invite(&server, cx);
+        let (invitation, _) = server.invitation();
+
+        click(&action(DONE_SELECTOR), cx);
+
+        assert_eq!(
+            *server.withdrawn.lock().expect("withdrawn"),
+            vec![invitation]
+        );
+        assert!(!shown(COPY_SELECTOR, cx));
+    }
+
+    #[gpui::test]
+    fn closing_while_a_device_waits_for_an_answer_refuses_it(cx: &mut TestAppContext) {
+        let server = ScriptedServer::new(300);
+        let (_, cx) = invite(&server, cx);
+        let (invitation, _) = server.invitation();
+        server.claim(3, "MacBook", [0; 4], invitation);
+        poll(cx);
+
+        cx.update(|window, _| window.remove_window());
+        cx.run_until_parked();
+
+        assert!(server.approved.lock().expect("approved").is_empty());
+        assert_eq!(
+            *server.withdrawn.lock().expect("withdrawn"),
+            vec![invitation]
+        );
+    }
+
+    #[gpui::test]
+    fn an_expired_invitation_says_so_and_return_opens_a_new_one(cx: &mut TestAppContext) {
+        let server = ScriptedServer::new(0);
+        let (_, cx) = invite(&server, cx);
+        let (expired, _) = server.invitation();
+        assert!(says("Expired", cx));
+        assert_eq!(*server.withdrawn.lock().expect("withdrawn"), vec![expired]);
+
+        *server.expires_at.lock().expect("expiry") = unix_now() + 300;
+        press_return(cx);
+
+        assert_eq!(server.invitations.lock().expect("invitations").len(), 2);
+        assert!(
+            shown(COPY_SELECTOR, cx),
+            "the new invitation is ready to copy"
+        );
     }
 }

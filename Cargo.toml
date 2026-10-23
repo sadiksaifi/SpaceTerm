@@ -53,6 +53,7 @@ desktop = [
     "dep:flate2",
     "dep:ring",
     "dep:base64",
+    "dep:qrcodegen",
     "dep:fontconfig_sys",
     "dep:zbus",
     "dep:roxmltree",
@@ -124,6 +125,7 @@ tar = { version = "=0.4.46", default-features = false, optional = true }
 flate2 = { version = "=1.1.10", optional = true }
 ring = { version = "=0.17.14", optional = true }
 base64 = { version = "=0.22.1", optional = true }
+qrcodegen = { version = "=1.8.0", optional = true }
 serde_json_lenient = "=0.2.4"
 
 accesskit_consumer = { version = "=0.38.0", optional = true }

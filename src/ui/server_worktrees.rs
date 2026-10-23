@@ -365,37 +365,73 @@ fn create_error(error: WriteError) -> crate::worktrees::git::WorktreeCreateError
 pub(crate) mod testing {
     use super::*;
     use crate::ui::shared_workspaces::testing::ScriptedEdits;
+    use spaceterm_server::repository::GitToolStatus;
     use spaceterm_server::worktree::Settings;
+    use spaceterm_server::worktree::path_template::{self, WorktreePathTemplateError};
     use std::sync::Mutex;
 
-    /// One server's Server Settings, answered from memory. It records every read it answers,
-    /// so a test can tell which server a Worktree read reached.
-    pub(crate) struct ScriptedReads(Mutex<Settings>, Mutex<Vec<Read>>);
+    /// One server's Server Settings and Git, answered from memory. It records every read it
+    /// answers, so a test can tell which server a Worktree read reached.
+    pub(crate) struct ScriptedReads {
+        settings: Mutex<Settings>,
+        reads: Mutex<Vec<Read>>,
+        git: Mutex<GitToolStatus>,
+        /// Folders the server's account can't write to.
+        unwritable: Mutex<Vec<String>>,
+    }
 
     impl ScriptedReads {
         pub(crate) fn new(template: &str) -> Arc<Self> {
-            Arc::new(Self(
-                Mutex::new(Settings {
+            Arc::new(Self {
+                settings: Mutex::new(Settings {
                     template: template.to_owned(),
                     version: 0,
                 }),
-                Mutex::default(),
-            ))
+                reads: Mutex::default(),
+                git: Mutex::default(),
+                unwritable: Mutex::default(),
+            })
         }
 
         /// Every read this server was asked, oldest first.
         pub(crate) fn reads(&self) -> Vec<Read> {
-            self.1.lock().unwrap().clone()
+            self.reads.lock().unwrap().clone()
+        }
+
+        /// The Git this server reports.
+        pub(crate) fn set_git(&self, git: GitToolStatus) {
+            *self.git.lock().unwrap() = git;
+        }
+
+        /// Makes every location under `folder` one this server can't write to.
+        pub(crate) fn refuse_writes_under(&self, folder: &str) {
+            self.unwritable.lock().unwrap().push(folder.to_owned());
+        }
+
+        /// Another client saves `template`, as a second writer does.
+        pub(crate) fn change(&self, template: &str) {
+            let mut settings = self.settings.lock().unwrap();
+            template.clone_into(&mut settings.template);
+            settings.version += 1;
         }
     }
 
     impl WorktreeReads for ScriptedReads {
         fn read(&self, read: Read) -> Result<ReadReply, Error> {
-            self.1.lock().unwrap().push(read.clone());
+            self.reads.lock().unwrap().push(read.clone());
             match read {
-                Read::Settings => Ok(ReadReply::Settings(self.0.lock().unwrap().clone())),
+                Read::Settings => Ok(ReadReply::Settings(self.settings.lock().unwrap().clone())),
+                Read::Git => Ok(ReadReply::Git(*self.git.lock().unwrap())),
+                Read::ValidateLocationTemplate { template } => {
+                    path_template::validate(&template).map_err(Error::Template)?;
+                    let unwritable = self.unwritable.lock().unwrap();
+                    if unwritable.iter().any(|folder| template.starts_with(folder)) {
+                        return Err(Error::Template(WorktreePathTemplateError::NotWritable));
+                    }
+                    Ok(ReadReply::LocationTemplate)
+                }
                 Read::Context { .. } => Ok(ReadReply::Context {
-                    settings: self.0.lock().unwrap().clone(),
+                    settings: self.settings.lock().unwrap().clone(),
                     home: "/srv/home".into(),
                     branches: spaceterm_server::worktree::Branches {
                         local: vec!["main".into()],

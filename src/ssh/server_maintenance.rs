@@ -28,7 +28,7 @@ use super::cancellation::SshCancellationToken;
 use super::process::{CapturedProcessOutput, SshProcessAdapter};
 use super::server_connection::{
     ConnectMode, ContinuityChange, IncompatibilityKind, InteractionReason, RefusalKind,
-    SshConnectFailure, SshServerContinuity, UnavailableKind,
+    ServerCandidate, SshConnectFailure, SshServerContinuity, UnavailableKind,
 };
 use super::server_process::{
     NativeRoute, NativeSshConnectBackend, RouteClaim, SshDispatchFailure, VerifiedArtifact,
@@ -59,6 +59,25 @@ const DISPATCH: Duration = Duration::from_secs(120);
 pub(crate) struct MaintenanceTarget {
     pub destination: SshDestination,
     pub continuity: SshServerContinuity,
+}
+
+/// The update this client's verified artifact offers against one observed approved installation.
+#[derive(Clone, Debug, Default)]
+pub(crate) enum RemoteUpdateOffer {
+    #[default]
+    Unchecked,
+    /// No suitable verified candidate can be offered against the observed installation.
+    Unavailable,
+    /// The verified whole archive is already the approved installation.
+    UpToDate,
+    Available(ServerCandidate),
+}
+
+/// One validated account read and its locally verified update offer, produced on the worker.
+#[derive(Clone, Debug)]
+pub(crate) struct RemoteMaintenanceObservation {
+    pub facts: MaintenanceFacts,
+    pub update_offer: RemoteUpdateOffer,
 }
 
 /// How much authority one exchange may acquire.
@@ -143,6 +162,16 @@ pub(crate) enum SshMaintenanceFailure {
 /// Construction performs no SSH work. Describing a change performs no destructive work, and
 /// nothing here starts a server except [`SubmittedKind::Start`].
 pub(crate) trait SshMaintenanceBackend: Send + Sync {
+    /// Change only automatic startup on the bound account route. Deliberate Stop remains.
+    /// A lost reply is unconfirmed; Observe reads the current preference without retrying it.
+    fn set_automatic_start(
+        &self,
+        target: &MaintenanceTarget,
+        enabled: bool,
+        cancellation: &SshCancellationToken,
+        progress: &MaintenanceProgress<'_>,
+    ) -> Result<MaintenanceFacts, SshMaintenanceFailure>;
+
     /// Reads the service's policy, approved build and any recorded original operation on the
     /// bound route. Starts, stages, installs and stops nothing.
     fn observe(
@@ -151,7 +180,7 @@ pub(crate) trait SshMaintenanceBackend: Send + Sync {
         authority: MaintenanceAuthority,
         cancellation: &SshCancellationToken,
         progress: &MaintenanceProgress<'_>,
-    ) -> Result<MaintenanceFacts, SshMaintenanceFailure>;
+    ) -> Result<RemoteMaintenanceObservation, SshMaintenanceFailure>;
 
     /// Describes one destructive action and returns the service's confirmation for the exact
     /// observation it describes. Changes nothing.
@@ -221,6 +250,7 @@ const fn dispatches(request: &Request) -> bool {
             | Request::ApplyUpdate { .. }
             | Request::ApplyReturn { .. }
             | Request::Start { .. }
+            | Request::SetAutomaticStart { .. }
     )
 }
 
@@ -284,6 +314,28 @@ fn replaceable(candidate: &str, approved: &str) -> Result<(), SshMaintenanceFail
         ));
     }
     Ok(())
+}
+
+/// Classify only metadata from the shared verifier against the account's approved whole artifact.
+fn verified_update_offer(
+    facts: &MaintenanceFacts,
+    candidate: Option<&VerifiedArtifact>,
+) -> RemoteUpdateOffer {
+    let (true, Some(approved), Some(candidate)) =
+        (facts.status.installed, facts.approved.as_ref(), candidate)
+    else {
+        return RemoteUpdateOffer::Unavailable;
+    };
+    if candidate.digest() == approved.digest {
+        return RemoteUpdateOffer::UpToDate;
+    }
+    if replaceable(candidate.version(), &approved.version).is_err() {
+        return RemoteUpdateOffer::Unavailable;
+    }
+    RemoteUpdateOffer::Available(ServerCandidate {
+        version: candidate.version().to_owned(),
+        digest: candidate.digest().to_owned(),
+    })
 }
 
 /// Every route, discovery and artifact failure as one maintenance classification.
@@ -460,18 +512,72 @@ impl<A: SshProcessAdapter> NativeSshConnectBackend<A> {
 }
 
 impl<A: SshProcessAdapter> SshMaintenanceBackend for NativeSshConnectBackend<A> {
+    fn set_automatic_start(
+        &self,
+        target: &MaintenanceTarget,
+        enabled: bool,
+        cancellation: &SshCancellationToken,
+        progress: &MaintenanceProgress<'_>,
+    ) -> Result<MaintenanceFacts, SshMaintenanceFailure> {
+        let (route, _) = self.bound(
+            target,
+            MaintenanceAuthority::Requested,
+            cancellation,
+            progress,
+            None,
+        )?;
+        progress(MaintenancePhase::Dispatching);
+        match self.exchange(
+            &route,
+            &Request::SetAutomaticStart { enabled },
+            cancellation,
+            None,
+        )? {
+            Reply::Facts(facts)
+                if facts.status.enabled == enabled
+                    && facts.server == target.continuity.server
+                    && facts.account == target.continuity.account
+                    && facts.build == target.continuity.build =>
+            {
+                Ok(facts)
+            }
+            Reply::Refused { refusal } => Err(SshMaintenanceFailure::Refused(refusal)),
+            _ => Err(SshMaintenanceFailure::Unconfirmed),
+        }
+    }
+
     fn observe(
         &self,
         target: &MaintenanceTarget,
         authority: MaintenanceAuthority,
         cancellation: &SshCancellationToken,
         progress: &MaintenanceProgress<'_>,
-    ) -> Result<MaintenanceFacts, SshMaintenanceFailure> {
-        let (route, _) = self.bound(target, authority, cancellation, progress, None)?;
-        match self.exchange(&route, &Request::Observe, cancellation, None)? {
-            Reply::Facts(facts) => Ok(facts),
-            reply => Err(unexpected(reply)),
-        }
+    ) -> Result<RemoteMaintenanceObservation, SshMaintenanceFailure> {
+        let (route, discovery) = self.bound(target, authority, cancellation, progress, None)?;
+        // Reuse the artifact owner's full verification for the target this exact route validated.
+        // Verify before the account read, so local archive work cannot age facts then make them
+        // appear newer than a concurrent Check Status when this observation is published.
+        let candidate = discovery
+            .as_ref()
+            .and_then(|discovery| route.candidate(&discovery.target).ok());
+        let facts = match self.exchange(&route, &Request::Observe, cancellation, None)? {
+            Reply::Facts(facts) => facts,
+            reply => return Err(unexpected(reply)),
+        };
+        target
+            .continuity
+            .verify(&SshServerContinuity {
+                route: target.continuity.route,
+                account: facts.account,
+                build: facts.build.clone(),
+                server: facts.server,
+            })
+            .map_err(failure)?;
+        let update_offer = verified_update_offer(&facts, candidate.as_ref());
+        Ok(RemoteMaintenanceObservation {
+            facts,
+            update_offer,
+        })
     }
 
     fn prepare(
@@ -729,7 +835,248 @@ mod tests {
     fn artifacts() -> SshServerArtifacts {
         SshServerArtifacts::new(None)
     }
+
+    /// Real archive verification with the repository's public nonproduction signing seed.
+    /// The executable is inert fixture data: candidate inspection neither extracts nor runs it.
+    fn with_candidate(version: &str, run: impl FnOnce(&std::path::Path, &str)) {
+        use base64::Engine;
+        const TARGET: &str = "x86_64-unknown-linux-gnu";
+        assert_ne!(
+            build(),
+            "spaceterm",
+            "the fixture has no Release signing authority"
+        );
+        let root = std::env::temp_dir().join(format!(
+            "st-ssh-offer-{:x}",
+            u128::from_be_bytes(rand_bytes())
+        ));
+        struct Cleanup(std::path::PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _cleanup = Cleanup(root.clone());
+        let directory = root.join(TARGET);
+        std::fs::create_dir_all(&directory).unwrap();
+        let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        let mut archive = tar::Builder::new(encoder);
+        let manifest = serde_json::json!({"schema":1,"identity":build(),"target":TARGET,"commit":"a".repeat(40),"version":version,"protocol_major":1,"capabilities":["workspace_policy"]}).to_string();
+        let mut entries = vec![
+            ("build.json".to_owned(), manifest.into_bytes(), 0o644),
+            (
+                "bin/spaceterm-server".to_owned(),
+                b"inert signed executable".to_vec(),
+                0o755,
+            ),
+            (
+                "share/spaceterm/terminfo/x/xterm-spaceterm".to_owned(),
+                b"terminfo".to_vec(),
+                0o644,
+            ),
+        ];
+        for resource in serde_json::from_str::<Vec<String>>(include_str!(
+            "../../packaging/server-resources.json"
+        ))
+        .unwrap()
+        {
+            entries.push((resource, b"signed resource".to_vec(), 0o644));
+        }
+        for (name, bytes, mode) in entries {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(bytes.len() as u64);
+            header.set_mode(mode);
+            header.set_cksum();
+            archive
+                .append_data(&mut header, format!("server/{name}"), bytes.as_slice())
+                .unwrap();
+        }
+        let bytes = archive.into_inner().unwrap().finish().unwrap();
+        let trust: serde_json::Value = serde_json::from_str(include_str!(
+            "../../packaging/server-nonproduction-trust.json"
+        ))
+        .unwrap();
+        let seed = base64::engine::general_purpose::STANDARD
+            .decode(trust["seed"].as_str().unwrap())
+            .unwrap();
+        let key = ring::signature::Ed25519KeyPair::from_seed_unchecked(&seed).unwrap();
+        let digest = Sha256::digest(&bytes)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        std::fs::write(directory.join("artifact.tar.gz"), &bytes).unwrap();
+        std::fs::write(directory.join("artifact.sig"), key.sign(&bytes).as_ref()).unwrap();
+        std::fs::write(directory.join("artifact.sha256"), &digest).unwrap();
+        run(&root, &digest);
+    }
+
+    fn rand_bytes() -> [u8; 16] {
+        let mut bytes = [0; 16];
+        getrandom::fill(&mut bytes).unwrap();
+        bytes
+    }
+
+    #[gpui::test]
+    fn observation_compares_the_verified_whole_artifact_and_uses_its_own_version(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::ssh::server_process::testing::backend_with_mechanisms;
+        with_candidate("9.8.7", |root, digest| {
+            for (same, same_version) in [(false, false), (false, true), (true, true)] {
+                let mut current = facts();
+                let approved = current.approved.as_mut().unwrap();
+                approved.version = if same_version { "9.8.7" } else { "0.1.0" }.into();
+                approved.digest = if same { digest.into() } else { "1".repeat(64) };
+                let account = account(discovery(SERVER), Reply::Facts(current.clone()));
+                let (backend, _) = backend_with_mechanisms(
+                    cx.background_executor.clone(),
+                    account.clone(),
+                    SshServerArtifacts::new(Some(root.into())),
+                    Arc::new(
+                        crate::platform::unix_host_config_filesystem::UnixHostConfigFilesystem,
+                    ),
+                    Arc::new(crate::ssh::server_process::testing::FakeBootstrap),
+                );
+                let observed = backend
+                    .observe(
+                        &target(bound()),
+                        MaintenanceAuthority::Requested,
+                        &SshCancellationToken::default(),
+                        &silent,
+                    )
+                    .unwrap();
+                assert_eq!(observed.facts, current);
+                match (same, observed.update_offer) {
+                    (true, RemoteUpdateOffer::UpToDate) => {}
+                    (false, RemoteUpdateOffer::Available(candidate)) => {
+                        assert_eq!(candidate.version, "9.8.7");
+                        assert_eq!(candidate.digest, digest);
+                    }
+                    (_, offer) => panic!("unexpected verified offer: {offer:?}"),
+                }
+                assert_eq!(asked(&account), vec![Request::Observe]);
+                for effect in ["ssh-stage", "ssh-install", "ssh-prepare"] {
+                    assert_eq!(account.ran(effect), 0);
+                }
+            }
+        });
+    }
+
+    #[gpui::test]
+    fn invalid_or_downgrade_candidates_leave_valid_service_facts_without_an_offer(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::ssh::server_process::testing::backend_with_mechanisms;
+        with_candidate("0.1.0", |root, _| {
+            let mut current = facts();
+            current.approved.as_mut().unwrap().version = "0.2.0".into();
+            for corrupt in [false, true] {
+                if corrupt {
+                    std::fs::write(root.join("x86_64-unknown-linux-gnu/artifact.sig"), [0; 64])
+                        .unwrap();
+                }
+                let account = account(discovery(SERVER), Reply::Facts(current.clone()));
+                let (backend, _) = backend_with_mechanisms(
+                    cx.background_executor.clone(),
+                    account.clone(),
+                    SshServerArtifacts::new(Some(root.into())),
+                    Arc::new(
+                        crate::platform::unix_host_config_filesystem::UnixHostConfigFilesystem,
+                    ),
+                    Arc::new(crate::ssh::server_process::testing::FakeBootstrap),
+                );
+                let observed = backend
+                    .observe(
+                        &target(bound()),
+                        MaintenanceAuthority::Requested,
+                        &SshCancellationToken::default(),
+                        &silent,
+                    )
+                    .unwrap();
+                assert_eq!(observed.facts, current);
+                assert!(matches!(
+                    observed.update_offer,
+                    RemoteUpdateOffer::Unavailable
+                ));
+                assert_eq!(asked(&account), vec![Request::Observe]);
+                assert_eq!(account.ran("ssh-stage"), 0);
+            }
+        });
+    }
     fn silent(_: MaintenancePhase) {}
+
+    #[gpui::test]
+    fn automatic_start_uses_only_the_bound_account_maintenance_route(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        for stopped in [false, true] {
+            let mut expected = facts();
+            expected.status.enabled = false;
+            expected.status.stopped = stopped;
+            expected.status.running = !stopped;
+            let discovered = AccountDiscovery {
+                running: !stopped,
+                stopped,
+                ..discovery(SERVER)
+            };
+            let account = account(discovered, Reply::Facts(expected.clone()));
+            let (backend, _) =
+                backend(cx.background_executor.clone(), account.clone(), artifacts());
+            let observed = backend.set_automatic_start(
+                &target(bound()),
+                false,
+                &SshCancellationToken::default(),
+                &silent,
+            );
+            assert_eq!(observed, Ok(expected));
+            assert_eq!(
+                asked(&account),
+                vec![Request::SetAutomaticStart { enabled: false }]
+            );
+            for effect in ["ssh-prepare", "ssh-stage", "ssh-install"] {
+                assert_eq!(account.ran(effect), 0, "automatic start asked for {effect}");
+            }
+        }
+    }
+
+    #[gpui::test]
+    fn automatic_start_does_not_claim_success_for_an_unconfirmed_native_change(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let account = account(discovery(SERVER), Reply::AutomaticStartUnconfirmed);
+        let (backend, _) = backend(cx.background_executor.clone(), account.clone(), artifacts());
+        assert_eq!(
+            backend.set_automatic_start(
+                &target(bound()),
+                false,
+                &SshCancellationToken::default(),
+                &silent
+            ),
+            Err(SshMaintenanceFailure::Unconfirmed)
+        );
+        assert_eq!(
+            asked(&account),
+            vec![Request::SetAutomaticStart { enabled: false }]
+        );
+    }
+
+    #[gpui::test]
+    fn automatic_start_refuses_changed_authority_before_dispatch(cx: &mut gpui::TestAppContext) {
+        let account = account(discovery([8; 32]), Reply::Facts(facts()));
+        let (backend, _) = backend(cx.background_executor.clone(), account.clone(), artifacts());
+        assert_eq!(
+            backend.set_automatic_start(
+                &target(bound()),
+                false,
+                &SshCancellationToken::default(),
+                &silent
+            ),
+            Err(SshMaintenanceFailure::Changed(
+                ContinuityChange::ServerChanged
+            ))
+        );
+        assert!(asked(&account).is_empty());
+    }
 
     /// Every exchange proves the route, account, application identity and server before it asks
     /// for anything, so a destination that now reaches another one sends nothing.
@@ -1167,7 +1514,12 @@ mod tests {
             &silent,
         );
 
-        assert_eq!(observed.ok().map(|facts| facts.server), Some(SERVER));
+        let observed = observed.unwrap();
+        assert_eq!(observed.facts.server, SERVER);
+        assert!(matches!(
+            observed.update_offer,
+            RemoteUpdateOffer::Unavailable
+        ));
         for effect in ["ssh-prepare", "ssh-stage", "ssh-install"] {
             assert_eq!(account.ran(effect), 0, "observing asked for {effect}");
         }

@@ -90,6 +90,14 @@ fn run() -> Result<(), Box<dyn Error>> {
         ),
     )?;
     support::await_output(&mut first, lease, "BEGIN")?;
+    let automatic_start = service.status()?.enabled;
+    for enabled in [false, true, automatic_start] {
+        let status = service.set_automatic_start(enabled)?;
+        if !status.installed || !status.running || status.stopped || status.enabled != enabled {
+            return Err("automatic-start change altered the service lifecycle".into());
+        }
+        support::await_output(&mut first, lease, "BEGIN")?;
+    }
     drop(first);
     println!("Client disconnected; the server-owned command is running.");
     std::thread::sleep(Duration::from_secs(delay + 1));
@@ -118,6 +126,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         support::await_output(&mut second, resumed, "NATIVE-TOOLS-OK")?;
         println!("Service-launched shell resolved native tools and the login agent socket.");
     }
+    service.set_automatic_start(false)?;
     service.stop()?;
     if !matches!(
         spaceterm_server::LocalStartup::for_identity(&identity)?
@@ -129,7 +138,10 @@ fn run() -> Result<(), Box<dyn Error>> {
     if !service.status()?.stopped {
         return Err("Stop intent was lost".into());
     }
-    service.start()?;
+    let started = service.start()?;
+    if started.enabled || started.stopped || !started.running {
+        return Err("explicit Start changed the automatic-start preference".into());
+    }
     let mut fresh = client.connect_pane()?;
     let Reply::Restored { .. } = fresh.exchange(&Request::SelectPane {
         pane,
@@ -140,6 +152,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     else {
         return Err("restart did not retain lazy organization".into());
     };
+    service.set_automatic_start(automatic_start)?;
     service.stop()?;
     println!(
         "Stop survived client setup; explicit Start retained organization without restarting shells."

@@ -549,6 +549,11 @@ mod exercise {
                     && claim.device_name.as_str() == DEVICE_NAME,
                 "claim fingerprint or identity substituted",
             )?;
+            require(
+                claim.comparison_code().to_string()
+                    == response["comparison_code"].as_str().unwrap_or_default(),
+                "owner and device comparison codes differ",
+            )?;
             let mut wrong = claim.clone();
             wrong.server[0] ^= 1;
             require(
@@ -871,14 +876,13 @@ mod exercise {
             api(enrollment.finish())?.is_none(),
             "enrollment completed without exact owner approval",
         )?;
-        let mut retry = api(Enrollment::claim(
-            &invitation,
-            DEVICE_NAME.into(),
-            &credential,
-        ))?;
+        let code = enrollment
+            .comparison_code()
+            .ok_or("authenticated comparison missing")?;
+        let retry_code = api(enrollment.submit())?;
         require(
-            retry.claim_id() == enrollment.claim_id() && api(retry.finish())?.is_none(),
-            "exact enrollment retry changed the original claim or bypassed approval",
+            retry_code == code && api(enrollment.finish())?.is_none(),
+            "exact enrollment retry changed the comparison or bypassed approval",
         )?;
         require(
             matches!(
@@ -901,7 +905,7 @@ mod exercise {
         )?;
         send_json(
             output,
-            json!({"claim": enrollment.claim_id(), "fingerprint": credential.fingerprint()}),
+            json!({"claim": enrollment.claim_id(), "fingerprint": credential.fingerprint(), "comparison_code": code.to_string()}),
         )?;
         require(
             receive_json(input)?["approved"] == true,

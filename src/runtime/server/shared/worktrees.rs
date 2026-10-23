@@ -231,7 +231,7 @@ impl SharedWorkspaceHost {
             )),
             Read::SeedLocation { template } => {
                 if self.state.worktree_settings.is_none() {
-                    path_template::validate(&template).map_err(|_| Error::Location)?;
+                    crate::server_settings::validate_location_template(&template)?;
                     let mut next = self.state.clone();
                     next.worktree_settings = Some(Settings {
                         template,
@@ -289,11 +289,11 @@ impl SharedWorkspaceHost {
         )?;
         if let Operation::SetLocation { version, template } = operation {
             let checked = (|| {
-                path_template::validate(&template).map_err(|_| Error::Location)?;
                 let current = next.worktree_settings.clone().unwrap_or_default();
                 if version != current.version {
                     return Err(Error::Changed);
                 }
+                crate::server_settings::validate_location_template(&template)?;
                 next.worktree_settings = Some(Settings {
                     template,
                     version: current.version.checked_add(1).ok_or(Error::Unavailable)?,

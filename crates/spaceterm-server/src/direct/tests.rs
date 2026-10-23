@@ -82,13 +82,13 @@ impl Fixture {
                 },
             )
             .unwrap();
-        let wire::Answer::Claim(id) = answer else {
+        let wire::Answer::Claim(claim) = answer else {
             panic!()
         };
         let ManagementReply::Claims(claims) = self.management(Management::Claims).unwrap() else {
             panic!()
         };
-        claims.into_iter().find(|c| c.id == id).unwrap()
+        claims.into_iter().find(|c| c.id == claim.id).unwrap()
     }
     pub(crate) fn enroll(&self, credential: &DeviceCredential) -> PairedDevice {
         let invitation = self.invite();
@@ -172,6 +172,75 @@ fn exposure_defaults_off_and_retains_only_the_explicit_listener_across_restart()
     };
     assert_eq!(before, after);
     reopened.lock().unwrap().stop();
+}
+
+#[test]
+fn invitation_links_round_trip_the_endpoint_pin_secret_and_expiry() {
+    let fixture = Fixture::new();
+    fixture.enable();
+    let invitation = fixture.invite();
+    let text = invitation.display_text();
+    assert!(text.starts_with("spaceterm://pair/"));
+    let parsed = Invitation::parse(&text).unwrap();
+    assert_eq!(parsed.endpoint(), invitation.endpoint());
+    assert_eq!(parsed.server_pin(), invitation.server_pin());
+    assert_eq!(parsed.server_name(), invitation.server_name());
+    assert_eq!(parsed.id(), invitation.id());
+    assert_eq!(parsed.payload.token, invitation.payload.token);
+    assert!(parsed.expires_at_unix_seconds() <= wire::now().unwrap() + 300);
+
+    // Parsing a displayed link must preserve the capability, not mint another one.
+    let credential = DeviceCredential::generate().unwrap();
+    let claim = fixture.claim(&parsed, &credential);
+    fixture.management(Management::Approve(claim)).unwrap();
+    let other = DeviceCredential::generate().unwrap();
+    assert!(matches!(
+        fixture.authenticate(
+            &other,
+            wire::Action::Claim {
+                id: Enrollment::prepare(&invitation, "Second device".into(), &other)
+                    .unwrap()
+                    .claim_id(),
+                token: invitation.payload.token,
+                key: crypto::public(other.expose_bytes()).unwrap(),
+                name: "Second device".into(),
+            }
+        ),
+        Err(DirectError::AlreadyDecided)
+    ));
+}
+
+#[test]
+fn malformed_links_cannot_extend_the_enrollment_lifetime_or_replace_trust_with_dns() {
+    let fixture = Fixture::new();
+    fixture.enable();
+    let invitation = fixture.invite();
+    for (field, value) in [
+        ("expires", serde_json::json!(wire::now().unwrap() + 600)),
+        ("endpoint", serde_json::json!("wss://example.com/spaceterm")),
+        (
+            "endpoint",
+            serde_json::json!("ws://127.0.0.1:9231/spaceterm"),
+        ),
+        ("token", serde_json::json!(vec![0; 32])),
+    ] {
+        use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+        let mut payload = serde_json::to_value(&invitation.payload).unwrap();
+        payload[field] = value;
+        let text = format!(
+            "spaceterm://pair/{}",
+            URL_SAFE_NO_PAD.encode(serde_json::to_vec(&payload).unwrap())
+        );
+        assert!(
+            Invitation::parse(&text).is_err(),
+            "accepted changed {field}"
+        );
+    }
+    for suffix in ["?redirect=elsewhere", "#secret", "/extra"] {
+        assert!(
+            Invitation::parse(&format!("{}{suffix}", invitation.display_text().as_str())).is_err()
+        );
+    }
 }
 
 #[test]
@@ -361,6 +430,166 @@ fn prepared_enrollment_cancels_before_submission_and_fences_every_late_retry() {
 }
 
 #[test]
+fn both_devices_compare_the_first_authenticated_exchange_across_exact_retries() {
+    let fixture = Fixture::new();
+    fixture.enable();
+    let invitation = fixture.invite();
+    let credential = DeviceCredential::generate().unwrap();
+    let mut enrollment =
+        Enrollment::prepare(&invitation, "Joining device".into(), &credential).unwrap();
+    assert_eq!(enrollment.comparison_code(), None);
+    let server = fixture.serve_next();
+    let code = enrollment.submit().unwrap();
+    server.join().unwrap().unwrap();
+    let ManagementReply::Claims(claims) = fixture.management(Management::Claims).unwrap() else {
+        panic!()
+    };
+    let claim = &claims[0];
+    assert_eq!(Some(code), enrollment.comparison_code());
+    assert_eq!(code, claim.comparison_code());
+    assert_eq!(code.to_string().len(), 6);
+    assert!(code.to_string().bytes().all(|byte| byte.is_ascii_digit()));
+
+    // A new server nonce on retry must not change what the owner is approving.
+    let server = fixture.serve_next();
+    assert_eq!(enrollment.submit(), Ok(code));
+    server.join().unwrap().unwrap();
+    let mut changed = claim.clone();
+    changed.exchange_hash[0] ^= 1;
+    assert!(matches!(
+        fixture.management(Management::Approve(changed)),
+        Err(DirectError::Substituted)
+    ));
+    fixture
+        .management(Management::Approve(claim.clone()))
+        .unwrap();
+    let server = fixture.serve_next();
+    assert!(enrollment.finish().unwrap().is_some());
+    server.join().unwrap().unwrap();
+}
+
+#[test]
+fn a_pinned_enrollment_reply_cannot_substitute_the_invitation_identity() {
+    let fixture = Fixture::new();
+    fixture.enable();
+    let invitation = fixture.invite();
+    let other = fixture.invite();
+    let credential = DeviceCredential::generate().unwrap();
+    let mut enrollment =
+        Enrollment::prepare(&invitation, "Joining device".into(), &credential).unwrap();
+    let state = Arc::clone(&fixture.state);
+    let substituted = other.id();
+    let server = std::thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let tcp = loop {
+            if let Some((tcp, _generation)) = state.lock().unwrap().accept() {
+                break tcp;
+            }
+            assert!(Instant::now() < deadline, "WSS accept deadline");
+            std::thread::sleep(Duration::from_millis(2));
+        };
+        let (certificate, key, challenge) = {
+            let state = state.lock().unwrap();
+            let (certificate, key) = state.certificate();
+            (
+                certificate.to_vec(),
+                zeroize::Zeroizing::new(key.to_vec()),
+                state.challenge().unwrap(),
+            )
+        };
+        let mut ws = wss::accept(tcp, &certificate, &key).unwrap();
+        wss::send(&mut ws, &challenge).unwrap();
+        let authentication: wire::Authentication = wss::receive(&mut ws).unwrap();
+        let wire::Answer::Claim(mut claim) = state
+            .lock()
+            .unwrap()
+            .authenticate(&challenge, &authentication)
+            .unwrap()
+        else {
+            panic!()
+        };
+        // Change only the response at the network boundary. The signed claim,
+        // exchange hash, device identity and original deadline remain genuine.
+        claim.invitation_id = substituted;
+        wss::send(&mut ws, &Ok::<_, DirectError>(wire::Answer::Claim(claim))).unwrap();
+    });
+    assert_eq!(enrollment.submit(), Err(DirectError::Substituted));
+    server.join().unwrap();
+    assert_eq!(enrollment.comparison_code(), None);
+}
+
+#[test]
+fn losing_the_first_wss_reply_still_compares_the_original_authenticated_exchange() {
+    let fixture = Fixture::new();
+    fixture.enable();
+    let invitation = fixture.invite();
+    let credential = DeviceCredential::generate().unwrap();
+    let mut enrollment =
+        Enrollment::prepare(&invitation, "Original device".into(), &credential).unwrap();
+    let state = Arc::clone(&fixture.state);
+    let server = std::thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let tcp = loop {
+            if let Some((tcp, _generation)) = state.lock().unwrap().accept() {
+                break tcp;
+            }
+            assert!(Instant::now() < deadline, "WSS accept deadline");
+            std::thread::sleep(Duration::from_millis(2));
+        };
+        let (certificate, key, challenge) = {
+            let state = state.lock().unwrap();
+            let (certificate, key) = state.certificate();
+            (
+                certificate.to_vec(),
+                zeroize::Zeroizing::new(key.to_vec()),
+                state.challenge().unwrap(),
+            )
+        };
+        let mut ws = wss::accept(tcp, &certificate, &key).unwrap();
+        wss::send(&mut ws, &challenge).unwrap();
+        let authentication: wire::Authentication = wss::receive(&mut ws).unwrap();
+        let wire::Answer::Claim(claim) = state
+            .lock()
+            .unwrap()
+            .authenticate(&challenge, &authentication)
+            .unwrap()
+        else {
+            panic!()
+        };
+        // Lose only the reply at the network boundary, after real authentication.
+        drop(ws);
+        claim
+    });
+    assert_eq!(enrollment.submit(), Err(DirectError::Transport));
+    let original = server.join().unwrap();
+    assert_eq!(enrollment.comparison_code(), None);
+    let server = fixture.serve_next();
+    assert_eq!(enrollment.submit(), Ok(original.comparison_code()));
+    server.join().unwrap().unwrap();
+    fixture.management(Management::Approve(original)).unwrap();
+    let server = fixture.serve_next();
+    assert!(enrollment.finish().unwrap().is_some());
+    server.join().unwrap().unwrap();
+}
+
+#[test]
+fn a_returned_comparison_must_belong_to_an_exchange_this_enrollment_signed() {
+    let fixture = Fixture::new();
+    fixture.enable();
+    let invitation = fixture.invite();
+    let credential = DeviceCredential::generate().unwrap();
+    // Another live enrollment with this key claimed first. Its nonce and proofs
+    // are not evidence observed by this independently prepared enrollment.
+    let original = fixture.claim(&invitation, &credential);
+    let mut other = Enrollment::prepare(&invitation, "Test device".into(), &credential).unwrap();
+    assert_eq!(other.claim_id(), original.id);
+    let server = fixture.serve_next();
+    assert_eq!(other.submit(), Err(DirectError::Substituted));
+    server.join().unwrap().unwrap();
+    assert_eq!(other.comparison_code(), None);
+}
+
+#[test]
 fn prepared_submission_replays_only_the_same_claim_key_and_name_after_a_lost_reply() {
     let fixture = Fixture::new();
     fixture.enable();
@@ -473,6 +702,7 @@ fn approved_enrollment_and_cancellation_resolve_the_same_pairing_after_restart()
         panic!()
     };
     assert_eq!(paired.pairing, info.pairing);
+    let newer = fixture.enroll(&credential);
     let wire::Answer::Cancelled(Some(original)) = fixture
         .authenticate(
             &credential,
@@ -498,6 +728,25 @@ fn approved_enrollment_and_cancellation_resolve_the_same_pairing_after_restart()
         panic!()
     };
     assert_eq!(original, repeated);
+    assert!(matches!(
+        fixture.authenticate(
+            &credential,
+            wire::Action::Connect {
+                paired: newer.clone()
+            }
+        ),
+        Ok(wire::Answer::Connected)
+    ));
+    let ManagementReply::Devices(devices) = fixture.management(Management::Devices).unwrap() else {
+        panic!()
+    };
+    assert_eq!(
+        devices
+            .iter()
+            .map(|device| device.pairing)
+            .collect::<Vec<_>>(),
+        vec![newer.pairing]
+    );
     assert!(matches!(
         fixture.authenticate(&credential, wire::Action::Connect { paired }),
         Err(DirectError::Revoked)
@@ -575,6 +824,95 @@ fn a_revoked_credential_can_repeat_only_its_exact_original_without_affecting_a_n
         fixture.authenticate(&credential, wire::Action::Connect { paired: new }),
         Ok(wire::Answer::Connected)
     ));
+}
+
+#[test]
+fn only_a_fully_admitted_device_updates_its_retained_last_connection_time() {
+    fn devices(fixture: &Fixture) -> Vec<DeviceInfo> {
+        let ManagementReply::Devices(devices) = fixture.management(Management::Devices).unwrap()
+        else {
+            panic!()
+        };
+        devices
+    }
+    let mut fixture = Fixture::new();
+    fixture.enable();
+    let credential = DeviceCredential::generate().unwrap();
+    let target = fixture.enroll(&credential);
+    // Reusing a key on a separate pairing must not share connection metadata.
+    let untouched = fixture.enroll(&credential);
+    let mut expected = devices(&fixture);
+    assert!(
+        expected
+            .iter()
+            .all(|device| device.last_connected_at_unix_seconds.is_none())
+    );
+    let endpoint = fixture.endpoint();
+    let wrong_key = DeviceCredential::generate().unwrap();
+    let server = fixture.serve_next();
+    assert!(matches!(
+        DirectConnection::connect(&endpoint, &target, &wrong_key),
+        Err(DirectError::AuthenticationRefused)
+    ));
+    server.join().unwrap().unwrap();
+
+    let server = fixture.serve_next();
+    let mut connection = DirectConnection::connect(&endpoint, &target, &credential).unwrap();
+    assert!(
+        crate::protocol::admit_transport(
+            &mut connection,
+            (&untouched.client, &"Spoofed".into()),
+            &target.pin.server,
+            &target.pin.build,
+            &[1],
+        )
+        .is_err()
+    );
+    drop(connection);
+    assert_eq!(
+        server.join().unwrap(),
+        Err(ServerError::AuthenticationRefused)
+    );
+    assert_eq!(devices(&fixture), expected);
+
+    let before = wire::now().unwrap();
+    let server = fixture.serve_next();
+    let mut connection = DirectConnection::connect(&endpoint, &target, &credential).unwrap();
+    crate::protocol::admit_transport(
+        &mut connection,
+        (&target.client, &"Admitted device".into()),
+        &target.pin.server,
+        &target.pin.build,
+        &[1],
+    )
+    .unwrap();
+    let mut protocol = crate::protocol::Wire::terminal(&mut connection).unwrap();
+    protocol
+        .write(&crate::pane::Request::Direct(Management::Devices))
+        .unwrap();
+    let crate::pane::Reply::Direct(Ok(ManagementReply::Devices(observed))) =
+        protocol.read().unwrap()
+    else {
+        panic!()
+    };
+    let timestamp = observed
+        .iter()
+        .find(|device| device.pairing == target.pairing)
+        .unwrap()
+        .last_connected_at_unix_seconds
+        .unwrap();
+    assert!((before..=wire::now().unwrap()).contains(&timestamp));
+    expected
+        .iter_mut()
+        .find(|device| device.pairing == target.pairing)
+        .unwrap()
+        .last_connected_at_unix_seconds = Some(timestamp);
+    assert_eq!(observed, expected);
+    drop(connection);
+    let _ = server.join().unwrap();
+    fixture.state.lock().unwrap().stop();
+    fixture.state = host::State::open(&fixture.paths).unwrap();
+    assert_eq!(devices(&fixture), expected);
 }
 
 #[test]

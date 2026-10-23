@@ -1024,6 +1024,12 @@ impl WorkspaceSidebar {
         let new_workspace_menu = Tooltip::new("new-workspace-tooltip", new_workspace_tooltip)
             .debug_selector("new-workspace-tooltip")
             .attach(new_workspace_menu, TooltipTargetVisibility::Visible);
+        // Linux desktops have no global menu bar, so the footer carries the application commands
+        // a menu bar would.
+        #[cfg(target_os = "linux")]
+        let application_menu = Some(application_menu(presentation, footer_icon_size));
+        #[cfg(not(target_os = "linux"))]
+        let application_menu: Option<AnyElement> = None;
         let sidebar = div()
             .id("workspace-sidebar")
             .debug_selector(|| "workspace-sidebar".to_owned())
@@ -1093,6 +1099,8 @@ impl WorkspaceSidebar {
                             );
                         }),
                     )
+                    .children(application_menu)
+                    .child(div().flex_1())
                     .child(new_workspace_menu),
             )
             .child(scrollbar)
@@ -1972,6 +1980,96 @@ fn machine_menu_entries(section: &MachineSection) -> Vec<MenuEntry<MachineMenuCo
 }
 
 /// The footer creation menu's rows, built from the shared creation descriptors.
+/// An application command the Linux sidebar footer offers in place of a menu bar.
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ApplicationMenuCommand {
+    CommandPalette,
+    AddServer,
+    KeyboardShortcuts,
+    About,
+}
+
+#[cfg(target_os = "linux")]
+impl ApplicationMenuCommand {
+    const ALL: [Self; 4] = [
+        Self::CommandPalette,
+        Self::AddServer,
+        Self::KeyboardShortcuts,
+        Self::About,
+    ];
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::CommandPalette => "Command Palette\u{2026}",
+            Self::AddServer => "Add Server\u{2026}",
+            Self::KeyboardShortcuts => crate::keybindings::Command::KeyboardShortcuts.label(),
+            Self::About => crate::keybindings::Command::About.label(),
+        }
+    }
+
+    const fn selector(self) -> &'static str {
+        match self {
+            Self::CommandPalette => "application-menu-command-palette",
+            Self::AddServer => "application-menu-add-server",
+            Self::KeyboardShortcuts => "application-menu-keyboard-shortcuts",
+            Self::About => "application-menu-about",
+        }
+    }
+
+    /// The same application action the Shortcut and every other entry point carry.
+    fn action(self) -> Box<dyn gpui::Action> {
+        match self {
+            Self::CommandPalette => Box::new(crate::ui::application_commands::OpenCommandPalette),
+            Self::AddServer => Box::new(crate::ui::settings_window::AddServer),
+            Self::KeyboardShortcuts => crate::keybindings::Command::KeyboardShortcuts.action(),
+            Self::About => crate::keybindings::Command::About.action(),
+        }
+    }
+
+    /// Server and help entries start their own groups.
+    const fn starts_group(self) -> bool {
+        matches!(self, Self::KeyboardShortcuts)
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn application_menu(
+    presentation: &crate::desktop_profile::DesktopPresentation,
+    icon_size: Pixels,
+) -> AnyElement {
+    let mut entries = Vec::new();
+    for command in ApplicationMenuCommand::ALL {
+        if command.starts_group() {
+            entries.push(MenuEntry::separator());
+        }
+        let entry = MenuEntry::action(command.label(), command).debug_selector(command.selector());
+        entries.push(match presentation.shortcut(command.action().as_ref()) {
+            Some(shortcut) => entry.shortcut(shortcut),
+            None => entry,
+        });
+    }
+    let menu = Menu::new("application-menu", "SpaceTerm", entries)
+        .placement(AnchoredPlacementConfig::new(
+            AnchoredPlacement::Top,
+            AnchoredAlignment::Start,
+        ))
+        .icon_trigger(move |foreground| {
+            div()
+                .flex()
+                .child(Icon::new(IconName::Ellipsis, icon_size, foreground))
+                .into_any_element()
+        })
+        .debug_selector("application-menu")
+        .on_activate(|activation, window, cx| {
+            window.dispatch_action(activation.action().action(), cx);
+        });
+    Tooltip::new("application-menu-tooltip", "More")
+        .debug_selector("application-menu-tooltip")
+        .attach(menu, TooltipTargetVisibility::Visible)
+        .into_any_element()
+}
+
 fn new_workspace_menu_entries(
     presentation: &crate::desktop_profile::DesktopPresentation,
     remote_disabled: bool,

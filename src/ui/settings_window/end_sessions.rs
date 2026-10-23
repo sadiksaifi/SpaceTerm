@@ -7,6 +7,7 @@
 //! is resolved by that writer's recovery, never by another request.
 use super::server_list::ServerChoice;
 use super::*;
+use crate::ui::chrome_typography::ChromeTextStyleExt as _;
 use crate::ui::server_worktrees::Client;
 use crate::ui::shared_workspaces::SharedRefusalReason;
 use crate::ui::sidebar_window::form::CaptionTone;
@@ -22,7 +23,7 @@ pub(super) const END_SELECTOR: &str = "settings-server-end-all-sessions";
 pub(super) const END_PROGRESS_SELECTOR: &str = "settings-server-end-all-sessions-progress";
 pub(super) const END_CONFIRM_SELECTOR: &str = "settings-server-end-all-sessions-confirm";
 pub(super) const END_CANCEL_SELECTOR: &str = "settings-server-end-all-sessions-cancel";
-const LABEL: &str = "End All Sessions\u{2026}";
+const LABEL: &str = "End All\u{2026}";
 const CONFIRM: &str = "End All Sessions";
 
 /// What the selected server's writer allows now.
@@ -260,6 +261,8 @@ impl SettingsWindow {
     /// Follows the selected server's writer while the Servers section shows it. Selection,
     /// section, and connection changes call this; rendering never does.
     pub(super) fn sync_end_all_sessions(&mut self, cx: &mut Context<Self>) {
+        // The presented server's facts follow the same selection, section and connection changes.
+        self.sync_server_facts(cx);
         let target = if self.active_section == SettingsSectionId::Servers {
             self.selected_server()
         } else {
@@ -309,6 +312,25 @@ impl SettingsWindow {
                     .await;
             }
         }));
+    }
+
+    /// How many Terminal Sessions run on the selected server, as it last published them, or
+    /// `None` while it isn't connected.
+    pub(super) fn running_sessions(&self) -> Option<usize> {
+        match &self.end_all_sessions.availability {
+            Availability::Ready(close) => Some(live_sessions(close).len()),
+            _ => None,
+        }
+    }
+
+    /// Why the last End All didn't end what the person confirmed, under its button.
+    pub(super) fn end_all_sessions_error(&self) -> Option<SharedString> {
+        let state = &self.end_all_sessions;
+        if state.working || matches!(state.ended, None | Some(Ended::Accepted)) {
+            return None;
+        }
+        let (caption, _) = self.end_all_sessions_caption();
+        Some(caption)
     }
 
     pub(super) fn end_all_sessions_caption(&self) -> (SharedString, CaptionTone) {
@@ -477,8 +499,9 @@ impl SettingsWindow {
         cx.notify();
     }
 
-    /// The End All Sessions button, with progress beside it while the server answers. The button
-    /// stays focusable while working, so the keyboard keeps its place, and ignores activation.
+    /// How many Terminal Sessions run, and End All. The count is the server's own while it is
+    /// connected and the last one observed otherwise. End All stays focusable while working, so
+    /// the keyboard keeps its place, and ignores activation.
     pub(super) fn render_end_all_sessions(
         &mut self,
         appearance: &ChromeAppearance,
@@ -488,6 +511,18 @@ impl SettingsWindow {
         let working = state.working;
         let offered = self.end_all_sessions_offered();
         let server = self.selected_server_name();
+        let count = self.running_sessions().or_else(|| {
+            let key = self.selected_server()?.key();
+            super::server_selection::facts(&key, cx)?
+                .running_sessions
+                .and_then(|count| usize::try_from(count).ok())
+        });
+        let value = match count {
+            Some(0) => SharedString::new_static("None"),
+            Some(count) => SharedString::from(format!("{count} running")),
+            None => SharedString::new_static("Unknown"),
+        };
+        let colors = appearance.host_colors(spaceterm_ui::ControlHost::Card);
         let owner = cx.weak_entity();
         let button = Button::new(END_SELECTOR, LABEL)
             .variant(ButtonVariant::Outline)
@@ -508,6 +543,20 @@ impl SettingsWindow {
             .flex_row()
             .items_center()
             .gap(appearance.spacing(8.0))
+            .child(
+                div()
+                    .id("settings-server-sessions-count")
+                    .debug_selector(|| "settings-server-sessions-count".to_owned())
+                    .role(gpui::accesskit::Role::Status)
+                    .aria_label(SharedString::from(format!("Terminal Sessions: {value}")))
+                    .chrome_text(
+                        appearance
+                            .typography
+                            .style(crate::ui::chrome_typography::TextRole::Body),
+                    )
+                    .text_color(crate::ui::appearance::gpui_color(colors.text_secondary))
+                    .child(value.clone()),
+            )
             .when(working, |row| {
                 row.child(
                     ProgressRing::new(

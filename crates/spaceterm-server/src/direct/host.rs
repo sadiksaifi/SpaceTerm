@@ -37,7 +37,6 @@ struct PendingInvitation {
     used: bool,
 }
 struct PendingClaim {
-    invitation: ClaimId,
     claim: PairingClaim,
     decision: Option<Result<DeviceInfo, DirectError>>,
 }
@@ -54,9 +53,16 @@ pub(crate) struct State {
     uncertain: bool,
     generation: [u8; 32],
     released: std::collections::BTreeSet<[u8; 32]>,
+    network: Arc<dyn network::Adapter>,
 }
 impl State {
     pub(crate) fn open(paths: &crate::host::Paths) -> Result<Shared, DirectError> {
+        Self::open_with_network(paths, Arc::new(network::Native))
+    }
+    fn open_with_network(
+        paths: &crate::host::Paths,
+        network: Arc<dyn network::Adapter>,
+    ) -> Result<Shared, DirectError> {
         let store = storage::Store::open(paths)?;
         let record = store.load()?;
         let pin = store.pin(&record)?;
@@ -72,6 +78,7 @@ impl State {
             uncertain: false,
             generation: crypto::random()?,
             released: Default::default(),
+            network,
         };
         state.listen();
         Ok(Arc::new(Mutex::new(state)))
@@ -200,6 +207,33 @@ impl State {
             connection,
         })
     }
+    fn note_connection(&mut self, peer: &Peer<'_>) -> Result<(), DirectError> {
+        self.authorized_peer(peer)?;
+        let Some(now) = wire::now()
+            .ok()
+            .filter(|time| *time <= storage::MAX_CONNECTION_TIME)
+        else {
+            return Ok(());
+        };
+        let device = self
+            .record
+            .devices
+            .iter_mut()
+            .find(|device| device.info.pairing == peer.device.pairing)
+            .ok_or(DirectError::AuthenticationRefused)?;
+        if device
+            .info
+            .last_connected_at_unix_seconds
+            .is_some_and(|previous| previous >= now)
+        {
+            return Ok(());
+        }
+        device.info.last_connected_at_unix_seconds = Some(now);
+        // This locked snapshot changes metadata only. A failed metadata write must
+        // not fence existing connections, rotate exposure, or change authority.
+        let _ = self.store.save(&self.record);
+        Ok(())
+    }
     fn expire(&mut self) -> Result<(), DirectError> {
         let now = wire::now()?;
         self.invitations.retain(|v| v.expires > now);
@@ -207,23 +241,32 @@ impl State {
             .retain(|v| v.claim.expires_at_unix_seconds > now);
         Ok(())
     }
-    fn status(&self) -> DirectStatus {
+    fn server_name() -> String {
         let mut name = [0u8; 256];
         // SAFETY: gethostname writes at most the supplied byte length.
-        let server_name = if unsafe { libc::gethostname(name.as_mut_ptr().cast(), name.len()) } == 0
-        {
+        if unsafe { libc::gethostname(name.as_mut_ptr().cast(), name.len()) } == 0 {
             let count = name.iter().position(|b| *b == 0).unwrap_or(name.len());
             ClientName::from(String::from_utf8_lossy(&name[..count]).into_owned())
                 .as_str()
                 .to_owned()
         } else {
             String::new()
+        }
+    }
+    fn status(&self) -> DirectStatus {
+        let network = network::snapshot(self.network.as_ref());
+        let listener = match (&self.listener_state, &network) {
+            (ListenerState::Listening { addr }, Ok(snapshot)) if !snapshot.contains(&addr.ip()) => {
+                ListenerState::Failed(DirectError::InvalidAddress)
+            }
+            _ => self.listener_state.clone(),
         };
         DirectStatus {
             pin: self.pin.clone(),
             policy: self.record.policy.clone(),
-            server_name,
-            listener: self.listener_state.clone(),
+            server_name: Self::server_name(),
+            listener,
+            network_addresses: network.map(|snapshot| snapshot.addresses),
         }
     }
     pub(crate) fn manage(
@@ -262,7 +305,8 @@ impl State {
                 ManagementReply::Status(self.status())
             }
             Management::Invite => {
-                let endpoint = match self.listener_state {
+                let status = self.status();
+                let endpoint = match status.listener {
                     ListenerState::Listening { addr } => format!("wss://{addr}/spaceterm"),
                     _ => return Err(DirectError::Disabled),
                 };
@@ -274,7 +318,7 @@ impl State {
                     id: crypto::random()?,
                     endpoint,
                     pin: self.pin.clone(),
-                    server_name: self.status().server_name,
+                    server_name: status.server_name,
                     token: crypto::random()?,
                     expires: wire::now()? + wire::INVITATION_SECONDS,
                 };
@@ -291,7 +335,7 @@ impl State {
                 for claim in self
                     .claims
                     .iter_mut()
-                    .filter(|c| c.invitation == id && c.decision.is_none())
+                    .filter(|c| c.claim.invitation_id == id && c.decision.is_none())
                 {
                     claim.decision = Some(Err(DirectError::AlreadyDecided));
                 }
@@ -327,6 +371,7 @@ impl State {
                     client: crypto::random()?,
                     name: claim.device_name.clone(),
                     public_key: claim.device_public_key,
+                    last_connected_at_unix_seconds: None,
                 };
                 let mut next = self.record.clone();
                 next.devices.push(storage::Device {
@@ -455,7 +500,7 @@ impl State {
             return Err(DirectError::Disabled);
         }
         let nonce = crypto::random()?;
-        let server_name = self.status().server_name;
+        let server_name = Self::server_name();
         let proof = crypto::sign(
             &self.record.key,
             &wire::transcript(
@@ -573,7 +618,7 @@ impl State {
                     if let Some(Err(error)) = &pending.decision {
                         return Err(*error);
                     }
-                    return Ok(wire::Answer::Claim(*id));
+                    return Ok(wire::Answer::Claim(pending.claim.clone()));
                 }
                 if invitation.used {
                     return Err(DirectError::AlreadyDecided);
@@ -583,20 +628,19 @@ impl State {
                 }
                 let claim = PairingClaim {
                     id: *id,
+                    invitation_id: invitation.id,
                     server: self.pin.server,
                     device_public_key: *key,
                     device_name: name.clone(),
                     expires_at_unix_seconds: invitation.expires,
+                    exchange_hash: wire::exchange_hash(challenge, authentication)?,
                 };
-                let id = claim.id;
-                let invitation = invitation.id;
                 self.invitations[invitation_index].used = true;
                 self.claims.push(PendingClaim {
-                    invitation,
-                    claim,
+                    claim: claim.clone(),
                     decision: None,
                 });
-                Ok(wire::Answer::Claim(id))
+                Ok(wire::Answer::Claim(claim))
             }
             wire::Action::Finish { claim, key } => {
                 if let Some(device) = self.record.devices.iter().find(|d| d.claim == *claim) {
@@ -767,14 +811,180 @@ pub(crate) fn serve(
         )?
     };
     let (_, client, name) = crate::protocol::admit_direct_server(&mut bridge, &paired)?;
+    state
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .note_connection(&peer)?;
     crate::host::serve_admitted(&mut bridge, client, name, Some(peer), &environment)?;
     bridge.finish_reply()?;
     Ok(())
 }
 
 #[cfg(test)]
+mod network_tests;
+
+#[cfg(test)]
+mod connection_time_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn simultaneous_invitations_with_the_same_expiry_keep_exact_claim_and_approval_bindings() {
+        let fixture = super::super::tests::Fixture::new();
+        fixture.enable();
+        let mut first = fixture.invite();
+        let mut second = fixture.invite();
+        // Give both real invitations the same deadline regardless of a clock tick
+        // between issuance. Their independent secrets and identities stay intact.
+        let expires = wire::now().unwrap() + 300;
+        first.payload.expires = expires;
+        second.payload.expires = expires;
+        for invitation in &mut fixture.state.lock().unwrap().invitations {
+            invitation.expires = expires;
+        }
+        let credential = DeviceCredential::generate().unwrap();
+        let first_claim = fixture.claim(&first, &credential);
+        let second_claim = fixture.claim(&second, &credential);
+        assert_eq!(
+            first_claim.expires_at_unix_seconds,
+            second_claim.expires_at_unix_seconds
+        );
+        assert_ne!(first_claim.id, second_claim.id);
+        assert_eq!(first_claim.invitation_id, first.id());
+        assert_eq!(second_claim.invitation_id, second.id());
+        assert_ne!(first_claim.invitation_id, second_claim.invitation_id);
+        let mut substituted = first_claim.clone();
+        substituted.invitation_id = second.id();
+        assert!(matches!(
+            fixture.management(Management::Approve(substituted)),
+            Err(DirectError::Substituted)
+        ));
+        // Withdrawing one invitation cannot reject a claim from the other, even
+        // when device key, name and expiry are identical.
+        fixture
+            .management(Management::Withdraw(first.id()))
+            .unwrap();
+        assert!(matches!(
+            fixture.management(Management::Approve(first_claim)),
+            Err(DirectError::AlreadyDecided)
+        ));
+        assert!(matches!(
+            fixture.management(Management::Approve(second_claim)),
+            Ok(ManagementReply::Approved(_))
+        ));
+    }
+
+    #[test]
+    fn five_minute_invitations_stay_one_use_while_pending_and_after_denial() {
+        let fixture = super::super::tests::Fixture::new();
+        fixture.enable();
+        let before = wire::now().unwrap();
+        let invitation = fixture.invite();
+        let after = wire::now().unwrap();
+        assert!((before + 300..=after + 300).contains(&invitation.expires_at_unix_seconds()));
+        let original = DeviceCredential::generate().unwrap();
+        let claim = fixture.claim(&invitation, &original);
+        let other = DeviceCredential::generate().unwrap();
+        let prepared = Enrollment::prepare(&invitation, "Other device".into(), &other).unwrap();
+        for denied in [false, true] {
+            if denied {
+                fixture.management(Management::Reject(claim.id)).unwrap();
+            }
+            assert!(matches!(
+                fixture.authenticate(
+                    &other,
+                    wire::Action::Claim {
+                        id: prepared.claim_id(),
+                        token: invitation.payload.token,
+                        key: crypto::public(other.expose_bytes()).unwrap(),
+                        name: "Other device".into(),
+                    }
+                ),
+                Err(DirectError::AlreadyDecided)
+            ));
+        }
+        assert!(matches!(
+            fixture.authenticate(
+                &original,
+                wire::Action::Finish {
+                    claim: claim.id,
+                    key: claim.device_public_key,
+                }
+            ),
+            Err(DirectError::Rejected)
+        ));
+        assert!(
+            matches!(fixture.management(Management::Devices), Ok(ManagementReply::Devices(devices)) if devices.is_empty())
+        );
+    }
+
+    #[test]
+    fn signed_cancellation_after_expiry_and_lost_approval_revokes_only_the_created_pairing() {
+        let fixture = super::super::tests::Fixture::new();
+        fixture.enable();
+        let credential = DeviceCredential::generate().unwrap();
+        let invitation = fixture.invite();
+        let claim = fixture.claim(&invitation, &credential);
+        let ManagementReply::Approved(created) = fixture
+            .management(Management::Approve(claim.clone()))
+            .unwrap()
+        else {
+            panic!()
+        };
+        {
+            let mut state = fixture.state.lock().unwrap();
+            state.invitations[0].expires = 0;
+            state.claims[0].claim.expires_at_unix_seconds = 0;
+        }
+        // The client never observed Finish. Expiry removes transient state, while
+        // a later invitation grants the same key a separate pairing.
+        let newer = fixture.enroll(&credential);
+        assert!(
+            fixture
+                .state
+                .lock()
+                .unwrap()
+                .claims
+                .iter()
+                .all(|pending| pending.claim.id != claim.id)
+        );
+        let mut original = Enrollment::resume(
+            invitation.endpoint(),
+            invitation.server_pin().clone(),
+            claim.id,
+            &credential,
+        )
+        .unwrap();
+        let server = fixture.serve_next();
+        let receipt = original.cancel().unwrap().unwrap();
+        server.join().unwrap().unwrap();
+        assert_eq!(receipt.target, created.pairing);
+        let server = fixture.serve_next();
+        assert_eq!(original.cancel(), Ok(Some(receipt)));
+        server.join().unwrap().unwrap();
+        assert!(matches!(
+            fixture.authenticate(
+                &credential,
+                wire::Action::Connect {
+                    paired: newer.clone()
+                }
+            ),
+            Ok(wire::Answer::Connected)
+        ));
+        let ManagementReply::Devices(devices) = fixture.management(Management::Devices).unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(
+            devices
+                .iter()
+                .map(|device| device.pairing)
+                .collect::<Vec<_>>(),
+            vec![newer.pairing]
+        );
+    }
+
     #[test]
     fn uncertain_storage_recovery_fences_registration_from_the_prior_exposure_generation() {
         let fixture = super::super::tests::Fixture::new();

@@ -291,6 +291,13 @@ impl<I> ComboBoxItem<I> {
         self
     }
 
+    /// Draws a divider before this choice while the list shows every choice in order. A filtered
+    /// list ranks choices across groups, so it draws no choice dividers.
+    pub fn starts_group(mut self) -> Self {
+        self.starts_group = true;
+        self
+    }
+
     pub fn debug_selector(mut self, selector: impl Into<String>) -> Self {
         self.debug_selector = Some(selector.into());
         self
@@ -1056,6 +1063,7 @@ pub struct ComboBox<I: Clone + Eq + 'static, C: Clone + Eq + 'static = NoComboBo
     trigger: ComboBoxTrigger,
     custom_trigger_height: Option<Pixels>,
     tooltip: Option<Tooltip>,
+    accessibility_description: Option<SharedString>,
     debug_selector: Option<String>,
     on_accept: Option<AcceptanceHandler<I>>,
     on_command: Option<CommandHandler<C>>,
@@ -1128,6 +1136,7 @@ impl<I: Clone + Eq + 'static, C: Clone + Eq + 'static> ComboBox<I, C> {
             trigger: ComboBoxTrigger::Text,
             custom_trigger_height: None,
             tooltip: None,
+            accessibility_description: None,
             debug_selector: None,
             on_accept: None,
             on_command: None,
@@ -1270,6 +1279,13 @@ impl<I: Clone + Eq + 'static, C: Clone + Eq + 'static> ComboBox<I, C> {
     /// Adds help for the enabled, closed trigger without changing its layout or focus behavior.
     pub fn tooltip(mut self, tooltip: Tooltip) -> Self {
         self.tooltip = Some(tooltip);
+        self
+    }
+
+    /// Describes what the control does, for assistive technology, such as a hint that names a
+    /// command the popup also offers.
+    pub fn accessibility_description(mut self, description: impl Into<SharedString>) -> Self {
+        self.accessibility_description = Some(description.into());
         self
     }
 
@@ -1831,6 +1847,11 @@ impl<I: Clone + Eq + 'static, C: Clone + Eq + 'static> ComboBoxState<I, C> {
 
     fn recompute_matches(&mut self, reset_command_selection: bool) -> bool {
         let mut presented = self.items.to_vec();
+        if !self.query.is_empty() {
+            for item in &mut presented {
+                item.starts_group = false;
+            }
+        }
         let item_matches = match_items(&self.items, &self.query);
         let mut matches = item_matches
             .iter()
@@ -2509,6 +2530,9 @@ impl<I: Clone + Eq + 'static, C: Clone + Eq + 'static> RenderOnce for ComboBox<I
             .role(accesskit::Role::ComboBox)
             .aria_label(accessibility_name)
             .when_some(value, |trigger, value| trigger.aria_value(value))
+            .when_some(self.accessibility_description, |trigger, description| {
+                trigger.aria_description(description)
+            })
             .aria_expanded(open)
             .aria_disabled(!enabled)
             .when(enabled, |trigger| {

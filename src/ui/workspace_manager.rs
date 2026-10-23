@@ -4932,7 +4932,8 @@ impl WorkspaceManager {
             .inset_0()
             .children(self.remote_workspace_flow.iter().cloned())
             .children(self.pin_picker.iter().cloned())
-            .children(self.active_directory_recovery(cx));
+            .children(self.active_directory_recovery(cx))
+            .children(super::application_commands::overlay(window, cx));
         ModalLayer::new(super::window_shell::render(content, window, cx)).transient(transients)
     }
 }

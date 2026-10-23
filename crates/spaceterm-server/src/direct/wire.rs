@@ -64,7 +64,7 @@ pub(super) struct Authentication {
 #[derive(Serialize, Deserialize)]
 pub(super) enum Answer {
     Connected,
-    Claim(ClaimId),
+    Claim(PairingClaim),
     Enrollment(Option<PairedDevice>),
     Revoked(RevocationReceipt),
     Cancelled(Option<RevocationReceipt>),
@@ -93,6 +93,17 @@ pub(super) fn claim_id(
         pin,
         &invitation,
         &(token_digest, key),
+    )?))
+}
+pub(super) fn exchange_hash(
+    challenge: &Challenge,
+    authentication: &Authentication,
+) -> Result<[u8; 32], DirectError> {
+    Ok(crypto::hash(&transcript(
+        "pairing-comparison",
+        &challenge.pin,
+        &challenge.nonce,
+        &(&challenge.proof, &authentication.proof),
     )?))
 }
 pub(super) fn now() -> Result<u64, DirectError> {

@@ -273,6 +273,10 @@ fn system_reservation_text(
     presentation: &DesktopPresentation,
 ) -> String {
     let owner = match reason {
+        // SpaceTerm's own Command Palette keeps its standard Shortcut on every desktop.
+        SystemReservation::CommandPalette => {
+            crate::application_identity::ApplicationIdentity::current().display_name()
+        }
         #[cfg(feature = "developer-tools")]
         SystemReservation::DeveloperWorkbench | SystemReservation::AppearancePreview => {
             crate::application_identity::ApplicationIdentity::current().display_name()
@@ -311,6 +315,7 @@ fn system_reservation_label(reason: SystemReservation) -> &'static str {
         SystemReservation::Screenshot => "screenshots",
         SystemReservation::Help => "Help",
         SystemReservation::Settings => "Settings",
+        SystemReservation::CommandPalette => "the Command Palette",
         SystemReservation::KeyboardNavigation => "keyboard navigation",
         SystemReservation::DockHiding => "hiding the Dock",
         SystemReservation::Zoom => "Zoom",

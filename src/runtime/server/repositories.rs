@@ -368,6 +368,31 @@ fn read(
     cancellation: SshCancellationToken,
     sender: mpsc::SyncSender<(GitToolStatus, DirectoryFacts)>,
 ) {
+    let (git, home, status) = discover_git(&cancellation);
+    let runner: Arc<dyn RepositoryProgramRunner> = Arc::new(DeadlineRunner);
+    let readers = match (git, status) {
+        (Some(git), GitToolStatus::Ready(version)) => Some((
+            policy::local_read::LocalRepositoryReader::new(
+                Arc::clone(&runner),
+                Arc::new(
+                    crate::platform::repository_marker_reader::UnixRepositoryMarkerReader::new(),
+                ),
+                git.clone(),
+                home.clone(),
+                version,
+            ),
+            crate::worktrees::git::LocalWorktreeGit::new(runner, git, home, version),
+        )),
+        _ => None,
+    };
+    read_sources(sources, interests, readers, status, cancellation, sender);
+}
+
+pub(super) fn git_status(cancellation: &SshCancellationToken) -> GitToolStatus {
+    discover_git(cancellation).2
+}
+
+fn discover_git(cancellation: &SshCancellationToken) -> (Option<PathBuf>, PathBuf, GitToolStatus) {
     #[cfg(target_os = "macos")]
     let discovery = crate::platform::macos_repository_tools::MacosRepositoryToolDiscovery::new();
     #[cfg(target_os = "linux")]
@@ -392,24 +417,9 @@ fn read(
         &home,
         &[],
         Instant::now() + Duration::from_secs(5),
-        &cancellation,
+        cancellation,
     );
-    let readers = match (tools.git, status) {
-        (Some(git), GitToolStatus::Ready(version)) => Some((
-            policy::local_read::LocalRepositoryReader::new(
-                Arc::clone(&runner),
-                Arc::new(
-                    crate::platform::repository_marker_reader::UnixRepositoryMarkerReader::new(),
-                ),
-                git.clone(),
-                home.clone(),
-                version,
-            ),
-            crate::worktrees::git::LocalWorktreeGit::new(runner, git, home, version),
-        )),
-        _ => None,
-    };
-    read_sources(sources, interests, readers, status, cancellation, sender);
+    (tools.git, home, status)
 }
 
 type Readers = (

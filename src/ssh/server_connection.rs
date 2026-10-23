@@ -133,6 +133,8 @@ pub(crate) enum RemoteConnectionStatus {
         facts: SshServerFacts,
         /// When the observation finished, which the result describes rather than the present.
         at: std::time::SystemTime,
+        /// Monotonic ordering with validated maintenance observations in this client process.
+        observed_at: Instant,
     },
     Paused {
         reason: ContinuityChange,
@@ -423,6 +425,12 @@ impl SshServerConnections {
             })
             .unwrap_or(RemoteConnectionStatus::Inactive)
     }
+    /// Whether startup successfully listed the complete saved inventory, including an empty one.
+    /// Until then, an absent connection is not evidence that the person removed it.
+    pub(crate) fn retained_inventory_loaded(&self) -> bool {
+        self.inner.state.lock().is_ok_and(|state| state.loaded)
+    }
+
     /// Every saved connection with its status, by destination.
     pub(crate) fn connections(&self) -> Vec<(SshDestination, RemoteConnectionStatus)> {
         let mut connections: Vec<_> = self
@@ -688,6 +696,7 @@ impl SshServerConnections {
                                     availability: observation.availability,
                                     facts: observation.facts,
                                     at: std::time::SystemTime::now(),
+                                    observed_at: Instant::now(),
                                 }
                             };
                         });
@@ -1228,9 +1237,6 @@ fn load(owner: &Arc<Inner>) -> Result<(), SshIntentStoreError> {
         return Ok(());
     }
     let connections = owner.intents.load()?;
-    if let Ok(mut state) = owner.state.lock() {
-        state.loaded = true;
-    }
     for retained in connections {
         let Ok(mut state) = owner.state.lock() else {
             continue;
@@ -1257,6 +1263,10 @@ fn load(owner: &Arc<Inner>) -> Result<(), SshIntentStoreError> {
                 false,
             );
         }
+    }
+    if let Ok(mut state) = owner.state.lock() {
+        state.loaded = true;
+        notify(&mut state);
     }
     Ok(())
 }
@@ -1573,6 +1583,7 @@ mod tests {
             RemoteConnectionStatus::Inactive
         ));
         assert!(registry.connections().is_empty());
+        assert!(!registry.retained_inventory_loaded());
         assert_eq!(
             (
                 backend.calls.load(Ordering::SeqCst),
@@ -1580,6 +1591,19 @@ mod tests {
                 intents.writes.load(Ordering::SeqCst)
             ),
             (0, 0, 0)
+        );
+    }
+    #[test]
+    fn an_empty_saved_inventory_finishes_loading_without_connecting() {
+        let (registry, backend, _, _, _) = setup(false);
+        let changes = registry.subscribe();
+        registry.resume_retained();
+        eventually(|| registry.retained_inventory_loaded());
+        assert!(registry.connections().is_empty());
+        assert_eq!(backend.calls.load(Ordering::SeqCst), 0);
+        assert!(
+            changes.try_recv().is_ok(),
+            "completion wakes inventory readers"
         );
     }
     #[test]
@@ -1922,6 +1946,7 @@ mod tests {
         registry.resume_retained();
         eventually(|| registry.persistence_error() == Some(SshIntentStoreError::Unavailable));
         assert!(registry.connections().is_empty());
+        assert!(!registry.retained_inventory_loaded());
 
         *intents.fails.lock().unwrap() = None;
         let other = SshDestination::new("other-host".into()).unwrap();
@@ -1935,6 +1960,7 @@ mod tests {
             "the saved active connection resumes quietly once it loads"
         );
         eventually(|| registry.persistence_error().is_none());
+        assert!(registry.retained_inventory_loaded());
         assert_eq!(
             registry
                 .connections()
@@ -2057,6 +2083,7 @@ mod tests {
         registry.resume_retained();
         eventually(|| registry.connections().len() == 1);
         let writes = intents.writes.load(Ordering::SeqCst);
+        let before = Instant::now();
         registry.check(&destination());
         eventually(|| {
             matches!(
@@ -2068,12 +2095,29 @@ mod tests {
             )
         });
         let RemoteConnectionStatus::Checked {
-            facts: observed, ..
+            facts: observed,
+            observed_at,
+            at,
+            ..
         } = registry.status(&destination())
         else {
             unreachable!()
         };
         assert_eq!(observed, facts());
+        assert!(observed_at >= before && observed_at <= Instant::now());
+        let RemoteConnectionStatus::Checked {
+            observed_at: unchanged,
+            at: display_at,
+            ..
+        } = registry.status(&destination())
+        else {
+            unreachable!()
+        };
+        assert_eq!(
+            (unchanged, display_at),
+            (observed_at, at),
+            "snapshot reads do not renew either observation time"
+        );
         assert_eq!(backend.calls.load(Ordering::SeqCst), 0, "nothing connects");
         assert_eq!(backend.observations.load(Ordering::SeqCst), 1);
         assert_eq!(

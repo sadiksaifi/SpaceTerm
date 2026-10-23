@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex};
 struct Pending {
     windows: HashMap<gpui::AnyWindowHandle, WindowEffects>,
     activation: Option<Option<String>>,
+    invitation: Option<String>,
     quit: bool,
 }
 
@@ -23,6 +24,7 @@ trait DesktopEffects {
     fn attention(&mut self, window: gpui::AnyWindowHandle, requested: bool);
     fn activate(&mut self, token: Option<String>);
     fn quit(&mut self);
+    fn open_invitation(&mut self, link: String);
 }
 struct GpuiEffects<'a>(&'a mut App);
 impl DesktopEffects for GpuiEffects<'_> {
@@ -41,6 +43,9 @@ impl DesktopEffects for GpuiEffects<'_> {
     fn activate(&mut self, token: Option<String>) {
         crate::app::activate_default_window(self.0, token.as_deref());
     }
+    fn open_invitation(&mut self, link: String) {
+        crate::ui::settings_window::open_add_server(Some(link), None, self.0);
+    }
     /// Quit runs the application quit policy, including its confirmation.
     fn quit(&mut self) {
         self.0.dispatch_action(&crate::app::QuitApplication);
@@ -58,6 +63,9 @@ impl Pending {
         }
         if let Some(token) = self.activation {
             effects.activate(token);
+        }
+        if let Some(link) = self.invitation {
+            effects.open_invitation(link);
         }
         if self.quit {
             effects.quit();
@@ -89,6 +97,11 @@ impl DesktopEventSender {
     pub(super) fn activate(&self, token: Option<String>) {
         let token = token.filter(|value| !value.is_empty() && value.len() <= 4096);
         self.send(|pending| pending.activation = Some(token));
+    }
+    pub(super) fn open_invitation(&self, link: String) {
+        if crate::invitation_links::is_pairing_link(&link) {
+            self.send(|pending| pending.invitation = Some(link));
+        }
     }
     pub(super) fn quit(&self) {
         self.send(|pending| pending.quit = true);
@@ -171,6 +184,7 @@ mod tests {
                 self.attention.insert(window, requested);
             }
             fn activate(&mut self, _token: Option<String>) {}
+            fn open_invitation(&mut self, _link: String) {}
             fn quit(&mut self) {}
         }
         use crate::terminal::attention_runtime::{AudioBell, DockAttentionDriver};
@@ -648,6 +662,49 @@ mod tests {
         );
         assert_eq!(replacement.body, "Terminal requested attention (3)");
         assert!(closes.try_recv().is_err());
+    }
+
+    #[test]
+    fn linux_desktop_second_instance_delivers_the_invitation_to_the_existing_owner() {
+        use crate::platform::linux_application_instance::{
+            InstanceLaunch, forward_launch_if_secondary,
+        };
+        let private = PrivateBus::new();
+        let primary = private.client();
+        let secondary = private.client();
+        let identity = crate::application_identity::ApplicationIdentity::current();
+        let (sender, events) = super::LinuxDesktopEvents::new(identity);
+        assert!(
+            !forward_launch_if_secondary(
+                &primary,
+                identity,
+                InstanceLaunch::Activate,
+                sender.clone(),
+                None,
+                None,
+            )
+            .unwrap()
+        );
+        let link = "spaceterm://pair/fixture-invitation";
+        assert!(
+            forward_launch_if_secondary(
+                &secondary,
+                identity,
+                InstanceLaunch::Activate,
+                sender,
+                Some("invitation-launch".into()),
+                Some(link.into()),
+            )
+            .unwrap()
+        );
+        assert_eq!(
+            wait_activation(&events).as_deref(),
+            Some("invitation-launch")
+        );
+        assert_eq!(
+            events.pending.lock().unwrap().invitation.as_deref(),
+            Some(link)
+        );
     }
 
     #[test]

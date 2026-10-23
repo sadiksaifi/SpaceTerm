@@ -2,6 +2,8 @@
 use super::*;
 use std::os::unix::fs::DirBuilderExt;
 
+const UNIT_PROPERTIES: &str = "--property=LoadState,ActiveState,Result,MainPID,TasksCurrent,FragmentPath,DropInPaths,NeedDaemonReload";
+
 pub(super) struct UserService {
     directory: PathBuf,
     name: String,
@@ -71,16 +73,7 @@ impl UserService {
         self.manager("/usr/bin/systemctl", &arguments)
     }
     fn observation(&self) -> Result<Vec<(String, String)>, ServerError> {
-        let bytes = self.systemctl(&["show", &self.name,
-            "--property=LoadState,ActiveState,MainPID,TasksCurrent,FragmentPath,DropInPaths,NeedDaemonReload"])?;
-        let text = std::str::from_utf8(&bytes).map_err(|_| ServerError::ServiceUnavailable)?;
-        text.lines()
-            .map(|line| {
-                line.split_once('=')
-                    .map(|(key, value)| (key.into(), value.into()))
-                    .ok_or(ServerError::ServiceUnavailable)
-            })
-            .collect()
+        parse_observation(&self.systemctl(&["show", &self.name, UNIT_PROPERTIES])?)
     }
     fn linger(&self) -> Result<(), ServerError> {
         let bytes = command(
@@ -190,12 +183,55 @@ impl UserService {
             .map_err(|_| ServerError::StorageUnavailable)
     }
 }
+fn parse_observation(bytes: &[u8]) -> Result<Vec<(String, String)>, ServerError> {
+    let text = std::str::from_utf8(bytes).map_err(|_| ServerError::ServiceUnavailable)?;
+    text.lines()
+        .map(|line| {
+            line.split_once('=')
+                .map(|(key, value)| (key.into(), value.into()))
+                .ok_or(ServerError::ServiceUnavailable)
+        })
+        .collect()
+}
 fn property<'a>(observation: &'a [(String, String)], key: &str) -> Result<&'a str, ServerError> {
     observation
         .iter()
         .find(|(name, _)| name == key)
         .map(|(_, value)| value.as_str())
         .ok_or(ServerError::ServiceUnavailable)
+}
+
+fn loaded_definition(state: &[(String, String)], registration: &Path) -> Result<bool, ServerError> {
+    if property(state, "LoadState")? == "not-found" {
+        return Ok(false);
+    }
+    if property(state, "LoadState")? != "loaded"
+        || Path::new(property(state, "FragmentPath")?) != registration
+        || !property(state, "DropInPaths")?.is_empty()
+        || property(state, "NeedDaemonReload")? != "no"
+    {
+        return Err(ServerError::CleanupUnresolved);
+    }
+    Ok(true)
+}
+
+/// Start after the owning service has validated its registration, runtime and account authority.
+fn start_unit(
+    name: &str,
+    registration: &Path,
+    mut systemctl: impl FnMut(&[&str]) -> Result<Vec<u8>, ServerError>,
+) -> Result<(), ServerError> {
+    let state = parse_observation(&systemctl(&["show", name, UNIT_PROPERTIES])?)?;
+    if loaded_definition(&state, registration)?
+        && (property(&state, "ActiveState")? == "failed"
+            || property(&state, "Result")? == "start-limit-hit")
+    {
+        // Inactive units can be garbage-collected before reset-failed, which then refuses an
+        // unloaded unit. Reset only an observed failure; Start loads fresh registrations itself.
+        systemctl(&["reset-failed", name])?;
+    }
+    systemctl(&["start", name])?;
+    Ok(())
 }
 
 fn linger_command(uid: u32, authorization: LingerAuthorization) -> Command {
@@ -262,15 +298,8 @@ impl Supervisor for UserService {
         self.registration()
             .check(&self.contents(runtime)?, removing)?;
         let state = self.observation()?;
-        if property(&state, "LoadState")? == "not-found" {
+        if !loaded_definition(&state, &self.registration().path())? {
             return Ok(());
-        }
-        if property(&state, "LoadState")? != "loaded"
-            || Path::new(property(&state, "FragmentPath")?) != self.registration().path()
-            || !property(&state, "DropInPaths")?.is_empty()
-            || property(&state, "NeedDaemonReload")? != "no"
-        {
-            return Err(ServerError::CleanupUnresolved);
         }
         let object = format!(
             "/org/freedesktop/systemd1/unit/{}",
@@ -326,16 +355,17 @@ impl Supervisor for UserService {
         self.linger()
     }
     fn start(&self) -> Result<(), ServerError> {
-        self.startup(true)?;
+        start_unit(&self.name, &self.registration().path(), |args| {
+            self.systemctl(args)
+        })
+    }
+    fn set_automatic_start(&self, enabled: bool) -> Result<(), ServerError> {
+        self.startup(enabled)?;
         self.systemctl(&["daemon-reload"])?;
-        self.systemctl(&["reset-failed", &self.name])?;
-        self.systemctl(&["start", &self.name])?;
         Ok(())
     }
-    fn disable(&self) -> Result<(), ServerError> {
-        // Remove boot activation before queuing the stop. A failed stop still retains Stop intent.
-        self.startup(false)?;
-        self.systemctl(&["daemon-reload"])?;
+    fn stop(&self) -> Result<(), ServerError> {
+        self.set_automatic_start(false)?;
         self.systemctl(&["--no-block", "stop", &self.name])?;
         Ok(())
     }
@@ -389,6 +419,112 @@ impl Supervisor for UserService {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const UNIT: &str = "spaceterm-test.service";
+    const DEFINITION: &str = "/owned/spaceterm-test.service";
+
+    /// Substitute only the systemctl process boundary. The real start policy consumes its output.
+    struct StartManager {
+        observation: Result<Vec<u8>, ServerError>,
+        reset: Result<(), ServerError>,
+        start: Result<(), ServerError>,
+        calls: Vec<Vec<String>>,
+    }
+    impl StartManager {
+        fn new(active: &str, result: &str) -> Self {
+            Self {
+                observation: Ok(format!("LoadState=loaded\nActiveState={active}\nResult={result}\nMainPID=0\nTasksCurrent=0\nFragmentPath={DEFINITION}\nDropInPaths=\nNeedDaemonReload=no\n").into_bytes()),
+                // A fresh inactive unit can be garbage-collected between show and reset-failed.
+                reset: if active == "inactive" && result == "success" { Err(ServerError::ServiceUnavailable) } else { Ok(()) },
+                start: Ok(()),
+                calls: Vec::new(),
+            }
+        }
+        fn run(&mut self) -> Result<(), ServerError> {
+            start_unit(UNIT, Path::new(DEFINITION), |args| {
+                self.calls
+                    .push(args.iter().map(|arg| (*arg).to_owned()).collect());
+                assert_eq!(args.get(1), Some(&UNIT));
+                match args[0] {
+                    "show" => self.observation.clone(),
+                    "reset-failed" => self.reset.map(|()| Vec::new()),
+                    "start" => self.start.map(|()| Vec::new()),
+                    command => panic!("unexpected manager command: {command}"),
+                }
+            })
+        }
+        fn commands(&self) -> Vec<&str> {
+            self.calls.iter().map(|args| args[0].as_str()).collect()
+        }
+    }
+
+    #[test]
+    fn fresh_inactive_registration_starts_without_resetting_an_unloaded_unit() {
+        let mut manager = StartManager::new("inactive", "success");
+        assert_eq!(manager.run(), Ok(()));
+        assert_eq!(manager.commands(), ["show", "start"]);
+    }
+
+    #[test]
+    fn failed_and_start_limited_units_are_reset_before_one_start() {
+        for (active, result) in [
+            ("failed", "exit-code"),
+            ("failed", "start-limit-hit"),
+            ("inactive", "start-limit-hit"),
+        ] {
+            let mut manager = StartManager::new(active, result);
+            assert_eq!(manager.run(), Ok(()));
+            assert_eq!(manager.commands(), ["show", "reset-failed", "start"]);
+        }
+    }
+
+    #[test]
+    fn a_required_reset_failure_is_returned_without_starting() {
+        let mut manager = StartManager::new("failed", "start-limit-hit");
+        manager.reset = Err(ServerError::ServiceUnavailable);
+        assert_eq!(manager.run(), Err(ServerError::ServiceUnavailable));
+        assert_eq!(manager.commands(), ["show", "reset-failed"]);
+    }
+
+    #[test]
+    fn observation_and_start_failures_are_returned_without_retry() {
+        let mut manager = StartManager::new("inactive", "success");
+        manager.observation = Err(ServerError::ServiceUnavailable);
+        assert_eq!(manager.run(), Err(ServerError::ServiceUnavailable));
+        assert_eq!(manager.commands(), ["show"]);
+        let mut manager = StartManager::new("inactive", "success");
+        manager.start = Err(ServerError::StartupFailed);
+        assert_eq!(manager.run(), Err(ServerError::StartupFailed));
+        assert_eq!(manager.commands(), ["show", "start"]);
+    }
+
+    #[test]
+    fn changed_loaded_definitions_are_neither_reset_nor_started() {
+        for changed in [
+            String::from(
+                "LoadState=loaded\nActiveState=failed\nResult=start-limit-hit\nFragmentPath=/foreign/unit.service\nDropInPaths=\nNeedDaemonReload=no\n",
+            ),
+            format!(
+                "LoadState=loaded\nActiveState=failed\nResult=start-limit-hit\nFragmentPath={DEFINITION}\nDropInPaths=/foreign/override.conf\nNeedDaemonReload=no\n"
+            ),
+            format!(
+                "LoadState=loaded\nActiveState=failed\nResult=start-limit-hit\nFragmentPath={DEFINITION}\nDropInPaths=\nNeedDaemonReload=yes\n"
+            ),
+        ] {
+            let mut manager = StartManager::new("failed", "start-limit-hit");
+            manager.observation = Ok(changed.into_bytes());
+            assert_eq!(manager.run(), Err(ServerError::CleanupUnresolved));
+            assert_eq!(manager.commands(), ["show"]);
+        }
+    }
+
+    #[test]
+    fn an_unloaded_registration_starts_without_resetting_manager_state() {
+        let mut manager = StartManager::new("inactive", "success");
+        manager.observation = Ok(b"LoadState=not-found\n".to_vec());
+        assert_eq!(manager.run(), Ok(()));
+        assert_eq!(manager.commands(), ["show", "start"]);
+    }
 
     #[test]
     fn remote_linger_authorization_limits_sudo_to_the_requested_account_and_prompt_mode() {

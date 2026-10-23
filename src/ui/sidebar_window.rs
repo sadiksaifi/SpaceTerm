@@ -155,6 +155,7 @@ impl SidebarNavigation {
         self.focus_visible
     }
 
+    #[cfg(test)]
     pub(crate) fn has_visible_focus(&self, window: &Window) -> bool {
         self.list_focus.is_focused(window) && self.focus_visible
     }
@@ -648,20 +649,16 @@ fn render_navigation_list<T: SidebarOwner>(
 ) -> AnyElement {
     let active = owner.active_section();
     let navigation = owner.navigation();
-    let list_focused = navigation.has_visible_focus(window);
     let list_focus = navigation.list_focus.clone();
     let list_holds_focus = list_focus.is_focused(window);
     let any_available = entries.iter().any(|entry| entry.available);
     let panel_colors = appearance.host_colors(spaceterm_ui::ControlHost::Panel);
-    // AppKit source lists draw no focus ring. Keyboard focus emphasizes the selection in the
-    // accent color instead, and a list without focus shows it in the unfocused colors.
-    let emphasized = list_focused && appearance.active;
+    // As in System Settings, the current section takes the accent fill with white text while the
+    // window is key, whether or not the list holds focus, and a neutral fill while the window is
+    // inactive. AppKit source lists draw no focus ring.
+    let emphasized = appearance.active;
     let selection_colors = if emphasized {
         crate::ui::selection_chip::emphasized_selection_colors(panel_colors)
-    } else if appearance.active {
-        appearance
-            .unfocused_selection_colors(spaceterm_ui::ControlHost::Panel)
-            .clone()
     } else {
         panel_colors.clone()
     };
@@ -830,9 +827,8 @@ impl<'a> DetailHeading<'a> {
         }
     }
 
-    /// Window-wide controls beside the heading, outside window-movement ownership. Only the
-    /// Developer Workbench has any.
-    #[cfg(feature = "developer-tools")]
+    /// Controls beside the heading, outside window-movement ownership, such as the Settings
+    /// server picker or the Developer Workbench's window-wide controls.
     pub(crate) fn toolbar(mut self, toolbar: impl IntoElement) -> Self {
         self.toolbar = Some(toolbar.into_any_element());
         self

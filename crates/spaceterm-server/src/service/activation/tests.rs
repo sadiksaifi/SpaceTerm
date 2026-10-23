@@ -9,6 +9,7 @@ struct SupervisorFixture {
     running: AtomicBool,
     stops: AtomicUsize,
     starts: AtomicUsize,
+    automatic_start: AtomicBool,
     fail_stop: AtomicBool,
     fail_replace: AtomicBool,
 }
@@ -33,7 +34,12 @@ impl Supervisor for SupervisorFixture {
         self.starts.fetch_add(1, Ordering::SeqCst);
         Err(ServerError::StartupFailed)
     }
-    fn disable(&self) -> Result<(), ServerError> {
+    fn set_automatic_start(&self, enabled: bool) -> Result<(), ServerError> {
+        self.automatic_start.store(enabled, Ordering::SeqCst);
+        Ok(())
+    }
+    fn stop(&self) -> Result<(), ServerError> {
+        self.set_automatic_start(false)?;
         self.stops.fetch_add(1, Ordering::SeqCst);
         if self.fail_stop.load(Ordering::SeqCst) {
             return Err(ServerError::ServiceUnavailable);
@@ -88,6 +94,7 @@ fn with_service_identity(
                 running: AtomicBool::new(false),
                 stops: AtomicUsize::new(0),
                 starts: AtomicUsize::new(0),
+                automatic_start: AtomicBool::new(false),
                 fail_stop: AtomicBool::new(false),
                 fail_replace: AtomicBool::new(false),
             });
@@ -526,7 +533,7 @@ fn explicit_return_requires_never_ready_and_unchanged_saved_state_and_stays_stop
             Ok(ServiceStatus {
                 installed: true,
                 stopped: true,
-                enabled: false,
+                enabled: true,
                 running: false,
             }),
             "a completed return settles the failed candidate without another recovery"
@@ -536,7 +543,7 @@ fn explicit_return_requires_never_ready_and_unchanged_saved_state_and_stays_stop
             ServiceStatus {
                 installed: true,
                 stopped: true,
-                enabled: false,
+                enabled: true,
                 running: false
             }
         );

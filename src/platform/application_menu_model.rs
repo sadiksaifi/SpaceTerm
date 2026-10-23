@@ -67,6 +67,7 @@ pub(crate) fn file_menu() -> Menu {
         items: vec![
             MenuItem::action("New Workspace", NewWorkspace),
             MenuItem::action("New Remote Workspace", crate::ui::NewRemoteWorkspace),
+            MenuItem::action("Add Server…", crate::ui::settings_window::AddServer),
             MenuItem::action("Open Local Directory…", crate::ui::OpenLocalDirectory),
             MenuItem::action("Open Remote Directory…", crate::ui::OpenRemoteDirectory),
             MenuItem::action("Switch Workspace", SwitchWorkspace),
@@ -114,6 +115,11 @@ pub(crate) fn view_menu() -> Menu {
         disabled: false,
         name: "View".into(),
         items: vec![
+            MenuItem::action(
+                "Command Palette…",
+                crate::ui::application_commands::OpenCommandPalette,
+            ),
+            MenuItem::separator(),
             MenuItem::action("Toggle Sidebar", ToggleSidebar),
             MenuItem::action("Toggle Sidebar Focus", ToggleSidebarFocus),
             MenuItem::separator(),
@@ -286,7 +292,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            labels(&view_menu())[6..12],
+            labels(&view_menu())[8..14],
             [
                 "|",
                 "Scroll to Top",

@@ -294,13 +294,6 @@ impl UnpairAction {
             Self::Dismiss => "Dismiss",
         }
     }
-
-    pub(crate) const fn slot(self) -> &'static str {
-        match self {
-            Self::Resume => "resume",
-            Self::Dismiss => "dismiss",
-        }
-    }
 }
 
 /// How one pending request reads, and the steps it allows. A request the server confirmed says

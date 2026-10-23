@@ -1,162 +1,124 @@
-//! The Git section: whether Repository Status and Pull Requests show and the state of the tools
-//! that provide them. New Worktree Location is a Server Setting, which the selected server's
-//! field in the Servers section edits; this module supplies that field and its caption.
-
-use std::path::Path;
+//! The Git section. Repository Status and Pull Requests are Client Settings, and the GitHub CLI
+//! runs on this computer, so those rows ignore the server picker. "Git on <server>" follows the
+//! picker: its Git row reads the selected server's Git, and [`super::server_location`] edits its
+//! New Worktree Location.
 
 use gpui::prelude::*;
-use gpui::{AnyElement, App, Context, Entity, SharedString, Subscription, Window};
-use spaceterm_ui::{Switch, TextInput, TextInputEvent, TextInputVariant, ToggleSize};
+use gpui::{AnyElement, App, Context, SharedString, Text};
+use spaceterm_ui::{Switch, ToggleSize};
 
 use super::{SettingsRowId, SettingsWindow};
 use crate::repository_status::{GitHubCliStatus, GitToolStatus, ToolVersion};
 use crate::settings::git::GitPreferences;
-use crate::ui::appearance::ChromeAppearance;
+use crate::ui::appearance::{ChromeAppearance, gpui_color};
+use crate::ui::chrome_typography::{ChromeTextStyleExt as _, TextRole};
 use crate::ui::repository_status_store::RepositoryTools;
-use crate::ui::sidebar_window::form::{CaptionTone, badge};
-use crate::worktrees::path_template::{WorktreePathTemplateError, expand};
+use crate::ui::sidebar_window::form::badge;
+use crate::worktrees::path_template::WorktreePathTemplateError;
 
-/// The repository and branch the location row's example expands, so the example reads like a
-/// real Worktree without naming one of the person's repositories.
-const EXAMPLE_REPOSITORY: &str = "my-app";
-const EXAMPLE_BRANCH: &str = "feature/login";
+/// New Worktree Location's description, beside its field.
+pub(super) const WORKTREE_LOCATION_DESCRIPTION: &str = "Use {repository} and {branch}.";
 
-/// The field editing the selected server's New Worktree Location. The server location saves it
-/// on Return or when focus leaves, and only a valid template; Escape returns it to the saved one.
-pub(super) struct WorktreeLocationField {
-    pub(super) input: Entity<TextInput>,
-    /// Why the field's text cannot be saved, shown while the person edits it.
-    pub(super) problem: Option<WorktreePathTemplateError>,
-    _events: Subscription,
-}
-
-impl WorktreeLocationField {
-    pub(super) fn new(window: &mut Window, cx: &mut Context<SettingsWindow>) -> Self {
-        let selector = "settings-server-worktree-location";
-        let input = cx.new(|cx| {
-            TextInput::new(selector, "New Worktree Location", String::new(), window, cx)
-                .variant(TextInputVariant::Bare)
-                .input_length_limit(Some(1024))
-                .debug_selector(selector)
-        });
-        let events = cx.subscribe_in(
-            &input,
-            window,
-            |settings, input, event: &TextInputEvent, _, cx| {
-                settings.server_location_event(input, event, cx);
-            },
-        );
-        Self {
-            input,
-            problem: None,
-            _events: events,
-        }
-    }
-}
-
-/// What the person reads under the location field.
-pub(super) fn worktree_location_caption(
-    text: &str,
-    problem: Option<WorktreePathTemplateError>,
-) -> (SharedString, CaptionTone) {
-    let explanation = match problem {
-        None => {
-            let example = expand(text, Path::new("~"), EXAMPLE_REPOSITORY, EXAMPLE_BRANCH)
-                .map(|path| path.display().to_string())
-                .unwrap_or_default();
-            return (
-                format!(
-                    "Use {{repository}} and {{branch}}. For example: {}",
-                    example
-                )
-                .into(),
-                CaptionTone::Guidance,
-            );
-        }
-        Some(WorktreePathTemplateError::Empty) => "Enter a location.",
-        Some(WorktreePathTemplateError::TooLong) => "Use 1,024 characters or fewer.",
-        Some(WorktreePathTemplateError::NotAbsolute) => "Start the location with ~/ or /.",
-        Some(WorktreePathTemplateError::ParentSegment) => "Remove \"..\" from the location.",
-        Some(WorktreePathTemplateError::UnclosedBrace) => "Close each placeholder with }.",
-        Some(WorktreePathTemplateError::UnknownPlaceholder) => {
+/// Why New Worktree Location cannot be saved, shown under its field.
+pub(super) fn worktree_location_problem(problem: WorktreePathTemplateError) -> &'static str {
+    match problem {
+        WorktreePathTemplateError::Empty => "Enter a location.",
+        WorktreePathTemplateError::TooLong => "Use 1,024 characters or fewer.",
+        WorktreePathTemplateError::NotAbsolute => "Start the location with ~/ or /.",
+        WorktreePathTemplateError::ParentSegment => "Remove \"..\" from the location.",
+        WorktreePathTemplateError::UnclosedBrace => "Close each placeholder with }.",
+        WorktreePathTemplateError::UnknownPlaceholder => {
             "Use only the {repository} and {branch} placeholders."
         }
-        Some(WorktreePathTemplateError::MissingBranch) => {
+        WorktreePathTemplateError::MissingBranch => {
             "Include {branch}, so each Worktree gets its own folder."
         }
-    };
-    (SharedString::new_static(explanation), CaptionTone::Error)
+        WorktreePathTemplateError::InvalidCharacter => {
+            "Remove tabs, line breaks, and other control characters."
+        }
+        WorktreePathTemplateError::NotWritable => "The server can\u{2019}t write to this folder.",
+    }
 }
 
 /// A tool row's complete presentation, derived from status alone so every state reads one way.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct ToolPresentation {
-    pub(super) state: SharedString,
+    /// The installed version, shown before the badge.
+    pub(super) version: Option<SharedString>,
+    pub(super) state: &'static str,
     /// Names the state badge, so a test can tell each state apart by geometry.
     pub(super) state_selector: &'static str,
     pub(super) explanation: &'static str,
 }
 
+/// The selected server's Git, which runs Repository Status and Worktrees on that server.
 pub(super) fn git_presentation(status: GitToolStatus) -> ToolPresentation {
-    let (state, state_selector, explanation) = match status {
+    let (version, state, state_selector, explanation) = match status {
         GitToolStatus::Unknown => (
-            SharedString::new_static("Not Checked"),
+            None,
+            "Not checked",
             "settings-git-tool-state-unknown",
-            "SpaceTerm looks for Git while Repository Status is on.",
+            "SpaceTerm checks Git while this server is connected.",
         ),
         GitToolStatus::Ready(version) => (
-            version_text(version),
+            Some(version),
+            "Installed",
             "settings-git-tool-state-ready",
-            "SpaceTerm reads repositories with this Git. It changes one only when you create or remove a Worktree.",
+            "Repository Status and Worktrees use this Git.",
         ),
         GitToolStatus::TooOld(version) => (
-            version_text(version),
+            Some(version),
+            "Too old",
             "settings-git-tool-state-too-old",
             "Repository Status needs Git 2.15 or later.",
         ),
         GitToolStatus::NotFound => (
-            SharedString::new_static("Not Found"),
+            None,
+            "Not found",
             "settings-git-tool-state-not-found",
-            "Install Git to show Repository Status.",
+            "Install Git on this server to use Repository Status.",
         ),
     };
     ToolPresentation {
+        version: version.map(version_text),
         state,
         state_selector,
         explanation,
     }
 }
 
+/// The GitHub CLI on this computer, which holds the GitHub login Pull Requests use.
 pub(super) fn github_cli_presentation(status: GitHubCliStatus) -> ToolPresentation {
     let (state, state_selector, explanation) = match status {
         GitHubCliStatus::Unknown => (
-            "Not Checked",
+            "Not checked",
             "settings-github-cli-state-unknown",
-            "SpaceTerm looks for the GitHub CLI while Pull Requests are shown.",
+            "SpaceTerm checks the GitHub CLI while Pull Requests are shown.",
         ),
         GitHubCliStatus::SignedIn => (
-            "Logged In",
+            "Signed in",
             "settings-github-cli-state-signed-in",
-            "Pull requests come from your GitHub CLI login. SpaceTerm stores no tokens.",
+            "Pull Requests use your GitHub CLI login.",
         ),
         GitHubCliStatus::SignedOut => (
-            "Not Logged In",
+            "Not signed in",
             "settings-github-cli-state-signed-out",
             "Run \"gh auth login\" in a terminal.",
         ),
         GitHubCliStatus::NotFound => (
-            "Not Found",
+            "Not found",
             "settings-github-cli-state-not-found",
-            "Install the GitHub CLI to show pull requests.",
+            "Install the GitHub CLI to show Pull Requests.",
         ),
         GitHubCliStatus::Unavailable => (
             "Unavailable",
             "settings-github-cli-state-unavailable",
-            "The GitHub CLI didn't answer. SpaceTerm asks again when a window becomes active.",
+            "SpaceTerm asks the GitHub CLI again when a window becomes active.",
         ),
     };
     ToolPresentation {
-        state: SharedString::new_static(state),
+        version: None,
+        state,
         state_selector,
         explanation,
     }
@@ -166,10 +128,11 @@ fn version_text(version: ToolVersion) -> SharedString {
     format!("{}.{}.{}", version.major, version.minor, version.patch).into()
 }
 
-fn tools(cx: &App) -> RepositoryTools {
+fn github_cli(cx: &App) -> GitHubCliStatus {
     cx.try_global::<RepositoryTools>()
         .copied()
         .unwrap_or_default()
+        .github_cli
 }
 
 impl SettingsWindow {
@@ -218,8 +181,23 @@ impl SettingsWindow {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let presentation = self.git_tool_presentation(row, cx);
+        let selector = row.descriptor().selector;
+        let colors = appearance.host_colors(spaceterm_ui::ControlHost::Card);
         gpui::div()
-            .debug_selector(|| format!("{}-control", row.descriptor().selector))
+            .debug_selector(move || format!("{selector}-control"))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(appearance.spacing(6.0))
+            .children(presentation.version.map(|version| {
+                gpui::div()
+                    .chrome_text(appearance.typography.style(TextRole::Body))
+                    .text_color(gpui_color(colors.text_muted))
+                    .child(Text::new(
+                        SharedString::from(format!("{selector}-version")).into(),
+                        version,
+                    ))
+            }))
             .child(
                 gpui::div()
                     .debug_selector(move || presentation.state_selector.to_owned())
@@ -232,12 +210,12 @@ impl SettingsWindow {
             .into_any_element()
     }
 
+    /// The Git row follows the selected server. The GitHub CLI row is this computer's.
     pub(super) fn git_tool_presentation(&self, row: SettingsRowId, cx: &App) -> ToolPresentation {
-        let tools = tools(cx);
         if row == SettingsRowId::GitHubCli {
-            github_cli_presentation(tools.github_cli)
+            github_cli_presentation(github_cli(cx))
         } else {
-            git_presentation(tools.git)
+            git_presentation(self.server_git())
         }
     }
 
@@ -280,59 +258,36 @@ mod tests {
     use crate::repository_status::MINIMUM_GIT_VERSION;
 
     #[test]
-    fn every_git_state_reads_one_way() {
+    fn the_servers_git_shows_its_version_beside_whether_it_is_usable() {
         let ready = git_presentation(GitToolStatus::Ready(ToolVersion {
             major: 2,
             minor: 47,
             patch: 0,
         }));
-        assert_eq!(ready.state.as_ref(), "2.47.0");
+        assert_eq!(
+            (ready.version.as_deref(), ready.state),
+            (Some("2.47.0"), "Installed")
+        );
         let old = git_presentation(GitToolStatus::TooOld(ToolVersion {
             major: 2,
             minor: 14,
             patch: 6,
         }));
-        assert_eq!(old.state.as_ref(), "2.14.6");
         assert_eq!(
-            old.explanation,
-            "Repository Status needs Git 2.15 or later."
+            (old.version.as_deref(), old.explanation),
+            (Some("2.14.6"), "Repository Status needs Git 2.15 or later.")
         );
-        assert_eq!(
-            git_presentation(GitToolStatus::NotFound).explanation,
-            "Install Git to show Repository Status."
-        );
+        let missing = git_presentation(GitToolStatus::NotFound);
+        assert_eq!((missing.version, missing.state), (None, "Not found"));
     }
 
     #[test]
-    fn a_logged_out_github_cli_names_the_fix() {
+    fn a_signed_out_github_cli_names_the_fix() {
         let presentation = github_cli_presentation(GitHubCliStatus::SignedOut);
 
-        assert_eq!(presentation.state.as_ref(), "Not Logged In");
         assert_eq!(
-            presentation.explanation,
-            "Run \"gh auth login\" in a terminal."
-        );
-    }
-
-    #[test]
-    fn the_worktree_location_caption_shows_an_example_or_the_fix() {
-        use crate::worktrees::path_template::DEFAULT_WORKTREE_PATH_TEMPLATE;
-
-        assert_eq!(
-            worktree_location_caption(DEFAULT_WORKTREE_PATH_TEMPLATE, None),
-            (
-                SharedString::from(
-                    "Use {repository} and {branch}. For example: ~/.worktrees/my-app/feature-login"
-                ),
-                CaptionTone::Guidance
-            )
-        );
-        assert_eq!(
-            worktree_location_caption("~/wt", Some(WorktreePathTemplateError::MissingBranch)),
-            (
-                SharedString::from("Include {branch}, so each Worktree gets its own folder."),
-                CaptionTone::Error
-            )
+            (presentation.state, presentation.explanation),
+            ("Not signed in", "Run \"gh auth login\" in a terminal.")
         );
     }
 

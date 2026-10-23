@@ -1,25 +1,40 @@
-//! Direct network access and pairing in the Servers section, through a scripted server.
+//! Network Access, paired devices and unpair notices in the Servers section, through a scripted
+//! server and a real offline registry of direct connections.
 //!
 //! The scripted server stands in for the network boundary: it answers each direct network
-//! operation as the test sets and records what the Settings window asked of it.
+//! operation as the test sets and records what the Settings window asked of it. Invite Device's
+//! own journey is tested with its sheet in `ui::direct_pairing`; these tests cover what Servers
+//! does around it.
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
-use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext};
+use gpui::{Entity, KeyUpEvent, Keystroke, Modifiers, TestAppContext, VisualTestContext};
 use spaceterm_ui::a11y_testing::A11yTree;
 use zeroize::Zeroizing;
 
+use super::super::direct_routes::{UNPAIR_SELF_CONFIRM_SELECTOR, UNSAVED_CHANGES};
+use super::super::notices::NOTICE_SELECTOR;
+use super::super::server_card::MENU_SELECTOR;
+use super::super::server_list::LIST_SELECTOR;
+use super::super::server_selection;
 use super::super::servers::testing::connected;
 use super::super::servers::{LocalServerControl, OfferedServer, ServerConnection};
-use super::{ADDRESS_CANCEL_SELECTOR, ADDRESS_CONFIRM_SELECTOR, PAIR_SELECTOR, TURN_ON_SELECTOR};
+use super::{
+    ACCESS_SELECTOR, ADDRESS_SELECTOR, DEVICE_SELECTOR, INVITE_SELECTOR, REMOVE_CANCEL_SELECTOR,
+    REMOVE_CONFIRM_SELECTOR, TURN_OFF_CONFIRM_SELECTOR,
+};
 use crate::appearance::Appearance;
 use crate::direct_connections::{DirectConnections, DirectRouteStatus, UnpairState};
 use crate::local_server::ServerError;
-use crate::local_server::direct::{ClaimId, NetworkPolicy, PairingClaim};
+use crate::local_server::direct::{ClaimId, NetworkAddresses, NetworkPolicy, PairingClaim};
 use crate::platform::appearance::testing::RecordingAppearancePlatform;
 use crate::platform::window_movement::RecordingOperatingSystemWindowDragPlatform;
+use crate::server_context::{
+    LastKnownFacts, NetworkAccessFacts, NetworkListenerFacts, PairedDeviceFacts,
+    PairedDevicesFacts, ServerKey,
+};
 use crate::settings::SettingsDocument;
 use crate::settings::storage::testing::MemoryStorage;
 use crate::ui::appearance_runtime;
@@ -27,73 +42,108 @@ use crate::ui::direct_access::{
     AccessFailure, AccessState, Claim, Device, DirectAccessControl, Listener, OpenInvitation,
     unix_now,
 };
-use crate::ui::direct_pairing::{APPROVE_SELECTOR, COPY_SELECTOR, DONE_SELECTOR};
 use crate::ui::settings_window::SettingsWindow;
-use crate::ui::settings_window::direct_join::{
-    JOIN_RETRY_SELECTOR, WITHDRAW_CONFIRM_SELECTOR, WITHDRAW_FAILURE_SELECTOR, WITHDRAW_SELECTOR,
-};
-use crate::ui::settings_window::direct_routes::{
-    PENDING_SELECTOR, UNPAIR_SELF_CONFIRM_SELECTOR, UNPAIR_SELF_SELECTOR, UNSAVED_CHANGES,
-};
-use crate::ui::settings_window::server_list::ServerChoice;
-
-/// The direct route's place in the server list, after the local server.
-const DIRECT_ROUTE_ITEM: &str = "settings-server-list-1";
 
 const NAVIGATION_SELECTOR: &str = "settings-navigation-settings-section-servers";
 const SERVER: &str = "studio";
-const INVITATION: &str = "spaceterm-invitation-for-test";
+const INVITATION: &str = "spaceterm://pair/test-invitation";
 const INVITATION_ID: ClaimId = [7; 32];
 
 /// A server's direct network operations as the test scripts them.
 struct ScriptedAccess {
-    state: Mutex<AccessState>,
+    /// What Status answers. A failure stands for a server SpaceTerm can't reach.
+    status: Mutex<Result<AccessState, AccessFailure>>,
     /// The refusal the next policy change returns, leaving the state unchanged.
     refusal: Mutex<Option<AccessFailure>>,
     policies: Mutex<Vec<Option<NetworkPolicy>>>,
     claims: Mutex<Vec<Claim>>,
-    approved: Mutex<Vec<ClaimId>>,
-    withdrawn: Mutex<Vec<ClaimId>>,
+    devices: Mutex<Vec<Device>>,
+    /// Why the server can't list its devices, when it can't.
+    devices_failure: Mutex<Option<AccessFailure>>,
 }
 
 impl ScriptedAccess {
-    fn new(listener: Listener) -> Arc<Self> {
+    fn new(listener: Listener, addresses: Option<NetworkAddresses>) -> Arc<Self> {
         let policy = match listener {
             Listener::Listening(address) => Some(address),
             _ => None,
         };
-        Arc::new(Self {
-            state: Mutex::new(AccessState {
-                server_name: SERVER.into(),
-                policy,
-                listener,
-                server_fingerprint: "AAAA BBBB".into(),
-            }),
-            refusal: Mutex::default(),
-            policies: Mutex::default(),
-            claims: Mutex::default(),
-            approved: Mutex::default(),
-            withdrawn: Mutex::default(),
+        Self::with_state(AccessState {
+            server_name: SERVER.into(),
+            policy,
+            listener,
+            addresses,
         })
     }
 
-    fn listening() -> Arc<Self> {
-        Self::new(Listener::Listening(address("192.168.1.20:9231")))
+    fn with_state(state: AccessState) -> Arc<Self> {
+        Arc::new(Self {
+            status: Mutex::new(Ok(state)),
+            refusal: Mutex::default(),
+            policies: Mutex::default(),
+            claims: Mutex::default(),
+            devices: Mutex::default(),
+            devices_failure: Mutex::default(),
+        })
     }
 
+    /// SpaceTerm can no longer reach the server, as after a disconnect or a lost connection. The
+    /// server itself keeps its access and devices.
+    fn become_unreachable(&self) {
+        *self.status.lock().expect("status") = Err(AccessFailure::Unreachable);
+    }
+
+    /// Off, with two addresses on the server and the routing table preferring the second.
+    fn off() -> Arc<Self> {
+        Self::new(
+            Listener::Off,
+            Some(addresses(
+                &["192.168.1.20", "192.168.1.21"],
+                Some("192.168.1.21"),
+            )),
+        )
+    }
+
+    fn listening() -> Arc<Self> {
+        Self::new(
+            Listener::Listening(address("192.168.1.20:9231")),
+            Some(addresses(&["192.168.1.20"], Some("192.168.1.20"))),
+        )
+    }
+
+    fn policies(&self) -> Vec<Option<NetworkPolicy>> {
+        self.policies.lock().expect("policies").clone()
+    }
+
+    fn pair(&self, id: u8, name: &str, last_connected_at: Option<u64>) {
+        self.devices
+            .lock()
+            .expect("devices")
+            .push(device(id, name, last_connected_at));
+    }
+
+    fn unpair(&self, name: &str) {
+        self.devices
+            .lock()
+            .expect("devices")
+            .retain(|device| device.name.as_ref() != name);
+    }
+
+    /// A device named `name` claims the invitation Invite Device opened.
     fn claim(&self, id: u8, name: &str) {
         let claim = PairingClaim {
             id: [id; 32],
+            invitation_id: INVITATION_ID,
             server: [1; 32],
             device_public_key: [id; 32],
             device_name: name.into(),
             expires_at_unix_seconds: unix_now() + 300,
+            exchange_hash: [0; 32],
         };
         self.claims.lock().expect("claims").push(Claim {
             id: claim.id,
             name: name.to_owned().into(),
-            fingerprint: format!("FP{id}").into(),
-            expires_at: claim.expires_at_unix_seconds,
+            code: claim.comparison_code(),
             claim,
         });
     }
@@ -101,7 +151,7 @@ impl ScriptedAccess {
 
 impl DirectAccessControl for ScriptedAccess {
     fn status(&self) -> Result<AccessState, AccessFailure> {
-        Ok(self.state.lock().expect("state").clone())
+        self.status.lock().expect("status").clone()
     }
 
     fn set_policy(&self, policy: Option<NetworkPolicy>) -> Result<AccessState, AccessFailure> {
@@ -109,7 +159,8 @@ impl DirectAccessControl for ScriptedAccess {
         if let Some(refusal) = *self.refusal.lock().expect("refusal") {
             return Err(refusal);
         }
-        let mut state = self.state.lock().expect("state");
+        let mut status = self.status.lock().expect("status");
+        let state = status.as_mut().map_err(|failure| *failure)?;
         state.policy = policy.as_ref().map(|policy| policy.bind);
         state.listener = policy.map_or(Listener::Off, |policy| Listener::Listening(policy.bind));
         Ok(state.clone())
@@ -123,8 +174,7 @@ impl DirectAccessControl for ScriptedAccess {
         })
     }
 
-    fn withdraw(&self, invitation: ClaimId) -> Result<(), AccessFailure> {
-        self.withdrawn.lock().expect("withdrawn").push(invitation);
+    fn withdraw(&self, _: ClaimId) -> Result<(), AccessFailure> {
         Ok(())
     }
 
@@ -133,12 +183,9 @@ impl DirectAccessControl for ScriptedAccess {
     }
 
     fn approve(&self, claim: &PairingClaim) -> Result<Device, AccessFailure> {
-        self.approved.lock().expect("approved").push(claim.id);
-        Ok(Device {
-            pairing: [9; 32],
-            name: claim.device_name.as_str().to_owned().into(),
-            fingerprint: "FP".into(),
-        })
+        let paired = device(claim.id[0], claim.device_name.as_str(), None);
+        self.devices.lock().expect("devices").push(paired.clone());
+        Ok(paired)
     }
 
     fn reject(&self, _: ClaimId) -> Result<(), AccessFailure> {
@@ -146,11 +193,15 @@ impl DirectAccessControl for ScriptedAccess {
     }
 
     fn devices(&self) -> Result<Vec<Device>, AccessFailure> {
-        Ok(Vec::new())
+        if let Some(failure) = *self.devices_failure.lock().expect("devices failure") {
+            return Err(failure);
+        }
+        Ok(self.devices.lock().expect("devices").clone())
     }
 }
 
-/// The account-local server, whose direct network access the scripted operations answer.
+/// The account-local server, whose direct network access the scripted operations answer. It
+/// offers no account connection, so nothing here reaches a real server.
 struct ScriptedLocal(Arc<ScriptedAccess>);
 
 impl LocalServerControl for ScriptedLocal {
@@ -165,6 +216,102 @@ impl LocalServerControl for ScriptedLocal {
 
 fn address(text: &str) -> SocketAddr {
     text.parse().expect("a test address")
+}
+
+fn ip(text: &str) -> IpAddr {
+    text.parse().expect("a test address")
+}
+
+fn addresses(available: &[&str], suggested: Option<&str>) -> NetworkAddresses {
+    NetworkAddresses {
+        available: available.iter().map(|text| ip(text)).collect(),
+        suggested: suggested.map(ip),
+    }
+}
+
+fn policy(text: &str) -> Option<NetworkPolicy> {
+    Some(NetworkPolicy::new(address(text)).expect("a concrete address"))
+}
+
+fn device(id: u8, name: &str, last_connected_at: Option<u64>) -> Device {
+    Device {
+        pairing: [id; 32],
+        name: name.to_owned().into(),
+        fingerprint: fingerprint(id).into(),
+        last_connected_at,
+    }
+}
+
+/// A device fingerprint in the form the server writes: eight groups of eight hex digits.
+fn fingerprint(id: u8) -> String {
+    vec![format!("{id:02X}").repeat(4); 8].join(" ")
+}
+
+/// What a previous launch retained about a server that let MacBook connect at 192.168.1.20, an
+/// hour ago. It carries no general observation of the server.
+fn retained_on() -> LastKnownFacts {
+    let observed_at = unix_now() - 3600;
+    LastKnownFacts {
+        network_access: Some(NetworkAccessFacts {
+            observed_at,
+            server_name: SERVER.to_owned(),
+            policy: Some(address("192.168.1.20:9231")),
+            listener: NetworkListenerFacts::Listening(address("192.168.1.20:9231")),
+            addresses: None,
+        }),
+        paired_devices: Some(PairedDevicesFacts {
+            observed_at,
+            devices: vec![PairedDeviceFacts {
+                pairing: [3; 32],
+                name: "MacBook".to_owned(),
+                fingerprint: fingerprint(3),
+                last_connected_at: None,
+            }],
+        }),
+        ..LastKnownFacts::default()
+    }
+}
+
+/// Retains `facts` for `key`, as a previous launch's record does once it loads.
+fn retain(key: ServerKey, facts: LastKnownFacts, cx: &mut gpui::App) {
+    server_selection::remember(key, facts, cx);
+}
+
+/// Saves penguin as an SSH server the person last left disconnected, so Servers lists it and its
+/// retained facts stay, while nothing reaches any computer.
+fn save_penguin(cx: &mut TestAppContext) {
+    use super::super::server_list::tests::{Computers, SavedConnections, destination};
+    use crate::ssh::server_connection::{
+        RetainedSshConnection, SshConnectionIntentStore as _, SshServerConnections,
+    };
+
+    // The SSH registry loads its saved connections on its own thread.
+    cx.executor().allow_parking();
+    let saved = Arc::new(SavedConnections::default());
+    saved
+        .retain(RetainedSshConnection {
+            destination: destination("penguin"),
+            continuity: None,
+            active: false,
+        })
+        .expect("penguin is saved");
+    let connections = SshServerConnections::new(Arc::new(Computers::default()), saved);
+    connections.resume_retained();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while connections.connections().is_empty() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the saved connections load"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    cx.update(|cx| crate::ui::ssh_servers::install(connections, None, cx));
+}
+
+/// What SpaceTerm retains about this computer's server for the next launch.
+fn retained_here(cx: &mut VisualTestContext) -> LastKnownFacts {
+    cx.update(|_, cx| server_selection::facts(&ServerKey::Local, cx))
+        .unwrap_or_default()
 }
 
 /// Opens Settings on the Servers section, presenting the local server's direct network access.
@@ -225,6 +372,16 @@ fn click(selector: &str, cx: &mut VisualTestContext) {
     cx.run_until_parked();
 }
 
+/// Presses Return the way a keyboard does. A focused button acts when the key comes back up, so
+/// a key-down alone leaves the focused action unpressed.
+fn press_return(cx: &mut VisualTestContext) {
+    cx.simulate_keystrokes("enter");
+    cx.simulate_event(KeyUpEvent {
+        keystroke: Keystroke::parse("enter").expect("Return parses"),
+    });
+    cx.run_until_parked();
+}
+
 /// The selector the modal gives an action.
 fn modal_action(selector: &str) -> String {
     format!("modal-action-{selector}")
@@ -235,10 +392,10 @@ fn open(selector: &str, cx: &mut VisualTestContext) -> bool {
     cx.debug_bounds(selector).is_some()
 }
 
-/// Replaces the focused field's text with `text`.
-fn retype(text: &str, cx: &mut VisualTestContext) {
-    cx.simulate_keystrokes("end shift-home");
-    cx.simulate_input(text);
+/// Lets the rows read the server again, as they do every two seconds.
+fn reread(cx: &mut VisualTestContext) {
+    cx.executor()
+        .advance_clock(std::time::Duration::from_secs(2));
     cx.run_until_parked();
 }
 
@@ -259,156 +416,520 @@ fn settle(cx: &mut VisualTestContext, mut done: impl FnMut(&mut VisualTestContex
     }
 }
 
-/// Whether any Label the window publishes contains `text`.
-fn says(text: &str, cx: &mut VisualTestContext) -> bool {
-    A11yTree::read(cx).with_role("Label").iter().any(|node| {
-        node["aria"]["value"]
-            .as_str()
-            .is_some_and(|value| value.contains(text))
+/// Whether assistive technology reads `text` anywhere in the window: in a label, an error under
+/// a control, a card's footnote or a notice.
+fn reads(text: &str, cx: &mut VisualTestContext) -> bool {
+    let tree = A11yTree::read(cx);
+    ["Label", "Alert", "Note", "Status"].iter().any(|role| {
+        tree.with_role(role).iter().any(|node| {
+            ["label", "value"].iter().any(|field| {
+                node["aria"][field]
+                    .as_str()
+                    .is_some_and(|value| value.contains(text))
+            })
+        })
     })
 }
 
-#[gpui::test]
-fn turn_on_keeps_an_unusable_address_in_the_dialog_and_saves_only_the_confirmed_one(
-    cx: &mut TestAppContext,
-) {
-    let access = ScriptedAccess::new(Listener::Off);
-    let (_, cx) = open_servers(&access, cx);
+fn access_on(window: &Entity<SettingsWindow>, cx: &mut VisualTestContext) -> bool {
+    window.read_with(cx, |settings, _| settings.network_access_on())
+}
 
-    click(TURN_ON_SELECTOR, cx);
-    retype("0.0.0.0", cx);
-    click(&modal_action(ADDRESS_CONFIRM_SELECTOR), cx);
+/// The notice for the registry's first unpair request.
+fn unpair_notice(direct: &DirectConnections) -> String {
+    let key = direct
+        .pending_unpairs()
+        .first()
+        .expect("an unpair request")
+        .key;
+    let hex: String = key.iter().map(|byte| format!("{byte:02x}")).collect();
+    format!("{NOTICE_SELECTOR}-unpair-{hex}")
+}
 
-    assert!(
-        open(&modal_action(ADDRESS_CONFIRM_SELECTOR), cx),
-        "an address naming every interface stays in the dialog for the person to correct"
-    );
-    assert!(
-        access.policies.lock().expect("policies").is_empty(),
-        "nothing reaches the server until the address is one it can listen at"
-    );
-    assert!(
-        says("own IP addresses", cx),
-        "the dialog says what to enter"
-    );
-
-    retype("192.168.1.20", cx);
-    click(&modal_action(ADDRESS_CONFIRM_SELECTOR), cx);
-
-    assert_eq!(
-        *access.policies.lock().expect("policies"),
-        vec![Some(
-            NetworkPolicy::new(address("192.168.1.20:9231")).expect("a concrete address")
-        )],
-        "the server saves exactly the confirmed address at SpaceTerm's port"
-    );
-    assert!(!open(&modal_action(ADDRESS_CONFIRM_SELECTOR), cx));
+/// Selects the paired server the offline registry saved, after this computer's server.
+fn select_paired_server(cx: &mut VisualTestContext) {
+    let paired = format!("{LIST_SELECTOR}-1");
+    settle(cx, |cx| open(&paired, cx));
+    click(&paired, cx);
 }
 
 #[gpui::test]
-fn a_policy_the_server_couldnt_save_keeps_the_dialog_open_with_its_reason(cx: &mut TestAppContext) {
-    let access = ScriptedAccess::new(Listener::Off);
+fn turning_on_listens_at_the_address_the_server_suggests_on_spaceterms_port(
+    cx: &mut TestAppContext,
+) {
+    let access = ScriptedAccess::off();
+    let (window, cx) = open_servers(&access, cx);
+
+    click(ACCESS_SELECTOR, cx);
+
+    assert_eq!(access.policies(), vec![policy("192.168.1.21:9231")]);
+    assert!(access_on(&window, cx));
+    assert!(reads("Listening on 192.168.1.21:9231.", cx));
+}
+
+#[gpui::test]
+fn a_change_the_server_couldnt_save_leaves_access_off_and_says_why(cx: &mut TestAppContext) {
+    let access = ScriptedAccess::off();
     *access.refusal.lock().expect("refusal") = Some(AccessFailure::Storage);
     let (window, cx) = open_servers(&access, cx);
 
-    click(TURN_ON_SELECTOR, cx);
-    retype("192.168.1.20", cx);
-    click(&modal_action(ADDRESS_CONFIRM_SELECTOR), cx);
+    click(ACCESS_SELECTOR, cx);
 
     assert!(
-        open(&modal_action(ADDRESS_CONFIRM_SELECTOR), cx),
-        "the dialog stays until the server confirms the save"
+        !access_on(&window, cx),
+        "the row reports the server as it is"
     );
-    assert!(says("couldn\u{2019}t save the change", cx));
-    let listening = window.read_with(cx, |settings, _| settings.direct_access.listening());
-    assert!(!listening, "the row keeps reporting the server as it is");
-
-    click(&modal_action(ADDRESS_CANCEL_SELECTOR), cx);
-    assert!(!open(&modal_action(ADDRESS_CONFIRM_SELECTOR), cx));
+    assert!(reads("couldn\u{2019}t save the change", cx));
 }
 
 #[gpui::test]
-fn pair_device_copies_the_invitation_only_when_the_person_asks(cx: &mut TestAppContext) {
-    let access = ScriptedAccess::listening();
+fn a_server_without_a_reachable_address_cant_be_turned_on_and_says_so(cx: &mut TestAppContext) {
+    let access = ScriptedAccess::new(Listener::Off, Some(addresses(&[], None)));
     let (_, cx) = open_servers(&access, cx);
 
-    click(PAIR_SELECTOR, cx);
+    click(ACCESS_SELECTOR, cx);
 
-    assert!(open(COPY_SELECTOR, cx), "the invitation is ready to copy");
-    assert_eq!(
-        cx.read_from_clipboard().and_then(|item| item.text()),
-        None,
-        "showing an invitation never overwrites the clipboard"
-    );
-
-    click(COPY_SELECTOR, cx);
-
-    assert_eq!(
-        cx.read_from_clipboard().and_then(|item| item.text()),
-        Some(INVITATION.to_owned())
-    );
+    assert!(access.policies().is_empty(), "nothing reaches the server");
+    assert!(reads(
+        "studio has no network address other devices can reach.",
+        cx
+    ));
 }
 
 #[gpui::test]
-fn approve_pairs_exactly_the_claim_the_person_saw(cx: &mut TestAppContext) {
-    let access = ScriptedAccess::listening();
-    access.claim(3, "MacBook");
-    access.claim(4, "Unexpected");
+fn addresses_the_server_couldnt_read_offer_no_guess_and_say_so(cx: &mut TestAppContext) {
+    let access = ScriptedAccess::new(Listener::Off, None);
     let (_, cx) = open_servers(&access, cx);
 
-    click(PAIR_SELECTOR, cx);
-    click(&format!("{APPROVE_SELECTOR}-0"), cx);
+    click(ACCESS_SELECTOR, cx);
 
-    assert_eq!(*access.approved.lock().expect("approved"), vec![[3; 32]]);
     assert!(
-        says(
-            "\u{201C}MacBook\u{201D} is paired with \u{201C}studio\u{201D}.",
-            cx
-        ),
-        "the dialog names the paired device and server"
+        access.policies().is_empty(),
+        "SpaceTerm never substitutes an address the server didn't report"
     );
+    assert!(reads(
+        "studio couldn\u{2019}t read its network addresses.",
+        cx
+    ));
 }
 
-/// A pending request in Pair Device is in view with its answers, even when the
-/// window is too short for the whole dialog.
 #[gpui::test]
-fn a_pairing_request_is_in_view_without_scrolling(cx: &mut TestAppContext) {
-    let access = ScriptedAccess::listening();
-    access.claim(3, "MacBook");
+fn a_listening_address_that_disappeared_asks_for_another_and_keeps_the_port(
+    cx: &mut TestAppContext,
+) {
+    let access = ScriptedAccess::with_state(AccessState {
+        server_name: SERVER.into(),
+        policy: Some(address("192.168.1.20:9300")),
+        listener: Listener::AddressGone,
+        addresses: Some(addresses(
+            &["192.168.1.21", "192.168.1.22"],
+            Some("192.168.1.21"),
+        )),
+    });
     let (_, cx) = open_servers(&access, cx);
+    assert!(reads(
+        "192.168.1.20 is no longer on studio. Choose another address.",
+        cx
+    ));
 
-    click(PAIR_SELECTOR, cx);
-    cx.simulate_resize(gpui::size(gpui::px(720.0), gpui::px(320.0)));
+    click(ADDRESS_SELECTOR, cx);
+    click("192.168.1.22", cx);
+
+    assert_eq!(access.policies(), vec![policy("192.168.1.22:9300")]);
+    assert!(reads("Listening on 192.168.1.22:9300.", cx));
+}
+
+#[gpui::test]
+fn turning_off_asks_first_and_escape_changes_nothing(cx: &mut TestAppContext) {
+    let access = ScriptedAccess::listening();
+    let (window, cx) = open_servers(&access, cx);
+
+    click(ACCESS_SELECTOR, cx);
+    assert!(open(&modal_action(TURN_OFF_CONFIRM_SELECTOR), cx));
+    cx.simulate_keystrokes("escape");
     cx.run_until_parked();
 
-    let viewport = cx
-        .debug_bounds("modal-body-viewport")
-        .expect("Pair Device shows its body");
-    let approve = cx
-        .debug_bounds(Box::leak(format!("{APPROVE_SELECTOR}-0").into_boxed_str()))
-        .expect("the request offers Approve");
+    assert!(access.policies().is_empty());
+    assert!(access_on(&window, cx));
+
+    click(ACCESS_SELECTOR, cx);
+    click(&modal_action(TURN_OFF_CONFIRM_SELECTOR), cx);
+
+    assert_eq!(access.policies(), vec![None]);
+    assert!(!access_on(&window, cx));
+}
+
+#[gpui::test]
+fn a_server_spaceterm_has_never_read_shows_its_access_as_unknown(cx: &mut TestAppContext) {
+    let access = ScriptedAccess::off();
+    access.become_unreachable();
+    let (window, cx) = open_servers(&access, cx);
+
     assert!(
-        viewport.top() <= approve.top() && approve.bottom() <= viewport.bottom(),
-        "Approve is inside the dialog's visible body: {approve:?} within {viewport:?}"
+        !open(ACCESS_SELECTOR, cx),
+        "no switch claims the server is off when nothing says so"
+    );
+    assert!(!access_on(&window, cx));
+    assert!(reads("Unknown", cx));
+    assert!(reads("to change its network access.", cx));
+    assert!(
+        !reads("Shown values are from", cx),
+        "nothing was read, so nothing is shown as last known"
     );
 }
 
 #[gpui::test]
-fn closing_pair_device_withdraws_its_invitation(cx: &mut TestAppContext) {
+fn a_server_spaceterm_loses_keeps_its_last_known_access_and_devices(cx: &mut TestAppContext) {
     let access = ScriptedAccess::listening();
+    access.pair(3, "MacBook", None);
+    let (window, cx) = open_servers(&access, cx);
+    assert!(reads("Devices: 1 paired", cx));
+
+    access.become_unreachable();
+    reread(cx);
+
+    assert!(
+        access_on(&window, cx),
+        "losing the connection changes nothing on the server, so access still reads as on"
+    );
+    assert!(open(ACCESS_SELECTOR, cx));
+    assert!(reads("Devices: 1 paired", cx));
+    assert!(open(&format!("{DEVICE_SELECTOR}-0"), cx));
+    assert!(reads("Shown values are from", cx));
+    assert!(
+        !reads("Listening on", cx),
+        "a server SpaceTerm can't reach isn't reported as listening now"
+    );
+}
+
+#[gpui::test]
+fn a_server_last_read_as_off_stays_off_and_says_when(cx: &mut TestAppContext) {
+    let access = ScriptedAccess::off();
+    let (window, cx) = open_servers(&access, cx);
+
+    access.become_unreachable();
+    reread(cx);
+
+    assert!(open(ACCESS_SELECTOR, cx), "the last reading still shows");
+    assert!(!access_on(&window, cx));
+    assert!(reads("Shown values are from", cx));
+}
+
+#[gpui::test]
+fn network_access_controls_change_nothing_while_the_server_is_out_of_reach(
+    cx: &mut TestAppContext,
+) {
+    let access = ScriptedAccess::listening();
+    access.pair(3, "MacBook", None);
+    let (_, cx) = open_servers(&access, cx);
+    access.become_unreachable();
+    reread(cx);
+
+    click(ACCESS_SELECTOR, cx);
+    assert!(
+        !open(&modal_action(TURN_OFF_CONFIRM_SELECTOR), cx),
+        "Turn Off isn't offered"
+    );
+    click(INVITE_SELECTOR, cx);
+    assert!(
+        !open(crate::ui::direct_pairing::COPY_SELECTOR, cx),
+        "no invitation opens"
+    );
+    click(&format!("{DEVICE_SELECTOR}-0-remove"), cx);
+    assert!(
+        !open(&modal_action(REMOVE_CONFIRM_SELECTOR), cx),
+        "Remove isn't offered"
+    );
+    assert!(access.policies().is_empty());
+}
+
+#[gpui::test]
+fn turning_off_after_the_server_went_out_of_reach_is_refused(cx: &mut TestAppContext) {
+    let access = ScriptedAccess::listening();
+    let (window, cx) = open_servers(&access, cx);
+
+    click(ACCESS_SELECTOR, cx);
+    access.become_unreachable();
+    reread(cx);
+    click(&modal_action(TURN_OFF_CONFIRM_SELECTOR), cx);
+
+    assert!(
+        access.policies().is_empty(),
+        "nothing is sent to a server SpaceTerm can't reach"
+    );
+    assert!(access_on(&window, cx));
+}
+
+#[gpui::test]
+fn a_reading_is_retained_for_the_next_launch(cx: &mut TestAppContext) {
+    let access = ScriptedAccess::listening();
+    access.pair(3, "MacBook", None);
     let (_, cx) = open_servers(&access, cx);
 
-    click(PAIR_SELECTOR, cx);
-    assert!(access.withdrawn.lock().expect("withdrawn").is_empty());
+    let retained = retained_here(cx);
 
-    click(&modal_action(DONE_SELECTOR), cx);
+    let network = retained
+        .network_access
+        .expect("the access reading is retained");
+    assert_eq!(network.policy, Some(address("192.168.1.20:9231")));
+    assert_eq!(network.server_name, SERVER);
+    let devices = retained
+        .paired_devices
+        .expect("the device list is retained");
+    assert_eq!(
+        devices
+            .devices
+            .iter()
+            .map(|device| device.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["MacBook"]
+    );
+}
+
+#[gpui::test]
+fn losing_the_server_keeps_what_was_retained_about_it(cx: &mut TestAppContext) {
+    let access = ScriptedAccess::listening();
+    access.pair(3, "MacBook", None);
+    let (_, cx) = open_servers(&access, cx);
+    let before = retained_here(cx);
+
+    access.become_unreachable();
+    reread(cx);
+
+    let after = retained_here(cx);
+    assert_eq!(after.network_access, before.network_access);
+    assert_eq!(after.paired_devices, before.paired_devices);
+}
+
+#[gpui::test]
+fn a_device_list_the_server_couldnt_read_keeps_the_retained_one(cx: &mut TestAppContext) {
+    let access = ScriptedAccess::listening();
+    access.pair(3, "MacBook", None);
+    let (_, cx) = open_servers(&access, cx);
+    let before = retained_here(cx).paired_devices;
+
+    access.unpair("MacBook");
+    *access.devices_failure.lock().expect("devices failure") = Some(AccessFailure::Refused);
+    reread(cx);
 
     assert_eq!(
-        *access.withdrawn.lock().expect("withdrawn"),
-        vec![INVITATION_ID],
-        "no device can use an invitation after its dialog closes"
+        retained_here(cx).paired_devices,
+        before,
+        "a failed listing is no reading, so it neither empties nor re-dates the devices"
     );
-    assert!(!open(COPY_SELECTOR, cx));
+}
+
+#[gpui::test]
+fn after_relaunch_a_server_out_of_reach_shows_its_retained_access(cx: &mut TestAppContext) {
+    cx.update(|cx| retain(ServerKey::Local, retained_on(), cx));
+    let access = ScriptedAccess::listening();
+    access.become_unreachable();
+    let (window, cx) = open_servers(&access, cx);
+
+    assert!(access_on(&window, cx));
+    assert!(open(ACCESS_SELECTOR, cx));
+    assert!(reads("Devices: 1 paired", cx));
+    assert!(open(&format!("{DEVICE_SELECTOR}-0"), cx));
+    assert!(reads("Shown values are from", cx));
+    assert!(reads("Last known address: 192.168.1.20:9231.", cx));
+}
+
+#[gpui::test]
+fn retained_access_that_loads_after_settings_opens_replaces_unknown(cx: &mut TestAppContext) {
+    let access = ScriptedAccess::listening();
+    access.become_unreachable();
+    let (window, cx) = open_servers(&access, cx);
+    assert!(reads("Unknown", cx));
+
+    cx.update(|_, cx| retain(ServerKey::Local, retained_on(), cx));
+    reread(cx);
+
+    assert!(access_on(&window, cx));
+    assert!(reads("Shown values are from", cx));
+}
+
+#[gpui::test]
+fn another_servers_retained_access_never_shows_for_this_one(cx: &mut TestAppContext) {
+    let penguin = ServerKey::Ssh("penguin".to_owned());
+    save_penguin(cx);
+    cx.update(|cx| retain(penguin.clone(), retained_on(), cx));
+    let access = ScriptedAccess::listening();
+    access.become_unreachable();
+    let (window, cx) = open_servers(&access, cx);
+
+    assert!(
+        cx.update(|_, cx| server_selection::facts(&penguin, cx))
+            .is_some(),
+        "penguin's record is still there to leak"
+    );
+    assert!(!access_on(&window, cx));
+    assert!(reads("Unknown", cx));
+    assert!(!reads("Shown values are from", cx));
+}
+
+#[gpui::test]
+fn a_retained_empty_device_list_reads_as_none(cx: &mut TestAppContext) {
+    let mut facts = retained_on();
+    if let Some(devices) = facts.paired_devices.as_mut() {
+        devices.devices.clear();
+    }
+    cx.update(|cx| retain(ServerKey::Local, facts, cx));
+    let access = ScriptedAccess::listening();
+    access.become_unreachable();
+    let (_, cx) = open_servers(&access, cx);
+
+    assert!(reads("Devices: None", cx));
+}
+
+#[gpui::test]
+fn devices_the_server_couldnt_list_read_as_unknown_rather_than_none(cx: &mut TestAppContext) {
+    let access = ScriptedAccess::listening();
+    *access.devices_failure.lock().expect("devices failure") = Some(AccessFailure::Refused);
+    let (_, cx) = open_servers(&access, cx);
+
+    assert!(reads("Devices: Unknown", cx));
+    assert!(!reads("Devices: None", cx));
+}
+
+#[gpui::test]
+fn a_paired_server_offers_no_network_access(cx: &mut TestAppContext) {
+    use super::super::server_card::AUTO_START_SELECTOR;
+    use super::super::server_list::tests::{Computers, SavedConnections};
+
+    cx.executor().allow_parking();
+    // An SSH registry makes Start automatically a row Servers offers, so its absence below comes
+    // from the paired connection alone.
+    cx.update(|cx| {
+        crate::ui::ssh_servers::install(
+            crate::ssh::server_connection::SshServerConnections::new(
+                Arc::new(Computers::default()),
+                Arc::new(SavedConnections::default()),
+            ),
+            None,
+            cx,
+        );
+    });
+    let access = ScriptedAccess::listening();
+    let (direct, _) = crate::direct_connections::tests::offline("studio");
+    let (_, cx) = open_servers_with(&access, Some(direct), cx);
+    assert!(
+        open(ACCESS_SELECTOR, cx),
+        "this computer's server offers it"
+    );
+    assert!(
+        open(AUTO_START_SELECTOR, cx),
+        "this computer's server offers Start automatically"
+    );
+
+    select_paired_server(cx);
+
+    assert!(
+        !open(ACCESS_SELECTOR, cx),
+        "a paired connection carries no authority over its server's network"
+    );
+    assert!(!open(INVITE_SELECTOR, cx));
+    assert!(
+        !open(AUTO_START_SELECTOR, cx),
+        "a paired connection carries no authority over its server's services"
+    );
+}
+
+#[gpui::test]
+fn invite_device_waits_while_the_server_cant_listen(cx: &mut TestAppContext) {
+    // Access is on, so Devices shows, but the server couldn't listen at the chosen address.
+    let access = ScriptedAccess::with_state(AccessState {
+        server_name: SERVER.into(),
+        policy: Some(address("192.168.1.20:9231")),
+        listener: Listener::Failed,
+        addresses: Some(addresses(&["192.168.1.20"], Some("192.168.1.20"))),
+    });
+    let (_, cx) = open_servers(&access, cx);
+    assert!(open(INVITE_SELECTOR, cx), "Devices offers Invite Device");
+
+    click(INVITE_SELECTOR, cx);
+
+    assert!(
+        !open(crate::ui::direct_pairing::COPY_SELECTOR, cx),
+        "no invitation opens on a server that isn't listening"
+    );
+}
+
+#[gpui::test]
+fn a_device_allowed_in_invite_device_joins_the_devices_list_at_once(cx: &mut TestAppContext) {
+    let access = ScriptedAccess::listening();
+    let (_, cx) = open_servers(&access, cx);
+    assert!(reads("Devices: None", cx));
+
+    click(INVITE_SELECTOR, cx);
+    access.claim(3, "MacBook");
+    // Invite Device looks for claims every second, sooner than the rows read the server.
+    cx.executor()
+        .advance_clock(std::time::Duration::from_secs(1));
+    cx.run_until_parked();
+    press_return(cx);
+    // Done closes the confirmation, uncovering the rows.
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+
+    assert!(reads("Devices: 1 paired", cx));
+    assert!(open(&format!("{DEVICE_SELECTOR}-0"), cx));
+    assert!(reads("Never connected", cx));
+}
+
+#[gpui::test]
+fn a_device_removed_elsewhere_leaves_the_list_at_the_next_reading(cx: &mut TestAppContext) {
+    let access = ScriptedAccess::listening();
+    access.pair(3, "MacBook", Some(unix_now()));
+    access.pair(4, "iPad", None);
+    let (_, cx) = open_servers(&access, cx);
+    assert!(reads("Devices: 2 paired", cx));
+
+    access.unpair("iPad");
+    reread(cx);
+
+    assert!(reads("Devices: 1 paired", cx));
+    assert!(!open(&format!("{DEVICE_SELECTOR}-1"), cx));
+}
+
+#[gpui::test]
+fn cancelling_a_device_removal_keeps_the_device_and_records_nothing(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let access = ScriptedAccess::listening();
+    access.pair(3, "MacBook", None);
+    let (direct, _) = crate::direct_connections::tests::offline("studio");
+    let (_, cx) = open_servers_with(&access, Some(direct.clone()), cx);
+
+    click(&format!("{DEVICE_SELECTOR}-0-remove"), cx);
+    click(&modal_action(REMOVE_CANCEL_SELECTOR), cx);
+
+    assert!(direct.pending_unpairs().is_empty());
+    assert!(open(&format!("{DEVICE_SELECTOR}-0-remove"), cx));
+    assert!(!open(&format!("{DEVICE_SELECTOR}-0-progress"), cx));
+}
+
+#[gpui::test]
+fn a_removal_spaceterm_cant_record_keeps_the_device_and_says_why(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let access = ScriptedAccess::listening();
+    access.pair(3, "MacBook", None);
+    let (direct, _) = crate::direct_connections::tests::offline("studio");
+    let (_, cx) = open_servers_with(&access, Some(direct.clone()), cx);
+
+    click(&format!("{DEVICE_SELECTOR}-0-remove"), cx);
+    click(&modal_action(REMOVE_CONFIRM_SELECTOR), cx);
+
+    assert!(
+        direct.pending_unpairs().is_empty(),
+        "no removal is recorded without the account connection that authorizes it"
+    );
+    assert!(
+        open(&format!("{DEVICE_SELECTOR}-0-remove"), cx),
+        "the device stays removable rather than waiting on a removal nobody records"
+    );
+    assert!(reads(
+        "can\u{2019}t reach the server on \u{201C}studio\u{201D}",
+        cx
+    ));
 }
 
 #[gpui::test]
@@ -418,12 +939,13 @@ fn unpairing_this_device_while_offline_removes_it_at_once_and_says_revocation_is
     // The registry's worker tries the offline server on its own thread and wakes the window from
     // there.
     cx.executor().allow_parking();
-    let access = ScriptedAccess::new(Listener::Off);
+    let access = ScriptedAccess::new(Listener::Off, None);
     let (direct, route) = crate::direct_connections::tests::offline("studio");
     let (_, cx) = open_servers_with(&access, Some(direct.clone()), cx);
 
-    click(DIRECT_ROUTE_ITEM, cx);
-    click(UNPAIR_SELF_SELECTOR, cx);
+    select_paired_server(cx);
+    click(MENU_SELECTOR, cx);
+    click("settings-server-unpair", cx);
     click(&modal_action(UNPAIR_SELF_CONFIRM_SELECTOR), cx);
 
     assert_eq!(
@@ -432,28 +954,24 @@ fn unpairing_this_device_while_offline_removes_it_at_once_and_says_revocation_is
         "the route is gone from this computer"
     );
     assert!(
-        !open(DIRECT_ROUTE_ITEM, cx),
-        "the server list no longer offers the unpaired server"
+        !open(&format!("{LIST_SELECTOR}-1"), cx),
+        "All Servers no longer offers the unpaired server"
     );
-    assert!(
-        says(
-            "is removed here, but the server hasn\u{2019}t confirmed",
-            cx
-        ),
-        "the notice says what is done and what isn\u{2019}t"
-    );
+    settle(cx, |cx| {
+        reads("Unpair from studio isn\u{2019}t confirmed yet.", cx)
+    });
 }
 
 #[gpui::test]
-fn connect_on_a_disconnected_direct_route_reaches_only_that_route(cx: &mut TestAppContext) {
+fn connect_on_a_disconnected_paired_server_reaches_only_that_route(cx: &mut TestAppContext) {
     // Connect starts the registry's worker, which tries the offline server on its own thread.
     cx.executor().allow_parking();
-    let access = ScriptedAccess::new(Listener::Off);
+    let access = ScriptedAccess::new(Listener::Off, None);
     let (direct, route) = crate::direct_connections::tests::offline("studio");
     direct.disconnect(&route);
     let (_, cx) = open_servers_with(&access, Some(direct.clone()), cx);
 
-    click(DIRECT_ROUTE_ITEM, cx);
+    select_paired_server(cx);
     click(
         crate::ui::direct_servers::DirectServerAction::Connect.selector(),
         cx,
@@ -467,18 +985,15 @@ fn connect_on_a_disconnected_direct_route_reaches_only_that_route(cx: &mut TestA
 }
 
 #[gpui::test]
-fn a_dismissed_unpair_returns_with_resume_once_only_the_person_can_continue_it(
+fn a_dismissed_unpair_keeps_trying_and_returns_with_resume_once_only_the_person_can_continue_it(
     cx: &mut TestAppContext,
 ) {
     // The registry's worker tries the offline server on its own thread and wakes the window from
     // there.
     cx.executor().allow_parking();
-    let access = ScriptedAccess::new(Listener::Off);
+    let access = ScriptedAccess::new(Listener::Off, None);
     let (direct, _, credentials) = crate::direct_connections::tests::offline_with_lock("studio");
     let (_, cx) = open_servers_with(&access, Some(direct.clone()), cx);
-    let notice = format!("{PENDING_SELECTOR}-0");
-    let dismiss = format!("{PENDING_SELECTOR}-0-dismiss");
-    let resume = format!("{PENDING_SELECTOR}-0-resume");
     let state = |direct: &DirectConnections| {
         direct
             .pending_unpairs()
@@ -486,9 +1001,14 @@ fn a_dismissed_unpair_returns_with_resume_once_only_the_person_can_continue_it(
             .map(|pending| pending.state)
     };
 
-    click(DIRECT_ROUTE_ITEM, cx);
-    click(UNPAIR_SELF_SELECTOR, cx);
+    select_paired_server(cx);
+    click(MENU_SELECTOR, cx);
+    click("settings-server-unpair", cx);
     click(&modal_action(UNPAIR_SELF_CONFIRM_SELECTOR), cx);
+    settle(cx, |_| !direct.pending_unpairs().is_empty());
+    let notice = unpair_notice(&direct);
+    let dismiss = format!("{notice}-dismiss");
+    let resume = format!("{notice}-resume");
     // The offline server never confirms, and SpaceTerm keeps trying quietly.
     settle(cx, |cx| {
         state(&direct) == Some(UnpairState::Unconfirmed) && open(&dismiss, cx)
@@ -497,6 +1017,11 @@ fn a_dismissed_unpair_returns_with_resume_once_only_the_person_can_continue_it(
     assert!(
         !open(&notice, cx),
         "Dismiss hides a request SpaceTerm can still finish"
+    );
+    assert_eq!(
+        direct.pending_unpairs().len(),
+        1,
+        "hiding the notice cancels nothing behind it"
     );
 
     // The key the request was made with now needs the person's permission.
@@ -509,10 +1034,6 @@ fn a_dismissed_unpair_returns_with_resume_once_only_the_person_can_continue_it(
         open(&resume, cx),
         "a dismissed request that only the person can continue shows again with Resume"
     );
-    assert!(
-        !open(&dismiss, cx),
-        "a request that needs the person can't be dismissed out of reach"
-    );
 
     credentials.set_locked(false);
     click(&resume, cx);
@@ -522,177 +1043,71 @@ fn a_dismissed_unpair_returns_with_resume_once_only_the_person_can_continue_it(
     settle(cx, |cx| !open(&notice, cx));
 }
 
-/// Shows `join` in the Join row, as if this window had started it, and follows it.
-fn follow(
-    window: &Entity<SettingsWindow>,
-    join: crate::direct_connections::JoinId,
-    cx: &mut VisualTestContext,
-) {
-    window.update(cx, |settings, cx| {
-        if let Some(rows) = settings.direct_routes.as_mut() {
-            rows.join = Some(join);
-        }
-        settings.follow_join(cx);
-        // Starting a join repaints the window, as Join does.
-        cx.notify();
-    });
-    cx.run_until_parked();
-}
-
 #[gpui::test]
-fn a_pairing_saved_without_confirmation_is_selected_and_its_detail_keeps_the_warning(
+fn hiding_an_unpair_that_waits_for_the_person_hides_it_here_and_cancels_nothing(
     cx: &mut TestAppContext,
 ) {
-    // The registry's worker reaches the new route on its own thread.
+    // The registry's worker tries the offline server on its own thread and wakes the window from
+    // there.
     cx.executor().allow_parking();
-    let access = ScriptedAccess::new(Listener::Off);
-    let (direct, join, route) = crate::direct_connections::tests::uncertain_join("studio");
-    let (window, cx) = open_servers_with(&access, Some(direct.clone()), cx);
+    let access = ScriptedAccess::new(Listener::Off, None);
+    let (direct, _, credentials) = crate::direct_connections::tests::offline_with_lock("studio");
+    let (_, cx) = open_servers_with(&access, Some(direct.clone()), cx);
+    let state = |direct: &DirectConnections| {
+        direct
+            .pending_unpairs()
+            .first()
+            .map(|pending| pending.state)
+    };
 
-    follow(&window, join, cx);
-    // The window follows the join as the registry reports it, wherever that report comes from.
+    select_paired_server(cx);
+    click(MENU_SELECTOR, cx);
+    click("settings-server-unpair", cx);
+    click(&modal_action(UNPAIR_SELF_CONFIRM_SELECTOR), cx);
+    settle(cx, |_| state(&direct) == Some(UnpairState::Unconfirmed));
+    let notice = unpair_notice(&direct);
+    let dismiss = format!("{notice}-dismiss");
+    let resume = format!("{notice}-resume");
+    // The key the request was made with now needs the person's permission.
+    credentials.set_locked(true);
     settle(cx, |cx| {
-        window.read_with(cx, |settings, _| settings.selected_server())
-            == Some(ServerChoice::Direct(route))
+        state(&direct) == Some(UnpairState::NeedsInteraction) && open(&resume, cx)
     });
 
-    // The Join row moves on, and the route's own detail still says its save is unconfirmed.
-    window.update(cx, |settings, cx| {
-        if let Some(rows) = settings.direct_routes.as_mut() {
-            rows.join = None;
-        }
-        cx.notify();
-    });
-    cx.run_until_parked();
+    click(&dismiss, cx);
+
     assert!(
-        says(UNSAVED_CHANGES, cx),
-        "the selected route keeps its durability warning"
+        !open(&notice, cx),
+        "Dismiss hides the notice in this window"
+    );
+    assert_eq!(
+        state(&direct),
+        Some(UnpairState::NeedsInteraction),
+        "the request still waits for the person, uncancelled"
     );
 }
 
-/// A join the network interrupted keeps its request and asks again only when the person
-/// chooses Try Again, without claiming why the server was out of reach.
 #[gpui::test]
-fn an_interrupted_join_waits_for_try_again_with_the_same_request(cx: &mut TestAppContext) {
-    cx.executor().allow_parking();
-    let access = ScriptedAccess::new(Listener::Off);
-    let (direct, join) = crate::direct_connections::tests::retryable_join(
-        "studio",
-        crate::direct_connections::EnrollmentStage::Claim,
-    );
-    let (window, cx) = open_servers_with(&access, Some(direct.clone()), cx);
-
-    follow(&window, join, cx);
-    settle(cx, |cx| open(JOIN_RETRY_SELECTOR, cx));
-
-    assert!(
-        says(
-            "SpaceTerm didn\u{2019}t get an answer from the server at the invitation\u{2019}s address.",
-            cx
-        ),
-        "the row says what happened"
-    );
-    assert!(
-        !says("denied", cx) && !says("permission", cx),
-        "a network failure names no cause SpaceTerm didn't observe"
-    );
-    assert!(
-        direct.pending_unpairs().is_empty(),
-        "an interrupted join withdraws nothing"
-    );
-
-    click(JOIN_RETRY_SELECTOR, cx);
-
-    settle(cx, |cx| {
-        window
-            .read_with(cx, |settings, _| settings.selected_server())
-            .is_some_and(|server| matches!(server, ServerChoice::Direct(route) if route == join))
-    });
-    assert!(direct.pending_unpairs().is_empty());
-}
-
-/// The fixture's storage can't confirm any further save after an unknown publication, so the
-/// person's withdrawal is requested but not retained, and the window says exactly that.
-#[gpui::test]
-fn a_pairing_whose_save_is_unknown_uses_no_route_and_reports_an_unsaved_withdrawal(
+fn dismissing_the_unsaved_direct_record_notice_hides_it_without_claiming_a_save(
     cx: &mut TestAppContext,
 ) {
     cx.executor().allow_parking();
-    let access = ScriptedAccess::new(Listener::Off);
-    let (direct, join) = crate::direct_connections::tests::unconfirmed_join("studio");
-    let (window, cx) = open_servers_with(&access, Some(direct.clone()), cx);
-
-    follow(&window, join, cx);
-    settle(cx, |cx| open(WITHDRAW_SELECTOR, cx));
-
-    assert!(
-        direct.routes().is_empty(),
-        "SpaceTerm uses no connection it may not have saved"
-    );
-    assert!(!open(DIRECT_ROUTE_ITEM, cx));
-    assert!(
-        direct.pending_unpairs().is_empty(),
-        "nothing is withdrawn until the person asks"
-    );
-
-    click(WITHDRAW_SELECTOR, cx);
-    click(&modal_action(WITHDRAW_CONFIRM_SELECTOR), cx);
-
-    settle(cx, |cx| open(WITHDRAW_FAILURE_SELECTOR, cx));
-
-    assert!(
-        says("couldn\u{2019}t save this request on this computer yet", cx),
-        "a withdrawal SpaceTerm couldn't save says so rather than promising to continue"
-    );
-    assert!(
-        open(&format!("{PENDING_SELECTOR}-0"), cx),
-        "the requested withdrawal is listed with its next step"
-    );
-    assert!(
-        !says("withdraws anything the server already received", cx),
-        "nothing promises a withdrawal SpaceTerm couldn't save"
-    );
-    assert!(
-        direct.routes().is_empty(),
-        "withdrawing presents no connection"
-    );
-}
-
-/// A stop that couldn't be saved keeps saying so through the registry's unrelated changes, and
-/// stops once the registry saves again, so the alert follows recovery instead of outliving it.
-#[gpui::test]
-fn an_unsaved_stop_alert_clears_once_the_registry_saves_again(cx: &mut TestAppContext) {
-    cx.executor().allow_parking();
-    let access = ScriptedAccess::new(Listener::Off);
+    let access = ScriptedAccess::new(Listener::Off, None);
     let (direct, route, storage) = crate::direct_connections::tests::offline_with_storage("studio");
-    let (window, cx) = open_servers_with(&access, Some(direct.clone()), cx);
-    // This computer can't save the registry, as when the stop itself failed to save.
+    let (_, cx) = open_servers_with(&access, Some(direct.clone()), cx);
+    let notice = format!("{NOTICE_SELECTOR}-direct-record");
+
+    // This computer can't save the registry's change.
     storage.set_failing(true);
     direct.disconnect(&route);
-    assert!(direct.persistence_error(), "the registry couldn't save");
-    window.update(cx, |settings, cx| {
-        if let Some(rows) = settings.direct_routes.as_mut() {
-            rows.join = Some(route);
-            rows.join_cancelled = true;
-            rows.join_withdraw_failure =
-                Some(crate::local_server::direct::DirectError::StorageUnavailable);
-        }
-        cx.notify();
-    });
-    cx.run_until_parked();
-    assert!(open(WITHDRAW_FAILURE_SELECTOR, cx));
+    settle(cx, |cx| open(&notice, cx));
+    assert!(reads(UNSAVED_CHANGES, cx));
 
-    // Changes the registry announces but can't save leave the stop unsaved, so the alert stays.
-    direct.connect(&route);
-    direct.disconnect(&route);
-    cx.run_until_parked();
-    assert!(direct.persistence_error());
-    assert!(open(WITHDRAW_FAILURE_SELECTOR, cx));
+    click(&format!("{notice}-dismiss"), cx);
 
-    // A change the registry saves and announces, as a quiet retry's save would.
-    storage.set_failing(false);
-    direct.disconnect(&route);
-    assert!(!direct.persistence_error(), "the registry saved its change");
-
-    settle(cx, |cx| !open(WITHDRAW_FAILURE_SELECTOR, cx));
+    assert!(!open(&notice, cx));
+    assert!(
+        direct.persistence_error(),
+        "the registry still reports the change it couldn't save"
+    );
 }

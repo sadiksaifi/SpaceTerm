@@ -49,6 +49,10 @@ pub(crate) struct StartupDependencies<A: SshProcessAdapter> {
 }
 
 impl<A: SshProcessAdapter> StartupDependencies<A> {
+    pub(crate) fn server_context_paths(&self) -> Arc<AppPaths> {
+        Arc::clone(&self.paths)
+    }
+
     pub(crate) fn settings_storage(&self) -> Arc<dyn crate::settings::storage::SettingsStorage> {
         Arc::new(crate::settings::storage::ConfigSettingsStorage::new(
             Arc::clone(&self.paths),
@@ -1274,6 +1278,8 @@ pub(crate) struct ApplicationCapabilities {
     /// The desktop's direct network connections, installed by its first Workspace Window.
     /// `None` offers no direct network connections.
     pub(crate) direct_servers: Option<crate::direct_connections::DirectConnections>,
+    /// Private presentation context, independent of saved connection authority and Settings.
+    pub(crate) server_context_paths: Option<Arc<AppPaths>>,
 }
 
 /// The startup-supplied file opener available to explicit local file selections.
@@ -1412,6 +1418,21 @@ pub(crate) fn run(host: HostComposition) -> Result<(), RuntimeError> {
     let host = Rc::new(host);
     let reopened_host = Rc::clone(&host);
     let application = gpui_platform::application().with_assets(spaceterm_ui::EmbeddedAssets);
+    // Platform callbacks may precede initial Workspace creation. Hold one transient delivery
+    // until startup finishes, then use the same sheet as every explicit Add Server entry.
+    let (invitations, pending_invitations) = async_channel::bounded(1);
+    if let Some(link) = crate::invitation_links::from_arguments(std::env::args_os().skip(1)) {
+        let _ = invitations.try_send(link);
+    }
+    application.on_open_urls(move |urls| {
+        if let Some(link) = urls
+            .into_iter()
+            .find(|url| crate::invitation_links::is_pairing_link(url))
+        {
+            let _ = invitations.try_send(link);
+        }
+    });
+    let pending_invitations = Rc::new(RefCell::new(Some(pending_invitations)));
     application.on_reopen(move |cx| {
         leave_menu_only(cx);
         restore_default_window(cx, &reopened_host);
@@ -1432,6 +1453,20 @@ pub(crate) fn run(host: HostComposition) -> Result<(), RuntimeError> {
                         if let Err(error) = open_initial_workspace(cx, &host) {
                             reported_failure.set(Some(error));
                             cx.quit();
+                        } else if let Some(receiver) = pending_invitations.borrow_mut().take() {
+                            cx.spawn(async move |cx| {
+                                while let Ok(link) = receiver.recv().await {
+                                    cx.update(|cx| {
+                                        leave_menu_only(cx);
+                                        crate::ui::settings_window::open_add_server(
+                                            Some(link),
+                                            None,
+                                            cx,
+                                        );
+                                    });
+                                }
+                            })
+                            .detach();
                         }
                     }),
                     cx,
@@ -1476,6 +1511,9 @@ pub(crate) fn initialize_application(
     #[cfg(feature = "developer-tools")]
     crate::ui::developer_workbench::configure_window_chrome(Rc::clone(&host.window_movement), cx);
     crate::ui::about_window::configure_window_chrome(Rc::clone(&host.window_movement), cx);
+    if let Some(paths) = &host.adapters.server_context_paths {
+        crate::ui::settings_window::configure_server_context(Arc::clone(paths), cx);
+    }
     if let (Some(access), Some(guide)) =
         (&host.adapters.permission_access, &host.adapters.setup_guide)
     {
@@ -2038,6 +2076,7 @@ mod runtime_tests {
                 local_server: crate::ui::launch_testing::presenting(session_factory),
                 ssh_servers: None,
                 direct_servers: None,
+                server_context_paths: None,
             },
             services: Some(services),
             window_movement: movement,

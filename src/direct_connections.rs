@@ -69,10 +69,7 @@ pub(crate) enum JoinStatus {
         stage: EnrollmentStage,
     },
     AwaitingApproval {
-        server_name: String,
-        server_fingerprint: String,
-        device_fingerprint: String,
-        expires_at: u64,
+        comparison_code: direct::ComparisonCode,
     },
     Approved(DirectRouteId),
     /// The route was published and is usable; synchronization remains unconfirmed.
@@ -135,6 +132,7 @@ struct Inner {
 #[derive(Default)]
 struct State {
     loaded: bool,
+    inventory_loaded: bool,
     worker: bool,
     document: Document,
     routes: BTreeMap<DirectRouteId, RouteState>,
@@ -247,6 +245,7 @@ impl DirectConnections {
                         .insert(pending.operation, Retry::new(Interaction::Quiet));
                 }
                 state.document = document;
+                state.inventory_loaded = true;
             }
             Err(()) => state.persistence_error = true,
         }
@@ -272,6 +271,16 @@ impl DirectConnections {
         let mut changes = self.0.changes.lock().unwrap_or_else(|e| e.into_inner());
         receiver.close();
         changes.retain(|sender| !sender.is_closed());
+    }
+
+    /// Whether startup successfully read the saved inventory, including an empty one.
+    /// Until then, an absent route is not evidence that the person removed it.
+    pub(crate) fn retained_inventory_loaded(&self) -> bool {
+        self.0
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .inventory_loaded
     }
 
     pub(crate) fn routes(&self) -> Vec<(DirectRouteId, DirectRouteStatus)> {

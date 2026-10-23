@@ -8438,3 +8438,184 @@ fn alert_suppression_publishes_a_checkbox_that_toggles_on_request(cx: &mut TestA
         })
     ));
 }
+
+struct AvailabilityFixture {
+    invoker: FocusHandle,
+    body: Entity<DialogFocusBody>,
+}
+
+impl Render for AvailabilityFixture {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        ModalLayer::new(
+            div()
+                .size_full()
+                .track_focus(&self.invoker)
+                .child("Availability underlay"),
+        )
+    }
+}
+
+/// Presents a Dialog whose body is one focused field and whose default Save starts available only
+/// when `save_available`. Returns the body, the Dialog's retained authority, and every action the
+/// Dialog requested, which it denies so the Dialog stays open.
+fn availability_dialog_window(
+    cx: &mut TestAppContext,
+    save_available: bool,
+) -> (
+    Entity<DialogFocusBody>,
+    super::super::DialogCompletion,
+    Rc<RefCell<Vec<&'static str>>>,
+    &mut VisualTestContext,
+) {
+    install_test_catalogs(cx);
+    let (root, cx) = cx.add_window_view(|window, cx| {
+        let first = cx.new(|cx| {
+            TextInput::new("availability-host", "Host", "", window, cx)
+                .return_behavior(TextInputReturnBehavior::Propagate)
+        });
+        let second = cx.new(|cx| TextInput::new("availability-unused", "Unused", "", window, cx));
+        AvailabilityFixture {
+            invoker: cx.focus_handle().tab_stop(true),
+            body: cx.new(|_| DialogFocusBody {
+                first,
+                second,
+                show_second: false,
+            }),
+        }
+    });
+    let requests = Rc::new(RefCell::new(Vec::new()));
+    let dialog_requests = requests.clone();
+    let completion = cx.update(|window, cx| {
+        window.activate_window();
+        root.update(cx, |root, cx| {
+            let field = root.body.read(cx).first.read(cx).focus_handle();
+            Dialog::new(
+                ModalId::new("availability"),
+                "Action availability",
+                "Availability",
+                vec![
+                    ModalAction::new(
+                        "save",
+                        "Save",
+                        ModalActionRole::Affirmative,
+                        "availability-save",
+                    )
+                    .default_action(true)
+                    .enabled(save_available),
+                    ModalAction::new(
+                        "cancel",
+                        "Cancel",
+                        ModalActionRole::Cancel,
+                        "availability-cancel",
+                    ),
+                ],
+                DialogInitialFocus::Body(field),
+            )
+            .body(root.body.clone())
+            .present(
+                window,
+                cx,
+                move |request, _, _| {
+                    dialog_requests.borrow_mut().push(*request.action_id());
+                    DialogCloseDecision::Deny {
+                        first_invalid: None,
+                    }
+                },
+                |_, _| {},
+            )
+            .expect("a Dialog whose default starts unavailable should present")
+        })
+    });
+    cx.run_until_parked();
+    let body = root.read_with(cx, |root, _| root.body.clone());
+    (body, completion, requests, cx)
+}
+
+/// Typing the first character of a form makes its default available in place: the Dialog stays
+/// the same presentation, the field keeps focus and its caret, and the action keeps its
+/// accessibility node, which assistive technology then reads as available.
+#[gpui::test]
+fn dialog_default_becomes_available_in_place_keeping_field_focus_and_caret(
+    cx: &mut TestAppContext,
+) {
+    use crate::a11y_testing::{A11yTree, node_id};
+
+    let (body, completion, requests, cx) = availability_dialog_window(cx, false);
+    let field = body.read_with(cx, |body, _| body.first.clone());
+    let field_focus = field.read_with(cx, |input, _| input.focus_handle());
+    let presentation = completion.presentation_id();
+    let before = A11yTree::read(cx).node("Save").clone();
+
+    cx.simulate_input("a");
+    cx.simulate_keystrokes("left");
+    // An unavailable default ignores Return.
+    press_return(cx);
+    cx.update(|window, cx| completion.set_action_enabled(&"save", true, window, cx))
+        .expect("the presented Dialog should make Save available");
+    cx.run_until_parked();
+    cx.simulate_input("b");
+
+    let after = A11yTree::read(cx).node("Save").clone();
+    let value = field.read_with(cx, |input, _| input.value().to_owned());
+    let focused = cx.update(|window, _| field_focus.is_focused(window));
+    let current = cx.update(|window, cx| {
+        super::super::current_modal_parent(window, cx).map(|parent| parent.presentation)
+    });
+    press_return(cx);
+
+    assert_eq!(
+        current,
+        Some(presentation),
+        "the same Dialog stays presented"
+    );
+    assert!(focused, "the field keeps keyboard focus");
+    assert_eq!(value, "ba", "typing continues at the caret the person left");
+    assert_eq!(before["aria"]["disabled"], true);
+    assert_ne!(after["aria"]["disabled"], true);
+    assert_eq!(
+        node_id(&before),
+        node_id(&after),
+        "Save keeps its accessibility node"
+    );
+    assert_eq!(
+        requests.borrow().as_slice(),
+        ["save"],
+        "Return chooses Save only once it is available"
+    );
+}
+
+/// An action made unavailable dispatches nothing from that moment, including a press already
+/// underway, and the safe Cancel path can't be made unavailable.
+#[gpui::test]
+fn an_unavailable_dialog_action_dispatches_nothing_from_pointer_or_return(cx: &mut TestAppContext) {
+    let (_, completion, requests, cx) = availability_dialog_window(cx, true);
+    let save = cx
+        .debug_bounds("modal-action-availability-save")
+        .expect("Save should render")
+        .center();
+
+    cx.simulate_mouse_down(save, MouseButton::Left, Modifiers::none());
+    cx.update(|window, cx| completion.set_action_enabled(&"save", false, window, cx))
+        .expect("the presented Dialog should make Save unavailable");
+    cx.simulate_mouse_up(save, MouseButton::Left, Modifiers::none());
+    cx.run_until_parked();
+    cx.simulate_click(save, Modifiers::none());
+    cx.run_until_parked();
+    press_return(cx);
+    let refused =
+        cx.update(|window, cx| completion.set_action_enabled(&"cancel", false, window, cx));
+    let unknown = cx.update(|window, cx| completion.set_action_enabled(&"other", true, window, cx));
+
+    assert!(
+        requests.borrow().is_empty(),
+        "an unavailable action can't be chosen"
+    );
+    assert!(cx.update(|window, cx| super::super::window_modal_is_open(window, cx)));
+    assert_eq!(
+        refused,
+        Err(ModalUpdateError::Invalid(
+            super::super::ModalValidationError::MissingSafeDismissal
+        ))
+    );
+    assert_eq!(unknown, Err(ModalUpdateError::UnknownAction));
+}

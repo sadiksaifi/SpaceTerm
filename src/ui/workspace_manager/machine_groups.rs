@@ -16,7 +16,9 @@ use crate::direct_connections::{DirectRouteId, DirectRouteStatus};
 use crate::domain::{SshDestination, WorkspaceEntry, WorkspaceId};
 use crate::ssh::server_connection::RemoteConnectionStatus;
 use crate::ssh::server_operations::RemoteOperationState;
-use crate::ui::remote_maintenance::{menu_actions_for, observed_menu_actions, working_state};
+use crate::ui::remote_maintenance::{
+    menu_actions_for, observed_menu_actions, read_update_offer, working_state,
+};
 use crate::ui::workspace_sidebar::{MachineMenuCommand, MachineSection, MachineTarget};
 
 /// What a direct network server's heading says beside its name.
@@ -257,11 +259,18 @@ impl WorkspaceManager {
                     // presented now or not.
                     // One destination can hold more than one unsettled original, so the
                     // heading reads every state the owner holds for it rather than the first.
-                    let maintenance = operations.as_ref().filter(|_| saved).map(|operations| {
+                    let entries = operations.as_ref().filter(|_| saved).map(|operations| {
                         operations
                             .entries()
                             .into_iter()
                             .filter(|entry| !entry.removed && entry.destination == destination)
+                            .collect::<Vec<_>>()
+                    });
+                    // Only a read verifies a candidate, so its offer decides Update Server.
+                    let update_offer = read_update_offer(entries.iter().flatten());
+                    let maintenance = entries.map(|entries| {
+                        entries
+                            .into_iter()
                             .map(|entry| entry.state)
                             .collect::<Vec<_>>()
                     });
@@ -296,7 +305,7 @@ impl WorkspaceManager {
                                     !matches!(state, RemoteOperationState::Unread)
                                 }) =>
                             {
-                                menu_actions_for(states, None)
+                                menu_actions_for(states, None, &update_offer)
                             }
                             // Before any maintenance read, the heading offers what the connection
                             // already observed about that account's server.

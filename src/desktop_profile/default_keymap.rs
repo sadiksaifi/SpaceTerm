@@ -260,6 +260,11 @@ fn fixed_bindings() -> Vec<KeyBinding> {
             Some(TERMINAL_KEY_CONTEXT),
         ),
         KeyBinding::new("cmd-,", crate::ui::settings_window::OpenSettings, None),
+        KeyBinding::new(
+            "cmd-shift-p",
+            crate::ui::application_commands::OpenCommandPalette,
+            None,
+        ),
         KeyBinding::new("cmd-q", DismissApplication, None),
         KeyBinding::new("cmd-h", HideApplication, None),
         KeyBinding::new("alt-cmd-h", HideOtherApplications, None),

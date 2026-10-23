@@ -119,6 +119,7 @@ pub enum Error {
     Branch,
     Unavailable,
     Interrupted,
+    Template(path_template::WorktreePathTemplateError),
 }
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Settings {
@@ -133,14 +134,80 @@ impl Default for Settings {
         }
     }
 }
+
+/// Presentation facts from the connected owning server. They grant no host maintenance authority.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ServerFacts {
+    #[serde(deserialize_with = "deserialize_server_fact")]
+    pub machine: String,
+    #[serde(deserialize_with = "deserialize_server_fact")]
+    pub operating_system: String,
+    #[serde(deserialize_with = "deserialize_server_fact")]
+    pub version: String,
+}
+
+fn deserialize_server_fact<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<String, D::Error> {
+    let value = String::deserialize(deserializer)?;
+    ServerFacts::bounded(&value).map_err(|_| serde::de::Error::custom("server fact is unavailable"))
+}
+
+impl ServerFacts {
+    /// Removes control and invisible formatting characters and bounds each field to 256 bytes.
+    /// A missing display value is a typed failure, never a guessed client-side fact.
+    pub fn new(machine: &str, operating_system: &str, version: &str) -> Result<Self, Error> {
+        Ok(Self {
+            machine: Self::bounded(machine)?,
+            operating_system: Self::bounded(operating_system)?,
+            version: Self::bounded(version)?,
+        })
+    }
+
+    fn bounded(value: &str) -> Result<String, Error> {
+        let mut value = crate::pane::metadata::sanitize(value, 256);
+        let mut end = value.len().min(256);
+        while !value.is_char_boundary(end) {
+            end -= 1;
+        }
+        value.truncate(end);
+        let value = value.trim().to_owned();
+        if value.is_empty() {
+            return Err(Error::Unavailable);
+        }
+        Ok(value)
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Read {
-    Poll { id: u64 },
-    Context { root: PathBuf },
+    Poll {
+        id: u64,
+    },
+    Context {
+        root: PathBuf,
+    },
     Settings,
-    SeedLocation { template: String },
-    CheckRemoval { root: PathBuf, path: PathBuf },
-    Location { root: PathBuf, location: String },
+    /// The owning server's Git installation, even when it owns no Workspaces.
+    Git,
+    /// Live facts from the owning server, independent of Git and Workspaces.
+    ServerFacts,
+    /// Checks a draft without changing Server Settings or creating folders.
+    ValidateLocationTemplate {
+        template: String,
+    },
+    SeedLocation {
+        template: String,
+    },
+    CheckRemoval {
+        root: PathBuf,
+        path: PathBuf,
+    },
+    Location {
+        root: PathBuf,
+        location: String,
+    },
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ReadReply {
@@ -153,6 +220,9 @@ pub enum ReadReply {
         branches: Branches,
     },
     Settings(Settings),
+    Git(crate::repository::GitToolStatus),
+    ServerFacts(ServerFacts),
+    LocationTemplate,
     Location(PathBuf),
     Removal(Removal),
 }
@@ -279,5 +349,48 @@ impl Removal {
             .affected_worktree_tabs(&self.root, &self.path)
             .iter()
             .all(|t| self.tabs.contains(t))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn server_facts_sanitize_and_bound_display_values_without_splitting_utf8() {
+        let facts = ServerFacts::new(
+            &format!(" \u{202e}{}\u{1b}", "界".repeat(100)),
+            "\u{2066}Linux\u{2069}",
+            "\t0.1.0\n",
+        )
+        .unwrap();
+        assert_eq!(facts.machine, "界".repeat(85));
+        assert_eq!(facts.operating_system, "Linux");
+        assert_eq!(facts.version, "0.1.0");
+    }
+
+    #[test]
+    fn server_facts_refuse_empty_metadata_instead_of_inventing_values() {
+        assert_eq!(
+            ServerFacts::new("\u{202e}\u{1b} ", "Linux", "0.1.0"),
+            Err(Error::Unavailable)
+        );
+        assert_eq!(
+            ServerFacts::new("server", "Linux", " \n"),
+            Err(Error::Unavailable)
+        );
+    }
+
+    #[test]
+    fn server_facts_apply_display_bounds_to_values_received_over_the_protocol() {
+        let facts: ServerFacts = serde_json::from_value(serde_json::json!({
+            "machine": format!("\u{202e}{}", "界".repeat(100)),
+            "operating_system": "\u{2066}Linux\u{2069}",
+            "version": "\t0.1.0\n",
+        }))
+        .unwrap();
+        assert_eq!(facts.machine, "界".repeat(85));
+        assert_eq!(facts.operating_system, "Linux");
+        assert_eq!(facts.version, "0.1.0");
     }
 }

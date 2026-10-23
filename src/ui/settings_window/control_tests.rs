@@ -289,10 +289,11 @@ fn navigation_selection_is_emphasized(chip: &'static str, cx: &mut VisualTestCon
     })
 }
 
-/// Pointer selection keeps the resting selection; keyboard focus emphasizes it in the accent
-/// color, the way an AppKit source list does, and draws no ring.
+/// As in System Settings, the current section takes the accent fill while the window is key,
+/// however it was chosen, and a neutral fill while the window is inactive. Arrow keys move the
+/// selection only after Tab enters the list.
 #[gpui::test]
-fn navigation_selection_is_emphasized_only_under_keyboard_navigation(cx: &mut TestAppContext) {
+fn navigation_selection_takes_the_accent_while_the_window_is_key(cx: &mut TestAppContext) {
     let (settings, cx) = open_settings(&SettingsDocument::default(), cx);
 
     click("settings-navigation-settings-section-font", cx);
@@ -303,13 +304,8 @@ fn navigation_selection_is_emphasized_only_under_keyboard_navigation(cx: &mut Te
         SettingsSectionId::Font
     );
     assert!(
-        cx.debug_bounds("settings-navigation-chip-settings-section-font")
-            .is_some(),
-        "the selected section should keep its own material"
-    );
-    assert!(
-        !navigation_selection_is_emphasized("settings-navigation-chip-settings-section-font", cx),
-        "a pointer selection should not look keyboard focused"
+        navigation_selection_is_emphasized("settings-navigation-chip-settings-section-font", cx),
+        "a pointer selection takes the accent while the window is key"
     );
 
     assert!(!cx.update(|window, cx| settings.read(cx).navigation.list_focus().is_focused(window)));
@@ -330,14 +326,21 @@ fn navigation_selection_is_emphasized_only_under_keyboard_navigation(cx: &mut Te
     );
     assert!(
         navigation_selection_is_emphasized("settings-navigation-chip-settings-section-themes", cx),
-        "keyboard navigation must emphasize the selected section"
+        "keyboard navigation keeps the accent"
     );
     cx.simulate_keystrokes("tab");
     cx.run_until_parked();
-    assert!(!navigation_selection_is_emphasized(
-        "settings-navigation-chip-settings-section-themes",
-        cx
-    ));
+    assert!(
+        navigation_selection_is_emphasized("settings-navigation-chip-settings-section-themes", cx),
+        "focus leaving the list keeps the accent while the window is key"
+    );
+
+    cx.deactivate_window();
+    redraw(cx);
+    assert!(
+        !navigation_selection_is_emphasized("settings-navigation-chip-settings-section-themes", cx),
+        "an inactive window shows the selection in the neutral fill"
+    );
 }
 
 /// Arrow keys move between the sections a query left something to present, and skip the rest.
