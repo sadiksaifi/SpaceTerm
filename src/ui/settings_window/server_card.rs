@@ -433,7 +433,22 @@ impl SettingsWindow {
                     _ => None,
                 });
                 let retained = self.retained_status.get(&choice.key()).copied();
-                ssh_state(&status, working, service, retained)
+                let state = ssh_state(&status, working, service, retained);
+                // An operation whose result SpaceTerm couldn't confirm is what the person waits
+                // on, until resolving that same operation settles it.
+                let unconfirmed = entries
+                    .iter()
+                    .any(|state| matches!(state, RemoteOperationState::Unconfirmed { .. }));
+                if unconfirmed && !state.working {
+                    ServerState {
+                        state: "Unconfirmed".into(),
+                        short: "Unconfirmed".into(),
+                        tone: Tone::Attention,
+                        ..state
+                    }
+                } else {
+                    state
+                }
             }
             ServerChoice::Direct(route) => {
                 let retained = self.retained_status.get(&choice.key()).copied();
@@ -1519,9 +1534,14 @@ impl SettingsWindow {
             .debug_selector(format!("{VERSION_SELECTOR}-progress"))
             .into_any_element()
         });
+        let machine = self.selected_server_name();
         let buttons = view.actions.into_iter().map(|step| {
             let owner = owner.clone();
             let selector = step.selector().to_owned();
+            let description = match step {
+                VersionStep::Local(action) => action.consequence().map(SharedString::new_static),
+                VersionStep::Remote(action) => Some(action.consequence(&machine)),
+            };
             Button::new(
                 ElementId::from(SharedString::from(selector.clone())),
                 step.label(),
@@ -1536,6 +1556,9 @@ impl SettingsWindow {
             // One step runs at a time. The steps act through this account's service or an SSH
             // account's route, so they need no connection to the server.
             .disabled(busy)
+            .when_some(description, |button, description| {
+                button.accessibility_description(description)
+            })
             .debug_selector(selector)
             .on_activate(move |_, _, cx| {
                 let _ = owner.update(cx, |settings, cx| settings.take_version_step(step, cx));

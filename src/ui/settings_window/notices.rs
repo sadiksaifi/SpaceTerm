@@ -124,7 +124,7 @@ impl SettingsWindow {
                 .collect();
             notices.push(Notice {
                 message: SharedString::from(format!(
-                    "You removed {}. {}",
+                    "You removed {}. {} Nothing here reconnects it.",
                     destination.as_str(),
                     presentation.explanation
                 )),
