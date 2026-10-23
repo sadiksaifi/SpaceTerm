@@ -694,6 +694,14 @@ impl WorkspaceManager {
             Error::Location => {
                 "The server could not use this location. Choose a new or empty folder."
             }
+            Error::Template(
+                spaceterm_server::worktree::path_template::WorktreePathTemplateError::NotWritable,
+            ) => {
+                "The server can\u{2019}t write to the New Worktree Location folder. Choose another folder in Settings, under Git."
+            }
+            Error::Template(_) => {
+                "The server can\u{2019}t use its New Worktree Location. Correct it in Settings, under Git."
+            }
             Error::Branch => {
                 "Git could not create the Worktree with this branch. Review the branch and the Worktrees from Git."
             }
