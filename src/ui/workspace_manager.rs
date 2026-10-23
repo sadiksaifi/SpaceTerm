@@ -3802,8 +3802,8 @@ impl WorkspaceManager {
         if let Some(entry) =
             close_target_workspace(target).and_then(|id| self.workspaces.workspace(id))
         {
-            entry.payload().update(cx, |manager, _| {
-                manager.prepare_shared_close_keyboard(held_keyboard);
+            entry.payload().update(cx, |manager, cx| {
+                manager.prepare_shared_close_keyboard(held_keyboard, cx);
             });
         }
     }
