@@ -277,6 +277,37 @@ fn retain(key: ServerKey, facts: LastKnownFacts, cx: &mut gpui::App) {
     server_selection::remember(key, facts, cx);
 }
 
+/// Saves penguin as an SSH server the person last left disconnected, so Servers lists it and its
+/// retained facts stay, while nothing reaches any computer.
+fn save_penguin(cx: &mut TestAppContext) {
+    use super::super::server_list::tests::{Computers, SavedConnections, destination};
+    use crate::ssh::server_connection::{
+        RetainedSshConnection, SshConnectionIntentStore as _, SshServerConnections,
+    };
+
+    // The SSH registry loads its saved connections on its own thread.
+    cx.executor().allow_parking();
+    let saved = Arc::new(SavedConnections::default());
+    saved
+        .retain(RetainedSshConnection {
+            destination: destination("penguin"),
+            continuity: None,
+            active: false,
+        })
+        .expect("penguin is saved");
+    let connections = SshServerConnections::new(Arc::new(Computers::default()), saved);
+    connections.resume_retained();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while connections.connections().is_empty() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the saved connections load"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    cx.update(|cx| crate::ui::ssh_servers::install(connections, None, cx));
+}
+
 /// What SpaceTerm retains about this computer's server for the next launch.
 fn retained_here(cx: &mut VisualTestContext) -> LastKnownFacts {
     cx.update(|_, cx| server_selection::facts(&ServerKey::Local, cx))
@@ -720,6 +751,7 @@ fn retained_access_that_loads_after_settings_opens_replaces_unknown(cx: &mut Tes
 #[gpui::test]
 fn another_servers_retained_access_never_shows_for_this_one(cx: &mut TestAppContext) {
     let penguin = ServerKey::Ssh("penguin".to_owned());
+    save_penguin(cx);
     cx.update(|cx| retain(penguin.clone(), retained_on(), cx));
     let access = ScriptedAccess::listening();
     access.become_unreachable();
