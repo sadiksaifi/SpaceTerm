@@ -2,6 +2,7 @@
 //!
 //! The item lives in the client process beside its windows. Close All Windows leaves it in the
 //! menu bar, and only its Quit, or the system's own termination, exits the client.
+use super::macos_alert::{AlertSeverity, application_alert};
 use crate::status_menu::{
     self,
     model::{Command, Item, Presentation, State},
@@ -17,8 +18,8 @@ use objc2::{
     sel,
 };
 use objc2_app_kit::{
-    NSAlert, NSAlertFirstButtonReturn, NSAlertStyle, NSApplication, NSApplicationActivationPolicy,
-    NSEvent, NSEventMask, NSImage, NSMenu, NSMenuDelegate, NSMenuItem, NSStatusBar, NSStatusItem,
+    NSAlertFirstButtonReturn, NSApplication, NSApplicationActivationPolicy, NSEvent, NSEventMask,
+    NSImage, NSMenu, NSMenuDelegate, NSMenuItem, NSStatusBar, NSStatusItem,
     NSVariableStatusItemLength,
 };
 use objc2_foundation::{NSString, ns_string};
@@ -356,12 +357,16 @@ fn alert(message: &str, detail: &str, destructive: Option<&str>, windowless: boo
         return false;
     }
     let application = NSApplication::sharedApplication(mtm);
-    let alert = NSAlert::new(mtm);
-    alert.setAlertStyle(if destructive.is_some() {
-        NSAlertStyle::Warning
-    } else {
-        NSAlertStyle::Informational
-    });
+    // Stop and Restart, the only confirmations, end every Terminal Session and the programs in
+    // them. A failure report loses nothing more.
+    let alert = application_alert(
+        if destructive.is_some() {
+            AlertSeverity::Caution
+        } else {
+            AlertSeverity::Standard
+        },
+        mtm,
+    );
     alert.setMessageText(&NSString::from_str(message));
     alert.setInformativeText(&NSString::from_str(detail));
     let chosen = match destructive {

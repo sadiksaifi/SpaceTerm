@@ -8,8 +8,8 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyClass, AnyObject, Bool, Imp, Sel};
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSAlert, NSAlertFirstButtonReturn, NSAlertSecondButtonReturn, NSAlertStyle, NSApplication,
-    NSModalResponse, NSView, NSWindow,
+    NSAlert, NSAlertFirstButtonReturn, NSAlertSecondButtonReturn, NSApplication, NSModalResponse,
+    NSView, NSWindow,
 };
 use objc2_foundation::{NSInteger, NSObject, NSObjectProtocol, NSString};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -18,6 +18,7 @@ use super::application_quit::{
     ApplicationQuitAdapter, ApplicationQuitDecision, ApplicationQuitError, ApplicationQuitHandler,
     ApplicationQuitRequest, DismissalAnswer, DismissalPrompt, present_window_dismissal,
 };
+use super::macos_alert::{AlertSeverity, application_alert};
 
 const NS_TERMINATE_CANCEL: NSInteger = 0;
 const NS_TERMINATE_NOW: NSInteger = 1;
@@ -175,8 +176,8 @@ fn native_window(window: &gpui::Window) -> Option<Retained<NSWindow>> {
 
 /// Builds the dismissal alert: the default answer, then Cancel.
 fn dismissal_alert(prompt: &DismissalPrompt, mtm: MainThreadMarker) -> Retained<NSAlert> {
-    let alert = NSAlert::new(mtm);
-    alert.setAlertStyle(NSAlertStyle::Informational);
+    // Every answer keeps Terminal Sessions running, so nothing is lost.
+    let alert = application_alert(AlertSeverity::Standard, mtm);
     alert.setMessageText(&NSString::from_str(&prompt.title));
     alert.setInformativeText(&NSString::from_str(&prompt.detail));
     let keep = alert.addButtonWithTitle(&NSString::from_str(&prompt.keep));

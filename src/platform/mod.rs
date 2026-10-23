@@ -130,6 +130,10 @@ mod macos_application_menu;
 #[cfg(feature = "desktop")]
 pub(crate) mod macos_application_menu;
 
+#[cfg(target_os = "macos")]
+#[cfg(feature = "desktop")]
+mod macos_alert;
+
 #[cfg(all(target_os = "macos", not(test)))]
 #[cfg(feature = "desktop")]
 mod macos_application_quit;

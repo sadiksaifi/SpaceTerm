@@ -748,19 +748,27 @@ impl ApplicationQuitCoordinator {
         };
         let count = snapshot.facts.pane_count;
         let noun = if count == 1 { "Pane" } else { "Panes" };
-        let detail = if self.exit_ends_sessions {
-            format!(
-                "Quit with {count} open {noun}? This development run ends with SpaceTerm, so its Terminal Sessions end and any running commands stop."
+        // The caution level is for an answer that stops running commands. Otherwise the Terminal
+        // Sessions keep running, and the alert shows the application icon.
+        let (level, detail) = if self.exit_ends_sessions {
+            (
+                PromptLevel::Critical,
+                format!(
+                    "Quit with {count} open {noun}? This development run ends with SpaceTerm, so its Terminal Sessions end and any running commands stop."
+                ),
             )
         } else {
-            format!(
-                "Quit with {count} open {noun}? Their windows close, and the SpaceTerm Server keeps their Terminal Sessions running."
+            (
+                PromptLevel::Info,
+                format!(
+                    "Quit with {count} open {noun}? Their windows close, and the SpaceTerm Server keeps their Terminal Sessions running."
+                ),
             )
         };
         let prompt = confirmation_window.update(cx, |_, window, cx| {
             window.activate_window();
             window.prompt(
-                PromptLevel::Critical,
+                level,
                 "Quit SpaceTerm?",
                 Some(&detail),
                 &[
