@@ -7,7 +7,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use gpui::{Entity, TestAppContext, VisualTestContext};
-use spaceterm_ui::a11y_testing::A11yTree;
+use spaceterm_ui::a11y_testing::{A11yTree, node_id};
 use zeroize::Zeroizing;
 
 use super::super::servers::testing::{ScriptedServer, connected};
@@ -261,6 +261,23 @@ impl Sheet<'_> {
             .read_with(self.cx, |settings, _| settings.selected_server())
     }
 
+    /// The sheet's current presentation and whether its host field has keyboard focus.
+    fn presented(&mut self) -> (Option<spaceterm_ui::ModalPresentationId>, bool) {
+        self.cx.update(|window, cx| {
+            let Some(sheet) = open_sheet(window, cx) else {
+                return (None, false);
+            };
+            let sheet = sheet.read(cx);
+            (
+                sheet
+                    .presentation
+                    .as_ref()
+                    .map(DialogCompletion::presentation_id),
+                sheet.host.read(cx).focus_handle().is_focused(window),
+            )
+        })
+    }
+
     fn open(&mut self) -> bool {
         self.cx
             .update(|window, cx| spaceterm_ui::window_modal_is_open(window, cx))
@@ -277,19 +294,23 @@ impl Sheet<'_> {
             .to_owned()
     }
 
-    /// Whether the sheet's button named `label` is unavailable.
-    fn disabled(&mut self, label: &str) -> bool {
+    /// The sheet's node named `label`, as assistive technology reads it.
+    fn node(&mut self, label: &str) -> serde_json::Value {
         let tree = A11yTree::read(self.cx);
         let dialog = *tree
             .with_role("Dialog")
             .first()
             .expect("the sheet is presented");
-        let button = tree
-            .descendants(dialog)
+        tree.descendants(dialog)
             .into_iter()
             .find(|node| node["aria"]["label"] == label)
-            .unwrap_or_else(|| panic!("the sheet offers {label}"));
-        button["aria"]["disabled"] == true
+            .unwrap_or_else(|| panic!("the sheet offers {label}"))
+            .clone()
+    }
+
+    /// Whether the sheet's button named `label` is unavailable.
+    fn disabled(&mut self, label: &str) -> bool {
+        self.node(label)["aria"]["disabled"] == true
     }
 
     /// Whether any Label the window publishes says `text`.
@@ -593,4 +614,95 @@ fn an_unsaved_stop_says_so_until_the_registry_saves_again(cx: &mut TestAppContex
     assert!(!direct.persistence_error(), "the registry saved its change");
 
     sheet.settle(|sheet| sheet.says("SpaceTerm saved that you stopped this pairing."));
+}
+
+/// Typing a host's first character makes Connect available on the same sheet: the presentation,
+/// the field's focus and Connect's accessibility node all stay.
+#[gpui::test]
+fn typing_the_first_host_character_makes_connect_available_in_place(cx: &mut TestAppContext) {
+    let mut sheet = open_settings(cx);
+    sheet.begin(AddServerRequest::Ssh(None));
+    let (before, _) = sheet.presented();
+    let connect = sheet.node("Connect");
+
+    sheet.cx.simulate_input("p");
+    sheet.cx.run_until_parked();
+
+    let (after, focused) = sheet.presented();
+    let available = sheet.node("Connect");
+    assert!(before.is_some());
+    assert_eq!(after, before, "the sheet stays the same presentation");
+    assert!(focused, "the host field keeps keyboard focus");
+    assert_eq!(connect["aria"]["disabled"], true);
+    assert_ne!(available["aria"]["disabled"], true);
+    assert_eq!(node_id(&connect), node_id(&available));
+}
+
+/// Connect can't be chosen while the host is empty, by pointer or by Return.
+#[gpui::test]
+fn an_unavailable_connect_connects_nothing(cx: &mut TestAppContext) {
+    let mut sheet = open_settings(cx);
+    sheet.begin(AddServerRequest::Ssh(None));
+
+    sheet.choose(SheetAction::Connect.selector());
+    sheet.cx.simulate_keystrokes("enter");
+    sheet.cx.run_until_parked();
+
+    assert!(sheet.open());
+    assert_eq!(sheet.title(), "Add Server");
+    assert_eq!(sheet.computers.connects.load(Ordering::SeqCst), 0);
+}
+
+/// Joining shows the code the authenticated exchange produced, which assistive technology reads
+/// digit by digit, while the server's owner decides. Escape stops that exact enrollment.
+#[gpui::test]
+fn joining_shows_the_comparison_code_until_escape_stops_it(cx: &mut TestAppContext) {
+    let (direct, link, code) = crate::direct_connections::tests::waiting_invitation("studio");
+    assert_eq!(
+        code.to_string(),
+        "000007",
+        "the fixture's exchange produces this code"
+    );
+    let mut sheet = open_settings_with(Arc::new(SavedConnections::default()), direct.clone(), cx);
+    sheet.begin(AddServerRequest::Invitation(Some(link)));
+
+    sheet.cx.simulate_keystrokes("enter");
+    sheet.settle(|sheet| {
+        A11yTree::read(sheet.cx)
+            .find("Code")
+            .is_some_and(|node| node["aria"]["value"] == "0 0 0 0 0 7")
+    });
+
+    assert_eq!(sheet.title(), "Join studio");
+    assert!(sheet.says("Check that studio shows the same code"));
+    assert!(sheet.says("Waiting for studio to allow"));
+
+    sheet.cx.simulate_keystrokes("escape");
+    sheet.settle(|sheet| !sheet.open());
+    assert!(direct.routes().is_empty(), "a stopped join adds no server");
+}
+
+/// A link delivered while a join waits doesn't replace it. The sheet says it arrived, and Add
+/// Server shows it once the current join ends.
+#[gpui::test]
+fn a_link_delivered_during_a_join_waits_for_it_to_end(cx: &mut TestAppContext) {
+    let (direct, link, _) = crate::direct_connections::tests::waiting_invitation("studio");
+    let (_, next, _) = crate::direct_connections::tests::waiting_invitation("annex");
+    let mut sheet = open_settings_with(Arc::new(SavedConnections::default()), direct, cx);
+    sheet.begin(AddServerRequest::Invitation(Some(link)));
+    sheet.cx.simulate_keystrokes("enter");
+    sheet.settle(|sheet| A11yTree::read(sheet.cx).find("Code").is_some());
+
+    sheet.begin(AddServerRequest::Invitation(Some(next)));
+
+    assert_eq!(
+        sheet.title(),
+        "Join studio",
+        "the join underway keeps its place"
+    );
+    assert!(sheet.says("Another invitation link arrived. Add Server shows it next."));
+
+    sheet.cx.simulate_keystrokes("escape");
+    sheet.settle(|sheet| sheet.open() && sheet.title() == "Add Server" && sheet.says("annex"));
+    assert!(!sheet.disabled("Join"), "the delivered link waits for Join");
 }

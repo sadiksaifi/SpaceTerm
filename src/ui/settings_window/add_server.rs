@@ -62,6 +62,7 @@ pub(super) const PREVIEW_SELECTOR: &str = "add-server-preview";
 pub(super) const PROBLEM_SELECTOR: &str = "add-server-problem";
 pub(super) const STATUS_SELECTOR: &str = "add-server-status";
 pub(super) const CODE_SELECTOR: &str = "add-server-code";
+pub(super) const DEFERRED_SELECTOR: &str = "add-server-deferred";
 
 /// What the host field's description says. It is also the field's accessibility hint.
 const HOST_DESCRIPTION: &str = "SpaceTerm signs in the way ssh does, then uses that \
@@ -150,10 +151,11 @@ enum FocusTarget {
 }
 
 /// The title and actions one stage presents. A different shape replaces the sheet on screen.
+/// Which actions are available is not part of the shape: it changes in place as the person types.
 #[derive(Clone, Debug, PartialEq)]
 struct Shape {
     title: SharedString,
-    actions: Vec<(SheetAction, bool)>,
+    actions: Vec<SheetAction>,
     focus: FocusTarget,
 }
 
@@ -231,9 +233,11 @@ struct OpenSheets(HashMap<WindowId, Entity<AddServerSheet>>);
 
 impl Global for OpenSheets {}
 
+/// The window's sheet, unless it already finished and is only waiting to be released.
 fn open_sheet(window: &Window, cx: &App) -> Option<Entity<AddServerSheet>> {
     cx.try_global::<OpenSheets>()
         .and_then(|sheets| sheets.0.get(&window.window_handle().window_id()))
+        .filter(|sheet| !sheet.read(cx).closed)
         .cloned()
 }
 
@@ -304,6 +308,11 @@ pub(super) struct AddServerSheet {
     /// A close the sheet holds open while it saves the person's stop.
     pending: Option<DialogPendingCompletion>,
     closed: bool,
+    /// The availability of each presented action, as last applied to the presentation.
+    applied: Vec<(SheetAction, bool)>,
+    /// A host or link that arrived while the sheet was busy. It waits here, in memory only, and
+    /// Add Server shows it next, without touching the work underway.
+    deferred: Option<AddServerRequest>,
     _subscriptions: Vec<Subscription>,
     _ssh_changes: Option<Task<()>>,
     _direct_changes: Option<DirectChanges>,
@@ -437,6 +446,8 @@ impl AddServerSheet {
             surface: 0,
             pending: None,
             closed: false,
+            applied: Vec::new(),
+            deferred: None,
             _subscriptions: subscriptions,
             _ssh_changes: ssh_changes,
             _direct_changes: direct_changes,
@@ -449,6 +460,13 @@ impl AddServerSheet {
     /// underway, such as a connection or a join, keeps its place.
     fn fill(&mut self, request: AddServerRequest, window: &mut Window, cx: &mut Context<Self>) {
         if self.busy() {
+            // The latest value waits; an empty request only brings the sheet forward.
+            if matches!(
+                request,
+                AddServerRequest::Ssh(Some(_)) | AddServerRequest::Invitation(Some(_))
+            ) {
+                self.deferred = Some(request);
+            }
             self.show(window, cx);
             return;
         }
@@ -477,6 +495,10 @@ impl AddServerSheet {
 
     /// Whether the sheet has work underway that a new value must not replace.
     fn busy(&self) -> bool {
+        // A stop being saved holds the sheet until it settles.
+        if self.pending.is_some() {
+            return true;
+        }
         match &self.stage {
             Stage::Connecting(_) | Stage::Install { .. } => true,
             Stage::Joining { join: None, .. } => true,
@@ -547,21 +569,13 @@ impl AddServerSheet {
         let join_title = |server: &str| SharedString::from(format!("Join {server}"));
         let shape = match &self.stage {
             Stage::Form => {
-                let (primary, enabled, focus) = match self.method {
-                    Method::Ssh => (
-                        SheetAction::Connect,
-                        self.ssh.is_some() && !self.host.read(cx).value().trim().is_empty(),
-                        FocusTarget::Host,
-                    ),
-                    Method::Invitation => (
-                        SheetAction::Join,
-                        self.direct.is_some() && matches!(self.preview, Some(Ok(_))),
-                        FocusTarget::Link,
-                    ),
+                let (primary, focus) = match self.method {
+                    Method::Ssh => (SheetAction::Connect, FocusTarget::Host),
+                    Method::Invitation => (SheetAction::Join, FocusTarget::Link),
                 };
                 Shape {
                     title: add(),
-                    actions: vec![(primary, enabled), (SheetAction::Cancel, true)],
+                    actions: vec![primary, SheetAction::Cancel],
                     focus,
                 }
             }
@@ -571,7 +585,7 @@ impl AddServerSheet {
                 }
                 Shape {
                     title: add(),
-                    actions: vec![(SheetAction::Cancel, true)],
+                    actions: vec![SheetAction::Cancel],
                     focus: FocusTarget::Action(SheetAction::Cancel),
                 }
             }
@@ -581,7 +595,7 @@ impl AddServerSheet {
                     destination.as_str()
                 )
                 .into(),
-                actions: vec![(SheetAction::Install, true), (SheetAction::Cancel, true)],
+                actions: vec![SheetAction::Install, SheetAction::Cancel],
                 focus: FocusTarget::Action(SheetAction::Install),
             },
             Stage::SshProblem {
@@ -589,10 +603,10 @@ impl AddServerSheet {
             } => {
                 let mut actions = Vec::with_capacity(3);
                 if *retry {
-                    actions.push((SheetAction::TryAgain, true));
+                    actions.push(SheetAction::TryAgain);
                 }
-                actions.push((SheetAction::Back, true));
-                actions.push((SheetAction::Cancel, true));
+                actions.push(SheetAction::Back);
+                actions.push(SheetAction::Cancel);
                 Shape {
                     title: format!(
                         "Couldn\u{2019}t Connect to \u{201C}{}\u{201D}",
@@ -611,18 +625,18 @@ impl AddServerSheet {
                 let status = join.and_then(|join| self.join_status(join));
                 let (actions, focus) = match status {
                     Some(JoinStatus::Retryable { .. }) => (
-                        vec![(SheetAction::TryAgain, true), (SheetAction::Cancel, true)],
+                        vec![SheetAction::TryAgain, SheetAction::Cancel],
                         SheetAction::TryAgain,
                     ),
                     Some(JoinStatus::PublicationUnconfirmed) => (
-                        vec![(SheetAction::Withdraw, true), (SheetAction::Close, true)],
+                        vec![SheetAction::Withdraw, SheetAction::Close],
                         SheetAction::Close,
                     ),
                     Some(JoinStatus::Rejected | JoinStatus::Expired | JoinStatus::Failed(_)) => (
-                        vec![(SheetAction::StartAgain, true), (SheetAction::Close, true)],
+                        vec![SheetAction::StartAgain, SheetAction::Close],
                         SheetAction::StartAgain,
                     ),
-                    _ => (vec![(SheetAction::Cancel, true)], SheetAction::Cancel),
+                    _ => (vec![SheetAction::Cancel], SheetAction::Cancel),
                 };
                 Shape {
                     title: join_title(server),
@@ -632,12 +646,12 @@ impl AddServerSheet {
             }
             Stage::JoinRefused { server, .. } => Shape {
                 title: join_title(server),
-                actions: vec![(SheetAction::StartAgain, true), (SheetAction::Close, true)],
+                actions: vec![SheetAction::StartAgain, SheetAction::Close],
                 focus: FocusTarget::Action(SheetAction::StartAgain),
             },
             Stage::StopUnsaved { server } | Stage::Stopped { server } => Shape {
                 title: join_title(server),
-                actions: vec![(SheetAction::Close, true)],
+                actions: vec![SheetAction::Close],
                 focus: FocusTarget::Action(SheetAction::Close),
             },
             Stage::Done => return None,
@@ -654,6 +668,7 @@ impl AddServerSheet {
         }
         let wanted = self.shape(cx);
         if wanted == self.shown {
+            self.sync_availability(window, cx);
             cx.notify();
             return;
         }
@@ -673,11 +688,17 @@ impl AddServerSheet {
         {
             let _ = presentation.dismiss(window, cx);
         }
+        let applied = shape
+            .actions
+            .iter()
+            .map(|action| (*action, self.available(*action, cx)))
+            .collect();
         let presented = self.present(&shape, window, cx);
         match presented {
             Some(presentation) => {
                 self.presentation = Some(presentation);
                 self.shown = Some(shape);
+                self.applied = applied;
             }
             None => {
                 self.shown = None;
@@ -686,6 +707,40 @@ impl AddServerSheet {
             }
         }
         cx.notify();
+    }
+
+    /// Whether `action` can be chosen now. Only Connect and Join wait for a value.
+    fn available(&self, action: SheetAction, cx: &App) -> bool {
+        match action {
+            SheetAction::Connect => {
+                self.ssh.is_some() && !self.host.read(cx).value().trim().is_empty()
+            }
+            SheetAction::Join => self.direct.is_some() && matches!(self.preview, Some(Ok(_))),
+            _ => true,
+        }
+    }
+
+    /// Brings the presented actions' availability up to date in place. The sheet stays on screen,
+    /// so the field keeps its focus and caret.
+    fn sync_availability(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (Some(shape), Some(presentation)) = (&self.shown, self.presentation.clone()) else {
+            return;
+        };
+        let changes: Vec<(SheetAction, bool)> = shape
+            .actions
+            .iter()
+            .map(|action| (*action, self.available(*action, cx)))
+            .filter(|change| !self.applied.contains(change))
+            .collect();
+        for (action, available) in changes {
+            if presentation
+                .set_action_enabled(&action, available, window, cx)
+                .is_ok()
+            {
+                self.applied.retain(|(applied, _)| *applied != action);
+                self.applied.push((action, available));
+            }
+        }
     }
 
     fn present(
@@ -707,7 +762,7 @@ impl AddServerSheet {
             shape
                 .actions
                 .iter()
-                .map(|(action, enabled)| action.modal(*enabled))
+                .map(|action| action.modal(self.available(*action, cx)))
                 .collect(),
             focus,
         )
@@ -847,6 +902,11 @@ impl AddServerSheet {
             },
             SheetAction::Back => self.back_to_form(window, cx),
             SheetAction::StartAgain => {
+                if let Some(request) = self.deferred.take() {
+                    self.stage = Stage::Form;
+                    self.fill(request, window, cx);
+                    return;
+                }
                 self.stage = Stage::Form;
                 self.method = Method::Invitation;
                 self.link.update(cx, |input, cx| {
@@ -873,6 +933,10 @@ impl AddServerSheet {
     fn back_to_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.end_attempt();
         self.stage = Stage::Form;
+        if let Some(request) = self.deferred.take() {
+            self.fill(request, window, cx);
+            return;
+        }
         self.method = Method::Ssh;
         self.show(window, cx);
         self.focus_field(window, cx);
@@ -1179,7 +1243,7 @@ impl AddServerSheet {
     }
 
     /// Lets go of this sheet once nothing it presents remains.
-    fn release(&self, cx: &mut Context<Self>) {
+    fn release(&mut self, cx: &mut Context<Self>) {
         let window = self.window.window_id();
         let this = cx.entity_id();
         let owned = cx
@@ -1190,6 +1254,18 @@ impl AddServerSheet {
             let released = cx.global_mut::<OpenSheets>().0.remove(&window);
             // The sheet may hold its own last reference here, so it drops after this update.
             cx.defer(move |_| drop(released));
+        }
+        // A value that arrived while this sheet was busy opens in a fresh sheet.
+        if let Some(request) = self.deferred.take() {
+            let settings = self.settings.clone();
+            let window = self.window;
+            cx.defer(move |cx| {
+                let _ = window.update(cx, |_, window, cx| {
+                    let _ = settings.update(cx, |settings, cx| {
+                        settings.begin_add_server(request, window, cx);
+                    });
+                });
+            });
         }
     }
 }
@@ -1206,6 +1282,23 @@ impl Render for AddServerSheet {
             Stage::Form => self.render_form(&appearance, cx),
             _ => self.render_status(&appearance),
         };
+        let deferred = self.deferred.as_ref().map(|request| {
+            let note: SharedString = match request {
+                AddServerRequest::Ssh(Some(host)) => {
+                    format!("Add Server shows \u{201C}{host}\u{201D} next.").into()
+                }
+                _ => "Another invitation link arrived. Add Server shows it next.".into(),
+            };
+            let colors = appearance.host_colors(spaceterm_ui::ControlHost::Floating);
+            div()
+                .id(DEFERRED_SELECTOR)
+                .debug_selector(|| DEFERRED_SELECTOR.to_owned())
+                .role(accesskit::Role::Status)
+                .chrome_text(appearance.typography.style(TextRole::Secondary))
+                .text_color(gpui_color(colors.text_secondary))
+                .whitespace_normal()
+                .child(readable(format!("{DEFERRED_SELECTOR}-text"), note))
+        });
         div()
             .debug_selector(|| MODAL_ID.to_owned())
             .flex()
@@ -1213,6 +1306,7 @@ impl Render for AddServerSheet {
             .w_full()
             .gap(appearance.spacing(12.0))
             .child(body)
+            .children(deferred)
     }
 }
 
