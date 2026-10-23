@@ -449,6 +449,7 @@ impl SettingsWindow {
                     server_fingerprint,
                     device_fingerprint,
                     expires_at,
+                    ..
                 }),
                 None,
             ) => {

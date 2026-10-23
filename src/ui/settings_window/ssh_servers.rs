@@ -130,6 +130,11 @@ impl SshServerRows {
         }
     }
 
+    /// The field where the person types a host to connect to.
+    pub(super) fn destination(&self) -> &Entity<TextInput> {
+        &self.destination
+    }
+
     /// The destinations the SSH Hosts menu offers: every configured host not already listed.
     fn offered(&self, listed: &[(SshDestination, RemoteConnectionStatus)]) -> Vec<SshDestination> {
         self.configured

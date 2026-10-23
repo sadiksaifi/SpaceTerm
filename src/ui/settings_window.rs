@@ -1,6 +1,7 @@
 //! The Settings Window: a separate, modeless Operating-System Window for SpaceTerm Settings.
 //! It is application scoped so it stays reachable when no Workspace window exists.
 
+mod add_server;
 mod advanced;
 mod background_image;
 mod catalog;
@@ -103,7 +104,8 @@ actions!(
         OpenKeyboardShortcuts,
         CloseSettingsWindow,
         FocusSettingsSearch,
-        ClearSettingsSearch
+        ClearSettingsSearch,
+        AddServer
     ]
 );
 
@@ -312,6 +314,33 @@ pub(crate) fn open_remote_maintenance(
     });
 }
 
+/// Opens Settings on Servers and starts adding a server there. `invitation` fills in an invitation
+/// link, such as one the operating system delivered, and `host` fills in an SSH host. Neither
+/// connects nor joins: the person reviews the value and confirms first. An invitation wins when
+/// both are given, because the person followed that link most recently.
+pub(crate) fn open_add_server(invitation: Option<String>, host: Option<String>, cx: &mut App) {
+    open_or_activate(Some(SettingsSectionId::Servers), cx);
+    // An existing window selects the section in a deferred update, so the request follows it.
+    cx.defer(move |cx| {
+        if let Some(settings) = open_settings_window(cx) {
+            let _ = settings.update(cx, |settings, window, cx| {
+                let request = match (invitation, host) {
+                    (Some(link), _) => AddServerRequest::Invitation(Some(link.into())),
+                    (None, host) => AddServerRequest::Ssh(host),
+                };
+                settings.begin_add_server(request, window, cx);
+            });
+        }
+    });
+}
+
+/// Where Add Server starts, and the value it fills in.
+pub(crate) enum AddServerRequest {
+    Ssh(Option<String>),
+    /// The invitation text is wiped when the request drops.
+    Invitation(Option<zeroize::Zeroizing<String>>),
+}
+
 /// Retains Settings until its latest edit is saved, then completes an authorized application quit.
 /// Closes the Settings window the way its own close button does: it saves first and stays open
 /// when saving fails. Reports whether `window` is the Settings window.
@@ -352,6 +381,7 @@ pub(crate) fn init(cx: &mut App) {
     cx.on_action(|_: &OpenKeyboardShortcuts, cx| {
         open_or_activate(Some(SettingsSectionId::Keybindings), cx);
     });
+    cx.on_action(|_: &AddServer, cx| open_add_server(None, None, cx));
 }
 
 fn appearance_mode_label(mode: AppearanceMode) -> &'static str {
