@@ -224,19 +224,25 @@ pub(crate) fn select(key: ServerKey, cx: &mut App) {
     });
 }
 
-/// Records an observation the window made of `key`. An older observation never replaces a newer
-/// one.
+/// Records an observation the window made of `key`, merged into what the selection holds as
+/// the retained record merges it. An older observation never replaces newer facts, and a reading
+/// that lacks network or device facts never erases them.
 pub(crate) fn remember(key: ServerKey, facts: LastKnownFacts, cx: &mut App) {
     ensure(cx);
     let selection = cx.global::<ServerSelection>();
-    let known = selection.facts.get(&key);
-    let newer = known.is_none_or(|known| facts.observed_at >= known.observed_at);
     // A removed server's late observation never brings its facts back.
-    if !newer || !selection.admits(&key) || known == Some(&facts) {
+    if !selection.admits(&key) {
+        return;
+    }
+    let known = selection.facts.get(&key);
+    let merged = known.map_or_else(|| facts.clone(), |known| known.merged(&facts));
+    if known == Some(&merged) {
         return;
     }
     cx.update_global::<ServerSelection, _>(|selection, _| {
-        selection.facts.insert(key.clone(), facts.clone());
+        selection.facts.insert(key.clone(), merged);
+        // The worker merges the observation into the record on disk, which can hold facts this
+        // window hasn't seen.
         selection.queue(Change::Remember(key, facts));
     });
 }
