@@ -111,6 +111,7 @@ pub(crate) struct FormGroup {
     selector: String,
     title: SharedString,
     rows: Vec<AnyElement>,
+    footnote: Option<SharedString>,
     on_rows_prepainted: Option<RowsPrepainted>,
 }
 
@@ -126,8 +127,15 @@ impl FormGroup {
             selector,
             title: title.into(),
             rows,
+            footnote: None,
             on_rows_prepainted: None,
         }
+    }
+
+    /// One line under the card saying why its rows can't be used now and what to do.
+    pub(crate) fn footnote(mut self, footnote: Option<SharedString>) -> Self {
+        self.footnote = footnote;
+        self
     }
 
     /// Reports where each row was laid out on every frame, in row order and window coordinates.
@@ -150,6 +158,7 @@ impl FormGroup {
         let row_separator = settings.separator(SettingsSurfaceRole::Card);
         let row_inset = row_horizontal_padding(appearance);
         let separator_selector = card_selector.clone();
+        let footnote_selector = format!("{selector}-footnote");
         let rows = self
             .rows
             .into_iter()
@@ -215,6 +224,18 @@ impl FormGroup {
                         .children(rows),
                 ),
             )
+            .children(self.footnote.map(|footnote| {
+                div()
+                    .id(SharedString::from(footnote_selector.clone()))
+                    .debug_selector(move || footnote_selector.clone())
+                    .role(accesskit::Role::Note)
+                    .aria_label(footnote.clone())
+                    .px(row_inset + px(HAIRLINE))
+                    .chrome_text(appearance.typography.style(TextRole::Secondary))
+                    .text_color(gpui_color(appearance.colors.text_muted))
+                    .whitespace_normal()
+                    .child(footnote)
+            }))
     }
 }
 
@@ -233,9 +254,13 @@ pub(crate) enum CaptionTone {
 /// One labeled row: a label, its control, and an optional reset affordance. The reset follows the
 /// label so every control stays on one shared right edge.
 pub(crate) struct FormRow {
-    selector: &'static str,
-    label: &'static str,
+    selector: SharedString,
+    label: SharedString,
     description: Option<SharedString>,
+    /// Why the control's value can't be used, shown under the control.
+    error: Option<SharedString>,
+    /// The row can't be used now. Its group's footnote says why.
+    dimmed: bool,
     separate_example: bool,
     tone: CaptionTone,
     control: AnyElement,
@@ -247,14 +272,16 @@ pub(crate) struct FormRow {
 
 impl FormRow {
     pub(crate) fn new(
-        selector: &'static str,
-        label: &'static str,
+        selector: impl Into<SharedString>,
+        label: impl Into<SharedString>,
         control: impl IntoElement,
     ) -> Self {
         Self {
-            selector,
-            label,
+            selector: selector.into(),
+            label: label.into(),
             description: None,
+            error: None,
+            dimmed: false,
             separate_example: false,
             tone: CaptionTone::Guidance,
             control: control.into_any_element(),
@@ -289,6 +316,19 @@ impl FormRow {
         self
     }
 
+    /// Shows a validation error directly under the control, right-aligned in the destructive
+    /// color. The description under the label stays.
+    pub(crate) fn error(mut self, error: Option<SharedString>) -> Self {
+        self.error = error;
+        self
+    }
+
+    /// Dims a row that can't be used now.
+    pub(crate) fn dimmed(mut self, dimmed: bool) -> Self {
+        self.dimmed = dimmed;
+        self
+    }
+
     /// Adds the affordance restoring this row's default. A full-width row drops it.
     pub(crate) fn reset(mut self, reset: Option<impl IntoElement>) -> Self {
         self.reset = reset.map(IntoElement::into_any_element);
@@ -318,7 +358,7 @@ impl FormRow {
         window: &Window,
         _cx: &App,
     ) -> impl IntoElement {
-        let selector = self.selector;
+        let selector = self.selector.clone();
         let colors = appearance.host_colors(spaceterm_ui::ControlHost::Card);
         let (foreground, secondary) = if self.highlighted {
             (
@@ -341,7 +381,7 @@ impl FormRow {
         let label_width = ChromeTypography::round_measurement_up(
             appearance
                 .typography
-                .measure(label_role, self.label, window),
+                .measure(label_role, &self.label, window),
             window,
         );
         let reset_slot_width = reset_slot_width(appearance);
@@ -427,7 +467,7 @@ impl FormRow {
                     label_width + appearance.spacing(RESET_GAP) + reset_slot_width;
                 width.max(label_with_reset)
             });
-        let label_ranges = highlight_ranges(self.label, &self.matched_indices);
+        let label_ranges = highlight_ranges(&self.label, &self.matched_indices);
         let label = (!full).then(|| {
             div()
                 .flex()
@@ -448,7 +488,7 @@ impl FormRow {
                             div()
                                 .id(SharedString::from(label_selector.clone()))
                                 .role(accesskit::Role::Label)
-                                .aria_value(self.label)
+                                .aria_value(self.label.clone())
                                 .debug_selector(move || label_selector.clone())
                                 .flex_basis(label_width)
                                 .flex_shrink(1.0)
@@ -456,7 +496,11 @@ impl FormRow {
                                 .chrome_text(appearance.typography.style(label_role))
                                 .text_color(gpui_color(foreground))
                                 .whitespace_normal()
-                                .child(highlighted_label(self.label, &label_ranges, matched)),
+                                .child(highlighted_label(
+                                    self.label.clone(),
+                                    &label_ranges,
+                                    matched,
+                                )),
                         )
                         .child(
                             div()
@@ -484,22 +528,49 @@ impl FormRow {
             .child(
                 div()
                     .flex()
-                    .flex_row()
-                    .items_center()
+                    .flex_col()
+                    .items_end()
+                    .gap(appearance.spacing(3.0))
                     .min_w_0()
-                    .when(above || full, |content| content.flex_1())
+                    .when(above || full, |content| content.flex_1().items_stretch())
                     .when(!(above || full), |content| content.flex_none())
-                    .child(self.control),
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .min_w_0()
+                            .when(above || full, |content| content.w_full())
+                            .child(self.control),
+                    )
+                    .children(self.error.map(|error| {
+                        let error_selector = format!("{selector}-error");
+                        div()
+                            .id(SharedString::from(error_selector.clone()))
+                            .debug_selector(move || error_selector.clone())
+                            .role(accesskit::Role::Alert)
+                            .aria_label(error.clone())
+                            .max_w(appearance.spacing(PROSE_MEASURE * 0.6))
+                            .text_align(gpui::TextAlign::Right)
+                            .chrome_text(appearance.typography.style(TextRole::Secondary))
+                            .text_color(gpui_color(colors.error))
+                            .whitespace_normal()
+                            .child(error)
+                    })),
             );
         // A row whose content takes the whole width has no label column to stack guidance in, so
         // it keeps its own line underneath.
         let trailing_caption = self.description.filter(|_| above || full).map(caption);
+        let row_selector = self.selector.clone();
         div()
-            .debug_selector(move || selector.to_owned())
+            .debug_selector(move || row_selector.to_string())
             .flex()
             .flex_col()
             .w_full()
             .gap(appearance.spacing(3.0))
+            // A row that can't be used now reads as unavailable at a glance; its group's footnote
+            // says why.
+            .when(self.dimmed, |row| row.opacity(0.45))
             .px(row_horizontal_padding(appearance))
             .py(if full {
                 row_horizontal_padding(appearance)
@@ -525,7 +596,7 @@ pub(crate) fn highlighted_row_background(appearance: &ChromeAppearance) -> Color
 }
 
 fn highlighted_label(
-    label: &'static str,
+    label: SharedString,
     ranges: &[std::ops::Range<usize>],
     matched: Color,
 ) -> AnyElement {
