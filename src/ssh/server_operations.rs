@@ -1857,9 +1857,10 @@ mod tests {
     use spaceterm_server::service::{ServiceStartup, ServiceStatus};
 
     use super::super::server_connection::{
-        ConnectMode, ConnectProgress, ConnectedSshServer, RetainedSshConnection, SshConnectBackend,
-        SshConnectFailure, SshConnectionIntentStore, SshServerContinuity, SshServerFacts,
-        SshServerLease, SshServerObservation,
+        ConnectMode, ConnectProgress, ConnectedSshServer, RemoteConnectionStatus,
+        RetainedSshConnection, ServerAvailability, SshConnectBackend, SshConnectFailure,
+        SshConnectionIntentStore, SshServerContinuity, SshServerFacts, SshServerLease,
+        SshServerObservation,
     };
     use super::super::server_maintenance::MaintenanceProgress;
 
@@ -2105,7 +2106,15 @@ mod tests {
             _: &SshCancellationToken,
             _: &ConnectProgress<'_>,
         ) -> Result<SshServerObservation, SshConnectFailure> {
-            Err(SshConnectFailure::Stopped(None))
+            Ok(SshServerObservation {
+                availability: ServerAvailability::Running,
+                facts: SshServerFacts {
+                    platform: ("linux".into(), "x86_64".into()),
+                    version: Some("1.2.3".into()),
+                    starts_automatically: true,
+                },
+                continuity: Some(pin()),
+            })
         }
     }
     #[derive(Default)]
@@ -2282,6 +2291,105 @@ mod tests {
         );
         owner.confirm(handle);
         (owner, connections, intents)
+    }
+
+    #[test]
+    fn check_status_and_maintenance_reads_expose_the_order_of_their_validated_facts() {
+        let script = Arc::new(Script::default());
+        let mut stopped = facts();
+        stopped.status.running = false;
+        stopped.status.stopped = true;
+        script.observes(Ok(stopped)).observes(Ok(facts()));
+        let records = Arc::new(Records::default());
+        let (connections, _) = connected();
+        connections.disconnect(&destination());
+        let owner = SshServerOperations::new(script.clone(), records, connections.clone());
+        let before = Instant::now();
+        owner.refresh(&destination());
+        eventually(|| matches!(owner.state(&destination()), RemoteOperationState::Read(_)));
+        let old = owner.entries().remove(0);
+        let old_at = old
+            .observed_at
+            .expect("fresh maintenance facts have an observation time");
+        assert!(old_at >= before);
+        assert!(matches!(old.state, RemoteOperationState::Read(facts) if facts.status.stopped));
+        connections.check(&destination());
+        eventually(|| {
+            matches!(
+                connections.status(&destination()),
+                RemoteConnectionStatus::Checked { .. }
+            )
+        });
+        let RemoteConnectionStatus::Checked {
+            availability,
+            observed_at: checked_at,
+            ..
+        } = connections.status(&destination())
+        else {
+            unreachable!()
+        };
+        assert_eq!(availability, ServerAvailability::Running);
+        assert!(checked_at >= old_at);
+        assert_eq!(
+            owner.entries()[0].observed_at,
+            Some(old_at),
+            "a connection check does not rejuvenate old maintenance facts"
+        );
+        owner.refresh(&destination());
+        eventually(
+            || matches!(owner.state(&destination()), RemoteOperationState::Read(facts) if facts.status.running),
+        );
+        let fresh = owner.entries().remove(0);
+        assert!(fresh.observed_at.is_some_and(|at| at >= checked_at));
+        assert_eq!(
+            owner.entries()[0].observed_at,
+            fresh.observed_at,
+            "reading snapshots preserves observation age"
+        );
+        assert_eq!(script.observed.lock().unwrap().len(), 2);
+        assert!(script.applied.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_newer_connection_check_keeps_the_unconfirmed_original_and_its_observation_age() {
+        let script = Arc::new(Script::default());
+        let records = Arc::new(Records::default());
+        let (owner, connections, _) =
+            submit(&script, &records, Err(SshMaintenanceFailure::Unconfirmed));
+        eventually(|| {
+            matches!(
+                owner.state(&destination()),
+                RemoteOperationState::Unconfirmed { .. }
+            )
+        });
+        let original = records.only();
+        let observed_at = owner.entries()[0]
+            .observed_at
+            .expect("the original's description observed the server");
+        connections.disconnect(&destination());
+        connections.check(&destination());
+        eventually(|| {
+            matches!(
+                connections.status(&destination()),
+                RemoteConnectionStatus::Checked { .. }
+            )
+        });
+        let RemoteConnectionStatus::Checked {
+            observed_at: checked_at,
+            ..
+        } = connections.status(&destination())
+        else {
+            unreachable!()
+        };
+        assert!(checked_at >= observed_at);
+        assert!(matches!(
+            owner.entries()[0].state,
+            RemoteOperationState::Unconfirmed { .. }
+        ));
+        assert_eq!(owner.entries()[0].observed_at, Some(observed_at));
+        assert_eq!(records.only(), original);
+        assert_eq!(script.applied.lock().unwrap().len(), 1);
+        assert!(script.resolved.lock().unwrap().is_empty());
     }
 
     #[test]
@@ -2683,6 +2791,11 @@ mod tests {
         let owner = SshServerOperations::new(script.clone(), records.clone(), connections);
         owner.resume_retained();
         let handle = resolved(owner.as_ref());
+        assert_eq!(
+            owner.entries()[0].observed_at,
+            None,
+            "restoring a retained outcome does not observe the server"
+        );
         assert!(matches!(
             owner.state(&destination()),
             RemoteOperationState::Resolved {
@@ -2700,6 +2813,7 @@ mod tests {
         owner.acknowledge(handle);
         eventually(|| records.operations.lock().unwrap().is_empty());
         eventually(|| matches!(owner.state(&destination()), RemoteOperationState::Unread));
+        assert_eq!(owner.entries()[0].observed_at, None);
     }
 
     #[test]
@@ -2832,13 +2946,26 @@ mod tests {
     #[test]
     fn a_validated_outcome_stays_until_it_is_acknowledged() {
         let script = Arc::new(Script::default());
+        let (entered, arrived) = async_channel::unbounded();
+        let (release, held) = async_channel::unbounded();
+        *script.gate.lock().unwrap() = Some(Gate {
+            entered,
+            release: held,
+        });
         let records = Arc::new(Records::default());
         let (owner, _, _) = submit(
             &script,
             &records,
             Ok(outcome(OperationResolution::Completed)),
         );
+        arrived.recv_blocking().unwrap();
+        let completed_after = Instant::now();
+        release.send_blocking(()).unwrap();
         let handle = resolved(owner.as_ref());
+        let observed_at = owner.entries()[0]
+            .observed_at
+            .expect("a validated completed outcome is a fresh observation");
+        assert!(observed_at >= completed_after);
         std::thread::sleep(Duration::from_millis(30));
         assert!(
             matches!(
@@ -2870,6 +2997,11 @@ mod tests {
             (facts.status.running, facts.status.stopped),
             (false, true),
             "an acknowledged result leaves the facts the operation produced"
+        );
+        assert_eq!(
+            owner.entries()[0].observed_at,
+            Some(observed_at),
+            "acknowledging an outcome preserves the time its facts were validated"
         );
         owner.acknowledge(handle);
         std::thread::sleep(Duration::from_millis(30));

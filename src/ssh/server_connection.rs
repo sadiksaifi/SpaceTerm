@@ -2080,6 +2080,7 @@ mod tests {
         registry.resume_retained();
         eventually(|| registry.connections().len() == 1);
         let writes = intents.writes.load(Ordering::SeqCst);
+        let before = Instant::now();
         registry.check(&destination());
         eventually(|| {
             matches!(
@@ -2091,12 +2092,29 @@ mod tests {
             )
         });
         let RemoteConnectionStatus::Checked {
-            facts: observed, ..
+            facts: observed,
+            observed_at,
+            at,
+            ..
         } = registry.status(&destination())
         else {
             unreachable!()
         };
         assert_eq!(observed, facts());
+        assert!(observed_at >= before && observed_at <= Instant::now());
+        let RemoteConnectionStatus::Checked {
+            observed_at: unchanged,
+            at: display_at,
+            ..
+        } = registry.status(&destination())
+        else {
+            unreachable!()
+        };
+        assert_eq!(
+            (unchanged, display_at),
+            (observed_at, at),
+            "snapshot reads do not renew either observation time"
+        );
         assert_eq!(backend.calls.load(Ordering::SeqCst), 0, "nothing connects");
         assert_eq!(backend.observations.load(Ordering::SeqCst), 1);
         assert_eq!(
