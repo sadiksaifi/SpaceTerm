@@ -145,6 +145,92 @@ impl Reading {
 }
 
 #[test]
+fn a_directory_deleted_during_discovery_keeps_saved_worktree_membership() {
+    struct DeleteDuringDiscovery {
+        directory: PathBuf,
+        deleted: AtomicBool,
+    }
+    impl RepositoryProgramRunner for DeleteDuringDiscovery {
+        fn run(
+            &self,
+            request: &ProgramRequest,
+            stdout: &mut dyn FnMut(&[u8]),
+            cancellation: &SshCancellationToken,
+        ) -> Result<ProgramExit, ProgramError> {
+            let discovery: Vec<std::ffi::OsString> = policy::local_read::DISCOVERY_ARGUMENTS
+                .iter()
+                .map(Into::into)
+                .collect();
+            if request.directory == self.directory
+                && request.arguments.ends_with(&discovery)
+                && !self.deleted.swap(true, Ordering::AcqRel)
+            {
+                // The native runner validates and enters the disposable directory first.
+                // Delete it in that child before executing the real Git discovery command.
+                let mut request = request.clone();
+                let mut arguments = vec![
+                    "-c".into(),
+                    "/bin/rm -rf -- \"$1\"; shift; exec \"$@\"".into(),
+                    "delete-during-discovery".into(),
+                    self.directory.as_os_str().to_owned(),
+                    request.executable.clone().into_os_string(),
+                ];
+                arguments.extend(request.arguments);
+                request.arguments = arguments;
+                request.executable = "/bin/sh".into();
+                return DeadlineRunner.run(&request, stdout, cancellation);
+            }
+            DeadlineRunner.run(request, stdout, cancellation)
+        }
+    }
+
+    let git = GitFixture::new();
+    let tree = git.0.join("linked");
+    git.git(&["worktree", "add", "-b", "feature", tree.to_str().unwrap()]);
+    let runner = Arc::new(DeleteDuringDiscovery {
+        directory: tree.clone(),
+        deleted: AtomicBool::new(false),
+    });
+    let mut reading = Reading::start([tree.clone()].into(), runner, git.0.join("unused-home"));
+    let tab = &mut reading.state.inventory.workspaces[0].tabs[0];
+    tab.worktree = Some(tree.clone());
+    tab.worktree_repository = Some(git.0.clone());
+    let until = Instant::now() + Duration::from_secs(4);
+    let facts = loop {
+        let snapshot = reading.poll();
+        if let Some(facts) = snapshot
+            .directories
+            .iter()
+            .find(|facts| facts.directory == tree)
+        {
+            break facts.clone();
+        }
+        assert!(
+            Instant::now() < until,
+            "deleted-directory read did not finish"
+        );
+        std::thread::sleep(POLL);
+    };
+    assert!(
+        !tree.exists(),
+        "the real child must delete the fixture directory"
+    );
+    assert_eq!(
+        reading.state.inventory.workspaces[0].tabs[0]
+            .worktree
+            .as_ref(),
+        Some(&tree),
+        "failed discovery cannot erase saved membership"
+    );
+    assert_eq!(facts.failure, Some(RepositoryReadError::Unavailable));
+    let restored = State::from_legacy(&reading.state.envelope(&git.0).unwrap());
+    assert_eq!(
+        restored.inventory.workspaces[0].tabs[0].worktree.as_ref(),
+        Some(&tree)
+    );
+}
+
+#[test]
 fn slow_count_publishes_branch_worktrees_other_sources_and_progress_before_completion() {
     let git = GitFixture::new();
     let other = GitFixture::new();
