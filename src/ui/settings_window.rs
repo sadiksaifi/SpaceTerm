@@ -1170,8 +1170,11 @@ impl SettingsWindow {
     ) -> AnyElement {
         let section = self.active_section;
         // Servers and Git act on one server, which the same picker chooses on both.
-        let picker = matches!(section, SettingsSectionId::Servers | SettingsSectionId::Git)
-            .then(|| self.render_server_picker(&settings.chrome, cx));
+        let picker =
+            matches!(section, SettingsSectionId::Servers | SettingsSectionId::Git).then(|| {
+                let flush = DetailHeading::toolbar_on_gutter(window, cx);
+                self.render_server_picker(&settings.chrome, flush, cx)
+            });
         let close_owner = cx.weak_entity();
         let close: spaceterm_ui::WindowCloseHandler = Rc::new(move |window, cx| {
             let handle = window.window_handle();

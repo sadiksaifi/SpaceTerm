@@ -1877,3 +1877,24 @@ fn a_hovered_row_rounds_only_the_corners_it_shares_with_its_card(cx: &mut TestAp
         "the card's last row should round only its bottom corners"
     );
 }
+
+#[gpui::test]
+fn the_picker_keeps_clear_of_client_drawn_window_controls(cx: &mut TestAppContext) {
+    let servers = open_servers(true, &["penguin"], cx);
+    let cx = servers.cx;
+    cx.simulate_decorations(gpui::Decorations::Client {
+        tiling: gpui::Tiling::default(),
+    });
+    cx.simulate_button_layout(Some(gpui::WindowButtonLayout {
+        left: [None; 3],
+        right: [Some(gpui::WindowButton::Close), None, None],
+    }));
+    cx.run_until_parked();
+
+    let picker = bounds(super::PICKER_SELECTOR, cx);
+    let close = bounds("window-close", cx);
+    assert!(
+        picker.right() < close.left(),
+        "the picker's hover surface should stop before Close, got {picker:?} beside {close:?}"
+    );
+}

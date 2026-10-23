@@ -834,6 +834,12 @@ impl<'a> DetailHeading<'a> {
         self
     }
 
+    /// Whether the toolbar ends on the content gutter, which client-drawn Window Controls on the
+    /// trailing side take instead. Only a toolbar on the gutter can line up with the rows below.
+    pub(crate) fn toolbar_on_gutter(window: &Window, cx: &App) -> bool {
+        ClientWindowControls::width(spaceterm_ui::WindowControlSide::Right, window, cx) <= px(0.0)
+    }
+
     pub(crate) fn scrolled(mut self, scrolled: bool) -> Self {
         self.scrolled = scrolled;
         self
@@ -847,9 +853,7 @@ impl<'a> DetailHeading<'a> {
     ) -> AnyElement {
         let appearance = &surface.chrome;
         let prefix = self.prefix;
-        let client_controls =
-            ClientWindowControls::width(spaceterm_ui::WindowControlSide::Right, window, cx)
-                > px(0.0);
+        let client_controls = !Self::toolbar_on_gutter(window, cx);
         let heading = div()
             .size_full()
             .px(appearance.spacing(CONTENT_GUTTER))

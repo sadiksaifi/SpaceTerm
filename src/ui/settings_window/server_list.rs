@@ -442,10 +442,12 @@ impl SettingsWindow {
 
     /// The server picker at the head of Servers and Git: the selected server's name and a small
     /// chevron, with no bezel. It searches the servers, then offers Add Server, and connecting to
-    /// a typed host it doesn't list.
+    /// a typed host it doesn't list. A `flush` picker ends its chevron on the rows' control edge;
+    /// beside client-drawn Window Controls it keeps its padding clear of them.
     pub(super) fn render_server_picker(
         &mut self,
         appearance: &ChromeAppearance,
+        flush: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let listed = self.listed_servers(cx);
@@ -516,7 +518,7 @@ impl SettingsWindow {
         )
         .ghost_trigger()
         .hug(true)
-        .flush(true)
+        .flush(flush)
         .accessibility_description(hint)
         .copy(ComboBoxCopy::new(
             "Search servers",
