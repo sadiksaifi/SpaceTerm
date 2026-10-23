@@ -909,12 +909,15 @@ impl AddServerSheet {
             RemoteConnectionStatus::Connected { .. }
         ) {
             self.end_attempt();
-            let saved = ssh
-                .connections()
-                .iter()
-                .any(|(listed, _)| *listed == destination);
+            // Only the complete saved inventory proves a host is new. Before it loads, an absent
+            // host may still be one the person saved, so the sheet never forgets it.
+            let new = ssh.retained_inventory_loaded()
+                && !ssh
+                    .connections()
+                    .iter()
+                    .any(|(listed, _)| *listed == destination);
             self.intent = ssh.connect_for_flow(destination.clone());
-            self.added = (self.intent.is_some() && !saved).then(|| destination.clone());
+            self.added = (self.intent.is_some() && new).then(|| destination.clone());
         }
         self.stage = Stage::Connecting(destination);
         self.observe(window, cx);

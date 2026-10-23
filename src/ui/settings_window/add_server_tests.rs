@@ -2,8 +2,8 @@
 //! remote call and a real direct connections registry whose network is unavailable.
 
 use std::rc::Rc;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use gpui::{Entity, TestAppContext, VisualTestContext};
@@ -95,22 +95,48 @@ impl SshConnectBackend for Computers {
     }
 }
 
-/// Saved connections kept in memory.
+/// Saved connections kept in memory. While `held`, loading waits, as a slow disk does.
 #[derive(Default)]
-struct SavedConnections(std::sync::Mutex<Vec<RetainedSshConnection>>);
+struct SavedConnections {
+    records: Mutex<Vec<RetainedSshConnection>>,
+    held: Mutex<bool>,
+    released: Condvar,
+}
+
+impl SavedConnections {
+    /// A record of `destination`, saved before this launch, that loads only once released.
+    fn holding(destination: &str) -> Arc<Self> {
+        Arc::new(Self {
+            records: Mutex::new(vec![RetainedSshConnection {
+                destination: SshDestination::new(destination.to_owned()).unwrap(),
+                continuity: None,
+                active: false,
+            }]),
+            held: Mutex::new(true),
+            released: Condvar::new(),
+        })
+    }
+
+    fn release(&self) {
+        *self.held.lock().unwrap() = false;
+        self.released.notify_all();
+    }
+}
 
 impl SshConnectionIntentStore for SavedConnections {
     fn load(&self) -> Result<Vec<RetainedSshConnection>, SshIntentStoreError> {
-        Ok(self.0.lock().unwrap().clone())
+        let held = self.held.lock().unwrap();
+        drop(self.released.wait_while(held, |held| *held).unwrap());
+        Ok(self.records.lock().unwrap().clone())
     }
     fn retain(&self, record: RetainedSshConnection) -> Result<(), SshIntentStoreError> {
-        let mut records = self.0.lock().unwrap();
+        let mut records = self.records.lock().unwrap();
         records.retain(|other| other.destination != record.destination);
         records.push(record);
         Ok(())
     }
     fn remove(&self, destination: &SshDestination) -> Result<(), SshIntentStoreError> {
-        self.0
+        self.records
             .lock()
             .unwrap()
             .retain(|record| record.destination != *destination);
@@ -127,11 +153,22 @@ struct Sheet<'a> {
 
 /// Opens Settings on Servers with the local server, an SSH registry and a direct registry.
 fn open_settings(cx: &mut TestAppContext) -> Sheet<'_> {
+    let sheet = open_settings_with(Arc::new(SavedConnections::default()), cx);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !sheet.connections.retained_inventory_loaded() {
+        assert!(Instant::now() < deadline, "the saved connections load");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    sheet
+}
+
+/// Opens Settings as [`open_settings`] does, with SSH connections saved in `saved`, without
+/// waiting for them to load.
+fn open_settings_with(saved: Arc<SavedConnections>, cx: &mut TestAppContext) -> Sheet<'_> {
     // The registries' workers run on their own threads.
     cx.executor().allow_parking();
     let computers = Arc::new(Computers::default());
-    let connections =
-        SshServerConnections::new(computers.clone(), Arc::new(SavedConnections::default()));
+    let connections = SshServerConnections::new(computers.clone(), saved);
     connections.resume_retained();
     let (direct, _) = crate::direct_connections::tests::offline("studio");
     let settings =
@@ -358,5 +395,35 @@ fn cancelling_after_a_new_host_fails_to_connect_adds_no_server(cx: &mut TestAppC
     assert!(
         sheet.connections.connections().is_empty(),
         "a host the person never added stays out of the server list"
+    );
+}
+
+#[gpui::test]
+fn cancelling_keeps_a_saved_host_whose_record_has_not_loaded_yet(cx: &mut TestAppContext) {
+    let saved = SavedConnections::holding(OFFLINE);
+    let mut sheet = open_settings_with(saved.clone(), cx);
+    assert!(
+        !sheet.connections.retained_inventory_loaded(),
+        "the saved connections are still loading"
+    );
+    sheet.begin(AddServerRequest::Ssh(None));
+
+    sheet.cx.simulate_input(OFFLINE);
+    sheet.cx.run_until_parked();
+    sheet.cx.simulate_keystrokes("enter");
+    sheet.settle(|sheet| sheet.title().starts_with("Couldn\u{2019}t Connect"));
+    sheet.cx.simulate_keystrokes("escape");
+    sheet.cx.run_until_parked();
+    let kept = sheet
+        .connections
+        .connections()
+        .iter()
+        .any(|(destination, _)| destination.as_str() == OFFLINE);
+    saved.release();
+
+    assert!(!sheet.open(), "Escape cancels the sheet");
+    assert!(
+        kept,
+        "a host the person saved before stays, although its record hadn't loaded when they typed it"
     );
 }
