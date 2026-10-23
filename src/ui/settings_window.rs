@@ -472,6 +472,8 @@ pub(crate) struct SettingsWindow {
     server_facts: server_facts::FactsFollower,
     /// Check Now underway on the Version row, for the server it was asked for.
     version_check: Option<server_card::VersionCheck>,
+    /// The SSH server whose automatic start the person last asked to change, and to what.
+    ssh_automatic_start: Option<(crate::domain::SshDestination, bool)>,
     /// The status last observed for each listed server, which a server SpaceTerm isn't connected
     /// to presents. It grants nothing: what each server offers follows its live connection.
     retained_status: std::collections::BTreeMap<
@@ -827,6 +829,7 @@ impl SettingsWindow {
             hidden_notices: notices::HiddenNotices::default(),
             server_facts: server_facts::FactsFollower::default(),
             version_check: None,
+            ssh_automatic_start: None,
             retained_status: std::collections::BTreeMap::new(),
             this_computer,
         };
@@ -2420,11 +2423,13 @@ impl SettingsWindow {
                     Some(server_list::ServerChoice::Direct(_))
                 ) && !self.selected_server_live()
             }
+            // An SSH account's route changes automatic start without a connection too.
             SettingsRowId::ServerAutoStart => {
-                !matches!(
+                matches!(
                     self.selected_server(),
-                    Some(server_list::ServerChoice::Local)
-                ) && !self.selected_server_live()
+                    Some(server_list::ServerChoice::Ssh(_))
+                ) && self.ssh_maintenance.is_none()
+                    && !self.selected_server_live()
             }
             SettingsRowId::EndAllSessions => !self.selected_server_live(),
             SettingsRowId::NetworkAccess | SettingsRowId::PairedDevices => {

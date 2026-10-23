@@ -1780,7 +1780,55 @@ impl SettingsWindow {
                 .automatic_start
                 .failure
                 .map(|error| SharedString::from(error.to_string())),
-            _ => None,
+            // A change the person asked for that the account route refused, or whose answer was
+            // lost, reads as the maintenance read reports it.
+            ServerChoice::Ssh(destination) => {
+                let asked = self.ssh_automatic_start.as_ref()?;
+                if asked.0 != destination {
+                    return None;
+                }
+                self.maintenance_presentation(MaintenanceRow::Service)
+                    .filter(|maintenance| maintenance.tone == CaptionTone::Error)
+                    .map(|maintenance| maintenance.explanation)
+            }
+            ServerChoice::Direct(_) => None,
+        }
+    }
+
+    /// Whether the selected server's automatic start can change now: this account's installed
+    /// service, or an SSH account's route while its maintenance owner is idle. A paired
+    /// connection carries no such authority.
+    fn automatic_start_changeable(&self, cx: &App) -> bool {
+        if self.automatic_start(cx).is_none() {
+            return false;
+        }
+        match self.selected_server() {
+            Some(ServerChoice::Local) => self
+                .server_service
+                .as_ref()
+                .is_some_and(|row| !row.automatic_start.working && row.state.working.is_none()),
+            Some(ServerChoice::Ssh(_)) => self
+                .maintenance_presentation(MaintenanceRow::Service)
+                .is_some_and(|maintenance| !maintenance.working),
+            _ => false,
+        }
+    }
+
+    /// Asks the selected server to start on its own, or not. This account's service changes at
+    /// once; an SSH account's route changes over the route its last read bound. A deliberate Stop
+    /// stays in force either way.
+    fn set_automatic_start(&mut self, enabled: bool, window: &mut Window, cx: &mut Context<Self>) {
+        match self.selected_server() {
+            Some(ServerChoice::Local) => self.set_local_automatic_start(enabled, window, cx),
+            Some(ServerChoice::Ssh(destination)) => {
+                let Some(rows) = self.ssh_maintenance.as_ref() else {
+                    return;
+                };
+                rows.operations.set_automatic_start(&destination, enabled);
+                self.ssh_automatic_start = Some((destination, enabled));
+                cx.notify();
+            }
+            _ => {}
         }
     }
 
@@ -1792,13 +1840,7 @@ impl SettingsWindow {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let value = self.automatic_start(cx);
-        let local = self.selected_server() == Some(ServerChoice::Local);
-        let changeable = local
-            && value.is_some()
-            && self
-                .server_service
-                .as_ref()
-                .is_some_and(|row| !row.automatic_start.working && row.state.working.is_none());
+        let changeable = self.automatic_start_changeable(cx);
         let owner = cx.weak_entity();
         Switch::new(
             AUTO_START_SELECTOR,
@@ -1812,7 +1854,7 @@ impl SettingsWindow {
         .on_change(move |change, window, cx| {
             let enabled = change.requested();
             let _ = owner.update(cx, |settings, cx| {
-                settings.set_local_automatic_start(enabled, window, cx);
+                settings.set_automatic_start(enabled, window, cx);
             });
         })
         .into_any_element()

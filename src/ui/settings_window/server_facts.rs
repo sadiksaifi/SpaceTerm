@@ -47,6 +47,8 @@ pub(super) struct FactsFollower {
 /// What something that reported on a server found. A part it didn't report is `None`.
 #[derive(Default)]
 pub(super) struct Observation {
+    /// When the report was made, in Unix seconds, when the report says. Otherwise it is now.
+    pub(super) observed_at: Option<u64>,
     pub(super) status: Option<ObservedServerStatus>,
     /// The server's own facts, read over a live connection.
     pub(super) server: Option<ServerFacts>,
@@ -135,10 +137,13 @@ pub(super) fn direct_status(route: DirectRouteStatus) -> Option<ObservedServerSt
 /// doesn't report keeps its previous value.
 pub(super) fn merged(
     previous: Option<LastKnownFacts>,
-    observed_at: u64,
+    now: u64,
     observed: Observation,
 ) -> LastKnownFacts {
     let previous = previous.unwrap_or_default();
+    // A report that carries its own time, such as Check Status, is as old as it says, so a result
+    // that finished while Settings was closed never reads as just observed.
+    let observed_at = observed.observed_at.unwrap_or(now).min(now);
     let server = observed.server;
     LastKnownFacts {
         observed_at,
@@ -244,6 +249,13 @@ impl SettingsWindow {
                         })
                 });
                 let reported = connection_facts(&connection);
+                let checked_at = match &connection {
+                    RemoteConnectionStatus::Checked { at, .. } => at
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .ok()
+                        .map(|elapsed| elapsed.as_secs()),
+                    _ => None,
+                };
                 // A connection is the most direct report. Otherwise an explicit service read
                 // reports the service, and Check Status what it found.
                 let status = match connection {
@@ -253,7 +265,14 @@ impl SettingsWindow {
                         .map(|facts| service_status(facts.status))
                         .or_else(|| ssh_status(&connection)),
                 };
+                // Only Check Status says when it looked; a maintenance read or a connection reports
+                // the present.
+                let observed_at = (read.is_none()
+                    && !matches!(connection, RemoteConnectionStatus::Connected { .. }))
+                .then_some(checked_at)
+                .flatten();
                 Observation {
+                    observed_at,
                     status,
                     version: read
                         .as_ref()
@@ -497,6 +516,22 @@ mod tests {
             ssh_status(&RemoteConnectionStatus::Stopped),
             Some(ObservedServerStatus::Stopped)
         );
+    }
+
+    /// A Check Status that finished while Settings was closed keeps the time it looked.
+    #[test]
+    fn a_report_that_says_when_it_looked_keeps_that_time() {
+        let next = merged(
+            None,
+            1_000,
+            Observation {
+                observed_at: Some(400),
+                status: Some(ObservedServerStatus::Running),
+                ..Observation::default()
+            },
+        );
+
+        assert_eq!(next.observed_at, 400);
     }
 
     #[test]
