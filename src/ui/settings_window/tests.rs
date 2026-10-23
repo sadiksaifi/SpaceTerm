@@ -4854,7 +4854,11 @@ fn a_search_that_orders_a_group_apart_should_still_show_it_as_one_card(cx: &mut 
         "GitHub CLI",
         "New Worktree Location",
     ] {
-        assert!(tree.find(label).is_some(), "{label} should be presented");
+        // Each row publishes its visible label as a Label.
+        assert!(
+            tree.find_text(label).is_some(),
+            "{label} should be presented"
+        );
     }
 }
 
