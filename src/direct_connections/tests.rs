@@ -17,6 +17,106 @@ pub(crate) fn retryable_join(label: &str, stage: EnrollmentStage) -> (DirectConn
     super::worker::enrollment_tests::retryable_join(label, stage)
 }
 
+/// An unjoined registry for the real Add Server journey. The network boundary returns
+/// a fixed exchange comparison ("000007") and waits for the person's cancellation.
+pub(crate) fn waiting_invitation(
+    label: &str,
+) -> (DirectConnections, Zeroizing<String>, direct::ComparisonCode) {
+    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+
+    let pin = saved(1, 5).route.paired.pin;
+    let invitation = random_id().unwrap();
+    let expires = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        + 300;
+    let mut exchange_hash = [7; 32];
+    exchange_hash[..4].copy_from_slice(&[0, 0, 0, 7]);
+    let comparison_code = direct::PairingClaim {
+        id: [9; 32],
+        invitation_id: invitation,
+        server: pin.server,
+        device_public_key: [3; 32],
+        device_name: "Joining device".into(),
+        expires_at_unix_seconds: expires,
+        exchange_hash,
+    }
+    .comparison_code();
+    let payload = Zeroizing::new(
+        serde_json::to_vec(&serde_json::json!({
+            "schema": 1, "id": invitation, "endpoint": "wss://127.0.0.1:9231/spaceterm",
+            "pin": pin, "server_name": label, "token": random_id().unwrap(),
+            "expires": expires,
+        }))
+        .unwrap(),
+    );
+    let text = Zeroizing::new(format!(
+        "spaceterm://pair/{}",
+        URL_SAFE_NO_PAD.encode(&payload)
+    ));
+    let owner = DirectConnections::new(
+        "spaceterm-development",
+        Arc::new(MemoryRecords::default()),
+        Arc::new(Credentials::default()),
+        Arc::new(WaitingNetwork {
+            comparison_code,
+            cleanup: Network::new(Answer::Exact),
+        }),
+    );
+    (owner, text, comparison_code)
+}
+
+struct WaitingNetwork {
+    comparison_code: direct::ComparisonCode,
+    cleanup: Arc<Network>,
+}
+
+impl DirectNetwork for WaitingNetwork {
+    fn submit_enrollment(
+        &self,
+        _: &mut direct::Enrollment,
+    ) -> Result<direct::ComparisonCode, DirectError> {
+        Ok(self.comparison_code)
+    }
+    fn finish_enrollment(
+        &self,
+        _: &mut direct::Enrollment,
+    ) -> Result<Option<PairedDevice>, DirectError> {
+        Ok(None)
+    }
+    fn cancel_enrollment(
+        &self,
+        endpoint: &str,
+        pin: &direct::ServerPin,
+        claim: [u8; 32],
+        credential: &DeviceCredential,
+    ) -> Result<Option<direct::RevocationReceipt>, DirectError> {
+        self.cleanup
+            .cancel_enrollment(endpoint, pin, claim, credential)
+    }
+    fn connect(
+        &self,
+        identity: &str,
+        route: &DirectRoute,
+        credential: DeviceCredential,
+        gate: Arc<AtomicBool>,
+    ) -> Result<LocalServer, DirectError> {
+        self.cleanup.connect(identity, route, credential, gate)
+    }
+    fn revoke(
+        &self,
+        endpoint: &str,
+        actor: &PairedDevice,
+        credential: &DeviceCredential,
+        operation: UnpairKey,
+        target: PairingId,
+    ) -> Result<direct::RevocationReceipt, DirectError> {
+        self.cleanup
+            .revoke(endpoint, actor, credential, operation, target)
+    }
+}
+
 /// Records kept in memory. While `failing`, a save publishes nothing, as a full or locked
 /// disk does.
 #[derive(Default)]
