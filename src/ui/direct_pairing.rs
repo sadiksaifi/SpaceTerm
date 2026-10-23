@@ -962,6 +962,8 @@ mod tests {
         /// When each invitation the server opens expires, in Unix seconds. Every invitation
         /// shares it, as invitations opened in the same second do.
         expires_at: Mutex<u64>,
+        /// The link each invitation the server opens carries.
+        link: Mutex<String>,
         invitations: Mutex<Vec<(ClaimId, u64)>>,
         claims: Mutex<Vec<Claim>>,
         approved: Mutex<Vec<ClaimId>>,
@@ -974,6 +976,7 @@ mod tests {
         fn new(lifetime: u64) -> Arc<Self> {
             Arc::new(Self {
                 expires_at: Mutex::new(unix_now() + lifetime),
+                link: Mutex::new(LINK.to_owned()),
                 invitations: Mutex::default(),
                 claims: Mutex::default(),
                 approved: Mutex::default(),
@@ -1045,7 +1048,7 @@ mod tests {
             invitations.push((id, expires_at));
             Ok(OpenInvitation {
                 id,
-                text: Zeroizing::new(LINK.to_owned()),
+                text: Zeroizing::new(self.link.lock().expect("link").clone()),
                 expires_at,
             })
         }
@@ -1177,6 +1180,42 @@ mod tests {
         assert_eq!(
             cx.read_from_clipboard().and_then(|item| item.text()),
             Some(LINK.to_owned())
+        );
+    }
+
+    #[gpui::test]
+    fn a_real_length_link_leaves_copy_in_view_and_usable(cx: &mut TestAppContext) {
+        // A real invitation is about a thousand characters of unbroken base64url.
+        let link = format!(
+            "spaceterm://pair/{}",
+            "eyJzY2hlbWEiOjEsImlkIjpbMTIsMzQsNTYsNzgsOTAsMTIs".repeat(20)
+        );
+        assert!(link.len() > 950);
+        let server = ScriptedServer::new(300);
+        *server.link.lock().expect("link") = link.clone();
+        let (_, cx) = invite(&server, cx);
+
+        let viewport = cx
+            .debug_bounds("modal-body-viewport")
+            .expect("Invite Device shows its body");
+        let field = cx.debug_bounds(LINK_SELECTOR).expect("the link shows");
+        let copy = cx.debug_bounds(COPY_SELECTOR).expect("Copy shows");
+        assert!(copy.size.width > px(0.0), "Copy has room: {copy:?}");
+        assert!(
+            viewport.left() <= field.left() && field.right() <= copy.left(),
+            "the link ends before Copy: {field:?}, {copy:?}"
+        );
+        assert!(
+            copy.right() <= viewport.right(),
+            "Copy is inside the sheet: {copy:?} within {viewport:?}"
+        );
+
+        click(COPY_SELECTOR, cx);
+
+        assert_eq!(
+            cx.read_from_clipboard().and_then(|item| item.text()),
+            Some(link),
+            "Copy takes the whole link, not what the field has room to show"
         );
     }
 
