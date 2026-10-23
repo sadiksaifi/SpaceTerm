@@ -117,6 +117,9 @@ fn read_git(
     token: &SshCancellationToken,
 ) -> Result<PreparedRead, Error> {
     let reply = match &read {
+        Read::ServerFacts => Some(ReadReply::ServerFacts(
+            crate::server_settings::server_facts()?,
+        )),
         Read::Git => Some(ReadReply::Git(
             crate::runtime::server::repositories::git_status(token),
         )),

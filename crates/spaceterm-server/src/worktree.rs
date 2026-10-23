@@ -139,33 +139,44 @@ impl Default for Settings {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ServerFacts {
+    #[serde(deserialize_with = "deserialize_server_fact")]
     pub machine: String,
+    #[serde(deserialize_with = "deserialize_server_fact")]
     pub operating_system: String,
+    #[serde(deserialize_with = "deserialize_server_fact")]
     pub version: String,
+}
+
+fn deserialize_server_fact<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<String, D::Error> {
+    let value = String::deserialize(deserializer)?;
+    ServerFacts::bounded(&value).map_err(|_| serde::de::Error::custom("server fact is unavailable"))
 }
 
 impl ServerFacts {
     /// Removes control and invisible formatting characters and bounds each field to 256 bytes.
     /// A missing display value is a typed failure, never a guessed client-side fact.
     pub fn new(machine: &str, operating_system: &str, version: &str) -> Result<Self, Error> {
-        fn bounded(value: &str) -> Result<String, Error> {
-            let mut value = crate::pane::metadata::sanitize(value, 256);
-            let mut end = value.len().min(256);
-            while !value.is_char_boundary(end) {
-                end -= 1;
-            }
-            value.truncate(end);
-            let value = value.trim().to_owned();
-            if value.is_empty() {
-                return Err(Error::Unavailable);
-            }
-            Ok(value)
-        }
         Ok(Self {
-            machine: bounded(machine)?,
-            operating_system: bounded(operating_system)?,
-            version: bounded(version)?,
+            machine: Self::bounded(machine)?,
+            operating_system: Self::bounded(operating_system)?,
+            version: Self::bounded(version)?,
         })
+    }
+
+    fn bounded(value: &str) -> Result<String, Error> {
+        let mut value = crate::pane::metadata::sanitize(value, 256);
+        let mut end = value.len().min(256);
+        while !value.is_char_boundary(end) {
+            end -= 1;
+        }
+        value.truncate(end);
+        let value = value.trim().to_owned();
+        if value.is_empty() {
+            return Err(Error::Unavailable);
+        }
+        Ok(value)
     }
 }
 
@@ -368,5 +379,18 @@ mod tests {
             ServerFacts::new("server", "Linux", " \n"),
             Err(Error::Unavailable)
         );
+    }
+
+    #[test]
+    fn server_facts_apply_display_bounds_to_values_received_over_the_protocol() {
+        let facts: ServerFacts = serde_json::from_value(serde_json::json!({
+            "machine": format!("\u{202e}{}", "界".repeat(100)),
+            "operating_system": "\u{2066}Linux\u{2069}",
+            "version": "\t0.1.0\n",
+        }))
+        .unwrap();
+        assert_eq!(facts.machine, "界".repeat(85));
+        assert_eq!(facts.operating_system, "Linux");
+        assert_eq!(facts.version, "0.1.0");
     }
 }

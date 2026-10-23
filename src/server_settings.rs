@@ -1,8 +1,29 @@
-//! Server-owned validation. A draft never creates folders or grants client file authority.
+//! Owning-server facts and validation. These reads grant no client file or maintenance authority.
 use std::path::{Path, PathBuf};
 
 use path_template::WorktreePathTemplateError;
-use spaceterm_server::worktree::{Error, path_template};
+use spaceterm_server::worktree::{Error, ServerFacts, path_template};
+
+pub(crate) fn server_facts() -> Result<ServerFacts, Error> {
+    let mut hostname = [0u8; 256];
+    // SAFETY: hostname is initialized writable storage of exactly the supplied length.
+    if unsafe { libc::gethostname(hostname.as_mut_ptr().cast(), hostname.len()) } != 0 {
+        return Err(Error::Unavailable);
+    }
+    let end = hostname
+        .iter()
+        .position(|byte| *byte == 0)
+        .ok_or(Error::Unavailable)?;
+    let machine = std::str::from_utf8(&hostname[..end]).map_err(|_| Error::Unavailable)?;
+    let operating_system = match std::env::consts::OS {
+        "macos" => "macOS",
+        "linux" => "Linux",
+        other => other,
+    };
+    // This crate is compiled into the owning server. A client or a pairing pin supplies none
+    // of these facts, including the release version selected by this crate's build script.
+    ServerFacts::new(machine, operating_system, env!("SPACETERM_VERSION"))
+}
 
 pub(crate) fn validate_location_template(template: &str) -> Result<(), Error> {
     path_template::validate(template).map_err(Error::Template)?;
