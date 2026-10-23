@@ -23,13 +23,13 @@ use crate::settings::storage::testing::MemoryStorage;
 use crate::ssh::cancellation::SshCancellationToken;
 use crate::ssh::server_connection::{
     ConnectMode, ConnectProgress, ConnectedSshServer, RemoteConnectionStatus,
-    RetainedSshConnection, ServerAvailability, SshConnectBackend, SshConnectFailure,
-    SshConnectionIntentStore, SshIntentStoreError, SshServerConnections, SshServerContinuity,
-    SshServerFacts, SshServerLease, SshServerObservation,
+    RetainedSshConnection, ServerAvailability, ServerCandidate, SshConnectBackend,
+    SshConnectFailure, SshConnectionIntentStore, SshIntentStoreError, SshServerConnections,
+    SshServerContinuity, SshServerFacts, SshServerLease, SshServerObservation,
 };
 use crate::ssh::server_operations::{
     RemoteMaintenanceRequest, RemoteOperationEntry, RemoteOperationHandle, RemoteOperationState,
-    RemoteServerOperations,
+    RemoteServerOperations, RemoteUpdateOffer,
 };
 use crate::ui::appearance_runtime;
 use crate::ui::settings_window::{SettingsSectionId, SettingsWindow};
@@ -580,7 +580,8 @@ fn after_disconnect_the_card_presents_the_facts_last_observed(cx: &mut TestAppCo
 /// An operations owner holding at most one service read of penguin, as Check Now leaves it, and
 /// when that read was observed. Every step it is asked for does nothing.
 struct HeldRead {
-    held: Mutex<Option<(MaintenanceFacts, std::time::Instant)>>,
+    /// The read, when it was observed, and what it found about updating.
+    held: Mutex<Option<(MaintenanceFacts, std::time::Instant, RemoteUpdateOffer)>>,
     changes: (async_channel::Sender<()>, async_channel::Receiver<()>),
 }
 
@@ -635,9 +636,19 @@ impl HeldRead {
         owner
     }
 
-    /// A read observed now, which replaces the one held and tells the surface.
+    /// A read observed now that verified no candidate, which replaces the one held.
     fn report(&self, version: &str, status: ServiceStatus) {
-        *self.held.lock().unwrap() = Some((read_facts(version, status), std::time::Instant::now()));
+        self.report_offer(version, status, RemoteUpdateOffer::Unchecked);
+    }
+
+    /// A read observed now that found `offer`, which replaces the one held and tells the
+    /// surface.
+    fn report_offer(&self, version: &str, status: ServiceStatus, offer: RemoteUpdateOffer) {
+        *self.held.lock().unwrap() = Some((
+            read_facts(version, status),
+            std::time::Instant::now(),
+            offer,
+        ));
         let _ = self.changes.0.try_send(());
     }
 }
@@ -652,19 +663,20 @@ impl RemoteServerOperations for HeldRead {
             .lock()
             .unwrap()
             .iter()
-            .map(|(facts, observed_at)| RemoteOperationEntry {
+            .map(|(facts, observed_at, offer)| RemoteOperationEntry {
                 destination: destination("penguin"),
                 removed: false,
                 operation: None,
                 state: RemoteOperationState::Read(Box::new(facts.clone())),
                 observed_at: Some(*observed_at),
+                update_offer: offer.clone(),
             })
             .collect()
     }
 
     fn state(&self, server: &SshDestination) -> RemoteOperationState {
         match &*self.held.lock().unwrap() {
-            Some((facts, _)) if *server == destination("penguin") => {
+            Some((facts, _, _)) if *server == destination("penguin") => {
                 RemoteOperationState::Read(Box::new(facts.clone()))
             }
             _ => RemoteOperationState::Unread,

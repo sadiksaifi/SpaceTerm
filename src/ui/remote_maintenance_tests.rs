@@ -3,7 +3,7 @@
 use super::*;
 use crate::local_server::service::ServiceStartup;
 use crate::local_server::service::maintenance::RemoteActivation;
-use crate::ssh::server_operations::RemoteOperationHandle;
+use crate::ssh::server_operations::{RemoteOperationHandle, RemoteUpdateOffer};
 
 fn remote_build(version: &str, digit: char) -> RemoteBuild {
     RemoteBuild {
@@ -559,7 +559,11 @@ fn the_machine_menu_carries_the_operations_without_inline_affordances() {
     let running = RemoteOperationState::Read(Box::new(facts(status(true, true, false))));
 
     assert_eq!(
-        menu_actions_for(std::slice::from_ref(&running), None),
+        menu_actions_for(
+            std::slice::from_ref(&running),
+            None,
+            &RemoteUpdateOffer::Unchecked
+        ),
         vec![
             RemoteAction::Stop,
             RemoteAction::Restart,
@@ -573,14 +577,26 @@ fn the_machine_menu_carries_the_operations_without_inline_affordances() {
         kind: SubmittedKind::Service(Action::Stop),
         outcome: completed(None),
     };
-    assert!(menu_actions_for(std::slice::from_ref(&resolved), None).is_empty());
+    assert!(
+        menu_actions_for(
+            std::slice::from_ref(&resolved),
+            None,
+            &RemoteUpdateOffer::Unchecked
+        )
+        .is_empty()
+    );
     let working = RemoteOperationState::Working {
         phase: MaintenancePhase::Dispatching,
         kind: Some(SubmittedKind::Service(Action::Stop)),
         cancellable: true,
     };
     assert!(
-        menu_actions_for(std::slice::from_ref(&working), None).is_empty(),
+        menu_actions_for(
+            std::slice::from_ref(&working),
+            None,
+            &RemoteUpdateOffer::Unchecked
+        )
+        .is_empty(),
         "nothing is offered while an operation is underway"
     );
 }
@@ -596,16 +612,25 @@ fn the_machine_menu_waits_for_the_original_settings_reports() {
     let read = RemoteOperationState::Read(Box::new(facts(status(true, true, false))));
 
     assert!(
-        menu_actions_for(std::slice::from_ref(&underway), None).is_empty(),
+        menu_actions_for(
+            std::slice::from_ref(&underway),
+            None,
+            &RemoteUpdateOffer::Unchecked
+        )
+        .is_empty(),
         "the first entry alone offers nothing while its operation is underway"
     );
     assert_eq!(
-        menu_actions_for(std::slice::from_ref(&underway), None),
+        menu_actions_for(
+            std::slice::from_ref(&underway),
+            None,
+            &RemoteUpdateOffer::Unchecked
+        ),
         Vec::new(),
         "one underway original still offers nothing"
     );
     assert_eq!(
-        menu_actions_for(&[underway, read], None),
+        menu_actions_for(&[underway, read], None, &RemoteUpdateOffer::Unchecked),
         Vec::new(),
         "the menu must not offer steps from the read hidden behind the original"
     );
@@ -1128,7 +1153,7 @@ fn two_originals_on_different_journeys_each_read_in_their_own_row() {
     ];
 
     assert_eq!(
-        menu_actions_for(&states, None),
+        menu_actions_for(&states, None, &RemoteUpdateOffer::Unchecked),
         vec![
             RemoteAction::CheckAgain,
             RemoteAction::Discard,
@@ -1136,7 +1161,13 @@ fn two_originals_on_different_journeys_each_read_in_their_own_row() {
         ],
         "both journeys stay reachable, with one shared Discard"
     );
-    let service = present_machine("penguin", &states, MaintenanceRow::Service, None);
+    let service = present_machine(
+        "penguin",
+        &states,
+        MaintenanceRow::Service,
+        None,
+        &RemoteUpdateOffer::Unchecked,
+    );
     assert_eq!(
         service.actions,
         vec![RemoteAction::CheckAgain, RemoteAction::Discard]
@@ -1153,7 +1184,13 @@ fn two_originals_on_different_journeys_each_read_in_their_own_row() {
         "the update journey reports its own original, so the service row names none, got {:?}",
         service.explanation
     );
-    let update = present_machine("penguin", &states, MaintenanceRow::Update, None);
+    let update = present_machine(
+        "penguin",
+        &states,
+        MaintenanceRow::Update,
+        None,
+        &RemoteUpdateOffer::Unchecked,
+    );
     assert_eq!(
         update.actions,
         vec![RemoteAction::Finish, RemoteAction::Discard]
@@ -1182,7 +1219,13 @@ fn a_row_names_every_original_it_has_still_to_report() {
         },
     ];
 
-    let service = present_machine("penguin", &one, MaintenanceRow::Service, None);
+    let service = present_machine(
+        "penguin",
+        &one,
+        MaintenanceRow::Service,
+        None,
+        &RemoteUpdateOffer::Unchecked,
+    );
     assert_eq!(
         service.state,
         Some("Unconfirmed"),
@@ -1216,7 +1259,13 @@ fn a_row_names_every_original_it_has_still_to_report() {
         },
     ];
 
-    let service = present_machine("penguin", &several, MaintenanceRow::Service, None);
+    let service = present_machine(
+        "penguin",
+        &several,
+        MaintenanceRow::Service,
+        None,
+        &RemoteUpdateOffer::Unchecked,
+    );
     assert!(
         service
             .explanation
@@ -1245,7 +1294,13 @@ fn an_original_takes_the_row_from_a_read_that_asked_for_nothing() {
     };
     let states = [read.clone(), unconfirmed.clone()];
 
-    let service = present_machine("penguin", &states, MaintenanceRow::Service, None);
+    let service = present_machine(
+        "penguin",
+        &states,
+        MaintenanceRow::Service,
+        None,
+        &RemoteUpdateOffer::Unchecked,
+    );
     assert_eq!(service.state, Some("Unconfirmed"));
     assert_eq!(
         service.actions,
@@ -1260,14 +1315,26 @@ fn an_original_takes_the_row_from_a_read_that_asked_for_nothing() {
     for state in [read, unconfirmed] {
         for row in [MaintenanceRow::Service, MaintenanceRow::Update] {
             assert_eq!(
-                present_machine("penguin", std::slice::from_ref(&state), row, None),
+                present_machine(
+                    "penguin",
+                    std::slice::from_ref(&state),
+                    row,
+                    None,
+                    &RemoteUpdateOffer::Unchecked
+                ),
                 present("penguin", &state, row, None),
                 "one state alone must read as it always has"
             );
         }
     }
     assert_eq!(
-        present_machine("penguin", &[], MaintenanceRow::Service, None),
+        present_machine(
+            "penguin",
+            &[],
+            MaintenanceRow::Service,
+            None,
+            &RemoteUpdateOffer::Unchecked
+        ),
         present(
             "penguin",
             &RemoteOperationState::Unread,

@@ -196,7 +196,14 @@ impl SettingsWindow {
             .as_ref()
             .filter(|(asked, _)| *asked == destination)
             .map(|(_, request)| *request);
-        Some(present_machine(destination.as_str(), &states, row, asked))
+        let offer = self.ssh_update_offer(&destination);
+        Some(present_machine(
+            destination.as_str(),
+            &states,
+            row,
+            asked,
+            &offer,
+        ))
     }
 
     /// Takes one step another surface offered, such as the sidebar machine heading menu. The

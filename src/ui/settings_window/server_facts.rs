@@ -29,7 +29,7 @@ use crate::server_context::{LastKnownFacts, ObservedServerStatus};
 use crate::ssh::server_connection::{
     IncompatibilityKind, RemoteConnectionStatus, ServerAvailability, SshServerFacts,
 };
-use crate::ssh::server_operations::RemoteOperationState;
+use crate::ssh::server_operations::{RemoteOperationState, RemoteUpdateOffer};
 use crate::ui::server_worktrees::Client;
 
 /// How often the presented server's observations are looked at again.
@@ -332,6 +332,24 @@ impl SettingsWindow {
             (Some(read), Some(checked)) if read > checked => Some(facts),
             _ => None,
         }
+    }
+
+    /// What the current read of `destination` found about updating. A read Check Status has
+    /// since outdated says nothing about the server now, so it offers no update.
+    pub(super) fn ssh_update_offer(&self, destination: &SshDestination) -> RemoteUpdateOffer {
+        if self.current_ssh_read(destination).is_none() {
+            return RemoteUpdateOffer::Unchecked;
+        }
+        self.ssh_maintenance
+            .as_ref()
+            .map_or(RemoteUpdateOffer::Unchecked, |rows| {
+                let entries = rows.operations.entries();
+                crate::ui::remote_maintenance::read_update_offer(
+                    entries
+                        .iter()
+                        .filter(|entry| entry.destination == *destination && !entry.removed),
+                )
+            })
     }
 
     /// Follows the observations of the server Servers or Git presents. Selection, section and
