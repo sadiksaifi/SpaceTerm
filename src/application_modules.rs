@@ -65,6 +65,11 @@ mod platform;
     )
 )]
 mod repository_status;
+#[cfg_attr(
+    not(feature = "desktop"),
+    allow(dead_code, reason = "the desktop owns server presentation context")
+)]
+mod server_context;
 mod server_settings;
 #[cfg(feature = "desktop")]
 mod settings;
