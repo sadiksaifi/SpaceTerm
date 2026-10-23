@@ -374,6 +374,66 @@ mod tests {
         );
     }
 
+    /// Network access is observed on its own, so a reading whose general facts are older than
+    /// the record can still carry newer network facts. Those are kept, and a later reading
+    /// without network facts never erases them.
+    #[gpui::test]
+    fn an_older_reading_still_brings_its_newer_network_access_once(cx: &mut gpui::TestAppContext) {
+        use crate::server_context::{NetworkAccessFacts, NetworkListenerFacts};
+
+        cx.update(|cx| {
+            reconcile(vec![ServerKey::Local, studio()], cx);
+            remember(studio(), observed(20), cx);
+        });
+        let (notified, _observer) = count_notifications(cx);
+        let network = NetworkAccessFacts {
+            observed_at: 30,
+            server_name: "Studio".to_owned(),
+            policy: None,
+            listener: NetworkListenerFacts::Off,
+            addresses: None,
+        };
+        let late = LastKnownFacts {
+            network_access: Some(network.clone()),
+            ..observed(10)
+        };
+
+        cx.update(|cx| remember(studio(), late.clone(), cx));
+        assert_eq!(
+            notified.get(),
+            1,
+            "the newer network reading is accepted once"
+        );
+        let held = cx.update(|cx| facts(&studio(), cx)).unwrap();
+        assert_eq!(
+            (held.observed_at, held.network_access.as_ref()),
+            (20, Some(&network)),
+            "the newer general facts stay"
+        );
+
+        cx.update(|cx| remember(studio(), late, cx));
+        assert_eq!(notified.get(), 1, "the same reading again changes nothing");
+
+        cx.update(|cx| {
+            remember(
+                studio(),
+                LastKnownFacts {
+                    observed_at: 40,
+                    machine: Some("Studio Pro".to_owned()),
+                    ..LastKnownFacts::default()
+                },
+                cx,
+            );
+        });
+        assert_eq!(notified.get(), 2);
+        let held = cx.update(|cx| facts(&studio(), cx)).unwrap();
+        assert_eq!(
+            (held.machine.as_deref(), held.network_access),
+            (Some("Studio Pro"), Some(network)),
+            "a reading without network facts keeps the ones observed"
+        );
+    }
+
     #[gpui::test]
     fn a_snapshot_that_changes_nothing_notifies_no_one(cx: &mut gpui::TestAppContext) {
         let mut worker = Delayed::install(cx);
