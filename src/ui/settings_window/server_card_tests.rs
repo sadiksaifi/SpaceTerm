@@ -243,7 +243,7 @@ fn a_service_read_tells_a_stopped_ssh_server_from_a_disconnected_one() {
         ssh_state(&RemoteConnectionStatus::Inactive, None, Some(running), None)
             .state
             .as_ref(),
-        "Not connected"
+        "Running \u{b7} not connected"
     );
 }
 
@@ -266,7 +266,8 @@ fn an_inactive_ssh_server_shows_its_last_observed_state_without_becoming_live() 
         None,
         Some(ObservedServerStatus::Running),
     );
-    assert_eq!(running.state.as_ref(), "Not connected");
+    assert_eq!(running.state.as_ref(), "Running \u{b7} not connected");
+    assert_eq!(running.short.as_ref(), "Not connected");
     assert!(
         !running.live,
         "a remembered Running never makes a server live"

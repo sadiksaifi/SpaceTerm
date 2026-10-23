@@ -513,8 +513,8 @@ fn check_status_observes_an_inactive_server_once_and_leaves_a_presented_one_alon
     );
     assert_eq!(
         status(&servers),
-        "Not connected",
-        "checking connects nothing"
+        "Running \u{b7} not connected",
+        "the check reports the server it read and connects nothing"
     );
 
     click("settings-ssh-server-connect", servers.cx);

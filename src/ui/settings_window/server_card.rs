@@ -197,6 +197,10 @@ pub(super) fn ssh_state(
     retained: Option<ObservedServerStatus>,
 ) -> ServerState {
     let connected = matches!(status, RemoteConnectionStatus::Connected { .. });
+    // A read says the server runs although SpaceTerm has no connection to it. The card says so;
+    // what the row offers still follows the connection.
+    let running_unconnected =
+        || ServerState::new("Running \u{b7} not connected", "Not connected", Tone::Idle);
     if let Some(kind) = maintenance {
         return ServerState::working(maintenance_verb(kind), connected);
     }
@@ -248,9 +252,7 @@ pub(super) fn ssh_state(
             ServerState::new("Not installed", "Not installed", Tone::Idle)
         }
         RemoteConnectionStatus::Checked { availability, .. } => match availability {
-            ServerAvailability::Running => {
-                ServerState::new("Not connected", "Not connected", Tone::Idle)
-            }
+            ServerAvailability::Running => running_unconnected(),
             ServerAvailability::NotRunning => {
                 ServerState::new("Not running", "Not running", Tone::Idle)
             }
@@ -277,9 +279,12 @@ pub(super) fn ssh_state(
         RemoteConnectionStatus::Unconfirmed { .. } => {
             ServerState::new("Unconfirmed", "Unconfirmed", Tone::Attention)
         }
+        // A service read reaching this point found the server running.
+        RemoteConnectionStatus::Inactive if service.is_some() => running_unconnected(),
         // Nothing reports on a saved connection that isn't active, so it shows what was last
         // observed. That presents a state only: what the row offers follows its connection.
         RemoteConnectionStatus::Inactive => match retained {
+            Some(ObservedServerStatus::Running) => running_unconnected(),
             Some(ObservedServerStatus::Stopped) => {
                 ServerState::new("Stopped", "Stopped", Tone::Idle)
             }
