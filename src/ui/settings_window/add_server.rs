@@ -219,6 +219,8 @@ enum Stage {
     JoinRefused { server: String, error: DirectError },
     /// The person stopped the join, and SpaceTerm couldn't save that on this computer yet.
     StopUnsaved { server: String },
+    /// A stop SpaceTerm couldn't save at first, saved since.
+    Stopped { server: String },
     /// The sheet finished; nothing more is presented.
     Done,
 }
@@ -488,6 +490,7 @@ impl AddServerSheet {
             | Stage::SshProblem { .. }
             | Stage::JoinRefused { .. }
             | Stage::StopUnsaved { .. }
+            | Stage::Stopped { .. }
             | Stage::Done => false,
         }
     }
@@ -632,7 +635,7 @@ impl AddServerSheet {
                 actions: vec![(SheetAction::StartAgain, true), (SheetAction::Close, true)],
                 focus: FocusTarget::Action(SheetAction::StartAgain),
             },
-            Stage::StopUnsaved { server } => Shape {
+            Stage::StopUnsaved { server } | Stage::Stopped { server } => Shape {
                 title: join_title(server),
                 actions: vec![(SheetAction::Close, true)],
                 focus: FocusTarget::Action(SheetAction::Close),
@@ -1121,6 +1124,18 @@ impl AddServerSheet {
                     return;
                 }
             }
+            // The stop is saved once the registry saves again, so the sheet follows that recovery
+            // rather than outliving it.
+            Stage::StopUnsaved { server } => {
+                if self
+                    .direct
+                    .as_ref()
+                    .is_some_and(|direct| !direct.persistence_error())
+                {
+                    let server = server.clone();
+                    self.stage = Stage::Stopped { server };
+                }
+            }
             _ => {}
         }
         self.show(window, cx);
@@ -1552,6 +1567,20 @@ impl AddServerSheet {
             Stage::StopUnsaved { .. } => text
                 .container(accesskit::Role::Alert)
                 .child(text.line("unsaved", WITHDRAW_UNSAVED.into(), colors.error))
+                .into_any_element(),
+            Stage::Stopped { server } => text
+                .container(accesskit::Role::Status)
+                .child(
+                    text.line(
+                        "stopped",
+                        format!(
+                            "SpaceTerm saved that you stopped this pairing. It withdraws anything \
+                         {server} already received."
+                        )
+                        .into(),
+                        colors.text,
+                    ),
+                )
                 .into_any_element(),
             Stage::Form | Stage::Done => div().into_any_element(),
         }

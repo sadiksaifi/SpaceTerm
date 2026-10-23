@@ -153,7 +153,8 @@ struct Sheet<'a> {
 
 /// Opens Settings on Servers with the local server, an SSH registry and a direct registry.
 fn open_settings(cx: &mut TestAppContext) -> Sheet<'_> {
-    let sheet = open_settings_with(Arc::new(SavedConnections::default()), cx);
+    let (direct, _) = crate::direct_connections::tests::offline("studio");
+    let sheet = open_settings_with(Arc::new(SavedConnections::default()), direct, cx);
     let deadline = Instant::now() + Duration::from_secs(5);
     while !sheet.connections.retained_inventory_loaded() {
         assert!(Instant::now() < deadline, "the saved connections load");
@@ -162,15 +163,18 @@ fn open_settings(cx: &mut TestAppContext) -> Sheet<'_> {
     sheet
 }
 
-/// Opens Settings as [`open_settings`] does, with SSH connections saved in `saved`, without
-/// waiting for them to load.
-fn open_settings_with(saved: Arc<SavedConnections>, cx: &mut TestAppContext) -> Sheet<'_> {
+/// Opens Settings as [`open_settings`] does, with SSH connections saved in `saved` and the direct
+/// registry `direct`, without waiting for the SSH connections to load.
+fn open_settings_with(
+    saved: Arc<SavedConnections>,
+    direct: DirectConnections,
+    cx: &mut TestAppContext,
+) -> Sheet<'_> {
     // The registries' workers run on their own threads.
     cx.executor().allow_parking();
     let computers = Arc::new(Computers::default());
     let connections = SshServerConnections::new(computers.clone(), saved);
     connections.resume_retained();
-    let (direct, _) = crate::direct_connections::tests::offline("studio");
     let settings =
         crate::settings::Settings::load(MemoryStorage::with_document(&SettingsDocument::default()));
     let platform = RecordingAppearancePlatform::default();
@@ -216,6 +220,45 @@ impl Sheet<'_> {
             });
         });
         self.cx.run_until_parked();
+    }
+
+    /// Shows `join` in the sheet as if the sheet had started it with an invitation from
+    /// `server`, then follows it.
+    fn adopt(&mut self, join: crate::direct_connections::JoinId, server: &str) {
+        let sheet = self
+            .cx
+            .update(|window, cx| open_sheet(window, cx))
+            .expect("the sheet is open");
+        let server = server.to_owned();
+        self.cx.update(|window, cx| {
+            sheet.update(cx, |sheet, cx| {
+                sheet.stage = Stage::Joining {
+                    join: Some(join),
+                    server,
+                };
+                sheet.observe(window, cx);
+            });
+        });
+        self.cx.run_until_parked();
+    }
+
+    /// Activates the sheet's action whose selector is `selector`.
+    fn choose(&mut self, selector: &str) {
+        let selector: &'static str = Box::leak(format!("modal-action-{selector}").into_boxed_str());
+        let position = self
+            .cx
+            .debug_bounds(selector)
+            .unwrap_or_else(|| panic!("{selector} was not rendered"))
+            .center();
+        self.cx
+            .simulate_mouse_move(position, None, gpui::Modifiers::none());
+        self.cx.simulate_click(position, gpui::Modifiers::none());
+        self.cx.run_until_parked();
+    }
+
+    fn selected(&mut self) -> Option<ServerChoice> {
+        self.window
+            .read_with(self.cx, |settings, _| settings.selected_server())
     }
 
     fn open(&mut self) -> bool {
@@ -401,7 +444,8 @@ fn cancelling_after_a_new_host_fails_to_connect_adds_no_server(cx: &mut TestAppC
 #[gpui::test]
 fn cancelling_keeps_a_saved_host_whose_record_has_not_loaded_yet(cx: &mut TestAppContext) {
     let saved = SavedConnections::holding(OFFLINE);
-    let mut sheet = open_settings_with(saved.clone(), cx);
+    let (direct, _) = crate::direct_connections::tests::offline("studio");
+    let mut sheet = open_settings_with(saved.clone(), direct, cx);
     assert!(
         !sheet.connections.retained_inventory_loaded(),
         "the saved connections are still loading"
@@ -426,4 +470,127 @@ fn cancelling_keeps_a_saved_host_whose_record_has_not_loaded_yet(cx: &mut TestAp
         kept,
         "a host the person saved before stays, although its record hadn't loaded when they typed it"
     );
+}
+
+#[gpui::test]
+fn a_join_whose_save_is_unconfirmed_still_selects_its_server_and_closes_the_sheet(
+    cx: &mut TestAppContext,
+) {
+    let (direct, join, route) = crate::direct_connections::tests::uncertain_join("studio");
+    let mut sheet = open_settings_with(Arc::new(SavedConnections::default()), direct, cx);
+    sheet.begin(AddServerRequest::Invitation(None));
+
+    sheet.adopt(join, "studio");
+
+    sheet.settle(|sheet| !sheet.open() && sheet.selected() == Some(ServerChoice::Direct(route)));
+}
+
+/// A join the network interrupted keeps its request and asks again only when the person chooses
+/// Try Again, without claiming why the server was out of reach.
+#[gpui::test]
+fn an_interrupted_join_waits_for_try_again_with_the_same_request(cx: &mut TestAppContext) {
+    let (direct, join) = crate::direct_connections::tests::retryable_join(
+        "studio",
+        crate::direct_connections::EnrollmentStage::Claim,
+    );
+    let mut sheet = open_settings_with(Arc::new(SavedConnections::default()), direct.clone(), cx);
+    sheet.begin(AddServerRequest::Invitation(None));
+
+    sheet.adopt(join, "studio");
+    sheet.settle(|sheet| {
+        sheet.says(
+            "SpaceTerm didn\u{2019}t get an answer from the server at the invitation\u{2019}s address.",
+        )
+    });
+
+    assert_eq!(sheet.title(), "Join studio");
+    assert!(
+        !sheet.says("denied") && !sheet.says("permission"),
+        "a network failure names no cause SpaceTerm didn't observe"
+    );
+    assert!(
+        direct.pending_unpairs().is_empty(),
+        "an interrupted join withdraws nothing"
+    );
+
+    sheet.choose(SheetAction::TryAgain.selector());
+
+    sheet.settle(|sheet| !sheet.open() && sheet.selected() == Some(ServerChoice::Direct(join)));
+    assert!(direct.pending_unpairs().is_empty());
+}
+
+/// The fixture's storage can't confirm any further save after an unknown publication, so the
+/// person's withdrawal is requested but not retained, and the sheet says exactly that.
+#[gpui::test]
+fn withdrawing_a_join_whose_save_is_unknown_says_the_withdrawal_isnt_saved(
+    cx: &mut TestAppContext,
+) {
+    let (direct, join) = crate::direct_connections::tests::unconfirmed_join("studio");
+    let mut sheet = open_settings_with(Arc::new(SavedConnections::default()), direct.clone(), cx);
+    sheet.begin(AddServerRequest::Invitation(None));
+
+    sheet.adopt(join, "studio");
+    sheet.settle(|sheet| sheet.says("couldn\u{2019}t confirm it saved the connection"));
+
+    assert!(
+        direct.routes().is_empty(),
+        "SpaceTerm uses no connection it may not have saved"
+    );
+    assert!(
+        direct.pending_unpairs().is_empty(),
+        "nothing is withdrawn until the person asks"
+    );
+
+    sheet.choose(SheetAction::Withdraw.selector());
+    sheet.settle(|sheet| sheet.says("couldn\u{2019}t save this request on this computer yet"));
+
+    assert!(
+        sheet.open(),
+        "the sheet stays to say the withdrawal isn't saved"
+    );
+    assert!(
+        direct.routes().is_empty(),
+        "withdrawing presents no connection"
+    );
+}
+
+/// A stop that couldn't be saved keeps saying so through the registry's unsaved changes, and
+/// changes once the registry saves again, so the sheet follows recovery instead of outliving it.
+#[gpui::test]
+fn an_unsaved_stop_says_so_until_the_registry_saves_again(cx: &mut TestAppContext) {
+    let (direct, route, storage) = crate::direct_connections::tests::offline_with_storage("studio");
+    let mut sheet = open_settings_with(Arc::new(SavedConnections::default()), direct.clone(), cx);
+    sheet.begin(AddServerRequest::Invitation(None));
+    // This computer can't save the registry, as when the stop itself failed to save.
+    storage.set_failing(true);
+    direct.disconnect(&route);
+    assert!(direct.persistence_error(), "the registry couldn't save");
+    let body = sheet
+        .cx
+        .update(|window, cx| open_sheet(window, cx))
+        .expect("the sheet is open");
+    sheet.cx.update(|window, cx| {
+        body.update(cx, |sheet, cx| {
+            sheet.stage = Stage::StopUnsaved {
+                server: "studio".to_owned(),
+            };
+            sheet.show(window, cx);
+        });
+    });
+    sheet.cx.run_until_parked();
+    assert!(sheet.says("couldn\u{2019}t save this request on this computer yet"));
+
+    // Changes the registry announces but can't save leave the stop unsaved.
+    direct.connect(&route);
+    direct.disconnect(&route);
+    sheet.cx.run_until_parked();
+    assert!(direct.persistence_error());
+    assert!(sheet.says("couldn\u{2019}t save this request on this computer yet"));
+
+    // A change the registry saves and announces, as a quiet retry's save would.
+    storage.set_failing(false);
+    direct.disconnect(&route);
+    assert!(!direct.persistence_error(), "the registry saved its change");
+
+    sheet.settle(|sheet| sheet.says("SpaceTerm saved that you stopped this pairing."));
 }
