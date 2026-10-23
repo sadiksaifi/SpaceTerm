@@ -10,7 +10,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
-use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext};
+use gpui::{Entity, KeyUpEvent, Keystroke, Modifiers, TestAppContext, VisualTestContext};
 use spaceterm_ui::a11y_testing::A11yTree;
 use zeroize::Zeroizing;
 
@@ -283,6 +283,16 @@ fn click(selector: &str, cx: &mut VisualTestContext) {
     cx.run_until_parked();
 }
 
+/// Presses Return the way a keyboard does. A focused button acts when the key comes back up, so
+/// a key-down alone leaves the focused action unpressed.
+fn press_return(cx: &mut VisualTestContext) {
+    cx.simulate_keystrokes("enter");
+    cx.simulate_event(KeyUpEvent {
+        keystroke: Keystroke::parse("enter").expect("Return parses"),
+    });
+    cx.run_until_parked();
+}
+
 /// The selector the modal gives an action.
 fn modal_action(selector: &str) -> String {
     format!("modal-action-{selector}")
@@ -516,9 +526,16 @@ fn a_paired_server_offers_no_network_access(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn invite_device_waits_until_the_server_listens(cx: &mut TestAppContext) {
-    let access = ScriptedAccess::off();
+fn invite_device_waits_while_the_server_cant_listen(cx: &mut TestAppContext) {
+    // Access is on, so Devices shows, but the server couldn't listen at the chosen address.
+    let access = ScriptedAccess::with_state(AccessState {
+        server_name: SERVER.into(),
+        policy: Some(address("192.168.1.20:9231")),
+        listener: Listener::Failed,
+        addresses: Some(addresses(&["192.168.1.20"], Some("192.168.1.20"))),
+    });
     let (_, cx) = open_servers(&access, cx);
+    assert!(open(INVITE_SELECTOR, cx), "Devices offers Invite Device");
 
     click(INVITE_SELECTOR, cx);
 
@@ -540,8 +557,7 @@ fn a_device_allowed_in_invite_device_joins_the_devices_list_at_once(cx: &mut Tes
     cx.executor()
         .advance_clock(std::time::Duration::from_secs(1));
     cx.run_until_parked();
-    cx.simulate_keystrokes("enter");
-    cx.run_until_parked();
+    press_return(cx);
     // Done closes the confirmation, uncovering the rows.
     cx.simulate_keystrokes("escape");
     cx.run_until_parked();
@@ -709,10 +725,6 @@ fn a_dismissed_unpair_keeps_trying_and_returns_with_resume_once_only_the_person_
         open(&resume, cx),
         "a dismissed request that only the person can continue shows again with Resume"
     );
-    assert!(
-        !open(&dismiss, cx),
-        "a request that needs the person can't be dismissed out of reach"
-    );
 
     credentials.set_locked(false);
     click(&resume, cx);
@@ -720,6 +732,50 @@ fn a_dismissed_unpair_keeps_trying_and_returns_with_resume_once_only_the_person_
         state(&direct) != Some(UnpairState::NeedsInteraction)
     });
     settle(cx, |cx| !open(&notice, cx));
+}
+
+#[gpui::test]
+fn hiding_an_unpair_that_waits_for_the_person_hides_it_here_and_cancels_nothing(
+    cx: &mut TestAppContext,
+) {
+    // The registry's worker tries the offline server on its own thread and wakes the window from
+    // there.
+    cx.executor().allow_parking();
+    let access = ScriptedAccess::new(Listener::Off, None);
+    let (direct, _, credentials) = crate::direct_connections::tests::offline_with_lock("studio");
+    let (_, cx) = open_servers_with(&access, Some(direct.clone()), cx);
+    let state = |direct: &DirectConnections| {
+        direct
+            .pending_unpairs()
+            .first()
+            .map(|pending| pending.state)
+    };
+
+    select_paired_server(cx);
+    click(MENU_SELECTOR, cx);
+    click("settings-server-unpair", cx);
+    click(&modal_action(UNPAIR_SELF_CONFIRM_SELECTOR), cx);
+    settle(cx, |_| state(&direct) == Some(UnpairState::Unconfirmed));
+    let notice = unpair_notice(&direct);
+    let dismiss = format!("{notice}-dismiss");
+    let resume = format!("{notice}-resume");
+    // The key the request was made with now needs the person's permission.
+    credentials.set_locked(true);
+    settle(cx, |cx| {
+        state(&direct) == Some(UnpairState::NeedsInteraction) && open(&resume, cx)
+    });
+
+    click(&dismiss, cx);
+
+    assert!(
+        !open(&notice, cx),
+        "Dismiss hides the notice in this window"
+    );
+    assert_eq!(
+        state(&direct),
+        Some(UnpairState::NeedsInteraction),
+        "the request still waits for the person, uncancelled"
+    );
 }
 
 #[gpui::test]

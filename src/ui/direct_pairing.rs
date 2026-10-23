@@ -944,7 +944,7 @@ impl Render for InviteDevice {
 mod tests {
     use std::sync::Mutex;
 
-    use gpui::{Modifiers, TestAppContext, VisualTestContext};
+    use gpui::{KeyUpEvent, Keystroke, Modifiers, TestAppContext, VisualTestContext};
     use spaceterm_ui::ModalLayer;
     use spaceterm_ui::a11y_testing::A11yTree;
     use zeroize::Zeroizing;
@@ -1136,6 +1136,16 @@ mod tests {
         cx.debug_bounds(selector).is_some()
     }
 
+    /// Presses Return the way a keyboard does. A focused button acts when the key comes back
+    /// up, so a key-down alone leaves the focused action unpressed.
+    fn press_return(cx: &mut VisualTestContext) {
+        cx.simulate_keystrokes("enter");
+        cx.simulate_event(KeyUpEvent {
+            keystroke: Keystroke::parse("enter").expect("Return parses"),
+        });
+        cx.run_until_parked();
+    }
+
     /// The selector the modal gives an action.
     fn action(selector: &str) -> String {
         format!("modal-action-{selector}")
@@ -1210,8 +1220,7 @@ mod tests {
         server.claim(3, "MacBook", [0; 4], ours);
         poll(cx);
 
-        cx.simulate_keystrokes("enter");
-        cx.run_until_parked();
+        press_return(cx);
 
         assert_eq!(*server.approved.lock().expect("approved"), vec![[3; 32]]);
         assert_eq!(host.read_with(cx, |host, _| host.paired), 1);
@@ -1301,8 +1310,7 @@ mod tests {
         assert_eq!(*server.withdrawn.lock().expect("withdrawn"), vec![expired]);
 
         *server.expires_at.lock().expect("expiry") = unix_now() + 300;
-        cx.simulate_keystrokes("enter");
-        cx.run_until_parked();
+        press_return(cx);
 
         assert_eq!(server.invitations.lock().expect("invitations").len(), 2);
         assert!(
