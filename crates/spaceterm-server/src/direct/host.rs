@@ -776,6 +776,116 @@ pub(crate) fn serve(
 mod tests {
     use super::*;
     #[test]
+    fn five_minute_invitations_stay_one_use_while_pending_and_after_denial() {
+        let fixture = super::super::tests::Fixture::new();
+        fixture.enable();
+        let before = wire::now().unwrap();
+        let invitation = fixture.invite();
+        let after = wire::now().unwrap();
+        assert!((before + 300..=after + 300).contains(&invitation.expires_at_unix_seconds()));
+        let original = DeviceCredential::generate().unwrap();
+        let claim = fixture.claim(&invitation, &original);
+        let other = DeviceCredential::generate().unwrap();
+        let prepared = Enrollment::prepare(&invitation, "Other device".into(), &other).unwrap();
+        for denied in [false, true] {
+            if denied {
+                fixture.management(Management::Reject(claim.id)).unwrap();
+            }
+            assert!(matches!(
+                fixture.authenticate(
+                    &other,
+                    wire::Action::Claim {
+                        id: prepared.claim_id(),
+                        token: invitation.payload.token,
+                        key: crypto::public(other.expose_bytes()).unwrap(),
+                        name: "Other device".into(),
+                    }
+                ),
+                Err(DirectError::AlreadyDecided)
+            ));
+        }
+        assert!(matches!(
+            fixture.authenticate(
+                &original,
+                wire::Action::Finish {
+                    claim: claim.id,
+                    key: claim.device_public_key,
+                }
+            ),
+            Err(DirectError::Rejected)
+        ));
+        assert!(
+            matches!(fixture.management(Management::Devices), Ok(ManagementReply::Devices(devices)) if devices.is_empty())
+        );
+    }
+
+    #[test]
+    fn signed_cancellation_after_expiry_and_lost_approval_revokes_only_the_created_pairing() {
+        let fixture = super::super::tests::Fixture::new();
+        fixture.enable();
+        let credential = DeviceCredential::generate().unwrap();
+        let invitation = fixture.invite();
+        let claim = fixture.claim(&invitation, &credential);
+        let ManagementReply::Approved(created) = fixture
+            .management(Management::Approve(claim.clone()))
+            .unwrap()
+        else {
+            panic!()
+        };
+        {
+            let mut state = fixture.state.lock().unwrap();
+            state.invitations[0].expires = 0;
+            state.claims[0].claim.expires_at_unix_seconds = 0;
+        }
+        // The client never observed Finish. Expiry removes transient state, while
+        // a later invitation grants the same key a separate pairing.
+        let newer = fixture.enroll(&credential);
+        assert!(
+            fixture
+                .state
+                .lock()
+                .unwrap()
+                .claims
+                .iter()
+                .all(|pending| pending.claim.id != claim.id)
+        );
+        let mut original = Enrollment::resume(
+            invitation.endpoint(),
+            invitation.server_pin().clone(),
+            claim.id,
+            &credential,
+        )
+        .unwrap();
+        let server = fixture.serve_next();
+        let receipt = original.cancel().unwrap().unwrap();
+        server.join().unwrap().unwrap();
+        assert_eq!(receipt.target, created.pairing);
+        let server = fixture.serve_next();
+        assert_eq!(original.cancel(), Ok(Some(receipt)));
+        server.join().unwrap().unwrap();
+        assert!(matches!(
+            fixture.authenticate(
+                &credential,
+                wire::Action::Connect {
+                    paired: newer.clone()
+                }
+            ),
+            Ok(wire::Answer::Connected)
+        ));
+        let ManagementReply::Devices(devices) = fixture.management(Management::Devices).unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(
+            devices
+                .iter()
+                .map(|device| device.pairing)
+                .collect::<Vec<_>>(),
+            vec![newer.pairing]
+        );
+    }
+
+    #[test]
     fn uncertain_storage_recovery_fences_registration_from_the_prior_exposure_generation() {
         let fixture = super::super::tests::Fixture::new();
         fixture.enable();

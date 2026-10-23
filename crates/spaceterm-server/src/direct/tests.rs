@@ -469,6 +469,60 @@ fn both_devices_compare_the_first_authenticated_exchange_across_exact_retries() 
 }
 
 #[test]
+fn losing_the_first_wss_reply_still_compares_the_original_authenticated_exchange() {
+    let fixture = Fixture::new();
+    fixture.enable();
+    let invitation = fixture.invite();
+    let credential = DeviceCredential::generate().unwrap();
+    let mut enrollment =
+        Enrollment::prepare(&invitation, "Original device".into(), &credential).unwrap();
+    let state = Arc::clone(&fixture.state);
+    let server = std::thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let tcp = loop {
+            if let Some((tcp, _generation)) = state.lock().unwrap().accept() {
+                break tcp;
+            }
+            assert!(Instant::now() < deadline, "WSS accept deadline");
+            std::thread::sleep(Duration::from_millis(2));
+        };
+        let (certificate, key, challenge) = {
+            let state = state.lock().unwrap();
+            let (certificate, key) = state.certificate();
+            (
+                certificate.to_vec(),
+                zeroize::Zeroizing::new(key.to_vec()),
+                state.challenge().unwrap(),
+            )
+        };
+        let mut ws = wss::accept(tcp, &certificate, &key).unwrap();
+        wss::send(&mut ws, &challenge).unwrap();
+        let authentication: wire::Authentication = wss::receive(&mut ws).unwrap();
+        let wire::Answer::Claim(claim) = state
+            .lock()
+            .unwrap()
+            .authenticate(&challenge, &authentication)
+            .unwrap()
+        else {
+            panic!()
+        };
+        // Lose only the reply at the network boundary, after real authentication.
+        drop(ws);
+        claim
+    });
+    assert_eq!(enrollment.submit(), Err(DirectError::Transport));
+    let original = server.join().unwrap();
+    assert_eq!(enrollment.comparison_code(), None);
+    let server = fixture.serve_next();
+    assert_eq!(enrollment.submit(), Ok(original.comparison_code()));
+    server.join().unwrap().unwrap();
+    fixture.management(Management::Approve(original)).unwrap();
+    let server = fixture.serve_next();
+    assert!(enrollment.finish().unwrap().is_some());
+    server.join().unwrap().unwrap();
+}
+
+#[test]
 fn a_returned_comparison_must_belong_to_an_exchange_this_enrollment_signed() {
     let fixture = Fixture::new();
     fixture.enable();
