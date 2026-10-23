@@ -51,6 +51,7 @@ struct Entry {
     dirty: bool,
     starting: bool,
     retained: usize,
+    preparing: bool,
 }
 
 impl Readiness {
@@ -106,6 +107,11 @@ impl Readiness {
                     state.wake.close();
                     state._task.take();
                     state._closed.take();
+                    for entry in &state.entries {
+                        if let Some(pane) = entry.pane.upgrade() {
+                            pane.read(cx).set_readiness_preparation(false);
+                        }
+                    }
                     state.entries.clear();
                 }
             }
@@ -133,6 +139,7 @@ impl Readiness {
             dirty: true,
             starting: false,
             retained: 0,
+            preparing: false,
         });
         self.wake();
     }
@@ -260,6 +267,30 @@ impl Readiness {
             }
             .rank(selected_order, direction)
         });
+        // Screen demand follows the same bounded likely-return set as hidden CPU caches. It
+        // changes transport demand only; the Pane's drawing and focus lifecycle stays hidden.
+        let mut preparation_panes = 0;
+        let mut preparation_bytes = 0usize;
+        for entry in &mut entries {
+            let (Some(tab), Some(pane)) = (entry.tab.upgrade(), entry.pane.upgrade()) else {
+                continue;
+            };
+            let prepare = !entry.visible
+                && pane.read(cx).readiness_preparation_eligible()
+                && tab
+                    .read(cx)
+                    .readiness_allocation(entry.pane_id, size, cx)
+                    .is_some()
+                && preparation_panes < CACHE_PANES
+                && preparation_bytes.saturating_add(entry.retained) <= CACHE_BYTES;
+            if prepare {
+                preparation_panes += 1;
+                preparation_bytes = preparation_bytes.saturating_add(entry.retained);
+            }
+            entry.dirty |= prepare && !entry.preparing;
+            entry.preparing = prepare;
+            pane.read(cx).set_readiness_preparation(prepare);
+        }
         let mut starting = entries.iter().filter(|entry| entry.starting).count();
         let mut worked = false;
         let mut more = starting > 0;
@@ -283,9 +314,10 @@ impl Readiness {
                 };
             worked = true;
             let (started, done) = pane.update(cx, |pane, cx| {
-                pane.prepare_readiness(allocation, allowed, window, cx)
+                pane.prepare_readiness(allocation, allowed, entry.preparing, window, cx)
             });
             if started {
+                pane.read(cx).set_readiness_preparation(entry.preparing);
                 entry.starting = tab.read(cx).readiness_starting(entry.pane_id);
                 starting += usize::from(entry.starting);
             }
@@ -305,10 +337,14 @@ impl Readiness {
             }
             retained = retained.saturating_add(entry.retained);
             panes += 1;
-            if panes > CACHE_PANES || retained > CACHE_BYTES {
+            if !entry.preparing || panes > CACHE_PANES || retained > CACHE_BYTES {
                 if let Some(pane) = entry.pane.upgrade() {
-                    pane.update(cx, |pane, cx| pane.evict_readiness_cache(cx));
+                    pane.update(cx, |pane, cx| {
+                        pane.set_readiness_preparation(false);
+                        pane.evict_readiness_cache(cx);
+                    });
                 }
+                entry.preparing = false;
                 entry.retained = 0;
                 entry.dirty = false;
             }
@@ -471,6 +507,23 @@ mod tests {
         }
         assert_eq!(records.starts().len(), 8);
         manager.update(cx, |manager, cx| manager.deactivate(cx));
+        cx.run_until_parked();
+        let preparation = || {
+            let mut demand = std::collections::BTreeMap::new();
+            for call in records.commands() {
+                if let crate::terminal::testing::RecordedCommand::SetPreparationDemand(prepare) =
+                    call.command
+                {
+                    demand.insert(call.session_id, prepare);
+                }
+            }
+            demand
+        };
+        assert_eq!(
+            preparation().values().filter(|prepare| **prepare).count(),
+            6,
+            "cold hidden Panes must receive bounded preparation demand before any screen arrives"
+        );
         let mut emulator =
             crate::terminal::emulator::TerminalEmulator::new(TerminalGeometry::from_grid(
                 CellGridSize::new(8, 2),
@@ -509,6 +562,25 @@ mod tests {
             );
             assert!(costs.iter().sum::<usize>() <= 16 * 1024 * 1024);
         });
+        manager.update(cx, |manager, cx| manager.activate_without_focus(cx));
+        cx.run_until_parked();
+        let active = records.starts().last().unwrap().session_id;
+        assert_eq!(
+            preparation().get(&active),
+            Some(&false),
+            "revealing a prepared Pane withdraws its hidden demand grant"
+        );
+        assert_eq!(
+            preparation().values().filter(|prepare| **prepare).count(),
+            6,
+            "another hidden candidate takes the released preparation grant"
+        );
+        cx.update(|window, _| window.remove_window());
+        cx.run_until_parked();
+        assert!(
+            preparation().values().all(|prepare| !prepare),
+            "closing the window withdraws preparation even while its Pane entities survive"
+        );
     }
 
     #[gpui::test]

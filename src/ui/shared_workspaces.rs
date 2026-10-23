@@ -2532,6 +2532,7 @@ mod development {
         /// A scripted Pane whose status a test sets and whose explicit requests it counts.
         pub(crate) struct ScriptedPane {
             status: Mutex<crate::terminal::server_session::DevelopmentPaneStatus>,
+            startup_pending: std::sync::atomic::AtomicBool,
             controller: Mutex<Option<spaceterm_server::pane::control::Controller>>,
             session_dormant: std::sync::atomic::AtomicBool,
             generation: std::sync::atomic::AtomicU64,
@@ -2549,6 +2550,7 @@ mod development {
                     status: Mutex::new(
                         crate::terminal::server_session::DevelopmentPaneStatus::Connecting,
                     ),
+                    startup_pending: std::sync::atomic::AtomicBool::new(true),
                     controller: Mutex::default(),
                     session_dormant: std::sync::atomic::AtomicBool::new(false),
                     generation: std::sync::atomic::AtomicU64::new(0),
@@ -2565,7 +2567,22 @@ mod development {
                 &self,
                 status: crate::terminal::server_session::DevelopmentPaneStatus,
             ) {
+                self.startup_pending.store(
+                    matches!(
+                        status,
+                        crate::terminal::server_session::DevelopmentPaneStatus::Connecting
+                            | crate::terminal::server_session::DevelopmentPaneStatus::TakingOver
+                            | crate::terminal::server_session::DevelopmentPaneStatus::Reconnecting
+                    ),
+                    std::sync::atomic::Ordering::SeqCst,
+                );
                 *self.status.lock().expect("status") = status;
+            }
+
+            /// An authenticated admission can precede every screen of a hidden Pane.
+            pub(crate) fn admitted(&self) {
+                self.startup_pending
+                    .store(false, std::sync::atomic::Ordering::SeqCst);
             }
 
             /// The server offers Take Over and says who controls the Pane.
@@ -2633,6 +2650,11 @@ mod development {
         impl crate::ui::server_pane::ServerPaneConnection for ScriptedPane {
             fn status(&self) -> crate::terminal::server_session::DevelopmentPaneStatus {
                 *self.status.lock().expect("status")
+            }
+
+            fn startup_pending(&self) -> bool {
+                self.startup_pending
+                    .load(std::sync::atomic::Ordering::SeqCst)
             }
 
             fn controller(&self) -> Option<spaceterm_server::pane::control::Controller> {

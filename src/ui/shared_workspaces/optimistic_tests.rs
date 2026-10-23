@@ -1014,7 +1014,12 @@ fn optimistic_rapid_tabs_keep_each_start_intent_after_later_navigation(cx: &mut 
         harness.server.finish(true, true);
         project_window(&harness, cx);
         for pane in harness.panes.opened() {
-            pane.reconnect();
+            pane.admitted();
+            assert_eq!(
+                crate::ui::server_pane::ServerPaneConnection::status(pane.as_ref()),
+                crate::terminal::server_session::DevelopmentPaneStatus::Connecting,
+                "hidden admission must release capacity without fabricating a first screen"
+            );
         }
         cx.executor()
             .advance_clock(std::time::Duration::from_millis(16));
@@ -1176,7 +1181,10 @@ fn accept_hidden_layout_wider_than_the_stage(
             .advance_clock(std::time::Duration::from_millis(16));
         cx.run_until_parked();
     }
-    assert_eq!(harness.server.inventory().workspaces[0].tabs[1].panes.len(), 3);
+    assert_eq!(
+        harness.server.inventory().workspaces[0].tabs[1].panes.len(),
+        3
+    );
 }
 
 fn resizes(harness: &WindowHarness) -> usize {

@@ -47,6 +47,7 @@ impl Wake {
 pub(super) struct Cadence {
     next_poll: Instant,
     visible: bool,
+    preparation: bool,
     demand_sent: Option<bool>,
 }
 impl Cadence {
@@ -55,6 +56,7 @@ impl Cadence {
         Self {
             next_poll: now,
             visible,
+            preparation: false,
             demand_sent: None,
         }
     }
@@ -71,11 +73,16 @@ impl Cadence {
         self.visible
     }
 
+    pub(super) fn set_preparation(&mut self, prepare: bool) {
+        self.preparation = prepare;
+    }
+
     /// The visual demand the server has not been told yet. Sending it precedes the next check.
     pub(super) fn take_demand(&mut self) -> Option<bool> {
-        (self.demand_sent != Some(self.visible)).then(|| {
-            self.demand_sent = Some(self.visible);
-            self.visible
+        let demand = self.visible || self.preparation;
+        (self.demand_sent != Some(demand)).then(|| {
+            self.demand_sent = Some(demand);
+            demand
         })
     }
 

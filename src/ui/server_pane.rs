@@ -862,6 +862,17 @@ mod connection {
     pub(crate) trait ServerPaneConnection: Send + Sync {
         fn status(&self) -> DevelopmentPaneStatus;
 
+        /// Whether the original presentation admission still occupies a startup slot. Receiving
+        /// a screen is a separate input barrier and may wait while this Pane is hidden.
+        fn startup_pending(&self) -> bool {
+            matches!(
+                self.status(),
+                DevelopmentPaneStatus::Connecting
+                    | DevelopmentPaneStatus::TakingOver
+                    | DevelopmentPaneStatus::Reconnecting
+            )
+        }
+
         /// Who controlled the Pane when the server last offered Take Over, if it ever did.
         fn controller(&self) -> Option<Controller>;
 
@@ -921,6 +932,10 @@ mod connection {
     impl ServerPaneConnection for DevelopmentPaneState {
         fn status(&self) -> DevelopmentPaneStatus {
             Self::status(self)
+        }
+
+        fn startup_pending(&self) -> bool {
+            Self::startup_pending(self)
         }
 
         fn controller(&self) -> Option<Controller> {

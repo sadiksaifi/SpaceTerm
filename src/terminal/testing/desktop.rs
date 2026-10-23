@@ -146,6 +146,7 @@ pub(crate) enum RecordedCommand {
     RequestSelectionCopy,
     RequestSelectionCopyAt(PresentationGeneration),
     SetPresentable(bool),
+    SetPreparationDemand(bool),
     UpdateAppearance(TerminalAppearanceUpdate),
 }
 
@@ -741,6 +742,10 @@ impl TerminalSessionHandle for TestTerminalSessionHandle {
 
     fn set_presentable(&self, presentable: bool) {
         self.record(RecordedCommand::SetPresentable(presentable));
+    }
+
+    fn set_preparation_demand(&self, prepare: bool) {
+        self.record(RecordedCommand::SetPreparationDemand(prepare));
     }
 
     fn update_appearance(&self, update: TerminalAppearanceUpdate) {

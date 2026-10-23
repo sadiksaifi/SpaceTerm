@@ -2076,6 +2076,7 @@ impl TerminalPane {
         &mut self,
         allocation: Option<Bounds<Pixels>>,
         may_start: bool,
+        may_prepare: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> (bool, bool) {
@@ -2120,7 +2121,10 @@ impl TerminalPane {
                 session.resize(geometry);
             }
         }
-        if self.terminal_session.connection_interrupted || self.screen.rows.is_empty() {
+        if (!self.render_lifecycle.can_present() && !may_prepare)
+            || self.terminal_session.connection_interrupted
+            || self.screen.rows.is_empty()
+        {
             return (started, true);
         }
         let screen =
