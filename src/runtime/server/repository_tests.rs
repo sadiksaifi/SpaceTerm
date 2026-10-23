@@ -1022,7 +1022,9 @@ fn replaced_worktree_and_main_worktree_are_preserved_after_confirmation() {
 fn worktree_location_refuses_an_unwritable_folder_without_changing_settings() {
     use spaceterm_server::{
         hierarchy::Outcome,
-        worktree::{Operation, Read, ReadReply, Settings},
+        worktree::{
+            Error, Operation, Read, ReadReply, Settings, path_template::WorktreePathTemplateError,
+        },
     };
     use std::os::unix::fs::{PermissionsExt, symlink};
 
@@ -1043,7 +1045,10 @@ fn worktree_location_refuses_an_unwritable_folder_without_changing_settings() {
     );
     std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o700)).unwrap();
     assert!(
-        matches!(result, Outcome::WorktreeFailed(_)),
+        matches!(
+            result,
+            Outcome::WorktreeFailed(Error::Template(WorktreePathTemplateError::NotWritable))
+        ),
         "a read-only ancestor on the owning server must reject the edit: {result:?}"
     );
     assert!(matches!(
@@ -1056,7 +1061,10 @@ fn worktree_location_refuses_an_unwritable_folder_without_changing_settings() {
 
 #[test]
 fn worktree_location_refuses_a_file_in_the_folder_prefix() {
-    use spaceterm_server::{hierarchy::Outcome, worktree::Operation};
+    use spaceterm_server::{
+        hierarchy::Outcome,
+        worktree::{Error, Operation, path_template::WorktreePathTemplateError},
+    };
     let fixture = GitFixture::new();
     let file = fixture.0.join("file");
     std::fs::write(&file, b"keep").unwrap();
@@ -1070,10 +1078,121 @@ fn worktree_location_refuses_a_file_in_the_folder_prefix() {
         },
     );
     assert!(
-        matches!(result, Outcome::WorktreeFailed(_)),
+        matches!(
+            result,
+            Outcome::WorktreeFailed(Error::Template(WorktreePathTemplateError::NotWritable))
+        ),
         "a file cannot contain new Worktree folders: {result:?}"
     );
     assert_eq!(std::fs::read(file).unwrap(), b"keep");
+    host.shutdown().unwrap();
+}
+
+#[test]
+fn worktree_location_draft_validation_returns_typed_errors_without_saving_or_creating_folders() {
+    use spaceterm_server::worktree::{
+        Error, Read, ReadReply, Settings, path_template::WorktreePathTemplateError::*,
+    };
+    let fixture = GitFixture::new();
+    let mut host = SharedWorkspaceHost::new(host());
+    for (template, expected) in [
+        ("", Empty),
+        ("~/worktrees/{unknown}", UnknownPlaceholder),
+        ("~/worktrees/{repository}", MissingBranch),
+        ("relative/{branch}", NotAbsolute),
+        ("~/{branch}}", UnknownPlaceholder),
+        ("~/\0/{branch}", InvalidCharacter),
+    ] {
+        assert!(
+            matches!(
+                read_worktree(&mut host, Read::ValidateLocationTemplate { template: template.into() }),
+                Reply::WorktreeRead(Err(Error::Template(actual))) if actual == expected
+            ),
+            "incorrect validation for {template:?}"
+        );
+    }
+    let folder = fixture.0.join("not-created");
+    assert!(matches!(
+        read_worktree(
+            &mut host,
+            Read::ValidateLocationTemplate {
+                template: format!("{}/{{repository}}/{{branch}}", folder.display()),
+            }
+        ),
+        Reply::WorktreeRead(Ok(ReadReply::LocationTemplate))
+    ));
+    assert!(!folder.exists());
+    assert!(matches!(
+        read_worktree(&mut host, Read::Settings),
+        Reply::WorktreeRead(Ok(ReadReply::Settings(saved))) if saved == Settings::default()
+    ));
+    host.shutdown().unwrap();
+}
+
+#[test]
+fn worktree_location_concurrent_clients_reload_the_authoritative_value_after_a_conflict() {
+    use spaceterm_server::{
+        hierarchy::{Mutation, Outcome},
+        worktree::{Error, Operation, Read, ReadReply},
+    };
+    let fixture = GitFixture::new();
+    let mut host = SharedWorkspaceHost::new(host());
+    let Reply::WorktreeRead(Ok(ReadReply::Settings(original))) =
+        read_worktree(&mut host, Read::Settings)
+    else {
+        panic!("initial settings unavailable")
+    };
+    let template = format!("{}/authoritative/{{branch}}", fixture.0.display());
+    assert!(matches!(
+        finish_write(
+            &mut host,
+            1,
+            Operation::SetLocation {
+                version: original.version,
+                template: template.clone(),
+            }
+        ),
+        Outcome::Accepted { .. }
+    ));
+    // The other device submits the version it originally read, even if its draft is invalid.
+    let Reply::Outcome(result) = host.request(
+        [3; 32],
+        [3; 32],
+        Request::Mutate {
+            sequence: 1,
+            mutation: Mutation::Worktree(Operation::SetLocation {
+                version: original.version,
+                template: "invalid stale draft".into(),
+            }),
+        },
+    ) else {
+        panic!("conflicting edit did not resolve")
+    };
+    assert_eq!(result.outcome, Outcome::WorktreeFailed(Error::Changed));
+    assert!(matches!(
+        host.request([3; 32], [3; 32], Request::WorktreeRead(Read::Settings)),
+        Reply::WorktreeRead(Ok(ReadReply::Settings(saved))) if saved.template == template && saved.version == original.version + 1
+    ));
+    host.shutdown().unwrap();
+}
+
+#[test]
+fn git_settings_read_the_owning_servers_tools_without_a_workspace() {
+    use spaceterm_server::{
+        repository::GitToolStatus,
+        worktree::{Read, ReadReply},
+    };
+    let mut host = SharedWorkspaceHost::new(host());
+    assert!(shared_inventory(&mut host).workspaces.is_empty());
+    let reply = read_worktree(&mut host, Read::Git);
+    assert!(
+        matches!(
+            reply,
+            Reply::WorktreeRead(Ok(ReadReply::Git(GitToolStatus::Ready(_))))
+        ),
+        "the fixture host's Git must be readable without a repository: {reply:?}"
+    );
+    assert!(shared_inventory(&mut host).workspaces.is_empty());
     host.shutdown().unwrap();
 }
 
