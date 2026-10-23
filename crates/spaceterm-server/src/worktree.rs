@@ -134,6 +134,41 @@ impl Default for Settings {
         }
     }
 }
+
+/// Presentation facts from the connected owning server. They grant no host maintenance authority.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ServerFacts {
+    pub machine: String,
+    pub operating_system: String,
+    pub version: String,
+}
+
+impl ServerFacts {
+    /// Removes control and invisible formatting characters and bounds each field to 256 bytes.
+    /// A missing display value is a typed failure, never a guessed client-side fact.
+    pub fn new(machine: &str, operating_system: &str, version: &str) -> Result<Self, Error> {
+        fn bounded(value: &str) -> Result<String, Error> {
+            let mut value = crate::pane::metadata::sanitize(value, 256);
+            let mut end = value.len().min(256);
+            while !value.is_char_boundary(end) {
+                end -= 1;
+            }
+            value.truncate(end);
+            let value = value.trim().to_owned();
+            if value.is_empty() {
+                return Err(Error::Unavailable);
+            }
+            Ok(value)
+        }
+        Ok(Self {
+            machine: bounded(machine)?,
+            operating_system: bounded(operating_system)?,
+            version: bounded(version)?,
+        })
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Read {
     Poll {
@@ -145,6 +180,8 @@ pub enum Read {
     Settings,
     /// The owning server's Git installation, even when it owns no Workspaces.
     Git,
+    /// Live facts from the owning server, independent of Git and Workspaces.
+    ServerFacts,
     /// Checks a draft without changing Server Settings or creating folders.
     ValidateLocationTemplate {
         template: String,
@@ -173,6 +210,7 @@ pub enum ReadReply {
     },
     Settings(Settings),
     Git(crate::repository::GitToolStatus),
+    ServerFacts(ServerFacts),
     LocationTemplate,
     Location(PathBuf),
     Removal(Removal),
@@ -300,5 +338,35 @@ impl Removal {
             .affected_worktree_tabs(&self.root, &self.path)
             .iter()
             .all(|t| self.tabs.contains(t))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn server_facts_sanitize_and_bound_display_values_without_splitting_utf8() {
+        let facts = ServerFacts::new(
+            &format!(" \u{202e}{}\u{1b}", "界".repeat(100)),
+            "\u{2066}Linux\u{2069}",
+            "\t0.1.0\n",
+        )
+        .unwrap();
+        assert_eq!(facts.machine, "界".repeat(85));
+        assert_eq!(facts.operating_system, "Linux");
+        assert_eq!(facts.version, "0.1.0");
+    }
+
+    #[test]
+    fn server_facts_refuse_empty_metadata_instead_of_inventing_values() {
+        assert_eq!(
+            ServerFacts::new("\u{202e}\u{1b} ", "Linux", "0.1.0"),
+            Err(Error::Unavailable)
+        );
+        assert_eq!(
+            ServerFacts::new("server", "Linux", " \n"),
+            Err(Error::Unavailable)
+        );
     }
 }

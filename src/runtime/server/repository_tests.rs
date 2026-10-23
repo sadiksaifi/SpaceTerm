@@ -1177,6 +1177,27 @@ fn worktree_location_concurrent_clients_reload_the_authoritative_value_after_a_c
 }
 
 #[test]
+fn server_facts_read_the_owning_hosts_metadata_without_a_workspace_or_git_context() {
+    use spaceterm_server::worktree::{Read, ReadReply};
+    let expected_machine =
+        crate::platform::launch_host::terminal_machine(std::path::Path::new("/"));
+    let mut host = SharedWorkspaceHost::new(host());
+    assert!(shared_inventory(&mut host).workspaces.is_empty());
+    let reply = read_worktree(&mut host, Read::ServerFacts);
+    let Reply::WorktreeRead(Ok(ReadReply::ServerFacts(facts))) = reply else {
+        panic!("owning-server facts unavailable without a Workspace: {reply:?}")
+    };
+    assert_eq!(facts.machine, expected_machine.hostname().unwrap());
+    #[cfg(target_os = "macos")]
+    assert_eq!(facts.operating_system, "macOS");
+    #[cfg(target_os = "linux")]
+    assert_eq!(facts.operating_system, "Linux");
+    assert_eq!(facts.version, env!("SPACETERM_VERSION"));
+    assert!(shared_inventory(&mut host).workspaces.is_empty());
+    host.shutdown().unwrap();
+}
+
+#[test]
 fn git_settings_read_the_owning_servers_tools_without_a_workspace() {
     use spaceterm_server::{
         repository::GitToolStatus,
