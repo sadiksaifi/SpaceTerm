@@ -446,10 +446,26 @@ mod tests {
 
     #[test]
     fn an_observation_keeps_facts_another_part_of_settings_retained() {
+        use crate::server_context::{NetworkAccessFacts, NetworkListenerFacts, PairedDevicesFacts};
+
+        let network_access = NetworkAccessFacts {
+            observed_at: 8,
+            server_name: "penguin".to_owned(),
+            policy: None,
+            listener: NetworkListenerFacts::Off,
+            addresses: None,
+        };
+        // A successful reading that found no devices, which differs from not knowing.
+        let paired_devices = PairedDevicesFacts {
+            observed_at: 9,
+            devices: Vec::new(),
+        };
         let previous = LastKnownFacts {
             observed_at: 10,
             worktree_location: Some("~/wt/{repository}/{branch}".to_owned()),
             running_sessions: Some(3),
+            network_access: Some(network_access.clone()),
+            paired_devices: Some(paired_devices.clone()),
             ..LastKnownFacts::default()
         };
 
@@ -469,6 +485,8 @@ mod tests {
             Some("~/wt/{repository}/{branch}")
         );
         assert_eq!(next.running_sessions, Some(3));
+        assert_eq!(next.network_access, Some(network_access));
+        assert_eq!(next.paired_devices, Some(paired_devices));
         assert_eq!(next.machine.as_deref(), Some("penguin"));
         assert_eq!(next.version.as_deref(), Some("2.1.0"));
         assert_eq!(next.observed_at, 20);
