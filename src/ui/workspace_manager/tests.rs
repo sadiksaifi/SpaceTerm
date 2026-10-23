@@ -12829,6 +12829,76 @@ mod shared_repositories {
         (rows[0], rows[1])
     }
 
+    /// New Tab in a Worktree with two Tabs, pressed twice before the server answers, keeps the
+    /// Worktree's Tabs in the strip and opens the latest new Tab there, even when a reading that
+    /// does not yet carry the new Tabs arrives in between.
+    #[gpui::test]
+    fn new_tabs_in_a_shared_worktree_should_stay_in_its_strip_before_the_server_answers(
+        cx: &mut TestAppContext,
+    ) {
+        let with_second_main_tab = |revision| {
+            let mut inventory = published(revision, "main", true);
+            let mut second = inventory.workspaces[0].tabs[0].clone();
+            second.id = [70; 32];
+            second.root_pane = [71; 32];
+            second.panes[0].id = second.root_pane;
+            inventory.workspaces[0].tabs.push(second);
+            inventory
+        };
+        let (harness, cx) = harness(cx, with_second_main_tab(1));
+        let (main, _) = worktree_ids(&harness, cx);
+        cx.update(|window, cx| {
+            harness.manager.update(cx, |manager, cx| {
+                manager.activate_workspace(harness.shared, window, cx);
+                manager.handle_sidebar_event(
+                    SidebarEvent::ActivateWorktree {
+                        workspace_id: harness.shared,
+                        worktree_id: main,
+                        focus_pane: true,
+                    },
+                    window,
+                    cx,
+                );
+            });
+        });
+        cx.run_until_parked();
+        let tabs = harness.manager.read_with(cx, |manager, _| {
+            manager
+                .workspaces
+                .workspace(harness.shared)
+                .expect("the shared Workspace")
+                .payload()
+                .clone()
+        });
+        let existing = tabs.read_with(cx, |tabs, _| tabs.worktree_tab_ids(main));
+        let strip = |cx: &mut VisualTestContext| {
+            tabs.read_with(cx, |tabs, cx| {
+                (
+                    tabs.active_worktree(),
+                    tabs.worktree_tab_ids(main),
+                    tabs.active_terminal_identity(cx).0,
+                )
+            })
+        };
+
+        for _ in 0..2 {
+            cx.update(|window, cx| tabs.update(cx, |tabs, cx| tabs.create_tab(window, cx)));
+        }
+        cx.run_until_parked();
+        let created = strip(cx);
+        harness.publish(with_second_main_tab(2), cx);
+        let after_reading = strip(cx);
+
+        assert_eq!(existing.len(), 2, "the main Worktree starts with two Tabs");
+        for (active_worktree, ids, active_tab) in [&created, &after_reading] {
+            assert_eq!(*active_worktree, Some(main), "the Active Worktree stays");
+            assert_eq!(ids.len(), 4, "each request adds one distinct Tab");
+            assert_eq!(ids[..2], existing[..], "existing Tabs keep their order");
+            assert_eq!(*active_tab, ids[3], "the latest new Tab is active");
+        }
+        assert_eq!(after_reading, created);
+    }
+
     #[gpui::test]
     fn worktree_menu_new_tab_uses_its_recent_tabs_focused_pane(cx: &mut TestAppContext) {
         use spaceterm_server::hierarchy::Mutation;

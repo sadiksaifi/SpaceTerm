@@ -280,7 +280,16 @@ mod development {
                 scopes.insert(tab.id, (id, root.clone()));
             }
             manager.update(cx, |manager, cx| {
-                manager.apply_shared_worktrees(&|tab| scopes.get(&tab).cloned(), cx);
+                manager.apply_shared_worktrees(
+                    &|tab| {
+                        server
+                            .tabs
+                            .iter()
+                            .any(|published| published.id == tab)
+                            .then(|| scopes.get(&tab).map(|(id, _)| *id))
+                    },
+                    cx,
+                );
             });
             let counts = manager.read(cx).worktree_tab_counts();
             let Some(state) = self.shared_repositories.worktrees.get_mut(&workspace_id) else {
