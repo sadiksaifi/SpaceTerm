@@ -294,7 +294,10 @@ fn a_development_run_server_is_described_as_ending_with_the_run(cx: &mut TestApp
             settings.local_server_presentation(),
         )
     });
-    assert!(description.contains("ends with its Terminal Sessions when the run ends"));
+    assert!(
+        description.contains("server ends when the run ends"),
+        "got {description:?}"
+    );
     assert!(!description.contains("keep running after SpaceTerm quits"));
     let presentation = presentation.expect("the local server is presented");
     assert_eq!(presentation.state, "Connected");
