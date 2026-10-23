@@ -987,7 +987,7 @@ pub(super) mod enrollment_tests {
                 .unwrap(),
             );
             let text = Zeroizing::new(format!(
-                "spaceterm-pair:{}",
+                "spaceterm://pair/{}",
                 URL_SAFE_NO_PAD.encode(&payload)
             ));
             let id = owner.join(text, "Test device".into()).unwrap();

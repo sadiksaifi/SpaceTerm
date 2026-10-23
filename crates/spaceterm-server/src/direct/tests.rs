@@ -469,6 +469,23 @@ fn both_devices_compare_the_first_authenticated_exchange_across_exact_retries() 
 }
 
 #[test]
+fn a_returned_comparison_must_belong_to_an_exchange_this_enrollment_signed() {
+    let fixture = Fixture::new();
+    fixture.enable();
+    let invitation = fixture.invite();
+    let credential = DeviceCredential::generate().unwrap();
+    // Another live enrollment with this key claimed first. Its nonce and proofs
+    // are not evidence observed by this independently prepared enrollment.
+    let original = fixture.claim(&invitation, &credential);
+    let mut other = Enrollment::prepare(&invitation, "Test device".into(), &credential).unwrap();
+    assert_eq!(other.claim_id(), original.id);
+    let server = fixture.serve_next();
+    assert_eq!(other.submit(), Err(DirectError::Substituted));
+    server.join().unwrap().unwrap();
+    assert_eq!(other.comparison_code(), None);
+}
+
+#[test]
 fn prepared_submission_replays_only_the_same_claim_key_and_name_after_a_lost_reply() {
     let fixture = Fixture::new();
     fixture.enable();
@@ -581,6 +598,7 @@ fn approved_enrollment_and_cancellation_resolve_the_same_pairing_after_restart()
         panic!()
     };
     assert_eq!(paired.pairing, info.pairing);
+    let newer = fixture.enroll(&credential);
     let wire::Answer::Cancelled(Some(original)) = fixture
         .authenticate(
             &credential,
@@ -606,6 +624,25 @@ fn approved_enrollment_and_cancellation_resolve_the_same_pairing_after_restart()
         panic!()
     };
     assert_eq!(original, repeated);
+    assert!(matches!(
+        fixture.authenticate(
+            &credential,
+            wire::Action::Connect {
+                paired: newer.clone()
+            }
+        ),
+        Ok(wire::Answer::Connected)
+    ));
+    let ManagementReply::Devices(devices) = fixture.management(Management::Devices).unwrap() else {
+        panic!()
+    };
+    assert_eq!(
+        devices
+            .iter()
+            .map(|device| device.pairing)
+            .collect::<Vec<_>>(),
+        vec![newer.pairing]
+    );
     assert!(matches!(
         fixture.authenticate(&credential, wire::Action::Connect { paired }),
         Err(DirectError::Revoked)
