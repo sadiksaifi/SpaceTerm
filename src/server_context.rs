@@ -1,8 +1,8 @@
 //! Client presentation context, outside Settings and saved connection authority.
-use std::{collections::BTreeSet, ffi::OsStr, sync::Arc};
+use std::{collections::BTreeSet, ffi::OsStr, net::SocketAddr, sync::Arc};
 
 use serde::{Deserialize, Serialize};
-use spaceterm_server::repository::GitToolStatus;
+use spaceterm_server::{direct::NetworkAddresses, repository::GitToolStatus};
 
 use crate::{
     domain::SshDestination,
@@ -63,6 +63,44 @@ pub(crate) enum ObservedServerStatus {
     Unavailable,
 }
 
+/// A historical display of the server's listener, never a live reachability assertion.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub(crate) enum NetworkListenerFacts {
+    Off,
+    Listening(SocketAddr),
+    AddressGone,
+    Failed,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct NetworkAccessFacts {
+    pub(crate) observed_at: u64,
+    pub(crate) server_name: String,
+    /// An observed bind preference, not a connection route or authority to change the server.
+    pub(crate) policy: Option<SocketAddr>,
+    pub(crate) listener: NetworkListenerFacts,
+    pub(crate) addresses: Option<NetworkAddresses>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PairedDeviceFacts {
+    /// Display identity only. This record carries no credentials or revocation authority.
+    pub(crate) pairing: [u8; 32],
+    pub(crate) name: String,
+    pub(crate) fingerprint: String,
+    pub(crate) last_connected_at: Option<u64>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PairedDevicesFacts {
+    pub(crate) observed_at: u64,
+    /// A successful empty reading is distinct from an unknown device list.
+    pub(crate) devices: Vec<PairedDeviceFacts>,
+}
+
 #[derive(Clone, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct LastKnownFacts {
@@ -78,6 +116,10 @@ pub(crate) struct LastKnownFacts {
     /// Last observed display copy. Edits and writability checks require the owning server.
     #[serde(default)]
     pub(crate) worktree_location: Option<String>,
+    #[serde(default)]
+    pub(crate) network_access: Option<NetworkAccessFacts>,
+    #[serde(default)]
+    pub(crate) paired_devices: Option<PairedDevicesFacts>,
 }
 
 impl std::fmt::Debug for LastKnownFacts {
