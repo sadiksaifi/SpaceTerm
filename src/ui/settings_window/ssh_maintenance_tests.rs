@@ -682,6 +682,9 @@ fn menu_offers(label: &str, cx: &mut VisualTestContext) -> bool {
     offered
 }
 
+/// What Status says about a server a read found running while SpaceTerm isn't connected to it.
+const RUNNING_UNCONNECTED: &str = "Running \u{b7} not connected";
+
 /// Whether the Status row announces penguin's state as `state`.
 fn status_reads(state: &str, cx: &mut VisualTestContext) -> bool {
     announces(&format!("penguin: {state}"), cx)
@@ -797,7 +800,7 @@ fn check_now_shows_the_approved_version_without_connecting(cx: &mut TestAppConte
 
     assert_eq!(servers.operations.calls(), vec![Call::Refresh]);
     assert!(
-        status_reads("Running", servers.cx),
+        status_reads(RUNNING_UNCONNECTED, servers.cx),
         "Check Now says what it found, not only what it offers"
     );
     assert!(
@@ -1373,6 +1376,10 @@ fn an_observed_server_offers_its_steps_before_any_maintenance_read(cx: &mut Test
     }
     servers.cx.run_until_parked();
 
+    assert!(
+        status_reads(RUNNING_UNCONNECTED, servers.cx),
+        "Check Status says what it found"
+    );
     for offered in [STOP_SERVER, RESTART_SERVER, UNINSTALL_SERVER] {
         assert!(
             menu_offers(offered, servers.cx),
