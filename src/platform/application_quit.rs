@@ -1,6 +1,6 @@
 use std::rc::Rc;
 
-use gpui::{App, AsyncApp};
+use gpui::{App, AsyncApp, PromptButton, PromptLevel, Task, Window};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ApplicationQuitDecision {
@@ -45,14 +45,59 @@ impl StatusAreaName {
             Self::StatusArea => "status area",
         }
     }
+}
 
-    /// The choice that closes every window and keeps the client there.
-    pub(crate) const fn keep_label(self) -> &'static str {
-        match self {
-            Self::MenuBar => "Keep in Menu Bar",
-            Self::StatusArea => "Keep in Status Area",
+/// The words of the dismissal choice. Its default answer comes first, then Cancel, then the
+/// complete quit.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct DismissalPrompt {
+    pub(crate) title: String,
+    pub(crate) detail: String,
+    /// The default answer, which keeps the client running.
+    pub(crate) keep: String,
+    pub(crate) quit_completely: String,
+}
+
+/// The person's answer to the dismissal choice.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum DismissalAnswer {
+    Keep,
+    Cancel,
+    QuitCompletely,
+}
+
+impl DismissalAnswer {
+    pub(crate) const CANCEL_LABEL: &str = "Cancel";
+
+    /// Reads an answer by the position of its button, in [`DismissalPrompt`] order.
+    pub(crate) const fn from_index(index: usize) -> Option<Self> {
+        match index {
+            0 => Some(Self::Keep),
+            1 => Some(Self::Cancel),
+            2 => Some(Self::QuitCompletely),
+            _ => None,
         }
     }
+}
+
+/// Presents the dismissal choice through GPUI's prompt for this window.
+pub(crate) fn present_window_dismissal(
+    prompt: &DismissalPrompt,
+    window: &mut Window,
+    cx: &mut App,
+) -> Task<Option<DismissalAnswer>> {
+    let answer = window.prompt(
+        PromptLevel::Info,
+        &prompt.title,
+        Some(&prompt.detail),
+        &[
+            PromptButton::ok(prompt.keep.clone()),
+            PromptButton::cancel(DismissalAnswer::CANCEL_LABEL),
+            PromptButton::new(prompt.quit_completely.clone()),
+        ],
+        cx,
+    );
+    cx.spawn(async move |_| DismissalAnswer::from_index(answer.await.ok()?))
 }
 
 #[cfg_attr(
@@ -135,6 +180,17 @@ pub(crate) trait ApplicationQuitAdapter {
     }
 
     fn install(&self, handler: ApplicationQuitHandler) -> Result<(), ApplicationQuitError>;
+
+    /// Asks the dismissal choice in `window`. Initial keyboard focus, Return, and Space choose
+    /// Keep, Escape chooses Cancel, and nothing but its own button quits completely.
+    fn present_dismissal(
+        &self,
+        prompt: &DismissalPrompt,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Task<Option<DismissalAnswer>> {
+        present_window_dismissal(prompt, window, cx)
+    }
 
     /// Asks the application to exit through the quit policy, without the dismissal choice.
     fn request_quit(&self, cx: &mut App);

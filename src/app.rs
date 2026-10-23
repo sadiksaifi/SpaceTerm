@@ -15,7 +15,7 @@ use crate::platform::application_menu::{
 };
 use crate::platform::application_quit::{
     ApplicationQuitAdapter, ApplicationQuitDecision, ApplicationQuitHandler,
-    ApplicationQuitRequest, StatusAreaName,
+    ApplicationQuitRequest, DismissalAnswer, DismissalPrompt, StatusAreaName,
 };
 use crate::platform::control_socket::ControlSocketProbe;
 use crate::ssh::command::{
@@ -596,19 +596,21 @@ impl ApplicationQuitCoordinator {
     }
 
     /// Lets the person choose between keeping the client in its menu bar or status area,
-    /// quitting it, and changing nothing. Keeping closes every window as Close All Windows does.
-    /// Quitting continues as Quit SpaceTerm does, without asking this question again.
+    /// quitting it completely, and changing nothing. Keeping closes every window as Close All
+    /// Windows does. Quitting completely continues as Quit SpaceTerm does, without asking again.
     fn dismiss(self: &Rc<Self>, cx: &mut App) {
         if !self.ready(cx) {
             return;
         }
+        let Some(adapter) = self.adapter.upgrade() else {
+            return;
+        };
         let reach = DismissalReach {
             status_area: crate::status_menu::available(cx),
             windows: !cx.windows().is_empty(),
         };
         let snapshot = application_quit_snapshot(cx);
-        let choice =
-            DismissalChoice::new(self.status_area, self.exit_ends_sessions, reach, &snapshot);
+        let prompt = dismissal_prompt(self.status_area, self.exit_ends_sessions, reach);
         // With no window open, a window of its own asks and closes with the answer.
         let existing = open_active_window(cx).or_else(|| cx.windows().into_iter().next());
         let (window, host) = match existing {
@@ -622,28 +624,18 @@ impl ApplicationQuitCoordinator {
             },
         };
         *self.state.borrow_mut() = ApplicationQuitCoordinatorState::Choosing;
-        let prompt = window.update(cx, |_, window, cx| {
+        let answer = window.update(cx, |_, window, cx| {
             window.activate_window();
-            window.prompt(
-                PromptLevel::Info,
-                &choice.title,
-                Some(&choice.detail),
-                &[
-                    PromptButton::ok(self.status_area.keep_label()),
-                    PromptButton::new(choice.quit.clone()),
-                    PromptButton::cancel("Cancel"),
-                ],
-                cx,
-            )
+            adapter.present_dismissal(&prompt, window, cx)
         });
-        let Ok(prompt) = prompt else {
+        let Ok(answer) = answer else {
             *self.state.borrow_mut() = ApplicationQuitCoordinatorState::Idle;
             close_dismissal_host(host, cx);
             return;
         };
         let coordinator = Rc::clone(self);
         cx.spawn(async move |cx| {
-            let answer = prompt.await;
+            let answer = answer.await;
             cx.update(|cx| {
                 close_dismissal_host(host, cx);
                 if *coordinator.state.borrow() != ApplicationQuitCoordinatorState::Choosing {
@@ -653,10 +645,12 @@ impl ApplicationQuitCoordinator {
                 match answer {
                     // Without a status item nothing could reach a windowless client, so keeping
                     // it leaves its windows open, as the choice said.
-                    Ok(DismissalChoice::KEEP) if reach.status_area => close_all_windows(cx),
+                    Some(DismissalAnswer::Keep) if reach.status_area => close_all_windows(cx),
                     // The choice covers the work it described. Work added while Settings saves
                     // asks again.
-                    Ok(DismissalChoice::QUIT) => coordinator.wait_for_settings(Some(snapshot), cx),
+                    Some(DismissalAnswer::QuitCompletely) => {
+                        coordinator.wait_for_settings(Some(snapshot), cx)
+                    }
                     _ => {}
                 }
             });
@@ -864,70 +858,38 @@ fn close_dismissal_host(host: Option<gpui::WindowHandle<DismissalHost>>, cx: &mu
     }
 }
 
-/// What the dismissal choice says, for this host and the client's current work.
-struct DismissalChoice {
-    title: String,
-    detail: String,
-    quit: String,
-}
-
-impl DismissalChoice {
-    const KEEP: usize = 0;
-    const QUIT: usize = 1;
-
-    fn new(
-        status_area: StatusAreaName,
-        exit_ends_sessions: bool,
-        reach: DismissalReach,
-        snapshot: &ApplicationQuitSnapshot,
-    ) -> Self {
-        let name = crate::application_identity::ApplicationIdentity::current().display_name();
-        let place = status_area.phrase();
-        let keep = status_area.keep_label();
-        let subject = if exit_ends_sessions {
-            "this development run"
-        } else {
-            name
-        };
-        let mut detail = match (reach.status_area, reach.windows) {
-            (true, true) => {
-                format!("{keep} closes all windows and keeps {subject} available in the {place}.")
-            }
-            (true, false) => {
-                format!(
-                    "{name} has no open windows. {keep} keeps {subject} available in the {place}."
-                )
-            }
-            (false, _) => format!(
-                "The {place} isn't available, so {keep} keeps {subject} open and closes no windows."
-            ),
-        };
-        if exit_ends_sessions {
-            let count = snapshot.facts.pane_count;
-            let noun = if count == 1 { "Pane" } else { "Panes" };
-            detail.push_str(&format!(
-                " Its Server and Terminal Sessions keep running. Quit {name} ends the run, including its Server and Terminal Sessions."
-            ));
-            if snapshot.facts.requires_confirmation() {
-                detail.push_str(&format!(
-                    " Quitting closes {count} open {noun} and stops any running commands."
-                ));
-            }
-        } else {
-            let removal = if reach.status_area {
-                format!(" and removes it from the {place}")
-            } else {
-                String::new()
-            };
-            detail.push_str(&format!(
-                " Quit {name} exits it{removal}. Either way, the {name} Server keeps your Terminal Sessions running."
-            ));
+/// What the dismissal choice says on this host. Every answer leaves an installed client's Server
+/// and Terminal Sessions running; only Source Development's run ends with the client.
+fn dismissal_prompt(
+    status_area: StatusAreaName,
+    exit_ends_sessions: bool,
+    reach: DismissalReach,
+) -> DismissalPrompt {
+    let name = crate::application_identity::ApplicationIdentity::current().display_name();
+    let place = status_area.phrase();
+    let (stays, keep) = if reach.status_area {
+        (
+            format!("{name} stays in the {place}"),
+            format!("Quit {name}"),
+        )
+    } else {
+        (
+            format!("The {place} isn't available, so {name} stays open"),
+            format!("Keep {name} Open"),
+        )
+    };
+    let detail = match (exit_ends_sessions, reach.status_area) {
+        (true, _) => {
+            format!("{stays}. Quitting completely ends this run's Server and Terminal Sessions.")
         }
-        Self {
-            title: format!("Keep {name} in the {place}?"),
-            detail,
-            quit: format!("Quit {name}"),
-        }
+        (false, true) => format!("{stays}, and your Terminal Sessions keep running."),
+        (false, false) => format!("{stays}. Your Terminal Sessions keep running."),
+    };
+    DismissalPrompt {
+        title: "Are you sure you want to quit?".to_owned(),
+        detail,
+        keep,
+        quit_completely: format!("Quit {name} Completely"),
     }
 }
 
@@ -1608,96 +1570,76 @@ mod tests {
         )
     }
 
-    fn dismissal_choice(
-        status_area: StatusAreaName,
-        exit_ends_sessions: bool,
-        reach: DismissalReach,
-        facts: crate::close_confirmation::ApplicationCloseFacts,
-    ) -> DismissalChoice {
-        DismissalChoice::new(
-            status_area,
-            exit_ends_sessions,
-            reach,
-            &ApplicationQuitSnapshot {
-                facts,
-                panes: Vec::new(),
-            },
-        )
-    }
-
     const WINDOWED: DismissalReach = DismissalReach {
         status_area: true,
         windows: true,
     };
 
     #[test]
-    fn the_dismissal_choice_names_the_hosts_status_area_and_the_servers_lifetime() {
+    fn the_dismissal_choice_offers_keeping_first_and_quitting_completely_last() {
         let name = crate::application_identity::ApplicationIdentity::current().display_name();
-        let idle = crate::close_confirmation::ApplicationCloseFacts::default();
-
-        let installed = dismissal_choice(StatusAreaName::StatusArea, false, WINDOWED, idle);
-        assert_eq!(installed.title, format!("Keep {name} in the status area?"));
-        assert_eq!(installed.quit, format!("Quit {name}"));
-        assert_eq!(
-            installed.detail,
-            format!(
-                "Keep in Status Area closes all windows and keeps {name} available in the status area. Quit {name} exits it and removes it from the status area. Either way, the {name} Server keeps your Terminal Sessions running."
-            )
-        );
-
-        // Source Development's foreground Server ends with the client, and the choice says so.
-        let busy = crate::close_confirmation::ApplicationCloseFacts {
-            workspace_count: 1,
-            tab_count: 1,
-            pane_count: 2,
-            has_running_work: true,
+        let windowless = DismissalReach {
+            status_area: true,
+            windows: false,
         };
-        let development = dismissal_choice(StatusAreaName::MenuBar, true, WINDOWED, busy);
-        assert_eq!(development.title, format!("Keep {name} in the menu bar?"));
-        assert_eq!(
-            development.detail,
-            format!(
-                "Keep in Menu Bar closes all windows and keeps this development run available in the menu bar. Its Server and Terminal Sessions keep running. Quit {name} ends the run, including its Server and Terminal Sessions. Quitting closes 2 open Panes and stops any running commands."
-            )
-        );
-    }
-
-    #[test]
-    fn the_dismissal_choice_says_what_keeping_does_without_windows_or_a_status_area() {
-        let name = crate::application_identity::ApplicationIdentity::current().display_name();
-        let idle = crate::close_confirmation::ApplicationCloseFacts::default();
-
-        let windowless = dismissal_choice(
-            StatusAreaName::MenuBar,
-            false,
-            DismissalReach {
-                status_area: true,
-                windows: false,
-            },
-            idle,
-        );
-        assert_eq!(
-            windowless.detail,
-            format!(
-                "{name} has no open windows. Keep in Menu Bar keeps {name} available in the menu bar. Quit {name} exits it and removes it from the menu bar. Either way, the {name} Server keeps your Terminal Sessions running."
-            )
-        );
-
-        let unreachable = dismissal_choice(
-            StatusAreaName::StatusArea,
-            false,
-            DismissalReach {
-                status_area: false,
-                windows: true,
-            },
-            idle,
-        );
-        assert_eq!(
-            unreachable.detail,
-            format!(
-                "The status area isn't available, so Keep in Status Area keeps {name} open and closes no windows. Quit {name} exits it. Either way, the {name} Server keeps your Terminal Sessions running."
-            )
-        );
+        let unreachable = DismissalReach {
+            status_area: false,
+            windows: true,
+        };
+        let cases = [
+            (
+                StatusAreaName::MenuBar,
+                false,
+                WINDOWED,
+                format!("{name} stays in the menu bar, and your Terminal Sessions keep running."),
+                format!("Quit {name}"),
+            ),
+            (
+                StatusAreaName::MenuBar,
+                false,
+                windowless,
+                format!("{name} stays in the menu bar, and your Terminal Sessions keep running."),
+                format!("Quit {name}"),
+            ),
+            (
+                StatusAreaName::StatusArea,
+                false,
+                WINDOWED,
+                format!(
+                    "{name} stays in the status area, and your Terminal Sessions keep running."
+                ),
+                format!("Quit {name}"),
+            ),
+            (
+                StatusAreaName::MenuBar,
+                false,
+                unreachable,
+                format!(
+                    "The menu bar isn't available, so {name} stays open. Your Terminal Sessions keep running."
+                ),
+                format!("Keep {name} Open"),
+            ),
+            (
+                StatusAreaName::MenuBar,
+                true,
+                WINDOWED,
+                format!(
+                    "{name} stays in the menu bar. Quitting completely ends this run's Server and Terminal Sessions."
+                ),
+                format!("Quit {name}"),
+            ),
+        ];
+        for (status_area, exit_ends_sessions, reach, detail, keep) in cases {
+            assert_eq!(
+                dismissal_prompt(status_area, exit_ends_sessions, reach),
+                DismissalPrompt {
+                    title: "Are you sure you want to quit?".to_owned(),
+                    detail,
+                    keep,
+                    quit_completely: format!("Quit {name} Completely"),
+                }
+            );
+        }
     }
 
     /// A client whose status item is showing and that has no window open.
@@ -1719,20 +1661,19 @@ mod tests {
     fn a_windowless_dismissal_asks_in_a_window_it_closes_with_the_answer(cx: &mut TestAppContext) {
         let quit = windowless_client(cx);
         let name = crate::application_identity::ApplicationIdentity::current().display_name();
-        for answer in ["Cancel", "Keep in Menu Bar"] {
+        for answer in ["Cancel".to_owned(), format!("Quit {name}")] {
             assert_eq!(
                 quit.simulate_native_request(ApplicationQuitRequest::Dismissal),
                 ApplicationQuitDecision::Cancel
             );
             cx.run_until_parked();
-            let (title, detail) = cx.pending_prompt().expect("the request asks first");
-            assert_eq!(title, format!("Keep {name} in the menu bar?"));
-            assert!(detail.starts_with(&format!("{name} has no open windows.")));
+            let (title, _) = cx.pending_prompt().expect("the request asks first");
+            assert_eq!(title, "Are you sure you want to quit?");
             let windows = cx.update(|cx| cx.windows());
             assert_eq!(windows.len(), 1, "one window presents the choice");
             assert!(windows[0].downcast::<WorkspaceManager>().is_none());
 
-            cx.simulate_prompt_answer(answer);
+            cx.simulate_prompt_answer(&answer);
             cx.run_until_parked();
             assert!(
                 cx.update(|cx| cx.windows().is_empty()),
@@ -1743,7 +1684,7 @@ mod tests {
 
         quit.simulate_native_request(ApplicationQuitRequest::Dismissal);
         cx.run_until_parked();
-        cx.simulate_prompt_answer(&format!("Quit {name}"));
+        cx.simulate_prompt_answer(&format!("Quit {name} Completely"));
         cx.run_until_parked();
         assert!(cx.update(|cx| cx.windows().is_empty()));
         assert_eq!(quit.confirmations(), 1);

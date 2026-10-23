@@ -3,15 +3,17 @@ use std::ffi::c_void;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::rc::Rc;
 
+use block2::RcBlock;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyClass, AnyObject, Bool, Imp, Sel};
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
-use objc2_app_kit::NSApplication;
-use objc2_foundation::{NSInteger, NSObject, NSObjectProtocol};
+use objc2_app_kit::{NSAlert, NSAlertStyle, NSApplication, NSModalResponse, NSView, NSWindow};
+use objc2_foundation::{NSInteger, NSObject, NSObjectProtocol, NSString};
+use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
 use super::application_quit::{
     ApplicationQuitAdapter, ApplicationQuitDecision, ApplicationQuitError, ApplicationQuitHandler,
-    ApplicationQuitRequest,
+    ApplicationQuitRequest, DismissalAnswer, DismissalPrompt, present_window_dismissal,
 };
 
 const NS_TERMINATE_CANCEL: NSInteger = 0;
@@ -122,6 +124,32 @@ impl ApplicationQuitAdapter for MacosApplicationQuitAdapter {
         self.install_on_delegate((*delegate).as_ref(), handler)
     }
 
+    /// GPUI's alert focuses its last button, so Space would quit completely. This sheet focuses
+    /// the default answer instead.
+    fn present_dismissal(
+        &self,
+        prompt: &DismissalPrompt,
+        window: &mut gpui::Window,
+        cx: &mut gpui::App,
+    ) -> gpui::Task<Option<DismissalAnswer>> {
+        let (Some(mtm), Some(sheet_window)) = (MainThreadMarker::new(), native_window(window))
+        else {
+            return present_window_dismissal(prompt, window, cx);
+        };
+        let alert = dismissal_alert(prompt, mtm);
+        let (answered, answer) = async_channel::bounded(1);
+        // As with GPUI's own prompts, the sheet begins after this window update, because AppKit
+        // reports the key window change back into GPUI while it presents.
+        cx.spawn(async move |_| {
+            let completion = RcBlock::new(move |response: NSModalResponse| {
+                let _ = answered.try_send(response);
+            });
+            alert.beginSheetModalForWindow_completionHandler(&sheet_window, Some(&completion));
+            let response = answer.recv().await.ok()?;
+            DismissalAnswer::from_index(usize::try_from(response).ok()?)
+        })
+    }
+
     fn request_quit(&self, cx: &mut gpui::App) {
         if self.state.handler.borrow().is_some() {
             cx.quit();
@@ -135,6 +163,42 @@ impl ApplicationQuitAdapter for MacosApplicationQuitAdapter {
         self.state.confirmed.set(true);
         cx.quit();
     }
+}
+
+fn native_window(window: &gpui::Window) -> Option<Retained<NSWindow>> {
+    let handle = HasWindowHandle::window_handle(window).ok()?;
+    let RawWindowHandle::AppKit(handle) = handle.as_raw() else {
+        return None;
+    };
+    // SAFETY: GPUI owns this live NSView during the synchronous call.
+    let view = unsafe { &*handle.ns_view.as_ptr().cast::<NSView>() };
+    view.window()
+}
+
+/// Builds the dismissal alert with its buttons in [`DismissalPrompt`] order. Each button's tag is
+/// its position, which the sheet reports as its response.
+fn dismissal_alert(prompt: &DismissalPrompt, mtm: MainThreadMarker) -> Retained<NSAlert> {
+    let alert = NSAlert::new(mtm);
+    alert.setAlertStyle(NSAlertStyle::Informational);
+    alert.setMessageText(&NSString::from_str(&prompt.title));
+    alert.setInformativeText(&NSString::from_str(&prompt.detail));
+    let labels = [
+        prompt.keep.as_str(),
+        DismissalAnswer::CANCEL_LABEL,
+        prompt.quit_completely.as_str(),
+    ];
+    let buttons = labels.map(|label| alert.addButtonWithTitle(&NSString::from_str(label)));
+    for (tag, button) in buttons.iter().enumerate() {
+        button.setTag(tag as NSInteger);
+    }
+    // The first button already answers Return. Escape cancels, and the complete quit answers
+    // no key at all.
+    buttons[0].setKeyEquivalent(&NSString::from_str("\r"));
+    buttons[1].setKeyEquivalent(&NSString::from_str("\u{1b}"));
+    buttons[2].setKeyEquivalent(&NSString::new());
+    let keep: &NSView = &buttons[0];
+    alert.window().setInitialFirstResponder(Some(keep));
+    alert
 }
 
 fn install_should_terminate_method(delegate: &AnyObject) -> Result<(), ApplicationQuitError> {
@@ -309,6 +373,47 @@ pub(in crate::platform) mod tests {
 
         unsafe impl NSObjectProtocol for TestDelegate {}
     );
+
+    pub(in crate::platform) fn dismissal_alert_focuses_the_default_and_keys_never_quit_completely()
+    {
+        let mtm = objc2::MainThreadMarker::new().expect("native test must run on the main thread");
+        let prompt = DismissalPrompt {
+            title: "Are you sure you want to quit?".to_owned(),
+            detail: "SpaceTerm stays in the menu bar, and your Terminal Sessions keep running."
+                .to_owned(),
+            keep: "Quit SpaceTerm".to_owned(),
+            quit_completely: "Quit SpaceTerm Completely".to_owned(),
+        };
+        let alert = dismissal_alert(&prompt, mtm);
+        let buttons = alert.buttons();
+        let titles = buttons
+            .iter()
+            .map(|button| button.title().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            titles,
+            ["Quit SpaceTerm", "Cancel", "Quit SpaceTerm Completely"]
+        );
+        let keys = buttons
+            .iter()
+            .map(|button| (button.tag(), button.keyEquivalent().to_string()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            keys,
+            [
+                (0, "\r".to_owned()),
+                (1, "\u{1b}".to_owned()),
+                (2, String::new())
+            ]
+        );
+        // Space presses the focused button, so focus starts on the default answer.
+        let focus = alert
+            .window()
+            .initialFirstResponder()
+            .expect("the alert names its initial focus");
+        let keep: &NSView = &buttons.objectAtIndex(0);
+        assert!(std::ptr::eq(&*focus, keep));
+    }
 
     pub(in crate::platform) fn native_hook_cancels_policy_then_consumes_one_confirmation(
         cx: &mut TestAppContext,
