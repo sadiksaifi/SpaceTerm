@@ -5,8 +5,10 @@ pub(super) fn invitation(payload: wire::Invite) -> Result<Invitation, DirectErro
     let bytes = zeroize::Zeroizing::new(
         serde_json::to_vec(&payload).map_err(|_| DirectError::InvalidInvitation)?,
     );
-    let text =
-        zeroize::Zeroizing::new(format!("spaceterm-pair:{}", URL_SAFE_NO_PAD.encode(&bytes)));
+    let text = zeroize::Zeroizing::new(format!(
+        "spaceterm://pair/{}",
+        URL_SAFE_NO_PAD.encode(&bytes)
+    ));
     Ok(Invitation { payload, text })
 }
 pub(super) fn parse_invitation(text: &str) -> Result<Invitation, DirectError> {
@@ -14,7 +16,7 @@ pub(super) fn parse_invitation(text: &str) -> Result<Invitation, DirectError> {
         return Err(DirectError::InvalidInvitation);
     }
     let encoded = text
-        .strip_prefix("spaceterm-pair:")
+        .strip_prefix("spaceterm://pair/")
         .ok_or(DirectError::InvalidInvitation)?;
     let bytes = zeroize::Zeroizing::new(
         URL_SAFE_NO_PAD
@@ -29,16 +31,28 @@ pub(super) fn parse_invitation(text: &str) -> Result<Invitation, DirectError> {
         || payload.pin.server == [0; 32]
         || payload.pin.public_key == [0; 32]
         || payload.pin.certificate == [0; 32]
+        || !valid_build(&payload.pin.build)
         || payload.server_name.len() > 192
         || ClientName::from(payload.server_name.as_str()).as_str() != payload.server_name
     {
         return Err(DirectError::InvalidInvitation);
     }
     wss::validate_endpoint(&payload.endpoint)?;
-    if payload.expires <= wire::now()? {
+    let now = wire::now()?;
+    if payload.expires <= now {
         return Err(DirectError::Expired);
     }
+    if payload.expires - now > wire::INVITATION_SECONDS {
+        return Err(DirectError::InvalidInvitation);
+    }
     invitation(payload)
+}
+pub(super) fn valid_build(build: &str) -> bool {
+    !build.is_empty()
+        && build.len() <= 128
+        && build
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-')
 }
 fn exchange(
     endpoint: &str,

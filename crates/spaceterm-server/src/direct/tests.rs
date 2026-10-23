@@ -175,6 +175,75 @@ fn exposure_defaults_off_and_retains_only_the_explicit_listener_across_restart()
 }
 
 #[test]
+fn invitation_links_round_trip_the_endpoint_pin_secret_and_expiry() {
+    let fixture = Fixture::new();
+    fixture.enable();
+    let invitation = fixture.invite();
+    let text = invitation.display_text();
+    assert!(text.starts_with("spaceterm://pair/"));
+    let parsed = Invitation::parse(&text).unwrap();
+    assert_eq!(parsed.endpoint(), invitation.endpoint());
+    assert_eq!(parsed.server_pin(), invitation.server_pin());
+    assert_eq!(parsed.server_name(), invitation.server_name());
+    assert_eq!(parsed.id(), invitation.id());
+    assert_eq!(parsed.payload.token, invitation.payload.token);
+    assert!(parsed.expires_at_unix_seconds() <= wire::now().unwrap() + 300);
+
+    // Parsing a displayed link must preserve the capability, not mint another one.
+    let credential = DeviceCredential::generate().unwrap();
+    let claim = fixture.claim(&parsed, &credential);
+    fixture.management(Management::Approve(claim)).unwrap();
+    let other = DeviceCredential::generate().unwrap();
+    assert!(matches!(
+        fixture.authenticate(
+            &other,
+            wire::Action::Claim {
+                id: Enrollment::prepare(&invitation, "Second device".into(), &other)
+                    .unwrap()
+                    .claim_id(),
+                token: invitation.payload.token,
+                key: crypto::public(other.expose_bytes()).unwrap(),
+                name: "Second device".into(),
+            }
+        ),
+        Err(DirectError::AlreadyDecided)
+    ));
+}
+
+#[test]
+fn malformed_links_cannot_extend_the_enrollment_lifetime_or_replace_trust_with_dns() {
+    let fixture = Fixture::new();
+    fixture.enable();
+    let invitation = fixture.invite();
+    for (field, value) in [
+        ("expires", serde_json::json!(wire::now().unwrap() + 600)),
+        ("endpoint", serde_json::json!("wss://example.com/spaceterm")),
+        (
+            "endpoint",
+            serde_json::json!("ws://127.0.0.1:9231/spaceterm"),
+        ),
+        ("token", serde_json::json!(vec![0; 32])),
+    ] {
+        use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+        let mut payload = serde_json::to_value(&invitation.payload).unwrap();
+        payload[field] = value;
+        let text = format!(
+            "spaceterm://pair/{}",
+            URL_SAFE_NO_PAD.encode(serde_json::to_vec(&payload).unwrap())
+        );
+        assert!(
+            Invitation::parse(&text).is_err(),
+            "accepted changed {field}"
+        );
+    }
+    for suffix in ["?redirect=elsewhere", "#secret", "/extra"] {
+        assert!(
+            Invitation::parse(&format!("{}{suffix}", invitation.display_text().as_str())).is_err()
+        );
+    }
+}
+
+#[test]
 fn invalid_device_proof_cannot_consume_an_invitation_or_substitute_an_approval() {
     let fixture = Fixture::new();
     fixture.enable();

@@ -289,12 +289,7 @@ impl Enrollment {
             || pin.server == [0; 32]
             || pin.public_key == [0; 32]
             || pin.certificate == [0; 32]
-            || pin.build.is_empty()
-            || pin.build.len() > 128
-            || !pin
-                .build
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+            || !client::valid_build(&pin.build)
         {
             return Err(DirectError::InvalidRequest);
         }
