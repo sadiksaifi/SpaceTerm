@@ -45,6 +45,7 @@ pub(crate) struct DevelopmentPaneState {
     session_dormant: AtomicBool,
     retry: AtomicBool,
     selected: AtomicBool,
+    created_start: AtomicBool,
     take_over: AtomicBool,
     start_restored: AtomicBool,
     connection_recovery: Arc<Mutex<recovery::Recovery>>,
@@ -77,6 +78,7 @@ impl DevelopmentPaneState {
             session_dormant: AtomicBool::new(false),
             retry: AtomicBool::new(false),
             selected: AtomicBool::new(false),
+            created_start: AtomicBool::new(false),
             take_over: AtomicBool::new(false),
             start_restored: AtomicBool::new(false),
             connection_recovery: Arc::default(),
@@ -145,6 +147,14 @@ impl DevelopmentPaneState {
     pub(crate) fn connection_generation(&self) -> u64 {
         self.connected_epoch.load(Ordering::Acquire)
     }
+    /// A bound creation requests one start under the creator's existing control grant.
+    pub(crate) fn start_created(&self) {
+        if !self.start_unconfirmed() {
+            self.created_start.store(true, Ordering::Release);
+            self.wake.notify();
+        }
+    }
+
     pub(crate) fn select(&self) {
         let status = self.status.lock().unwrap_or_else(|e| e.into_inner());
         if !self.start_unconfirmed()

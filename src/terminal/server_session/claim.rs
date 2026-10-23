@@ -121,6 +121,18 @@ impl ClaimWorker<'_> {
                 other => other,
             })?,
         };
+        // Creation grants no control acquisition. Only the first authenticated observation of a
+        // fresh, creator-controlled Pane can consume this intent. Reconnect never rearms it.
+        let created_start = state.created_start.swap(false, Ordering::AcqRel)
+            && matches!(
+                &reply,
+                Reply::Restored {
+                    fresh: true,
+                    session_ended: false,
+                    ..
+                }
+            );
+        let mut created_start = created_start && !state.start_unconfirmed();
         while matches!(reply, Reply::Restored { .. } | Reply::Takeover { .. }) {
             let mut dormant = false;
             while let Reply::Restored {
@@ -174,10 +186,12 @@ impl ClaimWorker<'_> {
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .take();
-                if repair.is_some()
-                    || state.start_restored.swap(false, Ordering::AcqRel)
-                    || state.selected.swap(false, Ordering::AcqRel)
-                {
+                // These requests authorize the same first use. Consume them together even
+                // when creation or repair already supplies that authorization.
+                let created = std::mem::take(&mut created_start);
+                let start_restored = state.start_restored.swap(false, Ordering::AcqRel);
+                let selected = state.selected.swap(false, Ordering::AcqRel);
+                if created || repair.is_some() || start_restored || selected {
                     grant_size = *size.lock().unwrap_or_else(|e| e.into_inner());
                     let update = appearance.lock().unwrap_or_else(|e| e.into_inner()).clone();
                     grant_appearance = Some(update.generation);
@@ -296,6 +310,10 @@ impl ClaimWorker<'_> {
         let Reply::Attached { lease } = reply else {
             return Err(ServerError::Protocol);
         };
+        // A selection made while the admitting request was in flight selected this running
+        // shell. It cannot authorize another shell after a later server restart.
+        state.selected.store(false, Ordering::Release);
+        state.start_restored.store(false, Ordering::Release);
         Ok(Some(Granted {
             lease,
             size: grant_size,
@@ -423,6 +441,140 @@ mod tests {
                 assert_eq!(granted.lease.connection, [1; 32]);
                 host.shutdown().unwrap();
             }
+        }
+    }
+
+    #[test]
+    fn creation_starts_only_a_fresh_controlled_pane_and_never_rearms_on_reconnect() {
+        let state = DevelopmentPaneState::new();
+        state.start_created();
+        let mut starts = 0;
+        let result = run_claim(&state, |request| match request {
+            Request::SelectPane {
+                explicit: false, ..
+            } => {
+                let mut reply = restored(1);
+                if let Reply::Restored { fresh, .. } = &mut reply {
+                    *fresh = true;
+                }
+                Ok(reply)
+            }
+            Request::StartRestored { .. } => {
+                starts += 1;
+                Err(ServerError::Protocol)
+            }
+            other => panic!("creation must not acquire control: {other:?}"),
+        });
+        assert!(matches!(result, Err(ServerError::Protocol)));
+        assert_eq!(starts, 1);
+        assert!(state.start_unconfirmed());
+        state.connection_failed(ServerError::Protocol, false);
+        let mut observations = 0;
+        let _ = run_claim(&state, |request| {
+            observations += 1;
+            assert!(matches!(
+                request,
+                Request::SelectPane {
+                    explicit: false,
+                    ..
+                }
+            ));
+            if observations == 1 {
+                Ok(restored(1))
+            } else {
+                Err(ServerError::Stopped)
+            }
+        });
+        assert_eq!(starts, 1);
+        assert!(!state.created_start.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn creation_and_selection_are_consumed_together_before_a_later_server_restart() {
+        let state = DevelopmentPaneState::new();
+        state.start_created();
+        state.select();
+        let lease = Lease {
+            server: [1; 32],
+            session: [5; 32],
+            control: [6; 32],
+            connection: [7; 32],
+        };
+        let granted = run_claim(&state, |request| match request {
+            Request::SelectPane {
+                explicit: false, ..
+            } => {
+                let mut reply = restored(1);
+                if let Reply::Restored { fresh, .. } = &mut reply {
+                    *fresh = true;
+                }
+                Ok(reply)
+            }
+            Request::StartRestored { .. } => {
+                state.select();
+                Ok(Reply::Attached { lease })
+            }
+            other => panic!("unexpected request {other:?}"),
+        })
+        .unwrap();
+        assert!(granted.is_some());
+        let mut observations = 0;
+        let _ = run_claim(&state, |request| {
+            assert!(
+                matches!(
+                    request,
+                    Request::SelectPane {
+                        explicit: false,
+                        ..
+                    }
+                ),
+                "the selection coalesced with creation must not start work after restart: {request:?}"
+            );
+            observations += 1;
+            if observations == 1 {
+                Ok(restored(2))
+            } else {
+                Err(ServerError::Stopped)
+            }
+        });
+        assert!(!state.selected.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn creation_intent_does_not_start_retained_or_taken_over_work() {
+        for taken_over in [false, true] {
+            let state = DevelopmentPaneState::new();
+            state.start_created();
+            let mut observations = 0;
+            let _ = run_claim(&state, |request| {
+                assert!(
+                    matches!(
+                        request,
+                        Request::SelectPane {
+                            explicit: false,
+                            ..
+                        }
+                    ),
+                    "creation must neither start retained work nor acquire control"
+                );
+                observations += 1;
+                if observations > 1 {
+                    return Err(ServerError::Stopped);
+                }
+                Ok(if taken_over {
+                    Reply::Takeover {
+                        target: pane::PaneTarget {
+                            server: [1; 32],
+                            session: [2; 32],
+                        },
+                        controller: pane::control::Controller::Nobody,
+                        session_ended: false,
+                    }
+                } else {
+                    restored(1)
+                })
+            });
+            assert!(!state.created_start.load(Ordering::Acquire));
         }
     }
 

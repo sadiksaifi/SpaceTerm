@@ -879,6 +879,10 @@ mod connection {
         /// Asks the server for this Pane, which starts or acquires only this Pane.
         fn select(&self);
 
+        /// Starts this client's exact new Pane after membership binds, without acquiring control
+        /// or authorizing a retained shell after a server restart.
+        fn start_created(&self) {}
+
         /// Asks for a reconnection attempt now instead of at the next automatic one.
         fn retry(&self);
 
@@ -933,6 +937,10 @@ mod connection {
 
         fn select(&self) {
             Self::select(self);
+        }
+
+        fn start_created(&self) {
+            Self::start_created(self);
         }
 
         fn retry(&self) {
