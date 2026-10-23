@@ -144,7 +144,7 @@ impl ApplicationQuitAdapter for MacosApplicationQuitAdapter {
             let completion = RcBlock::new(move |response: NSModalResponse| {
                 let _ = answered.try_send(response);
             });
-            alert.beginSheetModalForWindow_completionHandler(&sheet_window, Some(&completion));
+            begin_dismissal_sheet(&alert, &sheet_window, &completion);
             let response = answer.recv().await.ok()?;
             DismissalAnswer::from_index(usize::try_from(response).ok()?)
         })
@@ -175,17 +175,14 @@ fn native_window(window: &gpui::Window) -> Option<Retained<NSWindow>> {
     view.window()
 }
 
-/// Builds the dismissal alert with its buttons in [`DismissalPrompt`] order, top to bottom. Each
-/// button's tag is its position, which the sheet reports as its response.
+/// Builds the dismissal alert with its buttons in [`DismissalPrompt`] order. Each button's tag is
+/// its position, which the sheet reports as its response. Cancel stands in under the widest label
+/// until [`begin_dismissal_sheet`] names it.
 fn dismissal_alert(prompt: &DismissalPrompt, mtm: MainThreadMarker) -> Retained<NSAlert> {
     let alert = NSAlert::new(mtm);
     alert.setAlertStyle(NSAlertStyle::Informational);
     alert.setMessageText(&NSString::from_str(&prompt.title));
     alert.setInformativeText(&NSString::from_str(&prompt.detail));
-    // AppKit's layout moves a button titled Cancel, or answering Escape, to the bottom of a
-    // vertical stack. Cancel takes its place under a stand-in title, which is the widest label
-    // so the stack is sized for every title, and becomes Cancel once the alert is laid out.
-    // Presenting a laid-out alert does not lay it out again.
     let labels = [
         prompt.keep.as_str(),
         prompt.quit_completely.as_str(),
@@ -195,16 +192,33 @@ fn dismissal_alert(prompt: &DismissalPrompt, mtm: MainThreadMarker) -> Retained<
     for (tag, button) in buttons.iter().enumerate() {
         button.setTag(tag as NSInteger);
     }
-    alert.layout();
-    buttons[1].setTitle(&NSString::from_str(DismissalAnswer::CANCEL_LABEL));
-    // The first button already answers Return. Escape cancels, and the complete quit answers
-    // no key at all.
-    buttons[0].setKeyEquivalent(&NSString::from_str("\r"));
-    buttons[1].setKeyEquivalent(&NSString::from_str("\u{1b}"));
-    buttons[2].setKeyEquivalent(&NSString::new());
     let keep: &NSView = &buttons[0];
     alert.window().setInitialFirstResponder(Some(keep));
     alert
+}
+
+/// Presents `alert` as a sheet on `sheet_window`, top to bottom as Keep, Cancel, Quit Completely.
+///
+/// Beginning the sheet lays the alert out, and that layout moves a button titled Cancel, or
+/// answering Escape, to the bottom of a vertical stack. Cancel takes its name and Escape only
+/// once the sheet has begun, before AppKit first draws it. Layout also clears the default
+/// button's Return, so it is bound again here.
+fn begin_dismissal_sheet(
+    alert: &NSAlert,
+    sheet_window: &NSWindow,
+    completion: &block2::DynBlock<dyn Fn(NSModalResponse)>,
+) {
+    alert.beginSheetModalForWindow_completionHandler(sheet_window, Some(completion));
+    let buttons = alert.buttons();
+    let (keep, cancel, quit_completely) = (
+        buttons.objectAtIndex(0),
+        buttons.objectAtIndex(1),
+        buttons.objectAtIndex(2),
+    );
+    cancel.setTitle(&NSString::from_str(DismissalAnswer::CANCEL_LABEL));
+    keep.setKeyEquivalent(&NSString::from_str("\r"));
+    cancel.setKeyEquivalent(&NSString::from_str("\u{1b}"));
+    quit_completely.setKeyEquivalent(&NSString::new());
 }
 
 fn install_should_terminate_method(delegate: &AnyObject) -> Result<(), ApplicationQuitError> {
@@ -380,8 +394,13 @@ pub(in crate::platform) mod tests {
         unsafe impl NSObjectProtocol for TestDelegate {}
     );
 
-    pub(in crate::platform) fn dismissal_alert_focuses_the_default_and_keys_never_quit_completely()
-    {
+    /// Presents the sheet on a real window that stays off screen, then reads the laid-out sheet
+    /// after AppKit has had its turn to lay it out and draw it.
+    pub(in crate::platform) fn dismissal_sheet_stacks_cancel_between_and_keys_never_quit_completely()
+     {
+        use objc2_app_kit::{NSBackingStoreType, NSWindowStyleMask};
+        use objc2_foundation::{NSDate, NSPoint, NSRect, NSRunLoop, NSSize};
+
         let mtm = objc2::MainThreadMarker::new().expect("native test must run on the main thread");
         let prompt = DismissalPrompt {
             title: "Are you sure you want to quit?".to_owned(),
@@ -390,44 +409,78 @@ pub(in crate::platform) mod tests {
             keep: "Quit SpaceTerm".to_owned(),
             quit_completely: "Quit SpaceTerm Completely".to_owned(),
         };
+        // SAFETY: The window is created and released on the main thread, and AppKit does not
+        // release it on close because the test owns it.
+        let host = unsafe {
+            NSWindow::initWithContentRect_styleMask_backing_defer(
+                NSWindow::alloc(mtm),
+                NSRect::new(
+                    NSPoint::new(-20_000.0, -20_000.0),
+                    NSSize::new(600.0, 400.0),
+                ),
+                NSWindowStyleMask::Titled,
+                NSBackingStoreType::Buffered,
+                false,
+            )
+        };
+        unsafe { host.setReleasedWhenClosed(false) };
+        let responses = Rc::new(RefCell::new(Vec::new()));
+        let recorded = Rc::clone(&responses);
+        let completion = RcBlock::new(move |response: NSModalResponse| {
+            recorded.borrow_mut().push(response);
+        });
         let alert = dismissal_alert(&prompt, mtm);
-        let buttons = alert.buttons();
-        let titles = buttons
-            .iter()
-            .map(|button| button.title().to_string())
-            .collect::<Vec<_>>();
-        assert_eq!(
-            titles,
-            ["Quit SpaceTerm", "Cancel", "Quit SpaceTerm Completely"]
-        );
-        let keys = buttons
-            .iter()
-            .map(|button| (button.tag(), button.keyEquivalent().to_string()))
-            .collect::<Vec<_>>();
-        assert_eq!(
-            keys,
-            [
-                (0, "\r".to_owned()),
-                (1, "\u{1b}".to_owned()),
-                (2, String::new())
-            ]
-        );
-        // AppKit's coordinates rise up the alert, so each button lies above the next.
-        let heights = buttons
-            .iter()
-            .map(|button| button.convertRect_toView(button.bounds(), None).origin.y)
-            .collect::<Vec<_>>();
+        begin_dismissal_sheet(&alert, &host, &completion);
+        let settle =
+            || NSRunLoop::currentRunLoop().runUntilDate(&NSDate::dateWithTimeIntervalSinceNow(0.3));
+        settle();
+        let sheet = alert.window();
+        // Display lays out first, so this also settles any layout AppKit still owes the sheet.
+        sheet.displayIfNeeded();
         assert!(
-            heights.windows(2).all(|pair| pair[0] > pair[1]),
-            "laid out top to bottom as {titles:?}: {heights:?}"
+            host.attachedSheet().is_some(),
+            "the alert begins as a sheet"
         );
-        // Space presses the focused button, so focus starts on the default answer.
-        let focus = alert
-            .window()
-            .initialFirstResponder()
-            .expect("the alert names its initial focus");
+
+        let buttons = alert.buttons();
+        let laid_out = buttons
+            .iter()
+            .map(|button| {
+                (
+                    button.convertRect_toView(button.bounds(), None).origin.y,
+                    button.title().to_string(),
+                    button.tag(),
+                    button.keyEquivalent().to_string(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut top_to_bottom = laid_out.clone();
+        // AppKit's coordinates rise up the sheet.
+        top_to_bottom.sort_by(|above, below| below.0.total_cmp(&above.0));
+        assert_eq!(
+            top_to_bottom
+                .into_iter()
+                .map(|(_, title, tag, key)| (title, tag, key))
+                .collect::<Vec<_>>(),
+            [
+                ("Quit SpaceTerm".to_owned(), 0, "\r".to_owned()),
+                ("Cancel".to_owned(), 1, "\u{1b}".to_owned()),
+                ("Quit SpaceTerm Completely".to_owned(), 2, String::new()),
+            ],
+            "{laid_out:?}"
+        );
+        // Space presses the focused button, so focus rests on the default answer.
+        let focus = sheet.firstResponder().expect("the sheet focuses a button");
         let keep: &NSView = &buttons.objectAtIndex(0);
-        assert!(std::ptr::eq(&*focus, keep));
+        assert!(std::ptr::eq(
+            Retained::as_ptr(&focus).cast::<()>(),
+            (keep as *const NSView).cast::<()>()
+        ));
+
+        host.endSheet(&sheet);
+        settle();
+        assert_eq!(responses.borrow().len(), 1, "ending the sheet answers once");
+        host.close();
     }
 
     pub(in crate::platform) fn native_hook_cancels_policy_then_consumes_one_confirmation(

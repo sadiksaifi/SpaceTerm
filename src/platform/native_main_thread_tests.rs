@@ -127,7 +127,7 @@ pub(crate) fn run() {
         macos_application_quit::tests::native_hook_cancels_policy_then_consumes_one_confirmation
     );
     native_test!(
-        macos_application_quit::tests::dismissal_alert_focuses_the_default_and_keys_never_quit_completely
+        macos_application_quit::tests::dismissal_sheet_stacks_cancel_between_and_keys_never_quit_completely
     );
     gpui_test!(macos_services::tests::service_type_classifies_nil_and_empty_nsstring_as_absent);
     gpui_test!(macos_services::tests::nsstring_decode_enforces_the_paste_byte_limit);
