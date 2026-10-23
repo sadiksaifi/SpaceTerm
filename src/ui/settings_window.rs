@@ -382,6 +382,7 @@ pub(crate) fn init(cx: &mut App) {
         open_or_activate(Some(SettingsSectionId::Keybindings), cx);
     });
     cx.on_action(|_: &AddServer, cx| open_add_server(None, None, cx));
+    super::application_commands::init(cx);
 }
 
 fn appearance_mode_label(mode: AppearanceMode) -> &'static str {

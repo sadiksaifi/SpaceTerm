@@ -1,6 +1,7 @@
 pub(crate) mod about_window;
 pub(crate) mod appearance;
 pub(crate) mod appearance_runtime;
+pub(crate) mod application_commands;
 pub(crate) mod application_prompt;
 pub(crate) mod askpass_dialog;
 pub(crate) mod background_image_runtime;
