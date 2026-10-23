@@ -1002,6 +1002,52 @@ fn optimistic_pending_tab_split_and_later_navigation_keep_the_frame_and_keyboard
 }
 
 #[gpui::test]
+fn optimistic_tab_created_after_commit_before_ack_keeps_its_bound_source(cx: &mut TestAppContext) {
+    let (harness, cx) = window_harness(cx);
+    cx.dispatch_action(crate::ui::CreateTab);
+    let committed = harness.server.finish(false, true);
+    assert!(matches!(committed.outcome, Outcome::Accepted { .. }));
+    let bound_source = harness.server.inventory().workspaces[0].tabs[1].root_pane;
+    // The worker published accepted membership, but its original is still awaiting ack. The
+    // next key event observes that outcome before the regular window membership poll binds it.
+    cx.dispatch_action(crate::ui::CreateTab);
+    assert_eq!(
+        harness.server.dispatched().len(),
+        1,
+        "a queued dependent waits for the original acknowledgement"
+    );
+    assert_eq!(
+        harness.server.finish(true, true),
+        committed,
+        "settlement must acknowledge the original creation identity"
+    );
+    project_window(&harness, cx);
+    let dependent = harness.server.finish(true, true);
+    assert!(
+        matches!(dependent.outcome, Outcome::Accepted { .. }),
+        "a committed source Pane still on the server must not produce refusal: {:?}",
+        dependent.outcome
+    );
+    assert_eq!(
+        dependent.mutation,
+        Mutation::CreateTab {
+            workspace: harness.server.inventory().workspaces[0].id,
+            source: Some(bound_source),
+        },
+        "binding may retire the view alias only after queued intent owns its canonical source"
+    );
+    project_window(&harness, cx);
+    cx.dispatch_action(crate::ui::CreateTab);
+    assert!(matches!(
+        harness.server.finish(true, true).outcome,
+        Outcome::Accepted { .. }
+    ));
+    project_window(&harness, cx);
+    assert_eq!(harness.server.inventory().workspaces[0].tabs.len(), 4);
+    assert!(harness.model.borrow_mut().take_refusal().is_none());
+}
+
+#[gpui::test]
 fn optimistic_rapid_tabs_keep_each_start_intent_after_later_navigation(cx: &mut TestAppContext) {
     let (harness, cx) = window_harness(cx);
     for _ in 0..15 {
