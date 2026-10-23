@@ -176,6 +176,9 @@ pub(super) fn local_state(
             LocalServerStatus::Failed(ServerError::NotInstalled | ServerError::NotSetUp) => {
                 ServerState::new("Not installed", "Not installed", Tone::Idle)
             }
+            LocalServerStatus::Failed(ServerError::NotRunning | ServerError::StartupFailed) => {
+                ServerState::new("Not running", "Not running", Tone::Attention)
+            }
             LocalServerStatus::Failed(_) => {
                 ServerState::new("Unavailable", "Unavailable", Tone::Problem)
             }
@@ -556,7 +559,16 @@ impl SettingsWindow {
 
     fn local_status_steps(&self) -> (Vec<(StatusStep, bool)>, Vec<MenuItem>) {
         let Some(presentation) = self.server_service_presentation() else {
-            return (Vec::new(), Vec::new());
+            // Without a service, such as in a Development run, the connection can still be
+            // checked again.
+            let check = self
+                .local_server_presentation()
+                .is_some_and(|local| local.check && !local.working);
+            let buttons = check
+                .then_some((StatusStep::Local(ServiceAction::Check), false))
+                .into_iter()
+                .collect();
+            return (buttons, Vec::new());
         };
         let offered = |action: ServiceAction| presentation.actions.contains(&action);
         let idle = presentation.working.is_none();
@@ -1250,6 +1262,7 @@ impl SettingsWindow {
                 ProgressState::Indeterminate,
             )
             .size(ProgressSize::Compact)
+            .debug_selector(format!("{STATUS_SELECTOR}-progress"))
             .into_any_element()
         } else {
             status_dot(tone_color(state.tone, colors), appearance.spacing(8.0)).into_any_element()
@@ -1310,7 +1323,7 @@ impl SettingsWindow {
                         ButtonSize::Regular,
                         spaceterm_ui::ButtonShape::Rounded,
                     )
-                    .debug_selector(selector)
+                    .debug_selector(status_step_selector(&step))
                     .on_activate(move |activation, window, cx| {
                         let (build, directory) = activation.action().clone();
                         let _ = owner.update(cx, |settings, cx| {
@@ -1324,10 +1337,23 @@ impl SettingsWindow {
                 // say, Stop gives way to Start.
                 let slot = status_step_slot(&step).map_or_else(|| selector.clone(), str::to_owned);
                 let selector = status_step_selector(&step).to_owned();
-                let description = status_step_consequence(&step).map_or_else(
-                    || SharedString::from(format!("{} {name}", label.trim_end_matches('\u{2026}'))),
-                    SharedString::new_static,
-                );
+                let single_build = match (&step, install_choices.as_slice()) {
+                    (StatusStep::Local(ServiceAction::Install), [only]) => {
+                        Some(SharedString::from(format!("Installs {}.", only.label)))
+                    }
+                    _ => None,
+                };
+                let description = single_build.unwrap_or_else(|| {
+                    status_step_consequence(&step).map_or_else(
+                        || {
+                            SharedString::from(format!(
+                                "{} {name}",
+                                label.trim_end_matches('\u{2026}')
+                            ))
+                        },
+                        SharedString::new_static,
+                    )
+                });
                 Button::new(ElementId::from(SharedString::from(slot)), label)
                     .variant(if primary {
                         ButtonVariant::Primary
@@ -1405,7 +1431,6 @@ impl SettingsWindow {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let view = self.version_view(cx);
-        let live = self.selected_server_live();
         let colors = appearance.host_colors(spaceterm_ui::ControlHost::Card);
         let owner = cx.weak_entity();
         let value = view.value.clone().unwrap_or_else(|| "Unknown".into());
@@ -1433,8 +1458,9 @@ impl SettingsWindow {
             })
             .size(ButtonSize::Regular)
             .tab_stop(true)
-            // A step that changes the server needs it connected; Check Now only reads.
-            .disabled(busy || (!live && step.primary()))
+            // One step runs at a time. The steps act through this account's service or an SSH
+            // account's route, so they need no connection to the server.
+            .disabled(busy)
             .debug_selector(selector)
             .on_activate(move |_, _, cx| {
                 let _ = owner.update(cx, |settings, cx| settings.take_version_step(step, cx));
@@ -1473,7 +1499,7 @@ impl SettingsWindow {
     }
 
     /// Whether the selected server starts on its own, as it reports or as last observed.
-    fn automatic_start(&self, cx: &App) -> Option<bool> {
+    pub(super) fn automatic_start(&self, cx: &App) -> Option<bool> {
         match self.selected_server()? {
             ServerChoice::Local => self
                 .server_service

@@ -2,8 +2,8 @@
 //!
 //! An unpair a server hasn't confirmed (ADR 0038), an unresolved operation on a removed
 //! connection (ADR 0039), and a record SpaceTerm couldn't save each get one notice. Dismissing a
-//! notice only hides it. It never cancels the retries behind it, and a notice that needs the
-//! person to continue can't be dismissed out of reach.
+//! notice only hides it. It never cancels the retries behind it. A notice whose work waits for the
+//! person is hidden in this window only, so it returns the next time Settings opens.
 
 use std::collections::HashSet;
 
@@ -77,6 +77,10 @@ impl SettingsWindow {
         let hidden = &self.hidden_notices.0;
         let mut notices = Vec::new();
         for pending in self.visible_pending_unpairs() {
+            let id = format!("unpair-{}", hex(&pending.key));
+            if hidden.contains(&id) {
+                continue;
+            }
             let (_, actions) = crate::ui::direct_servers::present_unpair(&pending);
             let steps = actions
                 .iter()
@@ -89,11 +93,15 @@ impl SettingsWindow {
                     (label, NoticeStep::Unpair(pending.clone(), *action))
                 })
                 .collect();
-            let dismissal = actions
-                .contains(&UnpairAction::Dismiss)
-                .then(|| Dismissal::Unpair(pending.clone()));
+            // A request SpaceTerm finishes quietly stays hidden across launches. One that waits
+            // for the person is hidden here only, so Resume is offered again next time.
+            let dismissal = Some(if actions.contains(&UnpairAction::Dismiss) {
+                Dismissal::Unpair(pending.clone())
+            } else {
+                Dismissal::Window(id.clone())
+            });
             notices.push(Notice {
-                id: format!("unpair-{}", hex(&pending.key)),
+                id,
                 message: unpair_message(&pending).into(),
                 steps,
                 dismissal,
@@ -127,7 +135,7 @@ impl SettingsWindow {
         }
         if let Some(rows) = self.ssh_servers.as_ref() {
             let unsaved = rows.connections.unsaved_removals();
-            if !unsaved.is_empty() {
+            if !unsaved.is_empty() && !hidden.contains("unsaved-removal") {
                 let names = unsaved
                     .iter()
                     .map(|destination| destination.as_str().to_owned())
@@ -140,7 +148,7 @@ impl SettingsWindow {
                          when SpaceTerm reopens."
                     )),
                     steps: vec![("Remove Again", NoticeStep::RemoveAgain)],
-                    dismissal: None,
+                    dismissal: Some(Dismissal::Window("unsaved-removal".to_owned())),
                 });
             } else if let Some(error) = rows.connections.persistence_error() {
                 let id = "ssh-record".to_owned();

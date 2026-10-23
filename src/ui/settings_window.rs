@@ -19,6 +19,7 @@ mod microphone;
 mod notices;
 mod permission_access;
 mod server_card;
+mod server_facts;
 mod server_list;
 mod server_location;
 mod server_selection;
@@ -466,6 +467,9 @@ pub(crate) struct SettingsWindow {
     reconciled_servers: Option<Vec<crate::server_context::ServerKey>>,
     /// The Servers notices the person hid in this window.
     hidden_notices: notices::HiddenNotices,
+    /// Follows the presented server's facts, so a server SpaceTerm later disconnects from shows
+    /// them.
+    server_facts: server_facts::FactsFollower,
     /// How Servers names the server for this account on this computer.
     this_computer: &'static str,
 }
@@ -814,6 +818,7 @@ impl SettingsWindow {
             add_server_focus: cx.focus_handle().tab_stop(true),
             reconciled_servers: None,
             hidden_notices: notices::HiddenNotices::default(),
+            server_facts: server_facts::FactsFollower::default(),
             this_computer,
         };
         // Servers and Git present the retained selection, which loads after the window opens.
@@ -1374,10 +1379,14 @@ impl SettingsWindow {
                     SharedString::new_static(title)
                 };
                 // A card whose rows can't be used now says why, and what to do.
-                let footnote = match title {
-                    server_list::SERVER_GROUP => server_footnote.clone(),
-                    server_list::NETWORK_GROUP => network_footnote.clone(),
-                    server_list::GIT_SERVER_GROUP => git_footnote.clone(),
+                let footnote = match (section, title) {
+                    (SettingsSectionId::Servers, server_list::SERVER_GROUP) => {
+                        server_footnote.clone()
+                    }
+                    (SettingsSectionId::Servers, server_list::NETWORK_GROUP) => {
+                        network_footnote.clone()
+                    }
+                    (SettingsSectionId::Git, server_list::GIT_SERVER_GROUP) => git_footnote.clone(),
                     _ => None,
                 };
                 let row_bounds = Rc::clone(&self.row_bounds);
@@ -2394,9 +2403,22 @@ impl SettingsWindow {
     /// on. Its card's footnote says why.
     fn row_dimmed(&self, row: SettingsRowId) -> bool {
         match row {
-            SettingsRowId::ServerVersion
-            | SettingsRowId::ServerAutoStart
-            | SettingsRowId::EndAllSessions => !self.selected_server_live(),
+            // This account's service and an SSH account's maintenance route change the version
+            // without a connection, and this account's service changes automatic start. A paired
+            // connection carries no such authority, and Terminal Sessions need the server itself.
+            SettingsRowId::ServerVersion => {
+                matches!(
+                    self.selected_server(),
+                    Some(server_list::ServerChoice::Direct(_))
+                ) && !self.selected_server_live()
+            }
+            SettingsRowId::ServerAutoStart => {
+                !matches!(
+                    self.selected_server(),
+                    Some(server_list::ServerChoice::Local)
+                ) && !self.selected_server_live()
+            }
+            SettingsRowId::EndAllSessions => !self.selected_server_live(),
             SettingsRowId::NetworkAccess | SettingsRowId::PairedDevices => {
                 !self.network_access_live()
             }

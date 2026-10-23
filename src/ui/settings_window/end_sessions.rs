@@ -261,6 +261,8 @@ impl SettingsWindow {
     /// Follows the selected server's writer while the Servers section shows it. Selection,
     /// section, and connection changes call this; rendering never does.
     pub(super) fn sync_end_all_sessions(&mut self, cx: &mut Context<Self>) {
+        // The presented server's facts follow the same selection, section and connection changes.
+        self.sync_server_facts(cx);
         let target = if self.active_section == SettingsSectionId::Servers {
             self.selected_server()
         } else {

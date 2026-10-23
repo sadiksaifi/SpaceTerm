@@ -517,7 +517,10 @@ fn another_surface_starts_the_same_journey_once_the_row_reads(cx: &mut TestAppCo
     harness.cx.run_until_parked();
     assert!(!alert_open(UPDATE_CONFIRM_SELECTOR, harness.cx));
     assert_eq!(harness.update.changes(), [UpdateCall::PrepareUpdate]);
-    assert!(rendered(super::UPDATE_CONTROL_SELECTOR, harness.cx));
+    assert!(rendered(
+        super::super::server_card::VERSION_SELECTOR,
+        harness.cx
+    ));
 }
 
 #[test]

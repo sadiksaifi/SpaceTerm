@@ -2692,34 +2692,16 @@ fn rendered_control_selector(row: SettingsRowId) -> Option<String> {
             SettingsRowId::GitTool => "settings-row-git-tool-control",
             SettingsRowId::GitHubCli => "settings-row-github-cli-control",
             SettingsRowId::ServerWorktreeLocation => "settings-server-worktree-location-frame",
-            SettingsRowId::LocalServer => "settings-local-server-control",
-            SettingsRowId::ServerService => "settings-server-service-control",
-            SettingsRowId::ServerUpdate => "settings-server-update-control",
-            SettingsRowId::ServerList => "settings-server-list",
+            SettingsRowId::ServerStatus => "settings-server-status",
+            SettingsRowId::ServerVersion => "settings-server-version",
+            SettingsRowId::ServerAutoStart => "settings-server-auto-start",
             SettingsRowId::EndAllSessions => "settings-server-end-all-sessions",
-            SettingsRowId::ServerConnection => "settings-row-server-connection-value",
-            // The fixture's local server offers no direct network operations, so both rows
-            // present their value alone.
-            SettingsRowId::DirectNetworkAccess => "settings-row-direct-network-access-value",
-            SettingsRowId::DirectNetworkPairing => "settings-row-direct-network-pairing-value",
-            // The fixture installs no SSH server registry or operations owner, so the SSH rows
-            // are absent.
-            SettingsRowId::SshConnect
-            | SettingsRowId::SshServerStatus
-            | SettingsRowId::SshServerService
-            | SettingsRowId::SshServerUpdate
-            | SettingsRowId::SshServerVersion
-            | SettingsRowId::SshServerPlatform
-            | SettingsRowId::SshServerCompatibility
-            | SettingsRowId::SshServerStartup
-            | SettingsRowId::RemoveServer
-            // No connection was removed, so nothing is kept for one.
-            | SettingsRowId::RemovedServerOperations
-            // The fixture installs no direct registry, so the direct route rows are absent.
-            | SettingsRowId::JoinInvitation
-            | SettingsRowId::PendingUnpairs
-            | SettingsRowId::DirectServerStatus
-            | SettingsRowId::UnpairThisDevice => return None,
+            // The fixture's local server offers no network operations, so the switch is shown
+            // unavailable and Devices waits for access to be on.
+            SettingsRowId::NetworkAccess => "settings-network-access",
+            SettingsRowId::PairedDevices => return None,
+            // The list and its add action span the card, with no control column.
+            SettingsRowId::AllServers | SettingsRowId::AddServer => return None,
             // The fixture installs no update service, so this row presents no action control.
             SettingsRowId::UpdateStatus => return None,
             SettingsRowId::AutomaticUpdateDownloads => "settings-automatic-update-downloads",

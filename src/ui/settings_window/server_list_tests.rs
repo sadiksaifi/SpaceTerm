@@ -1,5 +1,5 @@
-//! The Servers section's server list and the selected server's detail, driven through a scripted
-//! local server and a registry of saved SSH connections whose backend counts every remote call.
+//! The server picker, All Servers and the selected server's card, driven through a scripted local
+//! server and a registry of saved SSH connections whose backend counts every remote call.
 
 use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -32,7 +32,7 @@ const NAVIGATION_SELECTOR: &str = "settings-navigation-settings-section-servers"
 
 /// The SSH computers the test reaches, counting every request that would leave this computer.
 #[derive(Default)]
-struct Computers {
+pub(in crate::ui::settings_window) struct Computers {
     connects: AtomicUsize,
     observations: AtomicUsize,
     /// Destinations whose host never answers.
@@ -120,7 +120,7 @@ impl SshConnectBackend for Computers {
 
 /// The private record of saved connections, kept apart from the Settings Document.
 #[derive(Default)]
-struct SavedConnections {
+pub(in crate::ui::settings_window) struct SavedConnections {
     records: Mutex<Vec<RetainedSshConnection>>,
     /// Whether removing a record fails, as unavailable storage does.
     removal_fails: std::sync::atomic::AtomicBool,
@@ -162,22 +162,26 @@ impl SshConnectionIntentStore for SavedConnections {
     }
 }
 
-fn destination(name: &str) -> SshDestination {
+pub(in crate::ui::settings_window) fn destination(name: &str) -> SshDestination {
     SshDestination::new(name.to_owned()).expect("a valid SSH destination")
 }
 
-struct Servers<'a> {
-    window: Entity<SettingsWindow>,
-    computers: Arc<Computers>,
-    saved: Arc<SavedConnections>,
-    connections: SshServerConnections,
-    storage: Arc<MemoryStorage>,
-    cx: &'a mut VisualTestContext,
+pub(in crate::ui::settings_window) struct Servers<'a> {
+    pub(in crate::ui::settings_window) window: Entity<SettingsWindow>,
+    pub(in crate::ui::settings_window) computers: Arc<Computers>,
+    pub(in crate::ui::settings_window) saved: Arc<SavedConnections>,
+    pub(in crate::ui::settings_window) connections: SshServerConnections,
+    pub(in crate::ui::settings_window) storage: Arc<MemoryStorage>,
+    pub(in crate::ui::settings_window) cx: &'a mut VisualTestContext,
 }
 
 /// Opens Settings on Servers with the local server when `local` is set and each `saved` SSH
 /// connection listed as it is after a relaunch: saved, inactive, and never reached.
-fn open_servers<'a>(local: bool, saved: &[&str], cx: &'a mut TestAppContext) -> Servers<'a> {
+pub(in crate::ui::settings_window) fn open_servers<'a>(
+    local: bool,
+    saved: &[&str],
+    cx: &'a mut TestAppContext,
+) -> Servers<'a> {
     open_servers_saved(local, saved, false, cx)
 }
 
@@ -245,7 +249,7 @@ fn open_servers_saved<'a>(
     }
 }
 
-fn click(selector: &str, cx: &mut VisualTestContext) {
+pub(in crate::ui::settings_window) fn click(selector: &str, cx: &mut VisualTestContext) {
     let selector: &'static str = Box::leak(selector.to_owned().into_boxed_str());
     let position = cx
         .debug_bounds(selector)
@@ -262,7 +266,10 @@ fn rendered(selector: &str, cx: &mut VisualTestContext) -> bool {
 }
 
 /// Waits for the registry's workers, repainting as their results arrive.
-fn settle(cx: &mut VisualTestContext, mut done: impl FnMut(&mut VisualTestContext) -> bool) {
+pub(in crate::ui::settings_window) fn settle(
+    cx: &mut VisualTestContext,
+    mut done: impl FnMut(&mut VisualTestContext) -> bool,
+) {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         cx.run_until_parked();
@@ -274,11 +281,15 @@ fn settle(cx: &mut VisualTestContext, mut done: impl FnMut(&mut VisualTestContex
     }
 }
 
-/// The servers the list offers, in order, by the name assistive technology hears.
+/// The servers All Servers offers, in order, by the name assistive technology hears.
 fn listed(cx: &mut VisualTestContext) -> Vec<(String, bool)> {
     let tree = A11yTree::read(cx);
-    let list = tree.node(super::SERVER_LIST_NAME);
-    assert_eq!(list["aria"]["role"], "ListBox");
+    // The card's heading shares the list's name, so the list is found by its role.
+    let list = tree
+        .with_role("ListBox")
+        .into_iter()
+        .find(|node| node["aria"]["label"] == super::SERVER_LIST_NAME)
+        .expect("All Servers lists the servers");
     tree.children(list)
         .into_iter()
         .filter(|node| node["aria"]["role"] == "ListBoxOption")
@@ -298,8 +309,35 @@ fn local_name() -> &'static str {
         .this_computer
 }
 
+fn select(name: &str, cx: &mut VisualTestContext) {
+    let tree = A11yTree::read(cx);
+    let item = tree.node(name);
+    assert_eq!(item["aria"]["role"], "ListBoxOption");
+    perform(cx, item, gpui::accesskit::Action::Click);
+    cx.run_until_parked();
+}
+
+/// What the card's Status row says about the selected server.
+fn status(servers: &Servers<'_>) -> String {
+    servers.window.read_with(servers.cx, |settings, _| {
+        settings
+            .selected_server()
+            .map(|choice| settings.server_state(&choice).state.to_string())
+            .unwrap_or_default()
+    })
+}
+
+/// The footnote under the server card, which says how to change rows that can't change now.
+fn footnote(servers: &Servers<'_>) -> Option<String> {
+    servers.window.read_with(servers.cx, |settings, cx| {
+        settings
+            .server_card_footnote(cx)
+            .map(|footnote| footnote.to_string())
+    })
+}
+
 #[gpui::test]
-fn the_list_names_this_computer_first_then_each_saved_ssh_server(cx: &mut TestAppContext) {
+fn all_servers_names_this_computer_first_then_each_saved_ssh_server(cx: &mut TestAppContext) {
     let servers = open_servers(true, &["penguin", "build.local"], cx);
 
     assert_eq!(
@@ -312,132 +350,112 @@ fn the_list_names_this_computer_first_then_each_saved_ssh_server(cx: &mut TestAp
         "the local server leads and is selected; saved SSH servers follow by destination"
     );
     let tree = A11yTree::read(servers.cx);
-    let local = tree.node(local_name());
     assert!(
-        local["aria"]["description"]
+        tree.node(local_name())["aria"]["description"]
             .as_str()
-            .is_some_and(|description| description.contains("This account")),
-        "each item names its connection method"
+            .is_some_and(|description| description.contains("Running \u{b7} this account")),
+        "each server says how it reads now"
     );
-    assert!(
-        tree.node("penguin")["aria"]["description"]
-            .as_str()
-            .is_some_and(
-                |description| description.contains("SSH") && description.contains("Not Connected")
-            ),
-        "each item names its method and compact status"
+    assert_eq!(
+        tree.node("penguin")["aria"]["description"],
+        "penguin, Not connected",
+        "an SSH server names its machine and its short status"
     );
-}
-
-/// The heading texts the page presents, in order.
-fn headings(cx: &mut VisualTestContext) -> Vec<String> {
-    A11yTree::read(cx)
-        .with_role("Heading")
-        .into_iter()
-        .filter_map(|node| node["aria"]["label"].as_str().map(str::to_owned))
-        .collect()
-}
-
-fn select(name: &str, cx: &mut VisualTestContext) {
-    let tree = A11yTree::read(cx);
-    let item = tree.node(name);
-    assert_eq!(item["aria"]["role"], "ListBoxOption");
-    perform(cx, item, gpui::accesskit::Action::Click);
-    cx.run_until_parked();
 }
 
 #[gpui::test]
-fn selecting_an_ssh_server_presents_its_detail_under_headings_naming_it(cx: &mut TestAppContext) {
+fn the_picker_and_all_servers_share_one_selection_that_connects_nothing(cx: &mut TestAppContext) {
     let servers = open_servers(true, &["penguin"], cx);
-    assert!(rendered("settings-row-local-server", servers.cx));
-    assert!(headings(servers.cx).contains(&format!("Connection to {}", local_name())));
-
-    click("settings-server-list-1", servers.cx);
-
     assert_eq!(
-        listed(servers.cx),
-        vec![
-            (local_name().to_owned(), false),
-            ("penguin".to_owned(), true)
-        ]
+        A11yTree::read(servers.cx).node(super::PICKER_NAME)["aria"]["value"],
+        local_name()
     );
-    let headings = headings(servers.cx);
-    for heading in ["penguin", "Connection to penguin"] {
-        assert!(
-            headings.iter().any(|shown| shown == heading),
-            "{heading:?} should name the selected machine, got {headings:?}"
-        );
-    }
-    assert!(
-        !headings.iter().any(|shown| shown.contains(local_name())),
-        "no heading may name a machine the rows don't act on, got {headings:?}"
-    );
-    for local in [
-        "settings-row-local-server",
-        "settings-row-server-service",
-        "settings-row-server-update",
-    ] {
-        assert!(
-            !rendered(local, servers.cx),
-            "{local} belongs to the local server"
-        );
-    }
-    for ssh in [
-        "settings-row-ssh-server-status",
-        "settings-row-ssh-server-version",
-        "settings-row-server-connection",
-        "settings-row-direct-network-access",
-        "settings-row-direct-network-pairing",
-        "settings-row-remove-server",
-    ] {
-        assert!(
-            rendered(ssh, servers.cx),
-            "{ssh} presents the selected SSH server"
-        );
-    }
+
+    select("penguin", servers.cx);
+
     let tree = A11yTree::read(servers.cx);
-    assert!(
-        tree.find_text("Unknown").is_some(),
-        "facts read as unknown until SpaceTerm observes the server"
+    let picker = tree.node(super::PICKER_NAME);
+    assert_eq!(picker["aria"]["role"], "ComboBox");
+    assert_eq!(picker["aria"]["value"], "penguin");
+    assert_eq!(picker["aria"]["description"], "Choose a server, or add one");
+    assert_eq!(
+        servers
+            .cx
+            .update(|_, cx| super::super::server_selection::selected(cx)),
+        crate::server_context::ServerKey::Ssh("penguin".to_owned()),
+        "the choice is retained for Git and the next launch"
     );
-    assert!(
-        tree.find_text(
-            "Connect to \u{201C}penguin\u{201D} to see or change its direct network access."
-        )
-        .is_some(),
-        "direct network access waits for a connection to the selected server"
+    assert_eq!(status(&servers), "Not connected");
+    assert_eq!(
+        servers.computers.remote_calls(),
+        0,
+        "choosing a server connects to, starts and installs nothing"
+    );
+
+    click("settings-navigation-settings-section-git", servers.cx);
+    assert_eq!(
+        A11yTree::read(servers.cx).node(super::PICKER_NAME)["aria"]["value"],
+        "penguin",
+        "Git presents the same server"
     );
 }
 
-/// A build with no remote operations owner offers no remote maintenance, so the selected SSH
-/// server keeps the rows that only report it.
+#[gpui::test]
+fn an_inactive_ssh_server_offers_check_status_and_connect_and_dims_its_settings(
+    cx: &mut TestAppContext,
+) {
+    let servers = open_servers(true, &["penguin"], cx);
+    select("penguin", servers.cx);
+
+    for row in [
+        "settings-row-server-status",
+        "settings-row-server-version",
+        "settings-row-server-auto-start",
+        "settings-row-end-all-sessions",
+        "settings-row-network-access",
+        "settings-ssh-server-check",
+        "settings-ssh-server-connect",
+    ] {
+        assert!(rendered(row, servers.cx), "{row} presents penguin");
+    }
+    assert_eq!(
+        footnote(&servers).as_deref(),
+        Some("Connect to penguin to change these settings.")
+    );
+    let network = servers
+        .window
+        .read_with(servers.cx, |settings, _| settings.network_access_footnote());
+    assert_eq!(
+        network.as_deref(),
+        Some("Connect to penguin to change its network access.")
+    );
+    assert_eq!(servers.computers.remote_calls(), 0);
+}
+
+/// A build with no remote operations owner offers no remote maintenance, so the SSH server's
+/// menu offers only forgetting it.
 #[gpui::test]
 fn without_an_operations_owner_an_ssh_server_offers_no_maintenance(cx: &mut TestAppContext) {
     let servers = open_servers(true, &["penguin"], cx);
+    select("penguin", servers.cx);
 
-    click("settings-server-list-1", servers.cx);
+    click(super::super::server_card::MENU_SELECTOR, servers.cx);
 
-    for absent in [
-        "settings-row-ssh-server-service",
-        "settings-row-ssh-server-update",
-        "settings-row-removed-server-operations",
-    ] {
-        assert!(
-            !rendered(absent, servers.cx),
-            "{absent} needs an operations owner this build has none of"
+    let tree = A11yTree::read(servers.cx);
+    for maintenance in ["Restart Server", "Stop Server", "Uninstall Server\u{2026}"] {
+        assert_eq!(
+            tree.node(maintenance)["aria"]["disabled"],
+            true,
+            "{maintenance} needs an operations owner this build has none of"
         );
     }
-    assert!(rendered("settings-row-ssh-server-status", servers.cx));
-    assert!(rendered("settings-row-ssh-server-version", servers.cx));
+    assert_ne!(tree.node("Remove Server\u{2026}")["aria"]["disabled"], true);
 }
 
 #[gpui::test]
 fn the_local_server_offers_no_removal_or_pairing_ceremony(cx: &mut TestAppContext) {
     let servers = open_servers(true, &["penguin"], cx);
 
-    assert!(rendered("settings-row-server-connection", servers.cx));
-    assert!(!rendered("settings-row-remove-server", servers.cx));
-    assert!(!rendered("settings-ssh-server-remove", servers.cx));
     let tree = A11yTree::read(servers.cx);
     assert!(
         tree.with_role("Button")
@@ -447,6 +465,7 @@ fn the_local_server_offers_no_removal_or_pairing_ceremony(cx: &mut TestAppContex
                 .is_some_and(|label| label.contains("Remove") || label.contains("Unpair"))),
         "the account-local server has nothing to remove or unpair"
     );
+    assert!(!rendered("settings-server-remove", servers.cx));
 }
 
 #[gpui::test]
@@ -492,15 +511,10 @@ fn check_status_observes_an_inactive_server_once_and_leaves_a_presented_one_alon
         A11yTree::read(servers.cx).find_text("1.4.0").is_some(),
         "the observed version replaces Unknown"
     );
-    let caption = servers.window.read_with(servers.cx, |settings, _| {
-        settings
-            .ssh_server_caption(super::super::SettingsRowId::SshServerStatus)
-            .map(|(caption, _)| caption.to_string())
-            .unwrap_or_default()
-    });
-    assert!(
-        caption.contains("was running") && caption.contains("Last checked just now"),
-        "a check says what it found and when, got {caption:?}"
+    assert_eq!(
+        status(&servers),
+        "Not connected",
+        "checking connects nothing"
     );
 
     click("settings-ssh-server-connect", servers.cx);
@@ -514,11 +528,17 @@ fn check_status_observes_an_inactive_server_once_and_leaves_a_presented_one_alon
         "a presented server already reports its state, so Check Status is not offered"
     );
     assert!(rendered("settings-ssh-server-disconnect", servers.cx));
+    assert_eq!(status(&servers), "Connected over SSH");
+    assert_eq!(
+        footnote(&servers),
+        None,
+        "a connected server's settings can change"
+    );
     assert_eq!(computers.observations.load(Ordering::SeqCst), 1);
 }
 
 #[gpui::test]
-fn after_disconnect_the_detail_presents_the_facts_last_observed(cx: &mut TestAppContext) {
+fn after_disconnect_the_card_presents_the_facts_last_observed(cx: &mut TestAppContext) {
     let servers = open_servers(true, &["penguin"], cx);
     select("penguin", servers.cx);
     click("settings-ssh-server-connect", servers.cx);
@@ -526,29 +546,21 @@ fn after_disconnect_the_detail_presents_the_facts_last_observed(cx: &mut TestApp
     settle(servers.cx, |_| {
         connections.server(&destination("penguin")).is_some()
     });
-    assert!(
-        A11yTree::read(servers.cx)
-            .find_text(LAST_OBSERVED)
-            .is_none(),
-        "a connected server's facts are current"
-    );
+    servers.cx.run_until_parked();
 
     click("settings-ssh-server-disconnect", servers.cx);
 
-    let tree = A11yTree::read(servers.cx);
     assert!(
-        tree.find_text("1.4.0").is_some(),
+        A11yTree::read(servers.cx).find_text("1.4.0").is_some(),
         "the version stays presented"
     );
+    let footnote = footnote(&servers).unwrap_or_default();
     assert!(
-        tree.find_text(LAST_OBSERVED).is_some(),
-        "the detail says the facts were observed earlier"
+        footnote.starts_with("Connect to penguin to change these settings. Shown values are from "),
+        "the card says the values were observed earlier, got {footnote:?}"
     );
     assert_eq!(servers.computers.observations.load(Ordering::SeqCst), 0);
 }
-
-const LAST_OBSERVED: &str = "SpaceTerm last observed these details when it connected or checked \
-                             the status. They may have changed since.";
 
 struct RecordingMovement;
 
@@ -643,11 +655,18 @@ fn opening_server_settings_selects_the_named_server(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn remove_forgets_the_connection_at_once_and_selects_the_local_server(cx: &mut TestAppContext) {
+fn removing_the_selected_server_forgets_it_and_presents_this_computer(cx: &mut TestAppContext) {
     let servers = open_servers(true, &["build.local", "penguin"], cx);
     select("penguin", servers.cx);
 
-    click("settings-ssh-server-remove", servers.cx);
+    click(super::super::server_card::MENU_SELECTOR, servers.cx);
+    click("settings-server-remove", servers.cx);
+    assert_eq!(
+        servers.saved.destinations(),
+        ["build.local", "penguin"],
+        "Remove Server asks first"
+    );
+    answer_alert("settings-server-remove-confirm", servers.cx);
 
     assert_eq!(
         listed(servers.cx),
@@ -655,10 +674,16 @@ fn remove_forgets_the_connection_at_once_and_selects_the_local_server(cx: &mut T
             (local_name().to_owned(), true),
             ("build.local".to_owned(), false)
         ],
-        "removal takes effect without a confirmation, and the local server is selected"
+        "the picker moves to this computer's server"
     );
     let saved = servers.saved.clone();
     settle(servers.cx, |_| saved.destinations() == ["build.local"]);
+    assert_eq!(
+        servers
+            .cx
+            .update(|_, cx| super::super::server_selection::selected(cx)),
+        crate::server_context::ServerKey::Local
+    );
     assert_eq!(
         servers.computers.remote_calls(),
         0,
@@ -667,15 +692,72 @@ fn remove_forgets_the_connection_at_once_and_selects_the_local_server(cx: &mut T
 }
 
 #[gpui::test]
-fn without_a_local_server_remove_selects_the_next_saved_server(cx: &mut TestAppContext) {
+fn without_a_local_server_removing_presents_the_first_saved_server(cx: &mut TestAppContext) {
     let servers = open_servers(false, &["alpha", "bravo", "charlie"], cx);
     select("bravo", servers.cx);
 
-    click("settings-ssh-server-remove", servers.cx);
+    click(super::super::server_card::MENU_SELECTOR, servers.cx);
+    click("settings-server-remove", servers.cx);
+    answer_alert("settings-server-remove-confirm", servers.cx);
 
     assert_eq!(
         listed(servers.cx),
-        vec![("alpha".to_owned(), false), ("charlie".to_owned(), true)]
+        vec![("alpha".to_owned(), true), ("charlie".to_owned(), false)]
+    );
+}
+
+/// A choice retained from an earlier launch waits for the saved connections to load rather than
+/// giving way to this computer's server while they do.
+#[gpui::test]
+fn a_retained_choice_returns_once_its_saved_connection_loads(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        super::super::server_selection::select(
+            crate::server_context::ServerKey::Ssh("penguin".to_owned()),
+            cx,
+        )
+    });
+
+    let servers = open_servers(true, &["penguin"], cx);
+
+    assert_eq!(listed(servers.cx)[1], ("penguin".to_owned(), true));
+}
+
+/// Loaded saved connections that no longer include the retained server are a real answer: the
+/// choice and its facts go, and this computer's server is presented.
+#[gpui::test]
+fn a_retained_choice_whose_connection_is_gone_gives_way_once_loading_finishes(
+    cx: &mut TestAppContext,
+) {
+    let gone = crate::server_context::ServerKey::Ssh("gone".to_owned());
+    cx.update(|cx| {
+        super::super::server_selection::select(gone.clone(), cx);
+        super::super::server_selection::remember(
+            gone.clone(),
+            crate::server_context::LastKnownFacts {
+                observed_at: 1,
+                ..Default::default()
+            },
+            cx,
+        );
+    });
+
+    let servers = open_servers(true, &[], cx);
+    let connections = servers.connections.clone();
+    settle(servers.cx, |_| connections.retained_inventory_loaded());
+    servers.cx.run_until_parked();
+
+    assert_eq!(
+        servers
+            .cx
+            .update(|_, cx| super::super::server_selection::selected(cx)),
+        crate::server_context::ServerKey::Local
+    );
+    assert!(
+        servers
+            .cx
+            .update(|_, cx| super::super::server_selection::facts(&gone, cx))
+            .is_none(),
+        "a forgotten server's facts go with it"
     );
 }
 
@@ -694,58 +776,29 @@ fn rendering_the_servers_section_reaches_no_computer(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn searching_for_a_server_by_name_reveals_and_selects_it(cx: &mut TestAppContext) {
-    let servers = open_servers(true, &["build.local", "penguin"], cx);
+    let mut servers = open_servers(true, &["build.local", "penguin"], cx);
     click("settings-navigation-settings-section-interface", servers.cx);
 
-    let search = servers
-        .window
-        .read_with(servers.cx, |settings, _| settings.search.clone());
-    servers.cx.update(|_, cx| {
-        search.update(cx, |search, cx| search.set_value("PENG".to_owned(), cx));
-    });
-    servers.cx.run_until_parked();
+    search_for("PENG", &mut servers);
 
     servers.window.read_with(servers.cx, |settings, _| {
         assert_eq!(settings.active_section, SettingsSectionId::Servers);
         assert_eq!(
             settings.revealed,
-            Some(super::super::SettingsRowId::SshServerStatus)
+            Some(super::super::SettingsRowId::ServerStatus)
         );
     });
     assert_eq!(listed(servers.cx)[2], ("penguin".to_owned(), true));
-    assert!(
-        headings(servers.cx)
-            .iter()
-            .any(|heading| heading == "Connection to penguin")
-    );
     assert_eq!(servers.computers.remote_calls(), 0);
-}
-
-fn search_for(query: &str, servers: &mut Servers<'_>) {
-    let search = servers
-        .window
-        .read_with(servers.cx, |settings, _| settings.search.clone());
-    let query = query.to_owned();
-    servers.cx.update(|_, cx| {
-        search.update(cx, |search, cx| search.set_value(query, cx));
-    });
-    servers.cx.run_until_parked();
 }
 
 /// A word that only appears inside a host's name answers the Settings it names, not that host.
 #[gpui::test]
-fn a_query_inside_a_host_name_keeps_the_local_server_and_its_rows(cx: &mut TestAppContext) {
+fn a_query_inside_a_host_name_keeps_the_local_server(cx: &mut TestAppContext) {
     let mut servers = open_servers(true, &["build.local"], cx);
     search_for("local", &mut servers);
 
     assert_eq!(listed(servers.cx)[0], (local_name().to_owned(), true));
-    assert!(rendered("settings-row-local-server", servers.cx));
-    servers.window.read_with(servers.cx, |settings, _| {
-        assert_eq!(
-            settings.revealed,
-            Some(super::super::SettingsRowId::LocalServer)
-        );
-    });
 }
 
 /// A Setting the query names by its own words comes before a host that happens to share it.
@@ -765,7 +818,7 @@ fn a_setting_named_by_the_query_ranks_before_a_host_with_that_name(cx: &mut Test
 }
 
 /// A host whose requested Connect failed stays saved to connect when SpaceTerm reopens, so its
-/// detail offers ending that without removing the saved connection.
+/// Status offers ending that without removing the saved connection.
 #[gpui::test]
 fn a_failed_connection_offers_to_stop_reconnecting_and_stays_saved(cx: &mut TestAppContext) {
     let servers = open_servers(true, &[], cx);
@@ -784,6 +837,7 @@ fn a_failed_connection_offers_to_stop_reconnecting_and_stays_saved(cx: &mut Test
         )
     });
     select("nohost", servers.cx);
+    assert_eq!(status(&servers), "Not reachable");
     let records = servers.saved.clone();
     let saved = move || {
         records
@@ -805,11 +859,10 @@ fn a_failed_connection_offers_to_stop_reconnecting_and_stays_saved(cx: &mut Test
     assert_eq!(listed(servers.cx)[1].0, "nohost");
 }
 
-/// A saved connection that reopens waiting for the person says why without naming a prompt
-/// nothing asked for, and promises no quiet retry SpaceTerm won't make.
+/// A saved connection that reopens waiting for the person waits for Connect.
 #[gpui::test]
-fn a_reopened_connection_waits_for_connect_without_claiming_a_prompt(cx: &mut TestAppContext) {
-    let mut servers = open_servers_saved(true, &["penguin"], true, cx);
+fn a_reopened_connection_waits_for_connect(cx: &mut TestAppContext) {
+    let servers = open_servers_saved(true, &["penguin"], true, cx);
     let connections = servers.connections.clone();
     settle(servers.cx, |_| {
         matches!(
@@ -818,76 +871,47 @@ fn a_reopened_connection_waits_for_connect_without_claiming_a_prompt(cx: &mut Te
         )
     });
     select("penguin", servers.cx);
-    let caption = |servers: &mut Servers<'_>| {
-        servers.window.read_with(servers.cx, |settings, _| {
-            settings
-                .ssh_server_caption(super::super::SettingsRowId::SshServerStatus)
-                .map(|(caption, _)| caption.to_string())
-                .unwrap_or_default()
-        })
-    };
 
-    let waiting = caption(&mut servers);
-    assert!(
-        waiting.contains("hasn\u{2019}t signed in to this computer since it opened"),
-        "got {waiting:?}"
-    );
-    assert!(!waiting.contains("credential provider"), "got {waiting:?}");
-    assert!(!waiting.contains("quietly"), "got {waiting:?}");
-
-    // A Connect that fails keeps the connection saved, for the person to connect after reopening.
-    servers
-        .computers
-        .unreachable
-        .lock()
-        .unwrap()
-        .push("penguin".to_owned());
-    click("settings-ssh-server-connect", servers.cx);
-    settle(servers.cx, |_| {
-        matches!(
-            connections.status(&destination("penguin")),
-            RemoteConnectionStatus::Unavailable { .. }
-        )
-    });
-    let failed = caption(&mut servers);
-    assert!(
-        failed.contains("When SpaceTerm reopens, it waits for you to choose Connect."),
-        "got {failed:?}"
-    );
-    assert!(!failed.contains("quietly"), "got {failed:?}");
+    assert_eq!(status(&servers), "Waiting for you");
+    assert!(rendered("settings-ssh-server-connect", servers.cx));
 }
 
-/// A removal SpaceTerm couldn't save would bring the connection back at relaunch, so Settings
+/// A removal SpaceTerm couldn't save would bring the connection back at relaunch, so a notice
 /// names it and offers to remove it again.
 #[gpui::test]
 fn a_removal_that_could_not_be_saved_names_the_host_and_can_be_retried(cx: &mut TestAppContext) {
+    let notice = "settings-server-notice-unsaved-removal";
     let servers = open_servers(true, &["penguin"], cx);
     servers.saved.removal_fails.store(true, Ordering::SeqCst);
     select("penguin", servers.cx);
-    click(super::super::ssh_servers::REMOVE_SELECTOR, servers.cx);
+    click(super::super::server_card::MENU_SELECTOR, servers.cx);
+    click("settings-server-remove", servers.cx);
+    answer_alert("settings-server-remove-confirm", servers.cx);
     let connections = servers.connections.clone();
     settle(servers.cx, |_| !connections.unsaved_removals().is_empty());
+    servers.cx.run_until_parked();
 
-    let notice = A11yTree::read(servers.cx).node(super::super::ssh_servers::UNSAVED_REMOVAL_NAME)
-        ["aria"]["description"]
-        .as_str()
-        .unwrap_or_default()
-        .to_owned();
-    assert!(notice.contains("\u{201C}penguin\u{201D}"), "got {notice:?}");
-    assert!(notice.contains("reopens"), "got {notice:?}");
+    let text = A11yTree::read(servers.cx)
+        .with_role("Status")
+        .into_iter()
+        .find_map(|node| {
+            node["aria"]["label"]
+                .as_str()
+                .filter(|label| label.contains("couldn\u{2019}t save that you removed"))
+                .map(str::to_owned)
+        })
+        .unwrap_or_default();
+    assert!(text.contains("penguin"), "got {text:?}");
+    assert!(text.contains("reopens"), "got {text:?}");
 
     servers.saved.removal_fails.store(false, Ordering::SeqCst);
-    click("settings-ssh-server-remove-again", servers.cx);
+    click(&format!("{notice}-remove-again"), servers.cx);
     settle(servers.cx, |_| connections.unsaved_removals().is_empty());
     assert!(servers.saved.destinations().is_empty());
     let connections = servers.connections.clone();
     settle(servers.cx, |_| connections.persistence_error().is_none());
-    assert!(!rendered("settings-ssh-server-remove-again", servers.cx));
     assert!(
-        !rendered(
-            super::super::ssh_servers::UNSAVED_REMOVAL_SELECTOR,
-            servers.cx
-        ) && !rendered(super::super::ssh_servers::PERSISTENCE_SELECTOR, servers.cx),
+        !rendered(notice, servers.cx),
         "once the removal saves, no notice remains"
     );
 }
@@ -915,23 +939,118 @@ fn clearing_a_search_returns_to_the_server_the_person_chose(cx: &mut TestAppCont
     assert_eq!(listed(servers.cx)[2], ("penguin".to_owned(), true));
 }
 
-#[gpui::test]
-fn a_query_for_a_local_only_row_selects_the_local_server(cx: &mut TestAppContext) {
-    let servers = open_servers(true, &["penguin"], cx);
-    select("penguin", servers.cx);
+#[test]
+fn a_typed_host_is_offered_over_ssh_and_a_partial_name_is_not() {
+    for host in ["penguin", "me@build.local", "10.0.0.4", "[::1]"] {
+        assert!(super::looks_like_host(host), "{host}");
+    }
+    for typed in ["", "  ", "two words", "-oProxyCommand=x", "a/b"] {
+        assert!(!super::looks_like_host(typed), "{typed:?}");
+    }
+}
 
+/// New Worktrees go where the selected server's own setting names, on the Git page.
+#[gpui::test]
+fn searching_for_the_worktree_location_reveals_the_selected_servers_setting(
+    cx: &mut TestAppContext,
+) {
+    let (mut servers, _alpha, _bravo) = present_both(cx);
+    select("bravo", servers.cx);
+
+    search_for("worktree", &mut servers);
+
+    servers.window.read_with(servers.cx, |settings, _| {
+        assert_eq!(settings.active_section, SettingsSectionId::Git);
+        assert_eq!(
+            settings.revealed,
+            Some(super::super::SettingsRowId::ServerWorktreeLocation)
+        );
+    });
+    settle(servers.cx, |cx| {
+        location_field(cx) == "~/bravo/{repository}/{branch}"
+    });
+}
+
+#[gpui::test]
+fn a_server_settings_change_reaches_only_the_selected_server(cx: &mut TestAppContext) {
+    use crate::ui::shared_workspaces::testing::ScriptedEdits;
+    use spaceterm_server::hierarchy::Mutation;
+    use spaceterm_server::worktree::Operation;
+
+    let (servers, alpha, bravo) = present_both(cx);
+    select("bravo", servers.cx);
+    click("settings-navigation-settings-section-git", servers.cx);
+    settle(servers.cx, |cx| {
+        location_field(cx) == "~/bravo/{repository}/{branch}"
+    });
+    assert!(
+        A11yTree::read(servers.cx)
+            .with_role("Heading")
+            .iter()
+            .any(|heading| heading["aria"]["label"] == "Git on bravo"),
+        "the section names the server it acts on"
+    );
+
+    click("settings-server-worktree-location", servers.cx);
+    servers.cx.simulate_keystrokes("cmd-a");
+    servers
+        .cx
+        .simulate_input("~/elsewhere/{repository}/{branch}");
+    servers.cx.simulate_keystrokes("enter");
+    let submitted = |edits: &ScriptedEdits| edits.submitted();
+    settle(servers.cx, |_| !submitted(&bravo).is_empty());
+
+    assert_eq!(
+        submitted(&bravo),
+        vec![Mutation::Worktree(Operation::SetLocation {
+            version: 0,
+            template: "~/elsewhere/{repository}/{branch}".into(),
+        })]
+    );
+    assert!(
+        submitted(&alpha).is_empty(),
+        "the other server is untouched"
+    );
+}
+
+#[gpui::test]
+fn choosing_another_server_carries_no_draft_to_it(cx: &mut TestAppContext) {
+    let (servers, alpha, bravo) = present_both(cx);
+    select("bravo", servers.cx);
+    select("alpha", servers.cx);
+    click("settings-navigation-settings-section-git", servers.cx);
+    settle(servers.cx, |cx| {
+        location_field(cx) == "~/alpha/{repository}/{branch}"
+    });
+    click("settings-server-worktree-location", servers.cx);
+    servers.cx.simulate_keystrokes("cmd-a");
+    servers.cx.simulate_input("~/draft/{repository}/{branch}");
+
+    servers.window.update(servers.cx, |settings, cx| {
+        settings.select_server(super::ServerChoice::Ssh(destination("bravo")), cx);
+    });
+    settle(servers.cx, |cx| {
+        location_field(cx) == "~/bravo/{repository}/{branch}"
+    });
+    servers.cx.simulate_keystrokes("enter");
+    servers.cx.run_until_parked();
+
+    assert!(alpha.submitted().is_empty());
+    assert!(
+        bravo.submitted().is_empty(),
+        "a draft typed for alpha must never be written to bravo"
+    );
+}
+
+fn search_for(query: &str, servers: &mut Servers<'_>) {
     let search = servers
         .window
         .read_with(servers.cx, |settings, _| settings.search.clone());
+    let query = query.to_owned();
     servers.cx.update(|_, cx| {
-        search.update(cx, |search, cx| {
-            search.set_value("start server".to_owned(), cx)
-        });
+        search.update(cx, |search, cx| search.set_value(query, cx));
     });
     servers.cx.run_until_parked();
-
-    assert_eq!(listed(servers.cx)[0], (local_name().to_owned(), true));
-    assert!(rendered("settings-row-local-server", servers.cx));
 }
 
 /// Two saved SSH servers, each connected and presented with its own scripted writer, as the
@@ -980,125 +1099,6 @@ fn location_field(cx: &mut VisualTestContext) -> String {
         .to_owned()
 }
 
-#[gpui::test]
-fn server_settings_are_unavailable_until_the_selected_server_is_connected(cx: &mut TestAppContext) {
-    let servers = open_servers(false, &["penguin"], cx);
-
-    assert!(rendered(
-        "settings-row-server-worktree-location",
-        servers.cx
-    ));
-    let caption = servers.window.read_with(servers.cx, |settings, cx| {
-        settings.server_location_caption(cx).0
-    });
-    assert_eq!(caption, "Connect to the server on penguin to change it.");
-    assert!(
-        headings(servers.cx)
-            .iter()
-            .any(|heading| heading == "Server Settings on penguin")
-    );
-}
-
-/// New Worktrees go where the selected server's own setting names, so Settings Search reveals
-/// that setting and no client field that only seeds a new local server.
-#[gpui::test]
-fn searching_for_the_worktree_location_reveals_the_selected_servers_setting(
-    cx: &mut TestAppContext,
-) {
-    let (mut servers, _alpha, _bravo) = present_both(cx);
-    select("bravo", servers.cx);
-    click("settings-navigation-settings-section-git", servers.cx);
-
-    search_for("worktree", &mut servers);
-
-    servers.window.read_with(servers.cx, |settings, _| {
-        use crate::ui::sidebar_window::SidebarOwner as _;
-        assert_eq!(settings.active_section, SettingsSectionId::Servers);
-        assert_eq!(
-            settings.revealed,
-            Some(super::super::SettingsRowId::ServerWorktreeLocation)
-        );
-        assert!(
-            !settings
-                .navigable_sections()
-                .contains(&SettingsSectionId::Git),
-            "the Git section offers no second New Worktree Location"
-        );
-    });
-    settle(servers.cx, |cx| {
-        location_field(cx) == "~/bravo/{repository}/{branch}"
-    });
-    assert_eq!(listed(servers.cx)[1], ("bravo".to_owned(), true));
-}
-
-#[gpui::test]
-fn a_server_settings_change_reaches_only_the_selected_server(cx: &mut TestAppContext) {
-    use crate::ui::shared_workspaces::testing::ScriptedEdits;
-    use spaceterm_server::hierarchy::Mutation;
-    use spaceterm_server::worktree::Operation;
-
-    let (servers, alpha, bravo) = present_both(cx);
-    select("bravo", servers.cx);
-    settle(servers.cx, |cx| {
-        location_field(cx) == "~/bravo/{repository}/{branch}"
-    });
-    let caption = servers.window.read_with(servers.cx, |settings, cx| {
-        settings.server_location_caption(cx).0
-    });
-    assert!(
-        caption.contains("on bravo"),
-        "the caption names the machine, got {caption:?}"
-    );
-
-    click("settings-server-worktree-location", servers.cx);
-    servers.cx.simulate_keystrokes("cmd-a");
-    servers
-        .cx
-        .simulate_input("~/elsewhere/{repository}/{branch}");
-    servers.cx.simulate_keystrokes("enter");
-    let submitted = |edits: &ScriptedEdits| edits.submitted();
-    settle(servers.cx, |_| !submitted(&bravo).is_empty());
-
-    assert_eq!(
-        submitted(&bravo),
-        vec![Mutation::Worktree(Operation::SetLocation {
-            version: 0,
-            template: "~/elsewhere/{repository}/{branch}".into(),
-        })]
-    );
-    assert!(
-        submitted(&alpha).is_empty(),
-        "the other server is untouched"
-    );
-}
-
-#[gpui::test]
-fn choosing_another_server_carries_no_draft_to_it(cx: &mut TestAppContext) {
-    let (servers, alpha, bravo) = present_both(cx);
-    // The list selects alpha first; choosing bravo and back reads alpha through its writer.
-    select("bravo", servers.cx);
-    select("alpha", servers.cx);
-    settle(servers.cx, |cx| {
-        location_field(cx) == "~/alpha/{repository}/{branch}"
-    });
-    click("settings-server-worktree-location", servers.cx);
-    servers.cx.simulate_keystrokes("cmd-a");
-    servers.cx.simulate_input("~/draft/{repository}/{branch}");
-
-    select("bravo", servers.cx);
-    settle(servers.cx, |cx| {
-        location_field(cx) == "~/bravo/{repository}/{branch}"
-    });
-    servers.cx.simulate_keystrokes("enter");
-    servers.cx.run_until_parked();
-
-    assert!(alpha.submitted().is_empty());
-    assert!(
-        bravo.submitted().is_empty(),
-        "a draft typed for alpha must never be written to bravo"
-    );
-}
-
 /// Answers the open alert with the action `selector` names.
 fn answer_alert(selector: &str, cx: &mut VisualTestContext) {
     click(&format!("modal-action-{selector}"), cx);
@@ -1112,6 +1112,7 @@ fn reset_all_and_import_leave_server_connections_and_server_settings_alone(
 ) {
     let (servers, alpha, bravo) = present_both(cx);
     select("bravo", servers.cx);
+    click("settings-navigation-settings-section-git", servers.cx);
     settle(servers.cx, |cx| {
         location_field(cx) == "~/bravo/{repository}/{branch}"
     });
@@ -1172,32 +1173,10 @@ fn reset_all_and_import_leave_server_connections_and_server_settings_alone(
         "both servers stay saved and connected"
     );
     assert!(alpha.submitted().is_empty() && bravo.submitted().is_empty());
-    click(NAVIGATION_SELECTOR, servers.cx);
+    click("settings-navigation-settings-section-git", servers.cx);
     settle(servers.cx, |cx| {
         location_field(cx) == "~/bravo/{repository}/{branch}"
     });
-}
-
-#[gpui::test]
-fn connecting_a_typed_host_lists_and_selects_it(cx: &mut TestAppContext) {
-    let servers = open_servers(true, &["penguin"], cx);
-
-    click("settings-ssh-server-destination", servers.cx);
-    servers.cx.simulate_input("me@build.local");
-    servers.cx.simulate_keystrokes("enter");
-    let computers = servers.computers.clone();
-    settle(servers.cx, |_| {
-        computers.connects.load(Ordering::SeqCst) == 1
-    });
-
-    assert_eq!(
-        listed(servers.cx),
-        vec![
-            (local_name().to_owned(), false),
-            ("me@build.local".to_owned(), true),
-            ("penguin".to_owned(), false),
-        ]
-    );
 }
 
 /// One server run with `live` running Terminal Sessions and a Pane waiting for its first shell.

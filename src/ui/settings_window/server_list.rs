@@ -39,7 +39,7 @@ pub(super) const SERVER_LIST_NAME: &str = "All Servers";
 const NAME_QUERY_MINIMUM: usize = 3;
 
 /// The card of rows reporting the selected server. It has no heading: the picker names it.
-pub(super) const SERVER_GROUP: &str = "Server";
+pub(super) const SERVER_GROUP: &str = "";
 /// The card of rows about other devices reaching the selected server over the network.
 pub(super) const NETWORK_GROUP: &str = "Network Access";
 /// The card listing every server.
@@ -397,7 +397,6 @@ impl SettingsWindow {
     /// names the server.
     pub(super) fn server_group_heading(&self, group: &'static str) -> SharedString {
         match group {
-            SERVER_GROUP => SharedString::default(),
             GIT_SERVER_GROUP => {
                 SharedString::from(format!("Git on {}", self.selected_server_name()))
             }

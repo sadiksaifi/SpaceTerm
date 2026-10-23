@@ -69,12 +69,9 @@ impl LocalServerControl for DevelopmentRunServer {
 }
 
 /// The Servers section's description while a Development run owns the local server.
-pub(super) const DEVELOPMENT_RUN_DESCRIPTION: &str = "The SpaceTerm servers that run your \
-                                                       Workspaces\u{2019} terminals. This \
-                                                       Development run owns the server on this \
-                                                       computer, which ends with its Terminal \
-                                                       Sessions when the run ends. Select a \
-                                                       server to see its connection and settings.";
+pub(super) const DEVELOPMENT_RUN_DESCRIPTION: &str = "Servers run your Workspaces and their \
+                                                       Terminal Sessions. This Development \
+                                                       run\u{2019}s server ends when the run ends.";
 
 impl LocalServerControl for LocalServer {
     fn worktree_server(&self) -> Option<LocalServer> {
