@@ -184,9 +184,10 @@ impl InviteDevice {
         let on_paired: Rc<dyn Fn(&mut App)> = Rc::new(move |cx: &mut App| {
             let _ = owner.update(cx, |owner, cx| on_paired(owner, cx));
         });
-        let body = cx.new(|cx| {
+        let body = cx.new(|cx: &mut Context<Self>| {
             // Invite Device ends with its window too, and the invitation it holds ends with it.
-            cx.on_release(|body, cx| body.withdraw_open(cx)).detach();
+            cx.on_release(|body: &mut Self, cx: &mut App| body.withdraw_open(cx))
+                .detach();
             Self {
                 control,
                 server,
