@@ -343,6 +343,11 @@ impl Controller {
         self.service.start()
     }
 
+    /// Change automatic startup without changing the running server or deliberate Stop.
+    pub fn set_automatic_start(&self, enabled: bool) -> Result<ServiceStatus, ServerError> {
+        self.service.set_automatic_start(enabled)
+    }
+
     /// Request the platform authorization selected by the person's explicit action.
     pub fn enable_linger(&self, authorization: LingerAuthorization) -> Result<(), ServerError> {
         self.service.enable_linger(authorization)

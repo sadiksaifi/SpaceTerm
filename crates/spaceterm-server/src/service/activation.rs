@@ -490,7 +490,7 @@ impl Service {
                         // Durable dispatch marker precedes the native call. Interruption in this
                         // gap requires intervention if the old process remains live; never resend.
                         self.set_step(data, operation.id, Step::StopDispatched)?;
-                        self.supervisor.disable()?;
+                        self.supervisor.stop()?;
                         self.wait_running(false)?;
                     } else {
                         self.set_step(data, operation.id, Step::StopDispatched)?;
@@ -571,6 +571,7 @@ impl Service {
                         self.supervisor.prepare_start()?;
                         self.set_step(data, operation.id, Step::StartDispatched)?;
                         self.supervisor.start()?;
+                        self.supervisor.set_automatic_start(state.automatic_start)?;
                         self.wait_running(true)?;
                     }
                 }

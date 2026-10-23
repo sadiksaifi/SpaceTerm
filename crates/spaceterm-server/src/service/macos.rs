@@ -95,7 +95,7 @@ impl Supervisor for LaunchAgent {
         self.registration()
             .check(&self.contents(previous)?, false)
             .or_else(|_| self.registration().check(&self.contents(candidate)?, false))?;
-        // Never reload a running job. disable already delivered the sole destructive dispatch.
+        // Never reload a running job. Stop already delivered the sole destructive dispatch.
         if self.running()? {
             return Err(ServerError::ActivationUnresolved);
         }
@@ -180,11 +180,18 @@ impl Supervisor for LaunchAgent {
         }
         Ok(())
     }
-    fn disable(&self) -> Result<(), ServerError> {
+    fn set_automatic_start(&self, enabled: bool) -> Result<(), ServerError> {
         command(
             "/bin/launchctl",
-            &["disable".into(), self.target.clone().into()],
+            &[
+                if enabled { "enable" } else { "disable" }.into(),
+                self.target.clone().into(),
+            ],
         )?;
+        Ok(())
+    }
+    fn stop(&self) -> Result<(), ServerError> {
+        self.set_automatic_start(false)?;
         if self.running()? {
             command(
                 "/bin/launchctl",

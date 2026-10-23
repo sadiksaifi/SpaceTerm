@@ -326,16 +326,17 @@ impl Supervisor for UserService {
         self.linger()
     }
     fn start(&self) -> Result<(), ServerError> {
-        self.startup(true)?;
-        self.systemctl(&["daemon-reload"])?;
         self.systemctl(&["reset-failed", &self.name])?;
         self.systemctl(&["start", &self.name])?;
         Ok(())
     }
-    fn disable(&self) -> Result<(), ServerError> {
-        // Remove boot activation before queuing the stop. A failed stop still retains Stop intent.
-        self.startup(false)?;
+    fn set_automatic_start(&self, enabled: bool) -> Result<(), ServerError> {
+        self.startup(enabled)?;
         self.systemctl(&["daemon-reload"])?;
+        Ok(())
+    }
+    fn stop(&self) -> Result<(), ServerError> {
+        self.set_automatic_start(false)?;
         self.systemctl(&["--no-block", "stop", &self.name])?;
         Ok(())
     }

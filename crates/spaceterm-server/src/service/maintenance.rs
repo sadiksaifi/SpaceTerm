@@ -1221,6 +1221,7 @@ mod tests {
         running: AtomicBool,
         stops: AtomicUsize,
         starts: AtomicUsize,
+        automatic_start: AtomicBool,
         uninstalls: AtomicUsize,
         fail_replace: AtomicBool,
     }
@@ -1245,7 +1246,12 @@ mod tests {
             self.starts.fetch_add(1, Ordering::SeqCst);
             Err(ServerError::StartupFailed)
         }
-        fn disable(&self) -> Result<(), ServerError> {
+        fn set_automatic_start(&self, enabled: bool) -> Result<(), ServerError> {
+            self.automatic_start.store(enabled, Ordering::SeqCst);
+            Ok(())
+        }
+        fn stop(&self) -> Result<(), ServerError> {
+            self.set_automatic_start(false)?;
             self.stops.fetch_add(1, Ordering::SeqCst);
             self.running.store(false, Ordering::SeqCst);
             // A real server process clears its own run marker as it exits.
@@ -1327,6 +1333,7 @@ mod tests {
                     running: AtomicBool::new(running),
                     stops: AtomicUsize::new(0),
                     starts: AtomicUsize::new(0),
+                    automatic_start: AtomicBool::new(false),
                     uninstalls: AtomicUsize::new(0),
                     fail_replace: AtomicBool::new(false),
                 });
@@ -1540,7 +1547,7 @@ mod tests {
             );
             assert_eq!(outcome.resolution, OperationResolution::Completed);
             let status = outcome.status.expect("resolved policy unavailable");
-            assert!(status.stopped && !status.running && !status.enabled);
+            assert!(status.stopped && !status.running && status.enabled);
             assert_eq!(harness.manager.stops.load(Ordering::SeqCst), 1);
             // The retained originals stay private to the owning account.
             let retained = harness.service.paths.data.join("maintenance.json");
