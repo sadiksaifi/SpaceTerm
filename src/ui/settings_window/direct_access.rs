@@ -7,7 +7,12 @@
 //! addresses offered are the ones that server reads from its own machine. The rows read the
 //! server only while Servers shows it, and choosing another server starts over, so nothing read
 //! or chosen for one server reaches another.
+//!
+//! Losing the connection to a server changes nothing on it. While SpaceTerm can't reach a server,
+//! the rows show what that server last reported, dimmed and dated, and offer no step that would
+//! change it. A server never read shows its access as unknown rather than off.
 
+use std::collections::BTreeMap;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
@@ -25,6 +30,7 @@ use super::catalog::SettingsSectionId;
 use super::server_list::ServerChoice;
 use crate::local_server::LocalServer;
 use crate::local_server::direct::{DEFAULT_PORT, NetworkPolicy, PairingId};
+use crate::server_context::ServerKey;
 use crate::ui::appearance::{ChromeAppearance, gpui_color};
 use crate::ui::chrome_icons::IconRole;
 use crate::ui::chrome_typography::{ChromeTextStyleExt as _, TextRole};
@@ -62,6 +68,25 @@ impl Change {
     }
 }
 
+/// What a server last reported about its network access and its devices, each with when it
+/// reported it in Unix seconds. It is display only: nothing here says what the server does now,
+/// and no step acts on it. `None` is a part the server never reported.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct LastKnown {
+    access: Option<(u64, AccessState)>,
+    devices: Option<(u64, Vec<Device>)>,
+}
+
+/// The access the rows show: the live reading, or what the server last reported while SpaceTerm
+/// can't reach it.
+struct Shown<'a> {
+    policy: Option<SocketAddr>,
+    /// `None` when the server never listed its devices.
+    devices: Option<&'a [Device]>,
+    /// When the server reported a last-known reading. `None` for a live one.
+    observed_at: Option<u64>,
+}
+
 /// What the rows know about the selected server's network access.
 pub(super) struct DirectAccess {
     /// The server the rows present.
@@ -70,7 +95,10 @@ pub(super) struct DirectAccess {
     generation: u64,
     /// The latest reading. `None` until the server answers, or while SpaceTerm can't ask it.
     reading: Option<Result<AccessState, AccessFailure>>,
+    /// The devices the live server listed. `None` while it isn't live or didn't list them.
     devices: Option<Vec<Device>>,
+    /// What each server last reported, so a server SpaceTerm can't reach keeps showing it.
+    last_known: BTreeMap<ServerKey, LastKnown>,
     change: Option<Change>,
     /// Why the person's latest step didn't take effect.
     problem: Option<AccessFailure>,
@@ -87,6 +115,7 @@ impl DirectAccess {
             generation: 0,
             reading: None,
             devices: None,
+            last_known: BTreeMap::new(),
             change: None,
             problem: None,
             unpairing: Vec::new(),
@@ -112,14 +141,53 @@ impl DirectAccess {
     }
 
     fn receive(&mut self, state: AccessState, devices: Option<Vec<Device>>) {
-        if let Some(devices) = &devices {
-            self.unpairing
-                .retain(|pairing| devices.iter().any(|device| device.pairing == *pairing));
+        if let Some(key) = self.target.as_ref().map(ServerChoice::key) {
+            self.last_known.entry(key).or_default().access =
+                Some((crate::ui::direct_access::unix_now(), state.clone()));
         }
         self.reading = Some(Ok(state));
-        if devices.is_some() {
-            self.devices = devices;
+        if let Some(devices) = devices {
+            self.receive_devices(devices);
         }
+    }
+
+    /// Takes the devices the live server listed.
+    fn receive_devices(&mut self, devices: Vec<Device>) {
+        self.unpairing
+            .retain(|pairing| devices.iter().any(|device| device.pairing == *pairing));
+        if let Some(key) = self.target.as_ref().map(ServerChoice::key) {
+            self.last_known.entry(key).or_default().devices =
+                Some((crate::ui::direct_access::unix_now(), devices.clone()));
+        }
+        self.devices = Some(devices);
+    }
+
+    /// SpaceTerm can't reach the server now: `failure` says why, or `None` when it has no
+    /// connection to ask over. What the server last reported stays.
+    fn lose(&mut self, failure: Option<AccessFailure>) {
+        self.reading = failure.map(Err);
+        self.devices = None;
+    }
+
+    /// The access the rows show for the presented server, or `None` when nothing is known.
+    fn shown(&self) -> Option<Shown<'_>> {
+        if let Some(state) = self.state() {
+            return Some(Shown {
+                policy: state.policy,
+                devices: self.devices.as_deref(),
+                observed_at: None,
+            });
+        }
+        let known = self.last_known.get(&self.target.as_ref()?.key())?;
+        let (observed_at, access) = known.access.as_ref()?;
+        Some(Shown {
+            policy: access.policy,
+            devices: known
+                .devices
+                .as_ref()
+                .map(|(_, devices)| devices.as_slice()),
+            observed_at: Some(*observed_at),
+        })
     }
 }
 
@@ -215,11 +283,12 @@ impl SettingsWindow {
             .unwrap_or_else(|| self.selected_server_name())
     }
 
-    /// Whether the selected server lets other devices connect, as it last said.
+    /// Whether the selected server lets other devices connect, as it last said. While SpaceTerm
+    /// can't reach the server this is what it last reported, not what it does now.
     pub(super) fn network_access_on(&self) -> bool {
         self.direct_access
-            .state()
-            .is_some_and(|state| state.policy.is_some())
+            .shown()
+            .is_some_and(|shown| shown.policy.is_some())
     }
 
     /// Whether SpaceTerm can change the selected server's network access now.
@@ -233,12 +302,26 @@ impl SettingsWindow {
             return None;
         }
         let name = self.selected_server_name();
-        Some(SharedString::from(match &self.direct_access.target {
+        let ask = match &self.direct_access.target {
             Some(ServerChoice::Local) => {
                 format!("Start the server on {name} to change its network access.")
             }
             _ => format!("Connect to {name} to change its network access."),
-        }))
+        };
+        let observed = self
+            .direct_access
+            .shown()
+            .and_then(|shown| shown.observed_at)
+            .map(|at| {
+                format!(
+                    " Shown values are from {}.",
+                    super::server_card::observed_time(at)
+                )
+            });
+        Some(SharedString::from(format!(
+            "{ask}{}",
+            observed.unwrap_or_default()
+        )))
     }
 
     /// Follows the selected server's network access while Servers shows it. Selection, section
@@ -289,14 +372,8 @@ impl SettingsWindow {
                     if state.change.is_none() {
                         match read {
                             Some((Ok(status), devices)) => state.receive(status, devices),
-                            Some((Err(failure), _)) => {
-                                state.reading = Some(Err(failure));
-                                state.devices = None;
-                            }
-                            None => {
-                                state.reading = None;
-                                state.devices = None;
-                            }
+                            Some((Err(failure), _)) => state.lose(Some(failure)),
+                            None => state.lose(None),
                         }
                     }
                     cx.notify();
@@ -310,11 +387,21 @@ impl SettingsWindow {
 
     /// The Allow row's description: where the server listens, or what turning it on does.
     pub(super) fn network_access_description(&self) -> SharedString {
-        match self.direct_access.state() {
-            Some(AccessState {
-                listener: Listener::Listening(address),
+        if let Some(AccessState {
+            listener: Listener::Listening(address),
+            ..
+        }) = self.direct_access.state()
+        {
+            return SharedString::from(format!("Listening on {address}."));
+        }
+        // A server SpaceTerm can't reach may have stopped listening since, so its address reads
+        // as what it last reported.
+        match self.direct_access.shown() {
+            Some(Shown {
+                policy: Some(address),
+                observed_at: Some(_),
                 ..
-            }) => SharedString::from(format!("Listening on {address}.")),
+            }) => SharedString::from(format!("Last known address: {address}.")),
             _ => SharedString::new_static("Devices you invite can connect over the network."),
         }
     }
@@ -340,9 +427,26 @@ impl SettingsWindow {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let server = self.direct_access_server_name();
+        let name = SharedString::from(format!("Allow other devices to connect to {server}"));
+        if self.direct_access.shown().is_none() {
+            // Nothing says whether the server lets devices connect, so no switch claims it's off.
+            let colors = appearance.host_colors(spaceterm_ui::ControlHost::Card);
+            return div()
+                .id(SharedString::from(format!("{ACCESS_SELECTOR}-unknown")))
+                .debug_selector(|| format!("{ACCESS_SELECTOR}-unknown"))
+                .role(accesskit::Role::Label)
+                .aria_label(name)
+                .aria_value("Unknown")
+                .chrome_text(appearance.typography.style(TextRole::Body))
+                .text_color(gpui_color(colors.text_secondary))
+                .child("Unknown")
+                .into_any_element();
+        }
         let state = self.direct_access.state().cloned();
         let change = self.direct_access.change;
-        let on = state.as_ref().is_some_and(|state| state.policy.is_some());
+        // What the server last reported while SpaceTerm can't reach it, dimmed by its row.
+        let on = self.network_access_on();
+        let live_on = state.as_ref().is_some_and(|state| state.policy.is_some());
         let gone = state
             .as_ref()
             .is_some_and(|state| state.listener == Listener::AddressGone);
@@ -404,39 +508,38 @@ impl SettingsWindow {
             .size(ProgressSize::Compact)
             .into_any_element()
         });
-        let switch = Switch::new(
-            ACCESS_SELECTOR,
-            SharedString::from(format!("Allow other devices to connect to {server}")),
-            on,
-        )
-        .size(ToggleSize::Regular)
-        .label_hidden(true)
-        .disabled(state.is_none() || change.is_some() || (!on && !can_turn_on))
-        .debug_selector(ACCESS_SELECTOR)
-        .on_change(move |change, window, cx| {
-            let enabled = change.requested();
-            let _ = owner.update(cx, |settings, cx| {
-                if enabled {
-                    settings.turn_on_network_access(None, cx);
-                } else {
-                    settings.confirm_turn_off(window, cx);
-                }
+        let switch = Switch::new(ACCESS_SELECTOR, name, on)
+            .size(ToggleSize::Regular)
+            .label_hidden(true)
+            .disabled(state.is_none() || change.is_some() || (!on && !can_turn_on))
+            .debug_selector(ACCESS_SELECTOR)
+            .on_change(move |change, window, cx| {
+                let enabled = change.requested();
+                let _ = owner.update(cx, |settings, cx| {
+                    if enabled {
+                        settings.turn_on_network_access(None, cx);
+                    } else {
+                        settings.confirm_turn_off(window, cx);
+                    }
+                });
             });
-        });
         div()
             .flex()
             .flex_row()
             .items_center()
             .gap(appearance.spacing(8.0))
             .children(progress)
-            .children(chooser.filter(|_| on || gone))
+            .children(chooser.filter(|_| live_on || gone))
             .child(switch)
             .into_any_element()
     }
 
     /// Moves access to `address`, or turns it on there, keeping the chosen port.
     fn choose_address(&mut self, address: IpAddr, _: &mut Window, cx: &mut Context<Self>) {
-        let on = self.network_access_on();
+        let on = self
+            .direct_access
+            .state()
+            .is_some_and(|state| state.policy.is_some());
         if on {
             self.apply_address(address, Change::Moving, cx);
         } else {
@@ -481,6 +584,9 @@ impl SettingsWindow {
 
     /// Asks before the selected server stops listening, naming the server and what ends.
     fn confirm_turn_off(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.network_access_live() {
+            return;
+        }
         let Some(target) = self.direct_access.target.clone() else {
             return;
         };
@@ -549,6 +655,12 @@ impl SettingsWindow {
         if self.direct_access.generation != generation || self.direct_access.change.is_some() {
             return;
         }
+        // A server SpaceTerm can't reach now gets no change, even one confirmed while it could.
+        if !self.network_access_live() {
+            self.direct_access.problem = Some(AccessFailure::Unreachable);
+            cx.notify();
+            return;
+        }
         self.direct_access.change = Some(change);
         self.direct_access.problem = None;
         self.direct_access.work = Some(cx.spawn(async move |settings, cx| {
@@ -572,15 +684,17 @@ impl SettingsWindow {
         cx.notify();
     }
 
-    /// The Devices row's value: how many devices are paired.
+    /// The Devices row's value: how many devices are paired, or Unknown when the server never
+    /// listed them.
     fn paired_count(&self) -> SharedString {
         match self
             .direct_access
-            .devices
-            .as_ref()
-            .map(|devices| devices.len())
+            .shown()
+            .and_then(|shown| shown.devices)
+            .map(<[Device]>::len)
         {
-            Some(0) | None => SharedString::new_static("None"),
+            None => SharedString::new_static("Unknown"),
+            Some(0) => SharedString::new_static("None"),
             Some(count) => SharedString::from(format!("{count} paired")),
         }
     }
@@ -638,7 +752,13 @@ impl SettingsWindow {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
-        let Some(devices) = self.direct_access.devices.clone() else {
+        // While SpaceTerm can't reach the server these are the devices it last listed, dimmed.
+        let Some(devices) = self
+            .direct_access
+            .shown()
+            .and_then(|shown| shown.devices)
+            .map(<[Device]>::to_vec)
+        else {
             return Vec::new();
         };
         let now = crate::ui::direct_access::unix_now();
@@ -709,6 +829,9 @@ impl SettingsWindow {
 
     /// Opens Invite Device on the selected server.
     fn invite_device(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.network_access_live() {
+            return;
+        }
         let Some(target) = self.direct_access.target.clone() else {
             return;
         };
@@ -748,7 +871,7 @@ impl SettingsWindow {
                 if settings.direct_access.generation == generation
                     && let Ok(devices) = devices
                 {
-                    settings.direct_access.devices = Some(devices);
+                    settings.direct_access.receive_devices(devices);
                     cx.notify();
                 }
             });
@@ -762,6 +885,9 @@ impl SettingsWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !self.network_access_live() {
+            return;
+        }
         let Some(target) = self.direct_access.target.clone() else {
             return;
         };
@@ -831,6 +957,12 @@ impl SettingsWindow {
         if self.direct_access.generation != generation
             || self.direct_access.target.as_ref() != Some(target)
         {
+            return;
+        }
+        // A removal confirmed just before SpaceTerm lost the server is refused, not recorded.
+        if !self.network_access_live() {
+            self.direct_access.problem = Some(AccessFailure::Unreachable);
+            cx.notify();
             return;
         }
         let Some(registry) = crate::ui::direct_servers::installed(cx) else {

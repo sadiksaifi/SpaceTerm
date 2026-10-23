@@ -17,15 +17,16 @@ use zeroize::Zeroizing;
 use super::super::direct_routes::{UNPAIR_SELF_CONFIRM_SELECTOR, UNSAVED_CHANGES};
 use super::super::notices::NOTICE_SELECTOR;
 use super::super::server_card::MENU_SELECTOR;
-use super::super::server_list::LIST_SELECTOR;
+use super::super::server_list::{LIST_SELECTOR, ServerChoice};
 use super::super::servers::testing::connected;
 use super::super::servers::{LocalServerControl, OfferedServer, ServerConnection};
 use super::{
-    ACCESS_SELECTOR, ADDRESS_SELECTOR, DEVICE_SELECTOR, INVITE_SELECTOR, REMOVE_CANCEL_SELECTOR,
-    REMOVE_CONFIRM_SELECTOR, TURN_OFF_CONFIRM_SELECTOR,
+    ACCESS_SELECTOR, ADDRESS_SELECTOR, DEVICE_SELECTOR, DirectAccess, INVITE_SELECTOR,
+    REMOVE_CANCEL_SELECTOR, REMOVE_CONFIRM_SELECTOR, TURN_OFF_CONFIRM_SELECTOR,
 };
 use crate::appearance::Appearance;
 use crate::direct_connections::{DirectConnections, DirectRouteStatus, UnpairState};
+use crate::domain::SshDestination;
 use crate::local_server::ServerError;
 use crate::local_server::direct::{ClaimId, NetworkAddresses, NetworkPolicy, PairingClaim};
 use crate::platform::appearance::testing::RecordingAppearancePlatform;
@@ -581,6 +582,39 @@ fn turning_off_after_the_server_went_out_of_reach_is_refused(cx: &mut TestAppCon
         "nothing is sent to a server SpaceTerm can't reach"
     );
     assert!(access_on(&window, cx));
+}
+
+#[test]
+fn a_servers_last_known_access_never_shows_for_another_server() {
+    let penguin = ServerChoice::Ssh(SshDestination::new("penguin".to_owned()).expect("a host"));
+    let mut access = DirectAccess::new();
+    access.start_over(Some(ServerChoice::Local));
+    access.receive(
+        AccessState {
+            server_name: SERVER.into(),
+            policy: Some(address("192.168.1.20:9231")),
+            listener: Listener::Listening(address("192.168.1.20:9231")),
+            addresses: None,
+        },
+        Some(vec![device(3, "MacBook", None)]),
+    );
+
+    access.start_over(Some(penguin));
+    access.lose(None);
+    assert!(
+        access.shown().is_none(),
+        "penguin was never read, so nothing shows for it"
+    );
+
+    access.start_over(Some(ServerChoice::Local));
+    access.lose(Some(AccessFailure::Unreachable));
+    let shown = access.shown().expect("this computer's last-known access");
+    assert_eq!(shown.policy, Some(address("192.168.1.20:9231")));
+    assert_eq!(shown.devices.map(<[Device]>::len), Some(1));
+    assert!(
+        shown.observed_at.is_some(),
+        "it shows as last known, not live"
+    );
 }
 
 #[gpui::test]
