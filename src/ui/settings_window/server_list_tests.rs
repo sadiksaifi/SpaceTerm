@@ -577,51 +577,68 @@ fn after_disconnect_the_card_presents_the_facts_last_observed(cx: &mut TestAppCo
     assert_eq!(servers.computers.observations.load(Ordering::SeqCst), 0);
 }
 
-/// An operations owner holding one service read of penguin, as Check Now leaves it, whose
-/// approved build is `version`. Every step it is asked for does nothing.
+/// An operations owner holding at most one service read of penguin, as Check Now leaves it, and
+/// when that read was observed. Every step it is asked for does nothing.
 struct HeldRead {
-    facts: MaintenanceFacts,
-    /// When the read was observed, which a later Check Status outdates.
-    observed_at: std::time::Instant,
+    held: Mutex<Option<(MaintenanceFacts, std::time::Instant)>>,
     changes: (async_channel::Sender<()>, async_channel::Receiver<()>),
 }
 
-impl HeldRead {
-    fn approving(version: &str) -> Self {
-        Self::reporting(
-            version,
-            ServiceStatus {
-                installed: true,
-                enabled: true,
-                running: true,
-                stopped: false,
-            },
-        )
+/// What a read of penguin reports: the service in `status`, with `version` approved.
+fn read_facts(version: &str, status: ServiceStatus) -> MaintenanceFacts {
+    MaintenanceFacts {
+        server: [2; 32],
+        account: 501,
+        build: "spaceterm-development".to_owned(),
+        status,
+        startup: ServiceStartup::AtLogin,
+        approved: Some(RemoteBuild {
+            version: version.to_owned(),
+            commit: "a".repeat(40),
+            digest: "a".repeat(64),
+        }),
+        activation: None,
     }
+}
 
-    /// A read that found the service in `status`, such as stopped from here.
-    fn reporting(version: &str, status: ServiceStatus) -> Self {
+const RUNNING_SERVICE: ServiceStatus = ServiceStatus {
+    installed: true,
+    enabled: true,
+    running: true,
+    stopped: false,
+};
+
+const STOPPED_SERVICE: ServiceStatus = ServiceStatus {
+    installed: true,
+    enabled: true,
+    running: false,
+    stopped: true,
+};
+
+impl HeldRead {
+    /// An owner that has read nothing yet.
+    fn unread() -> Self {
         Self {
-            facts: MaintenanceFacts {
-                server: [2; 32],
-                account: 501,
-                build: "spaceterm-development".to_owned(),
-                status,
-                startup: ServiceStartup::AtLogin,
-                approved: Some(RemoteBuild {
-                    version: version.to_owned(),
-                    commit: "a".repeat(40),
-                    digest: "a".repeat(64),
-                }),
-                activation: None,
-            },
-            observed_at: std::time::Instant::now(),
+            held: Mutex::new(None),
             changes: async_channel::unbounded(),
         }
     }
 
-    fn read(&self) -> RemoteOperationState {
-        RemoteOperationState::Read(Box::new(self.facts.clone()))
+    fn approving(version: &str) -> Self {
+        Self::reporting(version, RUNNING_SERVICE)
+    }
+
+    /// An owner whose read, observed now, found the service in `status`.
+    fn reporting(version: &str, status: ServiceStatus) -> Self {
+        let owner = Self::unread();
+        owner.report(version, status);
+        owner
+    }
+
+    /// A read observed now, which replaces the one held and tells the surface.
+    fn report(&self, version: &str, status: ServiceStatus) {
+        *self.held.lock().unwrap() = Some((read_facts(version, status), std::time::Instant::now()));
+        let _ = self.changes.0.try_send(());
     }
 }
 
@@ -631,20 +648,26 @@ impl RemoteServerOperations for HeldRead {
     }
 
     fn entries(&self) -> Vec<RemoteOperationEntry> {
-        vec![RemoteOperationEntry {
-            destination: destination("penguin"),
-            removed: false,
-            operation: None,
-            state: self.read(),
-            observed_at: Some(self.observed_at),
-        }]
+        self.held
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(facts, observed_at)| RemoteOperationEntry {
+                destination: destination("penguin"),
+                removed: false,
+                operation: None,
+                state: RemoteOperationState::Read(Box::new(facts.clone())),
+                observed_at: Some(*observed_at),
+            })
+            .collect()
     }
 
     fn state(&self, server: &SshDestination) -> RemoteOperationState {
-        if *server == destination("penguin") {
-            self.read()
-        } else {
-            RemoteOperationState::Unread
+        match &*self.held.lock().unwrap() {
+            Some((facts, _)) if *server == destination("penguin") => {
+                RemoteOperationState::Read(Box::new(facts.clone()))
+            }
+            _ => RemoteOperationState::Unread,
         }
     }
 
@@ -762,14 +785,8 @@ fn the_picker_tells_apart_servers_that_share_a_name(cx: &mut TestAppContext) {
 /// later, finds it running. The later report is what the card says and what SpaceTerm keeps.
 #[gpui::test]
 fn a_later_check_status_replaces_an_earlier_read(cx: &mut TestAppContext) {
-    let stopped = ServiceStatus {
-        installed: true,
-        enabled: true,
-        running: false,
-        stopped: true,
-    };
     let operations: Arc<dyn RemoteServerOperations> =
-        Arc::new(HeldRead::reporting("1.3.0", stopped));
+        Arc::new(HeldRead::reporting("1.3.0", STOPPED_SERVICE));
     let servers = open_servers_saved(true, &["penguin"], false, Some(operations), None, cx);
     select("penguin", servers.cx);
     assert!(
@@ -806,6 +823,53 @@ fn a_later_check_status_replaces_an_earlier_read(cx: &mut TestAppContext) {
             Some("1.4.0".to_owned())
         )),
         "SpaceTerm keeps the later report"
+    );
+}
+
+/// Check Status found the server running. A service read asked for later finds it stopped, as
+/// after Stop Server from another device. The later read is what the card says and keeps.
+#[gpui::test]
+fn a_later_read_replaces_an_earlier_check_status(cx: &mut TestAppContext) {
+    let owner = Arc::new(HeldRead::unread());
+    let operations: Arc<dyn RemoteServerOperations> = owner.clone();
+    let servers = open_servers_saved(true, &["penguin"], false, Some(operations), None, cx);
+    select("penguin", servers.cx);
+    click("settings-ssh-server-check", servers.cx);
+    let connections = servers.connections.clone();
+    settle(servers.cx, |_| {
+        matches!(
+            connections.status(&destination("penguin")),
+            RemoteConnectionStatus::Checked { .. }
+        )
+    });
+    servers.cx.run_until_parked();
+    assert!(
+        A11yTree::read(servers.cx)
+            .find("penguin: Running \u{b7} not connected")
+            .is_some(),
+        "Check Status says the server runs"
+    );
+
+    owner.report("1.3.0", STOPPED_SERVICE);
+    servers.cx.run_until_parked();
+
+    assert!(
+        A11yTree::read(servers.cx)
+            .find("penguin: Stopped")
+            .is_some(),
+        "the later read says the server is stopped"
+    );
+    assert!(version_reads("1.3.0", servers.cx));
+    let retained = servers.cx.update(|_, cx| {
+        super::super::server_selection::facts(&ServerChoice::Ssh(destination("penguin")).key(), cx)
+    });
+    assert_eq!(
+        retained.map(|facts| (facts.status, facts.version)),
+        Some((
+            crate::server_context::ObservedServerStatus::Stopped,
+            Some("1.3.0".to_owned())
+        )),
+        "SpaceTerm keeps the later read"
     );
 }
 
