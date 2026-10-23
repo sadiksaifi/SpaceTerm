@@ -49,6 +49,10 @@ pub(crate) struct StartupDependencies<A: SshProcessAdapter> {
 }
 
 impl<A: SshProcessAdapter> StartupDependencies<A> {
+    pub(crate) fn server_context_paths(&self) -> Arc<AppPaths> {
+        Arc::clone(&self.paths)
+    }
+
     pub(crate) fn settings_storage(&self) -> Arc<dyn crate::settings::storage::SettingsStorage> {
         Arc::new(crate::settings::storage::ConfigSettingsStorage::new(
             Arc::clone(&self.paths),
@@ -1274,6 +1278,8 @@ pub(crate) struct ApplicationCapabilities {
     /// The desktop's direct network connections, installed by its first Workspace Window.
     /// `None` offers no direct network connections.
     pub(crate) direct_servers: Option<crate::direct_connections::DirectConnections>,
+    /// Private presentation context, independent of saved connection authority and Settings.
+    pub(crate) server_context_paths: Option<Arc<AppPaths>>,
 }
 
 /// The startup-supplied file opener available to explicit local file selections.
@@ -1505,6 +1511,9 @@ pub(crate) fn initialize_application(
     #[cfg(feature = "developer-tools")]
     crate::ui::developer_workbench::configure_window_chrome(Rc::clone(&host.window_movement), cx);
     crate::ui::about_window::configure_window_chrome(Rc::clone(&host.window_movement), cx);
+    if let Some(paths) = &host.adapters.server_context_paths {
+        crate::ui::settings_window::configure_server_context(Arc::clone(paths), cx);
+    }
     if let (Some(access), Some(guide)) =
         (&host.adapters.permission_access, &host.adapters.setup_guide)
     {
@@ -2067,6 +2076,7 @@ mod runtime_tests {
                 local_server: crate::ui::launch_testing::presenting(session_factory),
                 ssh_servers: None,
                 direct_servers: None,
+                server_context_paths: None,
             },
             services: Some(services),
             window_movement: movement,

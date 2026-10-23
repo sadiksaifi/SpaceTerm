@@ -239,6 +239,7 @@ fn compose(
         super::launch_host::ssh_server_artifacts(),
     );
     let direct_servers = startup.direct_servers();
+    let server_context_paths = startup.server_context_paths();
     // Repository Status reads run on threads that the deterministic test executor rejects.
     let repository_status = (!cfg!(test)).then(|| {
         super::repository_status_host::repository_status_adapters(
@@ -297,6 +298,7 @@ fn compose(
             local_server: crate::ui::LocalServerAdapters::account(),
             ssh_servers: Some(ssh_servers),
             direct_servers: Some(direct_servers),
+            server_context_paths: Some(server_context_paths),
         },
         services: None,
         window_movement: Rc::new(super::linux_window_drag::LinuxWindowMovementFactory),
