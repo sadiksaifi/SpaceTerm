@@ -433,10 +433,8 @@ impl SettingsWindow {
                     RemoteOperationState::Working { kind, .. } => Some(kind.as_ref()),
                     _ => None,
                 });
-                let service = entries.iter().find_map(|state| match state {
-                    RemoteOperationState::Read(facts) => Some(facts.status),
-                    _ => None,
-                });
+                // A read Check Status has since outdated no longer reports the service.
+                let service = self.current_ssh_read(destination).map(|facts| facts.status);
                 let retained = self.retained_status.get(&choice.key()).copied();
                 let state = ssh_state(&status, working, service, retained);
                 // An operation whose result SpaceTerm couldn't confirm is what the person waits
@@ -1772,18 +1770,8 @@ impl SettingsWindow {
                 .filter(|status| status.installed)
                 .map(|status| status.enabled),
             ServerChoice::Ssh(destination) => self
-                .ssh_maintenance
-                .as_ref()
-                .and_then(|rows| {
-                    rows.operations
-                        .entries()
-                        .into_iter()
-                        .find(|entry| entry.destination == destination && !entry.removed)
-                })
-                .and_then(|entry| match entry.state {
-                    RemoteOperationState::Read(facts) => Some(facts.status.enabled),
-                    _ => None,
-                })
+                .current_ssh_read(&destination)
+                .map(|facts| facts.status.enabled)
                 .or_else(|| {
                     self.ssh_servers
                         .as_ref()

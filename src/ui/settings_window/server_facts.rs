@@ -21,8 +21,10 @@ use super::server_list::ServerChoice;
 use super::server_selection;
 use super::servers::{LocalServerStatus, ServicePhase};
 use crate::direct_connections::{DirectRouteStatus, RefusalReason};
+use crate::domain::SshDestination;
 use crate::local_server::ServerError;
 use crate::local_server::service::ServiceStatus;
+use crate::local_server::service::maintenance::MaintenanceFacts;
 use crate::server_context::{LastKnownFacts, ObservedServerStatus};
 use crate::ssh::server_connection::{
     IncompatibilityKind, RemoteConnectionStatus, ServerAvailability, SshServerFacts,
@@ -238,16 +240,7 @@ impl SettingsWindow {
                     .map_or(RemoteConnectionStatus::Inactive, |rows| {
                         rows.connections.status(destination)
                     });
-                let read = self.ssh_maintenance.as_ref().and_then(|rows| {
-                    rows.operations
-                        .entries()
-                        .into_iter()
-                        .filter(|entry| entry.destination == *destination && !entry.removed)
-                        .find_map(|entry| match entry.state {
-                            RemoteOperationState::Read(facts) => Some(facts),
-                            _ => None,
-                        })
-                });
+                let read = self.current_ssh_read(destination);
                 let reported = connection_facts(&connection);
                 let connected = matches!(connection, RemoteConnectionStatus::Connected { .. });
                 let checked_at = match &connection {
@@ -306,6 +299,38 @@ impl SettingsWindow {
                 running_sessions,
                 ..Observation::default()
             },
+        }
+    }
+
+    /// The service read of `destination` while it is the latest word on the service. A Check
+    /// Status observed after it outdates it, as does any Check Status when the read carries no
+    /// time. An unresolved original keeps its own record and steps regardless.
+    pub(super) fn current_ssh_read(
+        &self,
+        destination: &SshDestination,
+    ) -> Option<Box<MaintenanceFacts>> {
+        let (facts, read_at) = self
+            .ssh_maintenance
+            .as_ref()?
+            .operations
+            .entries()
+            .into_iter()
+            .filter(|entry| entry.destination == *destination && !entry.removed)
+            .find_map(|entry| match entry.state {
+                RemoteOperationState::Read(facts) => Some((facts, entry.observed_at)),
+                _ => None,
+            })?;
+        let checked_at =
+            self.ssh_servers
+                .as_ref()
+                .and_then(|rows| match rows.connections.status(destination) {
+                    RemoteConnectionStatus::Checked { observed_at, .. } => Some(observed_at),
+                    _ => None,
+                });
+        match (read_at, checked_at) {
+            (_, None) => Some(facts),
+            (Some(read), Some(checked)) if read > checked => Some(facts),
+            _ => None,
         }
     }
 
