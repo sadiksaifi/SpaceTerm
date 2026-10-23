@@ -16,6 +16,9 @@ use crate::{
 const FILE: &str = "server-context.json";
 const MAX_BYTES: usize = 512 * 1024;
 const MAX_SERVERS: usize = 257;
+const MAX_DEVICES: usize = 256;
+const MAX_ADDRESSES: usize = 256;
+const MAX_CONNECTION_TIME: u64 = 253_402_300_799;
 
 /// Identifies a picker entry without duplicating a saved connection or granting authority.
 #[derive(Clone, Default, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
@@ -101,6 +104,73 @@ pub(crate) struct PairedDevicesFacts {
     pub(crate) devices: Vec<PairedDeviceFacts>,
 }
 
+fn valid_display_name(value: &str, max_bytes: usize, max_chars: usize) -> bool {
+    !value.trim().is_empty()
+        && value.len() <= max_bytes
+        && spaceterm_server::pane::metadata::sanitize(value, max_chars) == value
+}
+
+impl NetworkAccessFacts {
+    fn validate(&self) -> Result<(), ContextError> {
+        if !valid_display_name(&self.server_name, 512, 512)
+            || self.policy.is_some_and(|address| {
+                spaceterm_server::direct::NetworkPolicy::new(address).is_err()
+            })
+            || !match (self.policy, self.listener) {
+                (None, NetworkListenerFacts::Off) => true,
+                (Some(policy), NetworkListenerFacts::Listening(address)) => policy == address,
+                (Some(_), NetworkListenerFacts::AddressGone | NetworkListenerFacts::Failed) => true,
+                _ => false,
+            }
+        {
+            return Err(ContextError::Malformed);
+        }
+        if let Some(addresses) = &self.addresses {
+            let mut unique = BTreeSet::new();
+            if addresses.available.len() > MAX_ADDRESSES
+                || addresses.available.iter().any(|address| {
+                    address.is_unspecified() || address.is_multicast() || !unique.insert(*address)
+                })
+                || addresses
+                    .suggested
+                    .is_some_and(|address| !unique.contains(&address))
+            {
+                return Err(ContextError::Malformed);
+            }
+        }
+        Ok(())
+    }
+}
+
+impl PairedDevicesFacts {
+    fn validate(&self) -> Result<(), ContextError> {
+        if self.devices.len() > MAX_DEVICES {
+            return Err(ContextError::Malformed);
+        }
+        let mut pairings = BTreeSet::new();
+        for device in &self.devices {
+            if device.pairing == [0; 32]
+                || !pairings.insert(device.pairing)
+                || !valid_display_name(&device.name, 192, 48)
+                || device.fingerprint.len() != 71
+                || !device.fingerprint.bytes().enumerate().all(|(index, byte)| {
+                    if index % 9 == 8 {
+                        byte == b' '
+                    } else {
+                        byte.is_ascii_digit() || (b'A'..=b'F').contains(&byte)
+                    }
+                })
+                || device
+                    .last_connected_at
+                    .is_some_and(|time| time > MAX_CONNECTION_TIME)
+            {
+                return Err(ContextError::Malformed);
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct LastKnownFacts {
@@ -142,7 +212,44 @@ impl LastKnownFacts {
         {
             return Err(ContextError::Malformed);
         }
+        if let Some(network) = &self.network_access {
+            network.validate()?;
+        }
+        if let Some(devices) = &self.paired_devices {
+            devices.validate()?;
+        }
         Ok(())
+    }
+
+    /// Merges independent observations without changing either input. Equal timestamps prefer
+    /// the incoming value; absent network/device readings never erase a successful observation.
+    pub(crate) fn merged(&self, incoming: &Self) -> Self {
+        let mut merged = if incoming.observed_at >= self.observed_at {
+            incoming.clone()
+        } else {
+            self.clone()
+        };
+        merged.network_access = incoming
+            .network_access
+            .as_ref()
+            .filter(|next| {
+                self.network_access
+                    .as_ref()
+                    .is_none_or(|previous| next.observed_at >= previous.observed_at)
+            })
+            .or(self.network_access.as_ref())
+            .cloned();
+        merged.paired_devices = incoming
+            .paired_devices
+            .as_ref()
+            .filter(|next| {
+                self.paired_devices
+                    .as_ref()
+                    .is_none_or(|previous| next.observed_at >= previous.observed_at)
+            })
+            .or(self.paired_devices.as_ref())
+            .cloned();
+        merged
     }
 }
 
@@ -192,6 +299,13 @@ impl Document {
             if !keys.insert(&record.key) {
                 return Err(ContextError::Malformed);
             }
+        }
+        if serde_json::to_vec(self)
+            .map_err(|_| ContextError::Malformed)?
+            .len()
+            > MAX_BYTES
+        {
+            return Err(ContextError::Malformed);
         }
         Ok(())
     }
@@ -261,7 +375,8 @@ impl ServerContext {
         })
     }
 
-    /// Only the connection/status owner records an observation. Older arrivals cannot replace it.
+    /// The connection/status owner records observations. General, network and device facts each
+    /// advance on their own timestamp; a missing network or device reading preserves known facts.
     pub(crate) fn remember(
         &mut self,
         key: ServerKey,
@@ -271,9 +386,7 @@ impl ServerContext {
         facts.validate()?;
         self.update(|document| {
             if let Some(record) = document.facts.iter_mut().find(|record| record.key == key) {
-                if facts.observed_at >= record.facts.observed_at {
-                    record.facts = facts.clone();
-                }
+                record.facts = record.facts.merged(&facts);
             } else {
                 document.facts.push(Record {
                     key: key.clone(),
@@ -294,7 +407,10 @@ impl ServerContext {
         self.paths
             .filesystem()
             .read_private_file(&directory, OsStr::new(FILE), MAX_BYTES)
-            .map_err(|_| ContextError::Unavailable)
+            .map_err(|error| match error {
+                SecureFilesystemError::TooLarge => ContextError::Malformed,
+                _ => ContextError::Unavailable,
+            })
     }
 
     fn decode(snapshot: Option<&PrivateFileSnapshot>) -> Result<Document, ContextError> {
@@ -311,62 +427,68 @@ impl ServerContext {
     }
 
     fn update(&mut self, change: impl Fn(&mut Document)) -> Result<(), ContextError> {
-        // Presentation follows the person's choice even if its retention fails.
         let mut displayed = self.document.clone();
         change(&mut displayed);
         displayed.validate()?;
-        self.document = displayed;
-        for _ in 0..8 {
-            let snapshot = self.snapshot()?;
-            let mut document = Self::decode(snapshot.as_ref())?;
-            let previous = document.clone();
-            change(&mut document);
-            document.validate()?;
-            if document == previous {
+        let retained = (|| {
+            for _ in 0..8 {
+                let snapshot = self.snapshot()?;
+                let mut document = Self::decode(snapshot.as_ref())?;
+                let previous = document.clone();
+                change(&mut document);
+                document.validate()?;
+                displayed = document.clone();
+                if document == previous {
+                    return Ok((document, SecureCommitOutcome::Committed));
+                }
+                let bytes = serde_json::to_vec(&document).map_err(|_| ContextError::Unavailable)?;
+                let directory = self
+                    .paths
+                    .ensure_secure_root(AppDirectoryRoot::Data)
+                    .map_err(|_| ContextError::Unavailable)?;
+                let mut nonce = [0; 16];
+                getrandom::fill(&mut nonce).map_err(|_| ContextError::Unavailable)?;
+                let prepared = match self.paths.filesystem().prepare_private_file(
+                    &directory,
+                    OsStr::new(FILE),
+                    &bytes,
+                    nonce,
+                ) {
+                    Ok(prepared) => prepared,
+                    Err(SecureFilesystemError::AlreadyExists) => continue,
+                    Err(_) => return Err(ContextError::Unavailable),
+                };
+                let result = self
+                    .paths
+                    .filesystem()
+                    .commit_private_file(
+                        prepared,
+                        snapshot.as_ref().map(|snapshot| &snapshot.identity),
+                    )
+                    .map_err(|_| ContextError::Unavailable)?;
+                if result.outcome != SecureCommitOutcome::Conflict {
+                    return Ok((document, result.outcome));
+                }
+            }
+            Err(ContextError::Unavailable)
+        })();
+        match retained {
+            Ok((document, durability)) => {
                 self.document = document;
-                return Ok(());
-            }
-            let bytes = serde_json::to_vec(&document).map_err(|_| ContextError::Unavailable)?;
-            if bytes.len() > MAX_BYTES {
-                return Err(ContextError::Malformed);
-            }
-            let directory = self
-                .paths
-                .ensure_secure_root(AppDirectoryRoot::Data)
-                .map_err(|_| ContextError::Unavailable)?;
-            let mut nonce = [0; 16];
-            getrandom::fill(&mut nonce).map_err(|_| ContextError::Unavailable)?;
-            let prepared = match self.paths.filesystem().prepare_private_file(
-                &directory,
-                OsStr::new(FILE),
-                &bytes,
-                nonce,
-            ) {
-                Ok(prepared) => prepared,
-                Err(SecureFilesystemError::AlreadyExists) => continue,
-                Err(_) => return Err(ContextError::Unavailable),
-            };
-            let result = self
-                .paths
-                .filesystem()
-                .commit_private_file(
-                    prepared,
-                    snapshot.as_ref().map(|snapshot| &snapshot.identity),
-                )
-                .map_err(|_| ContextError::Unavailable)?;
-            match result.outcome {
-                SecureCommitOutcome::Conflict => continue,
-                SecureCommitOutcome::Committed => {
-                    self.document = document;
-                    return Ok(());
-                }
-                SecureCommitOutcome::CommittedButUnsynced => {
-                    self.document = document;
-                    return Err(ContextError::DurabilityUncertain);
+                if durability == SecureCommitOutcome::CommittedButUnsynced {
+                    Err(ContextError::DurabilityUncertain)
+                } else {
+                    Ok(())
                 }
             }
+            Err(ContextError::Unavailable) => {
+                // Storage failure still applies the person's validated presentation change.
+                // Malformed input or retained data applies no part of its candidate.
+                self.document = displayed;
+                Err(ContextError::Unavailable)
+            }
+            Err(error) => Err(error),
         }
-        Err(ContextError::Unavailable)
     }
 }
 

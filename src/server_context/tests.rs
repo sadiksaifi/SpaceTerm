@@ -31,7 +31,7 @@ fn facts(at: u64, status: ObservedServerStatus) -> LastKnownFacts {
 }
 
 fn network(at: u64) -> NetworkAccessFacts {
-    let address = "192.0.2.10:4433".parse().unwrap();
+    let address = "192.0.2.10:4433".parse::<SocketAddr>().unwrap();
     NetworkAccessFacts {
         observed_at: at,
         server_name: "Penguin".into(),
@@ -333,7 +333,8 @@ fn malformed_device_observations_preserve_memory_and_exact_retained_bytes() {
 #[test]
 fn oversized_device_facts_reject_the_whole_candidate_before_changing_memory_or_disk() {
     let (paths, filesystem) = storage();
-    let mut context = ServerContext::load(paths).unwrap();
+    let mut context = ServerContext::load(paths.clone()).unwrap();
+    let mut stale_window = ServerContext::load(paths).unwrap();
     let devices: Vec<_> = (0..256)
         .map(|index| PairedDeviceFacts {
             name: "\u{10400}".repeat(48),
@@ -350,16 +351,14 @@ fn oversized_device_facts_reject_the_whole_candidate_before_changing_memory_or_d
                 (key, facts)
             })
             .collect();
-        match context.remember(
-            key.clone(),
-            LastKnownFacts {
-                paired_devices: Some(PairedDevicesFacts {
-                    observed_at: 30,
-                    devices: devices.clone(),
-                }),
-                ..facts(20, ObservedServerStatus::Running)
-            },
-        ) {
+        let incoming = LastKnownFacts {
+            paired_devices: Some(PairedDevicesFacts {
+                observed_at: 30,
+                devices: devices.clone(),
+            }),
+            ..facts(20, ObservedServerStatus::Running)
+        };
+        match context.remember(key.clone(), incoming.clone()) {
             Ok(()) => {}
             Err(ContextError::Malformed) => {
                 assert!(context.facts(&key).is_none());
@@ -367,12 +366,60 @@ fn oversized_device_facts_reject_the_whole_candidate_before_changing_memory_or_d
                 for (key, expected) in previous {
                     assert_eq!(context.facts(&key), expected.as_ref());
                 }
+                // This candidate fits the stale window alone, but not the authoritative file.
+                assert_eq!(
+                    stale_window.remember(key.clone(), incoming),
+                    Err(ContextError::Malformed)
+                );
+                assert!(stale_window.facts(&key).is_none());
+                assert_eq!(filesystem.files.lock().unwrap().values, before);
                 return;
             }
             Err(other) => panic!("unexpected retention error: {other:?}"),
         }
     }
     panic!("ten full 256-device observations must exceed the 512 KiB context bound");
+}
+
+#[test]
+fn storage_unavailability_applies_only_the_validated_merged_display_facts_in_memory() {
+    let (paths, filesystem) = storage();
+    let key = ServerKey::Ssh("penguin".into());
+    let mut context = ServerContext::load(paths.clone()).unwrap();
+    let initial = LastKnownFacts {
+        network_access: Some(network(30)),
+        paired_devices: Some(PairedDevicesFacts {
+            observed_at: 40,
+            devices: vec![device(1)],
+        }),
+        ..facts(100, ObservedServerStatus::Running)
+    };
+    context.remember(key.clone(), initial.clone()).unwrap();
+    let before = filesystem.files.lock().unwrap().values.clone();
+    filesystem.files.lock().unwrap().read_failure = Some(SecureFilesystemError::Unavailable);
+    let incoming = LastKnownFacts {
+        network_access: Some(NetworkAccessFacts {
+            observed_at: 60,
+            policy: None,
+            listener: NetworkListenerFacts::Off,
+            ..network(30)
+        }),
+        ..Default::default()
+    };
+    assert_eq!(
+        context.remember(key.clone(), incoming.clone()),
+        Err(ContextError::Unavailable)
+    );
+    let actual = context.facts(&key).unwrap();
+    assert_eq!(actual.status, ObservedServerStatus::Running);
+    assert_eq!(actual.network_access, incoming.network_access);
+    assert_eq!(actual.paired_devices, initial.paired_devices);
+    assert_eq!(filesystem.files.lock().unwrap().values, before);
+    filesystem.files.lock().unwrap().read_failure = None;
+    assert_eq!(
+        ServerContext::load(paths).unwrap().facts(&key),
+        Some(&initial)
+    );
 }
 
 #[test]
