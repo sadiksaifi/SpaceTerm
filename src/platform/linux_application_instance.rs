@@ -53,7 +53,7 @@ impl InstanceLaunch {
 }
 
 /// A bus outage leaves source builds usable. Only a confirmed forwarded activation exits.
-#[cfg(test)]
+#[cfg(all(test, feature = "native-tests"))]
 pub(super) fn forward_if_secondary(
     bus: &SessionBus,
     identity: ApplicationIdentity,
