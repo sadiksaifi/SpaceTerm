@@ -249,6 +249,7 @@ impl SettingsWindow {
                         })
                 });
                 let reported = connection_facts(&connection);
+                let connected = matches!(connection, RemoteConnectionStatus::Connected { .. });
                 let checked_at = match &connection {
                     RemoteConnectionStatus::Checked { at, .. } => at
                         .duration_since(std::time::UNIX_EPOCH)
@@ -267,18 +268,25 @@ impl SettingsWindow {
                 };
                 // Only Check Status says when it looked; a maintenance read or a connection reports
                 // the present.
-                let observed_at = (read.is_none()
-                    && !matches!(connection, RemoteConnectionStatus::Connected { .. }))
-                .then_some(checked_at)
-                .flatten();
+                let observed_at = (read.is_none() && !connected)
+                    .then_some(checked_at)
+                    .flatten();
+                let approved = read
+                    .as_ref()
+                    .and_then(|facts| facts.approved.as_ref())
+                    .map(|approved| approved.version.clone());
+                let reported_version = reported.and_then(|facts| facts.version.clone());
+                // A live connection reports the version the server runs now. Without one, a
+                // service read's approved build is the latest word, ahead of Check Status.
+                let version = if connected {
+                    reported_version.or(approved)
+                } else {
+                    approved.or(reported_version)
+                };
                 Observation {
                     observed_at,
                     status,
-                    version: read
-                        .as_ref()
-                        .and_then(|facts| facts.approved.as_ref())
-                        .map(|approved| approved.version.clone())
-                        .or_else(|| reported.and_then(|facts| facts.version.clone())),
+                    version,
                     operating_system: reported
                         .map(|facts| operating_system_name(&facts.platform.0).to_string()),
                     starts_automatically: read
