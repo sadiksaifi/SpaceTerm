@@ -1443,7 +1443,10 @@ impl TerminalPane {
         } else if let Some(command) = command {
             (command, None)
         } else {
-            (normalized_pane_title("", &self.fallback_title), None)
+            (
+                normalized_pane_title(&metadata.shell_name, &self.fallback_title),
+                None,
+            )
         };
         PaneCaptionFacts {
             origin: PaneOrigin::from_context(&metadata.context),

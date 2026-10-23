@@ -4983,7 +4983,7 @@ mod tests {
     }
 
     /// The Tab's activity prefers an explicit Terminal title, then the running command, then the
-    /// fallback title, and is followed by the Current Directory leaf.
+    /// host shell name, and is followed by the Current Directory leaf.
     #[gpui::test]
     fn tab_title_should_present_the_terminal_title_or_running_command_then_the_directory_leaf(
         cx: &mut TestAppContext,
@@ -4997,6 +4997,7 @@ mod tests {
         };
 
         report_metadata(&records, 1, 1, |metadata| {
+            metadata.shell_name = Arc::from("fish");
             metadata.directory.path = Arc::from("/tmp/api");
             metadata.command = Some(CommandMetadata {
                 line: Arc::from("cargo test"),
@@ -5007,6 +5008,7 @@ mod tests {
         assert_eq!(tab_title(cx).as_ref(), "cargo test · api");
 
         report_metadata(&records, 1, 2, |metadata| {
+            metadata.shell_name = Arc::from("fish");
             metadata.directory.path = Arc::from("/tmp/api");
             metadata.title.value = Arc::from("✳ Opaque ⠋ title");
             metadata.title.provenance = TitleProvenance::TerminalControl;
@@ -5020,10 +5022,11 @@ mod tests {
         assert_eq!(tab_title(cx).as_ref(), "Opaque ⠋ title · api");
 
         report_metadata(&records, 1, 3, |metadata| {
+            metadata.shell_name = Arc::from("fish");
             metadata.directory.path = Arc::from("/tmp/api");
         });
         cx.run_until_parked();
-        assert_eq!(tab_title(cx).as_ref(), "Terminal · api");
+        assert_eq!(tab_title(cx).as_ref(), "fish · api");
     }
 
     #[gpui::test]

@@ -1781,6 +1781,19 @@ fn a_tab_this_client_never_opened_names_what_its_server_shell_runs(cx: &mut Test
         ("cargo build".to_owned(), "web".to_owned()),
         "a metadata-only publication reaches the hidden Tab"
     );
+
+    let mut completed = running(5, "cargo build", "/srv/web");
+    completed.command.as_mut().unwrap().state =
+        spaceterm_server::pane::metadata::CommandState::Finished {
+            exit_status: Some(0),
+            duration_ms: 100,
+        };
+    harness
+        .edits
+        .set_inventory(with_hidden_tab(4, Some([41; 32]), Some(completed)));
+    sync(&harness, cx);
+    assert_eq!(tab_identities(cx)[1], ("sh".to_owned(), "web".to_owned()));
+    assert_eq!(harness.panes.pane(HIDDEN_PANE).selections(), 0);
 }
 
 #[gpui::test]
