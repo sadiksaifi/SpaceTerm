@@ -474,13 +474,32 @@ fn a_server_spaceterm_cant_reach_dims_network_access_and_says_what_to_do(cx: &mu
 
 #[gpui::test]
 fn a_paired_server_offers_no_network_access(cx: &mut TestAppContext) {
+    use super::super::server_card::AUTO_START_SELECTOR;
+    use super::super::server_list::tests::{Computers, SavedConnections};
+
     cx.executor().allow_parking();
+    // An SSH registry makes Start automatically a row Servers offers, so its absence below comes
+    // from the paired connection alone.
+    cx.update(|cx| {
+        crate::ui::ssh_servers::install(
+            crate::ssh::server_connection::SshServerConnections::new(
+                Arc::new(Computers::default()),
+                Arc::new(SavedConnections::default()),
+            ),
+            None,
+            cx,
+        );
+    });
     let access = ScriptedAccess::listening();
     let (direct, _) = crate::direct_connections::tests::offline("studio");
     let (_, cx) = open_servers_with(&access, Some(direct), cx);
     assert!(
         open(ACCESS_SELECTOR, cx),
         "this computer's server offers it"
+    );
+    assert!(
+        open(AUTO_START_SELECTOR, cx),
+        "this computer's server offers Start automatically"
     );
 
     select_paired_server(cx);
@@ -490,6 +509,10 @@ fn a_paired_server_offers_no_network_access(cx: &mut TestAppContext) {
         "a paired connection carries no authority over its server's network"
     );
     assert!(!open(INVITE_SELECTOR, cx));
+    assert!(
+        !open(AUTO_START_SELECTOR, cx),
+        "a paired connection carries no authority over its server's services"
+    );
 }
 
 #[gpui::test]
