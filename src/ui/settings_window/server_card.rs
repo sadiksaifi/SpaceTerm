@@ -1062,13 +1062,29 @@ struct VersionView {
 enum VersionStep {
     Local(UpdateAction),
     Remote(RemoteAction),
+    /// Check Now for a server with no update journey here, such as a paired server or a
+    /// Development run: SpaceTerm checks for its own update and reads the server's facts again.
+    Observe,
 }
+
+/// Check Now in progress for one server. It runs until SpaceTerm's own check settles and the
+/// server it was asked for has been read again.
+pub(super) struct VersionCheck {
+    target: ServerChoice,
+    _check: gpui::Task<()>,
+}
+
+/// The selector of Check Now where the server has no update journey of its own here.
+pub(super) const VERSION_CHECK_SELECTOR: &str = "settings-server-version-check";
+/// How often Check Now looks again at work it waits for.
+const CHECK_POLL: std::time::Duration = std::time::Duration::from_millis(200);
 
 impl VersionStep {
     const fn label(self) -> &'static str {
         match self {
             Self::Local(action) => action.label(),
             Self::Remote(action) => action.label(),
+            Self::Observe => "Check Now",
         }
     }
 
@@ -1076,6 +1092,7 @@ impl VersionStep {
         match self {
             Self::Local(action) => action.selector(),
             Self::Remote(action) => action.selector(),
+            Self::Observe => VERSION_CHECK_SELECTOR,
         }
     }
 
@@ -1091,6 +1108,20 @@ impl VersionStep {
 
 impl SettingsWindow {
     fn version_view(&self, cx: &App) -> VersionView {
+        let mut view = self.journey_view(cx);
+        // Check Now reads as checking from SpaceTerm's own check to the server's read after it.
+        if self
+            .version_check
+            .as_ref()
+            .is_some_and(|check| Some(&check.target) == self.selected_server().as_ref())
+        {
+            view.working = Some(SharedString::new_static("Checking\u{2026}"));
+        }
+        view
+    }
+
+    /// The Version row as the selected server's update journey presents it.
+    fn journey_view(&self, cx: &App) -> VersionView {
         let observed = self
             .selected_facts(cx)
             .and_then(|facts| facts.version)
@@ -1110,12 +1141,14 @@ impl SettingsWindow {
             ServerChoice::Ssh(destination) => {
                 self.ssh_version_view(&destination, observed, needs_update)
             }
+            // A paired connection carries no authority to update the server, so Check Now only
+            // checks SpaceTerm and reads the server's facts again over that connection.
             ServerChoice::Direct(_) => VersionView {
                 value: observed,
                 badge: needs_update.then(|| SharedString::new_static("Needs update")),
                 description: SharedString::new_static("Update it on its own computer or over SSH."),
                 working: None,
-                actions: Vec::new(),
+                actions: vec![VersionStep::Observe],
             },
         }
     }
@@ -1133,7 +1166,7 @@ impl SettingsWindow {
                     "This run builds its own server, so it has no update.",
                 ),
                 working: None,
-                actions: Vec::new(),
+                actions: vec![VersionStep::Observe],
             };
         };
         let presentation = row.presentation();
@@ -1303,25 +1336,116 @@ impl SettingsWindow {
         self.version_view(cx).description
     }
 
-    /// Checks for a newer SpaceTerm, which brings each server's build, then reads the server again.
+    /// Checks for a newer SpaceTerm, which brings each server's build, then reads the server it
+    /// was asked for again once that check settles. Reading connects to, starts and installs
+    /// nothing: this account's service and an SSH account's route are read as Check Status reads
+    /// them, and a paired server only over a connection SpaceTerm already has.
     fn check_versions(&mut self, cx: &mut Context<Self>) {
-        if let Some(service) = cx.try_global::<crate::updates::UpdateService>() {
-            let updates = service.0.clone();
+        let Some(target) = self.selected_server() else {
+            return;
+        };
+        if self
+            .version_check
+            .as_ref()
+            .is_some_and(|check| check.target == target)
+        {
+            return;
+        }
+        let updates = cx
+            .try_global::<crate::updates::UpdateService>()
+            .map(|service| service.0.clone());
+        if let Some(updates) = &updates {
             updates.update(cx, |updates, cx| updates.check(true, cx));
         }
-        match self.selected_server() {
-            Some(ServerChoice::Local) => self.request_update_action(UpdateAction::Check, cx),
-            Some(ServerChoice::Ssh(destination)) => {
-                self.request_remote_maintenance(destination, RemoteAction::Check, cx)
+        let checked = target.clone();
+        let check = cx.spawn(async move |settings, cx| {
+            if let Some(updates) = updates {
+                while cx.update(|cx| {
+                    matches!(
+                        updates.read(cx).state(),
+                        crate::updates::UpdateState::Checking
+                    )
+                }) {
+                    cx.background_executor().timer(CHECK_POLL).await;
+                }
             }
-            _ => {}
+            let facts = settings
+                .update(cx, |settings, cx| settings.reread_server(&checked, cx))
+                .ok()
+                .flatten();
+            if let Some(facts) = facts {
+                facts.await;
+            }
+            while settings
+                .update(cx, |settings, _| settings.server_reading(&checked))
+                .unwrap_or(false)
+            {
+                cx.background_executor().timer(CHECK_POLL).await;
+            }
+            let _ = settings.update(cx, |settings, cx| {
+                if settings
+                    .version_check
+                    .as_ref()
+                    .is_some_and(|check| check.target == checked)
+                {
+                    settings.version_check = None;
+                }
+                cx.notify();
+            });
+        });
+        self.version_check = Some(VersionCheck {
+            target,
+            _check: check,
+        });
+        cx.notify();
+    }
+
+    /// Reads `target` again as Check Now does, and returns the read of its own facts when one runs
+    /// over an existing connection.
+    fn reread_server(
+        &mut self,
+        target: &ServerChoice,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::Task<()>> {
+        match target {
+            ServerChoice::Local => {
+                if self.server_update.is_some() {
+                    self.request_update_action(UpdateAction::Check, cx);
+                }
+                self.check_local_server(cx);
+            }
+            ServerChoice::Ssh(destination) => {
+                self.request_remote_maintenance(destination.clone(), RemoteAction::Check, cx);
+            }
+            ServerChoice::Direct(_) => {}
+        }
+        self.reread_facts(target, cx)
+    }
+
+    /// Whether a read Check Now started for `target` is still underway.
+    fn server_reading(&self, target: &ServerChoice) -> bool {
+        match target {
+            ServerChoice::Local => {
+                self.server_update
+                    .as_ref()
+                    .is_some_and(|row| row.state.working.is_some())
+                    || self.local_server_working()
+            }
+            ServerChoice::Ssh(_) if self.selected_server().as_ref() == Some(target) => {
+                [MaintenanceRow::Service, MaintenanceRow::Update]
+                    .into_iter()
+                    .filter_map(|row| self.maintenance_presentation(row))
+                    .any(|presentation| presentation.working)
+            }
+            _ => false,
         }
     }
 
     fn take_version_step(&mut self, step: VersionStep, cx: &mut Context<Self>) {
         match (step, self.selected_server()) {
             (VersionStep::Local(UpdateAction::Check), _)
-            | (VersionStep::Remote(RemoteAction::Check), _) => self.check_versions(cx),
+            | (VersionStep::Remote(RemoteAction::Check), _)
+            | (VersionStep::Observe, _) => self.check_versions(cx),
             (VersionStep::Local(action), Some(ServerChoice::Local)) => {
                 self.request_update_action(action, cx)
             }
@@ -1541,6 +1665,10 @@ impl SettingsWindow {
             let description = match step {
                 VersionStep::Local(action) => action.consequence().map(SharedString::new_static),
                 VersionStep::Remote(action) => Some(action.consequence(&machine)),
+                VersionStep::Observe => Some(SharedString::from(format!(
+                    "Checks for a newer SpaceTerm, then reads {machine} again. It connects to \
+                     nothing."
+                ))),
             };
             Button::new(
                 ElementId::from(SharedString::from(selector.clone())),

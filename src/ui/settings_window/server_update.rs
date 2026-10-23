@@ -1125,6 +1125,15 @@ pub(super) mod testing {
             self.shared().outcome = Some(outcome);
         }
 
+        /// How many times the version was read.
+        pub(in crate::ui::settings_window) fn reads(&self) -> usize {
+            self.shared()
+                .calls
+                .iter()
+                .filter(|call| **call == UpdateCall::Read)
+                .count()
+        }
+
         /// The operations other than reads.
         pub(in crate::ui::settings_window) fn changes(&self) -> Vec<UpdateCall> {
             self.shared()

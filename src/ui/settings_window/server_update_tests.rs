@@ -8,9 +8,9 @@ use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext};
 use super::testing::{Outcome, ScriptedUpdate, UpdateCall, approved, available, included};
 use super::{
     FINISH_SELECTOR, IncludedServer, RETURN_CANCEL_SELECTOR, RETURN_CONFIRM_SELECTOR,
-    RETURN_SELECTOR, ServerUpdateControl, UPDATE_CANCEL_SELECTOR, UPDATE_CONFIRM_SELECTOR,
-    UPDATE_SELECTOR, UpdateAction, UpdateFacts, UpdatePresentation, UpdateState, UpdateStep,
-    present_update,
+    RETURN_SELECTOR, ServerUpdateControl, UPDATE_CANCEL_SELECTOR, UPDATE_CHECK_SELECTOR,
+    UPDATE_CONFIRM_SELECTOR, UPDATE_SELECTOR, UpdateAction, UpdateFacts, UpdatePresentation,
+    UpdateState, UpdateStep, present_update,
 };
 use crate::appearance::Appearance;
 use crate::local_server::ServerError;
@@ -678,4 +678,53 @@ fn updating_a_stopped_server_after_settings_reopens_keeps_it_stopped(cx: &mut Te
     assert!(presentation.explanation.contains("stopped"));
     assert_eq!(failure, None);
     assert_eq!(calls, [UpdateCall::PrepareUpdate, UpdateCall::Activate]);
+}
+
+/// Check Now checks for a newer SpaceTerm first, because server builds ship inside it, and reads
+/// the server only once that check settles. The row says Checking the whole time.
+#[gpui::test]
+fn check_now_reads_the_server_after_spaceterm_finishes_checking(cx: &mut TestAppContext) {
+    use spaceterm_ui::a11y_testing::A11yTree;
+
+    let adapter = Rc::new(crate::updates::testing::RecordingAdapter::available());
+    cx.update(|cx| crate::updates::ApplicationUpdates::install(adapter.clone(), cx));
+    let mut facts = available();
+    if let Ok(included) = &mut facts.included {
+        included.approved = true;
+    }
+    let harness = open(facts, cx);
+    let reads = harness.update.reads();
+    let checking = |cx: &mut VisualTestContext| {
+        A11yTree::read(cx).with_role("Status").iter().any(|node| {
+            node["aria"]["label"].as_str().is_some_and(|label| {
+                label.starts_with("Version") && label.ends_with("Checking\u{2026}")
+            })
+        })
+    };
+
+    click(UPDATE_CHECK_SELECTOR, harness.cx);
+
+    assert_eq!(
+        harness.update.reads(),
+        reads,
+        "the server waits for SpaceTerm's own check"
+    );
+    assert!(checking(harness.cx));
+
+    adapter.emit(crate::updates::UpdateEvent::UpToDate);
+    adapter.emit(crate::updates::UpdateEvent::Finished);
+    for _ in 0..5 {
+        harness
+            .cx
+            .executor()
+            .advance_clock(std::time::Duration::from_millis(250));
+        harness.cx.run_until_parked();
+    }
+
+    assert_eq!(harness.update.reads(), reads + 1);
+    assert!(!checking(harness.cx));
+    assert!(
+        harness.update.changes().is_empty(),
+        "checking changes nothing"
+    );
 }

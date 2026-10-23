@@ -470,6 +470,8 @@ pub(crate) struct SettingsWindow {
     /// Follows the presented server's facts, so a server SpaceTerm later disconnects from shows
     /// them.
     server_facts: server_facts::FactsFollower,
+    /// Check Now underway on the Version row, for the server it was asked for.
+    version_check: Option<server_card::VersionCheck>,
     /// The status last observed for each listed server, which a server SpaceTerm isn't connected
     /// to presents. It grants nothing: what each server offers follows its live connection.
     retained_status: std::collections::BTreeMap<
@@ -824,6 +826,7 @@ impl SettingsWindow {
             reconciled_servers: None,
             hidden_notices: notices::HiddenNotices::default(),
             server_facts: server_facts::FactsFollower::default(),
+            version_check: None,
             retained_status: std::collections::BTreeMap::new(),
             this_computer,
         };

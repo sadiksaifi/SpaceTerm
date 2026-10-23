@@ -340,6 +340,30 @@ impl SettingsWindow {
         }));
     }
 
+    /// Reads `target`'s own facts again now, over the connection SpaceTerm already has, and
+    /// retains them. `None` when SpaceTerm isn't connected to it, so nothing is read.
+    pub(super) fn reread_facts(
+        &mut self,
+        target: &ServerChoice,
+        cx: &mut Context<Self>,
+    ) -> Option<Task<()>> {
+        if !self.server_state(target).live {
+            return None;
+        }
+        let client = client_for(target, cx)?;
+        let read = client.read(Read::ServerFacts, cx);
+        let target = target.clone();
+        Some(cx.spawn(async move |settings, cx| {
+            let server = match read.await {
+                Ok(ReadReply::ServerFacts(facts)) => Some(facts),
+                _ => None,
+            };
+            let _ = settings.update(cx, |settings, cx| {
+                settings.remember_observation(&target, server, cx);
+            });
+        }))
+    }
+
     /// Retains what reported on `target`, merged into what SpaceTerm knew.
     fn remember_observation(
         &mut self,
