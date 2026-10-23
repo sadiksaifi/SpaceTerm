@@ -28,7 +28,9 @@ use crate::platform::window_movement::RecordingOperatingSystemWindowDragPlatform
 use crate::settings::SettingsDocument;
 use crate::settings::storage::testing::MemoryStorage;
 use crate::ui::appearance_runtime;
-use crate::ui::settings_window::server_card::{MENU_SELECTOR, STATUS_SELECTOR};
+use crate::ui::settings_window::server_card::{
+    AUTO_START_SELECTOR, MENU_SELECTOR, STATUS_SELECTOR,
+};
 use crate::ui::settings_window::server_list::ServerChoice;
 use crate::ui::settings_window::{SettingsSectionId, SettingsWindow};
 use crate::ui::sidebar_window::form::CaptionTone;
@@ -1627,4 +1629,59 @@ fn an_admitted_start_notifies_a_waiting_workspace_after_settings_closes(cx: &mut
         ["run", "run"],
         "completion wakes the existing launch and never issues another Start"
     );
+}
+
+/// Whether the Start automatically switch reads as on, as assistive technology hears it.
+fn starts_automatically(cx: &mut VisualTestContext) -> bool {
+    spaceterm_ui::a11y_testing::A11yTree::read(cx)
+        .with_role("Switch")
+        .iter()
+        .find(|switch| switch["aria"]["label"] == "Start automatically")
+        .expect("the Start automatically switch is rendered")["aria"]["toggled"]
+        == "True"
+}
+
+/// Start automatically owns its change until the change finishes. Leaving Servers and coming
+/// back while the change is still queued asks for a passive read, which waits rather than taking
+/// the change's place, so the switch shows the change's result and works again without reopening
+/// Settings.
+#[gpui::test]
+fn a_passive_read_waits_for_an_automatic_start_change(cx: &mut TestAppContext) {
+    let server = ScriptedServer::new(Ok(connected(2)));
+    let service = ScriptedService::new(Ok(running()));
+    let (window, cx) = open_settings(offered_with_service(&server, &service), cx);
+    click(NAVIGATION_SELECTOR, cx);
+    assert!(starts_automatically(cx));
+
+    // The switch asks for the change, then the person visits Interface and returns to Servers,
+    // all before the change's work runs.
+    cx.update(|presenting, cx| {
+        window.update(cx, |settings, cx| {
+            settings.set_local_automatic_start(false, presenting, cx);
+            settings.select_section(SettingsSectionId::Interface, cx);
+            settings.select_section(SettingsSectionId::Servers, cx);
+        });
+    });
+    cx.run_until_parked();
+
+    assert_eq!(
+        service.changes(),
+        [ServiceCall::SetAutomaticStart(false)],
+        "the change runs to completion"
+    );
+    assert!(
+        !starts_automatically(cx),
+        "the switch shows the change's result"
+    );
+
+    click(AUTO_START_SELECTOR, cx);
+    assert_eq!(
+        service.changes(),
+        [
+            ServiceCall::SetAutomaticStart(false),
+            ServiceCall::SetAutomaticStart(true)
+        ],
+        "the switch works again without reopening Settings"
+    );
+    assert!(starts_automatically(cx));
 }
