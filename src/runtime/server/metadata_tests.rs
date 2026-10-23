@@ -21,9 +21,11 @@ fn encoder_sanitizes_bounds_and_client_rejects_malformed_presentation() {
     )
     .into();
     snapshot.command.as_mut().unwrap().line = format!("\u{1b}{}", "x".repeat(5000)).into();
+    snapshot.shell_name = format!("\u{202e}{}", "s".repeat(300)).into();
     snapshot.directory.path = format!("/{}", "d".repeat(5000)).into();
     let encoded = metadata::encode(&snapshot);
     assert_eq!(encoded.title, "界".repeat(wire::MAX_TITLE_CHARS));
+    assert_eq!(encoded.shell_name, "s".repeat(wire::MAX_TITLE_CHARS));
     assert_eq!(
         encoded.command.as_ref().unwrap().line,
         "x".repeat(wire::MAX_COMMAND_CHARS)
@@ -32,6 +34,12 @@ fn encoder_sanitizes_bounds_and_client_rejects_malformed_presentation() {
     encoded.validate().unwrap();
     let mut bad = encoded.clone();
     bad.title.push('\u{1b}');
+    assert!(server_metadata::decode(bad, None, None).is_err());
+    let mut bad = encoded.clone();
+    bad.shell_name.push('x');
+    assert!(server_metadata::decode(bad, None, None).is_err());
+    let mut bad = encoded.clone();
+    bad.shell_name = "fish\u{202e}".into();
     assert!(server_metadata::decode(bad, None, None).is_err());
     let mut bad = encoded.clone();
     bad.command.as_mut().unwrap().line.push('x');
@@ -136,6 +144,16 @@ fn inventory_observers_receive_unpainted_pane_metadata_without_claiming_control(
         ),
         Reply::Unchanged
     ));
+    let idle = wait(&mut host, 20, "sh");
+    let idle_metadata = idle.workspaces[0].tabs[0].panes[0]
+        .presentation
+        .as_ref()
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(idle_metadata).unwrap()["shell_name"],
+        "sh",
+        "the observing client receives the executable name selected on the Pane host"
+    );
     // Publish the source directory before the command starts so completion changes only metadata.
     // Neither client requests a Screen. Only the owner sends input; the observer reads Inventory.
     command(
@@ -166,6 +184,7 @@ fn inventory_observers_receive_unpainted_pane_metadata_without_claiming_control(
         .as_ref()
         .unwrap();
     let decoded = server_metadata::decode((**snapshot).clone(), None, None).unwrap();
+    assert_eq!(decoded.shell_name.as_ref(), "sh");
     assert_eq!(decoded.directory.path.as_ref(), "/tmp/api");
     assert_eq!(decoded.progress, ProgressMetadata::Normal(42));
     assert_eq!(
@@ -195,11 +214,36 @@ fn inventory_observers_receive_unpainted_pane_metadata_without_claiming_control(
         TerminalLocalFileCapabilities::Disabled
     );
     assert!(decoded.confirmed_directory.is_none());
+    command(&mut host, 1, lease, "printf '\\033]133;D;7\\007'");
+    let completed = wait(&mut host, 20, "api");
+    let completed = server_metadata::decode(
+        (**completed.workspaces[0].tabs[0].panes[0]
+            .presentation
+            .as_ref()
+            .unwrap())
+        .clone(),
+        None,
+        None,
+    )
+    .unwrap();
+    assert_eq!(completed.shell_name.as_ref(), "sh");
+    assert_eq!(
+        completed.title.provenance,
+        TitleProvenance::WorkingDirectory
+    );
+    assert!(!completed.title_activity);
+    assert!(matches!(
+        completed.command.as_ref().unwrap().state,
+        CommandState::Finished {
+            exit_status: Some(7),
+            ..
+        }
+    ));
     command(
         &mut host,
         1,
         lease,
-        "printf '\\033]133;D;7\\007\\033]2;metadata-only-update\\007'",
+        "printf '\\033]2;metadata-only-update\\007'",
     );
     let changed = wait(&mut host, 20, "metadata-only-update");
     assert_eq!(
@@ -280,6 +324,7 @@ fn presentation_is_excluded_from_retained_organization_and_maximum_inventory_fit
             .contains("presentation")
     );
     metadata.title = "界".repeat(pane::metadata::MAX_TITLE_CHARS);
+    metadata.shell_name = metadata.title.clone();
     metadata.directory = "界".repeat(pane::metadata::MAX_DIRECTORY_CHARS);
     metadata.user = Some("界".repeat(pane::metadata::MAX_MACHINE_CHARS));
     metadata.host = metadata.user.clone();

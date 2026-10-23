@@ -9,6 +9,7 @@ pub(super) fn encode(snapshot: &local::TerminalMetadataSnapshot) -> wire::Snapsh
     let clean = wire::sanitize;
     wire::Snapshot {
         revision: snapshot.revision,
+        shell_name: clean(&snapshot.shell_name, wire::MAX_TITLE_CHARS),
         title: clean(&snapshot.title.value, wire::MAX_TITLE_CHARS),
         title_provenance: match snapshot.title.provenance {
             local::TitleProvenance::Fallback => wire::TitleProvenance::Fallback,

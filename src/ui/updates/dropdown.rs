@@ -1,22 +1,25 @@
-//! The title bar Updates menu: the client's update above one section per actual SpaceTerm Server.
-//! Each row reaches an existing journey. The client rows drive the client update prompts, and a
-//! server row hands its exact server to that server's Settings update journey.
+//! The title bar update pill and the Updates menu behind its chevron: the client's update above one
+//! section per actual SpaceTerm Server. Each row reaches an existing journey. The client rows drive
+//! the client update prompts, and a server row hands its exact server to that server's Settings
+//! update journey.
 
 use gpui::prelude::*;
 use gpui::{
     AnyElement, AnyWindowHandle, App, Context, Entity, Pixels, Rgba, SharedString, Subscription,
-    Window, div,
+    WeakEntity, Window, div,
 };
 use spaceterm_ui::{
+    ButtonPaint, ButtonShape, ButtonSize, ButtonVariant, ButtonVariantStyle, ComboButton,
     DeterminateProgress, Icon, IconName, Menu, MenuAlignment, MenuEntry, MenuLifecycleEvent,
     MenuPlacement, MenuPlacementConfig, MenuSize, ProgressRing, ProgressSize, ProgressState,
+    Tooltip,
 };
 
 use super::server_rows::{ServerUpdateAction, ServerUpdateRow, ServerUpdates};
 use super::{
     CHECK_FOR_UPDATES_TITLE, CURRENT_VERSION, ControlCommand, ControlGlyph, ControlPresentation,
-    ControlReminder, InstallRequest, check_for_updates, failure_message, present_stop_download,
-    request_install, retry_install, service,
+    InstallRequest, PillCommand, PillTone, UpdatePill, check_for_updates, failure_message,
+    present_stop_download, request_install, retry_install, service,
 };
 use crate::desktop_profile::{DesktopPresentation, DesktopWording};
 use crate::ui::WorkspaceManager;
@@ -35,17 +38,28 @@ enum UpdatesMenuAction {
     Server(ServerUpdateAction),
 }
 
-/// The Updates menu at the trailing end of one window's title bar. It stays present so each
-/// server's update remains reachable while the client has none.
+/// The update pill at the trailing end of one window's title bar. It appears while the client or a
+/// server asks for action, and the Updates menu behind its chevron keeps every row.
 pub(crate) struct UpdateControl {
     servers: Entity<ServerUpdates>,
     _subscriptions: Vec<Subscription>,
 }
 
 impl UpdateControl {
-    pub(crate) fn new(cx: &mut Context<Self>) -> Self {
+    pub(crate) fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let servers = cx.new(ServerUpdates::new);
-        let mut subscriptions = vec![cx.observe(&servers, |_, _, cx| cx.notify())];
+        let mut subscriptions = vec![
+            cx.observe(&servers, |_, _, cx| cx.notify()),
+            // The pill shows server needs while the menu is closed. A Settings journey changes
+            // them elsewhere, so returning to the window reads them again.
+            cx.observe_window_activation(window, |control, window, cx| {
+                if window.is_window_active() {
+                    control
+                        .servers
+                        .update(cx, |servers, cx| servers.refresh(cx));
+                }
+            }),
+        ];
         subscriptions
             .extend(service(cx).map(|updates| cx.observe(&updates, |_, _, cx| cx.notify())));
         Self {
@@ -63,6 +77,15 @@ impl UpdateControl {
             UpdatesMenuAction::Server(action) => action.activate(cx),
         });
     }
+}
+
+/// Runs after the press, because prompts present into the window the pill belongs to.
+fn activate_pill(command: PillCommand, window: AnyWindowHandle, cx: &mut App) {
+    cx.defer(move |cx| match command {
+        PillCommand::Client(Some(command)) => activate_client(command, window, cx),
+        PillCommand::Server(action) => action.activate(cx),
+        PillCommand::Client(None) | PillCommand::Menu => {}
+    });
 }
 
 fn activate_client(command: ControlCommand, window: AnyWindowHandle, cx: &mut App) {
@@ -171,47 +194,50 @@ fn server_sections(rows: Vec<ServerUpdateRow>) -> Vec<MenuEntry<UpdatesMenuActio
         .collect()
 }
 
-/// The trigger's leading glyph while the client has a step in progress. The user's own step takes
-/// the accent paint, and an overdue update takes the warning paint.
-fn trigger_glyph(
-    presentation: &ControlPresentation,
-    accent: Rgba,
-    warning: Rgba,
-    glyph_size: Pixels,
-) -> impl Fn(Rgba) -> AnyElement + 'static {
-    let glyph = presentation.glyph;
-    let paint = match presentation.reminder {
-        Some(ControlReminder::Overdue) => Some(warning),
-        _ if presentation.prominent => Some(accent),
-        _ => None,
-    };
-    move |foreground| {
-        let color = paint.unwrap_or(foreground);
-        match glyph {
-            ControlGlyph::Download => {
-                Icon::new(IconName::Download, glyph_size, color).into_any_element()
-            }
-            ControlGlyph::Restart => {
-                Icon::new(IconName::RotateCw, glyph_size, color).into_any_element()
-            }
-            ControlGlyph::Warning => {
-                Icon::new(IconName::CircleAlert, glyph_size, color).into_any_element()
-            }
-            ControlGlyph::Progress(fraction) => {
-                let state = DeterminateProgress::new(f64::from(fraction))
-                    .map_or(ProgressState::Indeterminate, ProgressState::Determinate);
-                ProgressRing::new("update-control-progress", "Update", state)
-                    .size(ProgressSize::Compact)
-                    .into_any_element()
-            }
-            ControlGlyph::Activity => ProgressRing::new(
-                "update-control-progress",
-                "Update",
-                ProgressState::Indeterminate,
-            )
-            .size(ProgressSize::Compact)
-            .into_any_element(),
+/// The pill's leading glyph. Icons take the pill's foreground; the progress ring keeps the
+/// installed accent because the disabled foreground of Checking and Stopping is too faint for it.
+fn pill_glyph(glyph: ControlGlyph, glyph_size: Pixels) -> impl FnOnce(Rgba) -> AnyElement {
+    move |foreground| match glyph {
+        ControlGlyph::Download => {
+            Icon::new(IconName::Download, glyph_size, foreground).into_any_element()
         }
+        ControlGlyph::Restart => {
+            Icon::new(IconName::RotateCw, glyph_size, foreground).into_any_element()
+        }
+        ControlGlyph::Warning => {
+            Icon::new(IconName::CircleAlert, glyph_size, foreground).into_any_element()
+        }
+        ControlGlyph::Progress(fraction) => {
+            let state = DeterminateProgress::new(f64::from(fraction))
+                .map_or(ProgressState::Indeterminate, ProgressState::Determinate);
+            ProgressRing::new("update-control-progress", "Update", state)
+                .size(ProgressSize::Compact)
+                .into_any_element()
+        }
+        ControlGlyph::Activity => ProgressRing::new(
+            "update-control-progress",
+            "Update",
+            ProgressState::Indeterminate,
+        )
+        .size(ProgressSize::Compact)
+        .into_any_element(),
+    }
+}
+
+/// Reads the server inventory again whenever the Updates menu opens, so a local service change
+/// is observed without polling.
+fn refresh_on_open(
+    servers: WeakEntity<ServerUpdates>,
+) -> impl Fn(&MenuLifecycleEvent, &mut App) + 'static {
+    move |event, cx| {
+        if *event != MenuLifecycleEvent::Opened {
+            return;
+        }
+        let servers = servers.clone();
+        // Lifecycle delivery can occur while the window is borrowed.
+        cx.defer(move |cx| {
+            let _ = servers.update(cx, |servers, cx| servers.refresh(cx));
+        });
     }
 }
 
@@ -232,43 +258,96 @@ impl Render for UpdateControl {
             }
             None => (UpdateState::Unavailable, None),
         };
+        let rows = self.servers.read(cx).rows();
+        // Nothing asks for action, so the pill stays hidden. Check for Updates stays in the
+        // application menu.
+        let Some(pill) = UpdatePill::resolve(presentation.clone(), &rows) else {
+            return div().into_any_element();
+        };
         let mut entries = vec![client_section(presentation.as_ref(), &state, wording)];
         entries.push(MenuEntry::separator());
-        entries.extend(server_sections(self.servers.read(cx).rows()));
+        entries.extend(server_sections(rows));
 
         let appearance = chrome(cx);
         let glyph_size = appearance.icons.metrics(IconRole::Caption).glyph_size;
         let handle = window.window_handle();
         let servers = self.servers.downgrade();
-        let menu = Menu::new("update-control", "Updates", entries)
-            .size(MenuSize::Wide)
-            .placement(MenuPlacementConfig::new(
-                MenuPlacement::Bottom,
-                MenuAlignment::End,
-            ))
-            .when_some(presentation.as_ref(), |menu, presentation| {
-                menu.leading_icon(trigger_glyph(
-                    presentation,
-                    gpui_color(appearance.colors.text_accent),
-                    gpui_color(appearance.semantic_text_pairs.warning_status.primary),
-                    glyph_size,
-                ))
-            })
-            .debug_selector("update-control")
-            .on_lifecycle(move |event, cx| {
-                if *event != MenuLifecycleEvent::Opened {
-                    return;
-                }
-                let servers = servers.clone();
-                // Lifecycle delivery can occur while the window is borrowed.
-                cx.defer(move |cx| {
-                    let _ = servers.update(cx, |servers, cx| servers.refresh(cx));
-                });
-            })
-            .on_activate(move |activation, _, cx| {
-                UpdateControl::activate(activation.action().clone(), handle, cx)
-            });
-        // The menu owns its clicks inside the title bar's drag region. Its trailing edge stops
+        let placement = MenuPlacementConfig::new(MenuPlacement::Bottom, MenuAlignment::End);
+        let variant = match pill.tone() {
+            PillTone::Primary => ButtonVariant::Primary,
+            PillTone::Neutral | PillTone::Warning => ButtonVariant::Secondary,
+        };
+        let label = pill.label();
+        let description = pill.description();
+        let control = match pill.command() {
+            PillCommand::Menu => Menu::new("update-control-menu", label, entries)
+                .button_trigger(variant, ButtonSize::Small, ButtonShape::Capsule)
+                .size(MenuSize::Wide)
+                .placement(placement)
+                .debug_selector("update-control-menu")
+                .on_lifecycle(refresh_on_open(servers))
+                .on_activate(move |activation, _, cx| {
+                    UpdateControl::activate(activation.action().clone(), handle, cx)
+                })
+                .into_any_element(),
+            command => {
+                let enabled = !matches!(command, PillCommand::Client(None));
+                let dot = appearance.spacing(5.0);
+                ComboButton::new("update-control", label, entries)
+                    .variant(variant)
+                    .size(ButtonSize::Small)
+                    .shape(ButtonShape::Capsule)
+                    .disabled(!enabled)
+                    .when_some(pill.glyph(), |button, glyph| {
+                        button.leading(pill_glyph(glyph, glyph_size))
+                    })
+                    .accessibility_description(description.clone())
+                    .tooltip(
+                        Tooltip::new("update-control-tooltip", description)
+                            .debug_selector("update-control-tooltip"),
+                    )
+                    .when(pill.tone() == PillTone::Warning, |button| {
+                        let pair = appearance.semantic_text_pairs.warning_status;
+                        let paint = |amount| {
+                            ButtonPaint::new(
+                                gpui_color(pair.background.mix(pair.primary, amount)),
+                                gpui_color(pair.primary),
+                                gpui::rgba(0),
+                            )
+                        };
+                        button.contextual_style(
+                            ButtonVariantStyle::new(
+                                paint(0.0),
+                                paint(0.12),
+                                paint(0.2),
+                                paint(0.0),
+                            ),
+                            gpui_color(pair.primary),
+                        )
+                    })
+                    .menu_label("Updates")
+                    .menu_size(MenuSize::Wide)
+                    .placement(placement)
+                    .when(pill.marked(), |button| {
+                        button.menu_indicator(move |color| {
+                            div()
+                                .debug_selector(|| "update-control-servers-dot".to_owned())
+                                .size(dot)
+                                .rounded_full()
+                                .bg(color)
+                                .into_any_element()
+                        })
+                    })
+                    .debug_selector("update-control")
+                    .on_activate(move |_, _, cx| activate_pill(command.clone(), handle, cx))
+                    .on_menu_lifecycle(refresh_on_open(servers))
+                    .on_menu_activate(move |activation, _, cx| {
+                        UpdateControl::activate(activation.action().clone(), handle, cx)
+                    })
+                    .into_any_element()
+            }
+        };
+        // The pill owns its clicks inside the title bar's drag region. Its trailing edge stops
         // where the Pane beneath it stops, and it keeps one frame gap from the Tabs.
         let frame = WorkspaceFrame::for_appearance(appearance, cx);
         div()
@@ -281,7 +360,8 @@ impl Render for UpdateControl {
                     .block_mouse_except_scroll()
                     .flex()
                     .items_center()
-                    .child(menu),
+                    .child(control),
             )
+            .into_any_element()
     }
 }

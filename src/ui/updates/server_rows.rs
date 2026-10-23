@@ -9,6 +9,7 @@ use gpui::{App, Context, SharedString, Task};
 use crate::application_identity::ApplicationIdentity;
 use crate::direct_connections::{DirectConnections, DirectRouteStatus};
 use crate::domain::SshDestination;
+use crate::local_server::ServerError;
 use crate::local_server::service::Service;
 use crate::local_server::service::activation::is_released_downgrade;
 use crate::local_server::service::maintenance::{MaintenanceFacts, RemoteActivationPhase};
@@ -23,6 +24,7 @@ use crate::ui::settings_window;
 
 /// Each status is a few words that fit the menu. The action's Settings journey explains it.
 const UPDATE_STATUS_UNKNOWN: &str = "Update Status Unknown";
+const UPDATE_NEEDS_ATTENTION: &str = "Update Needs Attention";
 
 #[derive(Clone)]
 pub(crate) struct ServerUpdateRow {
@@ -36,14 +38,32 @@ pub(crate) struct ServerUpdateRow {
 pub(crate) enum ServerUpdateAction {
     Local,
     Ssh(SshDestination),
+    /// The server's update stopped before it finished, and its Settings explain what to do.
+    Review(MachineTarget),
+    /// The server's Settings, which only report its status here.
     Settings(MachineTarget),
+}
+
+/// What a server asks of the user. Offline, unknown, and unauthorized status asks nothing.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub(crate) enum ServerNeed {
+    Update,
+    Attention,
 }
 
 impl ServerUpdateAction {
     pub(crate) fn label(&self) -> &'static str {
         match self {
             Self::Local | Self::Ssh(_) => "Update Server…",
-            Self::Settings(_) => "Settings…",
+            Self::Review(_) | Self::Settings(_) => "Settings…",
+        }
+    }
+
+    pub(crate) fn need(&self) -> Option<ServerNeed> {
+        match self {
+            Self::Local | Self::Ssh(_) => Some(ServerNeed::Update),
+            Self::Review(_) => Some(ServerNeed::Attention),
+            Self::Settings(_) => None,
         }
     }
 
@@ -55,12 +75,10 @@ impl ServerUpdateAction {
                 RemoteAction::Update,
                 cx,
             ),
-            Self::Settings(target) => settings_window::open_server_settings(target.clone(), cx),
+            Self::Review(target) | Self::Settings(target) => {
+                settings_window::open_server_settings(target.clone(), cx)
+            }
         }
-    }
-
-    fn offers_update(&self) -> bool {
-        matches!(self, Self::Local | Self::Ssh(_))
     }
 }
 
@@ -193,26 +211,19 @@ fn read_inventory(sources: Sources) -> Vec<ServerUpdateRow> {
             build: identity.to_owned(),
             server,
         });
-    let (detail, available) = if crate::local_startup::owned_foreground() {
-        ("Development Server".into(), false)
+    let row = if crate::local_startup::owned_foreground() {
+        local_row(Ok(("Development Server".into(), false)))
     } else {
-        service
-            .as_ref()
-            .map_err(|error| *error)
-            .and_then(settings_window::server_update::passive_update)
-            .unwrap_or_else(|_| (UPDATE_STATUS_UNKNOWN.into(), false))
+        local_row(
+            service
+                .as_ref()
+                .map_err(|error| *error)
+                .and_then(settings_window::server_update::passive_update),
+        )
     };
     let local = Observation {
         key,
-        row: ServerUpdateRow {
-            label: "This computer · this account".into(),
-            detail,
-            action: Some(if available {
-                ServerUpdateAction::Local
-            } else {
-                ServerUpdateAction::Settings(MachineTarget::Local)
-            }),
-        },
+        row,
         route_priority: 3,
     };
     let mut observations = vec![local];
@@ -284,18 +295,44 @@ fn read_inventory(sources: Sources) -> Vec<ServerUpdateRow> {
     merge_rows(observations)
 }
 
+/// The account server's row from its passive read. A passive read refuses an unresolved update,
+/// which is the one refusal that asks the user to act.
+fn local_row(passive: Result<(SharedString, bool), ServerError>) -> ServerUpdateRow {
+    let (detail, action) = match passive {
+        Ok((detail, true)) => (detail, ServerUpdateAction::Local),
+        Ok((detail, false)) => (detail, ServerUpdateAction::Settings(MachineTarget::Local)),
+        Err(ServerError::ActivationUnresolved) => (
+            UPDATE_NEEDS_ATTENTION.into(),
+            ServerUpdateAction::Review(MachineTarget::Local),
+        ),
+        Err(_) => (
+            UPDATE_STATUS_UNKNOWN.into(),
+            ServerUpdateAction::Settings(MachineTarget::Local),
+        ),
+    };
+    ServerUpdateRow {
+        label: "This computer · this account".into(),
+        detail,
+        action: Some(action),
+    }
+}
+
 fn merge_rows(observations: Vec<Observation>) -> Vec<ServerUpdateRow> {
     let mut positions = HashMap::new();
     let mut servers: Vec<Observation> = Vec::new();
+    // An available update's route wins, then a route that reports a stopped update.
     let priority = |observation: &Observation| {
-        (
-            observation
-                .row
-                .action
-                .as_ref()
-                .is_some_and(ServerUpdateAction::offers_update),
-            observation.route_priority,
-        )
+        let need = observation
+            .row
+            .action
+            .as_ref()
+            .and_then(ServerUpdateAction::need);
+        let rank = match need {
+            Some(ServerNeed::Update) => 2,
+            Some(ServerNeed::Attention) => 1,
+            None => 0,
+        };
+        (rank, observation.route_priority)
     };
     for observation in observations {
         if let Some(index) = positions.get(&observation.key).copied() {
@@ -341,50 +378,54 @@ fn ssh_row(
         }
         _ => None,
     };
-    let (detail, available) = match (known, facts) {
-        (false, _) => ("Offline or Status Unknown".to_owned(), false),
+    let (detail, need) = match (known, facts) {
+        (false, _) => ("Offline or Status Unknown", None),
         (true, Some(facts)) => remote_update(facts, candidate),
-        (true, None) => (UPDATE_STATUS_UNKNOWN.to_owned(), false),
+        (true, None) => (UPDATE_STATUS_UNKNOWN, None),
     };
+    let target = MachineTarget::Ssh(destination.clone());
     ServerUpdateRow {
         label: label.into(),
         detail: detail.into(),
-        action: Some(if available {
-            ServerUpdateAction::Ssh(destination)
-        } else {
-            ServerUpdateAction::Settings(MachineTarget::Ssh(destination))
+        action: Some(match need {
+            Some(ServerNeed::Update) => ServerUpdateAction::Ssh(destination),
+            Some(ServerNeed::Attention) => ServerUpdateAction::Review(target),
+            None => ServerUpdateAction::Settings(target),
         }),
     }
 }
 
-fn remote_update(facts: &MaintenanceFacts, candidate: Option<&ServerCandidate>) -> (String, bool) {
+fn remote_update(
+    facts: &MaintenanceFacts,
+    candidate: Option<&ServerCandidate>,
+) -> (&'static str, Option<ServerNeed>) {
     if !facts.status.installed {
-        return ("Not Installed".to_owned(), false);
+        return ("Not Installed", None);
     }
     if facts.activation.as_ref().is_some_and(|activation| {
         !activation.returned && !matches!(activation.phase, RemoteActivationPhase::Completed { .. })
     }) {
-        return ("Update Needs Attention".to_owned(), false);
+        return (UPDATE_NEEDS_ATTENTION, Some(ServerNeed::Attention));
     }
     let Some(approved) = &facts.approved else {
-        return (UPDATE_STATUS_UNKNOWN.to_owned(), false);
+        return (UPDATE_STATUS_UNKNOWN, None);
     };
     let Some(candidate) = candidate else {
-        return ("No Update".to_owned(), false);
+        return ("No Update", None);
     };
     if candidate.digest == approved.digest {
-        return ("Up to Date".to_owned(), false);
+        return ("Up to Date", None);
     }
     if is_released_downgrade(&candidate.version, &approved.version) {
-        return ("No Update".to_owned(), false);
+        return ("No Update", None);
     }
-    ("Update Available".to_owned(), true)
+    ("Update Available", Some(ServerNeed::Update))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::local_server::service::maintenance::RemoteBuild;
+    use crate::local_server::service::maintenance::{RemoteActivation, RemoteBuild};
     use crate::local_server::service::{ServiceStartup, ServiceStatus};
     use crate::ssh::server_connection::{SshServerFacts, UnavailableKind};
 
@@ -461,7 +502,8 @@ mod tests {
             !row(approved, Some(&candidate))
                 .action
                 .unwrap()
-                .offers_update()
+                .need()
+                .is_some()
         );
         let mut same_version = candidate.clone();
         same_version.version = "1.4.0".into();
@@ -475,7 +517,8 @@ mod tests {
             !row(facts(), Some(&downgrade))
                 .action
                 .unwrap()
-                .offers_update()
+                .need()
+                .is_some()
         );
         let mut unknown = facts();
         unknown.approved = None;
@@ -483,7 +526,8 @@ mod tests {
             !row(unknown, Some(&candidate))
                 .action
                 .unwrap()
-                .offers_update()
+                .need()
+                .is_some()
         );
     }
 
@@ -504,7 +548,7 @@ mod tests {
             Some(&candidate),
         );
         assert!(offline.detail.contains("Offline"));
-        assert!(!offline.action.unwrap().offers_update());
+        assert_eq!(offline.action.unwrap().need(), None);
         let mut changed = continuity();
         changed.account += 1;
         let row = ssh_row(
@@ -515,7 +559,73 @@ mod tests {
             Some(&candidate),
         );
         assert_eq!(&*row.detail, UPDATE_STATUS_UNKNOWN);
-        assert!(!row.action.unwrap().offers_update());
+        assert_eq!(row.action.unwrap().need(), None);
+    }
+
+    #[test]
+    fn a_stopped_update_needs_attention_while_offline_unknown_and_unauthorized_status_asks_nothing()
+    {
+        let mut interrupted = facts();
+        interrupted.activation = Some(RemoteActivation {
+            operation: [5; 32],
+            previous: facts().approved.unwrap(),
+            candidate: RemoteBuild {
+                version: "1.5.0".into(),
+                commit: "b".repeat(40),
+                digest: "b".repeat(64),
+            },
+            stopped: false,
+            phase: RemoteActivationPhase::Uncertain,
+            returned: false,
+        });
+        let attention = row(interrupted, None);
+        assert_eq!(&*attention.detail, "Update Needs Attention");
+        assert_eq!(
+            attention.action,
+            Some(ServerUpdateAction::Review(MachineTarget::Ssh(destination(
+                "macbookpro"
+            ))))
+        );
+        assert_eq!(
+            attention.action.unwrap().need(),
+            Some(ServerNeed::Attention)
+        );
+
+        let unresolved = local_row(Err(ServerError::ActivationUnresolved));
+        assert_eq!(&*unresolved.detail, "Update Needs Attention");
+        assert_eq!(
+            unresolved.action.unwrap().need(),
+            Some(ServerNeed::Attention)
+        );
+        assert_eq!(
+            local_row(Ok(("Update Available".into(), true)))
+                .action
+                .unwrap()
+                .need(),
+            Some(ServerNeed::Update)
+        );
+
+        let unknown = local_row(Err(ServerError::NotSetUp));
+        assert_eq!(&*unknown.detail, UPDATE_STATUS_UNKNOWN);
+        let offline = ssh_row(
+            destination("macbookpro"),
+            &RemoteConnectionStatus::Unavailable {
+                kind: UnavailableKind::Network,
+            },
+            None,
+            None,
+            None,
+        );
+        let unread = ssh_row(
+            destination("macbookpro"),
+            &connected(),
+            Some(&continuity()),
+            None,
+            None,
+        );
+        for quiet in [unknown, offline, unread] {
+            assert_eq!(quiet.action.unwrap().need(), None, "{}", quiet.detail);
+        }
     }
 
     #[test]

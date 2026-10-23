@@ -3,9 +3,9 @@ use gpui::{Menu, MenuItem, SystemMenuType};
 use spaceterm_ui::{EditCopy, EditCut, EditPaste, EditRedo, EditSelectAll, EditUndo};
 
 use crate::app::{
-    BringAllWindowsToFront, CloseAllWindows, HideApplication, HideOtherApplications,
-    MinimizeWindow, OpenApplicationHelp, QuitApplication, ShowAboutApplication,
-    ShowAllApplications, ZoomActiveWindow,
+    BringAllWindowsToFront, DismissApplication, HideApplication, HideOtherApplications,
+    MinimizeWindow, OpenApplicationHelp, ShowAboutApplication, ShowAllApplications,
+    ZoomActiveWindow,
 };
 use crate::ui::updates::{
     CHECK_FOR_UPDATES_TITLE, CheckForUpdates, OpenReleaseNotes, RELEASE_NOTES_TITLE,
@@ -54,10 +54,8 @@ pub(crate) fn application_menu(application_name: &str) -> Menu {
             MenuItem::action("Hide Others", HideOtherApplications),
             MenuItem::action("Show All", ShowAllApplications),
             MenuItem::separator(),
-            // Command-Q asks which of these two the person wants. Each item here is that choice
-            // already made, so neither asks it again.
-            MenuItem::action("Close All Windows", CloseAllWindows),
-            MenuItem::action(format!("Quit {application_name}"), QuitApplication),
+            // The one Quit item asks the same question as Command-Q, whose Shortcut it shows.
+            MenuItem::action(format!("Quit {application_name}"), DismissApplication),
         ],
     }
 }
@@ -262,17 +260,16 @@ mod tests {
     }
 
     #[test]
-    fn application_menu_items_are_dismissal_choices_already_made() {
-        let menus = menus("SpaceTerm");
-        assert!(
-            menu_action(&menus, "SpaceTerm", "Close All Windows")
-                .as_any()
-                .is::<CloseAllWindows>()
+    fn application_menu_quit_asks_the_same_question_as_command_q() {
+        let menu = application_menu("SpaceTerm");
+        assert_eq!(
+            labels(&menu)[labels(&menu).len() - 2..],
+            ["|", "Quit SpaceTerm"]
         );
         assert!(
-            menu_action(&menus, "SpaceTerm", "Quit SpaceTerm")
+            menu_action(&menus("SpaceTerm"), "SpaceTerm", "Quit SpaceTerm")
                 .as_any()
-                .is::<QuitApplication>()
+                .is::<DismissApplication>()
         );
     }
 

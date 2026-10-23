@@ -50,6 +50,7 @@ pub(crate) fn decode(
     };
     Ok(Arc::new(TerminalMetadataSnapshot {
         revision: wire.revision,
+        shell_name: wire.shell_name.into(),
         context,
         freshness: match wire.freshness {
             wire::Freshness::Live => MetadataFreshness::Live,

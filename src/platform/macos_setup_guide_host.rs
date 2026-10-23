@@ -486,6 +486,15 @@ pub(in crate::platform) mod tests {
         guide
             .update(&mut cx, |_, window, _| window.remove_window())
             .expect("guide closes");
+        // GPUI queues the native close on AppKit's dispatcher. Keep its App alive until that
+        // callback finishes, before a later native fixture pumps the run loop.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        while panel.isVisible() && std::time::Instant::now() < deadline {
+            objc2_foundation::NSRunLoop::currentRunLoop().runUntilDate(
+                &objc2_foundation::NSDate::dateWithTimeIntervalSinceNow(0.01),
+            );
+        }
+        assert!(!panel.isVisible(), "the native guide finishes closing");
         input_window.close();
         cx.update(|cx| cx.quit());
 

@@ -186,6 +186,10 @@ impl ButtonPaint {
         self.border
     }
 
+    pub(crate) fn shadow(self) -> crate::ControlShadow {
+        self.shadow
+    }
+
     /// The paint `level` of the way from this state to `other`.
     ///
     /// A shadow has no partial state, so it switches halfway.
@@ -564,11 +568,11 @@ pub(crate) struct ButtonStyle {
     icon_button_size: Pixels,
     icon_baseline_center: Option<Pixels>,
     pub(crate) horizontal_padding: Pixels,
-    gap: Pixels,
+    pub(crate) gap: Pixels,
     pub(crate) corner_radius: Pixels,
     pub(crate) border_width: Pixels,
-    font_size: Pixels,
-    single_line_height: f32,
+    pub(crate) font_size: Pixels,
+    pub(crate) single_line_height: f32,
     multiline_line_height: f32,
 }
 
@@ -604,6 +608,16 @@ impl ButtonStyle {
 
     fn paints(self) -> ButtonVariantStyle {
         ButtonVariantStyle::new(self.normal, self.hovered, self.pressed, self.disabled)
+    }
+
+    /// Replaces the paints with ones resolved for a contextual meaning, such as a warning.
+    pub(crate) fn contextual(mut self, paints: ButtonVariantStyle, focus_border: Rgba) -> Self {
+        self.normal = paints.normal;
+        self.hovered = paints.hovered;
+        self.pressed = paints.pressed;
+        self.disabled = paints.disabled;
+        self.focus_border = focus_border;
+        self
     }
 }
 
@@ -1422,11 +1436,7 @@ impl ButtonCore {
             style = ButtonStyle::new(style.paints(), style.focus_border, metrics, self.shape);
         }
         if let Some((paints, focus_border)) = self.contextual_style {
-            style.normal = paints.normal;
-            style.hovered = paints.hovered;
-            style.pressed = paints.pressed;
-            style.disabled = paints.disabled;
-            style.focus_border = focus_border;
+            style = style.contextual(paints, focus_border);
         }
         if let Some(icon_button_size) = self.icon_button_size {
             style.icon_button_size = icon_button_size;

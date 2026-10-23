@@ -369,7 +369,7 @@ impl WorkspaceManager {
             remote_workspace_focus_restore_pending: false,
             operating_system_window_drag_platform,
             window_drag_status: WindowDragRegionStatus::new(),
-            update_control: cx.new(super::updates::UpdateControl::new),
+            update_control: cx.new(|cx| super::updates::UpdateControl::new(window, cx)),
             pending_final_tab_closes: BTreeSet::new(),
             close_empty_after_shared_removal: false,
             close_confirmation: CloseConfirmation::default(),

@@ -1,6 +1,6 @@
 use std::rc::Rc;
 
-use gpui::{App, AsyncApp};
+use gpui::{App, AsyncApp, PromptButton, PromptLevel, Task, Window};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ApplicationQuitDecision {
@@ -45,14 +45,50 @@ impl StatusAreaName {
             Self::StatusArea => "status area",
         }
     }
+}
 
-    /// The choice that closes every window and keeps the client there.
-    pub(crate) const fn keep_label(self) -> &'static str {
-        match self {
-            Self::MenuBar => "Keep in Menu Bar",
-            Self::StatusArea => "Keep in Status Area",
-        }
-    }
+/// The words of the dismissal choice. Its default answer, which keeps the client running, comes
+/// before Cancel. Only the status item's own Quit exits the client completely.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct DismissalPrompt {
+    pub(crate) title: String,
+    pub(crate) detail: String,
+    /// The default answer, which keeps the client running.
+    pub(crate) keep: String,
+}
+
+/// The person's answer to the dismissal choice.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum DismissalAnswer {
+    Keep,
+    Cancel,
+}
+
+impl DismissalAnswer {
+    pub(crate) const CANCEL_LABEL: &str = "Cancel";
+}
+
+/// Presents the dismissal choice through GPUI's prompt for this window.
+pub(crate) fn present_window_dismissal(
+    prompt: &DismissalPrompt,
+    window: &mut Window,
+    cx: &mut App,
+) -> Task<Option<DismissalAnswer>> {
+    let answer = window.prompt(
+        PromptLevel::Info,
+        &prompt.title,
+        Some(&prompt.detail),
+        &[
+            PromptButton::ok(prompt.keep.clone()),
+            PromptButton::cancel(DismissalAnswer::CANCEL_LABEL),
+        ],
+        cx,
+    );
+    cx.spawn(async move |_| match answer.await.ok()? {
+        0 => Some(DismissalAnswer::Keep),
+        1 => Some(DismissalAnswer::Cancel),
+        _ => None,
+    })
 }
 
 #[cfg_attr(
@@ -135,6 +171,17 @@ pub(crate) trait ApplicationQuitAdapter {
     }
 
     fn install(&self, handler: ApplicationQuitHandler) -> Result<(), ApplicationQuitError>;
+
+    /// Asks the dismissal choice in `window`. Initial keyboard focus, Return, and Space choose
+    /// Keep, and Escape chooses Cancel.
+    fn present_dismissal(
+        &self,
+        prompt: &DismissalPrompt,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Task<Option<DismissalAnswer>> {
+        present_window_dismissal(prompt, window, cx)
+    }
 
     /// Asks the application to exit through the quit policy, without the dismissal choice.
     fn request_quit(&self, cx: &mut App);

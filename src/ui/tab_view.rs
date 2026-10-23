@@ -6264,7 +6264,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn caption_directory_and_running_command_should_update_without_a_title_change(
+    fn caption_and_tab_should_show_the_host_shell_again_after_a_command_finishes(
         cx: &mut TestAppContext,
     ) {
         use crate::terminal::metadata::{CommandMetadata, CommandState, TitleProvenance};
@@ -6273,7 +6273,23 @@ mod tests {
             ScreenSnapshot::from_test_parts_at(Arc::from([]), Default::default(), "zsh", 1);
         let metadata = Arc::make_mut(&mut Arc::make_mut(&mut screen).metadata);
         metadata.title.provenance = TitleProvenance::Fallback;
+        // The client factory's placeholder says zsh; the Pane host actually launched fish.
+        metadata.shell_name = Arc::from("fish");
         metadata.directory.path = Arc::from("/srv/new-place");
+        records
+            .event_sender(1)
+            .unwrap()
+            .try_send(TerminalSessionEvent::Screen(screen.clone()))
+            .unwrap();
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| {
+            assert_eq!(view.pane_captions[&PaneId::new(1)].label, "fish");
+            assert_eq!(view.tab_title(), "fish · new-place");
+        });
+
+        let snapshot = Arc::make_mut(&mut screen);
+        snapshot.generation = crate::terminal::PresentationGeneration::test(2);
+        let metadata = Arc::make_mut(&mut snapshot.metadata);
         metadata.command = Some(CommandMetadata {
             line: Arc::from("π build"),
             state: CommandState::Running,
@@ -6297,8 +6313,12 @@ mod tests {
             caption,
             ("/srv/".into(), "new-place".into(), "π build".into(), None,)
         );
+        assert_eq!(
+            view.read_with(cx, |view, _| view.tab_title()),
+            "π build · new-place"
+        );
         let snapshot = Arc::make_mut(&mut screen);
-        snapshot.generation = crate::terminal::PresentationGeneration::test(2);
+        snapshot.generation = crate::terminal::PresentationGeneration::test(3);
         let metadata = Arc::make_mut(&mut snapshot.metadata);
         metadata.command.as_mut().unwrap().state = CommandState::Finished {
             exit_status: Some(0),
@@ -6321,7 +6341,11 @@ mod tests {
         });
         assert_eq!(
             caption,
-            ("/srv/".into(), "new-place".into(), "zsh".into(), None)
+            ("/srv/".into(), "new-place".into(), "fish".into(), None)
+        );
+        assert_eq!(
+            view.read_with(cx, |view, _| view.tab_title()),
+            "fish · new-place"
         );
     }
 
