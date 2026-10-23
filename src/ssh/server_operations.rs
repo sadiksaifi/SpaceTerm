@@ -1897,9 +1897,9 @@ mod tests {
 
     use super::super::server_connection::{
         ConnectMode, ConnectProgress, ConnectedSshServer, RemoteConnectionStatus,
-        RetainedSshConnection, ServerAvailability, SshConnectBackend, SshConnectFailure,
-        SshConnectionIntentStore, SshServerContinuity, SshServerFacts, SshServerLease,
-        SshServerObservation,
+        RetainedSshConnection, ServerAvailability, ServerCandidate, SshConnectBackend,
+        SshConnectFailure, SshConnectionIntentStore, SshServerContinuity, SshServerFacts,
+        SshServerLease, SshServerObservation,
     };
     use super::super::server_maintenance::MaintenanceProgress;
 
@@ -1912,7 +1912,7 @@ mod tests {
     /// A backend that answers each exchange from a script and records what it was asked.
     #[derive(Default)]
     struct Script {
-        observations: Mutex<VecDeque<Result<MaintenanceFacts, SshMaintenanceFailure>>>,
+        observations: Mutex<VecDeque<Result<RemoteMaintenanceObservation, SshMaintenanceFailure>>>,
         preparations: Mutex<VecDeque<Result<Option<PreparedChange>, SshMaintenanceFailure>>>,
         applications: Mutex<VecDeque<Result<OperationOutcome, SshMaintenanceFailure>>>,
         resolutions: Mutex<VecDeque<Result<OperationOutcome, SshMaintenanceFailure>>>,
@@ -1941,7 +1941,27 @@ mod tests {
                 )))
         }
         fn observes(&self, facts: Result<MaintenanceFacts, SshMaintenanceFailure>) -> &Self {
-            self.observations.lock().unwrap().push_back(facts);
+            self.observations
+                .lock()
+                .unwrap()
+                .push_back(facts.map(|facts| RemoteMaintenanceObservation {
+                    facts,
+                    update_offer: RemoteUpdateOffer::Unavailable,
+                }));
+            self
+        }
+        fn observes_offer(
+            &self,
+            facts: MaintenanceFacts,
+            update_offer: RemoteUpdateOffer,
+        ) -> &Self {
+            self.observations
+                .lock()
+                .unwrap()
+                .push_back(Ok(RemoteMaintenanceObservation {
+                    facts,
+                    update_offer,
+                }));
             self
         }
         fn prepares(&self, change: Result<Option<PreparedChange>, SshMaintenanceFailure>) -> &Self {
@@ -1983,7 +2003,7 @@ mod tests {
             authority: MaintenanceAuthority,
             _: &SshCancellationToken,
             _: &MaintenanceProgress<'_>,
-        ) -> Result<MaintenanceFacts, SshMaintenanceFailure> {
+        ) -> Result<RemoteMaintenanceObservation, SshMaintenanceFailure> {
             self.observed.lock().unwrap().push(authority);
             Self::next(&self.observations)
         }
@@ -2330,6 +2350,102 @@ mod tests {
         );
         owner.confirm(handle);
         (owner, connections, intents)
+    }
+
+    #[test]
+    fn an_already_approved_update_reads_fresh_facts_and_keeps_up_to_date_across_refresh() {
+        let script = Arc::new(Script::default());
+        let mut previous = facts();
+        previous.approved = Some(spaceterm_server::service::maintenance::RemoteBuild {
+            version: "0.1.0".into(),
+            commit: "a".repeat(40),
+            digest: "1".repeat(64),
+        });
+        let candidate = ServerCandidate {
+            version: "9.8.7".into(),
+            digest: "2".repeat(64),
+        };
+        let mut approved = previous.clone();
+        let build = approved.approved.as_mut().unwrap();
+        build.version = candidate.version.clone();
+        build.digest = candidate.digest.clone();
+        script.observes_offer(previous, RemoteUpdateOffer::Available(candidate));
+        script.prepares(Ok(None));
+        script.observes_offer(approved.clone(), RemoteUpdateOffer::UpToDate);
+        script.observes_offer(approved.clone(), RemoteUpdateOffer::UpToDate);
+        let records = Arc::new(Records::default());
+        let (connections, _) = connected();
+        let owner = SshServerOperations::new(script.clone(), records.clone(), connections);
+        owner.describe(&destination(), RemoteMaintenanceRequest::Update);
+        eventually(|| matches!(owner.state(&destination()), RemoteOperationState::Read(_)));
+        let entry = owner.entries().remove(0);
+        assert!(matches!(entry.update_offer, RemoteUpdateOffer::UpToDate));
+        assert!(matches!(entry.state, RemoteOperationState::Read(current) if *current == approved));
+        assert_eq!(
+            script.observed.lock().unwrap().len(),
+            2,
+            "no-op preparation must not return the old approved version"
+        );
+        owner.refresh(&destination());
+        eventually(|| matches!(owner.state(&destination()), RemoteOperationState::Read(_)));
+        assert!(matches!(
+            owner.entries()[0].update_offer,
+            RemoteUpdateOffer::UpToDate
+        ));
+        assert!(script.applied.lock().unwrap().is_empty());
+        assert!(records.operations.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn failed_or_changed_facts_do_not_inherit_an_old_available_offer() {
+        let script = Arc::new(Script::default());
+        script.observes_offer(
+            facts(),
+            RemoteUpdateOffer::Available(ServerCandidate {
+                version: "9.8.7".into(),
+                digest: "2".repeat(64),
+            }),
+        );
+        let (connections, _) = connected();
+        let owner =
+            SshServerOperations::new(script.clone(), Arc::new(Records::default()), connections);
+        owner.refresh(&destination());
+        eventually(|| matches!(owner.state(&destination()), RemoteOperationState::Read(_)));
+        assert!(matches!(
+            owner.entries()[0].update_offer,
+            RemoteUpdateOffer::Available(_)
+        ));
+        script.observes(Err(SshMaintenanceFailure::Unavailable(
+            UnavailableKind::Network,
+        )));
+        owner.refresh(&destination());
+        eventually(|| {
+            matches!(
+                owner.state(&destination()),
+                RemoteOperationState::Failed { .. }
+            )
+        });
+        assert!(matches!(
+            owner.entries()[0].update_offer,
+            RemoteUpdateOffer::Unchecked
+        ));
+        let mut changed = facts();
+        changed.approved = Some(spaceterm_server::service::maintenance::RemoteBuild {
+            version: "8.0.0".into(),
+            commit: "b".repeat(40),
+            digest: "3".repeat(64),
+        });
+        script
+            .automatic_start_results
+            .lock()
+            .unwrap()
+            .push_back(Ok(changed));
+        owner.set_automatic_start(&destination(), true);
+        eventually(|| matches!(owner.state(&destination()), RemoteOperationState::Read(_)));
+        assert!(matches!(
+            owner.entries()[0].update_offer,
+            RemoteUpdateOffer::Unchecked
+        ));
     }
 
     #[test]
