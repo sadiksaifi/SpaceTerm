@@ -231,7 +231,7 @@ class LinuxPrefixTests(unittest.TestCase):
         self.assertEqual(entry.read_text(), "retain previous metadata")
         self.assertNotIn("private-diagnostic", result.stderr)
 
-    def test_registered_exec_round_trips_reserved_characters_through_gio(self):
+    def test_registered_exec_forwards_an_invitation_through_gio_with_reserved_path_characters(self):
         self.assertTrue(
             Path("/usr/bin/python3").is_file(),
             "system Python with python3-gi is required; run mise doctor project",
@@ -250,6 +250,7 @@ class LinuxPrefixTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.record.unlink()
         entry = self.data / "applications" / (APPLICATION_ID + ".desktop")
+        invitation = "spaceterm://pair/development-invitation"
         launch = subprocess.run(
             [
                 "/usr/bin/python3",
@@ -260,9 +261,10 @@ from gi.repository import Gio
 app = Gio.DesktopAppInfo.new_from_filename(sys.argv[1])
 assert app is not None
 print(json.dumps({"id": app.get_id(), "name": app.get_name()}))
-assert app.launch([], None)
+assert app.launch_uris([sys.argv[2]], None)
 """,
                 str(entry),
+                invitation,
             ],
             env=self.environment(),
             capture_output=True,
@@ -284,9 +286,10 @@ assert app.launch([], None)
             [
                 str(self.root / "target/development-apps/development/bin/spaceterm"),
                 "",
-                "0",
+                "1",
+                invitation,
             ],
-            "a desktop launch activates a running instance",
+            "desktop URL delivery preserves the invitation for the running instance",
         )
 
     def test_development_launch_preserves_the_workbench_request(self):
