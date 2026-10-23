@@ -632,6 +632,7 @@ impl SettingsWindow {
             super::super::chrome_geometry::RadiusRole::Control.pixels(),
             cx,
         )
+        .debug_selector(|| "settings-server-worktree-location-frame".to_owned())
         .h(appearance.height(28.0, 13.0))
         .w_full()
         .flex()
