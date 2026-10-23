@@ -66,7 +66,7 @@ pub(super) fn git_facts(
 }
 
 #[test]
-fn osc7_without_owned_prompts_updates_repository_worktrees_and_workspace_without_restoration() {
+fn repository_sources_follow_owning_prompts_while_osc7_keeps_live_directory_display() {
     use spaceterm_server::hierarchy::State;
     let git = GitFixture::new();
     let tree = git.0.join("live-worktree");
@@ -147,11 +147,9 @@ fn osc7_without_owned_prompts_updates_repository_worktrees_and_workspace_without
             .presentation
             .is_none()
     );
-    assert!(
-        !String::from_utf8(serde_json::to_vec(&retained).unwrap())
-            .unwrap()
-            .contains("current_directory")
-    );
+    let retained_json = String::from_utf8(serde_json::to_vec(&retained).unwrap()).unwrap();
+    assert!(!retained_json.contains("current_directory"));
+    assert!(!retained_json.contains("repository_directory"));
     let restored = State::from_legacy(
         &serde_json::from_slice(&serde_json::to_vec(&retained).unwrap()).unwrap(),
     );
@@ -167,8 +165,7 @@ fn osc7_without_owned_prompts_updates_repository_worktrees_and_workspace_without
                 .as_path()
         )
     );
-    // Once an owned prompt has confirmed this directory, a later plain OSC 7 still moves
-    // live facts. The earlier owning-shell confirmation remains the restoration target.
+    // An owning prompt establishes the protected Repository Source Directory.
     command(
         &mut host,
         1,
@@ -182,30 +179,63 @@ fn osc7_without_owned_prompts_updates_repository_worktrees_and_workspace_without
             .as_ref(),
         Some(&tree)
     );
+    for (marker, report) in [
+        ("COMMAND-OSC7", "\\033]7;file://localhost%s\\007"),
+        (
+            "NESTED-SSH",
+            "\\033]7;file://localhost%s\\007\\033]133;A;spaceterm=nested-ssh\\007",
+        ),
+        (
+            "NESTED-CONTAINER",
+            "\\033]133;C\\007\\033]7;file://localhost%s\\007\\033]133;D;0\\007\\033]133;A;spaceterm=container\\007",
+        ),
+    ] {
+        command(
+            &mut host,
+            1,
+            lease,
+            &format!(
+                "cd '{}'; printf '{report}' \"$PWD\"; printf '\\033[2J\\033[H{marker}\\n'",
+                git.0.display()
+            ),
+        );
+        await_text(&mut host, 1, lease, marker);
+        let current = shared_inventory(&mut host);
+        let workspace = &current.workspaces[0];
+        assert_eq!(
+            workspace.tabs[0].panes[0].presented_directory(),
+            git.0.as_path(),
+            "ordinary directory display follows {marker}"
+        );
+        assert_eq!(
+            super::repositories::workspace_directory(workspace),
+            Some(tree.as_path()),
+            "{marker} must not move the Repository Source Directory"
+        );
+        assert_eq!(workspace.tabs[0].worktree.as_ref(), Some(&tree));
+        assert_eq!(
+            workspace.tabs[0].panes[0].confirmed_directory.as_ref(),
+            Some(&tree)
+        );
+    }
+    // Only the genuine owning-shell prompt moves repository discovery and Root Tab grouping.
     command(
         &mut host,
         1,
         lease,
-        &format!(
-            "cd '{}'; printf '\\033]7;file://localhost%s\\007' \"$PWD\"; printf '\\033[2J\\033[HOSC7-AFTER-OWNER\\n'",
-            git.0.display()
-        ),
+        "printf '\\033]7;file://localhost%s\\007\\033]133;A;spaceterm=%s\\007' \"$PWD\" \"$SPACETERM_PROMPT_OWNER\"; printf '\\033[2J\\033[HOWNER-MOVED\\n'",
     );
-    await_text(&mut host, 1, lease, "OSC7-AFTER-OWNER");
-    let after_owner = git_facts(&mut host, &git.0, |facts| facts.worktrees.is_some());
+    await_text(&mut host, 1, lease, "OWNER-MOVED");
+    let moved = git_facts(&mut host, &git.0, |facts| facts.worktrees.is_some());
+    let workspace = &moved.workspaces[0];
     assert_eq!(
-        super::repositories::workspace_directory(&after_owner.workspaces[0]),
+        super::repositories::workspace_directory(workspace),
         Some(git.0.as_path())
     );
+    assert_eq!(workspace.tabs[0].worktree.as_ref(), Some(&git.0));
     assert_eq!(
-        after_owner.workspaces[0].tabs[0].worktree.as_ref(),
+        workspace.tabs[0].panes[0].confirmed_directory.as_ref(),
         Some(&git.0)
-    );
-    assert_eq!(
-        after_owner.workspaces[0].tabs[0].panes[0]
-            .confirmed_directory
-            .as_ref(),
-        Some(&tree)
     );
     host.shutdown().unwrap();
 }
@@ -248,7 +278,12 @@ fn assert_count_failure_keeps_facts(timeout: bool) {
     prototype.directory = git.0.clone();
     let mut host = SharedWorkspaceHost::new(prototype);
     create_shared(&mut host, 1);
-    git_facts(&mut host, &git.0, |facts| facts.repository.is_some());
+    git_facts(&mut host, &git.0, |facts| {
+        facts
+            .repository
+            .as_ref()
+            .is_some_and(|repository| repository.counting.is_none() && repository.changes.is_ok())
+    });
     // Fail only the expensive change read after a successful earlier publication.
     let filter = if timeout {
         std::fs::write(
@@ -265,10 +300,13 @@ fn assert_count_failure_keeps_facts(timeout: bool) {
     git.git(&["branch", "-m", "feature"]);
     std::fs::write(git.0.join("tracked.txt"), "after!\n").unwrap();
     let current = git_facts(&mut host, &git.0, |facts| {
-        facts
-            .repository
-            .as_ref()
-            .is_some_and(|repository| repository.head == RepositoryHead::Branch("feature".into()))
+        facts.repository.as_ref().is_some_and(|repository| {
+            repository.head == RepositoryHead::Branch("feature".into())
+                && repository.counting.is_none()
+        }) && facts.worktrees.as_ref().is_some_and(|list| {
+            list.worktrees[0].head
+                == spaceterm_server::repository::WorktreeHead::Branch("feature".into())
+        })
     });
     let facts = current
         .repositories
@@ -320,10 +358,9 @@ fn shared_git_reads_publish_external_changes_to_two_clients_and_retain_worktree_
     let mut host = SharedWorkspaceHost::new(prototype);
     let workspace = create_shared(&mut host, 1);
     let first = git_facts(&mut host, &tree, |facts| {
-        facts
-            .repository
-            .as_ref()
-            .is_some_and(|repo| repo.head == RepositoryHead::Branch("feature".into()))
+        facts.repository.as_ref().is_some_and(|repo| {
+            repo.head == RepositoryHead::Branch("feature".into()) && repo.counting.is_none()
+        }) && facts.worktrees.is_some()
     });
     let tab = &first.workspaces[0].tabs[0];
     assert_eq!(tab.worktree.as_ref(), Some(&tree));
@@ -547,7 +584,7 @@ fn an_unpinned_root_tab_follows_entering_and_leaving_git_without_moving_other_ta
     prototype.directory = git.0.clone();
     let mut host = SharedWorkspaceHost::new(prototype);
     let workspace = create_shared(&mut host, 1);
-    git_facts(&mut host, &git.0, |facts| facts.repository.is_some());
+    git_facts(&mut host, &git.0, |facts| facts.worktrees.is_some());
     assert!(matches!(
         host.request(
             [1; 32],
@@ -1070,6 +1107,26 @@ fn server_removal_protects_pins_in_unattached_workspaces_and_rechecks_missing_lo
             },
         },
     );
+    let mut inventory = git_facts(&mut host, &git.0, |facts| facts.worktrees.is_some());
+    let until = Instant::now() + Duration::from_secs(3);
+    while inventory.repositories.as_ref().unwrap().pin_check
+        == spaceterm_server::repository::PinCheckState::Checking
+    {
+        assert!(
+            Instant::now() < until,
+            "the owning server must finish physical pin discovery"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+        inventory = shared_inventory(&mut host);
+    }
+    assert!(
+        inventory
+            .repositories
+            .unwrap()
+            .pinned_worktrees
+            .contains(&tree),
+        "the server publishes physical containment for a pin in another Workspace"
+    );
     assert!(matches!(
         read_worktree(
             &mut host,
@@ -1091,6 +1148,14 @@ fn server_removal_protects_pins_in_unattached_workspaces_and_rechecks_missing_lo
                 directory: None,
             },
         },
+    );
+    assert!(
+        !shared_inventory(&mut host)
+            .repositories
+            .unwrap()
+            .pinned_worktrees
+            .contains(&tree),
+        "unpinning removes the server's removal restriction"
     );
     let review = review_removal(&mut host, &git.0, &tree);
     std::fs::remove_dir_all(&tree).unwrap();

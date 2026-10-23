@@ -11,23 +11,31 @@ use spaceterm_server::{
     repository::*,
 };
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
-    sync::{Arc, mpsc},
+    sync::{Arc, Mutex, mpsc},
     thread::JoinHandle,
     time::{Duration, Instant},
 };
 
+const DISCOVERY_WORKERS: usize = 4;
+const COUNT_WORKERS: usize = 2;
+const COUNTING_DELAY: Duration = Duration::from_secs(1);
+const POLL: Duration = Duration::from_millis(10);
 const REFRESH: Duration = Duration::from_secs(2);
 const MAX_DIRECTORIES: usize = 512;
 const MAX_WORKTREES: usize = 256;
 const MAX_SNAPSHOT_BYTES: usize = 8 * 1024 * 1024;
+
+mod pins;
 
 type Sources = BTreeSet<PathBuf>;
 struct Worker {
     cancellation: SshCancellationToken,
     handle: JoinHandle<()>,
     results: mpsc::Receiver<(GitToolStatus, DirectoryFacts)>,
+    interests: mpsc::SyncSender<Sources>,
+    sent_sources: Sources,
 }
 pub(super) struct ServerRepositories {
     subscribers: BTreeSet<Id>,
@@ -35,6 +43,7 @@ pub(super) struct ServerRepositories {
     snapshot: Snapshot,
     worker: Option<Worker>,
     next_read: Instant,
+    pin_membership: pins::PinMembership,
 }
 impl ServerRepositories {
     pub(super) fn new(boot: Id) -> Self {
@@ -46,9 +55,12 @@ impl ServerRepositories {
                 revision: 0,
                 git: GitToolStatus::Unknown,
                 directories: Vec::new(),
+                pinned_worktrees: Vec::new(),
+                pin_check: PinCheckState::Ready,
             },
             worker: None,
             next_read: Instant::now(),
+            pin_membership: pins::PinMembership::default(),
         }
     }
 }
@@ -128,12 +140,15 @@ impl ServerRepositories {
                 .directories
                 .retain(|facts| self.sources.contains(&facts.directory));
             self.snapshot.revision = self.snapshot.revision.saturating_add(1);
-            if let Some(worker) = &self.worker {
-                worker.cancellation.cancel();
-            }
             self.next_read = Instant::now();
         }
-        if let Some(worker) = &self.worker {
+        if let Some(worker) = &mut self.worker {
+            // Retry the latest interests on the next update if the bounded mailbox is full.
+            if worker.sent_sources != self.sources
+                && worker.interests.try_send(self.sources.clone()).is_ok()
+            {
+                worker.sent_sources.clone_from(&self.sources);
+            }
             let finished = worker.handle.is_finished();
             for (git, mut facts) in worker.results.try_iter() {
                 if worker.cancellation.is_cancelled() || !self.sources.contains(&facts.directory) {
@@ -144,12 +159,29 @@ impl ServerRepositories {
                     .directories
                     .iter()
                     .position(|old| old.directory == facts.directory);
+                if let Some(old) = old {
+                    let previous = &self.snapshot.directories[old];
+                    if let (Some(current), Some(previous_repository)) =
+                        (&mut facts.repository, &previous.repository)
+                        && current.root == previous_repository.root
+                    {
+                        if current.counting.is_some() && previous_repository.changes.is_ok() {
+                            current.changes.clone_from(&previous_repository.changes);
+                        }
+                        if facts.worktrees.is_none() {
+                            facts.worktrees.clone_from(&previous.worktrees);
+                        }
+                    }
+                }
                 if facts.failure.is_some()
                     && let Some(old) = old
                 {
                     let previous = &self.snapshot.directories[old];
                     if facts.repository.is_none() {
                         facts.repository.clone_from(&previous.repository);
+                        if let Some(repository) = &mut facts.repository {
+                            repository.counting = None;
+                        }
                     }
                     if facts.worktrees.is_none() {
                         facts.worktrees.clone_from(&previous.worktrees);
@@ -180,21 +212,30 @@ impl ServerRepositories {
                 }
             }
         }
+        self.pin_membership.update(
+            &state.inventory,
+            &mut self.snapshot,
+            !self.subscribers.is_empty(),
+        );
         reconcile_membership(state, &self.snapshot);
         if !self.subscribers.is_empty() && self.worker.is_none() && Instant::now() >= self.next_read
         {
             let cancellation = SshCancellationToken::default();
             let token = cancellation.clone();
             let sources = self.sources.clone();
+            let sent_sources = sources.clone();
+            let (interests, updates) = mpsc::sync_channel(1);
             let (sender, results) = mpsc::sync_channel(1);
             if let Ok(handle) = std::thread::Builder::new()
                 .name("spaceterm-server-git".into())
-                .spawn(move || read(sources, token, sender))
+                .spawn(move || read(sources, updates, token, sender))
             {
                 self.worker = Some(Worker {
                     cancellation,
                     handle,
                     results,
+                    interests,
+                    sent_sources,
                 });
             }
             self.next_read = Instant::now() + REFRESH;
@@ -202,7 +243,7 @@ impl ServerRepositories {
     }
 }
 pub(super) fn pane_directory(pane: &spaceterm_server::hierarchy::Pane) -> &Path {
-    pane.presented_directory()
+    pane.repository_directory()
 }
 pub(super) fn workspace_directory(
     workspace: &spaceterm_server::hierarchy::Workspace,
@@ -323,6 +364,7 @@ impl RepositoryProgramRunner for DeadlineRunner {
 }
 fn read(
     sources: Sources,
+    interests: mpsc::Receiver<Sources>,
     cancellation: SshCancellationToken,
     sender: mpsc::SyncSender<(GitToolStatus, DirectoryFacts)>,
 ) {
@@ -367,77 +409,543 @@ fn read(
         )),
         _ => None,
     };
-    for directory in sources {
-        if cancellation.is_cancelled() {
-            return;
+    read_sources(sources, interests, readers, status, cancellation, sender);
+}
+
+type Readers = (
+    policy::local_read::LocalRepositoryReader,
+    crate::worktrees::git::LocalWorktreeGit,
+);
+type Changes = Result<ChangeSummary, RepositoryReadError>;
+
+struct ActiveRead {
+    // Reject late results after a source or physical root is removed and reintroduced.
+    id: u64,
+    cancellation: SshCancellationToken,
+}
+struct DiscoveryJob {
+    directory: PathBuf,
+    active: ActiveRead,
+}
+struct CountJob {
+    root: PathBuf,
+    fsmonitor: FsmonitorPolicy,
+    active: ActiveRead,
+}
+enum ReadEvent {
+    Facts {
+        id: u64,
+        facts: Box<DirectoryFacts>,
+        fsmonitor: FsmonitorPolicy,
+        discovered: bool,
+    },
+    CountFinished {
+        id: u64,
+        root: PathBuf,
+        changes: Changes,
+    },
+}
+struct DirectoryRead {
+    facts: Option<DirectoryFacts>,
+    active: Option<ActiveRead>,
+    next_read: Instant,
+}
+struct CountRead {
+    fsmonitor: FsmonitorPolicy,
+    active: Option<ActiveRead>,
+    next_read: Instant,
+    // Queue time counts toward progress, including when both scan workers are occupied.
+    requested: Option<Instant>,
+    counting: Option<ChangeCounting>,
+    changes: Changes,
+}
+impl CountRead {
+    fn apply(&self, facts: &mut DirectoryFacts) {
+        if let Some(repository) = &mut facts.repository {
+            repository.counting = self.counting;
+            repository.changes.clone_from(&self.changes);
         }
-        let mut facts = DirectoryFacts {
-            directory,
-            repository: None,
-            worktrees: None,
-            failure: None,
-        };
-        let result = (|| {
-            let (repository, worktrees) =
-                readers.as_ref().ok_or(RepositoryReadError::ToolMissing)?;
-            let validated = super::local_filesystem()
-                .validate_directory(&facts.directory)
-                .map_err(|_| RepositoryReadError::Unavailable)?;
-            let directory = validated.path();
-            if let ProbeOutcome::Repository(probe) = repository.probe(directory, &cancellation)? {
-                let RepositoryRoot::Local(root) = &probe.root else {
-                    return Err(RepositoryReadError::InvalidResponse);
-                };
-                let changes = repository
-                    .count(root, probe.config.fsmonitor, &cancellation)
-                    .map(|summary| summary.changes);
-                facts.repository = Some(Repository {
-                    root: root.clone(),
-                    pull_request: policy::pull_request::pull_request_query(
-                        &probe.config,
-                        &probe.head,
-                    ),
-                    head: probe.head,
-                    commit: probe.commit,
-                    upstream: probe.upstream,
-                    operation: probe.operation,
-                    changes,
-                });
-                // Every Pane needs its actual membership from Git, including inactive Tabs.
-                if let Some(mut list) = worktrees.list(directory, &cancellation)? {
-                    if list.worktrees.len() > MAX_WORKTREES {
-                        return Err(RepositoryReadError::OutputTooLarge);
-                    }
-                    for record in &mut list.worktrees {
-                        record.missing |= matches!(
-                            super::local_filesystem().validate_directory(&record.root),
-                            Err(super::LocalFilesystemError::Missing
-                                | super::LocalFilesystemError::NotDirectory)
-                        );
-                    }
-                    facts.worktrees = Some(WorktreeInventory {
-                        main_root: list.repository.main_root().to_owned(),
-                        current: list.current,
-                        worktrees: list.worktrees,
-                    });
-                }
-            }
-            Ok(())
-        })();
-        facts.failure = result.err();
-        let mut publication = (status, facts);
-        loop {
-            if cancellation.is_cancelled() {
+    }
+}
+
+/// One subscriber lifetime owns fixed discovery and count pools. Recurring discovery never
+/// waits for a full scan; source edits update interests without restarting scans still in use.
+fn read_sources(
+    sources: Sources,
+    interests: mpsc::Receiver<Sources>,
+    readers: Option<Readers>,
+    status: GitToolStatus,
+    cancellation: SshCancellationToken,
+    sender: mpsc::SyncSender<(GitToolStatus, DirectoryFacts)>,
+) {
+    let Some((repository, worktrees)) = readers else {
+        for directory in sources {
+            if !send(
+                &sender,
+                (
+                    status,
+                    DirectoryFacts {
+                        directory,
+                        repository: None,
+                        worktrees: None,
+                        failure: Some(RepositoryReadError::ToolMissing),
+                    },
+                ),
+                &cancellation,
+            ) {
                 return;
             }
-            match sender.try_send(publication) {
-                Ok(()) => break,
-                Err(mpsc::TrySendError::Disconnected(_)) => return,
-                Err(mpsc::TrySendError::Full(pending)) => {
-                    publication = pending;
-                    std::thread::sleep(Duration::from_millis(10));
+        }
+        return;
+    };
+    // Queues hold only a bounded window of jobs. The supervisor retains at most one pending
+    // discovery per interested source and one pending count per physical Worktree root.
+    let (discoveries, discovery_receiver) = mpsc::sync_channel::<DiscoveryJob>(DISCOVERY_WORKERS);
+    let discovery_receiver = Mutex::new(discovery_receiver);
+    let (counts, count_receiver) = mpsc::sync_channel::<CountJob>(COUNT_WORKERS);
+    let count_receiver = Mutex::new(count_receiver);
+    let (events, receiver) = mpsc::sync_channel(8);
+    std::thread::scope(|scope| {
+        for _ in 0..DISCOVERY_WORKERS {
+            let jobs = &discovery_receiver;
+            let events = &events;
+            let cancellation = &cancellation;
+            let repository = &repository;
+            let worktrees = &worktrees;
+            scope.spawn(move || {
+                while !cancellation.is_cancelled() {
+                    let job = jobs.lock().unwrap().recv();
+                    match job {
+                        Ok(job) if !job.active.cancellation.is_cancelled() => discover(
+                            job.directory,
+                            job.active.id,
+                            repository,
+                            worktrees,
+                            events,
+                            &job.active.cancellation,
+                        ),
+                        Ok(_) => {}
+                        Err(_) => return,
+                    }
                 }
+            });
+        }
+        for _ in 0..COUNT_WORKERS {
+            let jobs = &count_receiver;
+            let events = &events;
+            let repository = &repository;
+            let cancellation = &cancellation;
+            scope.spawn(move || {
+                while !cancellation.is_cancelled() {
+                    let job = match jobs.lock().unwrap().recv() {
+                        Ok(job) => job,
+                        Err(_) => return,
+                    };
+                    if job.active.cancellation.is_cancelled() {
+                        continue;
+                    }
+                    let changes = repository
+                        .count(&job.root, job.fsmonitor, &job.active.cancellation)
+                        .map(|summary| summary.changes);
+                    if !send(
+                        events,
+                        ReadEvent::CountFinished {
+                            id: job.active.id,
+                            root: job.root,
+                            changes,
+                        },
+                        cancellation,
+                    ) {
+                        return;
+                    }
+                }
+            });
+        }
+        let mut supervisor = ReadSupervisor {
+            directories: BTreeMap::new(),
+            counts: BTreeMap::new(),
+            next_id: 0,
+            discoveries,
+            count_jobs: counts,
+            sender,
+            status,
+            cancellation: cancellation.clone(),
+        };
+        supervisor.set_sources(sources);
+        supervisor.run(interests, receiver);
+        // Every queued or running job observes this token. Join the fixed pools before the
+        // owning worker exits, including when publication or source delivery disconnects.
+        cancellation.cancel();
+    });
+}
+
+struct ReadSupervisor {
+    directories: BTreeMap<PathBuf, DirectoryRead>,
+    counts: BTreeMap<PathBuf, CountRead>,
+    next_id: u64,
+    discoveries: mpsc::SyncSender<DiscoveryJob>,
+    count_jobs: mpsc::SyncSender<CountJob>,
+    sender: mpsc::SyncSender<(GitToolStatus, DirectoryFacts)>,
+    status: GitToolStatus,
+    cancellation: SshCancellationToken,
+}
+impl ReadSupervisor {
+    fn set_sources(&mut self, sources: Sources) {
+        let sources: Sources = sources.into_iter().take(MAX_DIRECTORIES).collect();
+        self.directories.retain(|directory, read| {
+            if sources.contains(directory) {
+                return true;
+            }
+            if let Some(active) = &read.active {
+                active.cancellation.cancel();
+            }
+            false
+        });
+        // Also bound injected source updates at this worker boundary, rather than relying only
+        // on the hierarchy's independently bounded inventory.
+        for directory in sources {
+            self.directories
+                .entry(directory)
+                .or_insert_with(|| DirectoryRead {
+                    facts: None,
+                    active: None,
+                    next_read: Instant::now(),
+                });
+        }
+        self.prune_counts();
+    }
+    fn prune_counts(&mut self) {
+        let roots: Sources = self
+            .directories
+            .values()
+            .filter_map(|read| Some(read.facts.as_ref()?.repository.as_ref()?.root.clone()))
+            .collect();
+        self.counts.retain(|root, read| {
+            if roots.contains(root) {
+                return true;
+            }
+            if let Some(active) = &read.active {
+                active.cancellation.cancel();
+            }
+            false
+        });
+    }
+    fn run(&mut self, interests: mpsc::Receiver<Sources>, events: mpsc::Receiver<ReadEvent>) {
+        while !self.cancellation.is_cancelled() {
+            match interests.try_recv() {
+                Ok(sources) => self.set_sources(sources),
+                Err(mpsc::TryRecvError::Empty) => {}
+                Err(mpsc::TryRecvError::Disconnected) => return,
+            }
+            if !self.schedule() {
+                return;
+            }
+            match events.recv_timeout(POLL) {
+                Ok(event) => {
+                    if !self.accept(event) {
+                        return;
+                    }
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => return,
+            }
+        }
+    }
+    fn schedule(&mut self) -> bool {
+        let now = Instant::now();
+        // Keep waiting work ahead of recurring refreshes, including after a bounded queue
+        // fills. A completed read receives a new due time; unscheduled work keeps its place.
+        let mut directories: Vec<_> = self
+            .directories
+            .iter()
+            .filter(|(_, read)| read.active.is_none() && now >= read.next_read)
+            .map(|(directory, read)| (read.next_read, directory.clone()))
+            .collect();
+        directories.sort_unstable();
+        for (_, directory) in directories {
+            let read = self.directories.get_mut(&directory).unwrap();
+            self.next_id = self.next_id.saturating_add(1);
+            let cancellation =
+                SshCancellationToken::linked(&self.cancellation, &SshCancellationToken::default());
+            let job = DiscoveryJob {
+                directory: directory.clone(),
+                active: ActiveRead {
+                    id: self.next_id,
+                    cancellation: cancellation.clone(),
+                },
+            };
+            match self.discoveries.try_send(job) {
+                Ok(()) => {
+                    read.active = Some(ActiveRead {
+                        id: self.next_id,
+                        cancellation,
+                    })
+                }
+                Err(mpsc::TrySendError::Full(_)) => break,
+                Err(mpsc::TrySendError::Disconnected(_)) => return false,
+            }
+        }
+        let mut progress = Vec::new();
+        let mut count_capacity = true;
+        let mut roots: Vec<_> = self
+            .counts
+            .iter()
+            .map(|(root, read)| (read.next_read, root.clone()))
+            .collect();
+        roots.sort_unstable();
+        for (_, root) in roots {
+            let read = self.counts.get_mut(&root).unwrap();
+            if read.active.is_none() && now >= read.next_read {
+                if read.counting.is_none() {
+                    read.counting = Some(ChangeCounting::Pending);
+                    read.requested = Some(now);
+                    progress.push(root.clone());
+                }
+                if count_capacity {
+                    self.next_id = self.next_id.saturating_add(1);
+                    let cancellation = SshCancellationToken::linked(
+                        &self.cancellation,
+                        &SshCancellationToken::default(),
+                    );
+                    let job = CountJob {
+                        root: root.clone(),
+                        fsmonitor: read.fsmonitor,
+                        active: ActiveRead {
+                            id: self.next_id,
+                            cancellation: cancellation.clone(),
+                        },
+                    };
+                    match self.count_jobs.try_send(job) {
+                        Ok(()) => {
+                            read.active = Some(ActiveRead {
+                                id: self.next_id,
+                                cancellation,
+                            })
+                        }
+                        Err(mpsc::TrySendError::Full(_)) => count_capacity = false,
+                        Err(mpsc::TrySendError::Disconnected(_)) => return false,
+                    }
+                }
+            }
+            if read.counting == Some(ChangeCounting::Pending)
+                && read
+                    .requested
+                    .is_some_and(|requested| now.duration_since(requested) >= COUNTING_DELAY)
+            {
+                read.counting = Some(ChangeCounting::Counting);
+                progress.push(root.clone());
+            }
+        }
+        for root in progress {
+            if !self.publish_root(&root) {
+                return false;
+            }
+        }
+        true
+    }
+    fn accept(&mut self, event: ReadEvent) -> bool {
+        match event {
+            ReadEvent::Facts {
+                id,
+                facts,
+                fsmonitor,
+                discovered,
+            } => {
+                let Some(read) = self.directories.get_mut(&facts.directory) else {
+                    return true;
+                };
+                if read.active.as_ref().map(|active| active.id) != Some(id) {
+                    return true;
+                }
+                let directory = facts.directory.clone();
+                let missing_tool = facts.failure == Some(RepositoryReadError::ToolMissing);
+                read.facts = Some(*facts);
+                if discovered {
+                    read.active = None;
+                    read.next_read = Instant::now() + REFRESH;
+                }
+                self.prune_counts();
+                if let Some(root) = self.directories[&directory]
+                    .facts
+                    .as_ref()
+                    .and_then(|facts| facts.repository.as_ref())
+                    .map(|repository| repository.root.clone())
+                {
+                    self.counts
+                        .entry(root)
+                        .or_insert_with(|| CountRead {
+                            fsmonitor,
+                            active: None,
+                            next_read: Instant::now(),
+                            requested: Some(Instant::now()),
+                            counting: Some(ChangeCounting::Pending),
+                            changes: Err(RepositoryReadError::Unavailable),
+                        })
+                        .fsmonitor = fsmonitor;
+                }
+                self.publish_directory(&directory) && !missing_tool
+            }
+            ReadEvent::CountFinished { id, root, changes } => {
+                let Some(read) = self.counts.get_mut(&root) else {
+                    return true;
+                };
+                if read.active.as_ref().map(|active| active.id) != Some(id) {
+                    return true;
+                }
+                read.active = None;
+                read.requested = None;
+                read.counting = None;
+                read.changes = changes;
+                read.next_read = Instant::now() + REFRESH;
+                self.publish_root(&root)
+            }
+        }
+    }
+    fn publish_root(&mut self, root: &Path) -> bool {
+        let directories: Vec<_> = self
+            .directories
+            .iter()
+            .filter_map(|(directory, read)| {
+                if read.facts.as_ref()?.repository.as_ref()?.root == root {
+                    Some(directory.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        for directory in directories {
+            if !self.publish_directory(&directory) {
+                return false;
+            }
+        }
+        true
+    }
+    fn publish_directory(&mut self, directory: &Path) -> bool {
+        let facts = self
+            .directories
+            .get_mut(directory)
+            .unwrap()
+            .facts
+            .as_mut()
+            .unwrap();
+        if let Some(count) = facts
+            .repository
+            .as_ref()
+            .and_then(|repository| self.counts.get(&repository.root))
+        {
+            count.apply(facts);
+        }
+        send(
+            &self.sender,
+            (self.status, facts.clone()),
+            &self.cancellation,
+        )
+    }
+}
+
+fn discover(
+    directory: PathBuf,
+    id: u64,
+    repository: &policy::local_read::LocalRepositoryReader,
+    worktrees: &crate::worktrees::git::LocalWorktreeGit,
+    events: &mpsc::SyncSender<ReadEvent>,
+    cancellation: &SshCancellationToken,
+) {
+    let mut facts = DirectoryFacts {
+        directory,
+        repository: None,
+        worktrees: None,
+        failure: None,
+    };
+    let mut fsmonitor = FsmonitorPolicy::Disabled;
+    let result = (|| {
+        let validated = super::local_filesystem()
+            .validate_directory(&facts.directory)
+            .map_err(|_| RepositoryReadError::Unavailable)?;
+        let directory = validated.path();
+        if let ProbeOutcome::Repository(probe) = repository.probe(directory, cancellation)? {
+            let RepositoryRoot::Local(root) = &probe.root else {
+                return Err(RepositoryReadError::InvalidResponse);
+            };
+            // Git can preserve an alias spelling. Full scans share the physical Worktree root.
+            let root = std::fs::canonicalize(root).map_err(|_| RepositoryReadError::Unavailable)?;
+            fsmonitor = probe.config.fsmonitor;
+            facts.repository = Some(Repository {
+                root,
+                pull_request: policy::pull_request::pull_request_query(&probe.config, &probe.head),
+                head: probe.head,
+                commit: probe.commit,
+                upstream: probe.upstream,
+                operation: probe.operation,
+                changes: Err(RepositoryReadError::Unavailable),
+                counting: Some(ChangeCounting::Pending),
+            });
+            if !send(
+                events,
+                ReadEvent::Facts {
+                    id,
+                    facts: Box::new(facts.clone()),
+                    fsmonitor,
+                    discovered: false,
+                },
+                cancellation,
+            ) {
+                return Err(RepositoryReadError::Cancelled);
+            }
+            // Every Pane needs its actual membership from Git, including inactive Tabs.
+            if let Some(mut list) = worktrees.list(directory, cancellation)? {
+                if list.worktrees.len() > MAX_WORKTREES {
+                    return Err(RepositoryReadError::OutputTooLarge);
+                }
+                for record in &mut list.worktrees {
+                    record.missing |= matches!(
+                        super::local_filesystem().validate_directory(&record.root),
+                        Err(super::LocalFilesystemError::Missing
+                            | super::LocalFilesystemError::NotDirectory)
+                    );
+                }
+                facts.worktrees = Some(WorktreeInventory {
+                    main_root: list.repository.main_root().to_owned(),
+                    current: list.current,
+                    worktrees: list.worktrees,
+                });
+            }
+        }
+        Ok(())
+    })();
+    facts.failure = result.err();
+    send(
+        events,
+        ReadEvent::Facts {
+            id,
+            facts: Box::new(facts),
+            fsmonitor,
+            discovered: true,
+        },
+        cancellation,
+    );
+}
+
+/// Bounded backpressure must remain cancellable when a subscriber stops draining publications.
+fn send<T>(
+    sender: &mpsc::SyncSender<T>,
+    mut value: T,
+    cancellation: &SshCancellationToken,
+) -> bool {
+    loop {
+        if cancellation.is_cancelled() {
+            return false;
+        }
+        match sender.try_send(value) {
+            Ok(()) => return true,
+            Err(mpsc::TrySendError::Disconnected(_)) => return false,
+            Err(mpsc::TrySendError::Full(pending)) => {
+                value = pending;
+                std::thread::sleep(POLL);
             }
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

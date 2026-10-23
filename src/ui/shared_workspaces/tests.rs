@@ -49,6 +49,7 @@ fn pane(id: Id, source: Option<Id>, axis: Axis) -> Pane {
         axis,
         starting_directory: PathBuf::from("/server/work"),
         current_directory: None,
+        repository_directory: None,
         presentation: None,
         confirmed_directory: None,
         creator: None,

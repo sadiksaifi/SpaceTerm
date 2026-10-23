@@ -148,8 +148,6 @@ pub(super) enum SettingsRowId {
     ShowPullRequests,
     /// Whether the GitHub CLI is installed and logged in.
     GitHubCli,
-    /// The Worktree Path Template, where a new Worktree's directory goes.
-    WorktreeLocation,
     /// Every server this desktop presents, which selects the server the rows below act on.
     ServerList,
     /// The local server's connection status and the next step.
@@ -253,7 +251,6 @@ impl SettingsRowId {
             | Self::GitHubCli
             | Self::ServerWorktreeLocation
             | Self::RemovedServerOperations
-            | Self::WorktreeLocation
             // The server rows hold status and actions, not a preference.
             | Self::ServerList
             | Self::LocalServer
@@ -698,22 +695,6 @@ const PREFERENCE_ROWS: &[SettingsRowDescriptor] = &[
         label: "GitHub CLI",
         keywords: &["gh", "login", "auth", "sign in", "install", "enterprise"],
         selector: "settings-row-github-cli",
-    },
-    SettingsRowDescriptor {
-        id: SettingsRowId::WorktreeLocation,
-        section: SettingsSectionId::Git,
-        group: "Worktrees",
-        label: "New Worktree Location",
-        keywords: &[
-            "worktree",
-            "path",
-            "folder",
-            "directory",
-            "template",
-            "branch",
-            "repository",
-        ],
-        selector: "settings-row-worktree-location",
     },
     SettingsRowDescriptor {
         id: SettingsRowId::ServerList,
@@ -1385,7 +1366,7 @@ mod tests {
     }
 
     /// The complete preference row identity set, so the catalog cannot silently omit one.
-    const EVERY_PREFERENCE_ROW: [SettingsRowId; 56] = [
+    const EVERY_PREFERENCE_ROW: [SettingsRowId; 55] = [
         SettingsRowId::AppearanceMode,
         SettingsRowId::Opacity,
         SettingsRowId::Blur,
@@ -1410,7 +1391,6 @@ mod tests {
         SettingsRowId::GitTool,
         SettingsRowId::ShowPullRequests,
         SettingsRowId::GitHubCli,
-        SettingsRowId::WorktreeLocation,
         SettingsRowId::ServerList,
         SettingsRowId::SshConnect,
         SettingsRowId::JoinInvitation,
@@ -1736,7 +1716,6 @@ mod tests {
                     | SettingsRowId::GitHubCli
                     | SettingsRowId::ServerWorktreeLocation
                     | SettingsRowId::RemovedServerOperations
-                    | SettingsRowId::WorktreeLocation
                     | SettingsRowId::ServerList
                     | SettingsRowId::LocalServer
                     | SettingsRowId::ServerService
@@ -1802,7 +1781,6 @@ mod tests {
             ("branch", SettingsRowId::ShowRepositoryStatus),
             ("pull request", SettingsRowId::ShowPullRequests),
             ("gh", SettingsRowId::GitHubCli),
-            ("worktree", SettingsRowId::WorktreeLocation),
             ("command line tools", SettingsRowId::GitTool),
         ] {
             assert!(

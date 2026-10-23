@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use spaceterm_server::hierarchy::{Pane, Workspace};
-use spaceterm_server::repository::{DirectoryFacts, Snapshot, WorktreeInventory};
+use spaceterm_server::repository::{ChangeCounting, DirectoryFacts, Snapshot, WorktreeInventory};
 
 use crate::repository_status::{
     ChangeState, Freshness, PullRequest, RemoteMachineKey, RepositoryKey, RepositoryMachine,
@@ -84,6 +84,20 @@ impl SharedRepositories {
     /// The facts the server read for one directory it reported.
     pub(crate) fn facts(&self, directory: &Path) -> Option<&DirectoryFacts> {
         find(self.snapshot.as_ref()?, directory)
+    }
+
+    /// The owning server resolves pins across all its Workspaces on its own filesystem.
+    pub(crate) fn holds_pinned_directory(&self, root: &Path) -> bool {
+        self.snapshot
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.pinned_worktrees.iter().any(|path| path == root))
+    }
+
+    pub(crate) fn pin_check_state(&self) -> spaceterm_server::repository::PinCheckState {
+        self.snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.pin_check)
+            .unwrap_or_default()
     }
 
     /// The Worktrees of the repository containing one directory, as git on the server lists them.
@@ -185,6 +199,12 @@ impl SharedRepositories {
             operation: repository.operation,
             changes: match &repository.changes {
                 Ok(changes) => ChangeState::Known(changes.clone()),
+                Err(_) if repository.counting == Some(ChangeCounting::Pending) => {
+                    ChangeState::NotCounted
+                }
+                Err(_) if repository.counting == Some(ChangeCounting::Counting) => {
+                    ChangeState::Counting
+                }
                 Err(error) => ChangeState::Unavailable(*error),
             },
             freshness,
@@ -216,9 +236,9 @@ fn pull_request_key(
     })
 }
 
-/// The live directory a server Pane presents, independent of restoration authority.
+/// The protected Repository Source Directory a server Pane reports.
 pub(crate) fn pane_directory(pane: &Pane) -> &Path {
-    pane.presented_directory()
+    pane.repository_directory()
 }
 
 /// The directory a server Workspace's row reads: its Pinned Directory, else its Root Pane's.
@@ -253,6 +273,7 @@ mod tests {
             commit: Some("abc1234".into()),
             upstream: None,
             operation: None,
+            counting: None,
             changes: Ok(ChangeSummary {
                 total: ChangeTotal::Exact(2),
                 modified: 2,
@@ -276,6 +297,8 @@ mod tests {
             revision,
             git: GitToolStatus::Unknown,
             directories,
+            pinned_worktrees: Vec::new(),
+            pin_check: spaceterm_server::repository::PinCheckState::Ready,
         }
     }
 
@@ -484,6 +507,58 @@ mod tests {
     }
 
     #[test]
+    fn decoded_count_progress_keeps_branch_and_last_known_changes_visible() {
+        let mut repositories = SharedRepositories::default();
+        let now = Instant::now();
+        for (revision, counting, changes, expected) in [
+            (
+                1,
+                Some(ChangeCounting::Pending),
+                Err(RepositoryReadError::Unavailable),
+                ChangeState::NotCounted,
+            ),
+            (
+                2,
+                Some(ChangeCounting::Counting),
+                Err(RepositoryReadError::Unavailable),
+                ChangeState::Counting,
+            ),
+            (
+                3,
+                None,
+                Ok(ChangeSummary::default()),
+                ChangeState::Known(ChangeSummary::default()),
+            ),
+            (
+                4,
+                Some(ChangeCounting::Pending),
+                Ok(ChangeSummary::default()),
+                ChangeState::Known(ChangeSummary::default()),
+            ),
+            (
+                5,
+                Some(ChangeCounting::Counting),
+                Ok(ChangeSummary::default()),
+                ChangeState::Known(ChangeSummary::default()),
+            ),
+        ] {
+            let mut current = repository("feature");
+            current.counting = counting;
+            current.changes = changes;
+            let decoded: Snapshot = serde_json::from_slice(
+                &serde_json::to_vec(&snapshot(revision, vec![facts(Some(current), None)])).unwrap(),
+            )
+            .unwrap();
+            repositories.accept(Some(&decoded), now);
+            let view = present(&repositories, RepositoryStatusPreferences::default(), true);
+            assert_eq!(status(&view).head, RepositoryHead::Branch("feature".into()));
+            assert_eq!(status(&view).changes, expected);
+            assert_eq!(status(&view).read_failure, None);
+            assert_eq!(status(&view).freshness, Freshness::Current);
+        }
+    }
+
+    #[test]
     fn client_settings_should_decide_what_server_facts_present() {
         let mut repositories = SharedRepositories::default();
         repositories.accept(
@@ -614,6 +689,7 @@ mod tests {
                 axis: Axis::Right,
                 starting_directory: worktree.into(),
                 current_directory: None,
+                repository_directory: None,
                 presentation: None,
                 confirmed_directory: None,
                 creator: None,
@@ -631,6 +707,65 @@ mod tests {
                 tab(2, "/srv/other-feature", "/srv/other"),
             ],
         }
+    }
+
+    #[test]
+    fn server_repository_views_follow_the_protected_source_independently_of_live_display() {
+        let mut workspace = workspace_in_removed_worktree();
+        let pane = &mut workspace.tabs[0].panes[0];
+        pane.current_directory = Some("/srv/nested".into());
+        pane.repository_directory = Some("/srv/app/src".into());
+        pane.confirmed_directory = Some("/srv/restore".into());
+        // Consume the hierarchy as an observer receives it over SpaceTerm Protocol.
+        let mut workspace: Workspace =
+            serde_json::from_slice(&serde_json::to_vec(&workspace).unwrap()).unwrap();
+        let mut repositories = SharedRepositories::default();
+        let mut source = listing("/srv/app/src", "/srv/app", &["/srv/app", "/srv/feature"]);
+        source.repository = Some(repository("owner"));
+        let mut nested = listing("/srv/nested", "/srv/nested", &["/srv/nested"]);
+        nested.repository = Some(repository("nested"));
+        repositories.accept(Some(&snapshot(1, vec![source, nested])), Instant::now());
+        let presentation = LocalPresentation {
+            preferences: RepositoryStatusPreferences::default(),
+            connected: true,
+            pull_request: &|_| None,
+        };
+        let view = repositories.view(pane_directory(&workspace.tabs[0].panes[0]), &presentation);
+        assert_eq!(status(&view).head, RepositoryHead::Branch("owner".into()));
+        assert_eq!(
+            repositories
+                .workspace_worktrees(&workspace)
+                .unwrap()
+                .main_root,
+            Path::new("/srv/app")
+        );
+        assert_eq!(
+            workspace.tabs[0].panes[0].presented_directory(),
+            Path::new("/srv/nested")
+        );
+        assert_eq!(
+            workspace.tabs[0].panes[0].confirmed_directory.as_deref(),
+            Some(Path::new("/srv/restore"))
+        );
+        // The owning server's next protected source update moves both repository views.
+        workspace.tabs[0].panes[0].repository_directory = Some("/srv/nested".into());
+        let view = repositories.view(pane_directory(&workspace.tabs[0].panes[0]), &presentation);
+        assert_eq!(status(&view).head, RepositoryHead::Branch("nested".into()));
+        assert_eq!(
+            repositories
+                .workspace_worktrees(&workspace)
+                .unwrap()
+                .main_root,
+            Path::new("/srv/nested")
+        );
+        workspace.pinned_directory = Some("/srv/app/src".into());
+        assert_eq!(
+            repositories
+                .workspace_worktrees(&workspace)
+                .unwrap()
+                .main_root,
+            Path::new("/srv/app")
+        );
     }
 
     fn workspace_listing(repositories: &SharedRepositories) -> Option<Vec<PathBuf>> {

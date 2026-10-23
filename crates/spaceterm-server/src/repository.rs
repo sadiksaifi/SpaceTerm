@@ -220,9 +220,23 @@ pub struct Repository {
     pub operation: Option<RepositoryOperation>,
     /// Change counting can fail independently of branch, upstream, and Worktree discovery.
     pub changes: Result<ChangeSummary, RepositoryReadError>,
+    /// A pending count carries the last successful summary, or an unavailable placeholder.
+    /// Readers that understand progress ignore that placeholder until the count finishes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub counting: Option<ChangeCounting>,
     /// Parsed target only. Raw remote URLs and Git configuration stay on the server.
     pub pull_request: Option<PullRequestQuery>,
 }
+
+/// Progress for an incomplete change count; the last successful summary can remain visible.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ChangeCounting {
+    /// The count has not run long enough to announce progress.
+    Pending,
+    /// The count has exceeded the presentation delay.
+    Counting,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorktreeInventory {
     pub main_root: PathBuf,
@@ -236,4 +250,19 @@ pub struct Snapshot {
     pub revision: u64,
     pub git: GitToolStatus,
     pub directories: Vec<DirectoryFacts>,
+    /// Listed Worktree roots that physically contain a Workspace's Pinned Directory.
+    /// The owning server resolves symbolic links; clients grant no local file authority.
+    #[serde(default)]
+    pub pinned_worktrees: Vec<PathBuf>,
+    #[serde(default)]
+    pub pin_check: PinCheckState,
+}
+
+/// Physical removal eligibility is resolved independently of Git and the terminal request lock.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PinCheckState {
+    #[default]
+    Ready,
+    Checking,
+    Unavailable,
 }

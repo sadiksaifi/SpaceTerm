@@ -524,6 +524,13 @@ run = [
   "cargo run --package spaceterm-server-host --features client --example repository_reads --locked -- 1",
 ]
 
+[tasks."server:repository:desktop:test"]
+description = "Test server-backed repository, Worktree and Settings presentation without native fixture windows"
+usage = '''
+arg "[filter]" help="Run one regression instead of the affected repository and Settings suites"
+'''
+run = "cargo test --package spaceterm --lib --all-features --locked -- {% if usage.filter %}{{usage.filter | quote}}{% else %}runtime::server::repositories runtime::server::repository_tests shared_workspaces::repositories workspace_manager::tests::shared_repositories settings_window{% endif %}"
+
 [tasks."server:test:host"]
 description = "Test the headless executable's build isolation"
 run = "cargo test --package spaceterm-server-host --no-default-features --locked"

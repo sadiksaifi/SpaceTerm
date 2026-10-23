@@ -160,7 +160,13 @@ fn read_git(
             if record.locked {
                 return Err(Error::Locked);
             }
-            if pinned_in_worktree(&inventory, &path)? {
+            if pinned_in_worktree(
+                inventory
+                    .workspaces
+                    .iter()
+                    .filter_map(|w| w.pinned_directory.as_deref()),
+                &path,
+            )? {
                 return Err(Error::Pinned);
             }
             let (expected, changes, submodules) = if matches!(

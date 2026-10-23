@@ -1,29 +1,28 @@
-//! The Git section: whether Repository Status and Pull Requests show, the state of the tools
-//! that provide them, and where new Worktrees go.
+//! The Git section: whether Repository Status and Pull Requests show and the state of the tools
+//! that provide them. New Worktree Location is a Server Setting, which the selected server's
+//! field in the Servers section edits; this module supplies that field and its caption.
 
 use std::path::Path;
 
 use gpui::prelude::*;
 use gpui::{AnyElement, App, Context, Entity, SharedString, Subscription, Window};
-use spaceterm_ui::{FieldState, Switch, TextInput, TextInputEvent, TextInputVariant, ToggleSize};
+use spaceterm_ui::{Switch, TextInput, TextInputEvent, TextInputVariant, ToggleSize};
 
 use super::{SettingsRowId, SettingsWindow};
 use crate::repository_status::{GitHubCliStatus, GitToolStatus, ToolVersion};
 use crate::settings::git::GitPreferences;
-use crate::ui::appearance::{ChromeAppearance, gpui_color};
-use crate::ui::chrome_geometry::RadiusRole;
-use crate::ui::chrome_typography::{ChromeTextStyleExt as _, TextRole};
+use crate::ui::appearance::ChromeAppearance;
 use crate::ui::repository_status_store::RepositoryTools;
 use crate::ui::sidebar_window::form::{CaptionTone, badge};
-use crate::worktrees::path_template::{WorktreePathTemplateError, expand, validate};
+use crate::worktrees::path_template::{WorktreePathTemplateError, expand};
 
 /// The repository and branch the location row's example expands, so the example reads like a
 /// real Worktree without naming one of the person's repositories.
 const EXAMPLE_REPOSITORY: &str = "my-app";
 const EXAMPLE_BRANCH: &str = "feature/login";
 
-/// The field editing the Worktree Path Template. It saves on Return or when focus leaves, and
-/// only a valid template; Escape returns it to the saved one.
+/// The field editing the selected server's New Worktree Location. The server location saves it
+/// on Return or when focus leaves, and only a valid template; Escape returns it to the saved one.
 pub(super) struct WorktreeLocationField {
     pub(super) input: Entity<TextInput>,
     /// Why the field's text cannot be saved, shown while the person edits it.
@@ -32,65 +31,19 @@ pub(super) struct WorktreeLocationField {
 }
 
 impl WorktreeLocationField {
-    pub(super) fn new(
-        template: &str,
-        window: &mut Window,
-        cx: &mut Context<SettingsWindow>,
-    ) -> Self {
-        Self::with_scope(template, false, window, cx)
-    }
-    pub(super) fn with_scope(
-        template: &str,
-        server: bool,
-        window: &mut Window,
-        cx: &mut Context<SettingsWindow>,
-    ) -> Self {
-        let selector = if server {
-            "settings-server-worktree-location"
-        } else {
-            "settings-worktree-location"
-        };
+    pub(super) fn new(window: &mut Window, cx: &mut Context<SettingsWindow>) -> Self {
+        let selector = "settings-server-worktree-location";
         let input = cx.new(|cx| {
-            TextInput::new(
-                selector,
-                "New Worktree Location",
-                template.to_owned(),
-                window,
-                cx,
-            )
-            .variant(TextInputVariant::Bare)
-            .input_length_limit(Some(1024))
-            .debug_selector(selector)
+            TextInput::new(selector, "New Worktree Location", String::new(), window, cx)
+                .variant(TextInputVariant::Bare)
+                .input_length_limit(Some(1024))
+                .debug_selector(selector)
         });
         let events = cx.subscribe_in(
             &input,
             window,
-            move |settings, input, event: &TextInputEvent, _, cx| {
-                if server {
-                    settings.server_location_event(input, event, cx);
-                    return;
-                }
-                match event {
-                    TextInputEvent::ValueChanged(_) => {
-                        settings.worktree_location.problem = validate(input.read(cx).value()).err();
-                        cx.notify();
-                    }
-                    TextInputEvent::Submitted | TextInputEvent::FocusLost => {
-                        settings.commit_worktree_location(cx);
-                    }
-                    TextInputEvent::Cancelled => {
-                        let saved = settings
-                            .editor
-                            .document()
-                            .git
-                            .worktree_path_template
-                            .clone();
-                        settings.worktree_location.problem = None;
-                        input.update(cx, |input, cx| input.set_value(saved, cx));
-                        cx.notify();
-                    }
-                    _ => {}
-                }
+            |settings, input, event: &TextInputEvent, _, cx| {
+                settings.server_location_event(input, event, cx);
             },
         );
         Self {
@@ -258,83 +211,6 @@ impl SettingsWindow {
         .into_any_element()
     }
 
-    pub(super) fn render_worktree_location(
-        &mut self,
-        appearance: &ChromeAppearance,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let saved = &self.editor.document().git.worktree_path_template;
-        let input = self.worktree_location.input.clone();
-        // An import, a reset, or the settings file can change the template while the field rests.
-        let resting = !input.read(cx).is_focused() && self.worktree_location.problem.is_none();
-        if resting && input.read(cx).value() != saved {
-            let saved = saved.clone();
-            input.update(cx, |input, cx| input.set_value(saved, cx));
-        }
-        let editable = self.editor.editable();
-        input.update(cx, |input, cx| input.set_editable(editable, cx));
-        let invalid = self.worktree_location.problem.is_some();
-        let focus = input.read(cx).focus_handle();
-        let colors = appearance.host_colors(spaceterm_ui::ControlHost::Card);
-        spaceterm_ui::field_frame(
-            "settings-worktree-location-frame",
-            &focus,
-            FieldState::default().disabled(!editable).invalid(invalid),
-            RadiusRole::Control.pixels(),
-            cx,
-        )
-        .debug_selector(move || {
-            if invalid {
-                "settings-worktree-location-invalid"
-            } else {
-                "settings-worktree-location-frame"
-            }
-            .to_owned()
-        })
-        .h(appearance.height(28.0, 13.0))
-        .w_full()
-        .min_w_0()
-        .flex()
-        .items_center()
-        .px(appearance.spacing(8.0))
-        .chrome_text(appearance.typography.style(TextRole::Body))
-        .text_color(gpui_color(colors.text))
-        .on_click(move |_, window, cx| {
-            focus.focus(window, cx);
-            cx.stop_propagation();
-        })
-        .child(input)
-        .into_any_element()
-    }
-
-    /// Saves the field's template when it is valid and differs from the saved one.
-    fn commit_worktree_location(&mut self, cx: &mut Context<Self>) {
-        let text = self.worktree_location.input.read(cx).value().to_owned();
-        if self.worktree_location.problem.is_some()
-            || text == self.editor.document().git.worktree_path_template
-        {
-            return;
-        }
-        self.edit(move |draft| draft.git.worktree_path_template = text, cx);
-        cx.notify();
-    }
-
-    pub(super) fn worktree_location_caption(&self, cx: &App) -> (SharedString, CaptionTone) {
-        let (text, tone) = worktree_location_caption(
-            self.worktree_location.input.read(cx).value(),
-            self.worktree_location.problem,
-        );
-        if self.worktree_location.problem.is_none() {
-            (
-                format!("Shared Workspaces use the New Worktree Location in Servers. {text}")
-                    .into(),
-                tone,
-            )
-        } else {
-            (text, tone)
-        }
-    }
-
     pub(super) fn render_git_tool(
         &mut self,
         row: SettingsRowId,
@@ -375,24 +251,12 @@ impl SettingsWindow {
             SettingsRowId::ShowPullRequests => {
                 Some(current.show_pull_requests != defaults.show_pull_requests)
             }
-            SettingsRowId::WorktreeLocation => {
-                Some(current.worktree_path_template != defaults.worktree_path_template)
-            }
             _ => None,
         }
     }
 
     pub(super) fn reset_git_preference(&mut self, row: SettingsRowId, cx: &mut Context<Self>) {
         let defaults = GitPreferences::default();
-        if row == SettingsRowId::WorktreeLocation {
-            self.worktree_location.problem = None;
-            let template = defaults.worktree_path_template;
-            self.worktree_location
-                .input
-                .update(cx, |input, cx| input.set_value(template.clone(), cx));
-            self.edit(move |draft| draft.git.worktree_path_template = template, cx);
-            return;
-        }
         let value = if row == SettingsRowId::ShowPullRequests {
             defaults.show_pull_requests
         } else {

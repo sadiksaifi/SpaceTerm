@@ -400,8 +400,6 @@ pub(crate) struct SettingsWindow {
     shortcuts: ShortcutRows,
     /// The read-only settings file in the Advanced section.
     settings_file: advanced::SettingsFileView,
-    /// The Worktree Path Template field, kept so an edit survives re-rendering.
-    worktree_location: git::WorktreeLocationField,
     server_location: server_location::ServerLocation,
     end_all_sessions: end_sessions::EndAllSessions,
     /// The selected server's direct network access and paired devices.
@@ -660,11 +658,6 @@ impl SettingsWindow {
         let theme_store = cx.new(|cx| ThemeStore::new(owner, theme_registry, window, cx));
         let shortcuts = ShortcutRows::new(window, cx);
         let settings_file = advanced::SettingsFileView::new(window, cx);
-        let worktree_location = git::WorktreeLocationField::new(
-            &editor.document().git.worktree_path_template,
-            window,
-            cx,
-        );
         let server_location = server_location::ServerLocation::new(window, cx);
         let permission_changes =
             PermissionAccessChanges::observe(permissions.system_permissions.as_ref(), cx);
@@ -773,7 +766,6 @@ impl SettingsWindow {
             theme_store,
             shortcuts,
             settings_file,
-            worktree_location,
             server_location,
             end_all_sessions: end_sessions::EndAllSessions::new(),
             direct_access: direct_access::DirectAccess::new(),
@@ -1427,9 +1419,6 @@ impl SettingsWindow {
         } else if row == SettingsRowId::ServerWorktreeLocation {
             let (caption, tone) = self.server_location_caption(cx);
             rendered = rendered.caption_with_example(caption, tone);
-        } else if row == SettingsRowId::WorktreeLocation {
-            let (caption, tone) = self.worktree_location_caption(cx);
-            rendered = rendered.caption_with_example(caption, tone);
         } else if row == SettingsRowId::LocalServer {
             if let Some(presentation) = self.local_server_presentation() {
                 rendered = rendered.caption(presentation.explanation, presentation.tone);
@@ -1496,7 +1485,6 @@ impl SettingsWindow {
             }
             SettingsRowId::ServerWorktreeLocation => self.render_server_location(appearance, cx),
             SettingsRowId::EndAllSessions => self.render_end_all_sessions(appearance, cx),
-            SettingsRowId::WorktreeLocation => self.render_worktree_location(appearance, cx),
             SettingsRowId::LocalServer => self.render_local_server(appearance, cx),
             SettingsRowId::ServerService => self.render_server_service(appearance, cx),
             SettingsRowId::ServerUpdate => self.render_server_update(appearance, cx),
@@ -2367,9 +2355,7 @@ fn row_layout(row: SettingsRowId) -> FormRowLayout {
         | SettingsRowId::RemovedServerOperations
         | SettingsRowId::PendingUnpairs
         | SettingsRowId::SettingsFile => FormRowLayout::Full,
-        SettingsRowId::WorktreeLocation | SettingsRowId::ServerWorktreeLocation => {
-            FormRowLayout::Above
-        }
+        SettingsRowId::ServerWorktreeLocation => FormRowLayout::Above,
         _ => FormRowLayout::Beside,
     }
 }

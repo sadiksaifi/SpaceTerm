@@ -7,6 +7,7 @@ use std::collections::BTreeMap;
 #[path = "shared/session_end_tests.rs"]
 mod session_end_tests;
 mod worktrees;
+pub(super) use worktrees::pinned_in_worktree;
 
 pub struct SharedWorkspaceHost {
     writes: worktrees::Writes,
@@ -129,9 +130,13 @@ impl SharedWorkspaceHost {
                 .as_ref()
                 .and_then(|pane| pane.runtime.metadata_snapshot())
             {
-                // OSC 7 is live presentation even without owned prompt markers. Restoration
-                // continues to use only retain_directory's independently confirmed candidate.
+                // Keep live OSC 7 display separate from the owning shell's Repository Source
+                // Directory and retain_directory's independently confirmed restoration target.
                 next.present_directory(*id, metadata.directory.path.as_ref().into());
+                next.present_repository_directory(
+                    *id,
+                    metadata.repository_directory.as_ref().into(),
+                );
             }
             if let Some(org) = &host.organization {
                 if let Some(path) = &org.confirmed_directory {

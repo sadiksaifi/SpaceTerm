@@ -8480,6 +8480,7 @@ fn a_shared_pin_chosen_while_another_client_pins_should_submit_the_version_it_op
                     axis: Axis::Right,
                     starting_directory: PathBuf::from("/server/work"),
                     current_directory: None,
+                    repository_directory: None,
                     presentation: None,
                     confirmed_directory: None,
                     creator: None,
@@ -8599,6 +8600,7 @@ fn each_servers_workspaces_should_take_edits_and_withdrawal_only_from_their_own_
                     axis: Axis::Right,
                     starting_directory: PathBuf::from("/srv/work"),
                     current_directory: None,
+                    repository_directory: None,
                     presentation: None,
                     confirmed_directory: None,
                     creator: None,
@@ -8743,6 +8745,7 @@ fn machine_inventory(
                         axis: Axis::Right,
                         starting_directory: PathBuf::from("/srv/work"),
                         current_directory: None,
+                        repository_directory: None,
                         presentation: None,
                         confirmed_directory: None,
                         creator: None,
@@ -10044,6 +10047,7 @@ fn shared_pane_harness(cx: &mut TestAppContext) -> (SharedPaneHarness, &mut Visu
                     axis: Axis::Right,
                     starting_directory: PathBuf::from("/server/work"),
                     current_directory: None,
+                    repository_directory: None,
                     presentation: None,
                     confirmed_directory: None,
                     creator: None,
@@ -10293,6 +10297,7 @@ fn shared_close_inventory(
         axis: Axis::Right,
         starting_directory: PathBuf::from("/server/work"),
         current_directory: None,
+        repository_directory: None,
         presentation: None,
         confirmed_directory: None,
         creator: None,
@@ -11229,6 +11234,7 @@ fn attachment_inventory() -> spaceterm_server::hierarchy::Inventory {
                 axis: Axis::Right,
                 starting_directory: PathBuf::from("/server/work"),
                 current_directory: None,
+                repository_directory: None,
                 presentation: None,
                 confirmed_directory: None,
                 creator: None,
@@ -11762,6 +11768,7 @@ mod shared_repositories {
             axis: Axis::Right,
             starting_directory: PathBuf::from(directory),
             current_directory: None,
+            repository_directory: None,
             presentation: None,
             confirmed_directory: Some(PathBuf::from(directory)),
             creator: None,
@@ -11786,6 +11793,7 @@ mod shared_repositories {
                 commit: Some("abc1234".into()),
                 upstream: None,
                 operation: None,
+                counting: None,
                 changes: Ok(ChangeSummary {
                     total: ChangeTotal::Exact(1),
                     modified: 1,
@@ -11823,6 +11831,8 @@ mod shared_repositories {
                     patch: 0,
                 }),
                 directories,
+                pinned_worktrees: Vec::new(),
+                pin_check: spaceterm_server::repository::PinCheckState::Ready,
             }),
             revision: 1,
             close: None,
@@ -12129,6 +12139,44 @@ mod shared_repositories {
         );
     }
 
+    #[gpui::test]
+    fn a_new_shared_worktree_uses_the_owning_servers_location(cx: &mut TestAppContext) {
+        use spaceterm_server::hierarchy::Mutation;
+        use spaceterm_server::worktree::{Branch, BranchName, Operation};
+        use spaceterm_ui::a11y_testing::A11yTree;
+
+        // This server uses ~/{branch}; the client's retained default is ~/.worktrees/....
+        let (harness, edits, _, cx) = ssh_harness(cx, published(1, "main", true));
+        cx.update(|window, cx| {
+            window.activate_window();
+            harness.manager.update(cx, |manager, cx| {
+                assert!(manager.new_worktree(harness.shared, window, cx));
+            });
+        });
+        cx.run_until_parked();
+        click("new-worktree-name", cx);
+        cx.simulate_input("topic/new");
+        cx.run_until_parked();
+        assert_eq!(
+            A11yTree::read(cx).node("Location")["aria"]["value"],
+            "~/topic-new"
+        );
+        click("modal-action-new-worktree-create", cx);
+        cx.run_until_parked();
+        assert_eq!(
+            edits.submitted(),
+            [Mutation::Worktree(Operation::Create {
+                workspace: WORKSPACE,
+                root: MAIN_ROOT.into(),
+                path: "/srv/home/topic-new".into(),
+                branch: Branch::New {
+                    name: "topic/new".into(),
+                    base: BranchName::Local("main".into()),
+                },
+            })]
+        );
+    }
+
     /// The server reads Git for a Workspace nobody is looking at, and a new reading reaches its
     /// row and every Pane even though its organization revision never changes.
     #[gpui::test]
@@ -12197,6 +12245,90 @@ mod shared_repositories {
         assert_eq!(rows[1].removal, WorktreeRemoval::Server);
         assert!(rows.iter().all(|row| !row.opens_tabs() && row.closes_tabs));
         assert!(!creates_worktrees, "New Worktree stays unavailable");
+    }
+
+    /// A second Workspace pinned through a server-side alias of the feature Worktree, which the
+    /// server reports as holding a pin once its check of `state` publishes.
+    fn pinned_through_an_alias(state: spaceterm_server::repository::PinCheckState) -> Inventory {
+        let mut initial = published(1, "main", true);
+        // This path is an opaque alias on the server. The client cannot resolve it locally.
+        let mut other = initial.workspaces[0].clone();
+        other.id = [90; 32];
+        other.pinned_directory = Some("/server/pin-alias/src".into());
+        other.root_tab = [91; 32];
+        other.tabs.truncate(1);
+        other.tabs[0].id = other.root_tab;
+        other.tabs[0].root_pane = [92; 32];
+        other.tabs[0].panes = vec![pane([92; 32], "/server/pin-alias/src")];
+        initial.workspaces.push(other);
+        let repositories = initial.repositories.as_mut().unwrap();
+        repositories.pinned_worktrees = vec![FEATURE_ROOT.into()];
+        repositories.pin_check = state;
+        initial
+    }
+
+    /// Opens the feature Worktree's menu and returns its removal state, asserting that the menu
+    /// shows `label` disabled and nothing reached the server.
+    fn feature_removal_reads(
+        initial: Inventory,
+        label: &str,
+        cx: &mut TestAppContext,
+    ) -> WorktreeRemoval {
+        use spaceterm_ui::a11y_testing::A11yTree;
+
+        let (harness, _, _, cx) = ssh_harness(cx, initial);
+        cx.update(|window, cx| {
+            window.activate_window();
+            harness.manager.update(cx, |manager, cx| {
+                manager.activate_workspace(harness.shared, window, cx);
+            });
+        });
+        redraw(cx);
+        let section = harness.row(cx).worktrees.unwrap();
+        let feature = section
+            .rows()
+            .find(|row| row.name.as_ref() == "app-feature")
+            .unwrap();
+        right_click(worktree_row(harness.shared, feature.worktree_id, cx), cx);
+        assert_eq!(A11yTree::read(cx).node(label)["aria"]["disabled"], true);
+        assert!(harness.edits.submitted().is_empty());
+        feature.removal
+    }
+
+    #[gpui::test]
+    fn a_server_physical_pin_should_disable_removal_across_workspaces(cx: &mut TestAppContext) {
+        use spaceterm_server::repository::PinCheckState;
+
+        let removal = feature_removal_reads(
+            pinned_through_an_alias(PinCheckState::Ready),
+            "Unpin the Directory to Remove",
+            cx,
+        );
+        assert_eq!(removal, WorktreeRemoval::HoldsPinnedDirectory);
+    }
+
+    /// A pin list from before the current check confirms nothing, and removal waits for it.
+    #[gpui::test]
+    fn removal_should_wait_while_the_server_checks_pinned_directories(cx: &mut TestAppContext) {
+        use spaceterm_server::repository::PinCheckState;
+
+        let removal = feature_removal_reads(
+            pinned_through_an_alias(PinCheckState::Checking),
+            "Checking for Pinned Directories\u{2026}",
+            cx,
+        );
+        assert_eq!(removal, WorktreeRemoval::CheckingPinnedDirectories);
+    }
+
+    #[gpui::test]
+    fn removal_should_stay_unavailable_when_the_server_cannot_check_pins(cx: &mut TestAppContext) {
+        use spaceterm_server::repository::PinCheckState;
+
+        let mut initial = published(1, "main", true);
+        initial.repositories.as_mut().unwrap().pin_check = PinCheckState::Unavailable;
+        let removal =
+            feature_removal_reads(initial, "Pinned Directories Couldn\u{2019}t Be Checked", cx);
+        assert_eq!(removal, WorktreeRemoval::PinnedDirectoriesUnavailable);
     }
 
     /// A Worktree removed outside SpaceTerm keeps its row while the server keeps its Tab there.
