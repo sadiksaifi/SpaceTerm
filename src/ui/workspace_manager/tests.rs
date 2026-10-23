@@ -9774,6 +9774,11 @@ impl crate::ssh::server_operations::RemoteServerOperations for ScriptedMaintenan
         self.record("refresh");
     }
 
+    fn set_automatic_start(&self, destination: &crate::domain::SshDestination, enabled: bool) {
+        assert_eq!(destination, &self.destination);
+        self.record(&format!("automatic start {enabled}"));
+    }
+
     fn describe(
         &self,
         _: &crate::domain::SshDestination,
