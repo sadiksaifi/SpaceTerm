@@ -37,7 +37,6 @@ struct PendingInvitation {
     used: bool,
 }
 struct PendingClaim {
-    invitation: ClaimId,
     claim: PairingClaim,
     decision: Option<Result<DeviceInfo, DirectError>>,
 }
@@ -336,7 +335,7 @@ impl State {
                 for claim in self
                     .claims
                     .iter_mut()
-                    .filter(|c| c.invitation == id && c.decision.is_none())
+                    .filter(|c| c.claim.invitation_id == id && c.decision.is_none())
                 {
                     claim.decision = Some(Err(DirectError::AlreadyDecided));
                 }
@@ -629,16 +628,15 @@ impl State {
                 }
                 let claim = PairingClaim {
                     id: *id,
+                    invitation_id: invitation.id,
                     server: self.pin.server,
                     device_public_key: *key,
                     device_name: name.clone(),
                     expires_at_unix_seconds: invitation.expires,
                     exchange_hash: wire::exchange_hash(challenge, authentication)?,
                 };
-                let invitation = invitation.id;
                 self.invitations[invitation_index].used = true;
                 self.claims.push(PendingClaim {
-                    invitation,
                     claim: claim.clone(),
                     decision: None,
                 });
@@ -831,6 +829,52 @@ mod connection_time_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn simultaneous_invitations_with_the_same_expiry_keep_exact_claim_and_approval_bindings() {
+        let fixture = super::super::tests::Fixture::new();
+        fixture.enable();
+        let mut first = fixture.invite();
+        let mut second = fixture.invite();
+        // Give both real invitations the same deadline regardless of a clock tick
+        // between issuance. Their independent secrets and identities stay intact.
+        let expires = wire::now().unwrap() + 300;
+        first.payload.expires = expires;
+        second.payload.expires = expires;
+        for invitation in &mut fixture.state.lock().unwrap().invitations {
+            invitation.expires = expires;
+        }
+        let credential = DeviceCredential::generate().unwrap();
+        let first_claim = fixture.claim(&first, &credential);
+        let second_claim = fixture.claim(&second, &credential);
+        assert_eq!(
+            first_claim.expires_at_unix_seconds,
+            second_claim.expires_at_unix_seconds
+        );
+        assert_ne!(first_claim.id, second_claim.id);
+        assert_eq!(first_claim.invitation_id, first.id());
+        assert_eq!(second_claim.invitation_id, second.id());
+        assert_ne!(first_claim.invitation_id, second_claim.invitation_id);
+        let mut substituted = first_claim.clone();
+        substituted.invitation_id = second.id();
+        assert!(matches!(
+            fixture.management(Management::Approve(substituted)),
+            Err(DirectError::Substituted)
+        ));
+        // Withdrawing one invitation cannot reject a claim from the other, even
+        // when device key, name and expiry are identical.
+        fixture
+            .management(Management::Withdraw(first.id()))
+            .unwrap();
+        assert!(matches!(
+            fixture.management(Management::Approve(first_claim)),
+            Err(DirectError::AlreadyDecided)
+        ));
+        assert!(matches!(
+            fixture.management(Management::Approve(second_claim)),
+            Ok(ManagementReply::Approved(_))
+        ));
+    }
+
     #[test]
     fn five_minute_invitations_stay_one_use_while_pending_and_after_denial() {
         let fixture = super::super::tests::Fixture::new();

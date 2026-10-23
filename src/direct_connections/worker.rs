@@ -892,6 +892,7 @@ pub(super) mod enrollment_tests {
             } else {
                 Ok(direct::PairingClaim {
                     id: claim,
+                    invitation_id: [7; 32],
                     server: self.paired.pin.server,
                     device_public_key: self.paired.client,
                     device_name: "Network fixture".into(),

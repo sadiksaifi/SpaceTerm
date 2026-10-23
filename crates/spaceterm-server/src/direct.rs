@@ -96,6 +96,8 @@ pub enum ListenerState {
 #[serde(deny_unknown_fields)]
 pub struct PairingClaim {
     pub id: ClaimId,
+    /// The exact invitation consumed by this claim, independent of its expiry.
+    pub invitation_id: ClaimId,
     pub server: [u8; 32],
     pub device_public_key: [u8; 32],
     pub device_name: ClientName,

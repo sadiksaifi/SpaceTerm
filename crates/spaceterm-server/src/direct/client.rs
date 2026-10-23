@@ -184,6 +184,7 @@ pub(super) fn submit(enrollment: &mut Enrollment) -> Result<ComparisonCode, Dire
     match answer {
         wire::Answer::Claim(claim)
             if claim.id == enrollment.claim
+                && claim.invitation_id == invitation.id
                 && claim.server == enrollment.pin.server
                 && claim.device_public_key
                     == crypto::public(enrollment.credential.expose_bytes())?
