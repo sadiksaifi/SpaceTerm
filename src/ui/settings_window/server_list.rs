@@ -96,6 +96,20 @@ pub(super) struct ListedServer {
     pub(super) status: SharedString,
     pub(super) tone: Tone,
     pub(super) working: bool,
+    /// Another listed server has the same name, such as two paired servers named for one host.
+    pub(super) shares_name: bool,
+}
+
+impl ListedServer {
+    /// What the picker shows under the name: the short status, and where the server is when
+    /// another server shares its name, so the two read apart.
+    fn picker_description(&self) -> SharedString {
+        if self.shares_name && !self.detail.is_empty() {
+            SharedString::from(format!("{} \u{b7} {}", self.detail, self.status))
+        } else {
+            self.status.clone()
+        }
+    }
 }
 
 /// What the picker offers after its servers.
@@ -175,17 +189,30 @@ impl SettingsWindow {
     }
 
     pub(super) fn listed_servers(&self, cx: &App) -> Vec<ListedServer> {
-        self.listed_choices()
+        let named: Vec<_> = self
+            .listed_choices()
             .into_iter()
-            .map(|choice| {
-                let state = self.server_state(&choice);
+            .map(|choice| (self.server_name(&choice), choice))
+            .collect();
+        let shared = |name: &SharedString| {
+            named
+                .iter()
+                .filter(|(other, _)| other.to_lowercase() == name.to_lowercase())
+                .count()
+                > 1
+        };
+        named
+            .iter()
+            .map(|(name, choice)| {
+                let state = self.server_state(choice);
                 ListedServer {
-                    name: self.server_name(&choice),
-                    detail: self.server_detail(&choice, cx),
+                    name: name.clone(),
+                    detail: self.server_detail(choice, cx),
                     status: state.short,
                     tone: state.tone,
                     working: state.working,
-                    choice,
+                    shares_name: shared(name),
+                    choice: choice.clone(),
                 }
             })
             .collect()
@@ -423,6 +450,16 @@ impl SettingsWindow {
     ) -> AnyElement {
         let listed = self.listed_servers(cx);
         let selected = self.selected_server();
+        // The closed picker shows only a name, so a name another server shares also says where
+        // the selected one is.
+        let hint = listed
+            .iter()
+            .find(|server| Some(&server.choice) == selected.as_ref())
+            .filter(|server| server.shares_name && !server.detail.is_empty())
+            .map_or_else(
+                || SharedString::new_static(PICKER_HINT),
+                |server| SharedString::from(format!("{}. {PICKER_HINT}", server.detail)),
+            );
         let names: Vec<String> = listed
             .iter()
             .map(|server| server.name.to_lowercase())
@@ -437,8 +474,9 @@ impl SettingsWindow {
                 let starts_group = previous_kind.is_some_and(|previous| previous != kind);
                 previous_kind = Some(kind);
                 let dot = tone_color(server.tone, card);
+                let description = server.picker_description();
                 let item = ComboBoxItem::new(server.choice, server.name)
-                    .description(server.status)
+                    .description(description)
                     .keywords([server.detail])
                     .leading_icon(move |_, size| status_dot(dot, size * 0.5).into_any_element())
                     .debug_selector(format!("{PICKER_SELECTOR}-{index}"));
@@ -478,7 +516,7 @@ impl SettingsWindow {
         )
         .ghost_trigger()
         .hug(true)
-        .accessibility_description(PICKER_HINT)
+        .accessibility_description(hint)
         .copy(ComboBoxCopy::new(
             "Search servers",
             "Search",
