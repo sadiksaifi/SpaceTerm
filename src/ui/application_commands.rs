@@ -206,33 +206,101 @@ fn shortcut_text(command: Command, cx: &App) -> Option<SharedString> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::rc::Rc;
 
-    #[test]
-    fn the_palette_offers_every_command_once_and_add_server_after_the_workspace_commands() {
-        let order = entry_order();
-        assert_eq!(order.len(), Command::ALL.len() + 1);
-        for command in Command::ALL {
-            assert_eq!(
-                order
-                    .iter()
-                    .filter(|entry| **entry == PaletteEntry::Command(command))
-                    .count(),
-                1,
-                "{command:?}"
+    use gpui::{TestAppContext, VisualTestContext};
+
+    use super::*;
+    use crate::settings::sidebar::SidebarState;
+    use crate::ui::workspace_manager::WorkspaceManagerAdapters;
+
+    /// A Workspace Window presenting one Workspace, with the application's actions and Shortcuts
+    /// installed as at launch.
+    fn workspace_window(
+        cx: &mut TestAppContext,
+    ) -> (Entity<WorkspaceManager>, &mut VisualTestContext) {
+        cx.update(crate::ui::init)
+            .expect("UI initialization should succeed");
+        cx.update(|cx| {
+            crate::app::init(
+                cx,
+                Rc::new(
+                    crate::platform::application_menu::testing::RecordingApplicationMenuAdapter::default(),
+                ),
+                Rc::new(
+                    crate::platform::application_quit::testing::RecordingApplicationQuitAdapter::default(),
+                ),
+            )
+            .expect("application initialization should succeed");
+        });
+        let (manager, cx) = cx.add_window_view(|window, cx| {
+            let mut manager = WorkspaceManager::new_with_adapters(
+                std::env::temp_dir(),
+                WorkspaceManagerAdapters {
+                    local_filesystem:
+                        crate::platform::local_filesystem::LocalFilesystemAuthority::testing(),
+                    key_input: Rc::new(crate::terminal::GpuiTerminalKeyInputAdapterFactory::default()),
+                    accessibility: Rc::new(
+                        crate::platform::terminal_accessibility::testing::RecordingAccessibilityFactory::default(),
+                    ),
+                    native_services: crate::terminal::native_services::testing::adapters(),
+                    lifecycle: crate::ui::pane_lifecycle::PaneLifecycleDependencies::testing(),
+                    directory_selection: Rc::new(crate::directory_selection::GpuiDirectorySelection),
+                    window_drag: Rc::new(
+                        crate::platform::window_movement::RecordingOperatingSystemWindowDragPlatform::default(),
+                    ),
+                    local_server: crate::ui::launch_testing::unanswered(),
+                    server_directories:
+                        crate::ui::directory_picker::server_directory_testing::older(),
+                },
+                SidebarState::Expanded,
+                window,
+                cx,
             );
-        }
-        let add_server = order
-            .iter()
-            .position(|entry| *entry == PaletteEntry::AddServer)
-            .expect("Add Server is offered");
-        assert!(order[..add_server].iter().all(|entry| matches!(
-            entry,
-            PaletteEntry::Command(command) if command.group() == CommandGroup::Workspace
-        )));
-        assert!(order[add_server + 1..].iter().all(|entry| matches!(
-            entry,
-            PaletteEntry::Command(command) if command.group() != CommandGroup::Workspace
-        )));
+            manager.present_desktop_workspace(window, cx);
+            manager
+        });
+        cx.update(|window, cx| {
+            window.activate_window();
+            manager.update(cx, |manager, cx| manager.focus(window, cx));
+        });
+        cx.run_until_parked();
+        (manager, cx)
+    }
+
+    fn palette_open(cx: &mut VisualTestContext) -> bool {
+        cx.update(|window, cx| {
+            overlay(window, cx).is_some_and(|palette| palette.read(cx).palette.read(cx).is_open())
+        })
+    }
+
+    #[gpui::test]
+    fn choosing_new_tab_in_the_palette_opens_a_tab_in_the_workspace_window(
+        cx: &mut TestAppContext,
+    ) {
+        let (manager, cx) = workspace_window(cx);
+        let panes = |cx: &mut VisualTestContext| {
+            manager.read_with(cx, |manager, cx| manager.application_pane_facts(cx).len())
+        };
+        let before = panes(cx);
+
+        cx.dispatch_action(OpenCommandPalette);
+        cx.run_until_parked();
+        assert!(
+            palette_open(cx),
+            "the Workspace Window presents the palette"
+        );
+
+        cx.simulate_input("New Tab");
+        cx.run_until_parked();
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+
+        assert!(!palette_open(cx), "choosing an entry closes the palette");
+        assert_eq!(
+            panes(cx),
+            before + 1,
+            "New Tab runs where focus returned, adding one Tab and its Pane"
+        );
     }
 }
