@@ -1441,9 +1441,8 @@ impl SettingsWindow {
     ) -> Option<gpui::Task<()>> {
         match target {
             ServerChoice::Local => {
-                if self.server_update.is_some() {
-                    self.request_update_action(UpdateAction::Check, cx);
-                }
+                // A read is always allowed, whichever steps the last read offered.
+                self.check_server_update(cx);
                 self.check_local_server(cx);
             }
             ServerChoice::Ssh(destination) => {
