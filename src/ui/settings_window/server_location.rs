@@ -1,106 +1,347 @@
-//! New Worktree Location for the server selected in the Servers list.
+//! "Git on <server>": the selected server's Git and its New Worktree Location.
 //!
-//! This server-owned preference is deliberately outside Settings import, export and reset. The
-//! field reads and writes only the selected server, and only while SpaceTerm presents it. Choosing
-//! another server starts over, so a draft or an answer for one server never reaches another.
+//! These Server Settings are outside Settings import, export and reset. The section reads and
+//! writes only the selected server, over its existing connection, and only while Settings shows
+//! the section. Choosing another server starts over, so a draft or an answer for one server never
+//! reaches another. A server that is not connected keeps showing the values last read from it.
+use super::git::{WORKTREE_LOCATION_DESCRIPTION, worktree_location_problem};
 use super::server_list::ServerChoice;
 use super::*;
+use crate::repository_status::GitToolStatus;
 use crate::ui::appearance::gpui_color;
 use crate::ui::chrome_typography::{ChromeTextStyleExt as _, TextRole};
 use crate::ui::server_worktrees::{Client, WriteError};
+use crate::ui::shared_workspaces::SharedRefusalReason;
 use crate::ui::sidebar_window::form::CaptionTone;
-use gpui::Task;
+use crate::worktrees::path_template::{self, WorktreePathTemplateError};
+use gpui::{Subscription, Task, Text};
 use spaceterm_server::worktree::{Error, Operation, Read, ReadReply, Settings};
-use spaceterm_ui::{TextInput, TextInputEvent};
+use spaceterm_ui::{TextInput, TextInputEvent, TextInputVariant};
+use std::time::Duration;
+
+/// How long typing pauses before the owning server checks the folder, so each keystroke does not
+/// cost a round trip.
+const SERVER_CHECK_DELAY: Duration = Duration::from_millis(300);
+/// How often a connected server's New Worktree Location is read again, so another device's change
+/// appears without reopening Settings.
+const POLL_INTERVAL: Duration = Duration::from_secs(1);
+/// The field's width beside its label, wide enough for the default location.
+const FIELD_WIDTH: f32 = 260.0;
+/// Bounds the servers whose last-read values this window keeps, as the server picker does.
+const REMEMBERED_SERVERS: usize = 257;
+
+/// What New Worktree Location shows and may write, apart from GPUI. The field's text mirrors
+/// `draft`. A method that changes what the field should show returns that text.
+#[derive(Debug, Default)]
+struct LocationModel {
+    /// The server's value as last read or written. It stays while the server is disconnected.
+    known: Option<Settings>,
+    /// The value the draft edits. A write names its version, so the server refuses it when
+    /// another device changed the value first.
+    base: Option<Settings>,
+    draft: String,
+    problem: Option<WorktreePathTemplateError>,
+    notice: Option<LocationNotice>,
+    connected: bool,
+    saving: bool,
+}
+
+/// Something the field says about the last write.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LocationNotice {
+    /// Another device changed the value first, and the field now shows that device's value.
+    Changed,
+    Refused(SharedRefusalReason),
+    Failed,
+}
+
+impl LocationModel {
+    /// A disconnected server's field, showing the value last read from it.
+    fn remembered(known: Option<Settings>) -> Self {
+        Self {
+            draft: known
+                .as_ref()
+                .map(|known| known.template.clone())
+                .unwrap_or_default(),
+            base: known.clone(),
+            known,
+            ..Self::default()
+        }
+    }
+
+    fn has_draft(&self) -> bool {
+        self.base
+            .as_ref()
+            .is_some_and(|base| base.template != self.draft)
+    }
+
+    /// The server answered a read. The field follows it unless the person is changing it.
+    fn received(&mut self, settings: Settings) -> Option<String> {
+        self.connected = true;
+        if self
+            .known
+            .as_ref()
+            .is_some_and(|known| known.version > settings.version)
+        {
+            return None;
+        }
+        self.known = Some(settings.clone());
+        if self.saving || self.has_draft() || self.base.as_ref() == Some(&settings) {
+            return None;
+        }
+        self.problem = None;
+        self.draft = settings.template.clone();
+        self.base = Some(settings);
+        Some(self.draft.clone())
+    }
+
+    /// The server can no longer be read. A draft returns to the value last read, which cannot
+    /// change until the server is connected again.
+    fn disconnected(&mut self) -> Option<String> {
+        self.connected = false;
+        if self.saving {
+            return None;
+        }
+        self.notice = None;
+        self.revert()
+    }
+
+    /// The person changed the text. Returns the text for the owning server to check, when the
+    /// check only it can make is still needed.
+    fn edited(&mut self, text: &str) -> Option<String> {
+        text.clone_into(&mut self.draft);
+        self.notice = None;
+        self.problem = path_template::validate(text).err();
+        (self.connected && self.problem.is_none() && self.has_draft()).then(|| text.to_owned())
+    }
+
+    /// The owning server checked `template`. An answer about earlier text lands nowhere.
+    fn validated(&mut self, template: &str, result: Result<(), Error>) {
+        if template != self.draft || self.problem.is_some() {
+            return;
+        }
+        if let Err(Error::Template(problem)) = result {
+            self.problem = Some(problem);
+        }
+    }
+
+    /// The write saving the draft, when it is a valid change. The draft's text and the version it
+    /// edits identify the write.
+    fn commit(&mut self) -> Option<Settings> {
+        let base = self.base.as_ref()?;
+        if !self.connected || self.saving || self.problem.is_some() || self.draft == base.template {
+            return None;
+        }
+        self.saving = true;
+        Some(Settings {
+            template: self.draft.clone(),
+            version: base.version,
+        })
+    }
+
+    /// The server answered `write`. Returns whether another device changed the value first, so
+    /// the caller reads it again for [`Self::changed_elsewhere`].
+    fn committed(&mut self, write: Settings, result: Result<(), WriteError>) -> bool {
+        self.saving = false;
+        match result {
+            Ok(()) => {
+                let saved = Settings {
+                    template: write.template,
+                    version: write.version.saturating_add(1),
+                };
+                if self
+                    .known
+                    .as_ref()
+                    .is_none_or(|known| known.version <= saved.version)
+                {
+                    self.known = Some(saved.clone());
+                }
+                self.base = Some(saved);
+            }
+            Err(WriteError::Server(Error::Changed)) => return true,
+            Err(WriteError::Server(Error::Template(problem))) => {
+                if self.draft == write.template {
+                    self.problem = Some(problem);
+                }
+            }
+            Err(WriteError::Refused(reason)) => self.notice = Some(LocationNotice::Refused(reason)),
+            Err(WriteError::Server(_)) => self.notice = Some(LocationNotice::Failed),
+        }
+        false
+    }
+
+    /// Another device changed the value first. The field reloads the server's value, or the last
+    /// one read when the server did not answer again, and says so. The person's draft is not
+    /// written over the other device's change.
+    fn changed_elsewhere(&mut self, current: Option<Settings>) -> Option<String> {
+        if let Some(current) = current
+            && self
+                .known
+                .as_ref()
+                .is_none_or(|known| known.version <= current.version)
+        {
+            self.known = Some(current);
+        }
+        self.notice = Some(LocationNotice::Changed);
+        self.revert()
+    }
+
+    /// Escape returns the field to the server's value.
+    fn cancelled(&mut self) -> Option<String> {
+        self.notice = None;
+        self.revert()
+    }
+
+    fn revert(&mut self) -> Option<String> {
+        let known = self.known.clone()?;
+        self.problem = None;
+        self.base = Some(known.clone());
+        (self.draft != known.template).then(|| {
+            self.draft = known.template;
+            self.draft.clone()
+        })
+    }
+
+    fn editable(&self) -> bool {
+        self.connected && !self.saving
+    }
+
+    fn differs_from_default(&self) -> bool {
+        self.editable()
+            && self
+                .base
+                .as_ref()
+                .is_some_and(|base| base.template != Settings::default().template)
+    }
+
+    /// What the field says under itself, if anything.
+    fn message(&self) -> Option<(&'static str, CaptionTone)> {
+        if let Some(problem) = self.problem {
+            return Some((worktree_location_problem(problem), CaptionTone::Error));
+        }
+        Some(match self.notice? {
+            LocationNotice::Changed => (
+                "Another device changed this location.",
+                CaptionTone::Warning,
+            ),
+            LocationNotice::Refused(reason) => (reason.explanation(), CaptionTone::Error),
+            LocationNotice::Failed => (
+                "The server couldn\u{2019}t save this location.",
+                CaptionTone::Error,
+            ),
+        })
+    }
+}
+
+/// What this window last read from a server that is not selected now.
+struct Remembered {
+    settings: Option<Settings>,
+    git: GitToolStatus,
+}
 
 pub(super) struct ServerLocation {
-    field: super::git::WorktreeLocationField,
-    saved: Option<Settings>,
-    latest: Option<Settings>,
-    connected: bool,
+    input: Entity<TextInput>,
+    _events: Subscription,
+    model: LocationModel,
+    git: GitToolStatus,
     offered: bool,
-    saving: bool,
-    notice: Option<String>,
-    /// The server whose value the field shows.
+    /// The server whose values the section shows.
     target: Option<ServerChoice>,
-    /// Counts the times the field started over, so a read or write answered for an earlier server
-    /// or connection lands nowhere.
+    /// Counts the times the section started over, so a read or write answered for an earlier
+    /// server lands nowhere.
     generation: u64,
     /// The writer that answered the latest read, which a change writes through.
     client: Option<Client>,
     poll: Option<Task<()>>,
-    window: gpui::AnyWindowHandle,
+    /// The owning server's check of the text being typed. Replacing it cancels the earlier one.
+    check: Option<Task<()>>,
+    remembered: Vec<(ServerChoice, Remembered)>,
 }
+
 impl ServerLocation {
     pub(super) fn new(window: &mut Window, cx: &mut Context<SettingsWindow>) -> Self {
+        let selector = "settings-server-worktree-location";
+        let input = cx.new(|cx| {
+            TextInput::new(selector, "New Worktree Location", String::new(), window, cx)
+                .variant(TextInputVariant::Bare)
+                .input_length_limit(Some(1024))
+                .debug_selector(selector)
+        });
+        let events = cx.subscribe_in(
+            &input,
+            window,
+            |settings, input, event: &TextInputEvent, _, cx| {
+                settings.server_location_event(input, event, cx);
+            },
+        );
         Self {
-            field: super::git::WorktreeLocationField::new(window, cx),
-            saved: None,
-            latest: None,
-            connected: false,
+            input,
+            _events: events,
+            model: LocationModel::default(),
+            git: GitToolStatus::Unknown,
             offered: true,
-            saving: false,
-            notice: None,
             target: None,
             generation: 0,
             client: None,
             poll: None,
-            window: window.window_handle(),
+            check: None,
+            remembered: Vec::new(),
         }
     }
-    /// Forgets everything read from or typed for the previous server and stops reading it.
-    fn start_over(&mut self, target: Option<ServerChoice>, cx: &mut Context<SettingsWindow>) {
+
+    /// Shows `target`, from what this window last read from it, and stops reading the previous
+    /// server.
+    fn choose(&mut self, target: Option<ServerChoice>, cx: &mut Context<SettingsWindow>) {
+        if let Some(previous) = self.target.take() {
+            self.remembered.retain(|(server, _)| *server != previous);
+            if self.remembered.len() >= REMEMBERED_SERVERS {
+                self.remembered.remove(0);
+            }
+            let remembered = Remembered {
+                settings: self.model.known.take(),
+                git: self.git,
+            };
+            self.remembered.push((previous, remembered));
+        }
+        let remembered = target.as_ref().and_then(|target| {
+            let index = self
+                .remembered
+                .iter()
+                .position(|(server, _)| server == target)?;
+            Some(self.remembered.remove(index).1)
+        });
         self.target = target;
         self.generation = self.generation.wrapping_add(1);
-        self.saved = None;
-        self.latest = None;
-        self.connected = false;
+        self.git = remembered
+            .as_ref()
+            .map_or(GitToolStatus::Unknown, |remembered| remembered.git);
+        self.model =
+            LocationModel::remembered(remembered.and_then(|remembered| remembered.settings));
         self.offered = true;
-        self.saving = false;
-        self.notice = None;
         self.client = None;
         self.poll = None;
-        self.field.problem = None;
-        self.field
-            .input
-            .update(cx, |input, cx| input.set_value(String::new(), cx));
+        self.check = None;
+        self.show(Some(self.model.draft.clone()), cx);
     }
-    fn receive(&mut self, saved: Settings, cx: &mut Context<SettingsWindow>) {
-        if self
-            .latest
-            .as_ref()
-            .is_some_and(|latest| latest.version > saved.version)
-        {
-            return;
-        }
-        self.latest = Some(saved.clone());
-        let draft = self
-            .saved
-            .as_ref()
-            .is_some_and(|base| self.field.input.read(cx).value() != base.template);
-        if self.saved.is_none()
-            || (!self.saving
-                && !self.field.input.read(cx).is_focused()
-                && !draft
-                && self.field.problem.is_none()
-                && self.notice.is_none())
-        {
-            self.field
-                .input
-                .update(cx, |input, cx| input.set_value(saved.template.clone(), cx));
-            self.saved = Some(saved);
-        }
+
+    /// Stops reading the selected server and keeps what was read from it.
+    fn disconnect(&mut self, cx: &mut Context<SettingsWindow>) {
+        self.client = None;
+        self.poll = None;
+        self.check = None;
+        let text = self.model.disconnected();
+        self.show(text, cx);
     }
-    fn discard(&mut self, cx: &mut Context<SettingsWindow>) {
-        let saved = self.latest.clone().unwrap_or_default();
-        self.saved = Some(saved.clone());
-        self.field.problem = None;
-        self.notice = None;
-        self.field
-            .input
-            .update(cx, |input, cx| input.set_value(saved.template, cx));
+
+    fn show(&self, text: Option<String>, cx: &mut Context<SettingsWindow>) {
+        if let Some(text) = text {
+            self.input.update(cx, |input, cx| {
+                input.set_value(text, cx);
+            });
+        }
     }
 }
+
 impl SettingsWindow {
     /// Whether SpaceTerm presents `target` now, so its Server Settings can be read.
     fn server_location_reachable(&self, target: &ServerChoice) -> bool {
@@ -121,28 +362,28 @@ impl SettingsWindow {
         }
     }
 
-    /// Follows the selected server's New Worktree Location while the Servers section shows it.
-    /// Selection, section and connection changes call this; rendering never does, so painting
-    /// asks no server anything.
+    /// Follows the selected server's Git settings while the section showing New Worktree Location
+    /// is open. Selection, section and connection changes call this; rendering never does, so
+    /// painting asks no server anything.
     pub(super) fn sync_server_location(&mut self, cx: &mut Context<Self>) {
         // End All Sessions and direct network access follow the same server through the same
         // changes.
         self.sync_end_all_sessions(cx);
         self.sync_direct_access(cx);
-        let target = if self.active_section == SettingsSectionId::Servers {
-            self.selected_server()
-        } else {
-            None
-        };
-        let reachable = target
-            .as_ref()
-            .is_some_and(|target| self.server_location_reachable(target));
+        let target = self.selected_server();
+        let shown =
+            self.active_section == SettingsRowId::ServerWorktreeLocation.descriptor().section;
+        let live = shown
+            && target
+                .as_ref()
+                .is_some_and(|target| self.server_location_reachable(target));
         let state = &mut self.server_location;
-        if state.target != target || (!reachable && (state.poll.is_some() || state.saved.is_some()))
-        {
-            state.start_over(target.clone(), cx);
+        if state.target != target {
+            state.choose(target.clone(), cx);
+        } else if !live && state.poll.is_some() {
+            state.disconnect(cx);
         }
-        let Some(target) = target.filter(|_| reachable) else {
+        let Some(target) = target.filter(|_| live) else {
             return;
         };
         if state.poll.is_some() {
@@ -150,6 +391,7 @@ impl SettingsWindow {
         }
         let generation = state.generation;
         state.poll = Some(cx.spawn(async move |settings, cx| {
+            let mut git_read = false;
             loop {
                 // The Workspace Window may register a newly presented server's writer after
                 // this window hears of it, so each reading looks the writer up again.
@@ -162,21 +404,39 @@ impl SettingsWindow {
                     Some(client) => Some(cx.update(|cx| client.read(Read::Settings, cx)).await),
                     None => None,
                 };
+                // Git changes only when someone installs it, so one answer per connection does.
+                let git = match &client {
+                    Some(client) if !git_read && matches!(read, Some(Ok(_))) => {
+                        Some(cx.update(|cx| client.read(Read::Git, cx)).await)
+                    }
+                    _ => None,
+                };
+                if let Some(Ok(ReadReply::Git(_))) = git {
+                    git_read = true;
+                }
                 if settings
                     .update(cx, |settings, cx| {
                         let state = &mut settings.server_location;
                         if state.generation != generation {
                             return;
                         }
-                        state.connected = matches!(read, Some(Ok(_)));
                         if let Some(client) = &client
                             && client.availability().0
                         {
                             state.offered = client.supports_worktree_writes();
                         }
                         state.client = client;
-                        if let Some(Ok(ReadReply::Settings(saved))) = read {
-                            state.receive(saved, cx);
+                        // A missed answer pauses editing and keeps the draft, which the next
+                        // answer resumes.
+                        match read {
+                            Some(Ok(ReadReply::Settings(saved))) => {
+                                let text = state.model.received(saved);
+                                state.show(text, cx);
+                            }
+                            _ => state.model.connected = false,
+                        }
+                        if let Some(Ok(ReadReply::Git(git))) = git {
+                            state.git = git;
                         }
                         cx.notify();
                     })
@@ -184,33 +444,57 @@ impl SettingsWindow {
                 {
                     return;
                 }
-                cx.background_executor()
-                    .timer(std::time::Duration::from_secs(1))
-                    .await;
+                cx.background_executor().timer(POLL_INTERVAL).await;
             }
         }));
     }
+
     pub(super) fn offers_server_location(&self) -> bool {
         self.server_location.offered
     }
-    pub(super) fn server_location_differs(&self) -> bool {
-        self.server_location.connected
-            && !self.server_location.saving
-            && self
-                .server_location
-                .saved
-                .as_ref()
-                .is_some_and(|s| s.template != Settings::default().template)
+
+    /// The selected server's Git, as last read from it.
+    pub(super) fn server_git(&self) -> GitToolStatus {
+        self.server_location.git
     }
+
+    /// The "Git on <server>" footnote while its rows cannot change, saying how to change them.
+    #[expect(
+        dead_code,
+        reason = "the Git page's section framing presents this footnote (#629)"
+    )]
+    pub(super) fn server_git_footnote(&self) -> Option<SharedString> {
+        if self.server_location.model.connected {
+            return None;
+        }
+        Some(
+            match self.selected_server() {
+                Some(ServerChoice::Local) | None => format!(
+                    "Start the server on {} to change its Git settings.",
+                    self.selected_server_name()
+                ),
+                Some(_) => format!(
+                    "Connect to {} to change its Git settings.",
+                    self.selected_server_name()
+                ),
+            }
+            .into(),
+        )
+    }
+
+    pub(super) fn server_location_differs(&self) -> bool {
+        self.server_location.model.differs_from_default()
+    }
+
     pub(super) fn reset_server_location(&mut self, cx: &mut Context<Self>) {
-        self.server_location.saved = self.server_location.latest.clone();
-        self.server_location.field.problem = None;
-        self.server_location.notice = None;
-        self.server_location.field.input.update(cx, |input, cx| {
-            input.set_value(Settings::default().template, cx)
-        });
+        let template = Settings::default().template;
+        let state = &mut self.server_location;
+        state.check = None;
+        state.model.edited(&template);
+        state.show(Some(template), cx);
         self.commit_server_location(cx);
     }
+
     pub(super) fn server_location_event(
         &mut self,
         input: &Entity<TextInput>,
@@ -219,204 +503,119 @@ impl SettingsWindow {
     ) {
         match event {
             TextInputEvent::ValueChanged(_) => {
-                self.server_location.field.problem =
-                    crate::worktrees::path_template::validate(input.read(cx).value()).err();
-                self.server_location.notice = None;
+                let text = input.read(cx).value().to_owned();
+                let state = &mut self.server_location;
+                let check = state.model.edited(&text);
+                let generation = state.generation;
+                state.check = check.zip(state.client.clone()).map(|(template, client)| {
+                    cx.spawn(async move |settings, cx| {
+                        cx.background_executor().timer(SERVER_CHECK_DELAY).await;
+                        let read = Read::ValidateLocationTemplate {
+                            template: template.clone(),
+                        };
+                        let answer = cx.update(|cx| client.read(read, cx)).await;
+                        let _ = settings.update(cx, |settings, cx| {
+                            let state = &mut settings.server_location;
+                            if state.generation == generation {
+                                state.model.validated(&template, answer.map(drop));
+                                cx.notify();
+                            }
+                        });
+                    })
+                });
                 cx.notify();
             }
             TextInputEvent::Submitted | TextInputEvent::FocusLost => {
                 self.commit_server_location(cx)
             }
             TextInputEvent::Cancelled => {
-                self.server_location.discard(cx);
+                let state = &mut self.server_location;
+                state.check = None;
+                let text = state.model.cancelled();
+                state.show(text, cx);
                 cx.notify();
             }
             _ => {}
         }
     }
+
     fn commit_server_location(&mut self, cx: &mut Context<Self>) {
         let state = &mut self.server_location;
-        let Some(saved) = state.saved.as_ref() else {
-            return;
-        };
-        let template = state.field.input.read(cx).value().to_owned();
-        if !state.connected
-            || state.saving
-            || state.field.problem.is_some()
-            || template == saved.template
-        {
-            return;
-        }
-        let version = saved.version;
         // The change goes to the server whose value the person edited, through its own writer.
         let Some(client) = state.client.clone() else {
             return;
         };
+        let Some(write) = state.model.commit() else {
+            return;
+        };
         let generation = state.generation;
-        let draft = template.clone();
-        let write = client.write(Operation::SetLocation { version, template }, cx);
-        let handle = self.server_location.window;
-        self.server_location.saving = true;
+        let operation = Operation::SetLocation {
+            version: write.version,
+            template: write.template.clone(),
+        };
+        let written = client.write(operation, cx);
         cx.spawn(async move |settings, cx| {
-            let result = write.await.and_then(crate::ui::server_worktrees::result);
+            let result = written.await.and_then(crate::ui::server_worktrees::result);
             let current = if result == Err(WriteError::Server(Error::Changed)) {
-                Some(cx.update(|cx| client.read(Read::Settings, cx)).await)
+                match cx.update(|cx| client.read(Read::Settings, cx)).await {
+                    Ok(ReadReply::Settings(current)) => Some(current),
+                    _ => None,
+                }
             } else {
                 None
             };
-            let _ = handle.update(cx, |_, window, cx| {
-                let _ = settings.update(cx, |settings, cx| {
-                    // The person chose another server meanwhile. The change finished on the server
-                    // it was written to, and the field now shows a different one.
-                    if settings.server_location.generation != generation {
-                        return;
-                    }
-                    settings.server_location.saving = false;
-                    if result.is_ok() {
-                        let saved = Settings {
-                            template: draft.clone(),
-                            version: version.saturating_add(1),
-                        };
-                        settings.server_location.saved = Some(saved.clone());
-                        if settings.server_location.latest.as_ref().is_none_or(|latest| latest.version <= saved.version) {
-                            settings.server_location.latest = Some(saved);
-                        }
-                    }
-                    settings.server_location.notice = match result {
-                        Ok(()) => None,
-                        Err(WriteError::Server(Error::Changed)) => Some("Another client changed this setting. Your draft is kept for review.".into()),
-                        Err(WriteError::Server(Error::Location)) => Some("The server refused this location template. Review the placeholders and path.".into()),
-                        Err(WriteError::Refused(reason)) => Some(format!("SpaceTerm did not change New Worktree Location on the server. {}", reason.explanation())),
-                        Err(_) => Some("The server could not complete this change. Review the server value before trying again.".into()),
-                    };
-                    if let Some(Ok(ReadReply::Settings(saved))) = current {
-                        settings.present_server_location_conflict(saved, &draft, window, cx);
-                    }
-                    cx.notify();
-                });
+            let _ = settings.update(cx, |settings, cx| {
+                let state = &mut settings.server_location;
+                // The person chose another server meanwhile. The change finished on the server
+                // it was written to, and the section now shows a different one.
+                if state.generation != generation {
+                    return;
+                }
+                if state.model.committed(write, result) {
+                    let text = state.model.changed_elsewhere(current);
+                    state.show(text, cx);
+                }
+                cx.notify();
             });
         })
         .detach();
         cx.notify();
     }
-    fn present_server_location_conflict(
-        &mut self,
-        saved: Settings,
-        draft: &str,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.server_location.latest = Some(saved.clone());
-        let title = "Change Not Applied";
-        let message = format!(
-            "Another client changed New Worktree Location.\n\nOn the server:\n{}\n\nYour change:\n{draft}",
-            saved.template,
-        );
-        let owner = cx.weak_entity();
-        let generation = self.server_location.generation;
-        let _ = spaceterm_ui::Alert::new(
-            spaceterm_ui::ModalId::new("server-worktree-location-conflict"),
-            title,
-            title,
-            message,
-            vec![
-                spaceterm_ui::ModalAction::new(
-                    true,
-                    "Try Again",
-                    spaceterm_ui::ModalActionRole::Affirmative,
-                    "server-worktree-location-retry",
-                ),
-                spaceterm_ui::ModalAction::new(
-                    false,
-                    "Cancel",
-                    spaceterm_ui::ModalActionRole::Cancel,
-                    "server-worktree-location-cancel",
-                ),
-            ],
-        )
-        .intent(spaceterm_ui::AlertIntent::Warning)
-        .present(window, cx, move |outcome, cx| {
-            let _ = owner.update(cx, |settings, cx| {
-                if settings.server_location.generation != generation {
-                    return;
-                }
-                if matches!(
-                    outcome,
-                    spaceterm_ui::AlertOutcome::Activated {
-                        action_id: true,
-                        ..
-                    }
-                ) {
-                    // Retry against the value this confirmation showed, even if another poll arrived.
-                    settings.server_location.saved = Some(saved.clone());
-                    settings.commit_server_location(cx);
-                } else {
-                    settings.server_location.discard(cx);
-                    cx.notify();
-                }
-            });
-        });
-    }
-    pub(super) fn server_location_caption(&self, cx: &App) -> (SharedString, CaptionTone) {
-        let state = &self.server_location;
-        if let Some(notice) = &state.notice {
-            return (notice.clone().into(), CaptionTone::Error);
-        }
-        if state.saving {
-            return ("Saving…".into(), CaptionTone::Guidance);
-        }
-        // The card heading names the machine. A local server reads as the account's own.
-        let server = match self.selected_server() {
-            Some(ServerChoice::Ssh(destination)) => {
-                format!("the server on {}", destination.as_str())
-            }
-            Some(ServerChoice::Direct(_)) => {
-                format!("the server on {}", self.selected_server_name())
-            }
-            _ => "your account\u{2019}s server".to_owned(),
-        };
-        if !state.connected {
-            return (
-                format!("Connect to {server} to change it.").into(),
-                CaptionTone::Guidance,
-            );
-        }
-        if state.field.problem.is_some() {
-            return super::git::worktree_location_caption(
-                state.field.input.read(cx).value(),
-                state.field.problem,
-            );
-        }
+
+    /// New Worktree Location's description. Validation and save results appear under the field.
+    pub(super) fn server_location_caption(&self, _: &App) -> (SharedString, CaptionTone) {
         (
-            format!("Where {server} creates new Worktrees for its Workspaces. Use {{repository}} and {{branch}}. For example: ~/.worktrees/my-app/feature-login").into(),
+            SharedString::new_static(WORKTREE_LOCATION_DESCRIPTION),
             CaptionTone::Guidance,
         )
     }
+
+    /// The field at a fixed width, with what it says about its text directly under it.
     pub(super) fn render_server_location(
         &mut self,
         appearance: &ChromeAppearance,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let state = &self.server_location;
-        let input = state.field.input.clone();
-        input.update(cx, |input, cx| {
-            input.set_editable(state.connected && !state.saving, cx)
-        });
+        let model = &self.server_location.model;
+        let editable = model.editable();
+        let invalid = model.problem.is_some();
+        let message = model.message();
+        let input = self.server_location.input.clone();
+        input.update(cx, |input, cx| input.set_editable(editable, cx));
         let focus = input.read(cx).focus_handle();
         let click_focus = focus.clone();
         let colors = appearance.host_colors(spaceterm_ui::ControlHost::Card);
-        spaceterm_ui::field_frame(
+        let field = spaceterm_ui::field_frame(
             "settings-server-worktree-location-frame",
             &focus,
             spaceterm_ui::FieldState::default()
-                .disabled(!state.connected || state.saving)
-                .invalid(state.field.problem.is_some()),
+                .disabled(!editable)
+                .invalid(invalid),
             super::super::chrome_geometry::RadiusRole::Control.pixels(),
             cx,
         )
         .h(appearance.height(28.0, 13.0))
         .w_full()
-        .min_w_0()
         .flex()
         .items_center()
         .px(appearance.spacing(8.0))
@@ -426,58 +625,37 @@ impl SettingsWindow {
             click_focus.focus(window, cx);
             cx.stop_propagation();
         })
-        .child(input)
-        .into_any_element()
+        .child(input);
+        gpui::div()
+            .flex()
+            .flex_col()
+            .items_end()
+            .gap(appearance.spacing(3.0))
+            .w(appearance.spacing(FIELD_WIDTH))
+            .child(field)
+            .children(message.map(|(message, tone)| {
+                let color = match tone {
+                    CaptionTone::Guidance => colors.text_muted,
+                    CaptionTone::Warning => colors.warning,
+                    CaptionTone::Error => colors.error,
+                };
+                gpui::div()
+                    .debug_selector(|| "settings-server-worktree-location-message".to_owned())
+                    .w_full()
+                    .text_right()
+                    .whitespace_normal()
+                    .chrome_text(appearance.typography.style(TextRole::Secondary))
+                    .text_color(gpui_color(color))
+                    .child(Text::new(
+                        SharedString::new_static("settings-server-worktree-location-message")
+                            .into(),
+                        SharedString::new_static(message),
+                    ))
+            }))
+            .into_any_element()
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use crate::ui::settings_window::tests::open_settings;
-    use gpui::TestAppContext;
-
-    #[gpui::test]
-    fn server_location_poll_keeps_the_drafts_original_version_until_review(
-        cx: &mut TestAppContext,
-    ) {
-        use spaceterm_server::worktree::Settings;
-        let (window, _, cx) = open_settings(cx);
-        window.update(cx, |settings, cx| {
-            settings.server_location.receive(
-                Settings {
-                    template: "~/.worktrees/{repository}/{branch}".into(),
-                    version: 0,
-                },
-                cx,
-            );
-            settings
-                .server_location
-                .field
-                .input
-                .update(cx, |input, cx| input.set_value("~/draft/{branch}", cx));
-            settings.server_location.receive(
-                Settings {
-                    template: "~/other-client/{branch}".into(),
-                    version: 1,
-                },
-                cx,
-            );
-            assert_eq!(
-                settings.server_location.field.input.read(cx).value(),
-                "~/draft/{branch}"
-            );
-            assert_eq!(
-                settings.server_location.saved.as_ref().unwrap().version,
-                0,
-                "the draft must conflict with the other client's version 1"
-            );
-            settings.server_location.discard(cx);
-            assert_eq!(
-                settings.server_location.field.input.read(cx).value(),
-                "~/other-client/{branch}"
-            );
-            assert_eq!(settings.server_location.saved.as_ref().unwrap().version, 1);
-            assert!(settings.server_location.notice.is_none());
-        });
-    }
-}
+#[path = "server_location_tests.rs"]
+mod tests;
