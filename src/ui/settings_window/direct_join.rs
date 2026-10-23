@@ -36,7 +36,7 @@ pub(super) const WITHDRAW_CANCEL_SELECTOR: &str = "settings-join-invitation-with
 pub(super) const WITHDRAW_FAILURE_SELECTOR: &str = "settings-join-invitation-withdraw-failure";
 /// What a stop SpaceTerm couldn't save says. It states the rule rather than the server's state,
 /// since a later quiet save may already have sent it, and it stays only until a save succeeds.
-const WITHDRAW_UNSAVED: &str = "SpaceTerm couldn\u{2019}t save this request on this computer yet. \
+pub(super) const WITHDRAW_UNSAVED: &str = "SpaceTerm couldn\u{2019}t save this request on this computer yet. \
      It asks the server only after the request is saved, and the request may be gone if SpaceTerm \
      reopens first.";
 /// How often a waiting join repaints its countdown.
@@ -45,7 +45,7 @@ const TICK: Duration = Duration::from_secs(1);
 /// What a join that couldn't finish says. A declined request, a server that couldn't prove its
 /// identity and a pairing interrupted on this computer each read differently, and none claims
 /// more than SpaceTerm knows about what the server recorded.
-fn join_failure(error: DirectError) -> &'static str {
+pub(super) fn join_failure(error: DirectError) -> &'static str {
     match error {
         DirectError::Rejected => DECLINED,
         DirectError::InvalidInvitation => {
@@ -98,7 +98,7 @@ fn join_failure(error: DirectError) -> &'static str {
 /// What a join paused by a network failure says. The failure names no cause, so the copy names
 /// none: a pending system prompt, a firewall and a server that stopped all read the same. The
 /// request stays as it was, so trying again asks with the same invitation.
-fn join_paused(stage: EnrollmentStage) -> String {
+pub(super) fn join_paused(stage: EnrollmentStage) -> String {
     let what = match stage {
         EnrollmentStage::Claim => {
             "SpaceTerm didn\u{2019}t get an answer from the server at the invitation\u{2019}s \
