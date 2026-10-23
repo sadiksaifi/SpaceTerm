@@ -399,11 +399,15 @@ mod presented {
         cx: &mut TestAppContext,
     ) {
         let key = penguin();
+        // The connection's own observation stamps the time it looks. One newer than any this run
+        // makes keeps the record as its owner wrote it, so only retaining the Git settings can
+        // change it.
+        let observed_at = 4_102_444_800;
         cx.update(|cx| {
             server_selection::remember(
                 key.clone(),
                 LastKnownFacts {
-                    observed_at: 10,
+                    observed_at,
                     machine: Some("Penguin".to_owned()),
                     ..LastKnownFacts::default()
                 },
@@ -421,7 +425,7 @@ mod presented {
             .unwrap();
         assert_eq!(
             (facts.machine.as_deref(), facts.observed_at),
-            (Some("Penguin"), 10)
+            (Some("Penguin"), observed_at)
         );
     }
 }
