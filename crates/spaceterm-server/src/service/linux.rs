@@ -198,6 +198,17 @@ fn property<'a>(observation: &'a [(String, String)], key: &str) -> Result<&'a st
         .ok_or(ServerError::ServiceUnavailable)
 }
 
+/// Start after the owning service has validated its registration, runtime and account authority.
+fn start_unit(
+    name: &str,
+    _registration: &Path,
+    mut systemctl: impl FnMut(&[&str]) -> Result<Vec<u8>, ServerError>,
+) -> Result<(), ServerError> {
+    systemctl(&["reset-failed", name])?;
+    systemctl(&["start", name])?;
+    Ok(())
+}
+
 fn linger_command(uid: u32, authorization: LingerAuthorization) -> Command {
     let mut process = Command::new(if authorization == LingerAuthorization::Desktop {
         "/usr/bin/pkexec"
@@ -326,9 +337,9 @@ impl Supervisor for UserService {
         self.linger()
     }
     fn start(&self) -> Result<(), ServerError> {
-        self.systemctl(&["reset-failed", &self.name])?;
-        self.systemctl(&["start", &self.name])?;
-        Ok(())
+        start_unit(&self.name, &self.registration().path(), |args| {
+            self.systemctl(args)
+        })
     }
     fn set_automatic_start(&self, enabled: bool) -> Result<(), ServerError> {
         self.startup(enabled)?;
