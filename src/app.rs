@@ -595,9 +595,9 @@ impl ApplicationQuitCoordinator {
         }
     }
 
-    /// Lets the person choose between keeping the client in its menu bar or status area,
-    /// quitting it completely, and changing nothing. Keeping closes every window as Close All
-    /// Windows does. Quitting completely continues as Quit SpaceTerm does, without asking again.
+    /// Lets the person choose between keeping the client in its menu bar or status area and
+    /// changing nothing. Keeping closes every window as Close All Windows does. Only the status
+    /// item's own Quit exits the client completely.
     fn dismiss(self: &Rc<Self>, cx: &mut App) {
         if !self.ready(cx) {
             return;
@@ -609,7 +609,6 @@ impl ApplicationQuitCoordinator {
             status_area: crate::status_menu::available(cx),
             windows: !cx.windows().is_empty(),
         };
-        let snapshot = application_quit_snapshot(cx);
         let prompt = dismissal_prompt(self.status_area, self.exit_ends_sessions, reach);
         // With no window open, a window of its own asks and closes with the answer.
         let existing = open_active_window(cx).or_else(|| cx.windows().into_iter().next());
@@ -642,16 +641,10 @@ impl ApplicationQuitCoordinator {
                     return;
                 }
                 *coordinator.state.borrow_mut() = ApplicationQuitCoordinatorState::Idle;
-                match answer {
-                    // Without a status item nothing could reach a windowless client, so keeping
-                    // it leaves its windows open, as the choice said.
-                    Some(DismissalAnswer::Keep) if reach.status_area => close_all_windows(cx),
-                    // The choice covers the work it described. Work added while Settings saves
-                    // asks again.
-                    Some(DismissalAnswer::QuitCompletely) => {
-                        coordinator.wait_for_settings(Some(snapshot), cx)
-                    }
-                    _ => {}
+                // Without a status item nothing could reach a windowless client, so keeping it
+                // leaves its windows open, as the choice said.
+                if answer == Some(DismissalAnswer::Keep) && reach.status_area {
+                    close_all_windows(cx);
                 }
             });
         })
@@ -858,8 +851,8 @@ fn close_dismissal_host(host: Option<gpui::WindowHandle<DismissalHost>>, cx: &mu
     }
 }
 
-/// What the dismissal choice says on this host. Every answer leaves an installed client's Server
-/// and Terminal Sessions running; only Source Development's run ends with the client.
+/// What the dismissal choice says on this host. Keeping leaves an installed client's Server and
+/// Terminal Sessions running. Source Development's run ends only when its status item quits it.
 fn dismissal_prompt(
     status_area: StatusAreaName,
     exit_ends_sessions: bool,
@@ -867,29 +860,30 @@ fn dismissal_prompt(
 ) -> DismissalPrompt {
     let name = crate::application_identity::ApplicationIdentity::current().display_name();
     let place = status_area.phrase();
-    let (stays, keep) = if reach.status_area {
-        (
-            format!("{name} stays in the {place}"),
+    let (detail, keep) = match (reach.status_area, exit_ends_sessions) {
+        (true, false) => (
+            format!("{name} stays in the {place}, and your Terminal Sessions keep running."),
             format!("Quit {name}"),
-        )
-    } else {
-        (
-            format!("The {place} isn't available, so {name} stays open"),
+        ),
+        (true, true) => (
+            format!(
+                "{name} stays in the {place}. Quitting from the {place} ends this run's Server \
+                 and Terminal Sessions."
+            ),
+            format!("Quit {name}"),
+        ),
+        (false, _) => (
+            format!(
+                "The {place} isn't available, so {name} stays open. Your Terminal Sessions keep \
+                 running."
+            ),
             format!("Keep {name} Open"),
-        )
-    };
-    let detail = match (exit_ends_sessions, reach.status_area) {
-        (true, _) => {
-            format!("{stays}. Quitting completely ends this run's Server and Terminal Sessions.")
-        }
-        (false, true) => format!("{stays}, and your Terminal Sessions keep running."),
-        (false, false) => format!("{stays}. Your Terminal Sessions keep running."),
+        ),
     };
     DismissalPrompt {
         title: "Are you sure you want to quit?".to_owned(),
         detail,
         keep,
-        quit_completely: format!("Quit {name} Completely"),
     }
 }
 
@@ -1576,7 +1570,7 @@ mod tests {
     };
 
     #[test]
-    fn the_dismissal_choice_offers_keeping_first_and_quitting_completely_last() {
+    fn the_dismissal_choice_offers_keeping_or_cancelling() {
         let name = crate::application_identity::ApplicationIdentity::current().display_name();
         let windowless = DismissalReach {
             status_area: true,
@@ -1624,7 +1618,7 @@ mod tests {
                 true,
                 WINDOWED,
                 format!(
-                    "{name} stays in the menu bar. Quitting completely ends this run's Server and Terminal Sessions."
+                    "{name} stays in the menu bar. Quitting from the menu bar ends this run's Server and Terminal Sessions."
                 ),
                 format!("Quit {name}"),
             ),
@@ -1636,7 +1630,6 @@ mod tests {
                     title: "Are you sure you want to quit?".to_owned(),
                     detail,
                     keep,
-                    quit_completely: format!("Quit {name} Completely"),
                 }
             );
         }
@@ -1681,13 +1674,6 @@ mod tests {
             );
             assert_eq!(quit.confirmations(), 0, "{answer} keeps the client");
         }
-
-        quit.simulate_native_request(ApplicationQuitRequest::Dismissal);
-        cx.run_until_parked();
-        cx.simulate_prompt_answer(&format!("Quit {name} Completely"));
-        cx.run_until_parked();
-        assert!(cx.update(|cx| cx.windows().is_empty()));
-        assert_eq!(quit.confirmations(), 1);
     }
 
     #[gpui::test]

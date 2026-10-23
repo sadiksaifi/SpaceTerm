@@ -47,15 +47,14 @@ impl StatusAreaName {
     }
 }
 
-/// The words of the dismissal choice. Its default answer comes first, then Cancel, then the
-/// complete quit.
+/// The words of the dismissal choice. Its default answer, which keeps the client running, comes
+/// before Cancel. Only the status item's own Quit exits the client completely.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct DismissalPrompt {
     pub(crate) title: String,
     pub(crate) detail: String,
     /// The default answer, which keeps the client running.
     pub(crate) keep: String,
-    pub(crate) quit_completely: String,
 }
 
 /// The person's answer to the dismissal choice.
@@ -63,21 +62,10 @@ pub(crate) struct DismissalPrompt {
 pub(crate) enum DismissalAnswer {
     Keep,
     Cancel,
-    QuitCompletely,
 }
 
 impl DismissalAnswer {
     pub(crate) const CANCEL_LABEL: &str = "Cancel";
-
-    /// Reads an answer by the position of its button, in [`DismissalPrompt`] order.
-    pub(crate) const fn from_index(index: usize) -> Option<Self> {
-        match index {
-            0 => Some(Self::Keep),
-            1 => Some(Self::Cancel),
-            2 => Some(Self::QuitCompletely),
-            _ => None,
-        }
-    }
 }
 
 /// Presents the dismissal choice through GPUI's prompt for this window.
@@ -93,11 +81,14 @@ pub(crate) fn present_window_dismissal(
         &[
             PromptButton::ok(prompt.keep.clone()),
             PromptButton::cancel(DismissalAnswer::CANCEL_LABEL),
-            PromptButton::new(prompt.quit_completely.clone()),
         ],
         cx,
     );
-    cx.spawn(async move |_| DismissalAnswer::from_index(answer.await.ok()?))
+    cx.spawn(async move |_| match answer.await.ok()? {
+        0 => Some(DismissalAnswer::Keep),
+        1 => Some(DismissalAnswer::Cancel),
+        _ => None,
+    })
 }
 
 #[cfg_attr(
@@ -182,7 +173,7 @@ pub(crate) trait ApplicationQuitAdapter {
     fn install(&self, handler: ApplicationQuitHandler) -> Result<(), ApplicationQuitError>;
 
     /// Asks the dismissal choice in `window`. Initial keyboard focus, Return, and Space choose
-    /// Keep, Escape chooses Cancel, and nothing but its own button quits completely.
+    /// Keep, and Escape chooses Cancel.
     fn present_dismissal(
         &self,
         prompt: &DismissalPrompt,

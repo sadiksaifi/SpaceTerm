@@ -2520,14 +2520,6 @@ fn client_window_controls_remain_operable_during_close_confirmation(cx: &mut Tes
     }
 }
 
-/// The dismissal choice's button that exits the client.
-fn quit_choice() -> String {
-    format!(
-        "Quit {} Completely",
-        crate::application_identity::ApplicationIdentity::current().display_name()
-    )
-}
-
 /// The dismissal choice's default button, which keeps the client in the menu bar.
 fn keep_choice() -> String {
     format!(
@@ -2537,7 +2529,7 @@ fn keep_choice() -> String {
 }
 
 #[gpui::test]
-fn command_q_offers_keeping_the_client_in_the_menu_bar_or_quitting(cx: &mut TestAppContext) {
+fn command_q_offers_keeping_the_client_in_the_menu_bar_or_cancelling(cx: &mut TestAppContext) {
     let (_, records, application_quit, cx) = workspace_manager_with_application_actions(cx);
     cx.update(|_, cx| crate::status_menu::set_available(cx, true));
     redraw(cx);
@@ -2560,22 +2552,6 @@ fn command_q_offers_keeping_the_client_in_the_menu_bar_or_quitting(cx: &mut Test
     assert!(records.dropped_session_ids().is_empty());
     assert_eq!(application_quit.requests(), 0);
     assert_eq!(application_quit.confirmations(), 0);
-}
-
-#[gpui::test]
-fn choosing_quit_exits_once_without_asking_again(cx: &mut TestAppContext) {
-    let (_, _, application_quit, cx) = workspace_manager_with_application_actions(cx);
-    cx.update(|_, cx| crate::status_menu::set_available(cx, true));
-    redraw(cx);
-    cx.simulate_keystrokes("cmd-q");
-    cx.run_until_parked();
-    cx.simulate_prompt_answer(&quit_choice());
-    cx.run_until_parked();
-
-    // The choice covered the work it described, and exiting never re-enters the choice.
-    assert!(!cx.has_pending_prompt());
-    assert_eq!(application_quit.requests(), 0);
-    assert_eq!(application_quit.confirmations(), 1);
 }
 
 #[gpui::test]
@@ -2635,15 +2611,6 @@ fn command_q_without_a_status_area_keeps_the_windows_open(cx: &mut TestAppContex
     assert_eq!(cx.update(|_, cx| cx.windows().len()), 1);
     assert!(records.dropped_session_ids().is_empty());
     assert_eq!(application_quit.confirmations(), 0);
-
-    // Quitting stays available.
-    cx.simulate_keystrokes("cmd-q");
-    cx.run_until_parked();
-    cx.simulate_prompt_answer(&quit_choice());
-    cx.run_until_parked();
-    assert!(!cx.has_pending_prompt());
-    assert_eq!(application_quit.requests(), 0);
-    assert_eq!(application_quit.confirmations(), 1);
 }
 
 #[gpui::test]
@@ -2673,10 +2640,10 @@ fn keeping_the_client_closes_the_window_through_its_own_confirmation_without_qui
     assert_eq!(application_quit.confirmations(), 0);
 }
 
-/// The keyboard reaches only the safe default: Space and Return keep the client, and Escape
-/// cancels. Quitting completely takes its own button.
+/// Space and Return keep the client, and Escape cancels. Command-Q never exits the client; only
+/// the status item's Quit does.
 #[gpui::test]
-fn keyboard_answers_to_command_q_never_quit_completely(cx: &mut TestAppContext) {
+fn keyboard_answers_to_command_q_keep_or_cancel_without_quitting(cx: &mut TestAppContext) {
     let (manager, records, application_quit, cx) = workspace_manager_with_application_actions(cx);
     cx.update(|_, cx| {
         crate::ui::application_prompt::install(cx);
@@ -2700,7 +2667,7 @@ fn keyboard_answers_to_command_q_never_quit_completely(cx: &mut TestAppContext) 
             keystroke: Keystroke::parse(key).unwrap(),
         });
         cx.run_until_parked();
-        assert_eq!(application_quit.confirmations(), 0, "{key} quit completely");
+        assert_eq!(application_quit.confirmations(), 0, "{key} quit");
         if key == "escape" {
             assert_eq!(pending_close(cx), None, "Escape cancels");
             continue;
