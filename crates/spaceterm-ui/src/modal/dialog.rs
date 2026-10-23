@@ -1,4 +1,4 @@
-use std::rc::Rc;
+use std::{any::Any, rc::Rc};
 
 use gpui::{
     AnyElement, AnyView, App, Bounds, Context, Element, ElementId, Entity, FocusHandle,
@@ -413,7 +413,7 @@ impl<A> Dialog<A> {
             .copied()
             .ok_or(ModalPresentationError::DesktopPolicyNotInstalled)?;
         self.validate(&policy)?;
-        let default_action = policy.return_action(&self.actions);
+        let default_action = policy.default_action(&self.actions);
         let cancel_action = policy.cancel_action(&self.actions);
         let focus_intent = match &self.initial_focus {
             DialogInitialFocus::Body(focus) => PreparedFocusIntent::Body(focus.clone()),
@@ -434,6 +434,7 @@ impl<A> Dialog<A> {
             .map(|action| action.id().clone())
             .collect::<Vec<_>>();
         let result_action_ids = action_ids.clone();
+        let completion_action_ids: Rc<dyn Any> = Rc::new(action_ids.clone());
         let body = self.body;
         let request = PreparedModalRequest::new(
             self.id,
@@ -487,7 +488,7 @@ impl<A> Dialog<A> {
         .with_lifecycle(Some(Rc::new(on_lifecycle)));
         operation
             .apply(request, window, cx)
-            .map(DialogCompletion::new)
+            .map(|presentation| DialogCompletion::new(presentation, completion_action_ids))
     }
 }
 

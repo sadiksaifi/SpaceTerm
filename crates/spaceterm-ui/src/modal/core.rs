@@ -1,4 +1,5 @@
 use std::{
+    any::Any,
     cell::Cell,
     collections::{HashMap, VecDeque},
     rc::Rc,
@@ -18,8 +19,8 @@ use super::{
     ModalActionIntent, ModalActionRole, ModalActivationSource, ModalCloseReason,
     ModalDesktopPolicy, ModalDismissalError, ModalId, ModalLifecycleEvent, ModalParentToken,
     ModalPresentationError, ModalPresentationId, ModalStaleGenerationError,
-    ModalTerminalOutcomeError, ModalUpdateError, ProgressCancelDecision, ProgressDialogOutcome,
-    ProgressDialogUpdate, ProgressState,
+    ModalTerminalOutcomeError, ModalUpdateError, ModalValidationError, ProgressCancelDecision,
+    ProgressDialogOutcome, ProgressDialogUpdate, ProgressState,
     policy::{is_cancel_capability, is_safe_cancel},
 };
 
@@ -1484,6 +1485,52 @@ impl ModalWindowOwner {
         Ok(queued.update_generation)
     }
 
+    fn set_dialog_action_enabled(
+        &mut self,
+        presentation: ModalPresentationId,
+        action_index: usize,
+        enabled: bool,
+    ) -> Result<(), ModalUpdateError> {
+        let current = self.active.as_ref().map(|active| active.id);
+        let request = match self
+            .active
+            .as_mut()
+            .filter(|active| active.id == presentation)
+        {
+            Some(active) => &mut active.request,
+            None => match self
+                .queue
+                .iter_mut()
+                .find(|queued| queued.id == presentation)
+            {
+                Some(queued) => &mut queued.request,
+                None => {
+                    return Err(ModalUpdateError::Stale(ModalStaleGenerationError::new(
+                        presentation,
+                        current,
+                    )));
+                }
+            },
+        };
+        if request.completion.status() != CompletionStatus::Pending {
+            return Err(ModalUpdateError::Closed);
+        }
+        if request.kind != ModalKind::Dialog {
+            return Err(ModalUpdateError::UnknownAction);
+        }
+        let action = request
+            .actions
+            .get_mut(action_index)
+            .ok_or(ModalUpdateError::UnknownAction)?;
+        if action.role == ModalActionRole::Cancel && !enabled {
+            return Err(ModalUpdateError::Invalid(
+                ModalValidationError::MissingSafeDismissal,
+            ));
+        }
+        action.enabled = enabled;
+        Ok(())
+    }
+
     fn finish_dialog(
         &mut self,
         presentation: ModalPresentationId,
@@ -2215,15 +2262,65 @@ impl ModalPresentationHandle {
 /// Active and queued Dialogs may complete independently of semantic actions or pending action
 /// authority. Completion may nominate a logical successor focus target; restoration still refuses
 /// removed targets, another Operating-System Window, or a newer focus owner. Generic dismissal
-/// remains available and continues to produce a dismissed Dialog outcome.
+/// remains available and continues to produce a dismissed Dialog outcome. The same authority
+/// changes which actions are available while the Dialog stays presented.
 #[derive(Clone)]
 pub struct DialogCompletion {
     presentation: ModalPresentationHandle,
+    /// The presentation's typed action identities in caller order, as a `Vec<A>`.
+    actions: Rc<dyn Any>,
 }
 
 impl DialogCompletion {
-    pub(super) fn new(presentation: ModalPresentationHandle) -> Self {
-        Self { presentation }
+    pub(super) fn new(presentation: ModalPresentationHandle, actions: Rc<dyn Any>) -> Self {
+        Self {
+            presentation,
+            actions,
+        }
+    }
+
+    /// Makes one action of this exact active or queued Dialog available or unavailable.
+    ///
+    /// The Dialog stays the same presentation: its body, keyboard focus, text caret and
+    /// accessibility identity are unchanged, and the action keeps its role and default
+    /// designation. An unavailable action can't be chosen by pointer, Space or Return from the
+    /// moment this returns, including a press already underway. Return activates the default
+    /// action only while it is available. The safe Cancel action stays available, so Escape and
+    /// Cancel always end the Dialog.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ModalUpdateError::UnknownAction`] when no action has this identity,
+    /// [`ModalUpdateError::Invalid`] with [`ModalValidationError::MissingSafeDismissal`] when asked
+    /// to make the Cancel action unavailable, [`ModalUpdateError::Stale`] for a replacement or
+    /// window mismatch, [`ModalUpdateError::Closed`] after terminal completion, or
+    /// [`ModalUpdateError::OwnerRemoved`] after teardown.
+    pub fn set_action_enabled<A: PartialEq + 'static>(
+        &self,
+        action: &A,
+        enabled: bool,
+        window: &Window,
+        cx: &mut App,
+    ) -> Result<(), ModalUpdateError> {
+        check_update_operation(&self.presentation, window, cx)?;
+        let index = self
+            .actions
+            .downcast_ref::<Vec<A>>()
+            .and_then(|actions| actions.iter().position(|candidate| candidate == action))
+            .ok_or(ModalUpdateError::UnknownAction)?;
+        let owner = self.presentation.owner.clone();
+        if !enabled {
+            // A press already underway can't complete on an action that is no longer available.
+            disarm_modal_controls_for_presentation(&owner, self.presentation.presentation, cx);
+        }
+        owner.update(cx, |state, cx| {
+            let changed =
+                state.set_dialog_action_enabled(self.presentation.presentation, index, enabled);
+            if changed.is_ok() {
+                cx.notify();
+            }
+            changed
+        })
     }
 
     pub const fn presentation_id(&self) -> ModalPresentationId {
