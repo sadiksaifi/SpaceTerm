@@ -299,18 +299,6 @@ impl AccessFailure {
     }
 }
 
-/// The address this computer uses to reach other machines, which the local server's Turn On
-/// suggests. Choosing it sends nothing: connecting a UDP socket only selects a route.
-pub(crate) fn this_computers_address() -> Option<std::net::IpAddr> {
-    let socket = std::net::UdpSocket::bind((std::net::Ipv4Addr::UNSPECIFIED, 0)).ok()?;
-    // A documentation address, which no network routes traffic to.
-    socket
-        .connect((std::net::Ipv4Addr::new(192, 0, 2, 1), 9))
-        .ok()?;
-    let address = socket.local_addr().ok()?.ip();
-    (!address.is_unspecified() && !address.is_loopback()).then_some(address)
-}
-
 /// A comparison code as both screens show it: two groups of three digits, such as "042 917".
 pub(crate) fn code_text(code: ComparisonCode) -> SharedString {
     let digits = code.to_string();
