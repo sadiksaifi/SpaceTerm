@@ -14,6 +14,8 @@ use super::super::servers::{LocalServerControl, OfferedLocalServer, OfferedServe
 use super::ServerChoice;
 use crate::appearance::Appearance;
 use crate::domain::SshDestination;
+use crate::local_server::service::maintenance::{MaintenanceFacts, RemoteBuild};
+use crate::local_server::service::{ServiceStartup, ServiceStatus};
 use crate::platform::appearance::testing::RecordingAppearancePlatform;
 use crate::platform::window_movement::RecordingOperatingSystemWindowDragPlatform;
 use crate::settings::SettingsDocument;
@@ -24,6 +26,10 @@ use crate::ssh::server_connection::{
     RetainedSshConnection, ServerAvailability, SshConnectBackend, SshConnectFailure,
     SshConnectionIntentStore, SshIntentStoreError, SshServerConnections, SshServerContinuity,
     SshServerFacts, SshServerLease, SshServerObservation,
+};
+use crate::ssh::server_operations::{
+    RemoteMaintenanceRequest, RemoteOperationEntry, RemoteOperationHandle, RemoteOperationState,
+    RemoteServerOperations,
 };
 use crate::ui::appearance_runtime;
 use crate::ui::settings_window::{SettingsSectionId, SettingsWindow};
@@ -182,15 +188,16 @@ pub(in crate::ui::settings_window) fn open_servers<'a>(
     saved: &[&str],
     cx: &'a mut TestAppContext,
 ) -> Servers<'a> {
-    open_servers_saved(local, saved, false, cx)
+    open_servers_saved(local, saved, false, None, cx)
 }
 
 /// Opens Settings on Servers as [`open_servers`] does, with each `saved` connection set to
-/// reconnect when `active`.
+/// reconnect when `active`, and SSH maintenance through `operations` when given.
 fn open_servers_saved<'a>(
     local: bool,
     saved: &[&str],
     active: bool,
+    operations: Option<Arc<dyn RemoteServerOperations>>,
     cx: &'a mut TestAppContext,
 ) -> Servers<'a> {
     let computers = Arc::new(Computers::default());
@@ -220,6 +227,9 @@ fn open_servers_saved<'a>(
             .expect("appearance runtime should install");
         crate::ui::init(cx).expect("UI initialization should succeed");
         crate::ui::ssh_servers::install(registry, None, cx);
+        if let Some(operations) = operations {
+            crate::ssh::server_operations::install(operations, cx);
+        }
     });
     let offered: OfferedLocalServer = local.then(|| OfferedServer {
         connection: Ok(ScriptedServer::new(Ok(connected(1))) as Arc<dyn LocalServerControl>),
@@ -562,6 +572,115 @@ fn after_disconnect_the_card_presents_the_facts_last_observed(cx: &mut TestAppCo
     assert_eq!(servers.computers.observations.load(Ordering::SeqCst), 0);
 }
 
+/// An operations owner holding one service read of penguin, as Check Now leaves it, whose
+/// approved build is `version`. Every step it is asked for does nothing.
+struct HeldRead {
+    facts: MaintenanceFacts,
+    changes: (async_channel::Sender<()>, async_channel::Receiver<()>),
+}
+
+impl HeldRead {
+    fn approving(version: &str) -> Self {
+        Self {
+            facts: MaintenanceFacts {
+                server: [2; 32],
+                account: 501,
+                build: "spaceterm-development".to_owned(),
+                status: ServiceStatus {
+                    installed: true,
+                    enabled: true,
+                    running: true,
+                    stopped: false,
+                },
+                startup: ServiceStartup::AtLogin,
+                approved: Some(RemoteBuild {
+                    version: version.to_owned(),
+                    commit: "a".repeat(40),
+                    digest: "a".repeat(64),
+                }),
+                activation: None,
+            },
+            changes: async_channel::unbounded(),
+        }
+    }
+
+    fn read(&self) -> RemoteOperationState {
+        RemoteOperationState::Read(self.facts.clone())
+    }
+}
+
+impl RemoteServerOperations for HeldRead {
+    fn subscribe(&self) -> async_channel::Receiver<()> {
+        self.changes.1.clone()
+    }
+
+    fn entries(&self) -> Vec<RemoteOperationEntry> {
+        vec![RemoteOperationEntry {
+            destination: destination("penguin"),
+            removed: false,
+            operation: None,
+            state: self.read(),
+        }]
+    }
+
+    fn state(&self, server: &SshDestination) -> RemoteOperationState {
+        if *server == destination("penguin") {
+            self.read()
+        } else {
+            RemoteOperationState::Unread
+        }
+    }
+
+    fn refresh(&self, _: &SshDestination) {}
+    fn set_automatic_start(&self, _: &SshDestination, _: bool) {}
+    fn describe(&self, _: &SshDestination, _: RemoteMaintenanceRequest) {}
+    fn confirm(&self, _: RemoteOperationHandle) {}
+    fn start(&self, _: &SshDestination) {}
+    fn cancel(&self, _: &SshDestination) {}
+    fn resume(&self, _: &SshDestination) {}
+    fn acknowledge(&self, _: RemoteOperationHandle) {}
+    fn discard(&self, _: [u8; 32]) {}
+    fn dismiss(&self, _: [u8; 32]) {}
+    fn resume_retained(&self) {}
+}
+
+/// Whether the Version row announces `version`.
+fn version_reads(version: &str, cx: &mut VisualTestContext) -> bool {
+    let exact = format!("Version {version}");
+    let with_badge = format!("Version {version},");
+    A11yTree::read(cx).with_role("Status").iter().any(|node| {
+        node["aria"]["label"]
+            .as_str()
+            .is_some_and(|label| label == exact || label.starts_with(&with_badge))
+    })
+}
+
+/// A service read, such as Check Now leaves, names the build approved when it ran. Once
+/// SpaceTerm connects, the server reports the version it runs now, which the card shows instead.
+#[gpui::test]
+fn a_connected_server_shows_the_version_it_reports_over_an_earlier_read(cx: &mut TestAppContext) {
+    let operations: Arc<dyn RemoteServerOperations> = Arc::new(HeldRead::approving("1.3.0"));
+    let servers = open_servers_saved(true, &["penguin"], false, Some(operations), cx);
+    select("penguin", servers.cx);
+    assert!(
+        version_reads("1.3.0", servers.cx),
+        "before connecting, the read's approved build is what SpaceTerm knows"
+    );
+
+    click("settings-ssh-server-connect", servers.cx);
+    let connections = servers.connections.clone();
+    settle(servers.cx, |_| {
+        connections.server(&destination("penguin")).is_some()
+    });
+    servers.cx.run_until_parked();
+
+    assert!(
+        version_reads("1.4.0", servers.cx),
+        "the connected server's own version replaces the earlier read"
+    );
+    assert!(!version_reads("1.3.0", servers.cx));
+}
+
 struct RecordingMovement;
 
 impl crate::platform::window_movement::WindowMovementFactory for RecordingMovement {
@@ -864,7 +983,7 @@ fn a_failed_connection_offers_to_stop_reconnecting_and_stays_saved(cx: &mut Test
 /// A saved connection that reopens waiting for the person waits for Connect.
 #[gpui::test]
 fn a_reopened_connection_waits_for_connect(cx: &mut TestAppContext) {
-    let servers = open_servers_saved(true, &["penguin"], true, cx);
+    let servers = open_servers_saved(true, &["penguin"], true, None, cx);
     let connections = servers.connections.clone();
     settle(servers.cx, |_| {
         matches!(
