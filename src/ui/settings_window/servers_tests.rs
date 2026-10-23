@@ -33,6 +33,7 @@ use crate::ui::settings_window::server_card::{
 };
 use crate::ui::settings_window::server_list::ServerChoice;
 use crate::ui::settings_window::{SettingsSectionId, SettingsWindow};
+use crate::ui::sidebar_window::SidebarOwner;
 use crate::ui::sidebar_window::form::CaptionTone;
 
 const NAVIGATION_SELECTOR: &str = "settings-navigation-settings-section-servers";
