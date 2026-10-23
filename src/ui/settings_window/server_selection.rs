@@ -36,7 +36,8 @@ impl Global for ServerSelection {}
 enum Change {
     Reconcile(Vec<ServerKey>),
     Select(ServerKey),
-    Remember(ServerKey, LastKnownFacts),
+    /// Boxed, since the facts are much larger than the other changes.
+    Remember(ServerKey, Box<LastKnownFacts>),
 }
 
 /// What the retained record holds after one change.
@@ -82,7 +83,7 @@ impl Retainer {
             }
             Change::Remember(key, facts) => {
                 self.touched.insert(key.clone());
-                self.context.remember(key, facts)
+                self.context.remember(key, *facts)
             }
         };
         self.snapshot(change)
@@ -243,7 +244,7 @@ pub(crate) fn remember(key: ServerKey, facts: LastKnownFacts, cx: &mut App) {
         selection.facts.insert(key.clone(), merged);
         // The worker merges the observation into the record on disk, which can hold facts this
         // window hasn't seen.
-        selection.queue(Change::Remember(key, facts));
+        selection.queue(Change::Remember(key, Box::new(facts)));
     });
 }
 
