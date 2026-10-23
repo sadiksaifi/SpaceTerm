@@ -1074,7 +1074,7 @@ pub(super) struct VersionCheck {
     _check: gpui::Task<()>,
 }
 
-/// The selector of Check Now where the server has no update journey of its own here.
+/// The selector of Check Now on every server but this computer's installed one.
 pub(super) const VERSION_CHECK_SELECTOR: &str = "settings-server-version-check";
 /// How often Check Now looks again at work it waits for.
 const CHECK_POLL: std::time::Duration = std::time::Duration::from_millis(200);
@@ -1083,16 +1083,27 @@ impl VersionStep {
     const fn label(self) -> &'static str {
         match self {
             Self::Local(action) => action.label(),
+            Self::Remote(RemoteAction::Check) | Self::Observe => "Check Now",
             Self::Remote(action) => action.label(),
-            Self::Observe => "Check Now",
         }
     }
 
+    /// The Status row offers some of the same SSH maintenance steps for the service, such as OK
+    /// and Discard, so the Version row names its own.
     const fn selector(self) -> &'static str {
         match self {
             Self::Local(action) => action.selector(),
+            Self::Remote(RemoteAction::Update) => "settings-server-version-update",
+            Self::Remote(RemoteAction::Finish) => "settings-server-version-finish",
+            Self::Remote(RemoteAction::Return) => "settings-server-version-return",
+            Self::Remote(RemoteAction::CheckAgain) => "settings-server-version-check-again",
+            Self::Remote(RemoteAction::Cancel) => "settings-server-version-cancel",
+            Self::Remote(RemoteAction::Acknowledge) => "settings-server-version-acknowledge",
+            Self::Remote(RemoteAction::Dismiss) => "settings-server-version-dismiss",
+            Self::Remote(RemoteAction::Discard) => "settings-server-version-discard",
+            Self::Remote(RemoteAction::Check) | Self::Observe => VERSION_CHECK_SELECTOR,
+            // The row offers no service step.
             Self::Remote(action) => action.selector(),
-            Self::Observe => VERSION_CHECK_SELECTOR,
         }
     }
 
@@ -1571,23 +1582,26 @@ impl SettingsWindow {
                         SharedString::from(format!("{} {name}", label.trim_end_matches('\u{2026}')))
                     })
                 });
-                Button::new(ElementId::from(SharedString::from(slot)), label)
-                    .variant(if primary {
-                        ButtonVariant::Primary
-                    } else {
-                        ButtonVariant::Outline
-                    })
-                    .size(ButtonSize::Regular)
-                    .tab_stop(true)
-                    .debug_selector(selector)
-                    .accessibility_description(description)
-                    .on_activate(move |_, window, cx| {
-                        let step = step.clone();
-                        let _ = owner.update(cx, |settings, cx| {
-                            settings.take_status_step(step, window, cx);
-                        });
-                    })
-                    .into_any_element()
+                Button::new(
+                    ElementId::from(SharedString::from(format!("{STATUS_SELECTOR}-{slot}"))),
+                    label,
+                )
+                .variant(if primary {
+                    ButtonVariant::Primary
+                } else {
+                    ButtonVariant::Outline
+                })
+                .size(ButtonSize::Regular)
+                .tab_stop(true)
+                .debug_selector(selector)
+                .accessibility_description(description)
+                .on_activate(move |_, window, cx| {
+                    let step = step.clone();
+                    let _ = owner.update(cx, |settings, cx| {
+                        settings.take_status_step(step, window, cx);
+                    });
+                })
+                .into_any_element()
             });
         let menu = (!menu.is_empty()).then(|| {
             let mut entries = Vec::new();
@@ -1668,31 +1682,40 @@ impl SettingsWindow {
             let selector = step.selector().to_owned();
             let description = match step {
                 VersionStep::Local(action) => action.consequence().map(SharedString::new_static),
-                VersionStep::Remote(action) => Some(action.consequence(&machine)),
-                VersionStep::Observe => Some(SharedString::from(format!(
-                    "Checks for a newer SpaceTerm, then reads {machine} again. It connects to \
+                VersionStep::Remote(RemoteAction::Check) | VersionStep::Observe => {
+                    Some(SharedString::from(format!(
+                        "Checks for a newer SpaceTerm, then reads {machine} again. It connects to \
                      nothing."
-                ))),
+                    )))
+                }
+                VersionStep::Remote(action) => Some(action.consequence(&machine)),
             };
-            Button::new(ElementId::from(step.slot()), step.label())
-                .variant(if step.primary() {
-                    ButtonVariant::Primary
-                } else {
-                    ButtonVariant::Outline
-                })
-                .size(ButtonSize::Regular)
-                .tab_stop(true)
-                // One step runs at a time. The steps act through this account's service or an SSH
-                // account's route, so they need no connection to the server.
-                .disabled(busy)
-                .when_some(description, |button, description| {
-                    button.accessibility_description(description)
-                })
-                .debug_selector(selector)
-                .on_activate(move |_, _, cx| {
-                    let _ = owner.update(cx, |settings, cx| settings.take_version_step(step, cx));
-                })
-                .into_any_element()
+            // The row names the identity, so a step here never shares state with a Status step.
+            Button::new(
+                ElementId::from(SharedString::from(format!(
+                    "{VERSION_SELECTOR}-{}",
+                    step.slot()
+                ))),
+                step.label(),
+            )
+            .variant(if step.primary() {
+                ButtonVariant::Primary
+            } else {
+                ButtonVariant::Outline
+            })
+            .size(ButtonSize::Regular)
+            .tab_stop(true)
+            // One step runs at a time. The steps act through this account's service or an SSH
+            // account's route, so they need no connection to the server.
+            .disabled(busy)
+            .when_some(description, |button, description| {
+                button.accessibility_description(description)
+            })
+            .debug_selector(selector)
+            .on_activate(move |_, _, cx| {
+                let _ = owner.update(cx, |settings, cx| settings.take_version_step(step, cx));
+            })
+            .into_any_element()
         });
         div()
             .debug_selector(|| VERSION_SELECTOR.to_owned())
