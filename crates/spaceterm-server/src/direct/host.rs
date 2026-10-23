@@ -573,7 +573,7 @@ impl State {
                     if let Some(Err(error)) = &pending.decision {
                         return Err(*error);
                     }
-                    return Ok(wire::Answer::Claim(*id));
+                    return Ok(wire::Answer::Claim(pending.claim.clone()));
                 }
                 if invitation.used {
                     return Err(DirectError::AlreadyDecided);
@@ -587,16 +587,16 @@ impl State {
                     device_public_key: *key,
                     device_name: name.clone(),
                     expires_at_unix_seconds: invitation.expires,
+                    exchange_hash: wire::exchange_hash(challenge, authentication)?,
                 };
-                let id = claim.id;
                 let invitation = invitation.id;
                 self.invitations[invitation_index].used = true;
                 self.claims.push(PendingClaim {
                     invitation,
-                    claim,
+                    claim: claim.clone(),
                     decision: None,
                 });
-                Ok(wire::Answer::Claim(id))
+                Ok(wire::Answer::Claim(claim))
             }
             wire::Action::Finish { claim, key } => {
                 if let Some(device) = self.record.devices.iter().find(|d| d.claim == *claim) {

@@ -6,7 +6,10 @@ use super::records::Authority;
 use super::*;
 
 pub(super) trait DirectNetwork: Send + Sync {
-    fn submit_enrollment(&self, enrollment: &mut direct::Enrollment) -> Result<(), DirectError> {
+    fn submit_enrollment(
+        &self,
+        enrollment: &mut direct::Enrollment,
+    ) -> Result<direct::ComparisonCode, DirectError> {
         enrollment.submit()
     }
     fn finish_enrollment(
@@ -699,7 +702,7 @@ fn enroll(
             owner.start_worker();
             return Ok(());
         }
-        let Some(()) = enrollment_attempt(
+        let Some(comparison_code) = enrollment_attempt(
             owner,
             id,
             EnrollmentStage::Claim,
@@ -714,6 +717,7 @@ fn enroll(
             server_name: invitation.server_name().to_owned(),
             server_fingerprint: invitation.server_pin().fingerprint(),
             device_fingerprint: credential.fingerprint(),
+            comparison_code,
             expires_at: invitation.expires_at_unix_seconds(),
         };
         loop {
@@ -878,7 +882,7 @@ pub(super) mod enrollment_tests {
         fn submit_enrollment(
             &self,
             enrollment: &mut direct::Enrollment,
-        ) -> Result<(), DirectError> {
+        ) -> Result<direct::ComparisonCode, DirectError> {
             let claim = enrollment.claim_id();
             self.claims.lock().unwrap().insert(claim);
             let mut calls = self.calls.lock().unwrap();
@@ -886,7 +890,15 @@ pub(super) mod enrollment_tests {
             if self.lost == EnrollmentStage::Claim && calls.len() == 1 {
                 Err(DirectError::Transport)
             } else {
-                Ok(())
+                Ok(direct::PairingClaim {
+                    id: claim,
+                    server: self.paired.pin.server,
+                    device_public_key: self.paired.client,
+                    device_name: "Network fixture".into(),
+                    expires_at_unix_seconds: u64::MAX,
+                    exchange_hash: [7; 32],
+                }
+                .comparison_code())
             }
         }
         fn finish_enrollment(

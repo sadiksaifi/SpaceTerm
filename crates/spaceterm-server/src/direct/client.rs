@@ -60,7 +60,7 @@ fn exchange(
     credential: &DeviceCredential,
     action: wire::Action,
 ) -> Result<(wss::Ws, wire::Answer), DirectError> {
-    exchange_checked(endpoint, pin, credential, action, None)
+    exchange_checked(endpoint, pin, credential, action, None, None)
 }
 fn exchange_checked(
     endpoint: &str,
@@ -68,6 +68,7 @@ fn exchange_checked(
     credential: &DeviceCredential,
     action: wire::Action,
     expected_name: Option<&str>,
+    exchanges: Option<&mut Vec<[u8; 32]>>,
 ) -> Result<(wss::Ws, wire::Answer), DirectError> {
     let mut ws = wss::connect(endpoint, pin)?;
     let challenge: wire::Challenge = wss::receive(&mut ws)?;
@@ -101,7 +102,16 @@ fn exchange_checked(
         credential.expose_bytes(),
         &wire::transcript("device", pin, &challenge.nonce, &action)?,
     )?;
-    wss::send(&mut ws, &wire::Authentication { action, proof })?;
+    let authentication = wire::Authentication { action, proof };
+    if let Some(exchanges) = exchanges {
+        if exchanges.len() >= 64 {
+            return Err(DirectError::Capacity);
+        }
+        // Keep possible admitted originals even when sending or receiving fails.
+        // This live-only bounded set contains no invitation or device proof.
+        exchanges.push(wire::exchange_hash(&challenge, &authentication)?);
+    }
+    wss::send(&mut ws, &authentication)?;
     let answer: Result<wire::Answer, DirectError> = wss::receive(&mut ws)?;
     Ok((ws, answer?))
 }
@@ -146,9 +156,11 @@ pub(super) fn prepare(
         claim,
         credential: DeviceCredential::from_bytes(credential.expose_bytes())?,
         prepared: Some((invitation.payload.clone(), name)),
+        admitted: None,
+        exchanges: Vec::new(),
     })
 }
-pub(super) fn submit(enrollment: &Enrollment) -> Result<(), DirectError> {
+pub(super) fn submit(enrollment: &mut Enrollment) -> Result<ComparisonCode, DirectError> {
     let (invitation, name) = enrollment
         .prepared
         .as_ref()
@@ -167,9 +179,31 @@ pub(super) fn submit(enrollment: &Enrollment) -> Result<(), DirectError> {
             name: name.clone(),
         },
         Some(&invitation.server_name),
+        Some(&mut enrollment.exchanges),
     )?;
     match answer {
-        wire::Answer::Claim(id) if id == enrollment.claim => Ok(()),
+        wire::Answer::Claim(claim)
+            if claim.id == enrollment.claim
+                && claim.server == enrollment.pin.server
+                && claim.device_public_key
+                    == crypto::public(enrollment.credential.expose_bytes())?
+                && claim.device_name == *name
+                && claim.expires_at_unix_seconds == invitation.expires =>
+        {
+            // Both devices independently hash the original verified exchange. An
+            // exact retry may resolve an earlier submission whose response was lost.
+            if !enrollment.exchanges.contains(&claim.exchange_hash)
+                || enrollment
+                    .admitted
+                    .as_ref()
+                    .is_some_and(|previous| previous != &claim)
+            {
+                return Err(DirectError::Substituted);
+            }
+            let code = claim.comparison_code();
+            enrollment.admitted = Some(claim);
+            Ok(code)
+        }
         _ => Err(DirectError::Substituted),
     }
 }

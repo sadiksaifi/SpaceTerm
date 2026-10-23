@@ -88,10 +88,33 @@ pub struct PairingClaim {
     pub device_public_key: [u8; 32],
     pub device_name: ClientName,
     pub expires_at_unix_seconds: u64,
+    /// Hash of the first verified server challenge and signed device claim.
+    pub exchange_hash: [u8; 32],
 }
 impl PairingClaim {
     pub fn device_fingerprint(&self) -> String {
         fingerprint(&self.device_public_key)
+    }
+    /// Display on both devices before approving this exact claim.
+    pub fn comparison_code(&self) -> ComparisonCode {
+        ComparisonCode(
+            u32::from_be_bytes([
+                self.exchange_hash[0],
+                self.exchange_hash[1],
+                self.exchange_hash[2],
+                self.exchange_hash[3],
+            ]) % 1_000_000,
+        )
+    }
+}
+
+/// A display-only comparison of an authenticated exchange. Never an admission proof.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ComparisonCode(u32);
+
+impl std::fmt::Display for ComparisonCode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:06}", self.0)
     }
 }
 
@@ -275,6 +298,8 @@ pub struct Enrollment {
     claim: ClaimId,
     credential: DeviceCredential,
     prepared: Option<(wire::Invite, ClientName)>,
+    admitted: Option<PairingClaim>,
+    exchanges: Vec<[u8; 32]>,
 }
 impl Enrollment {
     /// Reconstructs only an original claim for observation or cancellation. Opens nothing.
@@ -299,6 +324,8 @@ impl Enrollment {
             claim,
             credential: DeviceCredential::from_bytes(credential.expose_bytes())?,
             prepared: None,
+            admitted: None,
+            exchanges: Vec::new(),
         })
     }
     /// Preallocates the exact claim without opening a socket. Retain its ID, endpoint,
@@ -313,7 +340,7 @@ impl Enrollment {
     }
     /// Submits the prepared original. Repeating the same claim and name is idempotent.
     /// A resumed cleanup has no invitation and cannot submit a replacement claim.
-    pub fn submit(&mut self) -> Result<(), DirectError> {
+    pub fn submit(&mut self) -> Result<ComparisonCode, DirectError> {
         client::submit(self)
     }
     /// Prepares and submits an ephemeral enrollment. Durable callers must use
@@ -329,6 +356,10 @@ impl Enrollment {
     }
     pub fn claim_id(&self) -> ClaimId {
         self.claim
+    }
+    /// Available only after a pinned server confirms this exact authenticated claim.
+    pub fn comparison_code(&self) -> Option<ComparisonCode> {
+        self.admitted.as_ref().map(PairingClaim::comparison_code)
     }
     pub fn finish(&mut self) -> Result<Option<PairedDevice>, DirectError> {
         client::finish(self)

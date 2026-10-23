@@ -82,13 +82,13 @@ impl Fixture {
                 },
             )
             .unwrap();
-        let wire::Answer::Claim(id) = answer else {
+        let wire::Answer::Claim(claim) = answer else {
             panic!()
         };
         let ManagementReply::Claims(claims) = self.management(Management::Claims).unwrap() else {
             panic!()
         };
-        claims.into_iter().find(|c| c.id == id).unwrap()
+        claims.into_iter().find(|c| c.id == claim.id).unwrap()
     }
     pub(crate) fn enroll(&self, credential: &DeviceCredential) -> PairedDevice {
         let invitation = self.invite();

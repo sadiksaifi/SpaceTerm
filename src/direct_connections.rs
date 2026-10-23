@@ -72,6 +72,7 @@ pub(crate) enum JoinStatus {
         server_name: String,
         server_fingerprint: String,
         device_fingerprint: String,
+        comparison_code: direct::ComparisonCode,
         expires_at: u64,
     },
     Approved(DirectRouteId),
