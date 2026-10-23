@@ -816,7 +816,9 @@ impl ControlPresentation {
         if matches!(self.command, Some(ControlCommand::OfferStop) | None) {
             return self;
         }
-        self.prominent = true;
+        // A failed step leads with a warning glyph and stays neutral until the update is overdue.
+        let failed = self.glyph == ControlGlyph::Warning;
+        self.prominent = !(failed && reminder == ControlReminder::Gentle);
         if reminder == ControlReminder::Overdue {
             self.glyph = ControlGlyph::Warning;
             self.status = Some(match self.status {
@@ -1159,7 +1161,7 @@ mod tests {
         servers: &[ServerUpdateRow],
     ) -> Option<(String, PillTone, Option<ControlGlyph>, PillCommand)> {
         let client = client
-            .and_then(|state| resolve(state))
+            .and_then(resolve)
             .map(|presentation| presentation.remind(reminder));
         UpdatePill::resolve(client, servers).map(|pill| {
             (
@@ -1239,6 +1241,16 @@ mod tests {
                     error: UpdateError::Download,
                 },
                 None,
+                "Retry 0.4.2",
+                PillTone::Neutral,
+                ControlGlyph::Warning,
+                Some(ControlCommand::RetryDownload),
+            ), // A gentle reminder raises a waiting step but leaves a failed one neutral.
+            (
+                UpdateState::Failed {
+                    error: UpdateError::Download,
+                },
+                Some(UpdateStage::Warning),
                 "Retry 0.4.2",
                 PillTone::Neutral,
                 ControlGlyph::Warning,
