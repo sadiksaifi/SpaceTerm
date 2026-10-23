@@ -18,6 +18,7 @@ use super::super::direct_routes::{UNPAIR_SELF_CONFIRM_SELECTOR, UNSAVED_CHANGES}
 use super::super::notices::NOTICE_SELECTOR;
 use super::super::server_card::MENU_SELECTOR;
 use super::super::server_list::{LIST_SELECTOR, ServerChoice};
+use super::super::server_selection;
 use super::super::servers::testing::connected;
 use super::super::servers::{LocalServerControl, OfferedServer, ServerConnection};
 use super::{
@@ -31,6 +32,10 @@ use crate::local_server::ServerError;
 use crate::local_server::direct::{ClaimId, NetworkAddresses, NetworkPolicy, PairingClaim};
 use crate::platform::appearance::testing::RecordingAppearancePlatform;
 use crate::platform::window_movement::RecordingOperatingSystemWindowDragPlatform;
+use crate::server_context::{
+    LastKnownFacts, NetworkAccessFacts, NetworkListenerFacts, PairedDeviceFacts,
+    PairedDevicesFacts, ServerKey,
+};
 use crate::settings::SettingsDocument;
 use crate::settings::storage::testing::MemoryStorage;
 use crate::ui::appearance_runtime;
@@ -233,9 +238,50 @@ fn device(id: u8, name: &str, last_connected_at: Option<u64>) -> Device {
     Device {
         pairing: [id; 32],
         name: name.to_owned().into(),
-        fingerprint: format!("FP{id}").into(),
+        fingerprint: fingerprint(id).into(),
         last_connected_at,
     }
+}
+
+/// A device fingerprint in the form the server writes: eight groups of eight hex digits.
+fn fingerprint(id: u8) -> String {
+    vec![format!("{id:02X}").repeat(4); 8].join(" ")
+}
+
+/// What a previous launch retained about a server that let MacBook connect at 192.168.1.20, an
+/// hour ago. It carries no general observation of the server.
+fn retained_on() -> LastKnownFacts {
+    let observed_at = unix_now() - 3600;
+    LastKnownFacts {
+        network_access: Some(NetworkAccessFacts {
+            observed_at,
+            server_name: SERVER.to_owned(),
+            policy: Some(address("192.168.1.20:9231")),
+            listener: NetworkListenerFacts::Listening(address("192.168.1.20:9231")),
+            addresses: None,
+        }),
+        paired_devices: Some(PairedDevicesFacts {
+            observed_at,
+            devices: vec![PairedDeviceFacts {
+                pairing: [3; 32],
+                name: "MacBook".to_owned(),
+                fingerprint: fingerprint(3),
+                last_connected_at: None,
+            }],
+        }),
+        ..LastKnownFacts::default()
+    }
+}
+
+/// Retains `facts` for `key`, as a previous launch's record does once it loads.
+fn retain(key: ServerKey, facts: LastKnownFacts, cx: &mut gpui::App) {
+    server_selection::remember(key, facts, cx);
+}
+
+/// What SpaceTerm retains about this computer's server for the next launch.
+fn retained_here(cx: &mut VisualTestContext) -> LastKnownFacts {
+    cx.update(|_, cx| server_selection::facts(&ServerKey::Local, cx))
+        .unwrap_or_default()
 }
 
 /// Opens Settings on the Servers section, presenting the local server's direct network access.
@@ -615,6 +661,126 @@ fn a_servers_last_known_access_never_shows_for_another_server() {
         shown.observed_at.is_some(),
         "it shows as last known, not live"
     );
+}
+
+#[gpui::test]
+fn a_reading_is_retained_for_the_next_launch(cx: &mut TestAppContext) {
+    let access = ScriptedAccess::listening();
+    access.pair(3, "MacBook", None);
+    let (_, cx) = open_servers(&access, cx);
+
+    let retained = retained_here(cx);
+
+    let network = retained
+        .network_access
+        .expect("the access reading is retained");
+    assert_eq!(network.policy, Some(address("192.168.1.20:9231")));
+    assert_eq!(network.server_name, SERVER);
+    let devices = retained
+        .paired_devices
+        .expect("the device list is retained");
+    assert_eq!(
+        devices
+            .devices
+            .iter()
+            .map(|device| device.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["MacBook"]
+    );
+}
+
+#[gpui::test]
+fn losing_the_server_keeps_what_was_retained_about_it(cx: &mut TestAppContext) {
+    let access = ScriptedAccess::listening();
+    access.pair(3, "MacBook", None);
+    let (_, cx) = open_servers(&access, cx);
+    let before = retained_here(cx);
+
+    access.become_unreachable();
+    reread(cx);
+
+    let after = retained_here(cx);
+    assert_eq!(after.network_access, before.network_access);
+    assert_eq!(after.paired_devices, before.paired_devices);
+}
+
+#[gpui::test]
+fn a_device_list_the_server_couldnt_read_keeps_the_retained_one(cx: &mut TestAppContext) {
+    let access = ScriptedAccess::listening();
+    access.pair(3, "MacBook", None);
+    let (_, cx) = open_servers(&access, cx);
+    let before = retained_here(cx).paired_devices;
+
+    access.unpair("MacBook");
+    *access.devices_failure.lock().expect("devices failure") = Some(AccessFailure::Refused);
+    reread(cx);
+
+    assert_eq!(
+        retained_here(cx).paired_devices,
+        before,
+        "a failed listing is no reading, so it neither empties nor re-dates the devices"
+    );
+}
+
+#[gpui::test]
+fn after_relaunch_a_server_out_of_reach_shows_its_retained_access(cx: &mut TestAppContext) {
+    cx.update(|cx| retain(ServerKey::Local, retained_on(), cx));
+    let access = ScriptedAccess::listening();
+    access.become_unreachable();
+    let (window, cx) = open_servers(&access, cx);
+
+    assert!(access_on(&window, cx));
+    assert!(open(ACCESS_SELECTOR, cx));
+    assert!(reads("Devices: 1 paired", cx));
+    assert!(open(&format!("{DEVICE_SELECTOR}-0"), cx));
+    assert!(reads("Shown values are from", cx));
+    assert!(reads("Last known address: 192.168.1.20:9231.", cx));
+}
+
+#[gpui::test]
+fn retained_access_that_loads_after_settings_opens_replaces_unknown(cx: &mut TestAppContext) {
+    let access = ScriptedAccess::listening();
+    access.become_unreachable();
+    let (window, cx) = open_servers(&access, cx);
+    assert!(reads("Unknown", cx));
+
+    cx.update(|_, cx| retain(ServerKey::Local, retained_on(), cx));
+    reread(cx);
+
+    assert!(access_on(&window, cx));
+    assert!(reads("Shown values are from", cx));
+}
+
+#[gpui::test]
+fn another_servers_retained_access_never_shows_for_this_one(cx: &mut TestAppContext) {
+    let penguin = ServerKey::Ssh("penguin".to_owned());
+    cx.update(|cx| retain(penguin.clone(), retained_on(), cx));
+    let access = ScriptedAccess::listening();
+    access.become_unreachable();
+    let (window, cx) = open_servers(&access, cx);
+
+    assert!(
+        cx.update(|_, cx| server_selection::facts(&penguin, cx))
+            .is_some(),
+        "penguin's record is still there to leak"
+    );
+    assert!(!access_on(&window, cx));
+    assert!(reads("Unknown", cx));
+    assert!(!reads("Shown values are from", cx));
+}
+
+#[gpui::test]
+fn a_retained_empty_device_list_reads_as_none(cx: &mut TestAppContext) {
+    let mut facts = retained_on();
+    if let Some(devices) = facts.paired_devices.as_mut() {
+        devices.devices.clear();
+    }
+    cx.update(|cx| retain(ServerKey::Local, facts, cx));
+    let access = ScriptedAccess::listening();
+    access.become_unreachable();
+    let (_, cx) = open_servers(&access, cx);
+
+    assert!(reads("Devices: None", cx));
 }
 
 #[gpui::test]
