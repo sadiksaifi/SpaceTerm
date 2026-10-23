@@ -2723,7 +2723,7 @@ impl TabManager {
                 .and_then(|shared| shared.local_tab(tab.id))
             {
                 Some(tab_id) => tab_id,
-                None => match self.create_shared_tab(tab, window, cx) {
+                None => match self.create_shared_tab(&workspace.tabs, tab, window, cx) {
                     Some(tab_id) => {
                         changed = true;
                         tab_id
@@ -2870,8 +2870,12 @@ impl TabManager {
     /// Presents one server Tab this client has not seen before. It appends to the strip and keeps
     /// the Tab a person is working in active, because another client's creation is membership and
     /// not a view change here.
+    ///
+    /// The Tab joins the Worktree of a presented Tab the server places in the same Worktree, so
+    /// it appears in that Worktree's strip before the server's Git facts name the Worktree.
     fn create_shared_tab(
         &mut self,
+        workspace_tabs: &[spaceterm_server::hierarchy::Tab],
         tab: &spaceterm_server::hierarchy::Tab,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -2883,7 +2887,8 @@ impl TabManager {
         let (session_factory, state) = sessions.open(tab.root_pane)?;
         let pane_construction = sessions.panes().clone();
         let active_tab_id = self.tabs.active_tab_id();
-        let created = self.tabs.create_tab_in(None, |tab_id| {
+        let scope = self.presented_worktree(workspace_tabs, tab);
+        let created = self.tabs.create_tab_in(scope, |tab_id| {
             Self::create_tab_view(tab_id, session_factory, pane_construction, window, cx)
         });
         let tab_id = match created {
@@ -2908,6 +2913,30 @@ impl TabManager {
         self.shared.as_mut()?.register(tab_id, tab.id);
         self.sync_terminal_focus_blocker(cx);
         Some(tab_id)
+    }
+
+    /// The Worktree this strip presents for Tabs the server places with `tab`, read from the
+    /// presented Tabs among `workspace_tabs` that share its Worktree.
+    fn presented_worktree(
+        &self,
+        workspace_tabs: &[spaceterm_server::hierarchy::Tab],
+        tab: &spaceterm_server::hierarchy::Tab,
+    ) -> Option<WorktreeId> {
+        let shared = self.shared.as_ref()?;
+        tab.worktree.as_ref()?;
+        workspace_tabs
+            .iter()
+            .filter(|other| {
+                other.id != tab.id
+                    && other.worktree == tab.worktree
+                    && other.worktree_repository == tab.worktree_repository
+            })
+            .find_map(|other| {
+                self.tabs
+                    .scope_of(shared.local_tab(other.id)?)
+                    .ok()
+                    .flatten()
+            })
     }
 
     /// Asks the server for another Tab in this shared Workspace.
@@ -2980,9 +3009,12 @@ impl TabManager {
     /// Tags each shared Tab with the Worktree the server says it belongs to. The server owns
     /// membership, so this client only mirrors it; the Tab strip and the Tab Commands then act on
     /// the Active Worktree's Tabs, as they do in a local Workspace.
+    ///
+    /// `scope` answers `None` for a Tab the server has not published yet. Such a Tab keeps the
+    /// Worktree it was presented in, so a pending new Tab never leaves its Worktree's strip.
     pub(crate) fn apply_shared_worktrees(
         &mut self,
-        scope: &dyn Fn(spaceterm_server::hierarchy::Id) -> Option<(WorktreeId, std::path::PathBuf)>,
+        scope: &dyn Fn(spaceterm_server::hierarchy::Id) -> Option<Option<WorktreeId>>,
         cx: &mut Context<Self>,
     ) {
         let Some(shared) = self.shared.as_ref() else {
@@ -2991,9 +3023,7 @@ impl TabManager {
         let scopes: Vec<_> = self
             .tabs
             .iter()
-            .filter_map(|(tab_id, _)| {
-                Some((tab_id, scope(shared.server_tab(tab_id)?).map(|(id, _)| id)))
-            })
+            .filter_map(|(tab_id, _)| Some((tab_id, scope(shared.server_tab(tab_id)?)?)))
             .collect();
         // Only the scope changes. A shared Tab's launch policy never takes the server's root,
         // which names no directory this client may validate or start in.
