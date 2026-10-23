@@ -26,7 +26,7 @@ use crate::ssh::server_connection::{
     ConnectPhase, IncompatibilityKind, RemoteConnectionStatus, ServerAvailability,
 };
 use crate::ssh::server_maintenance::SubmittedKind;
-use crate::ssh::server_operations::RemoteOperationState;
+use crate::ssh::server_operations::{RemoteOperationState, RemoteUpdateOffer};
 use crate::ui::appearance::{ChromeAppearance, gpui_color};
 use crate::ui::chrome_icons::IconRole;
 use crate::ui::chrome_typography::{ChromeTextStyleExt as _, TextRole};
@@ -1309,9 +1309,12 @@ impl SettingsWindow {
                 Some("Needs update".into()),
                 "SpaceTerm can\u{2019}t use this server until it\u{2019}s updated.",
             )
-        } else if offered(RemoteAction::Update) {
+        } else if offered(RemoteAction::Update)
+            && let RemoteUpdateOffer::Available(candidate) = self.ssh_update_offer(destination)
+        {
+            // The verified candidate's own version, which can differ from SpaceTerm's.
             (
-                Some(format!("{} available", env!("SPACETERM_VERSION")).into()),
+                Some(format!("{} available", candidate.version).into()),
                 "Updating ends its Terminal Sessions for every client.",
             )
         } else if presentation.state == Some("Up to Date") {

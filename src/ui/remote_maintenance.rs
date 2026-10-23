@@ -653,26 +653,64 @@ fn read_update(
     update_offer(machine, facts.status, facts.approved.as_ref(), offer)
 }
 
-/// The Update Server offer for one observed service state.
+/// The Update Server offer for one observed service state. Only a verified candidate that differs
+/// from the approved build is an update; SpaceTerm claims none it hasn't verified.
 fn update_offer(
     machine: &str,
     status: ServiceStatus,
     approved: Option<&RemoteBuild>,
-    _offer: &RemoteUpdateOffer,
+    offer: &RemoteUpdateOffer,
 ) -> MaintenancePresentation {
-    if !status.installed {
-        let (explanation, tone) = guidance(format!(
-            "{machine} has no SpaceTerm server for this account, so there is nothing to update."
-        ));
-        return MaintenancePresentation {
-            state: None,
-            state_selector: selector(MaintenanceRow::Update, "available"),
+    let quiet = |state: Option<&'static str>, name: &str, explanation: String| {
+        let (explanation, tone) = guidance(explanation);
+        MaintenancePresentation {
+            state,
+            state_selector: selector(MaintenanceRow::Update, name),
             explanation,
             tone,
             actions: Vec::new(),
             working: false,
-        };
+        }
+    };
+    if !status.installed {
+        return quiet(
+            None,
+            "available",
+            format!(
+                "{machine} has no SpaceTerm server for this account, so there is nothing to \
+                 update."
+            ),
+        );
     }
+    let candidate = match offer {
+        RemoteUpdateOffer::Available(candidate) => candidate,
+        RemoteUpdateOffer::UpToDate => {
+            return quiet(
+                Some("Up to Date"),
+                "current",
+                format!("{machine} runs the server version SpaceTerm includes."),
+            );
+        }
+        RemoteUpdateOffer::Unavailable => {
+            return quiet(
+                None,
+                "unavailable",
+                format!(
+                    "This SpaceTerm has no verified server version for {machine}, so it offers \
+                     no update."
+                ),
+            );
+        }
+        RemoteUpdateOffer::Unchecked => {
+            return quiet(
+                None,
+                "unchecked",
+                format!(
+                    "Choose Check Now to see whether SpaceTerm has a newer server for {machine}."
+                ),
+            );
+        }
+    };
     let approved = approved
         .map(|approved| format!("Version {} is approved on {machine}. ", build(approved)))
         .unwrap_or_default();
@@ -687,8 +725,9 @@ fn update_offer(
         "The server isn\u{2019}t running, so updating ends no Terminal Sessions.".to_owned()
     };
     let (explanation, tone) = guidance(format!(
-        "{approved}Update Server transfers the exact verified server version SpaceTerm includes, \
-         then asks before it replaces the approved one. {effect}"
+        "{approved}Update Server transfers the verified server version {} that SpaceTerm \
+         includes, then asks before it replaces the approved one. {effect}",
+        candidate.version
     ));
     MaintenancePresentation {
         state: None,
@@ -743,6 +782,7 @@ pub(crate) fn observed(
                 working: false,
             }
         }
+        // A connection verifies no candidate, so only a read can find an update.
         MaintenanceRow::Update => {
             update_offer(machine, status, None, &RemoteUpdateOffer::Unchecked)
         }
