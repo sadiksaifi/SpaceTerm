@@ -795,7 +795,12 @@ impl Render for InviteDevice {
                     .text_color(gpui_color(colors.input_text))
                     .truncate()
                     .child(SharedString::from(invitation.text.to_string()));
+                // The sheet's width bounds the column and its link row. A centered column
+                // otherwise takes its content's width, and the link has no place to break, so it
+                // would push Copy out of the sheet.
                 div()
+                    .w_full()
+                    .min_w_0()
                     .flex()
                     .flex_col()
                     .items_center()
@@ -804,12 +809,14 @@ impl Render for InviteDevice {
                     .child(
                         div()
                             .w_full()
+                            .min_w_0()
                             .flex()
                             .flex_row()
                             .items_center()
                             .gap(appearance.spacing(8.0))
                             .child(link)
-                            .child(copy),
+                            // Copy keeps its own width; the link gives up what the row lacks.
+                            .child(div().flex_none().child(copy)),
                     )
                     .child(
                         div()
