@@ -266,8 +266,6 @@ pub(crate) enum SshServerAction {
     Disconnect,
     /// Signs in and reads the server's state once, without connecting, starting, or installing.
     CheckStatus,
-    /// Forgets the saved connection. The server, its Terminal Sessions and SSH access stay.
-    Remove,
     /// Ends the intent to reconnect that a failed Connect left, keeping the connection saved.
     StopReconnecting,
 }
@@ -280,7 +278,6 @@ impl SshServerAction {
             Self::Cancel => "Cancel",
             Self::Disconnect => "Disconnect",
             Self::CheckStatus => "Check Status",
-            Self::Remove => "Remove",
             Self::StopReconnecting => "Don\u{2019}t Reconnect",
         }
     }
@@ -292,7 +289,6 @@ impl SshServerAction {
             Self::Cancel => "settings-ssh-server-cancel",
             Self::Disconnect => "settings-ssh-server-disconnect",
             Self::CheckStatus => "settings-ssh-server-check",
-            Self::Remove => "settings-ssh-server-remove",
             Self::StopReconnecting => "settings-ssh-server-stop-reconnecting",
         }
     }

@@ -81,12 +81,6 @@ impl SettingsWindow {
                 connections.disconnect(&destination)
             }
             SshServerAction::CheckStatus => connections.check(&destination),
-            SshServerAction::Remove => {
-                connections.remove(&destination);
-                // The selection gives way to this computer's server once the connection is gone.
-                self.reconcile_servers(cx);
-                self.sync_server_location(cx);
-            }
             SshServerAction::Install => self.confirm_ssh_installation(destination, window, cx),
         }
         cx.notify();

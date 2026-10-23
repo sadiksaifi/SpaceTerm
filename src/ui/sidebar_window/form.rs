@@ -262,7 +262,6 @@ pub(crate) struct FormRow {
     message: Option<(SharedString, CaptionTone)>,
     /// The row can't be used now. Its group's footnote says why.
     dimmed: bool,
-    separate_example: bool,
     tone: CaptionTone,
     control: AnyElement,
     reset: Option<AnyElement>,
@@ -283,7 +282,6 @@ impl FormRow {
             description: None,
             message: None,
             dimmed: false,
-            separate_example: false,
             tone: CaptionTone::Guidance,
             control: control.into_any_element(),
             reset: None,
@@ -303,17 +301,6 @@ impl FormRow {
     pub(crate) fn caption(mut self, message: impl Into<SharedString>, tone: CaptionTone) -> Self {
         self.description = Some(message.into());
         self.tone = tone;
-        self
-    }
-
-    /// Keeps a path example on its own line while retaining the plain caption for accessibility.
-    pub(crate) fn caption_with_example(
-        mut self,
-        message: impl Into<SharedString>,
-        tone: CaptionTone,
-    ) -> Self {
-        self = self.caption(message, tone);
-        self.separate_example = true;
         self
     }
 
@@ -403,48 +390,10 @@ impl FormRow {
         // One rule for the whole form: the label starts at the content's left edge, the control
         // ends at its right edge, and nothing is centered.
         let caption = |description: SharedString| {
-            let example = self
-                .separate_example
-                .then(|| description.split_once(" For example: "))
-                .flatten();
-            let content = match example {
-                Some((guidance, path)) => div()
-                    .id(SharedString::from(description_selector.clone()))
-                    .role(accesskit::Role::Label)
-                    .aria_value(description.clone())
-                    .child(
-                        div()
-                            .id(SharedString::from(format!("{selector}-guidance")))
-                            .role(accesskit::Role::Group)
-                            .aria_hidden(true)
-                            .child(guidance.to_owned()),
-                    )
-                    .child(
-                        Tooltip::new(
-                            SharedString::from(format!("{selector}-example-tooltip")),
-                            "For example",
-                        )
-                        .detail(path.to_owned())
-                        .attach(
-                            div()
-                                .id(SharedString::from(format!("{selector}-example")))
-                                .role(accesskit::Role::Group)
-                                .aria_hidden(true)
-                                .whitespace_nowrap()
-                                .child(spaceterm_ui::MiddleTruncatedText::new(
-                                    format!("For example: {path}"),
-                                    55,
-                                )),
-                            spaceterm_ui::TooltipTargetVisibility::Visible,
-                        ),
-                    )
-                    .into_any_element(),
-                None => Text::new(
-                    SharedString::from(description_selector.clone()).into(),
-                    description,
-                )
-                .into_any_element(),
-            };
+            let content = Text::new(
+                SharedString::from(description_selector.clone()).into(),
+                description,
+            );
             div()
                 .debug_selector({
                     let description_selector = description_selector.clone();

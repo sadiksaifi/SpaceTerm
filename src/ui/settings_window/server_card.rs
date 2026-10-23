@@ -1096,6 +1096,16 @@ impl VersionStep {
         }
     }
 
+    /// The element the step occupies. Steps that replace one another share a slot, so keyboard
+    /// focus stays on it when, say, Update Server gives way to Finish Update.
+    const fn slot(self) -> &'static str {
+        match self {
+            Self::Local(action) => action.slot(),
+            Self::Remote(action) => action.slot(),
+            Self::Observe => VERSION_CHECK_SELECTOR,
+        }
+    }
+
     /// The step that changes the server leads, as the primary button.
     const fn primary(self) -> bool {
         matches!(
@@ -1557,15 +1567,9 @@ impl SettingsWindow {
                     _ => None,
                 };
                 let description = single_build.unwrap_or_else(|| {
-                    status_step_consequence(&step).map_or_else(
-                        || {
-                            SharedString::from(format!(
-                                "{} {name}",
-                                label.trim_end_matches('\u{2026}')
-                            ))
-                        },
-                        SharedString::new_static,
-                    )
+                    status_step_consequence(&step, &name).unwrap_or_else(|| {
+                        SharedString::from(format!("{} {name}", label.trim_end_matches('\u{2026}')))
+                    })
                 });
                 Button::new(ElementId::from(SharedString::from(slot)), label)
                     .variant(if primary {
@@ -1670,28 +1674,25 @@ impl SettingsWindow {
                      nothing."
                 ))),
             };
-            Button::new(
-                ElementId::from(SharedString::from(selector.clone())),
-                step.label(),
-            )
-            .variant(if step.primary() {
-                ButtonVariant::Primary
-            } else {
-                ButtonVariant::Outline
-            })
-            .size(ButtonSize::Regular)
-            .tab_stop(true)
-            // One step runs at a time. The steps act through this account's service or an SSH
-            // account's route, so they need no connection to the server.
-            .disabled(busy)
-            .when_some(description, |button, description| {
-                button.accessibility_description(description)
-            })
-            .debug_selector(selector)
-            .on_activate(move |_, _, cx| {
-                let _ = owner.update(cx, |settings, cx| settings.take_version_step(step, cx));
-            })
-            .into_any_element()
+            Button::new(ElementId::from(step.slot()), step.label())
+                .variant(if step.primary() {
+                    ButtonVariant::Primary
+                } else {
+                    ButtonVariant::Outline
+                })
+                .size(ButtonSize::Regular)
+                .tab_stop(true)
+                // One step runs at a time. The steps act through this account's service or an SSH
+                // account's route, so they need no connection to the server.
+                .disabled(busy)
+                .when_some(description, |button, description| {
+                    button.accessibility_description(description)
+                })
+                .debug_selector(selector)
+                .on_activate(move |_, _, cx| {
+                    let _ = owner.update(cx, |settings, cx| settings.take_version_step(step, cx));
+                })
+                .into_any_element()
         });
         div()
             .debug_selector(|| VERSION_SELECTOR.to_owned())
@@ -1877,14 +1878,16 @@ fn status_step_selector(step: &StatusStep) -> &'static str {
 fn status_step_slot(step: &StatusStep) -> Option<&'static str> {
     match step {
         StatusStep::Local(action) => Some(action.slot()),
+        StatusStep::Maintenance(action) => Some(action.slot()),
         _ => None,
     }
 }
 
 /// What a Status step does beyond its name, for assistive technology.
-fn status_step_consequence(step: &StatusStep) -> Option<&'static str> {
+fn status_step_consequence(step: &StatusStep, machine: &str) -> Option<SharedString> {
     match step {
-        StatusStep::Local(action) => action.consequence(),
+        StatusStep::Local(action) => action.consequence().map(SharedString::new_static),
+        StatusStep::Maintenance(action) => Some(action.consequence(machine)),
         _ => None,
     }
 }
