@@ -304,12 +304,6 @@ impl FormRow {
         self
     }
 
-    /// Shows a validation error directly under the control, right-aligned in the destructive
-    /// color. The description under the label stays.
-    pub(crate) fn error(self, error: Option<SharedString>) -> Self {
-        self.message(error.map(|error| (error, CaptionTone::Error)))
-    }
-
     /// Shows what the control reports directly under it, right-aligned, in the color `tone`
     /// selects. An error is announced as an alert.
     pub(crate) fn message(mut self, message: Option<(SharedString, CaptionTone)>) -> Self {
