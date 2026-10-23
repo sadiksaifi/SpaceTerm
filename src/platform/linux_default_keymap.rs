@@ -255,7 +255,6 @@ pub(super) fn profile(
             Some(DefaultBinding::new("ctrl-?", &[])),
         ),
         // GNOME offers About from an app menu and binds no key to it.
-        (Command::AddServer, None),
         (Command::About, None),
     ];
     KeymapProfile::new(

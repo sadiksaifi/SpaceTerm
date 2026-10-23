@@ -238,7 +238,6 @@ pub(crate) fn profile(
             Some(DefaultBinding::new("cmd-shift-e", &[])),
         ),
         (Command::KeyboardShortcuts, None),
-        (Command::AddServer, None),
         (Command::About, None),
     ];
     KeymapProfile::new(

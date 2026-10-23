@@ -135,7 +135,6 @@ commands! {
     ToggleSidebar => ("toggle_sidebar", "Toggle Sidebar", View, Workspace, crate::ui::ToggleSidebar),
     ToggleSidebarFocus => ("toggle_sidebar_focus", "Toggle Sidebar Focus", View, Workspace, crate::ui::ToggleSidebarFocus),
     KeyboardShortcuts => ("keyboard_shortcuts", "Keyboard Shortcuts", View, Application, crate::ui::settings_window::OpenKeyboardShortcuts),
-    AddServer => ("add_server", "Add Server…", View, Application, crate::ui::settings_window::AddServer),
     About => ("about", "About SpaceTerm", Help, Application, crate::app::ShowAboutApplication),
 }
 

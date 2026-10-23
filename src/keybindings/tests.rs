@@ -81,7 +81,7 @@ fn command_ids_round_trip_and_groups_are_contiguous_in_settings_order() {
             previous_group = command.group();
         }
     }
-    assert_eq!(Command::ALL.len(), 60);
+    assert_eq!(Command::ALL.len(), 59);
     assert_eq!(Command::NewWorkspace.id(), "new_workspace");
     assert_eq!(Command::CloseTab.id(), "close_tab");
     assert_eq!(Command::from_id("NewWorkspace"), None);
@@ -119,7 +119,6 @@ fn command_scopes_match_their_dispatch_contexts() {
         Command::ClosePane,
         Command::CloseTab,
         Command::KeyboardShortcuts,
-        Command::AddServer,
         Command::About,
     ];
     for command in Command::ALL {
