@@ -422,6 +422,8 @@ pub struct TerminalMetadataSnapshot {
     pub revision: u64,
     pub context: TerminalMetadataContext,
     pub freshness: MetadataFreshness,
+    /// The executable basename selected by this Terminal Session's host.
+    pub shell_name: Arc<str>,
     pub title: TitleMetadata,
     pub directory: DirectoryMetadata,
     /// The Repository Source Directory: the reported directory as of the last prompt. Reports
@@ -444,6 +446,7 @@ impl TerminalMetadataSnapshot {
     /// whether those facts are still live.
     pub fn presentation_differs(&self, other: &Self) -> bool {
         self.freshness != other.freshness
+            || self.shell_name != other.shell_name
             || self.directory != other.directory
             || self.title != other.title
             || self.command != other.command
@@ -503,6 +506,7 @@ impl MetadataTracker {
                 revision: 0,
                 context,
                 freshness: MetadataFreshness::Live,
+                shell_name: Arc::from(sanitize_title(fallback_title)),
                 title: TitleMetadata {
                     value: Arc::from(sanitize_title(fallback_title)),
                     provenance: TitleProvenance::Fallback,

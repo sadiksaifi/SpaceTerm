@@ -11,6 +11,7 @@ pub const MAX_MACHINE_CHARS: usize = 256;
 #[serde(deny_unknown_fields)]
 pub struct Snapshot {
     pub revision: u64,
+    pub shell_name: String,
     pub title: String,
     pub title_provenance: TitleProvenance,
     pub directory: String,
@@ -95,6 +96,7 @@ impl Snapshot {
         let optional =
             |value: &Option<String>, limit| value.as_deref().is_none_or(|s| valid(s, limit));
         if !valid(&self.title, MAX_TITLE_CHARS)
+            || !valid(&self.shell_name, MAX_TITLE_CHARS)
             || !valid(&self.directory, MAX_DIRECTORY_CHARS)
             || !optional(&self.user, MAX_MACHINE_CHARS)
             || !optional(&self.host, MAX_MACHINE_CHARS)

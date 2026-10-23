@@ -1663,6 +1663,7 @@ fn running(
     };
     Snapshot {
         revision,
+        shell_name: "sh".to_owned(),
         title: "Terminal".to_owned(),
         title_provenance: TitleProvenance::Fallback,
         directory: directory.to_owned(),
