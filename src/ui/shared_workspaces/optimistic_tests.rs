@@ -1145,6 +1145,119 @@ fn readiness_hidden_split_uses_current_window_geometry_without_resize_on_first_v
     );
 }
 
+/// Accepts a new hidden Tab with three side-by-side Panes whose restored layout is wider than
+/// the stage once the window narrows, optionally zooming its Focused Pane first.
+fn accept_hidden_layout_wider_than_the_stage(
+    harness: &WindowHarness,
+    zoomed: bool,
+    cx: &mut VisualTestContext,
+) {
+    cx.simulate_resize(gpui::size(gpui::px(1600.0), gpui::px(900.0)));
+    cx.run_until_parked();
+    click("create-tab-button", cx);
+    for _ in 0..2 {
+        cx.dispatch_action(crate::ui::SplitRight);
+        cx.run_until_parked();
+    }
+    if zoomed {
+        cx.dispatch_action(crate::ui::TogglePaneZoom);
+        cx.run_until_parked();
+    }
+    cx.dispatch_action(crate::ui::PreviousTab);
+    cx.simulate_resize(gpui::size(gpui::px(460.0), gpui::px(600.0)));
+    cx.run_until_parked();
+    for _ in 0..3 {
+        harness.server.finish(true, true);
+        project_window(harness, cx);
+        for pane in harness.panes.opened() {
+            pane.reconnect();
+        }
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(16));
+        cx.run_until_parked();
+    }
+    assert_eq!(harness.server.inventory().workspaces[0].tabs[1].panes.len(), 3);
+}
+
+fn resizes(harness: &WindowHarness) -> usize {
+    use crate::terminal::testing::RecordedCommand;
+    harness
+        .records
+        .commands()
+        .iter()
+        .filter(|call| matches!(call.command, RecordedCommand::Resize(_)))
+        .count()
+}
+
+#[gpui::test]
+fn readiness_starts_visible_panes_of_a_restored_layout_wider_than_the_stage(
+    cx: &mut TestAppContext,
+) {
+    let (harness, cx) = window_harness(cx);
+    accept_hidden_layout_wider_than_the_stage(&harness, false, cx);
+    assert_eq!(
+        harness.records.starts().len(),
+        1,
+        "a hidden layout the stage cannot hold has no validated geometry to start from"
+    );
+    cx.dispatch_action(crate::ui::NextTab);
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(16));
+    cx.run_until_parked();
+    assert_eq!(
+        harness.records.starts().len(),
+        4,
+        "every Pane the first visit draws starts from its rendered allocation"
+    );
+    let resizes_before = resizes(&harness);
+    cx.update(|window, _| window.refresh());
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(16));
+    cx.run_until_parked();
+    assert_eq!(
+        resizes(&harness),
+        resizes_before,
+        "the started grid already matches the drawn allocation"
+    );
+}
+
+#[gpui::test]
+fn readiness_starts_a_zoomed_pane_that_fits_although_its_restored_layout_does_not(
+    cx: &mut TestAppContext,
+) {
+    let (harness, cx) = window_harness(cx);
+    accept_hidden_layout_wider_than_the_stage(&harness, true, cx);
+    assert_eq!(
+        harness.records.starts().len(),
+        2,
+        "the hidden Zoomed Pane fills the stage, so the stage validates its geometry"
+    );
+    let resizes_before = resizes(&harness);
+    cx.dispatch_action(crate::ui::NextTab);
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(16));
+    cx.run_until_parked();
+    assert_eq!(
+        harness.records.starts().len(),
+        2,
+        "Panes beneath the Zoomed Pane are not drawn and their restored layout does not fit"
+    );
+    assert_eq!(
+        resizes(&harness),
+        resizes_before,
+        "the first visit draws the Zoomed Pane at the grid it started with"
+    );
+    cx.dispatch_action(crate::ui::TogglePaneZoom);
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(16));
+    cx.run_until_parked();
+    assert_eq!(
+        harness.records.starts().len(),
+        4,
+        "restoring the layout starts every drawn Pane from its rendered allocation"
+    );
+}
+
 #[gpui::test]
 fn optimistic_close_hides_before_a_doomed_pane_status_and_restores_the_same_view_on_refusal(
     cx: &mut TestAppContext,

@@ -1484,8 +1484,10 @@ impl TabView {
         }
     }
 
-    /// The current window allocation, with this client's own layout and the visible caption and
-    /// gap rules. A hidden Tab's last measurement never authorizes startup.
+    /// The allocation a hidden Pane would be drawn at on the current stage, with this client's own
+    /// layout and the visible caption and gap rules. A hidden Tab's last measurement never
+    /// authorizes startup, and a layout the stage cannot hold has no allocation until it is
+    /// drawn. A drawn Pane starts from its rendered allocation instead.
     pub(crate) fn readiness_allocation(
         &self,
         pane_id: PaneId,
@@ -1500,7 +1502,12 @@ impl TabView {
             return None;
         }
         let appearance = super::appearance::chrome(cx);
-        let minimum = self.tab.minimum_size(pane_gap(cx)).ok()?;
+        // Match the minimum render applies: a Zoomed Pane fills the stage alone, while the Panes
+        // beneath it return to their restored layout when it unzooms.
+        let minimum = match self.tab.zoom_state() {
+            ZoomState::Zoomed(zoomed) if zoomed == pane_id => self.tab.minimum_pane_size(),
+            _ => self.tab.minimum_size(pane_gap(cx)).ok()?,
+        };
         if f32::from(size.width) < minimum.width() || f32::from(size.height) < minimum.height() {
             return None;
         }
@@ -1527,18 +1534,10 @@ impl TabView {
     }
 
     pub(crate) fn readiness_starting(&self, pane_id: PaneId) -> bool {
-        use crate::terminal::server_session::DevelopmentPaneStatus;
         self.shared
             .as_ref()
             .and_then(|shared| shared.view(pane_id))
-            .is_some_and(|view| {
-                matches!(
-                    view.connection().status(),
-                    DevelopmentPaneStatus::Connecting
-                        | DevelopmentPaneStatus::TakingOver
-                        | DevelopmentPaneStatus::Reconnecting
-                )
-            })
+            .is_some_and(|view| view.connection().startup_pending())
     }
 
     fn sync_terminal_focus(&mut self, cx: &mut Context<Self>) {
@@ -3514,11 +3513,7 @@ impl Render for TabView {
                         return;
                     };
                     let (resized, pending_split) = view
-                        .update(cx, |view, cx| {
-                            if view.active {
-                                super::terminal_readiness::Readiness::for_window(window, cx)
-                                    .measured(bounds.size);
-                            }
+                        .update(cx, |view, _| {
                             let measured = pane_size(*bounds).ok();
                             let resized = view.pane_layout_size != measured && measured.is_some();
                             view.pane_layout_size = measured;

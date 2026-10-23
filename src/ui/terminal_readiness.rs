@@ -274,10 +274,7 @@ impl Readiness {
             let (Some(tab), Some(pane)) = (entry.tab.upgrade(), entry.pane.upgrade()) else {
                 continue;
             };
-            let Some(bounds) = tab.read(cx).readiness_allocation(entry.pane_id, size, cx) else {
-                entry.dirty = false;
-                continue;
-            };
+            let allocation = tab.read(cx).readiness_allocation(entry.pane_id, size, cx);
             let allowed = starting
                 < if entry.visible {
                     START_LIMIT
@@ -286,7 +283,7 @@ impl Readiness {
                 };
             worked = true;
             let (started, done) = pane.update(cx, |pane, cx| {
-                pane.prepare_readiness(bounds, allowed, window, cx)
+                pane.prepare_readiness(allocation, allowed, window, cx)
             });
             if started {
                 entry.starting = tab.read(cx).readiness_starting(entry.pane_id);

@@ -2047,6 +2047,21 @@ impl TerminalPane {
         &self.readiness
     }
 
+    /// Whether readiness may ask this Pane's session for hidden screens to prepare.
+    pub(crate) fn readiness_preparation_eligible(&self) -> bool {
+        self.native_attention_pane.is_some()
+            && !self.terminal_session.session_factory.is_pending()
+            && (self.readiness_requested || self.terminal_session.session.is_some())
+    }
+
+    /// Asks the running session for hidden screens to prepare. Readiness grants it again after a
+    /// new session starts, so a Pane without one keeps nothing.
+    pub(crate) fn set_readiness_preparation(&self, prepare: bool) {
+        if let Some(session) = &self.terminal_session.session {
+            session.set_preparation_demand(prepare);
+        }
+    }
+
     pub(crate) fn readiness_visibility(&self) -> (bool, bool) {
         let visible = self.render_lifecycle.can_present();
         (visible, visible && self.product_focus.focused_pane)
@@ -2054,9 +2069,12 @@ impl TerminalPane {
 
     /// Starts a presentation worker from a current validated allocation, then warms CPU text
     /// only. Output processing belongs to the server and its connection worker, not this queue.
+    ///
+    /// A drawn Pane uses the grid it was last drawn at, which may exceed the stage when its
+    /// restored layout does. A hidden Pane uses the stage `allocation`, and none waits.
     pub(crate) fn prepare_readiness(
         &mut self,
-        bounds: Bounds<Pixels>,
+        allocation: Option<Bounds<Pixels>>,
         may_start: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -2069,11 +2087,18 @@ impl TerminalPane {
         if !self.readiness_requested && self.terminal_session.session.is_none() {
             return (false, true);
         }
+        let drawn = self
+            .grid_bounds
+            .filter(|_| self.render_lifecycle.can_present());
+        let Some(bounds) =
+            drawn.or_else(|| allocation.map(|allocation| TERMINAL_PADDING.grid_bounds(allocation)))
+        else {
+            return (false, true);
+        };
         if super::appearance_runtime::current(cx).generation != self.appearance.generation {
             self.refresh_appearance(window, cx);
         }
         self.update_backing_scale(window.scale_factor(), window, cx);
-        let bounds = TERMINAL_PADDING.grid_bounds(bounds);
         let geometry = terminal_geometry(
             bounds,
             self.cell_width,
