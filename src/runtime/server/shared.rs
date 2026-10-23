@@ -3,7 +3,7 @@ use super::*;
 use spaceterm_server::hierarchy::{
     CloseInventory, ConfirmedControl, ConfirmedPane, Id, Inventory, State,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[cfg(test)]
 #[path = "shared/close_control_tests.rs"]
@@ -20,6 +20,8 @@ pub struct SharedWorkspaceHost {
     repositories: super::repositories::ServerRepositories,
     state: State,
     panes: BTreeMap<Id, DevelopmentPaneHost>,
+    /// Pane identities introduced in this server run, independent of their control grants.
+    fresh_panes: BTreeSet<Id>,
     store: Option<OrganizationStore>,
     uncertain: bool,
     organization_prepared: bool,
@@ -46,6 +48,7 @@ impl SharedWorkspaceHost {
             repositories,
             state,
             panes: BTreeMap::new(),
+            fresh_panes: BTreeSet::new(),
             store: None,
             uncertain: false,
             organization_prepared: false,
@@ -71,6 +74,17 @@ impl SharedWorkspaceHost {
         self.commit(next)
     }
     fn commit(&mut self, mut next: State) -> Result<(), Refusal> {
+        // Keep provenance through an uncertain write and same-run recovery. Uncommitted
+        // identities cannot be selected; recovery prunes those absent from the saved state.
+        self.fresh_panes.extend(
+            next.inventory
+                .workspaces
+                .iter()
+                .flat_map(|w| &w.tabs)
+                .flat_map(|t| &t.panes)
+                .filter(|p| self.state.pane(p.id).is_none())
+                .map(|p| p.id),
+        );
         // Runtime facts authorize an in-memory comparison, never a later recovery read.
         next.inventory.close = None;
         next.inventory.repositories = None;
@@ -84,6 +98,7 @@ impl SharedWorkspaceHost {
             }
         }
         self.state = next;
+        self.fresh_panes.retain(|id| self.state.pane(*id).is_some());
         self.organization_prepared = true;
         Ok(())
     }
@@ -104,6 +119,7 @@ impl SharedWorkspaceHost {
         self.state = record.map_or_else(State::empty, State::from_legacy);
         // Recovery in the same boot preserves creator reservations; a restart clears them.
         self.state.begin_boot(self.prototype.boot);
+        self.fresh_panes.retain(|id| self.state.pane(*id).is_some());
         self.organization_prepared = record.is_some();
     }
     fn synchronize(&mut self) -> Result<(), Refusal> {
@@ -276,6 +292,7 @@ impl SharedWorkspaceHost {
     ) -> Result<Reply, Refusal> {
         size.validate().map_err(|_| Refusal::Unsupported)?;
         let creator = self.state.pane(id).ok_or(Refusal::Missing)?.2.creator;
+        let fresh = self.fresh_panes.contains(&id);
         let host = self.pane_host(id)?;
         if !explicit
             && let Some(dormant) = host.dormant
@@ -307,7 +324,16 @@ impl SharedWorkspaceHost {
         {
             return Ok(host.takeover(pane.lease.into(), pane.device, device));
         }
-        host.select(device, connection, explicit, size, None, style)
+        let mut reply = host.select(device, connection, explicit, size, None, style)?;
+        if let Reply::Restored {
+            fresh: reply_fresh,
+            session_ended,
+            ..
+        } = &mut reply
+        {
+            *reply_fresh = fresh && !*session_ended;
+        }
+        Ok(reply)
     }
     fn repair_directory(
         &mut self,
@@ -863,6 +889,42 @@ mod tests {
     }
 
     #[test]
+    fn same_run_organization_recovery_keeps_a_fresh_pane_waiting_for_first_use() {
+        let mut host = SharedWorkspaceHost::new(host());
+        host.prepare_initial_organization().unwrap();
+        let pane = shared_inventory(&mut host).workspaces[0].tabs[0].root_pane;
+        let record = retained(&host);
+        host.restore_organization(Some(&record));
+        assert!(matches!(
+            host.request(
+                [1; 32],
+                [1; 32],
+                Request::SelectPane {
+                    pane,
+                    explicit: false,
+                    size: size(),
+                    style: None,
+                }
+            ),
+            Reply::Restored {
+                fresh: true,
+                session_ended: false,
+                ..
+            }
+        ));
+        assert!(
+            shared_inventory(&mut host)
+                .close
+                .unwrap()
+                .sessions
+                .iter()
+                .all(|pane| pane.session.is_none()),
+            "passive observation starts no shell"
+        );
+        host.shutdown().unwrap();
+    }
+
+    #[test]
     fn end_all_sessions_clears_runtime_and_preserves_control_without_incidental_restart() {
         use spaceterm_server::hierarchy::{Mutation, Outcome};
         use spaceterm_server::pane::control::Controller;
@@ -901,6 +963,7 @@ mod tests {
         assert!(matches!(
             host.request([1; 32], [3; 32], select(false)),
             Reply::Restored {
+                fresh: false,
                 session_ended: true,
                 ..
             }
@@ -1101,7 +1164,11 @@ mod tests {
         );
         assert!(matches!(
             restored.request([1; 32], [2; 32], claim(false)),
-            Reply::Restored { .. }
+            Reply::Restored {
+                fresh: false,
+                session_ended: false,
+                ..
+            }
         ));
         assert!(
             shared_inventory(&mut restored)

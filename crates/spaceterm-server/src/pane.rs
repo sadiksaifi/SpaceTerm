@@ -424,6 +424,9 @@ pub enum Reply {
         presentation_changes: bool,
     },
     Restored {
+        /// This running server created the Pane; no previous shell ended in a server restart.
+        #[serde(default)]
+        fresh: bool,
         /// End All Sessions cleared this Pane in the current running server.
         #[serde(default)]
         session_ended: bool,

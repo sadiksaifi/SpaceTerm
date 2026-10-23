@@ -331,6 +331,7 @@ fn client_process() {
             // Model the person's action only after ClaimWorker has offered the screen.
             // Acting inside the reply callback runs before that offer and can be ignored.
             match state.status() {
+                DevelopmentPaneStatus::Connecting if losing_start => state.select(),
                 DevelopmentPaneStatus::Restored if losing_start => state.start_restored(),
                 DevelopmentPaneStatus::Takeover => state.take_over(),
                 _ => {}

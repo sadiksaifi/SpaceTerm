@@ -212,6 +212,7 @@ impl DevelopmentPaneHost {
     fn restored(&self) -> Result<Reply, Refusal> {
         let organization = self.organization.as_ref().ok_or(Refusal::Missing)?;
         Ok(Reply::Restored {
+            fresh: false,
             session_ended: self.dormant.is_some(),
             recovery: Some(pane::directories::Target {
                 boot: self.boot,
