@@ -733,6 +733,7 @@ const PREFERENCE_ROWS: &[SettingsRowDescriptor] = &[
         label: "Start automatically",
         keywords: &[
             "start automatically",
+            "start at login",
             "automatic",
             "startup",
             "login",
@@ -1484,6 +1485,9 @@ mod tests {
             ("pull request", SettingsRowId::ShowPullRequests),
             ("gh", SettingsRowId::GitHubCli),
             ("command line tools", SettingsRowId::GitTool),
+            // "login" also means the GitHub CLI's sign in, so it reaches both rows.
+            ("login", SettingsRowId::GitHubCli),
+            ("login", SettingsRowId::ServerAutoStart),
         ] {
             assert!(
                 matching_rows(query).contains(&row),
@@ -1498,7 +1502,7 @@ mod tests {
             ("stop server", SettingsRowId::ServerStatus),
             ("uninstall server", SettingsRowId::ServerStatus),
             ("update server", SettingsRowId::ServerVersion),
-            ("login", SettingsRowId::ServerAutoStart),
+            ("start at login", SettingsRowId::ServerAutoStart),
             ("end all", SettingsRowId::EndAllSessions),
             ("invite device", SettingsRowId::PairedDevices),
             ("other devices", SettingsRowId::NetworkAccess),
