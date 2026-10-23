@@ -35,7 +35,9 @@ impl Global for ApplicationPalettes {}
 
 /// Registers the application-scoped action that opens the palette.
 pub(crate) fn init(cx: &mut App) {
-    cx.on_action(|_: &OpenCommandPalette, cx| open(cx));
+    // A Shortcut delivers the action while its window is updating, and GPUI can't update a window
+    // inside its own update. Opening waits until that update ends.
+    cx.on_action(|_: &OpenCommandPalette, cx| cx.defer(open));
 }
 
 /// The palette `window` presents, for the window to mount above its content.
