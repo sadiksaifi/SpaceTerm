@@ -375,6 +375,19 @@ pub(crate) fn offline_routes(labels: &[&str]) -> (DirectConnections, Vec<DirectR
     (connections, ids)
 }
 
+/// Offline saved routes, in order, each named and reached at the endpoint given, such as two
+/// servers with one name on different addresses.
+pub(crate) fn offline_routes_at(
+    routes: &[(&str, &str)],
+) -> (DirectConnections, Vec<DirectRouteId>) {
+    let routes: Vec<_> = routes
+        .iter()
+        .map(|(label, endpoint)| (*label, Some(*endpoint)))
+        .collect();
+    let (connections, ids, _, _) = offline_fixture_reached(&routes);
+    (connections, ids)
+}
+
 fn offline_fixture(
     label: &str,
 ) -> (
@@ -389,6 +402,19 @@ fn offline_fixture(
 
 fn offline_fixture_routes(
     labels: &[&str],
+) -> (
+    DirectConnections,
+    Vec<DirectRouteId>,
+    CredentialLock,
+    Arc<MemoryRecords>,
+) {
+    let routes: Vec<_> = labels.iter().map(|label| (*label, None)).collect();
+    offline_fixture_reached(&routes)
+}
+
+/// Offline saved routes named as given, each at its own endpoint when one is given.
+fn offline_fixture_reached(
+    routes: &[(&str, Option<&str>)],
 ) -> (
     DirectConnections,
     Vec<DirectRouteId>,
@@ -429,9 +455,12 @@ fn offline_fixture_routes(
     let records = Arc::new(MemoryRecords::default());
     let credentials = Arc::new(Credentials::default());
     let mut ids = Vec::new();
-    for (index, label) in (0_u8..).zip(labels) {
+    for (index, (label, endpoint)) in (0_u8..).zip(routes) {
         let mut route = saved(1 + index, 5 + index);
         route.route.label = (*label).to_owned();
+        if let Some(endpoint) = endpoint {
+            route.route.endpoint = (*endpoint).to_owned();
+        }
         route.active = true;
         ids.push(route.route.id);
         records.0.lock().unwrap().routes.push(route);

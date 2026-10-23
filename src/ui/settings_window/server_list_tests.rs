@@ -188,16 +188,18 @@ pub(in crate::ui::settings_window) fn open_servers<'a>(
     saved: &[&str],
     cx: &'a mut TestAppContext,
 ) -> Servers<'a> {
-    open_servers_saved(local, saved, false, None, cx)
+    open_servers_saved(local, saved, false, None, None, cx)
 }
 
 /// Opens Settings on Servers as [`open_servers`] does, with each `saved` connection set to
-/// reconnect when `active`, and SSH maintenance through `operations` when given.
+/// reconnect when `active`, SSH maintenance through `operations` and paired servers through
+/// `direct` when given.
 fn open_servers_saved<'a>(
     local: bool,
     saved: &[&str],
     active: bool,
     operations: Option<Arc<dyn RemoteServerOperations>>,
+    direct: Option<crate::direct_connections::DirectConnections>,
     cx: &'a mut TestAppContext,
 ) -> Servers<'a> {
     let computers = Arc::new(Computers::default());
@@ -229,6 +231,9 @@ fn open_servers_saved<'a>(
         crate::ui::ssh_servers::install(registry, None, cx);
         if let Some(operations) = operations {
             crate::ssh::server_operations::install(operations, cx);
+        }
+        if let Some(direct) = direct {
+            crate::ui::direct_servers::install(direct, cx);
         }
     });
     let offered: OfferedLocalServer = local.then(|| OfferedServer {
@@ -660,7 +665,7 @@ fn version_reads(version: &str, cx: &mut VisualTestContext) -> bool {
 #[gpui::test]
 fn a_connected_server_shows_the_version_it_reports_over_an_earlier_read(cx: &mut TestAppContext) {
     let operations: Arc<dyn RemoteServerOperations> = Arc::new(HeldRead::approving("1.3.0"));
-    let servers = open_servers_saved(true, &["penguin"], false, Some(operations), cx);
+    let servers = open_servers_saved(true, &["penguin"], false, Some(operations), None, cx);
     select("penguin", servers.cx);
     assert!(
         version_reads("1.3.0", servers.cx),
@@ -679,6 +684,66 @@ fn a_connected_server_shows_the_version_it_reports_over_an_earlier_read(cx: &mut
         "the connected server's own version replaces the earlier read"
     );
     assert!(!version_reads("1.3.0", servers.cx));
+}
+
+/// The picker's rows for servers named `name`, as assistive technology hears them: each row's
+/// description, in order.
+fn picker_rows(name: &str, cx: &mut VisualTestContext) -> Vec<String> {
+    A11yTree::read(cx)
+        .with_role("ListBoxOption")
+        .into_iter()
+        .filter(|row| row["aria"]["label"] == name)
+        .filter_map(|row| row["aria"]["description"].as_str().map(str::to_owned))
+        .collect()
+}
+
+/// Two paired servers can share a name and a status. On Servers and on Git, the picker says
+/// where each one is, so choosing one never means guessing.
+#[gpui::test]
+fn the_picker_tells_apart_servers_that_share_a_name(cx: &mut TestAppContext) {
+    let (direct, routes) = crate::direct_connections::tests::offline_routes_at(&[
+        ("studio", "wss://192.168.1.10:9231"),
+        ("studio", "wss://192.168.1.11:9231"),
+    ]);
+    let servers = open_servers_saved(true, &[], false, None, Some(direct), cx);
+
+    for section in ["servers", "git"] {
+        click(
+            &format!("settings-navigation-settings-section-{section}"),
+            servers.cx,
+        );
+        click(super::PICKER_SELECTOR, servers.cx);
+        let rows = picker_rows("studio", servers.cx);
+        assert_eq!(rows.len(), 2, "both servers are offered on {section}");
+        assert_ne!(rows[0], rows[1], "the two rows read apart on {section}");
+        assert!(
+            rows[0].contains("192.168.1.10:9231") && rows[1].contains("192.168.1.11:9231"),
+            "each row names its own address on {section}, got {rows:?}"
+        );
+        servers.cx.simulate_keystrokes("escape");
+        servers.cx.run_until_parked();
+    }
+
+    // This computer's server lists first, then the two paired servers in order.
+    click(super::PICKER_SELECTOR, servers.cx);
+    click(&format!("{}-2", super::PICKER_SELECTOR), servers.cx);
+    assert_eq!(
+        servers
+            .cx
+            .update(|_, cx| super::super::server_selection::selected(cx)),
+        ServerChoice::Direct(routes[1]).key(),
+        "choosing the second row selects the server at its address"
+    );
+    let tree = A11yTree::read(servers.cx);
+    let picker = tree.node(super::PICKER_NAME);
+    assert_eq!(picker["aria"]["value"], "studio");
+    assert!(
+        picker["aria"]["description"]
+            .as_str()
+            .is_some_and(|description| description.contains("192.168.1.11:9231")),
+        "the closed picker says which studio it shows, got {:?}",
+        picker["aria"]["description"]
+    );
 }
 
 struct RecordingMovement;
@@ -983,7 +1048,7 @@ fn a_failed_connection_offers_to_stop_reconnecting_and_stays_saved(cx: &mut Test
 /// A saved connection that reopens waiting for the person waits for Connect.
 #[gpui::test]
 fn a_reopened_connection_waits_for_connect(cx: &mut TestAppContext) {
-    let servers = open_servers_saved(true, &["penguin"], true, None, cx);
+    let servers = open_servers_saved(true, &["penguin"], true, None, None, cx);
     let connections = servers.connections.clone();
     settle(servers.cx, |_| {
         matches!(
