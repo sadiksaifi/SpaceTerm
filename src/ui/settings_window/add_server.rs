@@ -288,6 +288,9 @@ pub(super) struct AddServerSheet {
     stage: Stage,
     /// The connection attempt this sheet started, which only this sheet's Cancel ends.
     intent: Option<SshFlowConnectionIntent>,
+    /// The host this sheet's attempt saved for the first time. Ending the attempt before it
+    /// connects forgets it again, so a cancelled Add Server adds nothing.
+    added: Option<SshDestination>,
     prompts: Entity<SshPromptActivity>,
     /// The shape on screen, if any.
     shown: Option<Shape>,
@@ -424,6 +427,7 @@ impl AddServerSheet {
             preview: None,
             stage: Stage::Form,
             intent: None,
+            added: None,
             prompts,
             shown: None,
             presentation: None,
@@ -905,16 +909,30 @@ impl AddServerSheet {
             RemoteConnectionStatus::Connected { .. }
         ) {
             self.end_attempt();
+            let saved = ssh
+                .connections()
+                .iter()
+                .any(|(listed, _)| *listed == destination);
             self.intent = ssh.connect_for_flow(destination.clone());
+            self.added = (self.intent.is_some() && !saved).then(|| destination.clone());
         }
         self.stage = Stage::Connecting(destination);
         self.observe(window, cx);
     }
 
-    /// Ends the connection attempt this sheet started. An attempt another consumer shares stays.
+    /// Ends the connection attempt this sheet started. An attempt another consumer shares stays,
+    /// and so does the host it saved.
     fn end_attempt(&mut self) {
-        if let (Some(ssh), Some(intent)) = (&self.ssh, self.intent.take()) {
+        let Some(ssh) = &self.ssh else {
+            return;
+        };
+        if let Some(intent) = self.intent.take() {
             ssh.cancel_flow_connection(intent);
+        }
+        if let Some(added) = self.added.take()
+            && !ssh.intends(&added)
+        {
+            ssh.remove(&added);
         }
     }
 
@@ -1109,6 +1127,7 @@ impl AddServerSheet {
     fn succeed(&mut self, server: ServerChoice, window: &mut Window, cx: &mut Context<Self>) {
         // The connection now belongs to the saved server, not to this sheet.
         self.intent = None;
+        self.added = None;
         self.stage = Stage::Done;
         self.closed = true;
         let _ = self

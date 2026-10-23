@@ -27,10 +27,13 @@ use crate::ssh::server_connection::{
 use crate::ui::appearance_runtime;
 
 /// The SSH computers the test reaches, counting every connection that would leave this computer.
+/// A host named `offline` never answers.
 #[derive(Default)]
 struct Computers {
     connects: AtomicUsize,
 }
+
+const OFFLINE: &str = "offline";
 
 struct Lease;
 impl SshServerLease for Lease {
@@ -50,13 +53,18 @@ fn facts() -> SshServerFacts {
 impl SshConnectBackend for Computers {
     fn connect(
         &self,
-        _: &SshDestination,
+        destination: &SshDestination,
         _: ConnectMode,
         _: Option<&SshServerContinuity>,
         _: &SshCancellationToken,
         _: &ConnectProgress<'_>,
     ) -> Result<ConnectedSshServer, SshConnectFailure> {
         self.connects.fetch_add(1, Ordering::SeqCst);
+        if destination.as_str() == OFFLINE {
+            return Err(SshConnectFailure::Unavailable(
+                crate::ssh::server_connection::UnavailableKind::HostUnreachable,
+            ));
+        }
         Ok(ConnectedSshServer {
             server: crate::local_server::LocalServer::for_identity("spaceterm-development")
                 .expect("the development identity resolves"),
@@ -113,6 +121,7 @@ impl SshConnectionIntentStore for SavedConnections {
 struct Sheet<'a> {
     window: Entity<SettingsWindow>,
     computers: Arc<Computers>,
+    connections: SshServerConnections,
     cx: &'a mut VisualTestContext,
 }
 
@@ -133,7 +142,7 @@ fn open_settings(cx: &mut TestAppContext) -> Sheet<'_> {
         appearance_runtime::install(settings, Rc::new(platform), cx)
             .expect("appearance runtime should install");
         crate::ui::init(cx).expect("UI initialization should succeed");
-        crate::ui::ssh_servers::install(connections, None, cx);
+        crate::ui::ssh_servers::install(connections.clone(), None, cx);
         crate::ui::direct_servers::install(direct, cx);
     });
     let local = Some(OfferedServer {
@@ -156,6 +165,7 @@ fn open_settings(cx: &mut TestAppContext) -> Sheet<'_> {
     Sheet {
         window,
         computers,
+        connections,
         cx,
     }
 }
@@ -330,4 +340,23 @@ fn a_link_that_isnt_an_invitation_says_so_and_cant_join(cx: &mut TestAppContext)
 
     assert!(sheet.says("This isn\u{2019}t a valid SpaceTerm invitation link."));
     assert!(sheet.disabled("Join"));
+}
+
+#[gpui::test]
+fn cancelling_after_a_new_host_fails_to_connect_adds_no_server(cx: &mut TestAppContext) {
+    let mut sheet = open_settings(cx);
+    sheet.begin(AddServerRequest::Ssh(None));
+
+    sheet.cx.simulate_input(OFFLINE);
+    sheet.cx.run_until_parked();
+    sheet.cx.simulate_keystrokes("enter");
+    sheet.settle(|sheet| sheet.title().starts_with("Couldn\u{2019}t Connect"));
+    sheet.cx.simulate_keystrokes("escape");
+    sheet.cx.run_until_parked();
+
+    assert!(!sheet.open(), "Escape cancels the sheet");
+    assert!(
+        sheet.connections.connections().is_empty(),
+        "a host the person never added stays out of the server list"
+    );
 }
