@@ -375,7 +375,7 @@ impl ApplicationMenuAdapter for MacosApplicationMenuAdapter {
     }
 }
 
-fn application_menu_item_icons(application_name: &str) -> [(String, &'static str); 9] {
+fn application_menu_item_icons(application_name: &str) -> [(String, &'static str); 8] {
     [
         (format!("About {application_name}"), "info.circle"),
         (CHECK_FOR_UPDATES_TITLE.to_owned(), "arrow.down.circle"),
@@ -384,7 +384,6 @@ fn application_menu_item_icons(application_name: &str) -> [(String, &'static str
         (format!("Hide {application_name}"), "eye.slash"),
         ("Hide Others".to_owned(), "eye.slash.fill"),
         ("Show All".to_owned(), "eye"),
-        ("Close All Windows".to_owned(), "xmark.rectangle"),
         (format!("Quit {application_name}"), "power"),
     ]
 }
@@ -827,7 +826,6 @@ mod tests {
                 "Hide Others",
                 "Show All",
                 "|",
-                "Close All Windows",
                 "Quit SpaceTerm",
             ]
         );
@@ -846,7 +844,6 @@ mod tests {
                 "Hide Others",
                 "Show All",
                 "|",
-                "Close All Windows",
                 "Quit SpaceTerm Development",
             ]
         );
