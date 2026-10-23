@@ -1215,6 +1215,79 @@ fn optimistic_tab_close_ack_keeps_later_find_focus(cx: &mut TestAppContext) {
     );
 }
 
+/// Closing the Active Tab onto a Pane whose shell already runs opens that Pane as a local close
+/// does. Its Terminal Session stays the one it had, and the keyboard reaches its terminal.
+#[gpui::test]
+fn closing_the_active_tab_onto_a_running_pane_keeps_its_session_and_keyboard(
+    cx: &mut TestAppContext,
+) {
+    let (harness, cx) = window_harness(cx);
+    let survivor_id = harness.server.inventory().workspaces[0].tabs[0].root_pane;
+    let survivor = harness.panes.pane(survivor_id);
+    survivor.reconnect();
+    let survivor_view = local_view(&harness, cx);
+    click("create-tab-button", cx);
+    harness.server.finish(true, true);
+    project_window(&harness, cx);
+    cx.executor()
+        .advance_clock(crate::ui::shared_workspaces::POLL_INTERVAL * 3);
+    cx.run_until_parked();
+    let closed = local_view(&harness, cx).0;
+    let inventory = harness.server.inventory();
+    let workspace = &inventory.workspaces[0];
+    let target = spaceterm_server::hierarchy::CloseTarget::Tab {
+        workspace: workspace.id,
+        tab: workspace.tabs.last().unwrap().id,
+    };
+    let approval = harness.model.borrow().close_approval(target).unwrap();
+    let opened = harness.panes.opened().len();
+    // The Workspace Window records where the keyboard was before submitting the close.
+    cx.update(|_, cx| {
+        harness
+            .manager
+            .update(cx, |manager, _| manager.prepare_shared_close_keyboard(true));
+    });
+    assert_eq!(
+        harness.model.borrow_mut().close(
+            approval,
+            crate::close_confirmation::CloseTarget::Tab {
+                workspace_id: first_workspace_id(),
+                tab_id: closed,
+            }
+        ),
+        SharedSubmission::Submitted
+    );
+    project_window(&harness, cx);
+
+    assert_eq!(
+        local_view(&harness, cx),
+        survivor_view,
+        "the survivor becomes the Active Tab"
+    );
+    assert!(
+        cx.update(|window, cx| harness
+            .manager
+            .read(cx)
+            .focused_terminal_has_input_focus(window, cx)),
+        "the keyboard reaches the survivor's terminal"
+    );
+    assert_eq!(
+        harness.panes.opened().len(),
+        opened,
+        "no Pane subscribes again"
+    );
+    assert!(
+        std::sync::Arc::ptr_eq(&harness.panes.pane(survivor_id), &survivor),
+        "the survivor keeps the connection to its running Terminal Session"
+    );
+    assert_eq!(
+        survivor.restored_starts(),
+        0,
+        "nothing starts a fresh shell"
+    );
+    assert_eq!(survivor.take_overs(), 0, "nothing takes the Pane over");
+}
+
 #[test]
 fn optimistic_field_presentation_never_renews_an_unseen_conflicting_version() {
     let server = DelayedServer::new();
