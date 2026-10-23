@@ -206,6 +206,32 @@ fn fixture(
     (connections, records, credentials, network)
 }
 
+#[test]
+fn an_empty_saved_inventory_is_distinct_from_one_that_could_not_be_read() {
+    struct Inventory(Option<Document>);
+    impl Records for Inventory {
+        fn load(&self) -> Result<Document, ()> {
+            self.0.clone().ok_or(())
+        }
+        fn save(&self, _: &Document) -> Result<Durability, SaveError> {
+            panic!("inventory observation must not write records")
+        }
+    }
+
+    for (document, ready) in [(None, false), (Some(Document::default()), true)] {
+        let connections = DirectConnections::new(
+            "spaceterm-development",
+            Arc::new(Inventory(document)),
+            Arc::new(Credentials::default()),
+            Network::new(Answer::Lost),
+        );
+        assert!(!connections.retained_inventory_loaded());
+        connections.resume_retained();
+        assert!(connections.routes().is_empty());
+        assert_eq!(connections.retained_inventory_loaded(), ready);
+    }
+}
+
 /// A real retained registry with unavailable network I/O for UI journey tests.
 pub(crate) fn offline(label: &str) -> (DirectConnections, DirectRouteId) {
     let (connections, id, _) = offline_with_lock(label);
