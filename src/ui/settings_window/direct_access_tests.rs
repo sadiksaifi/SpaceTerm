@@ -130,7 +130,6 @@ impl ScriptedAccess {
             id: claim.id,
             name: name.to_owned().into(),
             code: claim.comparison_code(),
-            expires_at: claim.expires_at_unix_seconds,
             claim,
         });
     }

@@ -236,7 +236,6 @@ pub(super) struct ServerLocation {
     _events: Subscription,
     model: LocationModel,
     git: GitToolStatus,
-    offered: bool,
     /// The server whose values the section shows.
     target: Option<ServerChoice>,
     /// Counts the times the section started over, so a read or write answered for an earlier
@@ -273,7 +272,6 @@ impl ServerLocation {
             _events: events,
             model: LocationModel::default(),
             git: GitToolStatus::Unknown,
-            offered: true,
             target: None,
             generation: 0,
             client: None,
@@ -290,7 +288,6 @@ impl ServerLocation {
         self.git = GitToolStatus::Unknown;
         self.git_answered = false;
         self.model = LocationModel::default();
-        self.offered = true;
         self.client = None;
         self.poll = None;
         self.check = None;
@@ -451,11 +448,6 @@ impl SettingsWindow {
                         if state.generation != generation {
                             return;
                         }
-                        if let Some(client) = &client
-                            && client.availability().0
-                        {
-                            state.offered = client.supports_worktree_writes();
-                        }
                         state.client = client;
                         // A missed answer pauses editing and keeps the draft, which the next
                         // answer resumes.
@@ -480,10 +472,6 @@ impl SettingsWindow {
                 cx.background_executor().timer(POLL_INTERVAL).await;
             }
         }));
-    }
-
-    pub(super) fn offers_server_location(&self) -> bool {
-        self.server_location.offered
     }
 
     /// The selected server's Git, as last read from it.
