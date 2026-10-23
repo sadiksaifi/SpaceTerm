@@ -999,12 +999,12 @@ fn an_observation_decides_what_is_offered_before_any_read() {
         "an earlier observation says when it was made, got {:?}",
         service.explanation
     );
+    // A connection verifies no candidate, so the heading offers no update before a read.
     assert_eq!(
         observed_menu_actions(&connected),
         vec![
             RemoteAction::Stop,
             RemoteAction::Restart,
-            RemoteAction::Update,
             RemoteAction::Uninstall
         ]
     );
