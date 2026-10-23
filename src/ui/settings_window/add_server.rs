@@ -1190,15 +1190,14 @@ impl AddServerSheet {
             }
             // The stop is saved once the registry saves again, so the sheet follows that recovery
             // rather than outliving it.
-            Stage::StopUnsaved { server } => {
+            Stage::StopUnsaved { server }
                 if self
                     .direct
                     .as_ref()
-                    .is_some_and(|direct| !direct.persistence_error())
-                {
-                    let server = server.clone();
-                    self.stage = Stage::Stopped { server };
-                }
+                    .is_some_and(|direct| !direct.persistence_error()) =>
+            {
+                let server = server.clone();
+                self.stage = Stage::Stopped { server };
             }
             _ => {}
         }
@@ -1647,7 +1646,7 @@ impl AddServerSheet {
                 state, explanation, ..
             } => text
                 .container(accesskit::Role::Alert)
-                .child(text.line("state", SharedString::new_static(*state), colors.text))
+                .child(text.line("state", SharedString::new_static(state), colors.text))
                 .child(text.line("detail", explanation.clone(), colors.text_secondary))
                 .into_any_element(),
             Stage::Joining { join, server } => {
