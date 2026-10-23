@@ -18,6 +18,7 @@ use super::application_quit::{
     ApplicationQuitAdapter, ApplicationQuitDecision, ApplicationQuitError, ApplicationQuitHandler,
     ApplicationQuitRequest, DismissalAnswer, DismissalPrompt, present_window_dismissal,
 };
+use super::macos_alert::application_alert;
 
 const NS_TERMINATE_CANCEL: NSInteger = 0;
 const NS_TERMINATE_NOW: NSInteger = 1;
@@ -175,7 +176,7 @@ fn native_window(window: &gpui::Window) -> Option<Retained<NSWindow>> {
 
 /// Builds the dismissal alert: the default answer, then Cancel.
 fn dismissal_alert(prompt: &DismissalPrompt, mtm: MainThreadMarker) -> Retained<NSAlert> {
-    let alert = NSAlert::new(mtm);
+    let alert = application_alert(mtm);
     alert.setAlertStyle(NSAlertStyle::Informational);
     alert.setMessageText(&NSString::from_str(&prompt.title));
     alert.setInformativeText(&NSString::from_str(&prompt.detail));
