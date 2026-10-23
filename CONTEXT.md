@@ -87,6 +87,14 @@ Each SpaceTerm Server owns terminal work on its machine. SpaceTerm Clients prese
 
 **Paired Device**: A client device deliberately enrolled for direct-network access to a SpaceTerm Server.
 
+**Add Server**: The client action that opens a sheet for an SSH Destination or an Invitation Link.
+
+**Invite Device**: The server action that creates an Invitation Link for one new Paired Device.
+
+**Invitation Link**: A one-use `spaceterm://pair/…` link containing the server address, pinned identity and a strong secret, valid for five minutes.
+
+**Comparison Code**: The six-digit value both devices display from the authenticated enrollment exchange for the person to compare before allowing access.
+
 **Unpair Device**: The action that requests revocation of a Paired Device's direct-network access to one SpaceTerm Server and removes the initiating client's saved connection when it unpairs itself.
 
 **Unpair Pending**: An Unpair Device request whose server-side revocation is awaiting confirmation, independently of completed local connection removal.
