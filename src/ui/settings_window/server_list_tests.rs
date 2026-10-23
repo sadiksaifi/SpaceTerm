@@ -721,13 +721,19 @@ fn a_connected_server_shows_the_version_it_reports_over_an_earlier_read(cx: &mut
     assert!(!version_reads("1.3.0", servers.cx));
 }
 
-/// The picker's rows for servers named `name`, as assistive technology hears them: each row's
-/// description, in order.
+/// The open picker's rows for servers named `name`, as assistive technology hears them: each
+/// row's description, in order. All Servers lists the same servers in a list of its own, so only
+/// the picker's choices count.
 fn picker_rows(name: &str, cx: &mut VisualTestContext) -> Vec<String> {
-    A11yTree::read(cx)
-        .with_role("ListBoxOption")
+    let tree = A11yTree::read(cx);
+    let choices = tree
+        .with_role("ListBox")
         .into_iter()
-        .filter(|row| row["aria"]["label"] == name)
+        .find(|list| list["aria"]["label"] == super::PICKER_NAME)
+        .expect("the picker's choices are open");
+    tree.descendants(choices)
+        .into_iter()
+        .filter(|row| row["aria"]["role"] == "ListBoxOption" && row["aria"]["label"] == name)
         .filter_map(|row| row["aria"]["description"].as_str().map(str::to_owned))
         .collect()
 }
