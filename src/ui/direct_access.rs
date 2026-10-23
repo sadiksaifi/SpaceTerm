@@ -81,10 +81,9 @@ pub(crate) struct OpenInvitation {
 }
 
 impl OpenInvitation {
-    /// Whether `claim` used this invitation. A claim expires when the invitation it used does,
-    /// so their expiry identifies the invitation.
+    /// Whether `claim` used this invitation, as the server recorded in the claim.
     pub(crate) fn claimed_by(&self, claim: &Claim) -> bool {
-        claim.expires_at == self.expires_at
+        claim.claim.invitation_id == self.id
     }
 }
 
@@ -359,6 +358,7 @@ mod tests {
         exchange_hash[..4].copy_from_slice(&prefix);
         PairingClaim {
             id: [1; 32],
+            invitation_id: [7; 32],
             server: [2; 32],
             device_public_key: [3; 32],
             device_name: "MacBook".into(),
@@ -423,17 +423,26 @@ mod tests {
     }
 
     #[test]
-    fn an_invitation_recognizes_only_claims_that_expire_with_it() {
+    fn an_invitation_recognizes_a_claim_that_names_it() {
         let invitation = OpenInvitation {
             id: [7; 32],
             text: Zeroizing::new("spaceterm://pair/test".to_owned()),
             expires_at: 1_000,
         };
-        let ours = claim(claim_with_exchange([0; 4]));
-        let mut other = claim_with_exchange([0; 4]);
-        other.expires_at_unix_seconds = 1_001;
 
-        assert!(invitation.claimed_by(&ours));
+        assert!(invitation.claimed_by(&claim(claim_with_exchange([0; 4]))));
+    }
+
+    #[test]
+    fn an_invitation_ignores_a_claim_on_another_invitation_that_expires_with_it() {
+        let invitation = OpenInvitation {
+            id: [7; 32],
+            text: Zeroizing::new("spaceterm://pair/test".to_owned()),
+            expires_at: 1_000,
+        };
+        let mut other = claim_with_exchange([0; 4]);
+        other.invitation_id = [8; 32];
+
         assert!(!invitation.claimed_by(&claim(other)));
     }
 }

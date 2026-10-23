@@ -958,8 +958,9 @@ mod tests {
     /// A server's invitation operations as the test scripts them, recording what Invite Device
     /// asked of it.
     struct ScriptedServer {
-        /// How long the next invitation lasts, in seconds.
-        lifetime: Mutex<u64>,
+        /// When each invitation the server opens expires, in Unix seconds. Every invitation
+        /// shares it, as invitations opened in the same second do.
+        expires_at: Mutex<u64>,
         invitations: Mutex<Vec<(ClaimId, u64)>>,
         claims: Mutex<Vec<Claim>>,
         approved: Mutex<Vec<ClaimId>>,
@@ -968,9 +969,10 @@ mod tests {
     }
 
     impl ScriptedServer {
+        /// A server whose invitations last `lifetime` seconds from now.
         fn new(lifetime: u64) -> Arc<Self> {
             Arc::new(Self {
-                lifetime: Mutex::new(lifetime),
+                expires_at: Mutex::new(unix_now() + lifetime),
                 invitations: Mutex::default(),
                 claims: Mutex::default(),
                 approved: Mutex::default(),
@@ -988,18 +990,33 @@ mod tests {
                 .expect("an invitation")
         }
 
-        /// A device named `name` claims the latest invitation, or another client's when
-        /// `ours` is false, with an exchange whose hash starts with `exchange`.
-        fn claim(&self, id: u8, name: &str, exchange: [u8; 4], ours: bool) {
-            let (_, expires_at) = self.invitation();
+        /// Opens an invitation the way another client's Invite Device does.
+        fn invite_elsewhere(&self) -> ClaimId {
+            self.invite().expect("an invitation").id
+        }
+
+        fn expiry(&self, invitation: ClaimId) -> u64 {
+            self.invitations
+                .lock()
+                .expect("invitations")
+                .iter()
+                .find(|(id, _)| *id == invitation)
+                .map(|(_, expires_at)| *expires_at)
+                .expect("an invitation the server opened")
+        }
+
+        /// A device named `name` claims `invitation`, with an exchange whose hash starts with
+        /// `exchange`.
+        fn claim(&self, id: u8, name: &str, exchange: [u8; 4], invitation: ClaimId) {
             let mut exchange_hash = [0; 32];
             exchange_hash[..4].copy_from_slice(&exchange);
             let claim = PairingClaim {
                 id: [id; 32],
+                invitation_id: invitation,
                 server: [1; 32],
                 device_public_key: [id; 32],
                 device_name: name.into(),
-                expires_at_unix_seconds: if ours { expires_at } else { expires_at + 1 },
+                expires_at_unix_seconds: self.expiry(invitation),
                 exchange_hash,
             };
             self.claims.lock().expect("claims").push(Claim {
@@ -1024,7 +1041,7 @@ mod tests {
         fn invite(&self) -> Result<OpenInvitation, AccessFailure> {
             let mut invitations = self.invitations.lock().expect("invitations");
             let id = [u8::try_from(invitations.len() + 1).expect("few invitations"); 32];
-            let expires_at = unix_now() + *self.lifetime.lock().expect("lifetime");
+            let expires_at = *self.expires_at.lock().expect("expiry");
             invitations.push((id, expires_at));
             Ok(OpenInvitation {
                 id,
@@ -1171,8 +1188,9 @@ mod tests {
         let server = ScriptedServer::new(300);
         let (_, cx) = invite(&server, cx);
 
+        let (invitation, _) = server.invitation();
         // An exchange hash starting 00 00 30 39 derives 12345.
-        server.claim(3, "MacBook", [0, 0, 0x30, 0x39], true);
+        server.claim(3, "MacBook", [0, 0, 0x30, 0x39], invitation);
         poll(cx);
 
         let tree = A11yTree::read(cx);
@@ -1186,8 +1204,10 @@ mod tests {
     ) {
         let server = ScriptedServer::new(300);
         let (host, cx) = invite(&server, cx);
-        server.claim(4, "Elsewhere", [0; 4], false);
-        server.claim(3, "MacBook", [0; 4], true);
+        let (ours, _) = server.invitation();
+        let theirs = server.invite_elsewhere();
+        server.claim(4, "Elsewhere", [0; 4], theirs);
+        server.claim(3, "MacBook", [0; 4], ours);
         poll(cx);
 
         cx.simulate_keystrokes("enter");
@@ -1206,7 +1226,7 @@ mod tests {
         let server = ScriptedServer::new(300);
         let (_, cx) = invite(&server, cx);
         let (invitation, _) = server.invitation();
-        server.claim(3, "MacBook", [0; 4], true);
+        server.claim(3, "MacBook", [0; 4], invitation);
         poll(cx);
 
         cx.simulate_keystrokes("escape");
@@ -1225,11 +1245,14 @@ mod tests {
     }
 
     #[gpui::test]
-    fn a_claim_on_another_invitation_asks_nothing(cx: &mut TestAppContext) {
+    fn a_claim_on_another_invitation_with_the_same_expiry_asks_nothing(cx: &mut TestAppContext) {
         let server = ScriptedServer::new(300);
         let (_, cx) = invite(&server, cx);
+        let (ours, _) = server.invitation();
+        let theirs = server.invite_elsewhere();
+        assert_eq!(server.expiry(ours), server.expiry(theirs));
 
-        server.claim(4, "Elsewhere", [0; 4], false);
+        server.claim(4, "Elsewhere", [0; 4], theirs);
         poll(cx);
 
         assert!(!shown(&action(ALLOW_SELECTOR), cx));
@@ -1256,7 +1279,7 @@ mod tests {
         let server = ScriptedServer::new(300);
         let (_, cx) = invite(&server, cx);
         let (invitation, _) = server.invitation();
-        server.claim(3, "MacBook", [0; 4], true);
+        server.claim(3, "MacBook", [0; 4], invitation);
         poll(cx);
 
         cx.update(|window, _| window.remove_window());
@@ -1277,7 +1300,7 @@ mod tests {
         assert!(says("Expired", cx));
         assert_eq!(*server.withdrawn.lock().expect("withdrawn"), vec![expired]);
 
-        *server.lifetime.lock().expect("lifetime") = 300;
+        *server.expires_at.lock().expect("expiry") = unix_now() + 300;
         cx.simulate_keystrokes("enter");
         cx.run_until_parked();
 
