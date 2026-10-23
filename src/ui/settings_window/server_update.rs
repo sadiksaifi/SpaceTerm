@@ -5,10 +5,10 @@
 use std::sync::Arc;
 
 use gpui::prelude::*;
-use gpui::{AnyElement, AnyWindowHandle, Context, ElementId, SharedString, Task, accesskit, div};
+use gpui::{AnyWindowHandle, Context, SharedString, Task};
 use spaceterm_ui::{
-    Alert, AlertIntent, AlertOutcome, Button, ModalAction, ModalActionEmphasis, ModalActionIntent,
-    ModalActionRole, ModalId, ProgressRing, ProgressSize, ProgressState,
+    Alert, AlertIntent, AlertOutcome, ModalAction, ModalActionEmphasis, ModalActionIntent,
+    ModalActionRole, ModalId,
 };
 
 use super::SettingsWindow;
@@ -21,11 +21,8 @@ use crate::local_server::service::activation::{
 use crate::local_server::service::control::{BuildName, UpdateChange, UpdateWording, build_labels};
 use crate::local_server::service::{RetainedInstallation, Service, ServiceStatus};
 use crate::local_startup::CandidateError;
-use crate::ui::appearance::ChromeAppearance;
-use crate::ui::sidebar_window::form::{CaptionTone, badge};
+use crate::ui::sidebar_window::form::CaptionTone;
 
-pub(super) const UPDATE_CONTROL_SELECTOR: &str = "settings-server-update-control";
-pub(super) const UPDATE_PROGRESS_SELECTOR: &str = "settings-server-update-progress";
 pub(super) const UPDATE_SELECTOR: &str = "settings-server-update";
 pub(super) const UPDATE_CHECK_SELECTOR: &str = "settings-server-update-check";
 pub(super) const FINISH_SELECTOR: &str = "settings-server-update-finish";
@@ -217,7 +214,7 @@ impl UpdateAction {
         }
     }
 
-    const fn selector(self) -> &'static str {
+    pub(super) const fn selector(self) -> &'static str {
         match self {
             Self::Check => UPDATE_CHECK_SELECTOR,
             Self::Update => UPDATE_SELECTOR,
@@ -228,14 +225,14 @@ impl UpdateAction {
 
     /// Update, Finish, and Return share the leading slot, so keyboard focus stays on it when
     /// one replaces another.
-    const fn slot(self) -> &'static str {
+    pub(super) const fn slot(self) -> &'static str {
         match self {
             Self::Update | Self::Finish | Self::Return => "settings-server-update-primary",
             Self::Check => "settings-server-update-secondary",
         }
     }
 
-    const fn consequence(self) -> Option<&'static str> {
+    pub(super) const fn consequence(self) -> Option<&'static str> {
         match self {
             Self::Update => Some(
                 "Verifies the server version included with SpaceTerm, then asks before ending the \
@@ -282,6 +279,17 @@ impl UpdateStep {
                 "Returning the server to its previous version\u{2026}",
             ),
             Self::Finish => ("Finishing", "Finishing the update you confirmed\u{2026}"),
+        }
+    }
+
+    /// The verb the Version row shows while the step runs.
+    pub(super) const fn verb(self) -> &'static str {
+        match self {
+            Self::Check | Self::PrepareReturn => "Checking\u{2026}",
+            Self::Prepare => "Verifying\u{2026}",
+            Self::Update { .. } => "Updating\u{2026}",
+            Self::Return => "Returning\u{2026}",
+            Self::Finish => "Finishing\u{2026}",
         }
     }
 
@@ -945,68 +953,6 @@ impl SettingsWindow {
         self.local_operations
             .update(cx, |owner, cx| owner.run_update(state, result, cx));
         cx.notify();
-    }
-
-    /// The version badge, or progress while a step runs, and the row's steps.
-    pub(super) fn render_server_update(
-        &mut self,
-        appearance: &ChromeAppearance,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let Some(presentation) = self.server_update_presentation() else {
-            return div().into_any_element();
-        };
-        let state_selector = presentation.state_selector;
-        let state = if presentation.working {
-            ProgressRing::new(
-                UPDATE_PROGRESS_SELECTOR,
-                presentation.state,
-                ProgressState::Indeterminate,
-            )
-            .size(ProgressSize::Compact)
-            .debug_selector(UPDATE_PROGRESS_SELECTOR)
-            .into_any_element()
-        } else {
-            div()
-                .debug_selector(move || state_selector.to_owned())
-                .child(badge(state_selector, presentation.state, appearance))
-                .into_any_element()
-        };
-        // Assistive technology announces the state when it changes, as a status.
-        let state = div()
-            .id("settings-server-update-state")
-            .role(accesskit::Role::Status)
-            .aria_label(SharedString::new_static(presentation.state))
-            .child(state);
-        // The steps stay enabled while a step runs, as the service row's do, so keyboard focus
-        // keeps its place. A step taken meanwhile is ignored, and the status says why.
-        let owner = cx.weak_entity();
-        let actions = presentation.actions.iter().map(|&action| {
-            let owner = owner.clone();
-            Button::new(ElementId::from(action.slot()), action.label())
-                .variant(spaceterm_ui::ButtonVariant::Outline)
-                .size(spaceterm_ui::ButtonSize::Regular)
-                .tab_stop(true)
-                .debug_selector(action.selector())
-                .when_some(action.consequence(), |button, consequence| {
-                    button.accessibility_description(SharedString::new_static(consequence))
-                })
-                .on_activate(move |_, _, cx| {
-                    let _ = owner.update(cx, |settings, cx| {
-                        settings.request_update_action(action, cx);
-                    });
-                })
-                .into_any_element()
-        });
-        div()
-            .debug_selector(|| UPDATE_CONTROL_SELECTOR.to_owned())
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(appearance.spacing(8.0))
-            .child(state)
-            .children(actions)
-            .into_any_element()
     }
 }
 

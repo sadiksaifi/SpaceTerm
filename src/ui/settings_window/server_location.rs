@@ -492,10 +492,6 @@ impl SettingsWindow {
     }
 
     /// The "Git on <server>" footnote while its rows cannot change, saying how to change them.
-    #[expect(
-        dead_code,
-        reason = "the Git page's section framing presents this footnote (#629)"
-    )]
     pub(super) fn server_git_footnote(&self) -> Option<SharedString> {
         if self.server_location.model.connected {
             return None;

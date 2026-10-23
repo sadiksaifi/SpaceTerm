@@ -1,10 +1,10 @@
-//! Remote server maintenance in the selected SSH server's detail.
+//! Remote server maintenance for the selected SSH server.
 //!
-//! Two rows carry it. Background service reports the server's own state and offers Start, Stop,
-//! Restart and Uninstall where that state allows them. Server update offers the Update Server
-//! journey, and finishes or returns an update the person already confirmed. Both read the
-//! operations owner's snapshot, so rendering asks no computer anything, and the section reads
-//! nothing from another machine until the person chooses a step.
+//! The server card carries it. Status offers Start, Stop, Restart and Uninstall where the
+//! server's state allows them, and Version offers the Update Server journey, finishing or
+//! returning an update the person already confirmed. A removed connection's unresolved operation
+//! appears in a Servers notice. Everything reads the operations owner's snapshot, so rendering asks
+//! no computer anything, and nothing reads another machine until the person chooses a step.
 //!
 //! A destructive step describes its change first and performs only the exact change the person
 //! then confirms. Cancelling the confirmation abandons that description, and nothing was sent.
@@ -12,15 +12,13 @@
 use std::sync::Arc;
 
 use gpui::prelude::*;
-use gpui::{AnyElement, AnyWindowHandle, Context, ElementId, SharedString, Task, accesskit, div};
+use gpui::{AnyWindowHandle, Context, Task};
 use spaceterm_ui::{
-    Alert, AlertIntent, AlertOutcome, Button, ButtonSize, ButtonVariant, ModalAction,
-    ModalActionEmphasis, ModalActionIntent, ModalActionRole, ModalId, ProgressRing, ProgressSize,
-    ProgressState,
+    Alert, AlertIntent, AlertOutcome, ModalAction, ModalActionEmphasis, ModalActionIntent,
+    ModalActionRole, ModalId,
 };
 
 use super::SettingsWindow;
-use super::catalog::SettingsRowId;
 use super::server_list::ServerChoice;
 use crate::domain::SshDestination;
 use crate::local_server::service::maintenance::PreparedChange;
@@ -29,20 +27,11 @@ use crate::ssh::server_operations::{
     RemoteMaintenanceRequest, RemoteOperationEntry, RemoteOperationHandle, RemoteOperationScope,
     RemoteOperationState, RemoteServerOperations,
 };
-use crate::ui::appearance::{ChromeAppearance, gpui_color};
-use crate::ui::chrome_typography::{ChromeTextStyleExt as _, TextRole};
 use crate::ui::remote_maintenance::{
     MaintenanceConfirmation, MaintenancePresentation, MaintenanceRow, RemoteAction,
     discarded_operation, dismissed_operation, observed, owning_row, present_machine,
     removed_presentation, removed_subject,
 };
-use crate::ui::sidebar_window::form::{CaptionTone, badge};
-
-pub(super) const SERVICE_CONTROL_SELECTOR: &str = "settings-ssh-server-service-control";
-pub(super) const SERVICE_PROGRESS_SELECTOR: &str = "settings-ssh-server-service-progress";
-pub(super) const UPDATE_CONTROL_SELECTOR: &str = "settings-ssh-server-update-control";
-pub(super) const UPDATE_PROGRESS_SELECTOR: &str = "settings-ssh-server-update-progress";
-pub(super) const REMOVED_SELECTOR: &str = "settings-removed-server-operations";
 
 /// The confirmation selectors of one described change, so a test answers the exact alert it
 /// reviewed.
@@ -181,7 +170,10 @@ impl SettingsWindow {
         Some((destination, states))
     }
 
-    fn maintenance_presentation(&self, row: MaintenanceRow) -> Option<MaintenancePresentation> {
+    pub(super) fn maintenance_presentation(
+        &self,
+        row: MaintenanceRow,
+    ) -> Option<MaintenancePresentation> {
         let (destination, states) = self.selected_maintenance()?;
         let rows = self.ssh_maintenance.as_ref()?;
         // Before any maintenance read, what the connection already observed decides what the row
@@ -204,15 +196,6 @@ impl SettingsWindow {
             .filter(|(asked, _)| *asked == destination)
             .map(|(_, request)| *request);
         Some(present_machine(destination.as_str(), &states, row, asked))
-    }
-
-    /// The caption under one maintenance row, or `None` for another row.
-    pub(super) fn ssh_maintenance_caption(
-        &self,
-        row: SettingsRowId,
-    ) -> Option<(SharedString, CaptionTone)> {
-        let presentation = self.maintenance_presentation(maintenance_row(row)?)?;
-        Some((presentation.explanation, presentation.tone))
     }
 
     /// Takes one step another surface offered, such as the sidebar machine heading menu. The
@@ -238,7 +221,7 @@ impl SettingsWindow {
 
     /// Takes one step from a maintenance row. A step the row no longer offers does nothing, so a
     /// click that arrives after the state changed never acts on the state it was offered for.
-    fn request_maintenance(
+    pub(super) fn request_maintenance(
         &mut self,
         destination: SshDestination,
         row: MaintenanceRow,
@@ -543,131 +526,14 @@ impl SettingsWindow {
             }
         });
     }
-
-    /// The selected server's service state, or progress while an operation runs, and its steps.
-    pub(super) fn render_ssh_server_service(
-        &mut self,
-        appearance: &ChromeAppearance,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        self.render_maintenance_row(
-            MaintenanceRow::Service,
-            SERVICE_CONTROL_SELECTOR,
-            SERVICE_PROGRESS_SELECTOR,
-            appearance,
-            cx,
-        )
-    }
-
-    /// The Update Server journey for the selected server.
-    pub(super) fn render_ssh_server_update(
-        &mut self,
-        appearance: &ChromeAppearance,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        self.render_maintenance_row(
-            MaintenanceRow::Update,
-            UPDATE_CONTROL_SELECTOR,
-            UPDATE_PROGRESS_SELECTOR,
-            appearance,
-            cx,
-        )
-    }
-
-    fn render_maintenance_row(
-        &mut self,
-        row: MaintenanceRow,
-        control_selector: &'static str,
-        progress_selector: &'static str,
-        appearance: &ChromeAppearance,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let Some((destination, _)) = self.selected_maintenance() else {
-            return div().into_any_element();
-        };
-        let Some(presentation) = self.maintenance_presentation(row) else {
-            return div().into_any_element();
-        };
-        let machine = SharedString::from(destination.as_str().to_owned());
-        let state = presentation.state.map(|label| {
-            let selector = presentation.state_selector.clone();
-            let id = SharedString::from(format!("{selector}-badge"));
-            let shown = if presentation.working {
-                ProgressRing::new(progress_selector, label, ProgressState::Indeterminate)
-                    .size(ProgressSize::Compact)
-                    .debug_selector(progress_selector)
-                    .into_any_element()
-            } else {
-                div()
-                    .debug_selector({
-                        let selector = selector.clone();
-                        move || selector.to_string()
-                    })
-                    .child(badge(id, label, appearance))
-                    .into_any_element()
-            };
-            // Assistive technology announces the state when it changes, as a status.
-            div()
-                .id(SharedString::from(format!("{control_selector}-state")))
-                .role(accesskit::Role::Status)
-                .aria_label(SharedString::from(format!("{machine}: {label}")))
-                .child(shown)
-        });
-        let owner = cx.weak_entity();
-        let actions = presentation.actions.into_iter().map(|action| {
-            let owner = owner.clone();
-            let destination = destination.clone();
-            let primary = matches!(action, RemoteAction::Start | RemoteAction::Acknowledge);
-            Button::new(
-                ElementId::from(SharedString::from(format!(
-                    "{control_selector}-{}",
-                    action.slot()
-                ))),
-                action.label(),
-            )
-            .variant(if primary {
-                ButtonVariant::Primary
-            } else {
-                ButtonVariant::Outline
-            })
-            .size(ButtonSize::Regular)
-            .tab_stop(true)
-            .debug_selector(format!("{control_selector}-{}", action.name()))
-            .accessibility_description(action.consequence(machine.as_ref()))
-            .on_activate(move |_, _, cx| {
-                let destination = destination.clone();
-                let _ = owner.update(cx, |settings, cx| {
-                    settings.request_maintenance(destination, row, action, cx);
-                });
-            })
-            .into_any_element()
-        });
-        div()
-            .debug_selector(move || control_selector.to_owned())
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(appearance.spacing(8.0))
-            .children(state)
-            .children(actions)
-            .into_any_element()
-    }
 }
-
-/// Why a removed connection still appears, and what the person can do about it. The section lists
-/// an operation that is still working or still unconfirmed, a validated result, and an original
-/// the server has no record of, so the caption promises no result an entry may not have and
-/// claims to follow no operation this client has given up.
-pub(super) const REMOVED_GUIDANCE: &str = "You removed these saved connections. SpaceTerm still \
-     has something to tell you about the work you asked for on them, whether or not it has a \
-     result yet. Nothing here reconnects, and answering doesn\u{2019}t bring a connection back.";
 
 impl SettingsWindow {
     /// The servers whose saved connection was removed and that still have something to say,
     /// ordered by destination as the owner reports them. One destination is listed once, with
     /// every state the owner holds for it, so two originals on one removed connection read as
     /// one entry whose step settles one of them at a time.
-    fn removed_operations(&self) -> Vec<(SshDestination, MaintenancePresentation)> {
+    pub(super) fn removed_operations(&self) -> Vec<(SshDestination, MaintenancePresentation)> {
         let Some(rows) = self.ssh_maintenance.as_ref() else {
             return Vec::new();
         };
@@ -687,14 +553,10 @@ impl SettingsWindow {
             .collect()
     }
 
-    pub(super) fn has_removed_operations(&self) -> bool {
-        !self.removed_operations().is_empty()
-    }
-
     /// Settles one removed connection's operation. A removed connection is no longer a selected
     /// server, so only resolving its original and acknowledging a validated result reach it, and
     /// neither recreates the connection.
-    fn request_removed_maintenance(
+    pub(super) fn request_removed_maintenance(
         &mut self,
         destination: SshDestination,
         action: RemoteAction,
@@ -756,109 +618,6 @@ impl SettingsWindow {
             _ => return,
         }
         cx.notify();
-    }
-
-    /// Each removed connection's server, what SpaceTerm still has to tell the person about it,
-    /// and the one step that settles it. Nothing here reconnects or reads that machine.
-    pub(super) fn render_removed_operations(
-        &mut self,
-        appearance: &ChromeAppearance,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let colors = appearance.host_colors(spaceterm_ui::ControlHost::Card);
-        let owner = cx.weak_entity();
-        let entries = self
-            .removed_operations()
-            .into_iter()
-            .map(|(destination, presentation)| {
-                let machine = SharedString::from(destination.as_str().to_owned());
-                let steps: Vec<_> = presentation
-                    .actions
-                    .into_iter()
-                    .map(|action| {
-                        let owner = owner.clone();
-                        let destination = destination.clone();
-                        let machine = machine.clone();
-                        Button::new(
-                            ElementId::from(SharedString::from(format!(
-                                "{REMOVED_SELECTOR}-{machine}-{}",
-                                action.slot()
-                            ))),
-                            action.label(),
-                        )
-                        .variant(ButtonVariant::Outline)
-                        .size(ButtonSize::Regular)
-                        .tab_stop(true)
-                        .debug_selector(format!("{}-{machine}", action.selector()))
-                        .accessibility_description(action.consequence(machine.as_ref()))
-                        .on_activate(move |_, _, cx| {
-                            let destination = destination.clone();
-                            let _ = owner.update(cx, |settings, cx| {
-                                settings.request_removed_maintenance(destination, action, cx);
-                            });
-                        })
-                        .into_any_element()
-                    })
-                    .collect();
-                div()
-                    .id(SharedString::from(format!("{REMOVED_SELECTOR}-{machine}")))
-                    .debug_selector({
-                        let machine = machine.clone();
-                        move || format!("{REMOVED_SELECTOR}-{machine}")
-                    })
-                    .role(accesskit::Role::Group)
-                    .aria_label(machine.clone())
-                    .aria_description(presentation.explanation.clone())
-                    .flex()
-                    .flex_row()
-                    .items_start()
-                    .w_full()
-                    .gap(appearance.spacing(8.0))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .flex()
-                            .flex_col()
-                            .gap(appearance.spacing(2.0))
-                            .child(
-                                div()
-                                    .chrome_text(appearance.typography.style(TextRole::Body))
-                                    .text_color(gpui_color(colors.text))
-                                    .child(machine.clone()),
-                            )
-                            .child(
-                                div()
-                                    .id(SharedString::from(format!(
-                                        "{REMOVED_SELECTOR}-{machine}-explanation"
-                                    )))
-                                    .role(accesskit::Role::Label)
-                                    .aria_value(presentation.explanation.clone())
-                                    .chrome_text(appearance.typography.style(TextRole::Secondary))
-                                    .text_color(gpui_color(colors.text_secondary))
-                                    .whitespace_normal()
-                                    .child(presentation.explanation),
-                            ),
-                    )
-                    .children(steps)
-            });
-        div()
-            .debug_selector(|| REMOVED_SELECTOR.to_owned())
-            .flex()
-            .flex_col()
-            .w_full()
-            .gap(appearance.spacing(8.0))
-            .children(entries)
-            .into_any_element()
-    }
-}
-
-/// The row one Settings row identity presents, or `None` for a row outside maintenance.
-pub(super) const fn maintenance_row(row: SettingsRowId) -> Option<MaintenanceRow> {
-    match row {
-        SettingsRowId::SshServerService => Some(MaintenanceRow::Service),
-        SettingsRowId::SshServerUpdate => Some(MaintenanceRow::Update),
-        _ => None,
     }
 }
 

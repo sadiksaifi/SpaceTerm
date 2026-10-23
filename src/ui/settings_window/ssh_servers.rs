@@ -15,27 +15,20 @@ use gpui::{
 };
 use spaceterm_ui::{
     Alert, AlertIntent, AlertOutcome, Button, ButtonSize, ButtonVariant, FieldState, Menu,
-    MenuEntry, ModalAction, ModalActionEmphasis, ModalActionRole, ModalId, ProgressRing,
-    ProgressSize, ProgressState, TextInput, TextInputEvent, TextInputVariant,
+    MenuEntry, ModalAction, ModalActionEmphasis, ModalActionRole, ModalId, TextInput,
+    TextInputEvent, TextInputVariant,
 };
 
 use super::SettingsWindow;
-use super::catalog::SettingsRowId;
 use super::server_list::ServerChoice;
 use crate::domain::SshDestination;
-use crate::ssh::server_connection::{
-    IncompatibilityKind, RemoteConnectionStatus, ServerAvailability, SshServerConnections,
-    SshServerFacts,
-};
-use crate::ssh::server_operations::RemoteOperationState;
+use crate::ssh::server_connection::{RemoteConnectionStatus, SshServerConnections};
 use crate::ui::appearance::{ChromeAppearance, gpui_color};
 use crate::ui::chrome_geometry::RadiusRole;
 use crate::ui::chrome_typography::{ChromeTextStyleExt as _, TextRole};
 use crate::ui::remote_maintenance::operations_persistence_warning;
-use crate::ui::sidebar_window::form::{CaptionTone, badge};
 use crate::ui::ssh_servers::{
-    SshHostSource, SshServerAction, installation_consequence, persistence_warning, platform_name,
-    present,
+    SshHostSource, SshServerAction, installation_consequence, persistence_warning, present,
 };
 
 pub(super) const CONTROL_SELECTOR: &str = "settings-ssh-servers";
@@ -55,8 +48,6 @@ pub(super) const UNSAVED_REMOVAL_SELECTOR: &str = "settings-ssh-server-unsaved-r
 pub(super) const REMOVE_AGAIN_SELECTOR: &str = "settings-ssh-server-remove-again";
 /// The unsaved-removal notice's name for assistive technology.
 pub(super) const UNSAVED_REMOVAL_NAME: &str = "Removal not saved";
-pub(super) const STATUS_SELECTOR: &str = "settings-ssh-server-status";
-pub(super) const REMOVE_SELECTOR: &str = "settings-ssh-server-remove";
 
 /// The SSH servers row: the registry it presents, and the hosts SSH configuration names.
 pub(super) struct SshServerRows {
@@ -110,6 +101,7 @@ impl SshServerRows {
         let follow = cx.spawn(async move |settings, cx| {
             while changes.recv().await.is_ok() {
                 let followed = settings.update(cx, |settings, cx| {
+                    settings.reconcile_servers(cx);
                     settings.sync_server_location(cx);
                     cx.notify();
                 });
@@ -189,7 +181,7 @@ impl SettingsWindow {
         self.run_ssh_server_action(destination, SshServerAction::Connect, window, cx);
     }
 
-    fn run_ssh_server_action(
+    pub(super) fn run_ssh_server_action(
         &mut self,
         destination: SshDestination,
         action: SshServerAction,
@@ -219,9 +211,9 @@ impl SettingsWindow {
             }
             SshServerAction::CheckStatus => connections.check(&destination),
             SshServerAction::Remove => {
-                let next = self.server_after_removing(&ServerChoice::Ssh(destination.clone()));
                 connections.remove(&destination);
-                self.selected_server = next;
+                // The selection gives way to this computer's server once the connection is gone.
+                self.reconcile_servers(cx);
                 self.sync_server_location(cx);
             }
             SshServerAction::Install => self.confirm_ssh_installation(destination, window, cx),
@@ -295,46 +287,9 @@ impl SettingsWindow {
         }
     }
 
-    /// The selected SSH server and its latest status, read from the registry's snapshot.
-    fn selected_ssh_server(&self) -> Option<(SshDestination, RemoteConnectionStatus)> {
-        let Some(ServerChoice::Ssh(destination)) = self.selected_server() else {
-            return None;
-        };
-        let rows = self.ssh_servers.as_ref()?;
-        let status = rows.connections.status(&destination);
-        Some((destination, status))
-    }
-
-    /// One SSH detail row's value and caption for the selected server, from maintenance facts or
-    /// the connection registry's latest observation.
-    fn selected_ssh_server_fact(
-        &self,
-        row: SettingsRowId,
-    ) -> Option<(SharedString, Option<SharedString>)> {
-        let (destination, status) = self.selected_ssh_server()?;
-        // A service read knows the approved build without opening a connection.
-        if row == SettingsRowId::SshServerVersion
-            && let Some(entry) = self.ssh_maintenance.as_ref().and_then(|rows| {
-                rows.operations
-                    .entries()
-                    .into_iter()
-                    .find(|entry| entry.destination == destination && !entry.removed)
-            })
-            && let RemoteOperationState::Read(facts) = entry.state
-            && let Some(approved) = facts.approved
-        {
-            return Some((approved.version.into(), None));
-        }
-        let last = self
-            .ssh_servers
-            .as_ref()
-            .and_then(|rows| rows.connections.last_facts(&destination));
-        Some(ssh_server_fact(row, &status, last.as_ref()))
-    }
-
     /// The steps the selected SSH server's state allows. Check Status asks for a fresh observation
     /// only of a server SpaceTerm isn't presenting: a presented one reports its state already.
-    fn ssh_server_actions(
+    pub(super) fn ssh_server_actions(
         &self,
         destination: &SshDestination,
         status: &RemoteConnectionStatus,
@@ -373,195 +328,6 @@ impl SettingsWindow {
         self.ssh_servers
             .as_ref()
             .is_some_and(|rows| rows.connections.reconnects(destination))
-    }
-
-    /// The selected SSH server's state, announced as it changes, and the steps it allows.
-    pub(super) fn render_ssh_server_status(
-        &mut self,
-        appearance: &ChromeAppearance,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let Some((destination, status)) = self.selected_ssh_server() else {
-            return div().into_any_element();
-        };
-        let presentation = present(&status);
-        let colors = appearance.host_colors(spaceterm_ui::ControlHost::Card);
-        let state_selector = presentation.state_selector;
-        let state = if presentation.working {
-            ProgressRing::new(
-                SharedString::from(format!("{STATUS_SELECTOR}-progress")),
-                presentation.state,
-                ProgressState::Indeterminate,
-            )
-            .size(ProgressSize::Compact)
-            .debug_selector(format!("{STATUS_SELECTOR}-progress"))
-            .into_any_element()
-        } else {
-            div()
-                .debug_selector(move || state_selector.to_owned())
-                .child(badge(state_selector, presentation.state, appearance))
-                .into_any_element()
-        };
-        // Assistive technology announces the state when it changes, as a status.
-        let state = div()
-            .id(SharedString::from(format!("{STATUS_SELECTOR}-state")))
-            .role(accesskit::Role::Status)
-            .aria_label(SharedString::from(format!(
-                "{}: {}",
-                destination.as_str(),
-                presentation.state
-            )))
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(appearance.spacing(6.0))
-            .child(state)
-            // Progress names its phase beside the ring, because the ring alone says nothing.
-            .when(presentation.working, |state| {
-                state.child(
-                    div()
-                        .chrome_text(appearance.typography.style(TextRole::Secondary))
-                        .text_color(gpui_color(colors.text_muted))
-                        .child(presentation.state),
-                )
-            });
-        let actions = self.ssh_server_actions(&destination, &status);
-        let leading = actions.first().copied();
-        let owner = cx.weak_entity();
-        let buttons = actions.into_iter().map(|action| {
-            let owner = owner.clone();
-            let destination = destination.clone();
-            let primary = leading == Some(action)
-                && matches!(action, SshServerAction::Connect | SshServerAction::Install);
-            Button::new(
-                ElementId::from(SharedString::from(format!(
-                    "{STATUS_SELECTOR}-{}",
-                    action.selector()
-                ))),
-                action.label(),
-            )
-            .variant(if primary {
-                ButtonVariant::Primary
-            } else {
-                ButtonVariant::Outline
-            })
-            .size(ButtonSize::Regular)
-            .tab_stop(true)
-            .debug_selector(action.selector())
-            .accessibility_description(SharedString::from(format!(
-                "{} {}",
-                action.label().trim_end_matches('\u{2026}'),
-                destination.as_str()
-            )))
-            .on_activate(move |_, window, cx| {
-                let destination = destination.clone();
-                let _ = owner.update(cx, |settings, cx| {
-                    settings.run_ssh_server_action(destination, action, window, cx);
-                });
-            })
-            .into_any_element()
-        });
-        div()
-            .debug_selector(|| STATUS_SELECTOR.to_owned())
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(appearance.spacing(8.0))
-            .child(state)
-            .children(buttons)
-            .into_any_element()
-    }
-
-    /// One fact about the selected SSH server, as its latest observation reported it.
-    pub(super) fn render_ssh_server_fact(
-        &self,
-        row: SettingsRowId,
-        appearance: &ChromeAppearance,
-    ) -> AnyElement {
-        let value = self
-            .selected_ssh_server_fact(row)
-            .map_or_else(|| SharedString::new_static(UNKNOWN), |(value, _)| value);
-        self.render_server_value(row, value, appearance)
-    }
-
-    /// Remove Connection, which forgets the selected saved connection at once.
-    pub(super) fn render_remove_server(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let Some((destination, _)) = self.selected_ssh_server() else {
-            return div().into_any_element();
-        };
-        let owner = cx.weak_entity();
-        Button::new(REMOVE_SELECTOR, "Remove Connection")
-            .variant(ButtonVariant::Outline)
-            .size(ButtonSize::Regular)
-            .tab_stop(true)
-            .debug_selector(REMOVE_SELECTOR)
-            .accessibility_description(SharedString::from(format!(
-                "Remove the saved connection to {}",
-                destination.as_str()
-            )))
-            .on_activate(move |_, window, cx| {
-                let destination = destination.clone();
-                let _ = owner.update(cx, |settings, cx| {
-                    settings.run_ssh_server_action(
-                        destination,
-                        SshServerAction::Remove,
-                        window,
-                        cx,
-                    );
-                });
-            })
-            .into_any_element()
-    }
-
-    /// The caption under one SSH detail row.
-    pub(super) fn ssh_server_caption(
-        &self,
-        row: SettingsRowId,
-    ) -> Option<(SharedString, CaptionTone)> {
-        let (destination, status) = self.selected_ssh_server()?;
-        match row {
-            SettingsRowId::SshServerStatus => {
-                let presentation = present(&status);
-                let mut explanation = presentation.explanation.to_string();
-                // A check describes the moment it ran, so it says how long ago that was.
-                if let RemoteConnectionStatus::Checked { at, .. } = &status {
-                    let seconds = |time: std::time::SystemTime| {
-                        time.duration_since(std::time::UNIX_EPOCH)
-                            .map_or(0, |elapsed| elapsed.as_secs())
-                    };
-                    explanation.push_str(&format!(
-                        " {}.",
-                        super::updates::last_checked(
-                            Some(seconds(*at)),
-                            seconds(std::time::SystemTime::now())
-                        )
-                    ));
-                }
-                // Nothing proves a route signs in without a prompt after SpaceTerm reopens, so a
-                // saved connection then waits for the person's Connect.
-                if self.ssh_server_reconnects(&destination)
-                    && !presentation.working
-                    && !matches!(status, RemoteConnectionStatus::NeedsPerson { .. })
-                {
-                    explanation
-                        .push_str(" When SpaceTerm reopens, it waits for you to choose Connect.");
-                }
-                Some((SharedString::from(explanation), presentation.tone))
-            }
-            SettingsRowId::RemoveServer => Some((
-                SharedString::from(format!(
-                    "SpaceTerm forgets this connection and stops reconnecting to it. The server on \
-                     \u{201C}{}\u{201D}, its Terminal Sessions and your SSH access stay, and work \
-                     already sent to the server isn\u{2019}t discarded.",
-                    destination.as_str()
-                )),
-                CaptionTone::Guidance,
-            )),
-            _ => self
-                .selected_ssh_server_fact(row)?
-                .1
-                .map(|caption| (caption, CaptionTone::Guidance)),
-        }
     }
 
     /// The field and SSH Hosts menu that connect to another computer, under the server list.
@@ -764,105 +530,6 @@ impl SettingsWindow {
                     .child(guidance),
             )
             .into_any_element()
-    }
-}
-
-/// A fact the server has not reported yet.
-const UNKNOWN: &str = "Unknown";
-
-/// The facts the latest observation carries, which only a connection or Check Status reports.
-fn observed_facts(status: &RemoteConnectionStatus) -> Option<&SshServerFacts> {
-    match status {
-        RemoteConnectionStatus::Connected { facts, .. }
-        | RemoteConnectionStatus::Checked { facts, .. } => Some(facts),
-        _ => None,
-    }
-}
-
-/// One SSH detail row's value and caption, from the server's latest status, or from the facts
-/// `last` observed when that status carries none.
-fn ssh_server_fact(
-    row: SettingsRowId,
-    status: &RemoteConnectionStatus,
-    last: Option<&SshServerFacts>,
-) -> (SharedString, Option<SharedString>) {
-    let current = observed_facts(status);
-    let facts = current.or(last);
-    // The version row leads the facts, so its caption says when a stale set was observed.
-    let earlier = (current.is_none() && last.is_some()).then(|| {
-        SharedString::new_static(
-            "SpaceTerm last observed these details when it connected or checked the status. \
-             They may have changed since.",
-        )
-    });
-    let unknown = || SharedString::new_static(UNKNOWN);
-    match row {
-        SettingsRowId::SshServerVersion => match facts {
-            Some(SshServerFacts {
-                version: Some(version),
-                ..
-            }) => (SharedString::from(version.clone()), earlier),
-            Some(_) => (SharedString::new_static("Not Installed"), earlier),
-            None => (
-                unknown(),
-                Some(SharedString::new_static(
-                    "SpaceTerm learns these details when it connects or checks the status.",
-                )),
-            ),
-        },
-        SettingsRowId::SshServerPlatform => facts.map_or_else(
-            || (unknown(), None),
-            |facts| {
-                (
-                    SharedString::from(platform_name(&facts.platform.0, &facts.platform.1)),
-                    None,
-                )
-            },
-        ),
-        SettingsRowId::SshServerCompatibility => match status {
-            RemoteConnectionStatus::Connected { protocol_major, .. } => (
-                SharedString::new_static("Compatible"),
-                Some(SharedString::from(format!(
-                    "Both use protocol version {protocol_major}."
-                ))),
-            ),
-            // Check Status refuses a server Connect would refuse, so what it found running or
-            // installed declares what this SpaceTerm needs.
-            RemoteConnectionStatus::Checked {
-                availability: ServerAvailability::Running | ServerAvailability::NotRunning,
-                ..
-            } => (
-                SharedString::new_static("Compatible"),
-                Some(SharedString::new_static(
-                    "It reported protocol version 1 and the features this SpaceTerm needs.",
-                )),
-            ),
-            RemoteConnectionStatus::Incompatible {
-                kind: IncompatibilityKind::Platform,
-            } => (SharedString::new_static("Unsupported Computer"), None),
-            RemoteConnectionStatus::Incompatible { .. } => {
-                (SharedString::new_static("Incompatible"), None)
-            }
-            _ => (unknown(), None),
-        },
-        SettingsRowId::SshServerStartup => match facts {
-            Some(facts) if facts.starts_automatically => (
-                SharedString::new_static("Yes"),
-                Some(SharedString::new_static(
-                    "That computer\u{2019}s service manager starts the server for this account \
-                     on its own.",
-                )),
-            ),
-            Some(_) => (
-                SharedString::new_static("No"),
-                Some(SharedString::new_static(
-                    "Nothing on that computer starts the server on its own. Connecting starts it \
-                     unless it was stopped.",
-                )),
-            ),
-            None => (unknown(), None),
-        },
-        _ => (unknown(), None),
     }
 }
 
