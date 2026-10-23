@@ -605,7 +605,7 @@ impl HeldRead {
     }
 
     fn read(&self) -> RemoteOperationState {
-        RemoteOperationState::Read(self.facts.clone())
+        RemoteOperationState::Read(Box::new(self.facts.clone()))
     }
 }
 
