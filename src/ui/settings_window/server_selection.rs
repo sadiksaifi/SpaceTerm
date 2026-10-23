@@ -6,7 +6,7 @@
 //! rendering never waits for storage. A failure to retain the record leaves the choice in effect
 //! for this run.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use gpui::prelude::*;
@@ -21,11 +21,13 @@ pub(crate) struct ServerSelection {
     facts: BTreeMap<ServerKey, LastKnownFacts>,
     /// The worker's queue. `None` keeps the selection for this run only.
     retain: Option<async_channel::Sender<(u64, Change)>>,
-    /// Counts the window's changes, so a snapshot answering an earlier one never undoes a later
-    /// choice.
+    /// Counts the window's changes. Only the snapshot answering the latest one is presented: an
+    /// earlier snapshot predates a change the window already shows, and the latest one holds
+    /// everything the earlier ones did.
     requested: u64,
-    /// The servers the latest reconciliation listed, which the worker reports facts for.
-    available: Vec<ServerKey>,
+    /// The servers that exist, once the saved connections have loaded. Until then every
+    /// server's facts are kept.
+    inventory: Option<Vec<ServerKey>>,
 }
 
 impl Global for ServerSelection {}
@@ -44,38 +46,81 @@ struct Snapshot {
     facts: BTreeMap<ServerKey, LastKnownFacts>,
 }
 
+/// The retained record, which the worker changes in the order the window asked.
+struct Retainer {
+    context: ServerContext,
+    /// The servers the window said exist. Until it says, the record keeps every server's facts.
+    inventory: Option<Vec<ServerKey>>,
+    /// The servers this run selected or observed, whose facts are reported before the window
+    /// says which servers exist.
+    touched: BTreeSet<ServerKey>,
+}
+
+impl Retainer {
+    fn load(paths: Arc<AppPaths>) -> Self {
+        // A record SpaceTerm can't read is never replaced: the context refuses to write over it,
+        // and the choices of this run stay in memory.
+        let context =
+            ServerContext::load(Arc::clone(&paths)).unwrap_or_else(|_| ServerContext::new(paths));
+        Self {
+            context,
+            inventory: None,
+            touched: BTreeSet::new(),
+        }
+    }
+
+    fn apply(&mut self, change: u64, request: Change) -> Snapshot {
+        let _: Result<(), ContextError> = match request {
+            Change::Reconcile(keys) => {
+                let reconciled = self.context.reconcile(&keys);
+                self.inventory = Some(keys);
+                reconciled
+            }
+            Change::Select(key) => {
+                self.touched.insert(key.clone());
+                self.context.select(key)
+            }
+            Change::Remember(key, facts) => {
+                self.touched.insert(key.clone());
+                self.context.remember(key, facts)
+            }
+        };
+        self.snapshot(change)
+    }
+
+    /// The selection and the facts of this computer's server, the selected server, and either
+    /// every server that exists or, before the window says which do, every one this run touched.
+    fn snapshot(&self, change: u64) -> Snapshot {
+        let selected = self.context.selected().clone();
+        let reported: BTreeSet<&ServerKey> = match &self.inventory {
+            Some(keys) => keys.iter().collect(),
+            None => self.touched.iter().collect(),
+        };
+        let facts = [&ServerKey::Local, &selected]
+            .into_iter()
+            .chain(reported)
+            .filter_map(|key| Some((key.clone(), self.context.facts(key)?.clone())))
+            .collect();
+        Snapshot {
+            change,
+            selected,
+            facts,
+        }
+    }
+}
+
 /// Starts the worker that loads and retains the selection in `paths`' private storage. Until it
 /// loads, the window presents this computer's server.
 pub(crate) fn configure_server_context(paths: Arc<AppPaths>, cx: &mut App) {
     let (changes, queue) = async_channel::unbounded::<(u64, Change)>();
     let (snapshots, published) = async_channel::unbounded::<Snapshot>();
-    cx.set_global(ServerSelection {
-        selected: ServerKey::Local,
-        facts: BTreeMap::new(),
-        retain: Some(changes),
-        requested: 0,
-        available: Vec::new(),
-    });
+    cx.set_global(ServerSelection::new(Some(changes)));
     cx.background_spawn(async move {
-        // A record SpaceTerm can't read is never replaced: the context refuses to write over it,
-        // and the choices of this run stay in memory.
-        let mut context = match ServerContext::load(Arc::clone(&paths)) {
-            Ok(context) => context,
-            Err(_) => ServerContext::new(paths),
-        };
-        let mut available: Vec<ServerKey> = vec![ServerKey::Local];
-        let _ = snapshots.send(snapshot(0, &context, &available)).await;
+        let mut retainer = Retainer::load(paths);
+        let _ = snapshots.send(retainer.snapshot(0)).await;
         while let Ok((change, request)) = queue.recv().await {
-            let _: Result<(), ContextError> = match request {
-                Change::Reconcile(keys) => {
-                    available = keys;
-                    context.reconcile(&available)
-                }
-                Change::Select(key) => context.select(key),
-                Change::Remember(key, facts) => context.remember(key, facts),
-            };
             if snapshots
-                .send(snapshot(change, &context, &available))
+                .send(retainer.apply(change, request))
                 .await
                 .is_err()
             {
@@ -86,44 +131,54 @@ pub(crate) fn configure_server_context(paths: Arc<AppPaths>, cx: &mut App) {
     .detach();
     cx.spawn(async move |cx| {
         while let Ok(snapshot) = published.recv().await {
-            cx.update_global::<ServerSelection, _>(|selection, _| {
-                // A choice made since this change was queued is still on its way.
-                if snapshot.change >= selection.requested {
-                    selection.selected = snapshot.selected;
-                }
-                for (key, facts) in snapshot.facts {
-                    let newer = selection
-                        .facts
-                        .get(&key)
-                        .is_none_or(|known| facts.observed_at >= known.observed_at);
-                    if newer {
-                        selection.facts.insert(key, facts);
-                    }
-                }
-            });
+            cx.update_global::<ServerSelection, _>(|selection, _| selection.publish(snapshot));
         }
     })
     .detach();
 }
 
-fn snapshot(change: u64, context: &ServerContext, available: &[ServerKey]) -> Snapshot {
-    Snapshot {
-        change,
-        selected: context.selected().clone(),
-        facts: available
-            .iter()
-            .filter_map(|key| Some((key.clone(), context.facts(key)?.clone())))
-            .collect(),
-    }
-}
-
 impl ServerSelection {
+    fn new(retain: Option<async_channel::Sender<(u64, Change)>>) -> Self {
+        Self {
+            selected: ServerKey::Local,
+            facts: BTreeMap::new(),
+            retain,
+            requested: 0,
+            inventory: None,
+        }
+    }
+
     fn queue(&mut self, change: Change) {
         self.requested = self.requested.wrapping_add(1);
         if let Some(retain) = &self.retain {
             // An unbounded queue refuses only once its worker has ended with the application.
             let _ = retain.try_send((self.requested, change));
         }
+    }
+
+    /// Whether `key` may carry facts: this computer's server always, another once it is known
+    /// to exist or while the saved connections are still loading.
+    fn admits(&self, key: &ServerKey) -> bool {
+        *key == ServerKey::Local
+            || self
+                .inventory
+                .as_ref()
+                .is_none_or(|inventory| inventory.contains(key))
+    }
+
+    /// Presents what the record holds, unless the window asked for a change since: that
+    /// change's own snapshot is still on its way.
+    fn publish(&mut self, snapshot: Snapshot) {
+        if snapshot.change != self.requested {
+            return;
+        }
+        let facts = snapshot
+            .facts
+            .into_iter()
+            .filter(|(key, _)| self.admits(key))
+            .collect();
+        self.selected = snapshot.selected;
+        self.facts = facts;
     }
 }
 
@@ -156,7 +211,8 @@ pub(crate) fn remember(key: ServerKey, facts: LastKnownFacts, cx: &mut App) {
             .facts
             .get(&key)
             .is_none_or(|known| facts.observed_at >= known.observed_at);
-        if !newer || selection.facts.get(&key) == Some(&facts) {
+        // A removed server's late observation never brings its facts back.
+        if !newer || !selection.admits(&key) || selection.facts.get(&key) == Some(&facts) {
             return;
         }
         selection.facts.insert(key.clone(), facts.clone());
@@ -164,21 +220,24 @@ pub(crate) fn remember(key: ServerKey, facts: LastKnownFacts, cx: &mut App) {
     });
 }
 
-/// Tells the record which servers exist now. A selected server that is gone gives way to this
-/// computer's, and the facts of forgotten servers are dropped.
+/// Tells the record which servers exist now, once the saved connections have loaded. A selected
+/// server that is gone gives way to this computer's, and the facts of forgotten servers are
+/// dropped.
 pub(crate) fn reconcile(available: Vec<ServerKey>, cx: &mut App) {
     ensure(cx);
     cx.update_global::<ServerSelection, _>(|selection, _| {
-        if selection.available == available {
+        if selection.inventory.as_ref() == Some(&available) {
             return;
         }
         if !available.contains(&selection.selected) {
             selection.selected = ServerKey::Local;
         }
-        selection
-            .facts
-            .retain(|key, _| *key == ServerKey::Local || available.contains(key));
-        selection.available = available.clone();
+        selection.inventory = Some(available.clone());
+        let facts = std::mem::take(&mut selection.facts);
+        selection.facts = facts
+            .into_iter()
+            .filter(|(key, _)| selection.admits(key))
+            .collect();
         selection.queue(Change::Reconcile(available));
     });
 }
@@ -186,19 +245,161 @@ pub(crate) fn reconcile(available: Vec<ServerKey>, cx: &mut App) {
 /// A build or test without retained storage still keeps the selection for its run.
 fn ensure(cx: &mut App) {
     if !cx.has_global::<ServerSelection>() {
-        cx.set_global(ServerSelection {
-            selected: ServerKey::Local,
-            facts: BTreeMap::new(),
-            retain: None,
-            requested: 0,
-            available: Vec::new(),
-        });
+        cx.set_global(ServerSelection::new(None));
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::platform::app_directories::AppDirectoryEnvironment;
+    use crate::platform::testing::{RecordingFilesystem, resolve_app_paths};
+
+    fn studio() -> ServerKey {
+        ServerKey::Ssh("studio".to_owned())
+    }
+
+    /// The window's selection with its worker run by hand over in-memory storage, so a test
+    /// decides when each snapshot arrives.
+    struct Delayed {
+        queued: async_channel::Receiver<(u64, Change)>,
+        retainer: Retainer,
+    }
+
+    impl Delayed {
+        fn install(cx: &mut gpui::TestAppContext) -> Self {
+            let paths = resolve_app_paths(
+                &AppDirectoryEnvironment {
+                    home: Some("/home/test".into()),
+                    ..Default::default()
+                },
+                Some("/runtime".into()),
+                200,
+                Arc::new(RecordingFilesystem::default()),
+            )
+            .unwrap();
+            let (changes, queued) = async_channel::unbounded();
+            cx.update(|cx| cx.set_global(ServerSelection::new(Some(changes))));
+            Self {
+                queued,
+                retainer: Retainer::load(Arc::new(paths)),
+            }
+        }
+
+        /// Retains every change the window queued so far, returning each one's snapshot
+        /// without presenting it.
+        fn retain(&mut self) -> Vec<Snapshot> {
+            std::iter::from_fn(|| self.queued.try_recv().ok())
+                .map(|(change, request)| self.retainer.apply(change, request))
+                .collect()
+        }
+    }
+
+    fn arrive(snapshots: Vec<Snapshot>, cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            for snapshot in snapshots {
+                cx.update_global::<ServerSelection, _>(|selection, _| selection.publish(snapshot));
+            }
+        });
+    }
+
+    #[gpui::test]
+    fn a_removed_servers_facts_never_return_with_a_late_snapshot(cx: &mut gpui::TestAppContext) {
+        let mut worker = Delayed::install(cx);
+        let studio_facts = LastKnownFacts {
+            observed_at: 10,
+            machine: Some("Studio".to_owned()),
+            ..LastKnownFacts::default()
+        };
+        cx.update(|cx| {
+            reconcile(vec![ServerKey::Local, studio()], cx);
+            remember(studio(), studio_facts, cx);
+        });
+        let before_removal = worker.retain();
+        cx.update(|cx| reconcile(vec![ServerKey::Local], cx));
+        let after_removal = worker.retain();
+
+        arrive(before_removal, cx);
+        assert_eq!(cx.update(|cx| facts(&studio(), cx)), None);
+        arrive(after_removal, cx);
+
+        cx.update(|cx| {
+            assert_eq!(facts(&studio(), cx), None);
+            remember(
+                studio(),
+                LastKnownFacts {
+                    observed_at: 20,
+                    ..LastKnownFacts::default()
+                },
+                cx,
+            );
+            assert_eq!(
+                facts(&studio(), cx),
+                None,
+                "a removed server's late observation stays forgotten"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn a_late_snapshot_never_undoes_a_change_observed_at_the_same_time(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let mut worker = Delayed::install(cx);
+        let observed = LastKnownFacts {
+            observed_at: 10,
+            machine: Some("Studio".to_owned()),
+            ..LastKnownFacts::default()
+        };
+        // A Git observation keeps the time the server's other facts were observed.
+        let with_location = LastKnownFacts {
+            worktree_location: Some("~/.worktrees/{repository}/{branch}".to_owned()),
+            ..observed.clone()
+        };
+        cx.update(|cx| {
+            reconcile(vec![ServerKey::Local, studio()], cx);
+            remember(studio(), observed, cx);
+        });
+        let earlier = worker.retain();
+        cx.update(|cx| remember(studio(), with_location.clone(), cx));
+
+        arrive(earlier, cx);
+        assert_eq!(
+            cx.update(|cx| facts(&studio(), cx)).as_ref(),
+            Some(&with_location)
+        );
+        let latest = worker.retain();
+        arrive(latest, cx);
+
+        assert_eq!(
+            cx.update(|cx| facts(&studio(), cx)),
+            Some(with_location),
+            "the latest snapshot presents what the window asked for"
+        );
+    }
+
+    #[gpui::test]
+    fn facts_observed_before_the_saved_connections_load_are_kept(cx: &mut gpui::TestAppContext) {
+        let mut worker = Delayed::install(cx);
+        let observed = LastKnownFacts {
+            observed_at: 10,
+            machine: Some("Studio".to_owned()),
+            ..LastKnownFacts::default()
+        };
+        cx.update(|cx| remember(studio(), observed.clone(), cx));
+
+        let snapshots = worker.retain();
+        arrive(snapshots, cx);
+        assert_eq!(
+            cx.update(|cx| facts(&studio(), cx)).as_ref(),
+            Some(&observed)
+        );
+        cx.update(|cx| reconcile(vec![ServerKey::Local, studio()], cx));
+        let snapshots = worker.retain();
+        arrive(snapshots, cx);
+
+        assert_eq!(cx.update(|cx| facts(&studio(), cx)), Some(observed));
+    }
 
     #[gpui::test]
     fn removing_the_selected_server_presents_this_computer(cx: &mut gpui::TestAppContext) {
