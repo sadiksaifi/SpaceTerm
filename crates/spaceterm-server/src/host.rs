@@ -1028,6 +1028,7 @@ mod startup_tests {
                         next_sequence: 1,
                     },
                     Request::SelectPane { pane, .. } => Reply::Restored {
+                        fresh: false,
                         session_ended: false,
                         recovery: None,
                         directory_unavailable: false,

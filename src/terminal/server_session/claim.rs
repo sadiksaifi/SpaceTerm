@@ -129,6 +129,7 @@ impl ClaimWorker<'_> {
                 ref recovery,
                 directory_unavailable,
                 session_ended,
+                fresh,
                 ..
             } = reply
             {
@@ -158,6 +159,8 @@ impl ClaimWorker<'_> {
                     DevelopmentPaneStatus::Failed(ServerError::DirectoryUnavailable)
                 } else if session_ended {
                     DevelopmentPaneStatus::SessionEnded
+                } else if fresh {
+                    DevelopmentPaneStatus::Connecting
                 } else {
                     DevelopmentPaneStatus::Restored
                 });
@@ -334,6 +337,7 @@ mod tests {
 
     fn restored(boot: u8) -> Reply {
         Reply::Restored {
+            fresh: false,
             server: [boot; 32],
             pane: [2; 32],
             workspace: [3; 32],
@@ -341,6 +345,84 @@ mod tests {
             recovery: None,
             directory_unavailable: false,
             session_ended: false,
+        }
+    }
+
+    #[test]
+    fn fresh_panes_never_present_server_restarted_before_first_use() {
+        use crate::ui::server_pane::ServerPaneView;
+        use spaceterm_server::{hierarchy::Mutation, pane::PaneService as _};
+
+        for delayed in [false, true] {
+            for revoked in [false, true] {
+                let mut host = crate::runtime::directory_testing::terminal_host();
+                host.prepare_initial_organization().unwrap();
+                let Reply::Inventory { inventory, .. } =
+                    host.request([1; 32], [1; 32], Request::Inventory)
+                else {
+                    panic!("fixture inventory unavailable");
+                };
+                let workspace = inventory.workspaces[0].id;
+                assert!(matches!(
+                    host.request(
+                        [1; 32],
+                        [1; 32],
+                        Request::Mutate {
+                            sequence: 1,
+                            mutation: Mutation::CreateTab {
+                                workspace,
+                                source: None
+                            },
+                        }
+                    ),
+                    Reply::Outcome(_)
+                ));
+                let Reply::Inventory { inventory, .. } =
+                    host.request([1; 32], [1; 32], Request::Inventory)
+                else {
+                    panic!("new Tab inventory unavailable");
+                };
+                let pane = inventory.workspaces[0].tabs.last().unwrap().root_pane;
+                if revoked {
+                    host.revoked([1; 32]);
+                }
+                let state = Arc::new(DevelopmentPaneState::new());
+                let mut view = ServerPaneView::new(state.clone());
+                if !delayed {
+                    state.select();
+                }
+                let mut observations = 0;
+                let granted = ClaimWorker {
+                    state: &state,
+                    pane_id: pane,
+                    alive: &AtomicBool::new(true),
+                    attachment: &None,
+                    size: &Mutex::new(PaneSize {
+                        columns: 80, rows: 24, cell_width: 8, cell_height: 16,
+                    }),
+                    appearance: &Mutex::new(TerminalAppearanceUpdate::builtin().unwrap()),
+                    directory_recovery: true,
+                    attached_session: &mut false,
+                    takeover: &mut false,
+                    paste_unconfirmed: &mut false,
+                }.run(|request| {
+                    view.sync();
+                    assert_eq!(view.screen(), None,
+                        "a fresh Pane must not present restart recovery, delayed={delayed}, revoked={revoked}");
+                    if matches!(request, Request::SelectPane { .. }) {
+                        observations += 1;
+                        if delayed && observations == 2 {
+                            state.select();
+                        }
+                        assert!(observations <= 3, "first selection must start the shell");
+                    }
+                    exchange(&state, pane, request, |request| {
+                        Ok(host.request([1; 32], [1; 32], request.clone()))
+                    })
+                }, || {}).unwrap().unwrap();
+                assert_eq!(granted.lease.connection, [1; 32]);
+                host.shutdown().unwrap();
+            }
         }
     }
 
@@ -789,6 +871,7 @@ mod tests {
             paste_unconfirmed: &mut paste_unconfirmed,
         }.run(|request| {
             let restored = || Reply::Restored {
+                fresh: false,
                 recovery: None,
                 directory_unavailable: false,
                 session_ended: true,

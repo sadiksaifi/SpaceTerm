@@ -309,6 +309,7 @@ fn client_process() {
     let mut state = DevelopmentPaneState::new();
     state.connection_recovery = Arc::clone(&control.recovery);
     let losing_start = std::env::var("SPACETERM_START_TEST_PHASE").unwrap() == "lose-start";
+    let mut pane_observed = false;
     let result = ClaimWorker {
         state: &state,
         pane_id: pane,
@@ -328,14 +329,17 @@ fn client_process() {
     }
     .run(
         |request| {
-            // Model the person's action only after ClaimWorker has offered the screen.
-            // Acting inside the reply callback runs before that offer and can be ignored.
+            // Connecting is also the initial status, before the server has reported control.
+            // Model first use only after ClaimWorker has processed that initial observation.
             match state.status() {
+                DevelopmentPaneStatus::Connecting if losing_start && pane_observed => {
+                    state.select()
+                }
                 DevelopmentPaneStatus::Restored if losing_start => state.start_restored(),
                 DevelopmentPaneStatus::Takeover => state.take_over(),
                 _ => {}
             }
-            presenter.send(request, |request| {
+            let result = presenter.send(request, |request| {
                 exchange(&state, pane, request, |request| {
                     write(&mut stream, request).map_err(|_| ServerError::Protocol)?;
                     let reply = read::<Reply>(&mut stream)
@@ -346,7 +350,9 @@ fn client_process() {
                         reply => Ok(reply),
                     }
                 })
-            })
+            });
+            pane_observed |= result.is_ok();
+            result
         },
         || {},
     );
