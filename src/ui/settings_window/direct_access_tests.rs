@@ -53,6 +53,8 @@ struct ScriptedAccess {
     policies: Mutex<Vec<Option<NetworkPolicy>>>,
     claims: Mutex<Vec<Claim>>,
     devices: Mutex<Vec<Device>>,
+    /// Why the server can't list its devices, when it can't.
+    devices_failure: Mutex<Option<AccessFailure>>,
 }
 
 impl ScriptedAccess {
@@ -76,7 +78,14 @@ impl ScriptedAccess {
             policies: Mutex::default(),
             claims: Mutex::default(),
             devices: Mutex::default(),
+            devices_failure: Mutex::default(),
         })
+    }
+
+    /// SpaceTerm can no longer reach the server, as after a disconnect or a lost connection. The
+    /// server itself keeps its access and devices.
+    fn become_unreachable(&self) {
+        *self.status.lock().expect("status") = Err(AccessFailure::Unreachable);
     }
 
     /// Off, with two addresses on the server and the routing table preferring the second.
@@ -179,6 +188,9 @@ impl DirectAccessControl for ScriptedAccess {
     }
 
     fn devices(&self) -> Result<Vec<Device>, AccessFailure> {
+        if let Some(failure) = *self.devices_failure.lock().expect("devices failure") {
+            return Err(failure);
+        }
         Ok(self.devices.lock().expect("devices").clone())
     }
 }
@@ -471,15 +483,114 @@ fn turning_off_asks_first_and_escape_changes_nothing(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn a_server_spaceterm_cant_reach_dims_network_access_and_says_what_to_do(cx: &mut TestAppContext) {
+fn a_server_spaceterm_has_never_read_shows_its_access_as_unknown(cx: &mut TestAppContext) {
     let access = ScriptedAccess::off();
-    *access.status.lock().expect("status") = Err(AccessFailure::Unreachable);
+    access.become_unreachable();
+    let (window, cx) = open_servers(&access, cx);
+
+    assert!(
+        !open(ACCESS_SELECTOR, cx),
+        "no switch claims the server is off when nothing says so"
+    );
+    assert!(!access_on(&window, cx));
+    assert!(reads("Unknown", cx));
+    assert!(reads("to change its network access.", cx));
+    assert!(
+        !reads("Shown values are from", cx),
+        "nothing was read, so nothing is shown as last known"
+    );
+}
+
+#[gpui::test]
+fn a_server_spaceterm_loses_keeps_its_last_known_access_and_devices(cx: &mut TestAppContext) {
+    let access = ScriptedAccess::listening();
+    access.pair(3, "MacBook", None);
+    let (window, cx) = open_servers(&access, cx);
+    assert!(reads("Devices: 1 paired", cx));
+
+    access.become_unreachable();
+    reread(cx);
+
+    assert!(
+        access_on(&window, cx),
+        "losing the connection changes nothing on the server, so access still reads as on"
+    );
+    assert!(open(ACCESS_SELECTOR, cx));
+    assert!(reads("Devices: 1 paired", cx));
+    assert!(open(&format!("{DEVICE_SELECTOR}-0"), cx));
+    assert!(reads("Shown values are from", cx));
+    assert!(
+        !reads("Listening on", cx),
+        "a server SpaceTerm can't reach isn't reported as listening now"
+    );
+}
+
+#[gpui::test]
+fn a_server_last_read_as_off_stays_off_and_says_when(cx: &mut TestAppContext) {
+    let access = ScriptedAccess::off();
+    let (window, cx) = open_servers(&access, cx);
+
+    access.become_unreachable();
+    reread(cx);
+
+    assert!(open(ACCESS_SELECTOR, cx), "the last reading still shows");
+    assert!(!access_on(&window, cx));
+    assert!(reads("Shown values are from", cx));
+}
+
+#[gpui::test]
+fn network_access_controls_change_nothing_while_the_server_is_out_of_reach(
+    cx: &mut TestAppContext,
+) {
+    let access = ScriptedAccess::listening();
+    access.pair(3, "MacBook", None);
     let (_, cx) = open_servers(&access, cx);
+    access.become_unreachable();
+    reread(cx);
 
     click(ACCESS_SELECTOR, cx);
-
+    assert!(
+        !open(&modal_action(TURN_OFF_CONFIRM_SELECTOR), cx),
+        "Turn Off isn't offered"
+    );
+    click(INVITE_SELECTOR, cx);
+    assert!(
+        !open(crate::ui::direct_pairing::COPY_SELECTOR, cx),
+        "no invitation opens"
+    );
+    click(&format!("{DEVICE_SELECTOR}-0-remove"), cx);
+    assert!(
+        !open(&modal_action(REMOVE_CONFIRM_SELECTOR), cx),
+        "Remove isn't offered"
+    );
     assert!(access.policies().is_empty());
-    assert!(reads("to change its network access.", cx));
+}
+
+#[gpui::test]
+fn turning_off_after_the_server_went_out_of_reach_is_refused(cx: &mut TestAppContext) {
+    let access = ScriptedAccess::listening();
+    let (window, cx) = open_servers(&access, cx);
+
+    click(ACCESS_SELECTOR, cx);
+    access.become_unreachable();
+    reread(cx);
+    click(&modal_action(TURN_OFF_CONFIRM_SELECTOR), cx);
+
+    assert!(
+        access.policies().is_empty(),
+        "nothing is sent to a server SpaceTerm can't reach"
+    );
+    assert!(access_on(&window, cx));
+}
+
+#[gpui::test]
+fn devices_the_server_couldnt_list_read_as_unknown_rather_than_none(cx: &mut TestAppContext) {
+    let access = ScriptedAccess::listening();
+    *access.devices_failure.lock().expect("devices failure") = Some(AccessFailure::Refused);
+    let (_, cx) = open_servers(&access, cx);
+
+    assert!(reads("Devices: Unknown", cx));
+    assert!(!reads("Devices: None", cx));
 }
 
 #[gpui::test]
