@@ -1824,3 +1824,56 @@ fn all_servers_rows_keep_the_edges_and_insets_of_the_rows_around_them(cx: &mut T
         "the picker's chevron should end on the controls' edge"
     );
 }
+
+/// The corners of the hover fill painted over `selector` while the pointer rests on it.
+fn hovered_corners(selector: &str, cx: &mut VisualTestContext) -> gpui::Corners<gpui::Pixels> {
+    let item = bounds(selector, cx);
+    cx.simulate_mouse_move(item.center(), None, Modifiers::none());
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        let card = crate::ui::appearance::chrome(cx).host_colors(spaceterm_ui::ControlHost::Card);
+        let hover =
+            gpui::Background::from(crate::ui::appearance::gpui_color(card.row_hover_background));
+        let scale = window.scale_factor();
+        let quad = window
+            .painted_quads()
+            .into_iter()
+            .find(|quad| quad.bounds == item.scale(scale) && quad.background == hover)
+            .unwrap_or_else(|| panic!("{selector} should paint a hover fill"));
+        let corners = quad.corner_radii;
+        gpui::Corners {
+            top_left: gpui::px(corners.top_left.0 / scale),
+            top_right: gpui::px(corners.top_right.0 / scale),
+            bottom_right: gpui::px(corners.bottom_right.0 / scale),
+            bottom_left: gpui::px(corners.bottom_left.0 / scale),
+        }
+    })
+}
+
+#[gpui::test]
+fn a_hovered_row_rounds_only_the_corners_it_shares_with_its_card(cx: &mut TestAppContext) {
+    let servers = open_servers(true, &["penguin"], cx);
+    let cx = servers.cx;
+    let card = crate::ui::chrome_geometry::RadiusRole::Card.pixels()
+        - gpui::px(crate::ui::chrome_geometry::HAIRLINE);
+    let square = gpui::px(0.0);
+
+    let first = hovered_corners(&format!("{}-0", super::LIST_SELECTOR), cx);
+    assert_eq!(
+        (first.top_left, first.top_right, first.bottom_left),
+        (card, card, square),
+        "the card's first row should round only its top corners"
+    );
+    let middle = hovered_corners(&format!("{}-1", super::LIST_SELECTOR), cx);
+    assert_eq!(
+        (middle.top_left, middle.bottom_right),
+        (square, square),
+        "a row between others should stay square"
+    );
+    let last = hovered_corners(super::ADD_SERVER_SELECTOR, cx);
+    assert_eq!(
+        (last.top_left, last.bottom_left, last.bottom_right),
+        (square, card, card),
+        "the card's last row should round only its bottom corners"
+    );
+}

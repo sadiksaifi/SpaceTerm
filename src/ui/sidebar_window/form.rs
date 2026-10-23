@@ -116,6 +116,46 @@ pub(crate) fn row_insets<E: Styled>(item: E, appearance: &ChromeAppearance) -> E
         .py(row_vertical_inset(appearance))
 }
 
+/// Which of its card's edges a row touches. GPUI clips a card's rows to a rectangle, so a row
+/// whose fill reaches the card's edges rounds the corners it shares with the card itself.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct CardEnds {
+    /// The row is the card's first, under its top edge.
+    pub(crate) top: bool,
+    /// The row is the card's last, above its bottom edge.
+    pub(crate) bottom: bool,
+}
+
+impl CardEnds {
+    /// Where `row` sits among `rows`, of which `same_card` picks the ones sharing its card.
+    pub(crate) fn of<T: PartialEq>(rows: &[T], row: &T, same_card: impl Fn(&T) -> bool) -> Self {
+        Self {
+            top: rows.iter().find(|other| same_card(other)) == Some(row),
+            bottom: rows.iter().rev().find(|other| same_card(other)) == Some(row),
+        }
+    }
+
+    /// The part of these ends a row at `index` of `count` rows inside this row touches.
+    pub(crate) fn nth(self, index: usize, count: usize) -> Self {
+        Self {
+            top: self.top && index == 0,
+            bottom: self.bottom && index + 1 == count,
+        }
+    }
+
+    /// Rounds the corners `item` shares with its card, inside the card's border.
+    pub(crate) fn round<E: Styled>(self, mut item: E) -> E {
+        let radius = RadiusRole::Card.pixels() - px(HAIRLINE);
+        if self.top {
+            item = item.rounded_t(radius);
+        }
+        if self.bottom {
+            item = item.rounded_b(radius);
+        }
+        item
+    }
+}
+
 /// The hairline a card draws above each of its rows after the first. It starts at the row's
 /// inset and runs to the card's edge. Its row must be positioned relative.
 pub(crate) fn row_separator(appearance: &ChromeAppearance) -> gpui::Div {
@@ -903,6 +943,26 @@ pub(crate) fn action_button(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn card_ends_name_the_first_and_last_row_of_each_card() {
+        // A search can interleave two cards' rows; each card still has one first and one last.
+        let rows = [("a", 1), ("b", 2), ("a", 3), ("b", 4), ("a", 5)];
+        let ends = |row| CardEnds::of(&rows, &row, |other| other.0 == row.0);
+        let edges = |top, bottom| CardEnds { top, bottom };
+
+        assert_eq!(ends(("a", 1)), edges(true, false));
+        assert_eq!(ends(("a", 3)), edges(false, false));
+        assert_eq!(ends(("a", 5)), edges(false, true));
+        assert_eq!(ends(("b", 2)), edges(true, false));
+        assert_eq!(ends(("b", 4)), edges(false, true));
+        let alone = edges(true, true);
+        assert_eq!(alone.nth(0, 1), alone);
+        assert_eq!(alone.nth(0, 3), edges(true, false));
+        assert_eq!(alone.nth(1, 3), edges(false, false));
+        assert_eq!(alone.nth(2, 3), edges(false, true));
+        assert_eq!(edges(false, false).nth(0, 1), edges(false, false));
+    }
 
     struct FormLabelFixture {
         label: &'static str,

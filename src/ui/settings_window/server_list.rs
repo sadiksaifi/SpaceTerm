@@ -25,7 +25,7 @@ use crate::ssh::server_connection::RemoteConnectionStatus;
 use crate::ui::appearance::{ChromeAppearance, gpui_color};
 use crate::ui::chrome_icons::IconRole;
 use crate::ui::chrome_typography::{ChromeTextStyleExt as _, TextRole};
-use crate::ui::sidebar_window::form::{row_insets, row_separator};
+use crate::ui::sidebar_window::form::{CardEnds, row_insets, row_separator};
 
 pub(super) const PICKER_SELECTOR: &str = "settings-server-picker";
 pub(super) const LIST_SELECTOR: &str = "settings-all-servers";
@@ -581,6 +581,7 @@ impl SettingsWindow {
     /// keyboard stop, whose arrow keys move the selection.
     pub(super) fn render_all_servers(
         &mut self,
+        ends: CardEnds,
         appearance: &ChromeAppearance,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -639,6 +640,7 @@ impl SettingsWindow {
                 .gap(appearance.spacing(ITEM_GAP))
                 .w_full()
                 .map(|item| row_insets(item, appearance))
+                .map(|item| ends.nth(index, count).round(item))
                 .cursor_default()
                 .when(
                     is_selected && focused && window.last_input_was_keyboard(),
@@ -714,6 +716,7 @@ impl SettingsWindow {
     /// for a person who never opens the picker.
     pub(super) fn render_add_server_row(
         &mut self,
+        ends: CardEnds,
         appearance: &ChromeAppearance,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -757,6 +760,7 @@ impl SettingsWindow {
             .gap(appearance.spacing(ITEM_GAP))
             .w_full()
             .map(|row| row_insets(row, appearance))
+            .map(|row| ends.round(row))
             .cursor_default()
             .hover(|row| row.bg(gpui_color(card.row_hover_background)))
             .child(
