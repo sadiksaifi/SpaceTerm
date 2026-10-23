@@ -140,6 +140,10 @@ run = "git submodule update --init --recursive"
 description = "Download locked Rust dependencies"
 run = "cargo fetch --locked"
 
+[tasks."setup:lock"]
+description = "Add changed manifest dependencies to Cargo.lock without upgrading locked packages"
+run = "cargo update --workspace"
+
 [tasks."setup:skills"]
 description = "Install the agent skills listed in skills-lock.json and share them with Claude Code"
 env = { DISABLE_TELEMETRY = "1" }
