@@ -14,6 +14,7 @@ pub(super) fn shortcuts() -> Vec<SystemReserved> {
         ("ctrl-shift-q", Quit),
         ("ctrl-shift-m", Minimize),
         ("ctrl-,", Settings),
+        ("ctrl-shift-p", CommandPalette),
         ("f11", FullScreen),
         ("ctrl-shift-alt-left", MoveWindowToWorkspace),
         ("ctrl-shift-alt-right", MoveWindowToWorkspace),

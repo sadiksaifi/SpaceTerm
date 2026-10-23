@@ -115,6 +115,11 @@ pub(crate) fn view_menu() -> Menu {
         disabled: false,
         name: "View".into(),
         items: vec![
+            MenuItem::action(
+                "Command Palette…",
+                crate::ui::application_commands::OpenCommandPalette,
+            ),
+            MenuItem::separator(),
             MenuItem::action("Toggle Sidebar", ToggleSidebar),
             MenuItem::action("Toggle Sidebar Focus", ToggleSidebarFocus),
             MenuItem::separator(),
@@ -287,7 +292,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            labels(&view_menu())[6..12],
+            labels(&view_menu())[8..14],
             [
                 "|",
                 "Scroll to Top",
