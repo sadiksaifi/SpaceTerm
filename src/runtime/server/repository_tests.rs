@@ -1019,6 +1019,65 @@ fn replaced_worktree_and_main_worktree_are_preserved_after_confirmation() {
 }
 
 #[test]
+fn worktree_location_refuses_an_unwritable_folder_without_changing_settings() {
+    use spaceterm_server::{
+        hierarchy::Outcome,
+        worktree::{Operation, Read, ReadReply, Settings},
+    };
+    use std::os::unix::fs::{PermissionsExt, symlink};
+
+    let fixture = GitFixture::new();
+    let folder = fixture.0.join("read-only");
+    std::fs::create_dir(&folder).unwrap();
+    let alias = fixture.0.join("alias");
+    symlink(&folder, &alias).unwrap();
+    std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let mut host = SharedWorkspaceHost::new(host());
+    let result = finish_write(
+        &mut host,
+        1,
+        Operation::SetLocation {
+            version: 0,
+            template: format!("{}/missing/{{repository}}/{{branch}}", alias.display()),
+        },
+    );
+    std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(
+        matches!(result, Outcome::WorktreeFailed(_)),
+        "a read-only ancestor on the owning server must reject the edit: {result:?}"
+    );
+    assert!(matches!(
+        host.request([1; 32], [1; 32], Request::WorktreeRead(Read::Settings)),
+        Reply::WorktreeRead(Ok(ReadReply::Settings(saved))) if saved == Settings::default()
+    ));
+    assert!(!folder.join("missing").exists());
+    host.shutdown().unwrap();
+}
+
+#[test]
+fn worktree_location_refuses_a_file_in_the_folder_prefix() {
+    use spaceterm_server::{hierarchy::Outcome, worktree::Operation};
+    let fixture = GitFixture::new();
+    let file = fixture.0.join("file");
+    std::fs::write(&file, b"keep").unwrap();
+    let mut host = SharedWorkspaceHost::new(host());
+    let result = finish_write(
+        &mut host,
+        1,
+        Operation::SetLocation {
+            version: 0,
+            template: format!("{}/{{branch}}", file.display()),
+        },
+    );
+    assert!(
+        matches!(result, Outcome::WorktreeFailed(_)),
+        "a file cannot contain new Worktree folders: {result:?}"
+    );
+    assert_eq!(std::fs::read(file).unwrap(), b"keep");
+    host.shutdown().unwrap();
+}
+
+#[test]
 fn worktree_location_is_seeded_once_and_validated_by_the_owning_server() {
     use spaceterm_server::{
         hierarchy::Outcome,
