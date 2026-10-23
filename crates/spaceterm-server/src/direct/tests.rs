@@ -430,6 +430,45 @@ fn prepared_enrollment_cancels_before_submission_and_fences_every_late_retry() {
 }
 
 #[test]
+fn both_devices_compare_the_first_authenticated_exchange_across_exact_retries() {
+    let fixture = Fixture::new();
+    fixture.enable();
+    let invitation = fixture.invite();
+    let credential = DeviceCredential::generate().unwrap();
+    let mut enrollment =
+        Enrollment::prepare(&invitation, "Joining device".into(), &credential).unwrap();
+    assert_eq!(enrollment.comparison_code(), None);
+    let server = fixture.serve_next();
+    let code = enrollment.submit().unwrap();
+    server.join().unwrap().unwrap();
+    let ManagementReply::Claims(claims) = fixture.management(Management::Claims).unwrap() else {
+        panic!()
+    };
+    let claim = &claims[0];
+    assert_eq!(Some(code), enrollment.comparison_code());
+    assert_eq!(code, claim.comparison_code());
+    assert_eq!(code.to_string().len(), 6);
+    assert!(code.to_string().bytes().all(|byte| byte.is_ascii_digit()));
+
+    // A new server nonce on retry must not change what the owner is approving.
+    let server = fixture.serve_next();
+    assert_eq!(enrollment.submit(), Ok(code));
+    server.join().unwrap().unwrap();
+    let mut changed = claim.clone();
+    changed.exchange_hash[0] ^= 1;
+    assert!(matches!(
+        fixture.management(Management::Approve(changed)),
+        Err(DirectError::Substituted)
+    ));
+    fixture
+        .management(Management::Approve(claim.clone()))
+        .unwrap();
+    let server = fixture.serve_next();
+    assert!(enrollment.finish().unwrap().is_some());
+    server.join().unwrap().unwrap();
+}
+
+#[test]
 fn prepared_submission_replays_only_the_same_claim_key_and_name_after_a_lost_reply() {
     let fixture = Fixture::new();
     fixture.enable();
