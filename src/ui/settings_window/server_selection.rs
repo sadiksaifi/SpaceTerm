@@ -131,7 +131,7 @@ pub(crate) fn configure_server_context(paths: Arc<AppPaths>, cx: &mut App) {
     .detach();
     cx.spawn(async move |cx| {
         while let Ok(snapshot) = published.recv().await {
-            cx.update_global::<ServerSelection, _>(|selection, _| selection.publish(snapshot));
+            cx.update(|cx| present(snapshot, cx));
         }
     })
     .detach();
@@ -166,20 +166,42 @@ impl ServerSelection {
                 .is_none_or(|inventory| inventory.contains(key))
     }
 
-    /// Presents what the record holds, unless the window asked for a change since: that
-    /// change's own snapshot is still on its way.
-    fn publish(&mut self, snapshot: Snapshot) {
+    /// What the window presents once `snapshot` arrives, or `None` when it changes nothing. A
+    /// snapshot answering an earlier change changes nothing: the latest change's own snapshot is
+    /// still on its way.
+    fn presented(
+        &self,
+        snapshot: Snapshot,
+    ) -> Option<(ServerKey, BTreeMap<ServerKey, LastKnownFacts>)> {
         if snapshot.change != self.requested {
-            return;
+            return None;
         }
-        let facts = snapshot
+        let facts: BTreeMap<_, _> = snapshot
             .facts
             .into_iter()
             .filter(|(key, _)| self.admits(key))
             .collect();
-        self.selected = snapshot.selected;
-        self.facts = facts;
+        (snapshot.selected != self.selected || facts != self.facts)
+            .then_some((snapshot.selected, facts))
     }
+}
+
+// Updating the selection notifies its observers even when the update changes nothing. The
+// Settings window records observations whenever it is notified, so every step below decides on a
+// read of the selection first and updates it only to change it.
+
+/// Presents what the record holds after one change, when that changes what the window shows.
+fn present(snapshot: Snapshot, cx: &mut App) {
+    let Some((selected, facts)) = cx
+        .try_global::<ServerSelection>()
+        .and_then(|selection| selection.presented(snapshot))
+    else {
+        return;
+    };
+    cx.update_global::<ServerSelection, _>(|selection, _| {
+        selection.selected = selected;
+        selection.facts = facts;
+    });
 }
 
 /// The selected server. This computer's server until the record loads or when none is retained.
@@ -206,15 +228,14 @@ pub(crate) fn select(key: ServerKey, cx: &mut App) {
 /// one.
 pub(crate) fn remember(key: ServerKey, facts: LastKnownFacts, cx: &mut App) {
     ensure(cx);
+    let selection = cx.global::<ServerSelection>();
+    let known = selection.facts.get(&key);
+    let newer = known.is_none_or(|known| facts.observed_at >= known.observed_at);
+    // A removed server's late observation never brings its facts back.
+    if !newer || !selection.admits(&key) || known == Some(&facts) {
+        return;
+    }
     cx.update_global::<ServerSelection, _>(|selection, _| {
-        let newer = selection
-            .facts
-            .get(&key)
-            .is_none_or(|known| facts.observed_at >= known.observed_at);
-        // A removed server's late observation never brings its facts back.
-        if !newer || !selection.admits(&key) || selection.facts.get(&key) == Some(&facts) {
-            return;
-        }
         selection.facts.insert(key.clone(), facts.clone());
         selection.queue(Change::Remember(key, facts));
     });
@@ -225,10 +246,10 @@ pub(crate) fn remember(key: ServerKey, facts: LastKnownFacts, cx: &mut App) {
 /// dropped.
 pub(crate) fn reconcile(available: Vec<ServerKey>, cx: &mut App) {
     ensure(cx);
+    if cx.global::<ServerSelection>().inventory.as_ref() == Some(&available) {
+        return;
+    }
     cx.update_global::<ServerSelection, _>(|selection, _| {
-        if selection.inventory.as_ref() == Some(&available) {
-            return;
-        }
         if !available.contains(&selection.selected) {
             selection.selected = ServerKey::Local;
         }
@@ -301,7 +322,7 @@ mod tests {
     fn arrive(snapshots: Vec<Snapshot>, cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {
             for snapshot in snapshots {
-                cx.update_global::<ServerSelection, _>(|selection, _| selection.publish(snapshot));
+                present(snapshot, cx);
             }
         });
     }
