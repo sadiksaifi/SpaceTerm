@@ -640,21 +640,17 @@ fn click_modal(selector: &str, cx: &mut VisualTestContext) {
     click(modal_action(selector), cx);
 }
 
-/// Whether the page or the selected server's maintenance tells the person `text`: a message under
-/// Status or Version, a notice, or the maintenance state it reports.
-fn explains(text: &str, window: &Entity<SettingsWindow>, cx: &mut VisualTestContext) -> bool {
-    let published = A11yTree::read(cx).with_role("Label").iter().any(|node| {
-        node["aria"]["value"]
-            .as_str()
-            .is_some_and(|published| published.contains(text))
-    }) || announces(text, cx);
-    published
-        || window.read_with(cx, |settings, _| {
-            [MaintenanceRow::Service, MaintenanceRow::Update]
-                .into_iter()
-                .filter_map(|row| settings.maintenance_presentation(row))
-                .any(|presentation| presentation.explanation.contains(text))
+/// Whether the window tells the person `text` as assistive technology reads it: a description, a
+/// message under Status or Version, a notice, or an announced state. Text that exists only in
+/// SpaceTerm's model and isn't on screen doesn't count.
+fn explains(text: &str, cx: &mut VisualTestContext) -> bool {
+    A11yTree::read(cx).in_order().iter().any(|node| {
+        ["label", "value"].into_iter().any(|field| {
+            node["aria"][field]
+                .as_str()
+                .is_some_and(|published| published.contains(text))
         })
+    })
 }
 
 /// Whether the selected server's maintenance reports the state `selector` names.
@@ -764,11 +760,7 @@ fn check_now_shows_the_approved_version_without_connecting(cx: &mut TestAppConte
 
     assert_eq!(servers.operations.calls(), vec![Call::Refresh]);
     assert!(shows("settings-ssh-server-service-state-running", &servers));
-    assert!(explains(
-        "The server on penguin is running",
-        &servers.window,
-        servers.cx
-    ));
+    assert!(explains("The server on penguin is running", servers.cx));
     assert!(
         A11yTree::read(servers.cx)
             .with_role("Label")
@@ -807,7 +799,6 @@ fn stopping_asks_once_before_it_sends_anything(cx: &mut TestAppContext) {
     );
     assert!(explains(
         "Stop the penguin server and end all of its Terminal Sessions?",
-        &servers.window,
         servers.cx
     ));
 
@@ -821,11 +812,7 @@ fn stopping_asks_once_before_it_sends_anything(cx: &mut TestAppContext) {
         ],
         "only the described change is performed, once"
     );
-    assert!(explains(
-        "The server on penguin stopped",
-        &servers.window,
-        servers.cx
-    ));
+    assert!(explains("The server on penguin stopped", servers.cx));
     assert!(rendered(
         "settings-ssh-server-maintenance-acknowledge",
         servers.cx
@@ -895,7 +882,6 @@ fn updating_names_both_versions_and_asks_once(cx: &mut TestAppContext) {
     assert!(explains(
         "Update the penguin server to version 1.5.0 (commit bbbbbbb) and end all of its Terminal \
          Sessions?",
-        &servers.window,
         servers.cx
     ));
 
@@ -910,7 +896,6 @@ fn updating_names_both_versions_and_asks_once(cx: &mut TestAppContext) {
     );
     assert!(explains(
         "now runs version 1.5.0 (commit bbbbbbb)",
-        &servers.window,
         servers.cx
     ));
 }
@@ -929,11 +914,7 @@ fn a_validated_result_waits_for_an_ordinary_acknowledgement(cx: &mut TestAppCont
     );
     servers.cx.run_until_parked();
 
-    assert!(explains(
-        "The server on penguin stopped",
-        &servers.window,
-        servers.cx
-    ));
+    assert!(explains("The server on penguin stopped", servers.cx));
     assert!(!rendered("settings-ssh-server-service-check", servers.cx));
 
     click("settings-ssh-server-maintenance-acknowledge", servers.cx);
@@ -971,18 +952,13 @@ fn an_unconfirmed_operation_is_resolved_and_never_repeated(cx: &mut TestAppConte
     ));
     assert!(explains(
         "didn\u{2019}t hear whether penguin stopped its server",
-        &servers.window,
         servers.cx
     ));
 
     click("settings-ssh-server-service-again", servers.cx);
 
     assert_eq!(servers.operations.calls(), vec![Call::Resume]);
-    assert!(explains(
-        "The server on penguin stopped",
-        &servers.window,
-        servers.cx
-    ));
+    assert!(explains("The server on penguin stopped", servers.cx));
 }
 
 /// While an operation is underway, its row reports the phase and the other row offers nothing.
@@ -1007,11 +983,7 @@ fn progress_names_the_phase_and_only_one_row_reports_it(cx: &mut TestAppContext)
         "settings-server-version-progress-track",
         servers.cx
     ));
-    assert!(explains(
-        "Stopping the server on penguin",
-        &servers.window,
-        servers.cx
-    ));
+    assert!(explains("Stopping the server on penguin", servers.cx));
     assert!(rendered(
         "settings-ssh-server-maintenance-cancel",
         servers.cx
@@ -1112,14 +1084,9 @@ fn a_removed_connection_keeps_what_spaceterm_still_has_to_say(cx: &mut TestAppCo
     assert!(rendered(REMOVED_NOTICE, servers.cx));
     assert!(explains(
         "didn\u{2019}t hear whether penguin stopped its server",
-        &servers.window,
         servers.cx
     ));
-    assert!(explains(
-        "Nothing here reconnects",
-        &servers.window,
-        servers.cx
-    ));
+    assert!(explains("Nothing here reconnects", servers.cx));
     for absent in [
         "settings-ssh-server-connect",
         "settings-ssh-server-check",
@@ -1135,11 +1102,7 @@ fn a_removed_connection_keeps_what_spaceterm_still_has_to_say(cx: &mut TestAppCo
     click("settings-ssh-server-service-again-penguin", servers.cx);
 
     assert_eq!(servers.operations.calls(), vec![Call::Resume]);
-    assert!(explains(
-        "The server on penguin stopped",
-        &servers.window,
-        servers.cx
-    ));
+    assert!(explains("The server on penguin stopped", servers.cx));
 
     click(
         "settings-ssh-server-maintenance-acknowledge-penguin",
@@ -1195,18 +1158,10 @@ fn the_removed_section_claims_no_result_it_does_not_have(cx: &mut TestAppContext
             );
         }
         assert!(
-            !explains(
-                "has the result of work you asked for",
-                &servers.window,
-                servers.cx
-            ),
+            !explains("has the result of work you asked for", servers.cx),
             "{state:?} has no result, so the section must not claim one"
         );
-        assert!(explains(
-            "Nothing here reconnects",
-            &servers.window,
-            servers.cx
-        ));
+        assert!(explains("Nothing here reconnects", servers.cx));
     }
 }
 
@@ -1241,14 +1196,9 @@ fn discarding_an_operation_asks_before_it_retires_the_record(cx: &mut TestAppCon
     );
     assert!(explains(
         "Discard the stop SpaceTerm sent to penguin?",
-        &servers.window,
         servers.cx
     ));
-    assert!(explains(
-        "what the stop did on penguin",
-        &servers.window,
-        servers.cx
-    ));
+    assert!(explains("what the stop did on penguin", servers.cx));
 
     click_modal("settings-ssh-server-discard-cancel", servers.cx);
 
@@ -1303,7 +1253,6 @@ fn discarding_a_removed_connections_operation_asks_first(cx: &mut TestAppContext
     );
     assert!(explains(
         "Discard the removal SpaceTerm sent to penguin?",
-        &servers.window,
         servers.cx
     ));
 
@@ -1401,7 +1350,6 @@ fn an_observed_server_offers_its_steps_before_any_maintenance_read(cx: &mut Test
     ));
     assert!(explains(
         "was running when SpaceTerm last reached it",
-        &servers.window,
         servers.cx
     ));
     for offered in [
@@ -1522,11 +1470,7 @@ fn a_result_this_client_cannot_save_says_what_ok_leaves_behind(cx: &mut TestAppC
         rendered("settings-ssh-server-maintenance-acknowledge", servers.cx),
         "the result SpaceTerm couldn\u{2019}t retire stays on the row"
     );
-    assert!(explains(
-        "The server on penguin stopped",
-        &servers.window,
-        servers.cx
-    ));
+    assert!(explains("The server on penguin stopped", servers.cx));
     assert!(rendered(OPERATIONS_PERSISTENCE, servers.cx));
 }
 
@@ -1597,19 +1541,13 @@ fn a_removed_connections_unknown_original_ends_with_a_word(cx: &mut TestAppConte
     );
     assert!(explains(
         "penguin has no record of the operation SpaceTerm sent.",
-        &servers.window,
         servers.cx
     ));
     assert!(explains(
         "may never have arrived, or that server may have dropped it",
-        &servers.window,
         servers.cx
     ));
-    assert!(explains(
-        "has stopped following it",
-        &servers.window,
-        servers.cx
-    ));
+    assert!(explains("has stopped following it", servers.cx));
     for absent in [
         "settings-ssh-server-service-again-penguin",
         "settings-ssh-server-maintenance-discard-penguin",
@@ -1666,23 +1604,17 @@ fn a_second_original_on_one_machine_is_named_and_settled_in_turn(cx: &mut TestAp
     );
     assert!(explains(
         "didn\u{2019}t hear whether penguin stopped its server",
-        &servers.window,
         servers.cx
     ));
     assert!(
         explains(
             "You asked for one more operation on penguin: the restart.",
-            &servers.window,
             servers.cx
         ),
         "the row must name the original it has still to report"
     );
     assert!(
-        explains(
-            "reports that one here once this one is settled",
-            &servers.window,
-            servers.cx
-        ),
+        explains("reports that one here once this one is settled", servers.cx),
         "the row must say the named original gets its turn"
     );
 
@@ -1691,7 +1623,6 @@ fn a_second_original_on_one_machine_is_named_and_settled_in_turn(cx: &mut TestAp
 
     assert!(explains(
         "Discard the stop SpaceTerm sent to penguin?",
-        &servers.window,
         servers.cx
     ));
 
@@ -1707,13 +1638,12 @@ fn a_second_original_on_one_machine_is_named_and_settled_in_turn(cx: &mut TestAp
     assert!(
         explains(
             "can\u{2019}t ask it about the restart it already sent",
-            &servers.window,
             servers.cx
         ),
         "the original that was waiting takes the settled one's place in the row"
     );
     assert!(
-        !explains("one more operation on penguin", &servers.window, servers.cx),
+        !explains("one more operation on penguin", servers.cx),
         "nothing is left waiting once the machine holds one original"
     );
 }
@@ -1742,13 +1672,11 @@ fn a_removed_connection_with_two_originals_is_listed_once(cx: &mut TestAppContex
     assert!(rendered(REMOVED_NOTICE, servers.cx));
     assert!(explains(
         "can\u{2019}t ask it about the stop it already sent",
-        &servers.window,
         servers.cx
     ));
     assert!(
         explains(
             "You asked for one more operation on penguin: the removal.",
-            &servers.window,
             servers.cx
         ),
         "the entry must name the original it has still to report"
@@ -1760,11 +1688,7 @@ fn a_removed_connection_with_two_originals_is_listed_once(cx: &mut TestAppContex
     );
 
     assert!(
-        explains(
-            "Discard the stop SpaceTerm sent to penguin?",
-            &servers.window,
-            servers.cx
-        ),
+        explains("Discard the stop SpaceTerm sent to penguin?", servers.cx),
         "the step settles the original the entry reports"
     );
 
@@ -1779,13 +1703,12 @@ fn a_removed_connection_with_two_originals_is_listed_once(cx: &mut TestAppContex
     assert!(
         explains(
             "didn\u{2019}t hear whether penguin removed its service",
-            &servers.window,
             servers.cx
         ),
         "the original that was waiting takes the settled one's place"
     );
     assert!(
-        !explains("one more operation on penguin", &servers.window, servers.cx),
+        !explains("one more operation on penguin", servers.cx),
         "nothing is left waiting once the entry holds one original"
     );
 }
@@ -1807,7 +1730,6 @@ fn discarding_the_update_row_retires_only_its_original(cx: &mut TestAppContext) 
     click("settings-ssh-server-maintenance-discard", servers.cx);
     assert!(explains(
         "Discard the update SpaceTerm sent to penguin?",
-        &servers.window,
         servers.cx
     ));
     assert!(servers.operations.calls().is_empty());
@@ -1827,7 +1749,6 @@ fn discarding_the_update_row_retires_only_its_original(cx: &mut TestAppContext) 
     ));
     assert!(explains(
         "can\u{2019}t ask it about the stop it already sent",
-        &servers.window,
         servers.cx
     ));
 }
@@ -1866,11 +1787,7 @@ fn acknowledging_the_update_row_retires_its_second_resolved_original(cx: &mut Te
         "settings-ssh-server-maintenance-acknowledge",
         servers.cx
     ));
-    assert!(explains(
-        "The server on penguin stopped",
-        &servers.window,
-        servers.cx
-    ));
+    assert!(explains("The server on penguin stopped", servers.cx));
     click("settings-ssh-server-maintenance-acknowledge", servers.cx);
     assert_eq!(
         servers.operations.calls(),
