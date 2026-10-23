@@ -11,7 +11,6 @@
 
 use std::sync::Arc;
 
-use gpui::prelude::*;
 use gpui::{AnyWindowHandle, Context, Task};
 use spaceterm_ui::{
     Alert, AlertIntent, AlertOutcome, ModalAction, ModalActionEmphasis, ModalActionIntent,

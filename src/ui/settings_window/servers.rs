@@ -1560,8 +1560,11 @@ impl SettingsWindow {
     ) {
         let owner = cx.weak_entity();
         cx.defer(move |cx| {
+            let presenting = owner.clone();
             let _ = handle.update(cx, move |_, window, cx| {
-                let result = Alert::new(
+                // An alert belongs to the entity presenting it, so Settings presents it.
+                let _ = presenting.update(cx, |_, cx| {
+                    let result = Alert::new(
                     ModalId::new("settings-server-auto-start-authorize"),
                     "Start the Server at Boot",
                     "Start the Server at Boot",
@@ -1603,9 +1606,10 @@ impl SettingsWindow {
                         settings.change_automatic_start(true, true, handle, cx);
                     });
                 });
-                if result.is_err() {
-                    eprintln!("failed to present the automatic start authorization");
-                }
+                    if result.is_err() {
+                        eprintln!("failed to present the automatic start authorization");
+                    }
+                });
             });
         });
     }

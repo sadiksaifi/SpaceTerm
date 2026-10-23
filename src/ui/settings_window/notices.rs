@@ -240,34 +240,40 @@ impl SettingsWindow {
         let control_icon = appearance.icons.metrics(IconRole::Control).glyph_size;
         let rendered = notices.into_iter().map(|notice| {
             let selector = format!("{NOTICE_SELECTOR}-{}", notice.id);
-            let steps = notice.steps.into_iter().map(|(label, step)| {
-                let owner = cx.weak_entity();
-                Button::new(
-                    ElementId::from(SharedString::from(format!("{selector}-{label}"))),
-                    label,
-                )
-                .variant(ButtonVariant::Outline)
-                .size(ButtonSize::Regular)
-                .tab_stop(true)
-                .debug_selector(match &step {
-                    // A removed connection's step reads as the step it takes on that machine.
-                    NoticeStep::Removed(destination, action) => {
-                        format!("{}-{}", action.selector(), destination.as_str())
-                    }
-                    _ => format!(
-                        "{selector}-{}",
-                        label
-                            .trim_end_matches('\u{2026}')
-                            .to_lowercase()
-                            .replace(' ', "-")
-                    ),
+            let steps = notice
+                .steps
+                .into_iter()
+                .map(|(label, step)| {
+                    let owner = cx.weak_entity();
+                    Button::new(
+                        ElementId::from(SharedString::from(format!("{selector}-{label}"))),
+                        label,
+                    )
+                    .variant(ButtonVariant::Outline)
+                    .size(ButtonSize::Regular)
+                    .tab_stop(true)
+                    .debug_selector(match &step {
+                        // A removed connection's step reads as the step it takes on that machine.
+                        NoticeStep::Removed(destination, action) => {
+                            format!("{}-{}", action.selector(), destination.as_str())
+                        }
+                        _ => format!(
+                            "{selector}-{}",
+                            label
+                                .trim_end_matches('\u{2026}')
+                                .to_lowercase()
+                                .replace(' ', "-")
+                        ),
+                    })
+                    .on_activate(move |_, _, cx| {
+                        let step = step.clone();
+                        let _ =
+                            owner.update(cx, |settings, cx| settings.take_notice_step(step, cx));
+                    })
+                    .into_any_element()
                 })
-                .on_activate(move |_, _, cx| {
-                    let step = step.clone();
-                    let _ = owner.update(cx, |settings, cx| settings.take_notice_step(step, cx));
-                })
-                .into_any_element()
-            });
+                // The steps name their selectors after the notice's, which the notice then keeps.
+                .collect::<Vec<_>>();
             let dismiss = notice.dismissal.map(|dismissal| {
                 let owner = cx.weak_entity();
                 IconButton::new(
