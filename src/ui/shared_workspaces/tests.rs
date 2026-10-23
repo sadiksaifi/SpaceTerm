@@ -4,6 +4,9 @@
 //! Caption, the Pane itself, and the server inventory the window reads. None of them reaches into
 //! presentation state, so each one keeps holding as the implementation changes.
 
+#[path = "interaction_tests.rs"]
+mod interaction_tests;
+
 use std::path::PathBuf;
 use std::rc::Rc;
 
@@ -84,6 +87,7 @@ fn inventory(revision: u64, tabs: Vec<Tab>) -> Inventory {
         repositories: None,
         revision,
         close: Some(CloseInventory {
+            controls: None,
             boot: BOOT,
             sessions,
         }),
@@ -232,9 +236,7 @@ fn click(selector: &'static str, cx: &mut VisualTestContext) {
 }
 
 #[gpui::test]
-fn new_tab_in_a_shared_workspace_should_ask_the_server_and_create_nothing_locally(
-    cx: &mut TestAppContext,
-) {
+fn new_tab_should_present_provisionally_while_the_server_validates_it(cx: &mut TestAppContext) {
     let (harness, cx) = shared_tab_manager(cx);
     assert_eq!(tab_count(&harness, cx), 1);
 
@@ -250,8 +252,8 @@ fn new_tab_in_a_shared_workspace_should_ask_the_server_and_create_nothing_locall
     );
     assert_eq!(
         tab_count(&harness, cx),
-        1,
-        "no Tab should appear before the server publishes it"
+        2,
+        "the initiating interaction presents its provisional Tab at once"
     );
 }
 
@@ -348,8 +350,8 @@ fn a_split_in_a_shared_workspace_should_ask_the_server_for_the_pane(cx: &mut Tes
     );
     assert_eq!(
         pane_count(&harness, cx),
-        1,
-        "no Pane should appear before the server publishes it"
+        2,
+        "the initiating interaction presents its provisional Pane at once"
     );
 }
 
@@ -1543,7 +1545,7 @@ mod edits {
     }
 
     #[test]
-    fn a_client_waiting_for_an_answer_should_refuse_another_shared_edit() {
+    fn a_connected_client_should_keep_distinct_edits_ordered_while_an_answer_waits() {
         let (mut shared, edits) = shared(Some(root_only()));
         bind(&mut shared, &root_only());
 
@@ -1551,10 +1553,10 @@ mod edits {
             shared.rename(local(), "Logs".to_owned(), Some(0)),
             SharedSubmission::Submitted
         );
-        assert_eq!(shared.editability(), SharedEditability::Pending);
+        assert_eq!(shared.editability(), SharedEditability::Available);
         assert_eq!(
             shared.rename(local(), "Notes".to_owned(), Some(0)),
-            SharedSubmission::Refused(SharedRefusalReason::Pending)
+            SharedSubmission::Submitted
         );
         assert_eq!(edits.submitted().len(), 1, "only the first edit is sent");
     }
@@ -1596,8 +1598,8 @@ mod edits {
 
         assert_eq!(
             shared.create_workspace("Logs".to_owned(), None),
-            SharedSubmission::Refused(SharedRefusalReason::Pending),
-            "a second submission must not erase a conflict before the window reads it"
+            SharedSubmission::Submitted,
+            "a later connected interaction must retain the earlier conflict beside its snapshot"
         );
         shared.poll();
         assert_eq!(
@@ -1746,6 +1748,37 @@ mod edits {
         assert!(
             shared.poll().accepted.is_none(),
             "one answer opens its creation once"
+        );
+    }
+
+    #[test]
+    fn an_accepted_workspace_creation_retains_its_authoritative_attachment() {
+        let (mut shared, edits) = shared(Some(root_only()));
+        shared.poll();
+        bind(&mut shared, &root_only());
+        shared.create_workspace("Logs".to_owned(), None);
+        shared.poll();
+        let mut published = root_only();
+        let mut created = published.workspaces[0].clone();
+        let target = [21; 32];
+        created.id = target;
+        created.root_tab = [22; 32];
+        created.tabs[0].id = [22; 32];
+        created.tabs[0].root_pane = [23; 32];
+        created.tabs[0].panes[0].id = [23; 32];
+        published.revision += 1;
+        published.workspaces.push(created);
+        edits.set_inventory(published);
+        edits.answer(Outcome::Accepted { target });
+        let poll = shared.poll();
+        assert!(
+            shared
+                .plan(poll.inventory.as_ref().expect("accepted inventory"))
+                .iter()
+                .any(|step| {
+                    matches!(step, SharedWorkspacePlan::Create { facts } if facts.server == target)
+                }),
+            "the accepted Workspace remains attached after provisional binding"
         );
     }
 
@@ -2039,6 +2072,7 @@ mod close {
             vec![Mutation::Close {
                 target: ROOT_TAB_TARGET,
                 confirmation: CloseConfirmation {
+                    own_controls: None,
                     boot: BOOT,
                     panes: vec![
                         ConfirmedPane {
@@ -2192,6 +2226,7 @@ mod close {
         edits.submit_for_recovery(Mutation::Close {
             target: ROOT_TAB_TARGET,
             confirmation: CloseConfirmation {
+                own_controls: None,
                 boot: BOOT,
                 panes: Vec::new(),
                 removes_tab: true,
@@ -2270,13 +2305,13 @@ mod close {
 
         assert_eq!(
             only.title(),
-            "Close Pane?",
-            "Close Pane keeps its own meaning"
+            "Kill Workspace \u{201C}Build\u{201D}?",
+            "the final Pane requires Workspace-level review"
         );
+        assert_eq!(only.confirm_label(), "Kill Workspace");
         assert_eq!(
             only.message(),
-            "This is the only Pane in \u{201C}Build\u{201D}, so the Workspace is permanently \
-             removed for every client. This ends 1 Terminal Session for every client, including \
+            "Its Tabs and Panes are permanently removed for every client. This ends 1 Terminal Session for every client, including \
              on a client that controls its Pane, and stops its running commands."
         );
         assert!(only.detail().is_some());
@@ -2433,3 +2468,6 @@ mod draft {
 
 #[path = "retention_tests.rs"]
 mod retention_tests;
+
+#[path = "optimistic_tests.rs"]
+mod optimistic;

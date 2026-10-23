@@ -157,7 +157,7 @@ pub(crate) enum PaneError {
     MissingPane(PaneId),
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 enum PaneNode {
     Leaf(PaneId),
     Split {
@@ -224,6 +224,21 @@ pub(crate) enum PaneArrangement {
 enum FocusHistoryStep {
     Previous,
     Next,
+}
+
+/// A Pane held intact until its exact approved close has a definite result.
+pub(crate) struct ParkedPane<T> {
+    id: PaneId,
+    payload: T,
+    original: PaneNode,
+    remaining: PaneNode,
+    was_root: bool,
+}
+
+impl<T> ParkedPane<T> {
+    pub(crate) fn payload(&self) -> &T {
+        &self.payload
+    }
 }
 
 pub(crate) struct Tab<T> {
@@ -565,6 +580,50 @@ impl<T> Tab<T> {
         })
     }
 
+    pub(crate) fn park_pane(&mut self, id: PaneId) -> Result<Option<ParkedPane<T>>, PaneError> {
+        let original = self.root.clone();
+        let was_root = self.root_pane_id == id;
+        match self.close_pane(id)? {
+            ClosePaneOutcome::PaneClosed { closed_pane, .. } => Ok(Some(ParkedPane {
+                id,
+                payload: closed_pane,
+                original,
+                remaining: self.root.clone(),
+                was_root,
+            })),
+            ClosePaneOutcome::CloseTab { .. } => Ok(None),
+        }
+    }
+
+    pub(crate) fn restore_parked_pane(
+        &mut self,
+        parked: ParkedPane<T>,
+        source: PaneId,
+        axis: SplitAxis,
+    ) -> Result<PaneId, PaneError> {
+        if self.root == parked.remaining {
+            self.root = parked.original;
+        } else {
+            // Later layout intent wins. Reinsert just the refused close beside a surviving Pane.
+            let split = SplitId::from_raw(self.next_split_id);
+            let next = self
+                .next_split_id
+                .checked_add(1)
+                .ok_or(PaneError::SplitIdExhausted)?;
+            self.root = self
+                .root
+                .with_split(source, parked.id, split, PaneEdge::trailing(axis))
+                .ok_or(PaneError::PaneNotFound(source))?;
+            self.next_split_id = next;
+        }
+        if parked.was_root {
+            self.root_pane_id = parked.id;
+        }
+        self.panes.insert(parked.id, parked.payload);
+        self.focus_history.insert(0, parked.id);
+        Ok(parked.id)
+    }
+
     pub(crate) fn minimum_size(&self, divider_size: f32) -> Result<PaneSize, PaneError> {
         validate_divider_size(divider_size)?;
         self.root.minimum_size(self.minimum_pane_size, divider_size)
@@ -620,7 +679,7 @@ impl<T> Tab<T> {
         Ok(minimum_ratio..=maximum_ratio)
     }
 
-    fn validate_split(
+    pub(crate) fn validate_split(
         &self,
         target_pane_id: PaneId,
         axis: SplitAxis,

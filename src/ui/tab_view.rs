@@ -100,7 +100,7 @@ const PANE_DROP_TARGET_FILL_OPACITY: u8 = 56;
 #[cfg(test)]
 const PANE_STATUS_WIDTH: f32 = 13.0 + PANE_STATUS_ICON_GAP;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum PaneCaptionAction {
     SplitRight,
     SplitDown,
@@ -463,8 +463,8 @@ pub(crate) struct TabView {
     pane_bounds: BTreeMap<PaneId, Bounds<Pixels>>,
     /// Where each Pane's surface was drawn, which differs from its place while Panes move.
     pane_surfaces: BTreeMap<PaneId, Bounds<Pixels>>,
-    /// Where each Pane's caption Close control took presses in the last frame.
-    pane_close_controls: BTreeMap<PaneId, gpui::Hitbox>,
+    /// Where each Pane's caption Split and Close controls took presses in the last frame.
+    pane_unselecting_controls: BTreeMap<(PaneId, PaneCaptionAction), gpui::Hitbox>,
     pane_layout_size: Option<PaneSize>,
     /// A Split that waits for the next Pane measurement, because the retained bounds are stale.
     pending_split: Option<(PaneId, SplitAxis)>,
@@ -492,6 +492,7 @@ pub(crate) struct TabView {
     tab_focus: FocusHandle,
     /// The server Tab this Tab presents, when a SpaceTerm Server owns it.
     shared: Option<SharedPaneBinding>,
+    parked_shared_panes: BTreeMap<PaneId, crate::domain::tab::ParkedPane<Entity<TerminalPane>>>,
     directory_recovery: Option<Entity<super::server_pane::DirectoryRecovery>>,
     /// Reads every shared Pane's connection status while the Tab lives.
     _shared_status: Option<gpui::Task<()>>,
@@ -555,7 +556,7 @@ impl TabView {
             pane_construction,
             pane_bounds: BTreeMap::new(),
             pane_surfaces: BTreeMap::new(),
-            pane_close_controls: BTreeMap::new(),
+            pane_unselecting_controls: BTreeMap::new(),
             pane_layout_size: None,
             pending_split: None,
             split_bounds: BTreeMap::new(),
@@ -576,6 +577,7 @@ impl TabView {
             close_tab_requested: false,
             tab_focus: cx.focus_handle(),
             shared: None,
+            parked_shared_panes: BTreeMap::new(),
             directory_recovery: None,
             _shared_status: None,
         }
@@ -874,6 +876,9 @@ impl TabView {
         for terminal in self.tab.panes() {
             terminal.update(cx, |terminal, _| terminal.close());
         }
+        for (_, parked) in std::mem::take(&mut self.parked_shared_panes) {
+            parked.payload().update(cx, |terminal, _| terminal.close());
+        }
     }
 
     pub(crate) const fn focused_pane_id(&self) -> PaneId {
@@ -968,9 +973,7 @@ impl TabView {
             tab_id: self.tab.id(),
         });
         cx.notify();
-        if let Some(terminal) = self.tab.pane(pane_id) {
-            terminal.update(cx, |terminal, cx| terminal.focus(window, cx));
-        }
+        self.focus(window, cx);
     }
 
     pub(crate) fn split_focused(
@@ -996,16 +999,26 @@ impl TabView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // A shared Pane Layout belongs to the server. Splitting asks the server, and the new Pane
-        // arrives with the published membership rather than appearing here first.
-        if self.shared.is_some() {
-            self.split_shared(target_pane_id, axis, window, cx);
-            return;
-        }
         let Some(target_size) = self.split_target_size(target_pane_id, pane_gap(cx)) else {
             eprintln!("cannot split Pane {target_pane_id} without valid measured bounds");
             return;
         };
+        if self.shared.is_some() {
+            // This client owns its layout. Validate the restored allocation before asking the
+            // server for membership; another client's published membership has no such limit.
+            if self
+                .tab
+                .validate_split(target_pane_id, axis, target_size, pane_gap(cx))
+                .is_err()
+            {
+                return;
+            }
+            if matches!(self.tab.zoom_state(), ZoomState::Zoomed(_)) {
+                self.toggle_zoom(window, cx);
+            }
+            self.split_shared(target_pane_id, axis, window, cx);
+            return;
+        }
         self.split_pane_measured(target_pane_id, axis, target_size, window, cx);
     }
 
@@ -1193,9 +1206,7 @@ impl TabView {
                 cx.emit(TabViewEvent::PresentationChanged {
                     tab_id: self.tab.id(),
                 });
-                if let Some(terminal) = self.tab.pane(drag.pane_id) {
-                    terminal.update(cx, |terminal, cx| terminal.focus(window, cx));
-                }
+                self.focus(window, cx);
             }
             Ok(false) => {}
             Err(error) => eprintln!("failed to move Pane: {error}"),
@@ -1321,11 +1332,7 @@ impl TabView {
                 self.sync_terminal_focus(cx);
                 cx.emit(TabViewEvent::CloseTabRequested { tab_id });
             }
-            Ok(ClosePaneOutcome::PaneClosed {
-                focused_pane_id,
-                closed_pane,
-                ..
-            }) => {
+            Ok(ClosePaneOutcome::PaneClosed { closed_pane, .. }) => {
                 self.advance_native_service_hierarchy_generation(cx);
                 self.pane_layout_revision += 1;
                 self.pane_motion.expect_change();
@@ -1335,7 +1342,8 @@ impl TabView {
                 });
                 self.pane_bounds.remove(&pane_id);
                 self.pane_surfaces.remove(&pane_id);
-                self.pane_close_controls.remove(&pane_id);
+                self.pane_unselecting_controls
+                    .retain(|(control_pane_id, _), _| *control_pane_id != pane_id);
                 self.split_bounds.clear();
                 self.pane_titles.remove(&pane_id);
                 self.pane_captions.remove(&pane_id);
@@ -1346,11 +1354,8 @@ impl TabView {
                     tab_id: self.tab.id(),
                 });
                 cx.notify();
-                if self.active
-                    && focus_remaining
-                    && let Some(terminal) = self.tab.pane(focused_pane_id)
-                {
-                    terminal.update(cx, |terminal, cx| terminal.focus(window, cx));
+                if self.active && focus_remaining {
+                    self.focus(window, cx);
                 }
             }
             Err(error) => eprintln!("failed to close Pane: {error}"),
@@ -1531,9 +1536,9 @@ impl TabView {
         if self.tab.pane(pane_id).is_none() {
             return;
         }
-        // A caption control acts on its own Pane, which selects it. Close only asks for
-        // confirmation, so it starts no retained shell before a person approves.
-        if !matches!(action, PaneCaptionAction::Close) {
+        // Zoom explicitly selects its Pane. Splits validate the restored allocation before
+        // asking for membership or starting a shell; Close captures its exact targets first.
+        if matches!(action, PaneCaptionAction::ToggleZoom) {
             self.select_shared_pane(pane_id);
         }
         self.focus_pane(pane_id, cx);
@@ -1794,13 +1799,17 @@ impl TabView {
             .capture_any_mouse_down(move |event: &MouseDownEvent, window, cx| {
                 let _ = focus_view.update(cx, |view, cx| {
                     // A press is an explicit Pane selection, so a shared Pane asks the server for
-                    // itself. Focus a Pane regains on its own never does, and neither does a press
-                    // on Close, which only asks for confirmation.
-                    let on_close = view
-                        .pane_close_controls
-                        .get(&pane_id)
-                        .is_some_and(|close| close.is_hovered_at(event.position, window));
-                    if !on_close {
+                    // itself. Focus a Pane regains on its own never does. Neither does a press on
+                    // Split, which validates the restored allocation first, or on Close, which
+                    // only asks for confirmation.
+                    let on_unselecting_control = view
+                        .pane_unselecting_controls
+                        .range(
+                            (pane_id, PaneCaptionAction::SplitRight)
+                                ..=(pane_id, PaneCaptionAction::Close),
+                        )
+                        .any(|(_, control)| control.is_hovered_at(event.position, window));
+                    if !on_unselecting_control {
                         view.select_shared_pane(pane_id);
                     }
                     if view.tab.focused_pane_id() != pane_id {
@@ -2020,6 +2029,12 @@ impl TabView {
 /// Shared server Panes: how this Tab presents one server Tab's Panes, submits its edits, and
 /// refuses the operations the server path does not support yet.
 impl TabView {
+    pub(crate) fn canonicalize_shared_ids(&mut self) {
+        if let Some(shared) = self.shared.as_mut() {
+            shared.canonicalize();
+        }
+    }
+
     pub(crate) fn shared_layout(&self) -> Option<spaceterm_server::client_view::Layout> {
         use spaceterm_server::client_view::{Layout, LayoutNode};
         use spaceterm_server::hierarchy::Axis;
@@ -2155,9 +2170,10 @@ impl TabView {
     ) -> bool {
         use spaceterm_server::hierarchy::Axis;
 
-        if self.shared.is_none() {
+        let Some(shared) = self.shared.as_mut() else {
             return false;
-        }
+        };
+        shared.canonicalize();
         // Every Pane the server published joins before any Pane it removed leaves. One poll can
         // carry both a creation and the removal of what it was created beside, and a Tab that
         // lost its last known Pane first would lose the Panes that replaced it.
@@ -2166,7 +2182,53 @@ impl TabView {
             let Some(shared) = self.shared.as_ref() else {
                 break;
             };
-            if shared.holds(pane.id) {
+            if let Some(pane_id) = shared.local_pane(pane.id) {
+                if self.tab.pane(pane_id).is_none()
+                    && let Some(parked) = self.parked_shared_panes.remove(&pane_id)
+                {
+                    let source = pane
+                        .source
+                        .and_then(|id| shared.local_pane(id))
+                        .filter(|id| self.tab.pane(*id).is_some())
+                        .unwrap_or_else(|| self.tab.root_pane_id());
+                    let axis = match pane.axis {
+                        Axis::Right => SplitAxis::Horizontal,
+                        Axis::Down => SplitAxis::Vertical,
+                    };
+                    if self.tab.restore_parked_pane(parked, source, axis).is_ok() {
+                        self.finish_shared_insertion(pane_id, cx);
+                        changed = true;
+                    }
+                }
+                let Some(shared) = self.shared.as_ref() else {
+                    continue;
+                };
+                if shared.needs_binding(pane_id, pane.id) {
+                    let Some((factory, state)) = shared.sessions().open(pane.id) else {
+                        continue;
+                    };
+                    let held_keyboard = self.tab.pane(pane_id).is_some_and(|terminal| {
+                        self.shared_pane_holds_focus(pane_id, terminal, window, cx)
+                    });
+                    if let Some(terminal) = self.tab.pane(pane_id) {
+                        terminal
+                            .update(cx, |terminal, cx| terminal.bind_pending_server(factory, cx));
+                    }
+                    if let Some(shared) = self.shared.as_mut() {
+                        let focus = shared
+                            .screen_focus(pane_id)
+                            .cloned()
+                            .unwrap_or_else(|| cx.focus_handle());
+                        shared.register(pane_id, pane.id, state, focus);
+                    }
+                    // Binding supplies membership. Only the focus still on this provisional Pane
+                    // asks for first use; sidebar, Find, chooser and later navigation keep focus.
+                    if self.active && self.tab.focused_pane_id() == pane_id && held_keyboard {
+                        self.select_shared_pane(pane_id);
+                        self.focus(window, cx);
+                    }
+                    changed = true;
+                }
                 continue;
             }
             // The Pane this one was split from may already be gone, and the server clears the
@@ -2199,6 +2261,22 @@ impl TabView {
             }
         }
         changed |= self.remove_absent_shared_panes(server_tab, window, cx);
+        let retired = self
+            .parked_shared_panes
+            .keys()
+            .copied()
+            .filter(|id| {
+                self.shared
+                    .as_ref()
+                    .is_none_or(|shared| !shared.closing(*id))
+            })
+            .collect::<Vec<_>>();
+        for id in retired {
+            if let Some(parked) = self.parked_shared_panes.remove(&id) {
+                parked.payload().update(cx, |terminal, _| terminal.close());
+                self.forget_shared_pane(id);
+            }
+        }
         if changed {
             self.sync_shared_panes(window, cx);
         }
@@ -2223,9 +2301,10 @@ impl TabView {
             .pane_ids()
             .into_iter()
             .filter(|&pane_id| {
-                shared
-                    .server_pane(pane_id)
-                    .is_some_and(|server| !server_tab.panes.iter().any(|pane| pane.id == server))
+                self.tab.pane(pane_id).is_some()
+                    && shared.server_pane(pane_id).is_some_and(|server| {
+                        !server_tab.panes.iter().any(|pane| pane.id == server)
+                    })
             })
             .collect();
         let mut removed = false;
@@ -2236,9 +2315,43 @@ impl TabView {
             let held_keyboard = self.tab.pane(pane_id).is_some_and(|terminal| {
                 self.shared_pane_holds_focus(pane_id, terminal, window, cx)
             });
-            self.forget_shared_pane(pane_id);
-            // Closing the final Pane closes its Tab, as an ordinary final close does.
-            self.close_pane_focusing(pane_id, held_keyboard, window, cx);
+            if self
+                .shared
+                .as_ref()
+                .is_some_and(|shared| shared.closing(pane_id))
+            {
+                if let Ok(Some(parked)) = self.tab.park_pane(pane_id) {
+                    parked.payload().update(cx, |terminal, cx| {
+                        terminal.set_product_focus(
+                            TerminalProductFocus {
+                                active_workspace: false,
+                                active_tab: false,
+                                pane_visible: false,
+                                focused_pane: false,
+                                blocker: None,
+                            },
+                            cx,
+                        );
+                        terminal.set_accessibility_hierarchy(false);
+                    });
+                    self.parked_shared_panes.insert(pane_id, parked);
+                    self.advance_native_service_hierarchy_generation(cx);
+                    self.pane_layout_revision += 1;
+                    self.pane_motion.expect_change();
+                    self.split_bounds.clear();
+                    self.sync_terminal_focus(cx);
+                    if self.active && held_keyboard {
+                        self.focus(window, cx);
+                    }
+                    cx.emit(TabViewEvent::PresentationChanged {
+                        tab_id: self.tab.id(),
+                    });
+                    cx.notify();
+                }
+            } else {
+                self.forget_shared_pane(pane_id);
+                self.close_pane_focusing(pane_id, held_keyboard, window, cx);
+            }
             removed = true;
         }
         removed
@@ -2368,6 +2481,44 @@ impl TabView {
             .is_some_and(|shared| shared.holds(server))
     }
 
+    pub(crate) fn shared_pane_closes_directly(
+        &self,
+        server: spaceterm_server::hierarchy::Id,
+        live_session: bool,
+        cx: &App,
+    ) -> Option<bool> {
+        use crate::terminal::server_session::DevelopmentPaneStatus;
+        let shared = self.shared.as_ref()?;
+        let pane = shared.local_pane(server)?;
+        let status = shared.view(pane)?.connection().status();
+        if matches!(
+            status,
+            DevelopmentPaneStatus::Takeover
+                | DevelopmentPaneStatus::TakeoverReconnecting
+                | DevelopmentPaneStatus::TakeoverFailed(_)
+                | DevelopmentPaneStatus::TakingOver
+        ) {
+            return Some(false);
+        }
+        Some(if live_session {
+            status == DevelopmentPaneStatus::Connected
+                && !self
+                    .tab
+                    .pane(pane)?
+                    .read(cx)
+                    .close_facts()
+                    .requires_confirmation()
+        } else {
+            matches!(
+                status,
+                DevelopmentPaneStatus::Connected
+                    | DevelopmentPaneStatus::Restored
+                    | DevelopmentPaneStatus::SessionEnded
+                    | DevelopmentPaneStatus::Ended
+            )
+        })
+    }
+
     /// Whether the keyboard rests anywhere in this Tab: its Tab strip item, one of its Panes, or
     /// the screen replacing one of them.
     pub(crate) fn holds_keyboard(&self, window: &Window, cx: &App) -> bool {
@@ -2394,9 +2545,7 @@ impl TabView {
         };
         self.select_shared_pane(pane_id);
         self.focus_pane(pane_id, cx);
-        if let Some(terminal) = self.tab.pane(pane_id) {
-            terminal.update(cx, |terminal, cx| terminal.focus(window, cx));
-        }
+        self.focus(window, cx);
     }
 
     /// The bookkeeping a Pane needs once it joins the layout, without taking focus or zoom from
@@ -2419,7 +2568,7 @@ impl TabView {
         cx.notify();
     }
 
-    /// Asks the server to split a shared Pane. A refusal changes nothing and is never queued.
+    /// Presents a connected split immediately and queues its bounded membership request.
     fn split_shared(
         &mut self,
         source: PaneId,
@@ -2437,8 +2586,23 @@ impl TabView {
             SplitAxis::Horizontal => Axis::Right,
             SplitAxis::Vertical => Axis::Down,
         };
+        let edits = shared.edits();
         if let SharedSubmission::Refused(reason) = shared.split(source, axis) {
             self.report_shared_refusal("create a Pane", reason, window, cx);
+        } else {
+            let presentation = edits.take_presentation();
+            let tab = self
+                .shared
+                .as_ref()
+                .and_then(|shared| shared.presentation_tab());
+            let target = presentation.map(|event| edits.canonical(event.target));
+            if let Some(tab) = tab {
+                self.reconcile_shared(&tab, window, cx);
+            }
+            if let Some(target) = target {
+                // The initiating interaction owns this selection. Its acknowledgement owns none.
+                self.focus_shared_pane_explicitly(target, window, cx);
+            }
         }
         cx.notify();
     }
@@ -2482,6 +2646,13 @@ impl TabView {
         };
         let mut changed = false;
         for pane_id in pane_ids {
+            if self
+                .shared
+                .as_ref()
+                .is_some_and(|shared| shared.closing(pane_id))
+            {
+                continue;
+            }
             let Some(sync) = self
                 .shared
                 .as_mut()
@@ -3769,14 +3940,17 @@ fn render_pane_caption_content(
                 view.perform_caption_action(action, pane_id, window, cx);
             });
         });
-        controls = if matches!(action, PaneCaptionAction::Close) {
-            // The Pane's surface reads where Close takes presses, so a press there selects
-            // nothing.
-            let close_control = gpui::canvas(
+        controls = if matches!(action, PaneCaptionAction::ToggleZoom) {
+            controls.child(button)
+        } else {
+            // The Pane's surface reads where Split and Close take presses, so a press there
+            // selects nothing.
+            let unselecting_control = gpui::canvas(
                 move |bounds, window, cx| {
                     let hitbox = window.insert_hitbox(bounds, gpui::HitboxBehavior::Normal);
                     let _ = control_view.update(cx, |view, _| {
-                        view.pane_close_controls.insert(pane_id, hitbox);
+                        view.pane_unselecting_controls
+                            .insert((pane_id, action), hitbox);
                     });
                 },
                 |_, _, _, _| (),
@@ -3786,12 +3960,12 @@ fn render_pane_caption_content(
             controls.child(
                 div()
                     .relative()
-                    .ml(-appearance.spacing(PANE_CLOSE_OPTICAL_TRIM))
-                    .child(close_control)
+                    .when(matches!(action, PaneCaptionAction::Close), |control| {
+                        control.ml(-appearance.spacing(PANE_CLOSE_OPTICAL_TRIM))
+                    })
+                    .child(unselecting_control)
                     .child(button),
             )
-        } else {
-            controls.child(button)
         };
     }
     let caption_name = format!("Pane Caption, {}", text.name);

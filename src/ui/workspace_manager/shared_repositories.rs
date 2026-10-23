@@ -418,7 +418,15 @@ mod development {
                         .owning(workspace_id)
                         .is_some_and(|shared| shared.editability().available())
                         && counts.contains_key(&id)
-                        && manager.has_tabs_besides(&manager.worktree_tab_ids(id)),
+                        && (manager.has_tabs_besides(&manager.worktree_tab_ids(id))
+                            || (worktree_writes
+                                && inventory.is_some_and(|inventory| {
+                                    super::super::worktrees::fallback::destination(
+                                        inventory,
+                                        &record.root,
+                                    )
+                                    .is_some()
+                                }))),
                 }
             };
             let mut groups = Vec::new();

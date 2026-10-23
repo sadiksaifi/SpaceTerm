@@ -203,6 +203,7 @@ fn finish(
     connection: &mut PaneConnection,
     journal: &mut ClientJournal,
     controls: &PaneControls,
+    state: &PublishedSnapshot,
 ) -> Result<FinishedOperation, ServerError> {
     let Some(pending) = journal.pending().cloned() else {
         return Ok(FinishedOperation {
@@ -243,6 +244,15 @@ fn finish(
     if result.sequence != pending.sequence || result.mutation != pending.mutation {
         return Err(ServerError::Protocol);
     }
+    // Publish validated membership before acknowledgement. A lost acknowledgement keeps this
+    // Original Operation in the journal, while its committed creation can replace a provisional
+    // presentation without displaying both identities or waiting through a reconnect.
+    state.publish(|snapshot| {
+        if let Some((inventory, _)) = &reconciled {
+            snapshot.inventory = Some(inventory.clone());
+        }
+        snapshot.outcome = Some(result.clone());
+    });
     connection.exchange(&Request::Acknowledge {
         sequence: pending.sequence,
     })?;
@@ -296,7 +306,7 @@ fn run(
                     active = None;
                 }
             });
-            let finished = finish(&mut connection, &mut journal, &controls)?;
+            let finished = finish(&mut connection, &mut journal, &controls, &state)?;
             attachments.release_pending(&mut connection)?;
             state.publish(|s| {
                 if let Some((current, next_sequence)) = finished.reconciled {
@@ -319,7 +329,7 @@ fn run(
                     Ok(mutation) => {
                         active = Some((sequence, mutation.clone()));
                         journal.submit(sequence, mutation)?;
-                        let finished = finish(&mut connection, &mut journal, &controls)?;
+                        let finished = finish(&mut connection, &mut journal, &controls, &state)?;
                         let (current, next_sequence) =
                             finished.reconciled.ok_or(ServerError::Protocol)?;
                         sequence = next_sequence;

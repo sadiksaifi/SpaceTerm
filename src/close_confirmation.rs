@@ -114,7 +114,7 @@ impl ApplicationCloseFacts {
 }
 
 impl PaneCloseFacts<'_> {
-    fn requires_confirmation(&self) -> bool {
+    pub(crate) fn requires_confirmation(&self) -> bool {
         if !self.live_session
             || matches!(self.state, PaneTerminalState::Exited(_))
             || self

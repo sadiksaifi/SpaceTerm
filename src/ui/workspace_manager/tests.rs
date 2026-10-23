@@ -27,6 +27,8 @@ use spaceterm_ui::{
 };
 
 use super::*;
+#[path = "interaction_tests.rs"]
+mod interaction_tests;
 use crate::domain::PresentedWorkspace;
 use crate::domain::{PaneId, TabId};
 
@@ -2065,7 +2067,7 @@ fn risky_pane_close_should_follow_keyboard_focus_and_confirm_once(cx: &mut TestA
         (1, 2)
     );
 
-    cx.simulate_keystrokes("cmd-alt-w");
+    cx.simulate_keystrokes("cmd-w");
     cx.run_until_parked();
     let first_pending = manager.read_with(cx, |manager, _| {
         manager
@@ -2073,7 +2075,7 @@ fn risky_pane_close_should_follow_keyboard_focus_and_confirm_once(cx: &mut TestA
             .pending()
             .expect("risky close should present one confirmation")
     });
-    cx.simulate_keystrokes("cmd-alt-w");
+    cx.simulate_keystrokes("cmd-w");
     cx.run_until_parked();
 
     assert_eq!(
@@ -2166,7 +2168,7 @@ fn prompt_metadata_should_close_a_pane_without_confirmation(cx: &mut TestAppCont
         .unwrap();
     cx.run_until_parked();
 
-    cx.simulate_keystrokes("cmd-alt-w");
+    cx.simulate_keystrokes("cmd-w");
     cx.run_until_parked();
 
     assert!(manager.read_with(cx, |manager, _| {
@@ -2179,9 +2181,11 @@ fn prompt_metadata_should_close_a_pane_without_confirmation(cx: &mut TestAppCont
     assert_eq!(records.dropped_session_ids(), vec![2]);
 }
 
-/// Cmd+W asks to Kill Workspace, which confirms even when no Pane is running work.
+/// Control-Command-W asks to Kill Workspace, which confirms even when no Pane is running work.
 #[gpui::test]
-fn command_w_should_confirm_kill_workspace_even_when_its_panes_are_idle(cx: &mut TestAppContext) {
+fn control_command_w_should_confirm_kill_workspace_even_when_its_panes_are_idle(
+    cx: &mut TestAppContext,
+) {
     let (manager, records, cx) = workspace_manager(cx);
     redraw(cx);
     let mut metadata = crate::terminal::metadata::MetadataTracker::new(
@@ -2204,7 +2208,7 @@ fn command_w_should_confirm_kill_workspace_even_when_its_panes_are_idle(cx: &mut
     cx.run_until_parked();
     let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_id());
 
-    cx.simulate_keystrokes("cmd-w");
+    cx.simulate_keystrokes("ctrl-cmd-w");
     redraw(cx);
 
     assert_eq!(
@@ -2317,7 +2321,7 @@ fn native_application_quit_should_not_compete_with_an_in_app_close_confirmation(
         Some(CloseTarget::Window)
     );
     assert!(!cx.has_pending_prompt());
-    // Command-Q closes windows; it asks the application to quit only from the status menu.
+    // Command-Q leaves the window's own confirmation to answer first.
     assert_eq!(application_quit.requests(), 0);
     click("modal-action-close-confirmation-cancel", cx);
 }
@@ -2516,13 +2520,132 @@ fn client_window_controls_remain_operable_during_close_confirmation(cx: &mut Tes
     }
 }
 
+/// The application's name on the dismissal choice's Quit button.
+fn quit_choice() -> String {
+    format!(
+        "Quit {}",
+        crate::application_identity::ApplicationIdentity::current().display_name()
+    )
+}
+
 #[gpui::test]
-fn command_q_closes_the_window_through_its_own_confirmation_without_quitting(
-    cx: &mut TestAppContext,
-) {
+fn command_q_offers_keeping_the_client_in_the_menu_bar_or_quitting(cx: &mut TestAppContext) {
+    let (_, records, application_quit, cx) = workspace_manager_with_application_actions(cx);
+    cx.update(|_, cx| crate::status_menu::set_available(cx, true));
+    redraw(cx);
+    cx.simulate_keystrokes("cmd-q");
+    cx.run_until_parked();
+
+    let (title, detail) = cx.pending_prompt().expect("Command-Q asks first");
+    let name = crate::application_identity::ApplicationIdentity::current().display_name();
+    assert_eq!(title, format!("Keep {name} in the menu bar?"));
+    assert!(detail.starts_with("Keep in Menu Bar closes all windows"));
+    assert!(detail.contains(&format!(
+        "{name} Server keeps your Terminal Sessions running"
+    )));
+
+    // Cancel changes nothing.
+    cx.simulate_prompt_answer("Cancel");
+    cx.run_until_parked();
+    assert!(!cx.has_pending_prompt());
+    assert_eq!(cx.update(|_, cx| cx.windows().len()), 1);
+    assert!(records.dropped_session_ids().is_empty());
+    assert_eq!(application_quit.requests(), 0);
+    assert_eq!(application_quit.confirmations(), 0);
+}
+
+#[gpui::test]
+fn choosing_quit_exits_once_without_asking_again(cx: &mut TestAppContext) {
+    let (_, _, application_quit, cx) = workspace_manager_with_application_actions(cx);
+    cx.update(|_, cx| crate::status_menu::set_available(cx, true));
+    redraw(cx);
+    cx.simulate_keystrokes("cmd-q");
+    cx.run_until_parked();
+    cx.simulate_prompt_answer(&quit_choice());
+    cx.run_until_parked();
+
+    // The choice covered the work it described, and exiting never re-enters the choice.
+    assert!(!cx.has_pending_prompt());
+    assert_eq!(application_quit.requests(), 0);
+    assert_eq!(application_quit.confirmations(), 1);
+}
+
+#[gpui::test]
+fn a_native_dismissal_offers_the_same_choice_and_an_exit_does_not(cx: &mut TestAppContext) {
+    use crate::platform::application_quit::{ApplicationQuitDecision, ApplicationQuitRequest};
+
+    let (_, _, application_quit, cx) = workspace_manager_with_application_actions(cx);
+    cx.update(|_, cx| crate::status_menu::set_available(cx, true));
+    redraw(cx);
+
+    // The Dock's Quit asks, and the host keeps running until the person chooses.
+    assert_eq!(
+        application_quit.simulate_native_request(ApplicationQuitRequest::Dismissal),
+        ApplicationQuitDecision::Cancel
+    );
+    cx.run_until_parked();
+    let (title, _) = cx.pending_prompt().expect("the Dock's Quit asks first");
+    assert!(title.starts_with("Keep "));
+    // A second request while the person chooses asks nothing more.
+    application_quit.simulate_native_request(ApplicationQuitRequest::Dismissal);
+    cx.simulate_keystrokes("cmd-q");
+    cx.run_until_parked();
+    cx.simulate_prompt_answer("Cancel");
+    cx.run_until_parked();
+    assert!(!cx.has_pending_prompt());
+
+    // An installed update or ending session exits through the quit policy alone.
+    application_quit.simulate_native_request(ApplicationQuitRequest::Exit);
+    cx.run_until_parked();
+    let (title, _) = cx.pending_prompt().expect("running work still asks");
+    assert_eq!(title, "Quit SpaceTerm?");
+    cx.simulate_prompt_answer("Cancel");
+    cx.run_until_parked();
+    assert_eq!(application_quit.confirmations(), 0);
+}
+
+#[gpui::test]
+fn command_q_without_a_status_area_keeps_the_windows_open(cx: &mut TestAppContext) {
     let (manager, records, application_quit, cx) = workspace_manager_with_application_actions(cx);
     redraw(cx);
     cx.simulate_keystrokes("cmd-q");
+    cx.run_until_parked();
+
+    // Nothing could reach a windowless client, so keeping it closes no window, and says so.
+    let (title, detail) = cx.pending_prompt().expect("Command-Q asks first");
+    let name = crate::application_identity::ApplicationIdentity::current().display_name();
+    assert_eq!(title, format!("Keep {name} in the menu bar?"));
+    assert!(detail.starts_with("The menu bar isn't available, so Keep in Menu Bar keeps"));
+    cx.simulate_prompt_answer("Keep in Menu Bar");
+    cx.run_until_parked();
+    assert!(!cx.has_pending_prompt());
+    assert!(manager.read_with(cx, |manager, _| {
+        manager.close_confirmation.pending().is_none()
+    }));
+    assert_eq!(cx.update(|_, cx| cx.windows().len()), 1);
+    assert!(records.dropped_session_ids().is_empty());
+    assert_eq!(application_quit.confirmations(), 0);
+
+    // Quitting stays available.
+    cx.simulate_keystrokes("cmd-q");
+    cx.run_until_parked();
+    cx.simulate_prompt_answer(&quit_choice());
+    cx.run_until_parked();
+    assert!(!cx.has_pending_prompt());
+    assert_eq!(application_quit.requests(), 0);
+    assert_eq!(application_quit.confirmations(), 1);
+}
+
+#[gpui::test]
+fn keeping_the_client_closes_the_window_through_its_own_confirmation_without_quitting(
+    cx: &mut TestAppContext,
+) {
+    let (manager, records, application_quit, cx) = workspace_manager_with_application_actions(cx);
+    cx.update(|_, cx| crate::status_menu::set_available(cx, true));
+    redraw(cx);
+    cx.simulate_keystrokes("cmd-q");
+    cx.run_until_parked();
+    cx.simulate_prompt_answer("Keep in Menu Bar");
     cx.run_until_parked();
 
     // The window's running work asks first, exactly as its close button does.
@@ -2537,6 +2660,7 @@ fn command_q_closes_the_window_through_its_own_confirmation_without_quitting(
     click("modal-action-close-confirmation-cancel", cx);
     assert!(records.dropped_session_ids().is_empty());
     assert_eq!(application_quit.requests(), 0);
+    assert_eq!(application_quit.confirmations(), 0);
 }
 
 /// A Quit confirmed while a status-menu Stop or Restart runs waits for it, then checks the
@@ -2582,7 +2706,9 @@ fn quit_action_should_cancel_safely_and_confirm_once(cx: &mut TestAppContext) {
     assert!(cx.has_pending_prompt());
     assert_eq!(application_quit.requests(), 1);
     assert_eq!(
-        application_quit.simulate_native_request(),
+        application_quit.simulate_native_request(
+            crate::platform::application_quit::ApplicationQuitRequest::Exit
+        ),
         crate::platform::application_quit::ApplicationQuitDecision::Cancel
     );
     cx.simulate_prompt_answer("Cancel");
@@ -2598,7 +2724,9 @@ fn quit_action_should_cancel_safely_and_confirm_once(cx: &mut TestAppContext) {
     assert!(records.dropped_session_ids().is_empty());
 
     assert_eq!(
-        application_quit.simulate_native_request(),
+        application_quit.simulate_native_request(
+            crate::platform::application_quit::ApplicationQuitRequest::Exit
+        ),
         crate::platform::application_quit::ApplicationQuitDecision::Cancel
     );
     cx.run_until_parked();
@@ -6074,7 +6202,7 @@ fn close_pane_shortcut_from_sidebar_should_leave_the_empty_view_after_the_final_
 
     cx.simulate_keystrokes("cmd-shift-e");
     cx.run_until_parked();
-    cx.simulate_keystrokes("cmd-alt-w");
+    cx.simulate_keystrokes("cmd-w");
     cx.run_until_parked();
     click("modal-action-close-confirmation-confirm", cx);
 
@@ -10321,6 +10449,7 @@ fn shared_close_inventory(
         repositories: None,
         revision,
         close: Some(CloseInventory {
+            controls: None,
             boot: SHARED_CLOSE_BOOT,
             sessions: tabs
                 .iter()
@@ -10462,6 +10591,7 @@ fn shared_close_mutation(
     Mutation::Close {
         target,
         confirmation: CloseConfirmation {
+            own_controls: None,
             boot: SHARED_CLOSE_BOOT,
             panes: panes
                 .iter()
@@ -10478,7 +10608,7 @@ fn shared_close_mutation(
 
 /// Kill Workspace on a shared Workspace asks its server. Its confirmation starts on
 /// Cancel, and confirming asks the server to end every Pane and Session it showed; the Workspace
-/// leaves this window only when the server publishes its removal.
+/// leaves this window immediately while its server decides the exact operation.
 #[gpui::test]
 fn shared_kill_workspace_should_confirm_then_end_exactly_what_it_showed_for_every_client(
     cx: &mut TestAppContext,
@@ -10499,6 +10629,7 @@ fn shared_kill_workspace_should_confirm_then_end_exactly_what_it_showed_for_ever
         harness.closes().is_empty(),
         "nothing ends before confirmation"
     );
+    assert_eq!(harness.shared_rows(cx), 1);
 
     click("modal-action-shared-close-confirm", cx);
     redraw(cx);
@@ -10518,9 +10649,18 @@ fn shared_kill_workspace_should_confirm_then_end_exactly_what_it_showed_for_ever
     );
     assert_eq!(
         harness.shared_rows(cx),
-        1,
-        "the Workspace stays until the server publishes its removal"
+        0,
+        "the approved Workspace close hides it before the server answers"
     );
+    harness.manager.read_with(cx, |manager, _| {
+        assert_eq!(
+            manager.shared.local().unwrap().latest_inventory(),
+            Some(&shared_close_published()),
+            "hiding the Workspace changes no authoritative membership or Session facts"
+        );
+        assert_eq!(manager.workspaces.len(), 1);
+    });
+    assert!(shared_close_terminal_is_focused(&harness, cx));
 
     harness.edits.answer(Outcome::Accepted {
         target: SHARED_CLOSE_WORKSPACE,
@@ -10548,13 +10688,13 @@ fn shared_kill_workspace_should_confirm_then_end_exactly_what_it_showed_for_ever
     );
 }
 
-/// Cmd+W runs the retained close_workspace Command, which opens Kill Workspace on a shared
-/// Workspace rather than Close Pane.
+/// Control-Command-W runs the retained close_workspace Command, which opens Kill Workspace on a
+/// shared Workspace rather than Close Pane.
 #[gpui::test]
-fn shared_command_w_should_open_kill_workspace(cx: &mut TestAppContext) {
+fn shared_control_command_w_should_open_kill_workspace(cx: &mut TestAppContext) {
     let (harness, cx) = shared_close_harness(cx);
 
-    cx.simulate_keystrokes("cmd-w");
+    cx.simulate_keystrokes("ctrl-cmd-w");
     redraw(cx);
 
     assert!(
@@ -10954,7 +11094,7 @@ fn shared_close_pane_shortcut_should_confirm_and_escape_should_cancel(cx: &mut T
     let (harness, cx) = shared_close_harness(cx);
     assert!(shared_close_terminal_is_focused(&harness, cx));
 
-    cx.simulate_keystrokes("cmd-alt-w");
+    cx.simulate_keystrokes("cmd-w");
     redraw(cx);
     assert!(
         cx.debug_bounds("modal-action-shared-close-cancel-keyboard-focus")
@@ -10975,8 +11115,8 @@ fn shared_close_pane_shortcut_should_confirm_and_escape_should_cancel(cx: &mut T
     );
 }
 
-/// Closing a Tab changes this window only when the server publishes it. The surviving Tab takes
-/// the keyboard, and closing the final Tab removes the Workspace once the server removes it.
+/// An approved Tab close hides its exact membership and focuses the surviving Tab immediately.
+/// The final Tab's close hides the Workspace while the server decides the operation.
 #[gpui::test]
 fn shared_tab_closes_should_reconcile_through_publication_down_to_the_final_tab(
     cx: &mut TestAppContext,
@@ -10988,13 +11128,36 @@ fn shared_tab_closes_should_reconcile_through_publication_down_to_the_final_tab(
     settle_shared_panes(cx);
     cx.dispatch_action(crate::ui::CloseTab);
     redraw(cx);
+    assert_eq!(shared_close_counts(&harness, cx), (2, 3));
+    assert!(harness.closes().is_empty());
     click("modal-action-shared-close-confirm", cx);
     redraw(cx);
     assert_eq!(
-        shared_close_counts(&harness, cx),
-        (2, 3),
-        "nothing closes before the server publishes"
+        harness.closes(),
+        [shared_close_mutation(
+            ServerCloseTarget::Tab {
+                workspace: SHARED_CLOSE_WORKSPACE,
+                tab: SHARED_CLOSE_ROOT_TAB,
+            },
+            &[
+                (SHARED_CLOSE_ROOT_PANE, Some([31; 32])),
+                (SHARED_CLOSE_SPLIT_PANE, Some([32; 32])),
+            ],
+            SharedCloseRemoves::Tab,
+        )]
     );
+    assert_eq!(
+        shared_close_counts(&harness, cx),
+        (1, 1),
+        "the approved Tab close hides its Panes before the server answers"
+    );
+    harness.manager.read_with(cx, |manager, _| {
+        assert_eq!(
+            manager.shared.local().unwrap().latest_inventory(),
+            Some(&shared_close_published())
+        );
+    });
+    assert!(shared_close_terminal_is_focused(&harness, cx));
 
     harness.edits.answer(Outcome::Accepted {
         target: SHARED_CLOSE_ROOT_TAB,
@@ -11030,6 +11193,8 @@ fn shared_tab_closes_should_reconcile_through_publication_down_to_the_final_tab(
             SharedCloseRemoves::Workspace,
         ))
     );
+    assert_eq!(harness.shared_rows(cx), 0);
+    assert!(shared_close_terminal_is_focused(&harness, cx));
     harness.edits.answer(Outcome::Accepted {
         target: SHARED_CLOSE_SECOND_TAB,
     });
@@ -12717,6 +12882,7 @@ mod shared_repositories {
         second.panes[0].id = second.root_pane;
         initial.workspaces[0].tabs.push(second);
         initial.close = Some(CloseInventory {
+            controls: None,
             boot: [9; 32],
             sessions: initial.workspaces[0]
                 .tabs
@@ -12772,9 +12938,16 @@ mod shared_repositories {
                 .worktrees
                 .unwrap()
                 .rows()
-                .any(|row| row.worktree_id == feature && row.has_tabs),
-            "publication owns removal"
+                .any(|row| row.worktree_id == feature && !row.has_tabs),
+            "the approved close hides the Tabs and keeps their Git Worktree row"
         );
+        harness.manager.read_with(cx, |manager, _| {
+            assert_eq!(
+                manager.shared.local().unwrap().latest_inventory(),
+                Some(&initial),
+                "optimistic presentation changes no server membership"
+            );
+        });
         harness
             .edits
             .answer(Outcome::Accepted { target: WORKSPACE });
@@ -12792,51 +12965,8 @@ mod shared_repositories {
         );
     }
 
-    #[gpui::test]
-    fn closing_every_worktree_tab_refuses_without_a_confirmation_or_mutation(
-        cx: &mut TestAppContext,
-    ) {
-        let mut initial = published(1, "main", true);
-        initial.workspaces[0]
-            .tabs
-            .retain(|tab| tab.id == FEATURE_TAB);
-        initial.workspaces[0].root_tab = FEATURE_TAB;
-        let (harness, cx) = harness(cx, initial);
-        let (_, feature) = worktree_ids(&harness, cx);
-        assert!(
-            !harness
-                .row(cx)
-                .worktrees
-                .unwrap()
-                .rows()
-                .find(|row| row.worktree_id == feature)
-                .unwrap()
-                .closes_tabs
-        );
-        cx.update(|window, cx| {
-            harness.manager.update(cx, |manager, cx| {
-                manager.handle_sidebar_event(
-                    SidebarEvent::WorktreeCommand {
-                        workspace_id: harness.shared,
-                        worktree_id: feature,
-                        command: WorktreeMenuCommand::CloseTabs,
-                    },
-                    window,
-                    cx,
-                );
-            });
-        });
-        redraw(cx);
-        assert!(
-            spaceterm_ui::a11y_testing::A11yTree::read(cx)
-                .find("Tabs Not Closed")
-                .is_some()
-        );
-        assert!(
-            cx.debug_bounds("modal-action-shared-close-confirm")
-                .is_none()
-        );
-        assert!(harness.edits.submitted().is_empty());
+    mod worktree_fallback {
+        include!("worktrees/fallback_tests.rs");
     }
 
     #[gpui::test]

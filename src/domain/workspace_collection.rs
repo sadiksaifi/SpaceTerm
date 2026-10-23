@@ -223,6 +223,7 @@ impl<T> WorkspaceEntry<T> {
 
 pub(crate) struct WorkspaceCollection<T> {
     workspaces: Vec<WorkspaceEntry<T>>,
+    parked: Vec<(usize, WorkspaceEntry<T>)>,
     /// The Workspace the window presents. It is `None` only while the collection is empty.
     active_workspace_id: Option<WorkspaceId>,
     next_workspace_id: u64,
@@ -233,6 +234,7 @@ impl<T> WorkspaceCollection<T> {
     pub(crate) const fn empty() -> Self {
         Self {
             workspaces: Vec::new(),
+            parked: Vec::new(),
             active_workspace_id: None,
             next_workspace_id: 1,
         }
@@ -397,6 +399,85 @@ impl<T> WorkspaceCollection<T> {
         &mut self,
         workspace_id: WorkspaceId,
     ) -> Result<T, WorkspaceError> {
+        let (position, entry) = self.take_workspace(workspace_id)?;
+        self.retire_parked_position(self.position_with_parked(position));
+        Ok(entry.payload)
+    }
+
+    /// Removes a presentation while keeping its identity, payload and order for a refused close.
+    pub(crate) fn park_workspace(
+        &mut self,
+        workspace_id: WorkspaceId,
+    ) -> Result<(), WorkspaceError> {
+        let (position, entry) = self.take_workspace(workspace_id)?;
+        let position = self.position_with_parked(position);
+        let index = self.parked.partition_point(|(other, _)| *other < position);
+        self.parked.insert(index, (position, entry));
+        Ok(())
+    }
+
+    pub(crate) fn parked_ids(&self) -> impl Iterator<Item = WorkspaceId> + '_ {
+        self.parked.iter().map(|(_, entry)| entry.id)
+    }
+
+    /// Restores a refused close without replacing a newer Active Workspace.
+    pub(crate) fn restore_workspace(
+        &mut self,
+        workspace_id: WorkspaceId,
+    ) -> Result<(), WorkspaceError> {
+        let index = self
+            .parked
+            .iter()
+            .position(|(_, entry)| entry.id == workspace_id)
+            .ok_or(WorkspaceError::WorkspaceNotFound(workspace_id))?;
+        let (position, entry) = self.parked.remove(index);
+        self.workspaces.insert(
+            position.saturating_sub(index).min(self.workspaces.len()),
+            entry,
+        );
+        if self.active_workspace_id.is_none() {
+            self.active_workspace_id = Some(workspace_id);
+        }
+        self.recalculate_automatic_names();
+        Ok(())
+    }
+
+    /// Ends a parked presentation only after its removal is authoritative.
+    pub(crate) fn discard_parked_workspace(
+        &mut self,
+        workspace_id: WorkspaceId,
+    ) -> Result<T, WorkspaceError> {
+        let index = self
+            .parked
+            .iter()
+            .position(|(_, entry)| entry.id == workspace_id)
+            .ok_or(WorkspaceError::WorkspaceNotFound(workspace_id))?;
+        let (position, entry) = self.parked.remove(index);
+        self.retire_parked_position(position);
+        Ok(entry.payload)
+    }
+
+    fn position_with_parked(&self, mut visible_position: usize) -> usize {
+        for (position, _) in &self.parked {
+            if *position <= visible_position {
+                visible_position += 1;
+            }
+        }
+        visible_position
+    }
+
+    fn retire_parked_position(&mut self, position: usize) {
+        for (other, _) in &mut self.parked {
+            if *other > position {
+                *other -= 1;
+            }
+        }
+    }
+
+    fn take_workspace(
+        &mut self,
+        workspace_id: WorkspaceId,
+    ) -> Result<(usize, WorkspaceEntry<T>), WorkspaceError> {
         let index = self
             .workspaces
             .iter()
@@ -410,7 +491,7 @@ impl<T> WorkspaceCollection<T> {
                 .map(WorkspaceEntry::id);
         }
         self.recalculate_automatic_names();
-        Ok(removed.payload)
+        Ok((index, removed))
     }
 
     fn workspace_mut(&mut self, workspace_id: WorkspaceId) -> Option<&mut WorkspaceEntry<T>> {
@@ -455,6 +536,38 @@ pub(crate) mod tests {
     use std::cell::Cell;
 
     use super::*;
+
+    #[test]
+    fn refused_closes_restore_identity_and_order_without_replacing_newer_activation() {
+        for reverse in [false, true] {
+            let mut workspaces = new_workspaces("first");
+            let first = workspaces.active_workspace_id().unwrap();
+            let second = workspaces
+                .create_local_workspace(validated("/second", 1), |_, _| "second")
+                .unwrap();
+            workspaces.park_workspace(first).unwrap();
+            workspaces.park_workspace(second).unwrap();
+            let later = workspaces
+                .create_local_workspace(validated("/later", 2), |_, _| "later")
+                .unwrap();
+            for id in if reverse {
+                [second, first]
+            } else {
+                [first, second]
+            } {
+                workspaces.restore_workspace(id).unwrap();
+            }
+            assert_eq!(
+                workspaces
+                    .iter()
+                    .map(WorkspaceEntry::id)
+                    .collect::<Vec<_>>(),
+                [first, second, later]
+            );
+            assert_eq!(workspaces.workspace(first).unwrap().payload(), &"first");
+            assert_eq!(workspaces.active_workspace_id(), Some(later));
+        }
+    }
 
     /// Reads the Active Workspace of a collection a test knows is not empty.
     pub(crate) trait PresentedWorkspace<T> {

@@ -5,7 +5,7 @@ A native desktop terminal multiplexer for macOS and Linux, coming soon for Windo
 ## Sources of truth
 
 - Use the terms defined in [CONTEXT.md](CONTEXT.md).
-- Read the relevant [ADRs](docs/adr/) before changing architecture or authentication.
+- Read the relevant [ADRs](docs/adr/) before changing architecture, authentication, behavior, shortcuts, presentation, or lifecycle.
 - Write docs only for what code, configuration, or the UI cannot express. State each fact once and reference its owning file elsewhere.
 - Keep task plans and validation reports in issues or PRs.
 

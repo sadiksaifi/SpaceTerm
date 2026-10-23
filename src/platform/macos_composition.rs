@@ -445,11 +445,11 @@ mod tests {
                 presentation.shortcut(&TogglePaneZoom).as_deref(),
                 Some("⇧⌘↩")
             );
-            assert_eq!(presentation.shortcut(&ClosePane).as_deref(), Some("⌥⌘W"));
+            assert_eq!(presentation.shortcut(&ClosePane).as_deref(), Some("⌘W"));
             assert_eq!(presentation.shortcut(&CloseTab).as_deref(), Some("⇧⌘W"));
             assert_eq!(
                 presentation.shortcut(&CloseWorkspace).as_deref(),
-                Some("⌘W")
+                Some("⌃⌘W")
             );
             #[cfg(feature = "developer-tools")]
             assert_eq!(

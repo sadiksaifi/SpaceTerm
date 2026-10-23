@@ -8,6 +8,53 @@ pub(crate) enum ApplicationQuitDecision {
     Cancel,
 }
 
+/// Why the host asked the application to quit.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ApplicationQuitRequest {
+    /// The person asked to quit, such as from the Dock. They choose whether the client stays in
+    /// its menu bar or status area, quits, or keeps its windows.
+    #[cfg_attr(
+        not(target_os = "macos"),
+        allow(
+            dead_code,
+            reason = "Linux commands invoke dismissal directly; only macOS reports Dock requests"
+        )
+    )]
+    Dismissal,
+    /// The client chose to exit, such as from Quit SpaceTerm or an installed update, or the
+    /// person's session is ending. The quit policy runs without asking about the status area.
+    Exit,
+}
+
+/// The host's name for the place a windowless client stays reachable.
+#[cfg_attr(
+    target_os = "macos",
+    allow(dead_code, reason = "only Linux desktops present a status area")
+)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum StatusAreaName {
+    MenuBar,
+    StatusArea,
+}
+
+impl StatusAreaName {
+    /// The name inside a sentence, such as "menu bar".
+    pub(crate) const fn phrase(self) -> &'static str {
+        match self {
+            Self::MenuBar => "menu bar",
+            Self::StatusArea => "status area",
+        }
+    }
+
+    /// The choice that closes every window and keeps the client there.
+    pub(crate) const fn keep_label(self) -> &'static str {
+        match self {
+            Self::MenuBar => "Keep in Menu Bar",
+            Self::StatusArea => "Keep in Status Area",
+        }
+    }
+}
+
 #[cfg_attr(
     not(target_os = "macos"),
     allow(
@@ -37,19 +84,26 @@ pub(crate) enum ApplicationQuitError {
 #[derive(Clone)]
 pub(crate) struct ApplicationQuitHandler {
     app: AsyncApp,
-    request: Rc<dyn Fn(&mut App) -> ApplicationQuitDecision>,
+    request: Rc<ApplicationQuitRequestHandler>,
 }
 
+type ApplicationQuitRequestHandler =
+    dyn Fn(&mut App, ApplicationQuitRequest) -> ApplicationQuitDecision;
+
 impl ApplicationQuitHandler {
-    pub(crate) fn new(cx: &App, request: Rc<dyn Fn(&mut App) -> ApplicationQuitDecision>) -> Self {
+    pub(crate) fn new(cx: &App, request: Rc<ApplicationQuitRequestHandler>) -> Self {
         Self {
             app: cx.to_async(),
             request,
         }
     }
 
-    pub(crate) fn handle(&self, cx: &mut App) -> ApplicationQuitDecision {
-        (self.request)(cx)
+    pub(crate) fn handle(
+        &self,
+        request: ApplicationQuitRequest,
+        cx: &mut App,
+    ) -> ApplicationQuitDecision {
+        (self.request)(cx, request)
     }
 
     #[cfg_attr(
@@ -59,8 +113,8 @@ impl ApplicationQuitHandler {
             reason = "only an application delegate re-enters the quit handler from native callbacks"
         )
     )]
-    pub(crate) fn handle_native(&self) -> ApplicationQuitDecision {
-        self.app.update(|cx| self.handle(cx))
+    pub(crate) fn handle_native(&self, request: ApplicationQuitRequest) -> ApplicationQuitDecision {
+        self.app.update(|cx| self.handle(request, cx))
     }
 }
 
@@ -76,8 +130,13 @@ pub(crate) trait ApplicationQuitAdapter {
         LastWindowPolicy::KeepRunning
     }
 
+    fn status_area_name(&self) -> StatusAreaName {
+        StatusAreaName::MenuBar
+    }
+
     fn install(&self, handler: ApplicationQuitHandler) -> Result<(), ApplicationQuitError>;
 
+    /// Asks the application to exit through the quit policy, without the dismissal choice.
     fn request_quit(&self, cx: &mut App);
 
     fn confirm_quit(&self, cx: &mut App);
@@ -105,17 +164,16 @@ pub(crate) mod testing {
             self.confirmations.get()
         }
 
-        pub(crate) fn simulate_native_request(&self) -> ApplicationQuitDecision {
-            self.dispatch_request()
-        }
-
-        fn dispatch_request(&self) -> ApplicationQuitDecision {
+        pub(crate) fn simulate_native_request(
+            &self,
+            request: ApplicationQuitRequest,
+        ) -> ApplicationQuitDecision {
             self.requests.set(self.requests.get() + 1);
             self.handler
                 .borrow()
                 .as_ref()
                 .map_or(ApplicationQuitDecision::Proceed, |handler| {
-                    handler.handle_native()
+                    handler.handle_native(request)
                 })
         }
     }
@@ -134,7 +192,7 @@ pub(crate) mod testing {
             self.requests.set(self.requests.get() + 1);
             let handler = self.handler.borrow().clone();
             if let Some(handler) = handler {
-                handler.handle(cx);
+                handler.handle(ApplicationQuitRequest::Exit, cx);
             }
         }
 

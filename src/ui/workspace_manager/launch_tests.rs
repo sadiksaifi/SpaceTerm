@@ -100,6 +100,18 @@ impl LaunchHarness {
             .read_with(cx, |manager, _| manager.workspaces.len())
     }
 
+    fn authoritative_inventory(&self, cx: &mut VisualTestContext) -> Inventory {
+        self.manager.read_with(cx, |manager, _| {
+            manager
+                .shared
+                .local()
+                .expect("the local server is presented")
+                .latest_inventory()
+                .expect("the server published its inventory")
+                .clone()
+        })
+    }
+
     fn click(&self, selector: &'static str, cx: &mut VisualTestContext) {
         let bounds = cx
             .debug_bounds(selector)
@@ -775,7 +787,7 @@ fn a_stop_before_inventory_offers_start_server(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn removing_the_final_server_workspace_leaves_the_empty_view(cx: &mut TestAppContext) {
+fn removing_the_final_server_workspace_closes_its_window(cx: &mut TestAppContext) {
     let (harness, cx) = launch_harness(vec![ready()], cx);
     cx.run_until_parked();
     sync(&harness, cx);
@@ -788,16 +800,14 @@ fn removing_the_final_server_workspace_leaves_the_empty_view(cx: &mut TestAppCon
     });
     sync(&harness, cx);
 
-    assert_eq!(
-        harness.workspace_count(cx),
-        0,
-        "no desktop-owned Workspace replaces the server's"
+    assert!(
+        cx.windows().is_empty(),
+        "removing the final Workspace dismisses its Window without creating desktop work"
     );
-    assert!(cx.debug_bounds("empty-workspace").is_some());
 }
 
 #[gpui::test]
-fn new_workspace_asks_the_server_rather_than_creating_desktop_work(cx: &mut TestAppContext) {
+fn new_workspace_presents_a_pending_creation_without_server_authority(cx: &mut TestAppContext) {
     use spaceterm_server::hierarchy::Mutation;
 
     let (harness, cx) = launch_harness(vec![ready()], cx);
@@ -816,8 +826,53 @@ fn new_workspace_asks_the_server_rather_than_creating_desktop_work(cx: &mut Test
     );
     assert_eq!(
         harness.workspace_count(cx),
+        2,
+        "the pending Workspace appears before the server answers"
+    );
+    assert_ne!(active_server_workspace(&harness, cx).unwrap(), WORKSPACE);
+    assert_eq!(harness.authoritative_inventory(cx), inventory());
+    assert_eq!(
+        harness.panes.opened().len(),
         1,
-        "nothing appears before the server answers"
+        "a pending creation cannot subscribe to a server Pane"
+    );
+}
+
+/// New Workspace chosen with no Workspace Window opens one that has no attached Workspaces yet.
+/// It creates one Workspace once the server presents them, where opening SpaceTerm creates none.
+#[gpui::test]
+fn new_workspace_without_a_window_creates_once_the_server_presents_its_workspaces(
+    cx: &mut TestAppContext,
+) {
+    use spaceterm_server::hierarchy::Mutation;
+
+    let (harness, cx) = launch_harness_with(vec![ready()], ScriptedEdits::new(None), [], cx);
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        harness.manager.update(cx, |manager, cx| {
+            manager.create_workspace_when_presented(window, cx);
+        });
+    });
+    cx.run_until_parked();
+    assert!(
+        harness.edits.submitted().is_empty(),
+        "the server has not presented its Workspaces yet"
+    );
+
+    harness.edits.set_inventory(Inventory {
+        workspaces: Vec::new(),
+        ..inventory()
+    });
+    sync(&harness, cx);
+    sync(&harness, cx);
+
+    assert_eq!(
+        harness.edits.submitted(),
+        vec![Mutation::CreateWorkspace {
+            name: String::new(),
+            directory: None,
+        }],
+        "one request creates one Workspace"
     );
 }
 
@@ -854,7 +909,9 @@ fn open_local_directory_creates_a_server_workspace_rooted_there(cx: &mut TestApp
             directory: Some(chosen.clone()),
         }]
     );
-    assert_eq!(harness.workspace_count(cx), 1);
+    assert_eq!(harness.workspace_count(cx), 2);
+    assert_eq!(harness.authoritative_inventory(cx), inventory());
+    assert_eq!(harness.panes.opened().len(), 1);
     std::fs::remove_dir_all(chosen).unwrap();
 }
 
@@ -951,7 +1008,7 @@ fn a_tab_creation_leaves_the_workspace_rows_as_they_are(cx: &mut TestAppContext)
 }
 
 #[gpui::test]
-fn a_pending_rename_says_saving_on_its_own_row(cx: &mut TestAppContext) {
+fn a_pending_rename_presents_its_name_without_a_saving_label(cx: &mut TestAppContext) {
     let (harness, cx) = ready_harness(cx);
     harness.manager.update(cx, |manager, cx| {
         let id = manager.workspaces.iter().next().expect("one row").id();
@@ -960,7 +1017,14 @@ fn a_pending_rename_says_saving_on_its_own_row(cx: &mut TestAppContext) {
         cx.notify();
     });
     sync(&harness, cx);
-    assert!(shared_row_status_drawn(&harness, cx));
+    assert_eq!(
+        harness.manager.read_with(cx, |manager, _| {
+            manager.workspaces.iter().next().unwrap().name().to_owned()
+        }),
+        "Logs"
+    );
+    assert!(!shared_row_status_drawn(&harness, cx));
+    assert_eq!(harness.authoritative_inventory(cx), inventory());
 }
 
 #[gpui::test]
@@ -1043,7 +1107,9 @@ fn a_named_creation_never_switches_to_an_existing_match(cx: &mut TestAppContext)
     cx.run_until_parked();
 
     assert_eq!(created_names(&harness), ["Default"]);
-    assert_eq!(harness.workspace_count(cx), 1);
+    assert_eq!(harness.workspace_count(cx), 2);
+    assert_ne!(active_server_workspace(&harness, cx).unwrap(), WORKSPACE);
+    assert_eq!(harness.authoritative_inventory(cx), inventory());
 }
 
 #[gpui::test]
@@ -1146,6 +1212,50 @@ fn accept_creation(harness: &LaunchHarness, pinned: Option<PathBuf>, cx: &mut Vi
     sync(harness, cx);
 }
 
+#[gpui::test]
+fn a_refused_first_workspace_creation_keeps_the_window_and_its_notice(cx: &mut TestAppContext) {
+    let empty = Inventory {
+        revision: 1,
+        repositories: None,
+        close: None,
+        workspaces: Vec::new(),
+    };
+    let (harness, cx) = launch_harness_with(vec![ready()], ScriptedEdits::new(Some(empty)), [], cx);
+    cx.run_until_parked();
+    sync(&harness, cx);
+    assert_eq!(harness.workspace_count(cx), 0);
+    cx.dispatch_action(crate::ui::NewWorkspace);
+    cx.run_until_parked();
+    assert_eq!(
+        harness.workspace_count(cx),
+        1,
+        "creation appears before acknowledgement"
+    );
+    harness
+        .edits
+        .answer(spaceterm_server::hierarchy::Outcome::Limit);
+    sync(&harness, cx);
+    assert_eq!(
+        cx.windows().len(),
+        1,
+        "a refused creation must leave its empty window open"
+    );
+    assert_eq!(harness.workspace_count(cx), 0);
+    let action = cx
+        .debug_bounds("modal-action-shared-workspace-refused-ok")
+        .expect("the refusal remains readable");
+    cx.simulate_click(action.center(), Modifiers::none());
+    cx.run_until_parked();
+    cx.dispatch_action(crate::ui::NewWorkspace);
+    cx.run_until_parked();
+    assert_eq!(
+        created_names(&harness).len(),
+        2,
+        "the empty window remains usable after dismissal"
+    );
+    assert_eq!(harness.workspace_count(cx), 1);
+}
+
 fn active_server_workspace(
     harness: &LaunchHarness,
     cx: &mut VisualTestContext,
@@ -1167,13 +1277,26 @@ fn the_new_workspace_menu_creates_and_opens_a_server_workspace(cx: &mut TestAppC
     assert_eq!(created_names(&harness), [""]);
     assert_eq!(
         harness.workspace_count(cx),
-        1,
-        "nothing appears before the server answers"
+        2,
+        "the pending Workspace appears before the server answers"
     );
+    let pending = harness.manager.read_with(cx, |manager, _| {
+        manager.workspaces.active_workspace_id().unwrap()
+    });
+    assert_ne!(active_server_workspace(&harness, cx).unwrap(), WORKSPACE);
+    assert_eq!(harness.authoritative_inventory(cx), inventory());
+    assert_eq!(harness.panes.opened().len(), 1);
 
     accept_creation(&harness, None, cx);
 
     assert_eq!(harness.workspace_count(cx), 2);
+    assert_eq!(
+        harness.manager.read_with(cx, |manager, _| {
+            manager.workspaces.active_workspace_id()
+        }),
+        Some(pending),
+        "acceptance binds the pending Workspace without replacing its local identity"
+    );
     assert_eq!(active_server_workspace(&harness, cx), Some(CREATED));
     assert_eq!(
         harness.panes.pane([63; 32]).selections(),
@@ -1198,6 +1321,8 @@ fn switcher_keyboard_acceptance_creates_exactly_one_workspace_without_a_picker(
             .manager
             .read_with(cx, |manager, _| manager.pin_picker.is_none())
     );
+    assert_eq!(harness.workspace_count(cx), 2);
+    assert_ne!(active_server_workspace(&harness, cx).unwrap(), WORKSPACE);
     accept_creation(&harness, None, cx);
     assert_eq!(harness.workspace_count(cx), 2);
     assert_eq!(active_server_workspace(&harness, cx), Some(CREATED));
@@ -1587,6 +1712,7 @@ fn with_hidden_tab(
         }],
     });
     inventory.close = Some(CloseInventory {
+        controls: None,
         boot: BOOT,
         sessions: vec![
             ConfirmedPane {
@@ -1804,6 +1930,7 @@ fn with_root_progress(revision: u64, metadata_revision: u64, percent: u8) -> Inv
     presentation.progress = spaceterm_server::pane::metadata::Progress::Normal(percent);
     inventory.workspaces[0].tabs[0].panes[0].presentation = Some(Box::new(presentation));
     inventory.close = Some(CloseInventory {
+        controls: None,
         boot: BOOT,
         sessions: vec![ConfirmedPane {
             id: PANE,

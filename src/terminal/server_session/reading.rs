@@ -712,6 +712,32 @@ mod tests {
         assert!(Arc::ptr_eq(&original.plain_text, &unchanged.plain_text));
     }
     #[test]
+    fn an_oversized_query_retires_the_previous_generation_without_sending_text() {
+        let mut adapter = Adapter::new();
+        let generation = super::super::super::FindQueryGeneration::test(10);
+        adapter.handle.set_find_query(generation, "界".repeat(1366));
+        adapter.drain(|_| Ok(Reply::Unchanged)).unwrap();
+        let mut reader = Reader::default();
+        reader.screen(&adapter.handle.state, mapping(&adapter), false);
+        let ended = drain(&mut reader, &adapter, |_| {
+            Ok(Reply::Reading { accepted: true })
+        });
+        assert!(
+            matches!(ended.as_slice(), [Operation::EndFind { generation: value }] if *value == generation.value())
+        );
+        adapter
+            .handle
+            .set_find_query(generation.next(), "short".into());
+        adapter.drain(|_| Ok(Reply::Unchanged)).unwrap();
+        let submitted = drain(&mut reader, &adapter, |_| {
+            Ok(Reply::Reading { accepted: true })
+        });
+        assert!(
+            matches!(submitted.as_slice(), [Operation::Query { generation: value, text }] if *value == generation.next().value() && text == "short")
+        );
+    }
+
+    #[test]
     fn typing_a_new_query_coalesces_queued_search_work() {
         let adapter = Adapter::new();
         let state = &adapter.handle.state;

@@ -440,7 +440,7 @@ impl PaneTerminalSessionLifecycle {
         geometry: TerminalGeometry,
         appearance: crate::terminal::TerminalAppearanceUpdate,
     ) -> Option<Result<crate::terminal::StartedTerminalSession, TerminalFailure>> {
-        if self.session_start_attempted {
+        if self.session_start_attempted || self.session_factory.is_pending() {
             return None;
         }
         self.session_start_attempted = true;
@@ -1460,6 +1460,22 @@ impl TerminalPane {
                 std::time::Instant::now(),
             ),
         }
+    }
+
+    /// Bind a presentation-only Pane after the server supplies its actual membership.
+    pub(crate) fn bind_pending_server(
+        &mut self,
+        factory: WorkspaceTerminalSessionFactory,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.terminal_session.session_factory.is_pending() {
+            return;
+        }
+        self.terminal_session = PaneTerminalSessionLifecycle::new(factory);
+        // The placeholder already measured this grid without starting a presentation worker.
+        // Revisit those bounds even when acceptance changes no layout dimensions.
+        self.last_geometry = None;
+        cx.notify();
     }
 
     /// Whether the shell runs in a SpaceTerm Server.
@@ -4255,7 +4271,11 @@ impl TerminalPane {
             .find
             .as_ref()
             .filter(|snapshot| snapshot.generation == self.find_generation);
-        let result_label = if input.read(cx).value().is_empty() {
+        let query_too_large = self.server_backed()
+            && input.read(cx).value().len() > spaceterm_server::pane::reading::MAX_QUERY_BYTES;
+        let result_label = if query_too_large {
+            "Query exceeds 4,096 bytes".to_owned()
+        } else if input.read(cx).value().is_empty() {
             "Find".to_owned()
         } else {
             snapshot.map_or_else(
@@ -4274,7 +4294,8 @@ impl TerminalPane {
                 },
             )
         };
-        let has_results = snapshot.is_some_and(|snapshot| snapshot.total_matches > 0);
+        let has_results =
+            !query_too_large && snapshot.is_some_and(|snapshot| snapshot.total_matches > 0);
         let pane = cx.entity().downgrade();
         let previous_pane = pane.clone();
         let next_pane = pane.clone();
@@ -4565,12 +4586,51 @@ impl EntityInputHandler for TerminalPane {
             self.invalidate_preedit_layout();
             return;
         }
-        self.ime.commit(text);
-        self.invalidate_preedit_layout();
-        if let Some(text) = self.ime.take_commit() {
-            let translation = self.key_input_adapter.input_method_commit(text);
-            self.send_key_translation(translation, cx);
+        if self.server_backed() && !text.is_empty() {
+            let submitted = self
+                .terminal_session
+                .session
+                .as_ref()
+                .ok_or(crate::terminal::session::InputMethodRefusal::Unavailable)
+                .and_then(|session| session.commit_input_method(text));
+            match submitted {
+                Ok(outcome) => {
+                    self.ime.cancel();
+                    self.clear_attention(cx);
+                    if self.screen.cursor.visible && self.screen.cursor.blinking {
+                        self.reset_blink_phase();
+                    }
+                    // A queued commit belongs to this Terminal Session. A later interruption
+                    // is reported, never repaired by replaying committed text.
+                    let identity = self.terminal_session.native_service_session_identity;
+                    cx.spawn(async move |this, cx| {
+                        if outcome.recv().await != Ok(crate::terminal::session::InputMethodOutcome::Written) {
+                            let _ = this.update(cx, |this, cx| {
+                                if this.terminal_session.native_service_session_identity == identity {
+                                    this.status = Some("Input method text was not fully confirmed. Check the shell before entering it again.".to_owned());
+                                    this.status_intent = StatusIntent::Warning;
+                                    cx.notify();
+                                }
+                            });
+                        }
+                    }).detach();
+                }
+                Err(refusal) => {
+                    // Preserve the entire host string, including a direct emoji-picker commit
+                    // with no preceding marked text. No prefix has been queued.
+                    self.ime.replace_and_mark(None, text, None);
+                    self.status = Some(refusal.to_string());
+                    self.status_intent = StatusIntent::Warning;
+                }
+            }
+        } else {
+            self.ime.commit(text);
+            if let Some(text) = self.ime.take_commit() {
+                let translation = self.key_input_adapter.input_method_commit(text);
+                self.send_key_translation(translation, cx);
+            }
         }
+        self.invalidate_preedit_layout();
         self.pending_accessibility_notifications
             .insert(AccessibilityNotification::Value);
         cx.notify();
@@ -5117,9 +5177,7 @@ impl Render for TerminalPane {
             .on_action(cx.listener(Self::set_up_permission_request))
             .on_action(cx.listener(Self::decline_permission_request_action))
             .when(self.terminal_session.session_factory.file_insertion_capabilities() == TerminalLocalFileCapabilities::Enabled && self.interactive_input_available(), |root| root.on_drop(cx.listener(Self::insert_dropped_files)))
-            .when(local_operations, |root| {
-                root.on_action(cx.listener(Self::show_repository_status))
-            })
+            .on_action(cx.listener(Self::show_repository_status))
             // The owning server clears its Terminal Session for the client whose input it takes.
             .when(local_operations || self.interactive_input_available(), |root| {
                 root.on_action(cx.listener(Self::clear_screen_and_scrollback))

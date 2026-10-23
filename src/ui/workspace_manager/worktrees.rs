@@ -10,12 +10,14 @@ use crate::ui::workspace_sidebar::WorktreeSection;
 use crate::ui::worktree_form::WorktreeForm;
 
 mod cycle;
+pub(super) mod fallback;
 mod removal;
 mod server;
 
 #[derive(Default)]
 pub(super) struct SidebarWorktrees {
     form: Option<Entity<WorktreeForm>>,
+    close_fallbacks: std::collections::HashMap<WorkspaceId, spaceterm_server::hierarchy::Mutation>,
     created_shared: Option<(WorkspaceId, PathBuf, u64)>,
     /// The removal being checked, confirmed, or run. One runs at a time.
     removal: Option<u64>,

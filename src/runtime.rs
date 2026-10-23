@@ -63,10 +63,11 @@ pub use crate::terminal::permission_request::PermissionRequest;
 pub use crate::terminal::pointer_input::*;
 pub use crate::terminal::session::{
     AccessibilityDemandSender, AccessibilitySelectionSender, ClipboardCompletion, ClipboardRequest,
-    LocalTerminalLaunchPlan, NativeTerminalSessionFactory, SelectionCopyError,
-    StartedTerminalSession, TerminalAppearanceUpdate, TerminalRuntime, TerminalSessionError,
-    TerminalSessionEvent, TerminalSessionExit, TerminalSessionFactory, TerminalSessionFailure,
-    TerminalSessionHandle, TerminalSubscription,
+    InputMethodOutcome, InputMethodRefusal, LocalTerminalLaunchPlan, MAX_INPUT_METHOD_BYTES,
+    NativeTerminalSessionFactory, SelectionCopyError, StartedTerminalSession,
+    TerminalAppearanceUpdate, TerminalRuntime, TerminalSessionError, TerminalSessionEvent,
+    TerminalSessionExit, TerminalSessionFactory, TerminalSessionFailure, TerminalSessionHandle,
+    TerminalSubscription,
 };
 pub use crate::terminal::title::TitleGlyph;
 

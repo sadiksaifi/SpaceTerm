@@ -7,3 +7,7 @@ Beyond the independent Active Tab in [ADR 0024](0024-keep-tab-selection-independ
 Desktop presentation retains the single Workspace Window in [ADR 0046](0046-keep-one-workspace-window-per-desktop-client.md).
 
 The server owns terminal content and Scrollback; clients present independent views of that content while respecting [Pane control and the Takeover Screen](0022-give-one-client-control-of-each-pane.md). Shared creation and deletion reconcile each client's view against the remaining targets without copying the initiating client's focus or zoom changes to other clients.
+
+Membership reconciliation is independent of keyboard ownership. A later Workspace or Tab selection, sidebar edit, Terminal Find or chooser focus wins over an older operation's completion. Pane navigation focuses the rendered terminal or replacement screen. Explicit Workspace opening selects its restored Focused Pane; passive sidebar navigation starts no shell. An initiating split validates the restored allocation and reveals the resulting layout before requesting membership. Another client's membership never inherits this client's viewport limits.
+
+Architecture and transport changes preserve released shortcuts, focus, layout and interaction outcomes unless the owner approves a product change. [ADR 0037](0037-resolve-shared-mutations-at-the-server.md) owns optimistic mutation presentation and uncertainty.

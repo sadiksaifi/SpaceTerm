@@ -593,6 +593,9 @@ impl WorkspaceManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.is_worktree_close_fallback(&Mutation::Worktree(operation.clone())) {
+            return;
+        }
         let (path, creating) = match operation {
             Operation::Create { path, .. } => (path, true),
             Operation::Remove { path, .. } | Operation::OpenTab { path, .. } => (path, false),

@@ -10,6 +10,8 @@ use gpui::{
 };
 
 use super::*;
+#[path = "interaction_tests.rs"]
+mod interaction_tests;
 use crate::appearance::{Color, TerminalColors};
 use crate::terminal::native_services::clipboard::{
     ClipboardError, ClipboardRead, SelectionClipboard,
@@ -2569,6 +2571,37 @@ fn terminal_find_open_edit_navigate_and_close_are_pane_scoped(cx: &mut TestAppCo
     assert_eq!(commands[2].1, commands[3].1);
     assert!(commands[3].1 < commands[4].1);
     assert!(pane.read_with(cx, |pane, _| pane.find_input.is_none()));
+}
+
+#[gpui::test]
+fn server_find_reports_an_oversized_query_and_recovers_after_edit(cx: &mut TestAppContext) {
+    let (pane, cx, _) = terminal_pane_with_session_options(cx, |sessions| {
+        sessions.server_backed().with_reading_available(true)
+    });
+    cx.dispatch_action(OpenTerminalFind);
+    let input = terminal_find_input(&pane, cx);
+    let query = "界".repeat(1366);
+    replace_terminal_find_input(&input, &query, cx);
+    cx.run_until_parked();
+    assert_eq!(
+        input.read_with(cx, |input, _| input.value().to_owned()),
+        query
+    );
+    assert_eq!(
+        spaceterm_ui::a11y_testing::A11yTree::read(cx).node("Terminal Find results")["aria"]["value"],
+        "Query exceeds 4,096 bytes"
+    );
+    cx.dispatch_action(spaceterm_ui::EditSelectAll);
+    replace_terminal_find_input(&input, "short", cx);
+    cx.run_until_parked();
+    assert_eq!(
+        input.read_with(cx, |input, _| input.value().to_owned()),
+        "short"
+    );
+    assert_eq!(
+        spaceterm_ui::a11y_testing::A11yTree::read(cx).node("Terminal Find results")["aria"]["value"],
+        "Searching…"
+    );
 }
 
 #[gpui::test]
@@ -6177,6 +6210,33 @@ fn non_composing_zwj_prefix_does_not_fit_the_single_glyph_slot(cx: &mut TestAppC
             window,
         ));
     });
+}
+
+#[gpui::test]
+fn an_oversized_server_input_method_commit_preserves_the_entire_host_text(cx: &mut TestAppContext) {
+    let (pane, cx, records) =
+        terminal_pane_with_session_options(cx, |sessions| sessions.server_backed());
+    let text = "界🙂".repeat(10_000);
+    cx.update(|window, cx| {
+        pane.update(cx, |pane, cx| {
+            pane.replace_text_in_range(None, &text, window, cx);
+            assert_eq!(pane.ime.marked_text(), Some(text.as_str()));
+            assert!(pane.status.as_ref().unwrap().contains("65,536 bytes"));
+        })
+    });
+    assert!(
+        !records
+            .commands()
+            .iter()
+            .any(|call| matches!(call.command, RecordedCommand::Key(_)))
+    );
+    cx.update(|window, cx| {
+        pane.update(cx, |pane, cx| {
+            pane.replace_text_in_range(None, "short", window, cx);
+            assert!(pane.ime.marked_text().is_none());
+        })
+    });
+    assert!(records.commands().iter().any(|call| matches!(&call.command, RecordedCommand::Key(key) if key.text.as_deref() == Some("short"))));
 }
 
 #[gpui::test]

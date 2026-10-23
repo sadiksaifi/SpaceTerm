@@ -239,6 +239,11 @@ description = "Run shared tests without native features"
 usage = 'arg "[filter]" help="Run only tests whose names contain this filter"'
 run = "cargo test --package spaceterm --package spaceterm-directories --package spaceterm-server --package spaceterm-server-host --all-targets --no-default-features --locked {{usage.filter | quote}}"
 
+[tasks."test:desktop"]
+description = "Run desktop library regressions without native integration harnesses"
+usage = 'arg "[filter]" help="Run only tests whose names contain this filter"'
+run = "cargo test --package spaceterm --lib --all-features --locked {{usage.filter | quote}}"
+
 [tasks."test:rustdoc"]
 description = "Compile and test Rust documentation examples"
 # Explicit --doc selects generated C-header prose even when the sys crate has doctest = false.
@@ -713,3 +718,13 @@ arg "<installation>" help="Older server directory containing bin/spaceterm-serve
 arg "<commit>" help="Exact older server commit expected from --build-info"
 '''
 run = "python -m spaceterm_tasks.server_compatibility {{usage.installation | quote}} {{usage.commit | quote}}"
+
+[tasks."server:terminal-boundaries:test"]
+description = "Test desktop text admission, large grids and fresh-process startup recovery with fixture-owned PTYs"
+run = [
+  "cargo test --package spaceterm --lib --no-default-features --features desktop-tests --locked -- terminal::server_session",
+  "cargo test --package spaceterm --lib --no-default-features --features desktop-tests --locked -- runtime::server::boundary_tests",
+  "cargo test --package spaceterm --lib --no-default-features --features desktop-tests --locked -- terminal::geometry::tests",
+  "cargo test --package spaceterm --lib --no-default-features --features desktop-tests --locked -- server_find_reports_an_oversized_query",
+  "cargo test --package spaceterm --lib --no-default-features --features desktop-tests --locked -- an_oversized_server_input_method_commit",
+]

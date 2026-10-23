@@ -910,6 +910,12 @@ fn discover(
                     worktrees: list.worktrees,
                 });
             }
+        } else {
+            // Git also reports no repository when its working directory disappears after spawn.
+            // Only a read of the same directory can authoritatively clear saved membership.
+            super::local_filesystem()
+                .revalidate_directory(&validated)
+                .map_err(|_| RepositoryReadError::Unavailable)?;
         }
         Ok(())
     })();

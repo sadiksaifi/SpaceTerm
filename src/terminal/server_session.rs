@@ -501,6 +501,7 @@ enum Input {
     ClearScreenAndScrollback,
     Read(pane::reading::Operation),
     Key(KeyInput),
+    Commit(String, async_channel::Sender<InputMethodOutcome>),
     CopyOrForward(InputModifiers),
     Pointer(u64, pane::Pointer),
     Wheel(u64, pane::Wheel),
@@ -521,6 +522,10 @@ impl Input {
     fn eligible(&self, target: pane::FocusTarget) -> bool {
         match self {
             Self::Read(_) | Self::ClearScreenAndScrollback => true,
+            Self::Commit(..) => matches!(
+                target,
+                pane::FocusTarget::Terminal | pane::FocusTarget::FocusedPane
+            ),
             Self::Key(key) if key.is_input_method_commit() => matches!(
                 target,
                 pane::FocusTarget::Terminal | pane::FocusTarget::FocusedPane
@@ -721,7 +726,7 @@ fn submit_input(
     state: &DevelopmentPaneState,
     sender: &mpsc::SyncSender<SubmittedInput>,
     input: Input,
-) {
+) -> bool {
     let current_epoch = state.epoch.load(Ordering::Acquire);
     let epoch = match &input {
         Input::ResolvePaste(pending, ..) => pending.epoch,
@@ -747,7 +752,7 @@ fn submit_input(
     if !available {
         drop(interaction);
         discard_input(state, epoch, input);
-        return;
+        return false;
     }
     if let Input::Paste(_, reply) = &input {
         if interaction
@@ -763,7 +768,7 @@ fn submit_input(
             let _ = reply.try_send(Ok(super::PasteRequestOutcome::Rejected(
                 super::paste::PasteRejection::ConfirmationPending,
             )));
-            return;
+            return false;
         }
         interaction.paste_request = Some((epoch, interaction.focus_generation));
     }
@@ -778,7 +783,8 @@ fn submit_input(
     };
     let sent = sender.try_send(submitted);
     drop(interaction);
-    if sent.is_ok() {
+    let accepted = sent.is_ok();
+    if accepted {
         state.wake.notify();
     }
     if let Err(error) = sent {
@@ -793,9 +799,13 @@ fn submit_input(
         );
         state.invalidate();
     }
+    accepted
 }
 fn discard_input(state: &DevelopmentPaneState, epoch: u64, input: Input) {
     match input {
+        Input::Commit(_, reply) => {
+            let _ = reply.try_send(InputMethodOutcome::Interrupted);
+        }
         Input::Paste(_, reply) => {
             let mut interaction = state.interaction.lock().unwrap_or_else(|e| e.into_inner());
             if interaction
@@ -949,6 +959,59 @@ impl ActiveInput {
             }
         }
     }
+    /// One queue slot holds the complete bounded commit. Its UTF-8 chunks finish in order
+    /// before the next command; a failed or stale chunk ends the commit without replay.
+    fn write_input_method(
+        &mut self,
+        state: &DevelopmentPaneState,
+        generation: u64,
+        text: &str,
+        exchange: &mut impl FnMut(&Request) -> Result<Reply, ServerError>,
+    ) -> Result<InputMethodOutcome, ServerError> {
+        let mut remaining = text;
+        while !remaining.is_empty() {
+            {
+                let interaction = state.interaction.lock().unwrap_or_else(|e| e.into_inner());
+                if state.epoch.load(Ordering::Acquire) != self.epoch
+                    || generation != interaction.focus_generation
+                    || !interaction.interactive
+                    || !matches!(
+                        interaction.target,
+                        pane::FocusTarget::Terminal | pane::FocusTarget::FocusedPane
+                    )
+                {
+                    // New local focus retires the remaining input without turning a healthy
+                    // transport into a connection failure or taking focus back.
+                    return Ok(InputMethodOutcome::Interrupted);
+                }
+            }
+            let mut end = remaining.len().min(pane::MAX_KEY_TEXT_BYTES);
+            while !remaining.is_char_boundary(end) {
+                end -= 1;
+            }
+            let result = exchange(&Request::Input {
+                lease: self.lease,
+                generation,
+                input: pane::InteractiveInput::Key(encode_key(KeyInput::input_method_commit(
+                    &remaining[..end],
+                ))),
+            });
+            match result {
+                Ok(Reply::Unchanged) => remaining = &remaining[end..],
+                other => {
+                    // A lost acknowledgement may follow a successful write. Neither that
+                    // chunk nor the unsent suffix can be replayed on this or a new connection.
+                    state.invalidate();
+                    return Err(match other {
+                        Err(error) => error,
+                        _ => ServerError::Protocol,
+                    });
+                }
+            }
+        }
+        Ok(InputMethodOutcome::Written)
+    }
+
     fn process(
         &mut self,
         state: &DevelopmentPaneState,
@@ -990,6 +1053,14 @@ impl ActiveInput {
             input,
         };
         let (request, paste_reply) = match submitted.command {
+            Input::Commit(text, reply) => {
+                let result = self.write_input_method(state, generation, &text, exchange);
+                let _ = reply.try_send(match &result {
+                    Ok(outcome) => *outcome,
+                    Err(_) => InputMethodOutcome::Interrupted,
+                });
+                return result.map(|_| ());
+            }
             Input::ClearScreenAndScrollback => (
                 Request::ClearScreenAndScrollback { lease: self.lease },
                 None,
@@ -1286,8 +1357,8 @@ fn pane_size(geometry: TerminalGeometry) -> PaneSize {
     let grid = geometry.grid();
     let cell = geometry.backing_cell_size();
     PaneSize {
-        columns: grid.cols.clamp(2, pane::MAX_COLUMNS),
-        rows: grid.rows.clamp(2, pane::MAX_ROWS),
+        columns: grid.cols.max(2),
+        rows: grid.rows.max(2),
         cell_width: cell.width.clamp(1, 256) as u16,
         cell_height: cell.height.clamp(1, 256) as u16,
     }
@@ -1871,7 +1942,9 @@ impl TerminalSessionHandle for PresentationHandle {
         let state = Arc::clone(&self.state);
         let input = self.input.clone();
         Some(super::AccessibilitySelectionSender::server(Arc::new(
-            move |request| submit_input(&state, &input, Input::AccessibilitySelection(request)),
+            move |request| {
+                submit_input(&state, &input, Input::AccessibilitySelection(request));
+            },
         )))
     }
     fn accessibility_demand_sender(&self) -> Option<super::AccessibilityDemandSender> {
@@ -1934,12 +2007,32 @@ impl TerminalSessionHandle for PresentationHandle {
     }
     fn key(&self, k: KeyInput) {
         if k.validate().is_err()
-            || k.text.as_ref().is_some_and(|s| s.len() > 4096)
+            || k.text
+                .as_ref()
+                .is_some_and(|s| s.len() > pane::MAX_KEY_TEXT_BYTES)
             || k.logical_key.len() > 128
         {
             return;
         }
         self.send(Input::Key(k));
+    }
+    fn commit_input_method(
+        &self,
+        text: &str,
+    ) -> Result<async_channel::Receiver<InputMethodOutcome>, InputMethodRefusal> {
+        if text.len() > MAX_INPUT_METHOD_BYTES {
+            return Err(InputMethodRefusal::TooLarge);
+        }
+        let (reply, receiver) = async_channel::bounded(1);
+        if submit_input(
+            &self.state,
+            &self.input,
+            Input::Commit(text.to_owned(), reply),
+        ) {
+            Ok(receiver)
+        } else {
+            Err(InputMethodRefusal::Unavailable)
+        }
     }
     fn resize(&self, geometry: TerminalGeometry) {
         let size = pane_size(geometry);
@@ -2177,6 +2270,9 @@ impl TerminalSessionHandle for PresentationHandle {
                 generation: generation.value(),
                 text,
             });
+        } else {
+            // Retire the previous search while the field presents this generation's limit.
+            self.end_find(generation);
         }
     }
     fn navigate_find(
@@ -2862,7 +2958,7 @@ mod tests {
                 unconfirmed: false,
             })
         }
-        fn drain(
+        pub(super) fn drain(
             &mut self,
             mut exchange: impl FnMut(&Request) -> Result<Reply, ServerError>,
         ) -> Result<(), ServerError> {
@@ -3250,6 +3346,201 @@ mod tests {
                 Sent::Resize,
                 Sent::Batch(vec![(0, Some("b".into()), "a".into())]),
             ]
+        );
+    }
+
+    #[test]
+    fn a_large_input_method_commit_reaches_the_real_server_pty_once_in_order() {
+        use sha2::{Digest, Sha256};
+        use spaceterm_server::pane::PaneService as _;
+        let mut host = crate::runtime::directory_testing::terminal_host();
+        let size = PaneSize {
+            columns: 80,
+            rows: 24,
+            cell_width: 8,
+            cell_height: 16,
+        };
+        let Reply::Attached { lease } = host.request(
+            [1; 32],
+            [1; 32],
+            Request::Attach {
+                create: true,
+                size,
+                resume: None,
+                style: None,
+            },
+        ) else {
+            panic!("fixture Pane did not start")
+        };
+        let text = "界🙂".repeat(2200) + "尾";
+        let expected = text.clone() + "!";
+        let command = format!(
+            r#"stty raw -echo; python3 -c 'import sys,hashlib; sys.stdout.write("READY\r\n"); sys.stdout.flush(); b=sys.stdin.buffer.read({}); sys.stdout.write(hashlib.sha256(b).hexdigest()+"\r\n"); sys.stdout.flush()'"#,
+            expected.len()
+        );
+        let send = |host: &mut crate::runtime::SharedWorkspaceHost, key| {
+            host.request(
+                [1; 32],
+                [1; 32],
+                Request::Key {
+                    lease,
+                    key: encode_key(key),
+                },
+            )
+        };
+        let wait = |host: &mut crate::runtime::SharedWorkspaceHost, marker: Option<&str>| {
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            loop {
+                if let Reply::Screen(screen) =
+                    host.request([1; 32], [1; 32], Request::Poll { lease })
+                    && screen.rows.iter().any(|row| {
+                        let line = row
+                            .iter()
+                            .map(|cell| cell.text.as_str())
+                            .collect::<String>();
+                        marker.map_or(!line.trim().is_empty(), |marker| line.trim_end() == marker)
+                    })
+                {
+                    break;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "fixture PTY did not reach {marker:?}"
+                );
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        };
+        // Wait for the shell to finish its initial terminal setup before sending typeahead.
+        wait(&mut host, None);
+        assert!(matches!(
+            send(&mut host, KeyInput::text_input(command)),
+            Reply::Unchanged
+        ));
+        let mut enter = KeyInput::text_input("");
+        enter.physical_key = PhysicalKey::Enter;
+        enter.logical_key = "enter".into();
+        enter.text = None;
+        assert!(matches!(send(&mut host, enter), Reply::Unchanged));
+        wait(&mut host, Some("READY"));
+        let mut adapter = Adapter::new();
+        adapter.active.lease = lease;
+        let outcome = adapter.handle.commit_input_method(&text).unwrap();
+        adapter.handle.key(KeyInput::text_input("!"));
+        let mut chunks = 0;
+        adapter
+            .drain_rounds(2, true, |request| {
+                if let Request::Input {
+                    input: pane::InteractiveInput::Key(key),
+                    ..
+                } = request
+                {
+                    chunks += 1;
+                    assert!(key.text.as_ref().unwrap().len() <= pane::MAX_KEY_TEXT_BYTES);
+                }
+                match host.request([1; 32], [1; 32], request.clone()) {
+                    Reply::Refused(refusal) => Err(refusal.into()),
+                    reply => Ok(reply),
+                }
+            })
+            .unwrap();
+        assert!(chunks >= 4);
+        assert_eq!(outcome.try_recv().unwrap(), InputMethodOutcome::Written);
+        let digest = format!("{:x}", Sha256::digest(expected.as_bytes()));
+        wait(&mut host, Some(&digest));
+        host.shutdown().unwrap();
+    }
+
+    #[test]
+    fn an_interrupted_multibyte_commit_never_replays_a_chunk_or_its_suffix() {
+        for lost_chunk in [1, 2] {
+            let mut adapter = Adapter::new();
+            let outcome = adapter
+                .handle
+                .commit_input_method(&"界🙂".repeat(2500))
+                .unwrap();
+            adapter.handle.key(KeyInput::text_input("later"));
+            let mut chunks = Vec::new();
+            let result = adapter.drain_rounds(1, true, |request| {
+                if let Request::Input {
+                    input: pane::InteractiveInput::Key(key),
+                    ..
+                } = request
+                {
+                    chunks.push(key.text.clone().unwrap());
+                    if chunks.len() == lost_chunk {
+                        // The server could have accepted this chunk before its reply was lost.
+                        return Err(ServerError::NotRunning);
+                    }
+                }
+                Ok(Reply::Unchanged)
+            });
+            assert_eq!(result, Err(ServerError::NotRunning));
+            assert_eq!(outcome.try_recv().unwrap(), InputMethodOutcome::Interrupted);
+            let _ =
+                adapter.drain_rounds(2, true, |_| panic!("an uncertain commit must never replay"));
+            assert_eq!(chunks.len(), lost_chunk);
+        }
+    }
+
+    #[test]
+    fn focus_moving_during_a_commit_drops_its_suffix_without_reconnecting() {
+        let mut adapter = Adapter::new();
+        let outcome = adapter
+            .handle
+            .commit_input_method(&"界🙂".repeat(2500))
+            .unwrap();
+        let epoch = adapter.active.epoch;
+        let state = Arc::clone(&adapter.handle.state);
+        let mut chunks = 0;
+        adapter
+            .drain_rounds(1, true, |request| {
+                if matches!(
+                    request,
+                    Request::Input {
+                        input: pane::InteractiveInput::Key(_),
+                        ..
+                    }
+                ) {
+                    chunks += 1;
+                    state
+                        .interaction
+                        .lock()
+                        .unwrap()
+                        .focus(pane::FocusTarget::Unfocused);
+                }
+                Ok(Reply::Unchanged)
+            })
+            .unwrap();
+        assert_eq!(chunks, 1);
+        assert_eq!(outcome.try_recv().unwrap(), InputMethodOutcome::Interrupted);
+        assert_eq!(adapter.handle.state.epoch.load(Ordering::Acquire), epoch);
+        assert_eq!(
+            adapter.handle.state.status(),
+            DevelopmentPaneStatus::Connected
+        );
+    }
+
+    #[test]
+    fn input_method_commit_admission_is_whole_and_bounded() {
+        let adapter = Adapter::new();
+        assert!(matches!(
+            adapter
+                .handle
+                .commit_input_method(&"a".repeat(MAX_INPUT_METHOD_BYTES + 1)),
+            Err(InputMethodRefusal::TooLarge)
+        ));
+        assert!(adapter.input.try_recv().is_err());
+        for _ in 0..512 {
+            adapter.handle.key(KeyInput::text_input("queued"));
+        }
+        assert!(matches!(
+            adapter.handle.commit_input_method("界"),
+            Err(InputMethodRefusal::Unavailable)
+        ));
+        assert_eq!(
+            adapter.input.try_iter().count(),
+            512,
+            "no prefix of the refused commit is queued"
         );
     }
 
