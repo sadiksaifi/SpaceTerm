@@ -193,10 +193,35 @@ pub(super) fn local_state(
 pub(super) fn ssh_state(
     status: &RemoteConnectionStatus,
     maintenance: Option<Option<&SubmittedKind>>,
+    service: Option<crate::local_server::service::ServiceStatus>,
+    retained: Option<ObservedServerStatus>,
 ) -> ServerState {
     let connected = matches!(status, RemoteConnectionStatus::Connected { .. });
     if let Some(kind) = maintenance {
         return ServerState::working(maintenance_verb(kind), connected);
+    }
+    // A service read reports the server SpaceTerm isn't connected to, such as one stopped from
+    // here, which only Start Server starts again.
+    if let (false, Some(service)) = (
+        connected
+            || matches!(
+                status,
+                RemoteConnectionStatus::Working { .. }
+                    | RemoteConnectionStatus::Reconnecting { .. }
+                    | RemoteConnectionStatus::Cancelling
+            ),
+        service,
+    ) {
+        match ServicePhase::of(service) {
+            ServicePhase::Stopped => return ServerState::new("Stopped", "Stopped", Tone::Idle),
+            ServicePhase::NotInstalled => {
+                return ServerState::new("Not installed", "Not installed", Tone::Idle);
+            }
+            ServicePhase::NotRunning => {
+                return ServerState::new("Not running", "Not running", Tone::Attention);
+            }
+            ServicePhase::Running => {}
+        }
     }
     match status {
         RemoteConnectionStatus::Connected { .. } => {
@@ -252,9 +277,20 @@ pub(super) fn ssh_state(
         RemoteConnectionStatus::Unconfirmed { .. } => {
             ServerState::new("Unconfirmed", "Unconfirmed", Tone::Attention)
         }
-        RemoteConnectionStatus::Inactive => {
-            ServerState::new("Not connected", "Not connected", Tone::Idle)
-        }
+        // Nothing reports on a saved connection that isn't active, so it shows what was last
+        // observed. That presents a state only: what the row offers follows its connection.
+        RemoteConnectionStatus::Inactive => match retained {
+            Some(ObservedServerStatus::Stopped) => {
+                ServerState::new("Stopped", "Stopped", Tone::Idle)
+            }
+            Some(ObservedServerStatus::NotInstalled) => {
+                ServerState::new("Not installed", "Not installed", Tone::Idle)
+            }
+            Some(ObservedServerStatus::NeedsUpdate) => {
+                ServerState::new("Needs update", "Needs update", Tone::Problem)
+            }
+            _ => ServerState::new("Not connected", "Not connected", Tone::Idle),
+        },
     }
 }
 
@@ -287,21 +323,6 @@ pub(super) fn direct_state(status: DirectRouteStatus) -> ServerState {
         DirectRouteStatus::Unavailable(_) => {
             ServerState::new("Not reachable", "Not reachable", Tone::Attention)
         }
-    }
-}
-
-/// How the retained record names a state, so a server SpaceTerm isn't connected to shows the
-/// state last observed.
-pub(super) fn observed_status(state: &ServerState) -> ObservedServerStatus {
-    match state.state.as_ref() {
-        "Running" | "Connected over SSH" | "Connected over the network" => {
-            ObservedServerStatus::Running
-        }
-        "Stopped" | "Not running" => ObservedServerStatus::Stopped,
-        "Not installed" => ObservedServerStatus::NotInstalled,
-        "Needs update" => ObservedServerStatus::NeedsUpdate,
-        "Not reachable" | "Unavailable" => ObservedServerStatus::Unavailable,
-        _ => ObservedServerStatus::Unknown,
     }
 }
 
@@ -391,30 +412,45 @@ impl SettingsWindow {
                     .map_or(RemoteConnectionStatus::Inactive, |rows| {
                         rows.connections.status(destination)
                     });
-                let working = self
+                let entries: Vec<RemoteOperationState> = self
                     .ssh_maintenance
                     .as_ref()
-                    .and_then(|rows| {
-                        rows.operations.entries().into_iter().find(|entry| {
-                            entry.destination == *destination
-                                && !entry.removed
-                                && matches!(entry.state, RemoteOperationState::Working { .. })
-                        })
+                    .map(|rows| {
+                        rows.operations
+                            .entries()
+                            .into_iter()
+                            .filter(|entry| entry.destination == *destination && !entry.removed)
+                            .map(|entry| entry.state)
+                            .collect()
                     })
-                    .map(|entry| match entry.state {
-                        RemoteOperationState::Working { kind, .. } => kind,
-                        _ => None,
-                    });
-                ssh_state(&status, working.as_ref().map(Option::as_ref))
+                    .unwrap_or_default();
+                let working = entries.iter().find_map(|state| match state {
+                    RemoteOperationState::Working { kind, .. } => Some(kind.as_ref()),
+                    _ => None,
+                });
+                let service = entries.iter().find_map(|state| match state {
+                    RemoteOperationState::Read(facts) => Some(facts.status),
+                    _ => None,
+                });
+                let retained = self.retained_status.get(&choice.key()).copied();
+                ssh_state(&status, working, service, retained)
             }
-            ServerChoice::Direct(route) => self
-                .saved_direct_servers()
-                .into_iter()
-                .find(|(saved, _, _)| saved == route)
-                .map_or_else(
-                    || ServerState::new("Not connected", "Not connected", Tone::Idle),
-                    |(_, status, _)| direct_state(status),
-                ),
+            ServerChoice::Direct(route) => {
+                let retained = self.retained_status.get(&choice.key()).copied();
+                match self
+                    .saved_direct_servers()
+                    .into_iter()
+                    .find(|(saved, _, _)| saved == route)
+                {
+                    Some((_, DirectRouteStatus::Disconnected, _))
+                        if retained == Some(ObservedServerStatus::NeedsUpdate) =>
+                    {
+                        ServerState::new("Needs update", "Needs update", Tone::Problem)
+                    }
+                    Some((_, status, _)) => direct_state(status),
+                    None => ServerState::new("Not connected", "Not connected", Tone::Idle),
+                }
+            }
         }
     }
 
@@ -644,7 +680,9 @@ impl SettingsWindow {
             RemoteAction::Finish,
             RemoteAction::CheckAgain,
             RemoteAction::Acknowledge,
+            RemoteAction::Dismiss,
             RemoteAction::Cancel,
+            RemoteAction::Discard,
         ] {
             if offered(action) {
                 buttons.push((StatusStep::Maintenance(action), false));
@@ -1180,7 +1218,7 @@ impl SettingsWindow {
                 "Server updates come with SpaceTerm.",
             )
         };
-        let actions = presentation
+        let mut actions: Vec<VersionStep> = presentation
             .actions
             .iter()
             .copied()
@@ -1190,13 +1228,23 @@ impl SettingsWindow {
                     RemoteAction::Update
                         | RemoteAction::Finish
                         | RemoteAction::Return
-                        | RemoteAction::Check
+                        | RemoteAction::CheckAgain
                         | RemoteAction::Cancel
                         | RemoteAction::Acknowledge
+                        | RemoteAction::Discard
+                        | RemoteAction::Dismiss
                 )
             })
             .map(VersionStep::Remote)
             .collect();
+        // Check Now reads the service and its approved version, whichever journey offers it.
+        let checkable = presentation.actions.contains(&RemoteAction::Check)
+            || self
+                .maintenance_presentation(MaintenanceRow::Service)
+                .is_some_and(|service| service.actions.contains(&RemoteAction::Check));
+        if checkable {
+            actions.push(VersionStep::Remote(RemoteAction::Check));
+        }
         VersionView {
             value,
             badge,
@@ -1219,12 +1267,9 @@ impl SettingsWindow {
         }
         match self.selected_server() {
             Some(ServerChoice::Local) => self.request_update_action(UpdateAction::Check, cx),
-            Some(ServerChoice::Ssh(destination)) => self.request_maintenance(
-                destination,
-                MaintenanceRow::Update,
-                RemoteAction::Check,
-                cx,
-            ),
+            Some(ServerChoice::Ssh(destination)) => {
+                self.request_remote_maintenance(destination, RemoteAction::Check, cx)
+            }
             _ => {}
         }
     }

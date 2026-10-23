@@ -260,6 +260,15 @@ impl SettingsWindow {
         if retained != self.selected_server {
             self.selected_server = retained;
         }
+        self.retained_status = self
+            .listed_choices()
+            .iter()
+            .filter_map(|choice| {
+                let key = choice.key();
+                let status = server_selection::facts(&key, cx)?.status;
+                Some((key, status))
+            })
+            .collect();
         self.sync_server_location(cx);
         cx.notify();
     }

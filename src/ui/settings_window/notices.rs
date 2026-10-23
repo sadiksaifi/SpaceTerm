@@ -249,10 +249,19 @@ impl SettingsWindow {
                 .variant(ButtonVariant::Outline)
                 .size(ButtonSize::Regular)
                 .tab_stop(true)
-                .debug_selector(format!(
-                    "{selector}-{}",
-                    label.to_lowercase().replace(' ', "-")
-                ))
+                .debug_selector(match &step {
+                    // A removed connection's step reads as the step it takes on that machine.
+                    NoticeStep::Removed(destination, action) => {
+                        format!("{}-{}", action.selector(), destination.as_str())
+                    }
+                    _ => format!(
+                        "{selector}-{}",
+                        label
+                            .trim_end_matches('\u{2026}')
+                            .to_lowercase()
+                            .replace(' ', "-")
+                    ),
+                })
                 .on_activate(move |_, _, cx| {
                     let step = step.clone();
                     let _ = owner.update(cx, |settings, cx| settings.take_notice_step(step, cx));

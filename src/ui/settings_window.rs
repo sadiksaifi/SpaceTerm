@@ -470,6 +470,12 @@ pub(crate) struct SettingsWindow {
     /// Follows the presented server's facts, so a server SpaceTerm later disconnects from shows
     /// them.
     server_facts: server_facts::FactsFollower,
+    /// The status last observed for each listed server, which a server SpaceTerm isn't connected
+    /// to presents. It grants nothing: what each server offers follows its live connection.
+    retained_status: std::collections::BTreeMap<
+        crate::server_context::ServerKey,
+        crate::server_context::ObservedServerStatus,
+    >,
     /// How Servers names the server for this account on this computer.
     this_computer: &'static str,
 }
@@ -818,6 +824,7 @@ impl SettingsWindow {
             reconciled_servers: None,
             hidden_notices: notices::HiddenNotices::default(),
             server_facts: server_facts::FactsFollower::default(),
+            retained_status: std::collections::BTreeMap::new(),
             this_computer,
         };
         // Servers and Git present the retained selection, which loads after the window opens.

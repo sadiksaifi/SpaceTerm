@@ -1,12 +1,13 @@
 //! What SpaceTerm last observed about each server, so a server it isn't connected to shows its
 //! last-known facts.
 //!
-//! While Servers or Git shows a connected server, this reads that server's own facts over the
-//! connection SpaceTerm already has: its machine name, operating system and running version. It
-//! keeps them with the state, automatic start and running Terminal Sessions the window already
-//! knows. Nothing here connects to a server, and a server SpaceTerm isn't connected to keeps the
-//! facts it last showed. Each observation merges into the retained record, so facts another part
-//! of Settings keeps, such as Git and New Worktree Location, stay.
+//! An observation comes only from something that actually reported on the server: this account's
+//! service, an SSH account's maintenance read, Check Status, a connection, or the server's own
+//! facts over a live connection. Showing a server SpaceTerm isn't connected to is not an
+//! observation, so it never replaces what was last observed. Nothing here connects to a server:
+//! the server's own facts are read only over a connection SpaceTerm already has. Each observation
+//! merges into the retained record, so facts another part of Settings keeps, such as Git and New
+//! Worktree Location, stay.
 
 use std::time::Duration;
 
@@ -15,16 +16,24 @@ use spaceterm_server::worktree::{Read, ReadReply, ServerFacts};
 
 use super::SettingsWindow;
 use super::catalog::SettingsSectionId;
-use super::server_card::observed_status;
+use super::server_card::operating_system_name;
 use super::server_list::ServerChoice;
 use super::server_selection;
-use crate::server_context::LastKnownFacts;
+use super::servers::{LocalServerStatus, ServicePhase};
+use crate::direct_connections::{DirectRouteStatus, RefusalReason};
+use crate::local_server::ServerError;
+use crate::local_server::service::ServiceStatus;
+use crate::server_context::{LastKnownFacts, ObservedServerStatus};
+use crate::ssh::server_connection::{
+    IncompatibilityKind, RemoteConnectionStatus, ServerAvailability, SshServerFacts,
+};
+use crate::ssh::server_operations::RemoteOperationState;
 use crate::ui::server_worktrees::Client;
 
-/// How often the facts of a connected, presented server are read again.
+/// How often the presented server's observations are looked at again.
 const POLL: Duration = Duration::from_secs(5);
-/// How long an unchanged observation goes before it is retained again with its new time, so the
-/// time a disconnected server's facts show stays close to when it was last connected.
+/// How long an unchanged live observation goes before it is retained again with its new time, so
+/// the time a disconnected server's facts show stays close to when it was last connected.
 const UNCHANGED_RETENTION: u64 = 60;
 
 /// The poll following the presented server's facts.
@@ -35,31 +44,118 @@ pub(super) struct FactsFollower {
     poll: Option<Task<()>>,
 }
 
-/// The observation `previous` becomes with what SpaceTerm observed now. Facts this observation
-/// doesn't carry keep their previous values.
+/// What something that reported on a server found. A part it didn't report is `None`.
+#[derive(Default)]
+pub(super) struct Observation {
+    pub(super) status: Option<ObservedServerStatus>,
+    /// The server's own facts, read over a live connection.
+    pub(super) server: Option<ServerFacts>,
+    pub(super) version: Option<String>,
+    pub(super) operating_system: Option<String>,
+    pub(super) starts_automatically: Option<bool>,
+    pub(super) running_sessions: Option<u32>,
+}
+
+impl Observation {
+    fn is_empty(&self) -> bool {
+        self.status.is_none()
+            && self.server.is_none()
+            && self.version.is_none()
+            && self.operating_system.is_none()
+            && self.starts_automatically.is_none()
+            && self.running_sessions.is_none()
+    }
+}
+
+/// The status a service read reports.
+pub(super) fn service_status(status: ServiceStatus) -> ObservedServerStatus {
+    match ServicePhase::of(status) {
+        ServicePhase::Running => ObservedServerStatus::Running,
+        ServicePhase::Stopped => ObservedServerStatus::Stopped,
+        ServicePhase::NotInstalled => ObservedServerStatus::NotInstalled,
+        ServicePhase::NotRunning => ObservedServerStatus::Unavailable,
+    }
+}
+
+/// What this account's server reported: its connection and its service.
+pub(super) fn local_status(
+    connection: LocalServerStatus,
+    service: Option<ServiceStatus>,
+) -> Option<ObservedServerStatus> {
+    match (connection, service) {
+        (
+            LocalServerStatus::Failed(
+                ServerError::IncompatibleProtocol | ServerError::MissingRequiredCapability,
+            ),
+            _,
+        ) => Some(ObservedServerStatus::NeedsUpdate),
+        (LocalServerStatus::Connected(_), _) => Some(ObservedServerStatus::Running),
+        (_, Some(service)) => Some(service_status(service)),
+        (LocalServerStatus::Failed(ServerError::Stopped), None) => {
+            Some(ObservedServerStatus::Stopped)
+        }
+        (LocalServerStatus::Failed(ServerError::NotInstalled | ServerError::NotSetUp), None) => {
+            Some(ObservedServerStatus::NotInstalled)
+        }
+        _ => None,
+    }
+}
+
+/// What an SSH server's connection or Check Status reported. Showing a saved connection that
+/// isn't active reports nothing.
+pub(super) fn ssh_status(connection: &RemoteConnectionStatus) -> Option<ObservedServerStatus> {
+    Some(match connection {
+        RemoteConnectionStatus::Connected { .. } => ObservedServerStatus::Running,
+        RemoteConnectionStatus::Checked { availability, .. } => match availability {
+            ServerAvailability::Running => ObservedServerStatus::Running,
+            ServerAvailability::NotRunning => ObservedServerStatus::Unavailable,
+            ServerAvailability::NotInstalled => ObservedServerStatus::NotInstalled,
+        },
+        RemoteConnectionStatus::Stopped => ObservedServerStatus::Stopped,
+        RemoteConnectionStatus::InstallationOffered { .. } => ObservedServerStatus::NotInstalled,
+        RemoteConnectionStatus::Incompatible {
+            kind: IncompatibilityKind::Protocol | IncompatibilityKind::Capability,
+        } => ObservedServerStatus::NeedsUpdate,
+        _ => return None,
+    })
+}
+
+/// What a paired server's connection reported.
+pub(super) fn direct_status(route: DirectRouteStatus) -> Option<ObservedServerStatus> {
+    match route {
+        DirectRouteStatus::Connected => Some(ObservedServerStatus::Running),
+        DirectRouteStatus::Refused(RefusalReason::Incompatible) => {
+            Some(ObservedServerStatus::NeedsUpdate)
+        }
+        _ => None,
+    }
+}
+
+/// The record `previous` becomes with `observed`, as of `observed_at`. A part the observation
+/// doesn't report keeps its previous value.
 pub(super) fn merged(
     previous: Option<LastKnownFacts>,
     observed_at: u64,
     observed: Observation,
 ) -> LastKnownFacts {
     let previous = previous.unwrap_or_default();
+    let server = observed.server;
     LastKnownFacts {
         observed_at,
-        status: observed.status,
-        machine: observed
-            .server
+        status: observed.status.unwrap_or(previous.status),
+        machine: server
             .as_ref()
             .map(|facts| facts.machine.clone())
             .or(previous.machine.clone()),
-        operating_system: observed
-            .server
+        operating_system: server
             .as_ref()
             .map(|facts| facts.operating_system.clone())
+            .or(observed.operating_system)
             .or(previous.operating_system.clone()),
-        version: observed
-            .server
+        version: server
             .as_ref()
             .map(|facts| facts.version.clone())
+            .or(observed.version)
             .or(previous.version.clone()),
         starts_automatically: observed
             .starts_automatically
@@ -69,28 +165,125 @@ pub(super) fn merged(
     }
 }
 
-/// Whether `next` says something `previous` didn't, apart from when it was observed.
-pub(super) fn changed(previous: Option<&LastKnownFacts>, next: &LastKnownFacts) -> bool {
+/// Whether `next` is worth retaining over `previous`. A change in what was observed always is. A
+/// live server's unchanged observation is retained again after a while, so its time stays
+/// current; a server that isn't live has no new time to give.
+pub(super) fn changed(
+    previous: Option<&LastKnownFacts>,
+    next: &LastKnownFacts,
+    live: bool,
+) -> bool {
     previous.is_none_or(|previous| {
         LastKnownFacts {
             observed_at: next.observed_at,
             ..previous.clone()
         } != *next
-            || next.observed_at.saturating_sub(previous.observed_at) >= UNCHANGED_RETENTION
+            || (live
+                && next.observed_at.saturating_sub(previous.observed_at) >= UNCHANGED_RETENTION)
     })
 }
 
-/// What one look at a connected server found.
-pub(super) struct Observation {
-    pub(super) status: crate::server_context::ObservedServerStatus,
-    pub(super) server: Option<ServerFacts>,
-    pub(super) starts_automatically: Option<bool>,
-    pub(super) running_sessions: Option<u32>,
+/// The facts a connection or Check Status carries.
+fn connection_facts(connection: &RemoteConnectionStatus) -> Option<&SshServerFacts> {
+    match connection {
+        RemoteConnectionStatus::Connected { facts, .. }
+        | RemoteConnectionStatus::Checked { facts, .. } => Some(facts),
+        _ => None,
+    }
 }
 
 impl SettingsWindow {
-    /// Follows the facts of the server Servers or Git presents. Selection, section and connection
-    /// changes call this; rendering never does.
+    /// What SpaceTerm holds now that actually reported on `target`, from typed reports only.
+    pub(super) fn observation(&self, target: &ServerChoice) -> Observation {
+        let selected = self.selected_server().as_ref() == Some(target);
+        let running_sessions = (selected && self.server_state(target).live)
+            .then(|| self.running_sessions())
+            .flatten()
+            .and_then(|count| u32::try_from(count).ok());
+        match target {
+            ServerChoice::Local => {
+                let connection = self
+                    .local_server
+                    .as_ref()
+                    .map_or(LocalServerStatus::NotChecked, |row| row.current_status());
+                let service = self
+                    .server_service
+                    .as_ref()
+                    .and_then(|row| row.state.status);
+                let version = self
+                    .server_update
+                    .as_ref()
+                    .and_then(|row| row.state.facts.as_ref())
+                    .and_then(|facts| facts.approved.as_ref())
+                    .map(|approved| approved.version.clone());
+                Observation {
+                    status: local_status(connection, service),
+                    version,
+                    starts_automatically: service
+                        .filter(|status| status.installed)
+                        .map(|status| status.enabled),
+                    running_sessions,
+                    ..Observation::default()
+                }
+            }
+            ServerChoice::Ssh(destination) => {
+                let connection = self
+                    .ssh_servers
+                    .as_ref()
+                    .map_or(RemoteConnectionStatus::Inactive, |rows| {
+                        rows.connections.status(destination)
+                    });
+                let read = self.ssh_maintenance.as_ref().and_then(|rows| {
+                    rows.operations
+                        .entries()
+                        .into_iter()
+                        .filter(|entry| entry.destination == *destination && !entry.removed)
+                        .find_map(|entry| match entry.state {
+                            RemoteOperationState::Read(facts) => Some(facts),
+                            _ => None,
+                        })
+                });
+                let reported = connection_facts(&connection);
+                // A connection is the most direct report. Otherwise an explicit service read
+                // reports the service, and Check Status what it found.
+                let status = match connection {
+                    RemoteConnectionStatus::Connected { .. } => Some(ObservedServerStatus::Running),
+                    _ => read
+                        .as_ref()
+                        .map(|facts| service_status(facts.status))
+                        .or_else(|| ssh_status(&connection)),
+                };
+                Observation {
+                    status,
+                    version: read
+                        .as_ref()
+                        .and_then(|facts| facts.approved.as_ref())
+                        .map(|approved| approved.version.clone())
+                        .or_else(|| reported.and_then(|facts| facts.version.clone())),
+                    operating_system: reported
+                        .map(|facts| operating_system_name(&facts.platform.0).to_string()),
+                    starts_automatically: read
+                        .as_ref()
+                        .map(|facts| facts.status.enabled)
+                        .or_else(|| reported.map(|facts| facts.starts_automatically)),
+                    running_sessions,
+                    ..Observation::default()
+                }
+            }
+            ServerChoice::Direct(route) => Observation {
+                status: self
+                    .saved_direct_servers()
+                    .into_iter()
+                    .find(|(saved, _, _)| saved == route)
+                    .and_then(|(_, status, _)| direct_status(status)),
+                running_sessions,
+                ..Observation::default()
+            },
+        }
+    }
+
+    /// Follows the observations of the server Servers or Git presents. Selection, section and
+    /// connection changes call this; rendering never does.
     pub(super) fn sync_server_facts(&mut self, cx: &mut Context<Self>) {
         let target = matches!(
             self.active_section,
@@ -126,8 +319,8 @@ impl SettingsWindow {
                 let server = match client {
                     Some(client) => {
                         match cx.update(|cx| client.read(Read::ServerFacts, cx)).await {
-                            Ok(ReadReply::ServerFacts(facts)) => Some(Some(facts)),
-                            _ => Some(None),
+                            Ok(ReadReply::ServerFacts(facts)) => Some(facts),
+                            _ => None,
                         }
                     }
                     None => None,
@@ -136,9 +329,7 @@ impl SettingsWindow {
                     if settings.server_facts.generation != generation {
                         return false;
                     }
-                    if let Some(server) = server {
-                        settings.remember_server_facts(&target, server, cx);
-                    }
+                    settings.remember_observation(&target, server, cx);
                     true
                 });
                 if !matches!(followed, Ok(true)) {
@@ -149,27 +340,19 @@ impl SettingsWindow {
         }));
     }
 
-    /// Retains what SpaceTerm knows about the connected `target` now, merged into what it knew.
-    fn remember_server_facts(
+    /// Retains what reported on `target`, merged into what SpaceTerm knew.
+    fn remember_observation(
         &mut self,
         target: &ServerChoice,
         server: Option<ServerFacts>,
         cx: &mut Context<Self>,
     ) {
-        let state = self.server_state(target);
-        if !state.live {
+        let mut observation = self.observation(target);
+        observation.server = server;
+        if observation.is_empty() {
             return;
         }
-        let selected = self.selected_server().as_ref() == Some(target);
-        let observation = Observation {
-            status: observed_status(&state),
-            server,
-            starts_automatically: selected.then(|| self.automatic_start(cx)).flatten(),
-            running_sessions: selected
-                .then(|| self.running_sessions())
-                .flatten()
-                .and_then(|count| u32::try_from(count).ok()),
-        };
+        let live = self.server_state(target).live;
         let key = target.key();
         let previous = server_selection::facts(&key, cx);
         let next = merged(
@@ -177,7 +360,7 @@ impl SettingsWindow {
             crate::ui::direct_access::unix_now(),
             observation,
         );
-        if changed(previous.as_ref(), &next) {
+        if changed(previous.as_ref(), &next, live) {
             server_selection::remember(key, next, cx);
         }
     }
@@ -195,7 +378,6 @@ fn client_for(target: &ServerChoice, cx: &mut App) -> Option<Client> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::server_context::ObservedServerStatus;
 
     fn facts(machine: &str, version: &str) -> ServerFacts {
         serde_json::from_value(serde_json::json!({
@@ -219,10 +401,10 @@ mod tests {
             Some(previous),
             20,
             Observation {
-                status: ObservedServerStatus::Running,
+                status: Some(ObservedServerStatus::Running),
                 server: Some(facts("penguin", "2.1.0")),
                 starts_automatically: Some(true),
-                running_sessions: None,
+                ..Observation::default()
             },
         );
 
@@ -236,30 +418,96 @@ mod tests {
         assert_eq!(next.observed_at, 20);
     }
 
+    /// A Stop read from the service while SpaceTerm isn't connected is still what was observed
+    /// last, so relaunch shows Stopped rather than the Running seen earlier.
     #[test]
-    fn an_unchanged_observation_is_retained_again_only_after_a_while() {
+    fn a_service_read_without_a_connection_replaces_an_earlier_running_observation() {
+        let earlier = LastKnownFacts {
+            observed_at: 10,
+            status: ObservedServerStatus::Running,
+            starts_automatically: Some(true),
+            ..LastKnownFacts::default()
+        };
+        let stopped = ServiceStatus {
+            installed: true,
+            enabled: false,
+            running: false,
+            stopped: true,
+        };
+
+        let next = merged(
+            Some(earlier.clone()),
+            20,
+            Observation {
+                status: local_status(
+                    LocalServerStatus::Failed(ServerError::Stopped),
+                    Some(stopped),
+                ),
+                starts_automatically: Some(false),
+                ..Observation::default()
+            },
+        );
+
+        assert!(changed(Some(&earlier), &next, false));
+        assert_eq!(next.status, ObservedServerStatus::Stopped);
+        assert_eq!(next.starts_automatically, Some(false));
+    }
+
+    #[test]
+    fn an_inactive_saved_connection_reports_nothing_and_check_status_reports_what_it_found() {
+        assert_eq!(ssh_status(&RemoteConnectionStatus::Inactive), None);
+        let checked = RemoteConnectionStatus::Checked {
+            availability: ServerAvailability::NotInstalled,
+            facts: SshServerFacts {
+                platform: ("linux".into(), "x86_64".into()),
+                version: None,
+                starts_automatically: false,
+            },
+            at: std::time::SystemTime::UNIX_EPOCH,
+        };
+        assert_eq!(
+            ssh_status(&checked),
+            Some(ObservedServerStatus::NotInstalled)
+        );
+        assert_eq!(
+            ssh_status(&RemoteConnectionStatus::Stopped),
+            Some(ObservedServerStatus::Stopped)
+        );
+    }
+
+    #[test]
+    fn an_unchanged_observation_is_retained_again_only_while_live_and_after_a_while() {
         let observed = |at| {
             merged(
                 None,
                 at,
                 Observation {
-                    status: ObservedServerStatus::Running,
+                    status: Some(ObservedServerStatus::Running),
                     server: Some(facts("penguin", "2.1.0")),
-                    starts_automatically: None,
                     running_sessions: Some(1),
+                    ..Observation::default()
                 },
             )
         };
         let first = observed(100);
 
-        assert!(!changed(Some(&first), &observed(105)));
-        assert!(changed(Some(&first), &observed(100 + UNCHANGED_RETENTION)));
+        assert!(!changed(Some(&first), &observed(105), true));
+        assert!(changed(
+            Some(&first),
+            &observed(100 + UNCHANGED_RETENTION),
+            true
+        ));
+        assert!(
+            !changed(Some(&first), &observed(100 + UNCHANGED_RETENTION), false),
+            "a server that isn't live has no new time to give"
+        );
         assert!(changed(
             Some(&first),
             &LastKnownFacts {
                 running_sessions: Some(2),
                 ..observed(105)
-            }
+            },
+            false
         ));
     }
 }
