@@ -57,6 +57,7 @@ enum Call {
     Discard([u8; 32]),
     Dismiss([u8; 32]),
     ResumeRetained,
+    AutomaticStart(bool),
 }
 
 fn build(version: &str, digit: char) -> RemoteBuild {
@@ -305,6 +306,21 @@ impl RemoteServerOperations for ScriptedOperations {
         self.set(
             destination.as_str(),
             RemoteOperationState::Read(Box::new(facts(status(true, true, false)))),
+        );
+    }
+
+    /// Changes only whether the service starts on its own. Whether it runs, and a deliberate
+    /// Stop, stay as the last read found them.
+    fn set_automatic_start(&self, destination: &SshDestination, enabled: bool) {
+        self.record(Call::AutomaticStart(enabled));
+        let mut read = match self.state(destination) {
+            RemoteOperationState::Read(facts) => *facts,
+            _ => facts(status(true, true, false)),
+        };
+        read.status.enabled = enabled;
+        self.set(
+            destination.as_str(),
+            RemoteOperationState::Read(Box::new(read)),
         );
     }
 
@@ -1867,4 +1883,66 @@ fn acknowledging_the_update_row_retires_its_second_resolved_original(cx: &mut Te
         "settings-ssh-server-maintenance-acknowledge",
         servers.cx
     ));
+}
+
+/// Start automatically changes only the SSH server's start policy, over its account route. It
+/// starts, stops and removes nothing, and asks nothing first.
+#[gpui::test]
+fn the_automatic_start_switch_changes_only_the_start_policy(cx: &mut TestAppContext) {
+    let servers = open_maintenance(cx);
+    servers.operations.set(
+        "penguin",
+        RemoteOperationState::Read(Box::new(facts(status(true, true, false)))),
+    );
+    servers.cx.run_until_parked();
+    let starts_automatically = |servers: &Servers<'_>| {
+        servers
+            .window
+            .read_with(servers.cx, |settings, cx| settings.automatic_start(cx))
+    };
+    assert_eq!(starts_automatically(&servers), Some(true));
+
+    click(super::super::server_card::AUTO_START_SELECTOR, servers.cx);
+
+    assert_eq!(
+        servers.operations.calls(),
+        vec![Call::AutomaticStart(false)]
+    );
+    assert_eq!(starts_automatically(&servers), Some(false));
+    assert!(
+        shows("settings-ssh-server-service-state-running", &servers),
+        "the server keeps running"
+    );
+    assert!(offers(RemoteAction::Stop, &servers));
+    assert!(!alert_open("settings-ssh-server-stop-confirm", servers.cx));
+
+    click(super::super::server_card::AUTO_START_SELECTOR, servers.cx);
+
+    assert_eq!(
+        servers.operations.calls(),
+        vec![Call::AutomaticStart(false), Call::AutomaticStart(true)],
+        "the switch performs no Start, Stop or Uninstall"
+    );
+    assert_eq!(starts_automatically(&servers), Some(true));
+}
+
+/// A paired connection carries no authority over its computer's services, so a paired server
+/// has no Start automatically row, while this account's and an SSH server's do.
+#[test]
+fn only_a_paired_server_goes_without_start_automatically() {
+    use super::super::server_list::{ServerChoice, row_presents};
+    use crate::ui::settings_window::SettingsRowId;
+
+    let penguin = SshDestination::new("penguin".to_owned()).expect("destination");
+    for (server, presents) in [
+        (ServerChoice::Local, true),
+        (ServerChoice::Ssh(penguin), true),
+        (ServerChoice::Direct([7; 32]), false),
+    ] {
+        assert_eq!(
+            row_presents(SettingsRowId::ServerAutoStart, Some(&server)),
+            presents,
+            "{server:?}"
+        );
+    }
 }
