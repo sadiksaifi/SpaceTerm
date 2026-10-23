@@ -2,6 +2,8 @@
 use super::*;
 use std::os::unix::fs::DirBuilderExt;
 
+const UNIT_PROPERTIES: &str = "--property=LoadState,ActiveState,Result,MainPID,TasksCurrent,FragmentPath,DropInPaths,NeedDaemonReload";
+
 pub(super) struct UserService {
     directory: PathBuf,
     name: String,
@@ -71,16 +73,7 @@ impl UserService {
         self.manager("/usr/bin/systemctl", &arguments)
     }
     fn observation(&self) -> Result<Vec<(String, String)>, ServerError> {
-        let bytes = self.systemctl(&["show", &self.name,
-            "--property=LoadState,ActiveState,MainPID,TasksCurrent,FragmentPath,DropInPaths,NeedDaemonReload"])?;
-        let text = std::str::from_utf8(&bytes).map_err(|_| ServerError::ServiceUnavailable)?;
-        text.lines()
-            .map(|line| {
-                line.split_once('=')
-                    .map(|(key, value)| (key.into(), value.into()))
-                    .ok_or(ServerError::ServiceUnavailable)
-            })
-            .collect()
+        parse_observation(&self.systemctl(&["show", &self.name, UNIT_PROPERTIES])?)
     }
     fn linger(&self) -> Result<(), ServerError> {
         let bytes = command(
@@ -190,6 +183,16 @@ impl UserService {
             .map_err(|_| ServerError::StorageUnavailable)
     }
 }
+fn parse_observation(bytes: &[u8]) -> Result<Vec<(String, String)>, ServerError> {
+    let text = std::str::from_utf8(bytes).map_err(|_| ServerError::ServiceUnavailable)?;
+    text.lines()
+        .map(|line| {
+            line.split_once('=')
+                .map(|(key, value)| (key.into(), value.into()))
+                .ok_or(ServerError::ServiceUnavailable)
+        })
+        .collect()
+}
 fn property<'a>(observation: &'a [(String, String)], key: &str) -> Result<&'a str, ServerError> {
     observation
         .iter()
@@ -198,13 +201,35 @@ fn property<'a>(observation: &'a [(String, String)], key: &str) -> Result<&'a st
         .ok_or(ServerError::ServiceUnavailable)
 }
 
+fn loaded_definition(state: &[(String, String)], registration: &Path) -> Result<bool, ServerError> {
+    if property(state, "LoadState")? == "not-found" {
+        return Ok(false);
+    }
+    if property(state, "LoadState")? != "loaded"
+        || Path::new(property(state, "FragmentPath")?) != registration
+        || !property(state, "DropInPaths")?.is_empty()
+        || property(state, "NeedDaemonReload")? != "no"
+    {
+        return Err(ServerError::CleanupUnresolved);
+    }
+    Ok(true)
+}
+
 /// Start after the owning service has validated its registration, runtime and account authority.
 fn start_unit(
     name: &str,
-    _registration: &Path,
+    registration: &Path,
     mut systemctl: impl FnMut(&[&str]) -> Result<Vec<u8>, ServerError>,
 ) -> Result<(), ServerError> {
-    systemctl(&["reset-failed", name])?;
+    let state = parse_observation(&systemctl(&["show", name, UNIT_PROPERTIES])?)?;
+    if loaded_definition(&state, registration)?
+        && (property(&state, "ActiveState")? == "failed"
+            || property(&state, "Result")? == "start-limit-hit")
+    {
+        // Inactive units can be garbage-collected before reset-failed, which then refuses an
+        // unloaded unit. Reset only an observed failure; Start loads fresh registrations itself.
+        systemctl(&["reset-failed", name])?;
+    }
     systemctl(&["start", name])?;
     Ok(())
 }
@@ -273,15 +298,8 @@ impl Supervisor for UserService {
         self.registration()
             .check(&self.contents(runtime)?, removing)?;
         let state = self.observation()?;
-        if property(&state, "LoadState")? == "not-found" {
+        if !loaded_definition(&state, &self.registration().path())? {
             return Ok(());
-        }
-        if property(&state, "LoadState")? != "loaded"
-            || Path::new(property(&state, "FragmentPath")?) != self.registration().path()
-            || !property(&state, "DropInPaths")?.is_empty()
-            || property(&state, "NeedDaemonReload")? != "no"
-        {
-            return Err(ServerError::CleanupUnresolved);
         }
         let object = format!(
             "/org/freedesktop/systemd1/unit/{}",
@@ -484,7 +502,7 @@ mod tests {
     fn changed_loaded_definitions_are_neither_reset_nor_started() {
         for changed in [
             String::from(
-                "LoadState=loaded\nActiveState=failed\nResult=start-limit-hit\nFragmentPath=/foreign/unit.service\nDropInPaths=\nNeedDaemonReload=no\n"
+                "LoadState=loaded\nActiveState=failed\nResult=start-limit-hit\nFragmentPath=/foreign/unit.service\nDropInPaths=\nNeedDaemonReload=no\n",
             ),
             format!(
                 "LoadState=loaded\nActiveState=failed\nResult=start-limit-hit\nFragmentPath={DEFINITION}\nDropInPaths=/foreign/override.conf\nNeedDaemonReload=no\n"
