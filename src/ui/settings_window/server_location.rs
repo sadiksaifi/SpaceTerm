@@ -57,13 +57,14 @@ enum LocationNotice {
 }
 
 impl LocationModel {
-    /// A server's field before it answers, showing the value last read from it. That value is
-    /// for display: an edit needs the server's own answer and version.
-    fn remembered(template: Option<String>) -> Self {
-        Self {
-            draft: template.unwrap_or_default(),
-            ..Self::default()
-        }
+    /// The server's last-known value arrived, possibly after the server was chosen. It shows
+    /// until the server answers with its own value and version, which an edit needs.
+    fn remembered(&mut self, template: Option<String>) -> Option<String> {
+        let template = template.filter(|_| self.known.is_none())?;
+        (self.draft != template).then(|| {
+            self.draft.clone_from(&template);
+            template
+        })
     }
 
     fn has_draft(&self) -> bool {
@@ -244,6 +245,9 @@ pub(super) struct ServerLocation {
     /// The writer that answered the latest read, which a change writes through.
     client: Option<Client>,
     poll: Option<Task<()>>,
+    /// Whether the server reported its Git since it was chosen, so last-known facts no longer
+    /// replace it.
+    git_answered: bool,
     /// The owning server's check of the text being typed. Replacing it cancels the earlier one.
     check: Option<Task<()>>,
 }
@@ -274,25 +278,42 @@ impl ServerLocation {
             generation: 0,
             client: None,
             poll: None,
+            git_answered: false,
             check: None,
         }
     }
 
     /// Shows `target` from its last-known facts and stops reading the previous server.
     fn choose(&mut self, target: Option<ServerChoice>, cx: &mut Context<SettingsWindow>) {
-        let facts = target
-            .as_ref()
-            .and_then(|target| server_selection::facts(&target.key(), cx))
-            .unwrap_or_default();
         self.target = target;
         self.generation = self.generation.wrapping_add(1);
-        self.git = facts.git;
-        self.model = LocationModel::remembered(facts.worktree_location);
+        self.git = GitToolStatus::Unknown;
+        self.git_answered = false;
+        self.model = LocationModel::default();
         self.offered = true;
         self.client = None;
         self.poll = None;
         self.check = None;
-        self.show(Some(self.model.draft.clone()), cx);
+        self.show(Some(String::new()), cx);
+        self.show_last_known(cx);
+    }
+
+    /// Shows the selected server's last-known facts wherever the server hasn't answered itself
+    /// since it was chosen. Facts that load after the choice show the same way.
+    fn show_last_known(&mut self, cx: &mut Context<SettingsWindow>) {
+        let Some(facts) = self
+            .target
+            .as_ref()
+            .and_then(|target| server_selection::facts(&target.key(), cx))
+        else {
+            return;
+        };
+        if !self.git_answered && self.git != facts.git {
+            self.git = facts.git;
+            cx.notify();
+        }
+        let text = self.model.remembered(facts.worktree_location);
+        self.show(text, cx);
     }
 
     /// Records what the selected server answered among its last-known facts, so the section
@@ -307,7 +328,11 @@ impl ServerLocation {
             .known
             .as_ref()
             .map(|known| known.template.clone());
-        if self.git == GitToolStatus::Unknown && template.is_none() {
+        let git = self
+            .git_answered
+            .then_some(self.git)
+            .filter(|git| *git != GitToolStatus::Unknown);
+        if git.is_none() && template.is_none() {
             return;
         }
         let key = target.key();
@@ -316,8 +341,8 @@ impl ServerLocation {
             observed_at: unix_seconds(),
             ..LastKnownFacts::default()
         });
-        if self.git != GitToolStatus::Unknown {
-            facts.git = self.git;
+        if let Some(git) = git {
+            facts.git = git;
         }
         if template.is_some() {
             facts.worktree_location = template;
@@ -366,8 +391,8 @@ impl SettingsWindow {
     }
 
     /// Follows the selected server's Git settings while the section showing New Worktree Location
-    /// is open. Selection, section and connection changes call this; rendering never does, so
-    /// painting asks no server anything.
+    /// is open. Selection, section, connection and last-known facts changes call this; rendering
+    /// never does, so painting asks no server anything.
     pub(super) fn sync_server_location(&mut self, cx: &mut Context<Self>) {
         // End All Sessions and direct network access follow the same server through the same
         // changes.
@@ -383,8 +408,11 @@ impl SettingsWindow {
         let state = &mut self.server_location;
         if state.target != target {
             state.choose(target.clone(), cx);
-        } else if !live && state.poll.is_some() {
-            state.disconnect(cx);
+        } else {
+            if !live && state.poll.is_some() {
+                state.disconnect(cx);
+            }
+            state.show_last_known(cx);
         }
         let Some(target) = target.filter(|_| live) else {
             return;
@@ -440,6 +468,7 @@ impl SettingsWindow {
                         }
                         if let Some(Ok(ReadReply::Git(git))) = git {
                             state.git = git;
+                            state.git_answered = true;
                         }
                         state.retain(cx);
                         cx.notify();

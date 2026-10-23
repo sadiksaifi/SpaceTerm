@@ -140,9 +140,14 @@ fn a_disconnected_server_keeps_its_last_value_and_cannot_change() {
 
 #[test]
 fn a_remembered_value_shows_until_the_server_answers_and_never_saves() {
-    let mut model = LocationModel::remembered(Some("~/kept/{branch}".to_owned()));
+    let mut model = LocationModel::default();
 
-    assert_eq!(model.draft, "~/kept/{branch}");
+    assert_eq!(
+        model
+            .remembered(Some("~/kept/{branch}".to_owned()))
+            .as_deref(),
+        Some("~/kept/{branch}")
+    );
     assert!(!model.editable());
     assert_eq!(model.commit(), None);
     assert_eq!(
@@ -150,6 +155,13 @@ fn a_remembered_value_shows_until_the_server_answers_and_never_saves() {
         Some("~/now/{branch}"),
         "the server's own answer replaces the remembered value"
     );
+    model.edited("~/typing/{branch}");
+    assert_eq!(
+        model.remembered(Some("~/late/{branch}".to_owned())),
+        None,
+        "facts arriving late never replace the server's value or a draft"
+    );
+    assert_eq!(model.draft, "~/typing/{branch}");
 }
 
 #[test]
@@ -186,12 +198,22 @@ mod presented {
     const GIT_SECTION: &str = "settings-navigation-settings-section-git";
     const SAVED: &str = "~/penguin/{repository}/{branch}";
 
+    fn penguin() -> ServerKey {
+        ServerKey::Ssh("penguin".to_owned())
+    }
+
+    /// Opens Settings with penguin saved and chosen, whatever the selection would fall back to.
+    fn open_penguin(cx: &mut TestAppContext) -> Servers<'_> {
+        cx.update(|cx| server_selection::select(penguin(), cx));
+        open_servers(false, &["penguin"], cx)
+    }
+
     /// Opens Git with penguin connected and its writer answering from `reads`.
     fn present_penguin(
         reads: Arc<ScriptedReads>,
         cx: &mut TestAppContext,
     ) -> (Servers<'_>, Rc<ScriptedEdits>) {
-        let servers = open_servers(false, &["penguin"], cx);
+        let servers = open_penguin(cx);
         servers.connections.connect(destination("penguin"));
         let connections = servers.connections.clone();
         settle(servers.cx, |_| {
@@ -232,7 +254,7 @@ mod presented {
     }
 
     fn penguin_location(cx: &mut VisualTestContext) -> Option<String> {
-        let key = ServerKey::Ssh("penguin".to_owned());
+        let key = penguin();
         cx.update(|_, cx| server_selection::facts(&key, cx))
             .and_then(|facts| facts.worktree_location)
     }
@@ -316,7 +338,7 @@ mod presented {
         // presents penguin.
         cx.update(|cx| {
             server_selection::remember(
-                ServerKey::Ssh("penguin".to_owned()),
+                penguin(),
                 LastKnownFacts {
                     observed_at: 10,
                     git: GitToolStatus::Ready(ToolVersion {
@@ -330,7 +352,7 @@ mod presented {
                 cx,
             );
         });
-        let servers = open_servers(false, &["penguin"], cx);
+        let servers = open_penguin(cx);
         click(GIT_SECTION, servers.cx);
 
         assert_eq!(location_field(servers.cx), "~/kept/{branch}");
@@ -344,10 +366,39 @@ mod presented {
     }
 
     #[gpui::test]
+    fn last_known_facts_that_load_after_the_server_is_chosen_show_at_once(cx: &mut TestAppContext) {
+        let servers = open_penguin(cx);
+        click(GIT_SECTION, servers.cx);
+        assert_eq!(location_field(servers.cx), "");
+
+        // The retained record finishes loading while Git already shows penguin.
+        servers.cx.update(|_, cx| {
+            server_selection::remember(
+                penguin(),
+                LastKnownFacts {
+                    observed_at: 10,
+                    git: GitToolStatus::Ready(ToolVersion {
+                        major: 2,
+                        minor: 47,
+                        patch: 0,
+                    }),
+                    worktree_location: Some("~/late/{branch}".to_owned()),
+                    ..LastKnownFacts::default()
+                },
+                cx,
+            );
+        });
+        servers.cx.run_until_parked();
+
+        assert_eq!(location_field(servers.cx), "~/late/{branch}");
+        assert!(says("2.47.0", servers.cx));
+    }
+
+    #[gpui::test]
     fn the_location_read_is_retained_with_the_servers_other_last_known_facts(
         cx: &mut TestAppContext,
     ) {
-        let key = ServerKey::Ssh("penguin".to_owned());
+        let key = penguin();
         cx.update(|cx| {
             server_selection::remember(
                 key.clone(),
