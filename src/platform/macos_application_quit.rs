@@ -175,22 +175,28 @@ fn native_window(window: &gpui::Window) -> Option<Retained<NSWindow>> {
     view.window()
 }
 
-/// Builds the dismissal alert with its buttons in [`DismissalPrompt`] order. Each button's tag is
-/// its position, which the sheet reports as its response.
+/// Builds the dismissal alert with its buttons in [`DismissalPrompt`] order, top to bottom. Each
+/// button's tag is its position, which the sheet reports as its response.
 fn dismissal_alert(prompt: &DismissalPrompt, mtm: MainThreadMarker) -> Retained<NSAlert> {
     let alert = NSAlert::new(mtm);
     alert.setAlertStyle(NSAlertStyle::Informational);
     alert.setMessageText(&NSString::from_str(&prompt.title));
     alert.setInformativeText(&NSString::from_str(&prompt.detail));
+    // AppKit's layout moves a button titled Cancel, or answering Escape, to the bottom of a
+    // vertical stack. Cancel takes its place under a stand-in title, which is the widest label
+    // so the stack is sized for every title, and becomes Cancel once the alert is laid out.
+    // Presenting a laid-out alert does not lay it out again.
     let labels = [
         prompt.keep.as_str(),
-        DismissalAnswer::CANCEL_LABEL,
+        prompt.quit_completely.as_str(),
         prompt.quit_completely.as_str(),
     ];
     let buttons = labels.map(|label| alert.addButtonWithTitle(&NSString::from_str(label)));
     for (tag, button) in buttons.iter().enumerate() {
         button.setTag(tag as NSInteger);
     }
+    alert.layout();
+    buttons[1].setTitle(&NSString::from_str(DismissalAnswer::CANCEL_LABEL));
     // The first button already answers Return. Escape cancels, and the complete quit answers
     // no key at all.
     buttons[0].setKeyEquivalent(&NSString::from_str("\r"));
@@ -405,6 +411,15 @@ pub(in crate::platform) mod tests {
                 (1, "\u{1b}".to_owned()),
                 (2, String::new())
             ]
+        );
+        // AppKit's coordinates rise up the alert, so each button lies above the next.
+        let heights = buttons
+            .iter()
+            .map(|button| button.convertRect_toView(button.bounds(), None).origin.y)
+            .collect::<Vec<_>>();
+        assert!(
+            heights.windows(2).all(|pair| pair[0] > pair[1]),
+            "laid out top to bottom as {titles:?}: {heights:?}"
         );
         // Space presses the focused button, so focus starts on the default answer.
         let focus = alert
