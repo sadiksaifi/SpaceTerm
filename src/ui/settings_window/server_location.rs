@@ -3,11 +3,14 @@
 //! These Server Settings are outside Settings import, export and reset. The section reads and
 //! writes only the selected server, over its existing connection, and only while Settings shows
 //! the section. Choosing another server starts over, so a draft or an answer for one server never
-//! reaches another. A server that is not connected keeps showing the values last read from it.
+//! reaches another. A server that is not connected shows the values last read from it, which the
+//! server selection retains across launches with that server's other last-known facts.
 use super::git::{WORKTREE_LOCATION_DESCRIPTION, worktree_location_problem};
 use super::server_list::ServerChoice;
+use super::server_selection;
 use super::*;
 use crate::repository_status::GitToolStatus;
+use crate::server_context::LastKnownFacts;
 use crate::ui::appearance::gpui_color;
 use crate::ui::chrome_typography::{ChromeTextStyleExt as _, TextRole};
 use crate::ui::server_worktrees::{Client, WriteError};
@@ -27,8 +30,6 @@ const SERVER_CHECK_DELAY: Duration = Duration::from_millis(300);
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
 /// The field's width beside its label, wide enough for the default location.
 const FIELD_WIDTH: f32 = 260.0;
-/// Bounds the servers whose last-read values this window keeps, as the server picker does.
-const REMEMBERED_SERVERS: usize = 257;
 
 /// What New Worktree Location shows and may write, apart from GPUI. The field's text mirrors
 /// `draft`. A method that changes what the field should show returns that text.
@@ -56,15 +57,11 @@ enum LocationNotice {
 }
 
 impl LocationModel {
-    /// A disconnected server's field, showing the value last read from it.
-    fn remembered(known: Option<Settings>) -> Self {
+    /// A server's field before it answers, showing the value last read from it. That value is
+    /// for display: an edit needs the server's own answer and version.
+    fn remembered(template: Option<String>) -> Self {
         Self {
-            draft: known
-                .as_ref()
-                .map(|known| known.template.clone())
-                .unwrap_or_default(),
-            base: known.clone(),
-            known,
+            draft: template.unwrap_or_default(),
             ..Self::default()
         }
     }
@@ -233,12 +230,6 @@ impl LocationModel {
     }
 }
 
-/// What this window last read from a server that is not selected now.
-struct Remembered {
-    settings: Option<Settings>,
-    git: GitToolStatus,
-}
-
 pub(super) struct ServerLocation {
     input: Entity<TextInput>,
     _events: Subscription,
@@ -255,7 +246,6 @@ pub(super) struct ServerLocation {
     poll: Option<Task<()>>,
     /// The owning server's check of the text being typed. Replacing it cancels the earlier one.
     check: Option<Task<()>>,
-    remembered: Vec<(ServerChoice, Remembered)>,
 }
 
 impl ServerLocation {
@@ -285,43 +275,56 @@ impl ServerLocation {
             client: None,
             poll: None,
             check: None,
-            remembered: Vec::new(),
         }
     }
 
-    /// Shows `target`, from what this window last read from it, and stops reading the previous
-    /// server.
+    /// Shows `target` from its last-known facts and stops reading the previous server.
     fn choose(&mut self, target: Option<ServerChoice>, cx: &mut Context<SettingsWindow>) {
-        if let Some(previous) = self.target.take() {
-            self.remembered.retain(|(server, _)| *server != previous);
-            if self.remembered.len() >= REMEMBERED_SERVERS {
-                self.remembered.remove(0);
-            }
-            let remembered = Remembered {
-                settings: self.model.known.take(),
-                git: self.git,
-            };
-            self.remembered.push((previous, remembered));
-        }
-        let remembered = target.as_ref().and_then(|target| {
-            let index = self
-                .remembered
-                .iter()
-                .position(|(server, _)| server == target)?;
-            Some(self.remembered.remove(index).1)
-        });
+        let facts = target
+            .as_ref()
+            .and_then(|target| server_selection::facts(&target.key(), cx))
+            .unwrap_or_default();
         self.target = target;
         self.generation = self.generation.wrapping_add(1);
-        self.git = remembered
-            .as_ref()
-            .map_or(GitToolStatus::Unknown, |remembered| remembered.git);
-        self.model =
-            LocationModel::remembered(remembered.and_then(|remembered| remembered.settings));
+        self.git = facts.git;
+        self.model = LocationModel::remembered(facts.worktree_location);
         self.offered = true;
         self.client = None;
         self.poll = None;
         self.check = None;
         self.show(Some(self.model.draft.clone()), cx);
+    }
+
+    /// Records what the selected server answered among its last-known facts, so the section
+    /// shows it while that server isn't connected, even after relaunch. The record's other facts
+    /// and the time they were observed stay as their owner wrote them.
+    fn retain(&self, cx: &mut App) {
+        let Some(target) = &self.target else {
+            return;
+        };
+        let template = self
+            .model
+            .known
+            .as_ref()
+            .map(|known| known.template.clone());
+        if self.git == GitToolStatus::Unknown && template.is_none() {
+            return;
+        }
+        let key = target.key();
+        let previous = server_selection::facts(&key, cx);
+        let mut facts = previous.clone().unwrap_or_else(|| LastKnownFacts {
+            observed_at: unix_seconds(),
+            ..LastKnownFacts::default()
+        });
+        if self.git != GitToolStatus::Unknown {
+            facts.git = self.git;
+        }
+        if template.is_some() {
+            facts.worktree_location = template;
+        }
+        if previous.as_ref() != Some(&facts) {
+            server_selection::remember(key, facts, cx);
+        }
     }
 
     /// Stops reading the selected server and keeps what was read from it.
@@ -438,6 +441,7 @@ impl SettingsWindow {
                         if let Some(Ok(ReadReply::Git(git))) = git {
                             state.git = git;
                         }
+                        state.retain(cx);
                         cx.notify();
                     })
                     .is_err()
@@ -575,6 +579,7 @@ impl SettingsWindow {
                     let text = state.model.changed_elsewhere(current);
                     state.show(text, cx);
                 }
+                state.retain(cx);
                 cx.notify();
             });
         })
@@ -654,6 +659,13 @@ impl SettingsWindow {
             }))
             .into_any_element()
     }
+}
+
+/// Now, as the Unix seconds a last-known fact carries.
+fn unix_seconds() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs())
 }
 
 #[cfg(test)]
