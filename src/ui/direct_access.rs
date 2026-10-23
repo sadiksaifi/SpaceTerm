@@ -69,7 +69,6 @@ pub(crate) struct Claim {
     /// The code the device shows too, derived from this claim's authenticated exchange. The
     /// person compares it and never types it.
     pub(crate) code: ComparisonCode,
-    pub(crate) expires_at: u64,
 }
 
 /// An open invitation. Its link is shown while Invite Device is open and copied only when the
@@ -199,7 +198,6 @@ fn claim(claim: PairingClaim) -> Claim {
         id: claim.id,
         name: claim.device_name.as_str().to_owned().into(),
         code: claim.comparison_code(),
-        expires_at: claim.expires_at_unix_seconds,
         claim,
     }
 }
