@@ -36,6 +36,9 @@ pub enum Request {
     /// Reads service policy, the approved build and any recorded original operation. Starts,
     /// stages, installs and stops nothing.
     Observe,
+    /// Changes startup policy without starting, stopping or unregistering the service.
+    /// The reply contains current facts; a lost reply can be followed by Observe.
+    SetAutomaticStart { enabled: bool },
     /// Describes one destructive action and issues the confirmation for the observation it
     /// describes. Changes nothing.
     Prepare { action: Action },
@@ -81,6 +84,9 @@ pub enum Reply {
     },
     /// The exact artifact is already this account's approved build, so no update is needed.
     AlreadyApproved,
+    /// The requested startup preference may be retained, but native activation was not confirmed.
+    /// Observe reads policy; explicitly setting it again retries native activation only.
+    AutomaticStartUnconfirmed,
     Outcome(OperationOutcome),
     /// This service holds no record of that original operation.
     Unknown,
@@ -296,6 +302,20 @@ impl Maintenance {
     fn perform(&self, request: Request) -> Result<Reply, ServerError> {
         match request {
             Request::Observe => Ok(Reply::Facts(self.facts()?)),
+            Request::SetAutomaticStart { enabled } => {
+                match self.service.set_automatic_start(enabled) {
+                    Ok(_) => Ok(self
+                        .facts()
+                        .map(Reply::Facts)
+                        .unwrap_or(Reply::AutomaticStartUnconfirmed)),
+                    Err(
+                        error @ (ServerError::NotInstalled
+                        | ServerError::AuthorizationRequired
+                        | ServerError::ActivationUnresolved),
+                    ) => Err(error),
+                    Err(_) => Ok(Reply::AutomaticStartUnconfirmed),
+                }
+            }
             Request::Prepare { action } => Ok(Reply::Prepared(self.prepare(action)?)),
             Request::Apply {
                 operation,
@@ -1222,6 +1242,7 @@ mod tests {
         stops: AtomicUsize,
         starts: AtomicUsize,
         automatic_start: AtomicBool,
+        fail_automatic_start: AtomicBool,
         uninstalls: AtomicUsize,
         fail_replace: AtomicBool,
     }
@@ -1247,6 +1268,9 @@ mod tests {
             Err(ServerError::StartupFailed)
         }
         fn set_automatic_start(&self, enabled: bool) -> Result<(), ServerError> {
+            if self.fail_automatic_start.load(Ordering::SeqCst) {
+                return Err(ServerError::ServiceUnavailable);
+            }
             self.automatic_start.store(enabled, Ordering::SeqCst);
             Ok(())
         }
@@ -1334,6 +1358,7 @@ mod tests {
                     stops: AtomicUsize::new(0),
                     starts: AtomicUsize::new(0),
                     automatic_start: AtomicBool::new(false),
+                    fail_automatic_start: AtomicBool::new(false),
                     uninstalls: AtomicUsize::new(0),
                     fail_replace: AtomicBool::new(false),
                 });
@@ -1374,6 +1399,69 @@ mod tests {
                 exercise(&harness);
             },
         );
+    }
+
+    #[test]
+    fn a_failed_native_startup_change_is_unconfirmed_after_the_preference_is_retained() {
+        with_service(true, false, |harness| {
+            harness
+                .manager
+                .fail_automatic_start
+                .store(true, Ordering::SeqCst);
+            assert_eq!(
+                harness.exchange(&Request::SetAutomaticStart { enabled: false }),
+                Reply::AutomaticStartUnconfirmed
+            );
+            assert!(!harness.state().automatic_start);
+            assert!(harness.state().installed);
+            assert_eq!(harness.manager.stops.load(Ordering::SeqCst), 0);
+            assert_eq!(harness.manager.starts.load(Ordering::SeqCst), 0);
+            harness
+                .manager
+                .fail_automatic_start
+                .store(false, Ordering::SeqCst);
+            assert!(matches!(
+                harness.exchange(&Request::SetAutomaticStart { enabled: false }),
+                Reply::Facts(_)
+            ));
+        });
+    }
+
+    #[test]
+    fn automatic_start_changes_preserve_running_work_and_stopped_policy_over_the_wire() {
+        for (running, stopped) in [(true, false), (false, true)] {
+            with_service(running, stopped, |harness| {
+                let original = harness.state();
+                let approved = harness.manager.approved.lock().unwrap().clone();
+                for enabled in [false, true] {
+                    let Reply::Facts(facts) =
+                        harness.exchange(&Request::SetAutomaticStart { enabled })
+                    else {
+                        panic!("automatic-start policy was not changed");
+                    };
+                    assert_eq!(
+                        facts.status,
+                        ServiceStatus {
+                            installed: true,
+                            enabled,
+                            running,
+                            stopped
+                        }
+                    );
+                    let mut expected = original.clone();
+                    expected.automatic_start = enabled;
+                    assert_eq!(harness.state(), expected);
+                    assert_eq!(*harness.manager.approved.lock().unwrap(), approved);
+                    assert_eq!(
+                        harness.manager.automatic_start.load(Ordering::SeqCst),
+                        enabled && !stopped
+                    );
+                }
+                assert_eq!(harness.manager.stops.load(Ordering::SeqCst), 0);
+                assert_eq!(harness.manager.starts.load(Ordering::SeqCst), 0);
+                assert_eq!(harness.manager.uninstalls.load(Ordering::SeqCst), 0);
+            });
+        }
     }
 
     #[test]

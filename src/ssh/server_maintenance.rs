@@ -143,6 +143,16 @@ pub(crate) enum SshMaintenanceFailure {
 /// Construction performs no SSH work. Describing a change performs no destructive work, and
 /// nothing here starts a server except [`SubmittedKind::Start`].
 pub(crate) trait SshMaintenanceBackend: Send + Sync {
+    /// Change only automatic startup on the bound account route. Deliberate Stop remains.
+    /// A lost reply is unconfirmed; Observe reads the current preference without retrying it.
+    fn set_automatic_start(
+        &self,
+        target: &MaintenanceTarget,
+        enabled: bool,
+        cancellation: &SshCancellationToken,
+        progress: &MaintenanceProgress<'_>,
+    ) -> Result<MaintenanceFacts, SshMaintenanceFailure>;
+
     /// Reads the service's policy, approved build and any recorded original operation on the
     /// bound route. Starts, stages, installs and stops nothing.
     fn observe(
@@ -221,6 +231,7 @@ const fn dispatches(request: &Request) -> bool {
             | Request::ApplyUpdate { .. }
             | Request::ApplyReturn { .. }
             | Request::Start { .. }
+            | Request::SetAutomaticStart { .. }
     )
 }
 
@@ -460,6 +471,40 @@ impl<A: SshProcessAdapter> NativeSshConnectBackend<A> {
 }
 
 impl<A: SshProcessAdapter> SshMaintenanceBackend for NativeSshConnectBackend<A> {
+    fn set_automatic_start(
+        &self,
+        target: &MaintenanceTarget,
+        enabled: bool,
+        cancellation: &SshCancellationToken,
+        progress: &MaintenanceProgress<'_>,
+    ) -> Result<MaintenanceFacts, SshMaintenanceFailure> {
+        let (route, _) = self.bound(
+            target,
+            MaintenanceAuthority::Requested,
+            cancellation,
+            progress,
+            None,
+        )?;
+        progress(MaintenancePhase::Dispatching);
+        match self.exchange(
+            &route,
+            &Request::SetAutomaticStart { enabled },
+            cancellation,
+            None,
+        )? {
+            Reply::Facts(facts)
+                if facts.status.enabled == enabled
+                    && facts.server == target.continuity.server
+                    && facts.account == target.continuity.account
+                    && facts.build == target.continuity.build =>
+            {
+                Ok(facts)
+            }
+            Reply::Refused { refusal } => Err(SshMaintenanceFailure::Refused(refusal)),
+            _ => Err(SshMaintenanceFailure::Unconfirmed),
+        }
+    }
+
     fn observe(
         &self,
         target: &MaintenanceTarget,
@@ -730,6 +775,79 @@ mod tests {
         SshServerArtifacts::new(None)
     }
     fn silent(_: MaintenancePhase) {}
+
+    #[gpui::test]
+    fn automatic_start_uses_only_the_bound_account_maintenance_route(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        for stopped in [false, true] {
+            let mut expected = facts();
+            expected.status.enabled = false;
+            expected.status.stopped = stopped;
+            expected.status.running = !stopped;
+            let discovered = AccountDiscovery {
+                running: !stopped,
+                stopped,
+                ..discovery(SERVER)
+            };
+            let account = account(discovered, Reply::Facts(expected.clone()));
+            let (backend, _) =
+                backend(cx.background_executor.clone(), account.clone(), artifacts());
+            let observed = backend.set_automatic_start(
+                &target(bound()),
+                false,
+                &SshCancellationToken::default(),
+                &silent,
+            );
+            assert_eq!(observed, Ok(expected));
+            assert_eq!(
+                asked(&account),
+                vec![Request::SetAutomaticStart { enabled: false }]
+            );
+            for effect in ["ssh-prepare", "ssh-stage", "ssh-install"] {
+                assert_eq!(account.ran(effect), 0, "automatic start asked for {effect}");
+            }
+        }
+    }
+
+    #[gpui::test]
+    fn automatic_start_does_not_claim_success_for_an_unconfirmed_native_change(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let account = account(discovery(SERVER), Reply::AutomaticStartUnconfirmed);
+        let (backend, _) = backend(cx.background_executor.clone(), account.clone(), artifacts());
+        assert_eq!(
+            backend.set_automatic_start(
+                &target(bound()),
+                false,
+                &SshCancellationToken::default(),
+                &silent
+            ),
+            Err(SshMaintenanceFailure::Unconfirmed)
+        );
+        assert_eq!(
+            asked(&account),
+            vec![Request::SetAutomaticStart { enabled: false }]
+        );
+    }
+
+    #[gpui::test]
+    fn automatic_start_refuses_changed_authority_before_dispatch(cx: &mut gpui::TestAppContext) {
+        let account = account(discovery([8; 32]), Reply::Facts(facts()));
+        let (backend, _) = backend(cx.background_executor.clone(), account.clone(), artifacts());
+        assert_eq!(
+            backend.set_automatic_start(
+                &target(bound()),
+                false,
+                &SshCancellationToken::default(),
+                &silent
+            ),
+            Err(SshMaintenanceFailure::Changed(
+                ContinuityChange::ServerChanged
+            ))
+        );
+        assert!(asked(&account).is_empty());
+    }
 
     /// Every exchange proves the route, account, application identity and server before it asks
     /// for anything, so a destination that now reaches another one sends nothing.

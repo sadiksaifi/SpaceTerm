@@ -1842,6 +1842,15 @@ mod tests {
         }
     }
     impl SshMaintenanceBackend for Script {
+        fn set_automatic_start(
+            &self,
+            _: &MaintenanceTarget,
+            _: bool,
+            _: &SshCancellationToken,
+            _: &MaintenanceProgress<'_>,
+        ) -> Result<MaintenanceFacts, SshMaintenanceFailure> {
+            Self::next(&self.observations)
+        }
         fn observe(
             &self,
             _: &MaintenanceTarget,

@@ -1588,6 +1588,49 @@ mod tests {
         }
 
         #[test]
+        fn automatic_start_and_explicit_start_preserve_registration_and_require_linger() {
+            let fixture = Fixture::new();
+            fresh(&fixture);
+            let supervisor = AccountSupervisor::new(fixture.paths.clone());
+            let service = supervisor.service();
+            runtime::test_support::with_artifact(
+                &fixture.root.join("artifact"),
+                &fixture.paths.identity,
+                |archive, signature| {
+                    let installation = provision(&service, archive, signature).unwrap();
+                    service.install(&installation).unwrap();
+                    service.set_automatic_start(false).unwrap();
+                    assert_eq!(
+                        supervisor.registered.lock().unwrap().as_ref(),
+                        Some(&installation)
+                    );
+                    let stopped = service.stop().unwrap();
+                    assert!(stopped.stopped && !stopped.enabled && !stopped.running);
+                    supervisor.authorized.store(false, Ordering::Relaxed);
+                    assert_eq!(
+                        service.set_automatic_start(true),
+                        Err(ServerError::AuthorizationRequired)
+                    );
+                    assert_eq!(service.passive_status().unwrap(), stopped);
+                    supervisor.authorized.store(true, Ordering::Relaxed);
+                    let enabled = service.set_automatic_start(true).unwrap();
+                    assert!(enabled.enabled && enabled.stopped && !enabled.running);
+                    assert!(!supervisor.automatic_start.load(Ordering::Relaxed));
+                    service.set_automatic_start(false).unwrap();
+                    let started = service.start().unwrap();
+                    assert!(started.running && !started.stopped && !started.enabled);
+                    assert!(!supervisor.automatic_start.load(Ordering::Relaxed));
+                    assert_eq!(
+                        supervisor.registered.lock().unwrap().as_ref(),
+                        Some(&installation)
+                    );
+                    assert_eq!(supervisor.installs.load(Ordering::Relaxed), 1);
+                    assert_eq!(supervisor.starts.load(Ordering::Relaxed), 2);
+                },
+            );
+        }
+
+        #[test]
         fn first_launch_and_reopen_reuse_one_service_and_nonsecret_client_identity() {
             let fixture = Fixture::new();
             fresh(&fixture);
