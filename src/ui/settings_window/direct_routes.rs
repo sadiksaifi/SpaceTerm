@@ -6,18 +6,16 @@
 //! to revoke this device, and an unpair the server hasn't confirmed stays in a notice until it
 //! settles. Everything here reads the registry's snapshot, so rendering reaches no computer.
 
-use gpui::prelude::*;
-use gpui::{Context, Entity, SharedString, Subscription, Task, Window};
+use gpui::{Context, SharedString, Task, Window};
 use spaceterm_ui::{
     Alert, AlertIntent, AlertOutcome, ModalAction, ModalActionEmphasis, ModalActionIntent,
-    ModalActionRole, ModalId, TextInput, TextInputContentMode, TextInputEvent, TextInputVariant,
+    ModalActionRole, ModalId,
 };
 
 use super::SettingsWindow;
 use super::server_list::ServerChoice;
 use crate::direct_connections::{
-    DirectConnections, DirectRouteId, DirectRouteStatus, JoinId, PendingUnpair, RefusalReason,
-    UnpairState,
+    DirectConnections, DirectRouteId, DirectRouteStatus, PendingUnpair, RefusalReason, UnpairState,
 };
 use crate::ui::direct_access::AccessFailure;
 use crate::ui::direct_servers::{DirectServerAction, UnpairAction};
@@ -30,72 +28,24 @@ pub(super) const UNPAIR_SELF_CANCEL_SELECTOR: &str = "settings-direct-server-unp
 pub(super) const UNSAVED_CHANGES: &str = "SpaceTerm couldn\u{2019}t confirm its latest changes to \
      direct connections are saved on this computer, so recent changes, such as a new pairing, may \
      be missing after SpaceTerm reopens.";
-/// The direct network rows: the registry they present and the Join with Invitation journey.
+
+/// The direct network rows: the registry they present. Add Server owns joining a new server.
 pub(super) struct DirectRouteRows {
     pub(super) connections: DirectConnections,
-    /// The invitation the person pastes. Its value is obscured and taken out of the field when
-    /// the person joins, so the field never keeps it.
-    pub(super) invitation: Entity<TextInput>,
-    /// The join underway or last finished, which the Join row reports.
-    pub(super) join: Option<JoinId>,
-    /// Why the latest Join didn't start.
-    pub(super) join_failure: Option<crate::local_server::direct::DirectError>,
-    /// Whether the person cancelled the latest join, which the registry reports as refused.
-    pub(super) join_cancelled: bool,
-    /// Why SpaceTerm couldn't save the person's cancellation or withdrawal of the latest join.
-    pub(super) join_withdraw_failure: Option<crate::local_server::direct::DirectError>,
-    /// Whether the Servers list already selected the latest join's new route.
-    pub(super) join_selected: bool,
-    /// Repaints a waiting join's countdown.
-    pub(super) join_tick: Option<Task<()>>,
     /// Why the latest step on a route didn't take effect.
     pub(super) problem: Option<(DirectRouteId, AccessFailure)>,
     pub(super) _changes: crate::ui::direct_servers::DirectChanges,
-    pub(super) _invitation_events: Subscription,
     pub(super) _work: Option<Task<()>>,
 }
 
 impl DirectRouteRows {
     /// Follows the registry so each state change repaints the rows and follows the selected
     /// server. Construction reads nothing.
-    pub(super) fn new(
-        connections: DirectConnections,
-        window: &mut Window,
-        cx: &mut Context<SettingsWindow>,
-    ) -> Self {
-        let invitation = cx.new(|cx| {
-            TextInput::new(
-                super::direct_join::INVITATION_SELECTOR,
-                "Invitation",
-                String::new(),
-                window,
-                cx,
-            )
-            .variant(TextInputVariant::Bare)
-            .content_mode(TextInputContentMode::Obscured)
-            .placeholder("Paste an invitation")
-            .debug_selector(super::direct_join::INVITATION_SELECTOR)
-        });
-        let invitation_events = cx.subscribe_in(
-            &invitation,
-            window,
-            |settings, _, event: &TextInputEvent, _, cx| match event {
-                TextInputEvent::Submitted => settings.join_with_invitation(cx),
-                TextInputEvent::ValueChanged(_) => {
-                    if let Some(rows) = settings.direct_routes.as_mut()
-                        && rows.join_failure.take().is_some()
-                    {
-                        cx.notify();
-                    }
-                }
-                _ => {}
-            },
-        );
+    pub(super) fn new(connections: DirectConnections, cx: &mut Context<SettingsWindow>) -> Self {
         let follow = crate::ui::direct_servers::DirectChanges::follow(&connections, |changes| {
             cx.spawn(async move |settings, cx| {
                 while changes.recv().await.is_ok() {
                     let followed = settings.update(cx, |settings, cx| {
-                        settings.follow_join(cx);
                         settings.reconcile_servers(cx);
                         settings.sync_server_location(cx);
                         cx.notify();
@@ -108,16 +58,8 @@ impl DirectRouteRows {
         });
         Self {
             connections,
-            invitation,
-            join: None,
-            join_failure: None,
-            join_cancelled: false,
-            join_withdraw_failure: None,
-            join_selected: false,
-            join_tick: None,
             problem: None,
             _changes: follow,
-            _invitation_events: invitation_events,
             _work: None,
         }
     }
