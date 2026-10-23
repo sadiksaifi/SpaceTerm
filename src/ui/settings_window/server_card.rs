@@ -1268,11 +1268,17 @@ impl SettingsWindow {
         needs_update: bool,
     ) -> VersionView {
         let presentation = self.maintenance_presentation(MaintenanceRow::Update);
+        // A service read's approved build, or what the connection or Check Status reports, comes
+        // before what was retained.
         let reported = self
-            .ssh_servers
-            .as_ref()
-            .and_then(|rows| rows.connections.last_facts(destination))
-            .and_then(|facts| facts.version)
+            .observation(&ServerChoice::Ssh(destination.clone()))
+            .version
+            .or_else(|| {
+                self.ssh_servers
+                    .as_ref()
+                    .and_then(|rows| rows.connections.last_facts(destination))
+                    .and_then(|facts| facts.version)
+            })
             .map(SharedString::from);
         let value = reported.or(observed);
         let Some(presentation) = presentation else {
@@ -1739,7 +1745,11 @@ impl SettingsWindow {
                     }))
                     .chrome_text(appearance.typography.style(TextRole::Body))
                     .text_color(gpui_color(colors.text_secondary))
-                    .child(value.clone()),
+                    // The visible version reads as text too, not only in the status's name.
+                    .child(gpui::Text::new(
+                        ElementId::from(SharedString::from(format!("{VERSION_SELECTOR}-number"))),
+                        value.clone(),
+                    )),
             )
             .children(working)
             .children(view.badge.map(|label| {

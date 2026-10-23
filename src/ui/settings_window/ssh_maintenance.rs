@@ -102,6 +102,8 @@ impl SshMaintenanceRows {
             while changes.recv().await.is_ok() {
                 let followed = settings.update(cx, |settings, cx| {
                     settings.continue_asked_maintenance(cx);
+                    // A finished read reports the service and its approved version.
+                    settings.sync_server_facts(cx);
                     cx.notify();
                 });
                 if followed.is_err() {

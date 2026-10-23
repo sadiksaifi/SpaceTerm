@@ -312,6 +312,11 @@ impl SettingsWindow {
         .flatten();
         let follower = &mut self.server_facts;
         if follower.target == target && follower.poll.is_some() {
+            // A connection or read changed. What it reports now is retained at once, so a
+            // connection that ends before the next look still leaves its facts.
+            if let Some(target) = target {
+                self.remember_observation(&target, None, cx);
+            }
             return;
         }
         follower.target = target.clone();

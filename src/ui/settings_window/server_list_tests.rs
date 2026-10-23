@@ -793,12 +793,14 @@ fn searching_for_a_server_by_name_reveals_and_selects_it(cx: &mut TestAppContext
 }
 
 /// A word that only appears inside a host's name answers the Settings it names, not that host.
+/// "servers" names All Servers, so the list shows which server the search presents.
 #[gpui::test]
 fn a_query_inside_a_host_name_keeps_the_local_server(cx: &mut TestAppContext) {
-    let mut servers = open_servers(true, &["build.local"], cx);
-    search_for("local", &mut servers);
+    let mut servers = open_servers(true, &["build.servers"], cx);
+    search_for("servers", &mut servers);
 
     assert_eq!(listed(servers.cx)[0], (local_name().to_owned(), true));
+    assert_eq!(listed(servers.cx)[1], ("build.servers".to_owned(), false));
 }
 
 /// A Setting the query names by its own words comes before a host that happens to share it.

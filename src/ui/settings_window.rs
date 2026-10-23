@@ -1356,9 +1356,11 @@ impl SettingsWindow {
             let rendered = self.render_row(row, appearance, window, cx);
             // Each paired device has a row of its own under Devices. They follow every catalog
             // row of their card, so the card's row bounds still pair with its catalog rows.
-            let devices = (row == SettingsRowId::PairedDevices)
-                .then(|| self.render_device_rows(appearance, window, cx))
-                .unwrap_or_default();
+            let devices = if row == SettingsRowId::PairedDevices {
+                self.render_device_rows(appearance, window, cx)
+            } else {
+                Vec::new()
+            };
             match groups.iter_mut().find(|(current, _, _)| *current == title) {
                 Some((_, ids, members)) => {
                     ids.push(row);
