@@ -713,13 +713,7 @@ fn enroll(
             owner.start_worker();
             return Ok(());
         };
-        let awaiting = JoinStatus::AwaitingApproval {
-            server_name: invitation.server_name().to_owned(),
-            server_fingerprint: invitation.server_pin().fingerprint(),
-            device_fingerprint: credential.fingerprint(),
-            comparison_code,
-            expires_at: invitation.expires_at_unix_seconds(),
-        };
+        let awaiting = JoinStatus::AwaitingApproval { comparison_code };
         loop {
             let cancelled = owner
                 .0

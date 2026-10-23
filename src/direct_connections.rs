@@ -69,11 +69,7 @@ pub(crate) enum JoinStatus {
         stage: EnrollmentStage,
     },
     AwaitingApproval {
-        server_name: String,
-        server_fingerprint: String,
-        device_fingerprint: String,
         comparison_code: direct::ComparisonCode,
-        expires_at: u64,
     },
     Approved(DirectRouteId),
     /// The route was published and is usable; synchronization remains unconfirmed.
