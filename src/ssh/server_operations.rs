@@ -28,10 +28,10 @@ use super::server_connection::{
     ContinuityChange, InteractionReason, SshConnectionRemovals, SshIntentStoreError,
     SshServerConnections, UnavailableKind, wait,
 };
+pub(crate) use super::server_maintenance::RemoteUpdateOffer;
 use super::server_maintenance::{
     MaintenanceAuthority, MaintenancePhase, MaintenanceTarget, OperationSubmission,
-    RemoteMaintenanceObservation, RemoteUpdateOffer, SshMaintenanceBackend, SshMaintenanceFailure,
-    SubmittedKind,
+    RemoteMaintenanceObservation, SshMaintenanceBackend, SshMaintenanceFailure, SubmittedKind,
 };
 use crate::domain::SshDestination;
 
@@ -1036,6 +1036,7 @@ fn adopt(state: &mut State, record: RetainedRemoteOperation) -> Option<(Admitted
     // A retained outcome describes the original's history, not a new observation. An entry
     // reused during recovery must not lend its prior read's timestamp to that outcome.
     entry.observed_at = None;
+    entry.update_offer = RemoteUpdateOffer::Unchecked;
     entry.target = Some(record.target);
     entry.submitted = Some(Submitted {
         operation: record.operation,
@@ -1158,6 +1159,7 @@ fn admit(
         kind: kind.clone(),
         cancellable: true,
     };
+    entry.update_offer = RemoteUpdateOffer::Unchecked;
     let admitted = Admitted {
         destination: entry.destination.clone(),
         target: entry.target.clone()?,
@@ -1276,11 +1278,21 @@ fn run(
                     backend.set_automatic_start(&target, enabled, &cancellation, &progress)
                 });
             match result {
-                Ok(facts) => read(&inner, &destination, generation, facts, Instant::now()),
+                Ok(facts) => read(
+                    &inner,
+                    &destination,
+                    generation,
+                    RemoteMaintenanceObservation {
+                        facts,
+                        update_offer: RemoteUpdateOffer::Unchecked,
+                    },
+                    Instant::now(),
+                ),
                 Err(failure) => {
                     update(&inner, &destination, generation, |state, index| {
                         let entry = &mut state.entries[index];
                         entry.running = false;
+                        entry.update_offer = RemoteUpdateOffer::Unchecked;
                         entry.state = RemoteOperationState::Failed {
                             failure,
                             kind: None,
@@ -1381,14 +1393,15 @@ fn describe(
     cancellation: &SshCancellationToken,
     progress: &super::server_maintenance::MaintenanceProgress<'_>,
 ) {
-    let facts = match backend.observe(target, authority, cancellation, progress) {
-        Ok(facts) => facts,
+    let observation = match backend.observe(target, authority, cancellation, progress) {
+        Ok(observation) => observation,
         Err(failure) => return settle(inner, destination, generation, failure),
     };
     let observed_at = Instant::now();
     update(inner, destination, generation, |state, index| {
-        state.entries[index].facts = Some(facts.clone());
+        state.entries[index].facts = Some(observation.facts.clone());
         state.entries[index].observed_at = Some(observed_at);
+        state.entries[index].update_offer = observation.update_offer.clone();
     });
     let prepared = match request {
         RemoteMaintenanceRequest::Service(action) => backend
@@ -1403,12 +1416,22 @@ fn describe(
     };
     match prepared {
         // The artifact this client holds is already the approved build, so nothing changes.
-        Ok(None) => read(inner, destination, generation, facts, observed_at),
+        Ok(None) => {
+            // Another client may have approved the artifact after the first read. Re-read both
+            // approved metadata and the verified offer rather than returning that old version.
+            match backend.observe(target, authority, cancellation, progress) {
+                Ok(observation) => {
+                    read(inner, destination, generation, observation, Instant::now())
+                }
+                Err(failure) => settle(inner, destination, generation, failure),
+            }
+        }
         Ok(Some(change)) => {
             update(inner, destination, generation, |state, index| {
                 let handle = next_handle(state);
                 let entry = &mut state.entries[index];
                 entry.running = false;
+                entry.update_offer = RemoteUpdateOffer::Unchecked;
                 entry.state = RemoteOperationState::Described {
                     handle,
                     request,
@@ -1613,6 +1636,7 @@ fn await_outcome(
         let handle = next_handle(state);
         let entry = &mut state.entries[index];
         entry.running = false;
+        entry.update_offer = RemoteUpdateOffer::Unchecked;
         if matches!(&retained, RetainedOutcome::Completed { status, build } if status.is_some() || build.is_some())
         {
             entry.observed_at = observed_at;
@@ -1689,14 +1713,19 @@ fn read(
     inner: &Weak<Inner>,
     destination: &SshDestination,
     generation: u64,
-    facts: MaintenanceFacts,
+    observation: RemoteMaintenanceObservation,
     observed_at: Instant,
 ) {
     update(inner, destination, generation, |state, index| {
+        let RemoteMaintenanceObservation {
+            facts,
+            update_offer,
+        } = observation;
         let entry = &mut state.entries[index];
         entry.running = false;
         entry.facts = Some(facts.clone());
         entry.observed_at = Some(observed_at);
+        entry.update_offer = update_offer;
         entry.state = RemoteOperationState::Read(Box::new(facts));
     });
 }
@@ -1712,6 +1741,7 @@ fn settle(
     update(inner, destination, generation, |state, index| {
         let entry = &mut state.entries[index];
         entry.running = false;
+        entry.update_offer = RemoteUpdateOffer::Unchecked;
         let kind = entry
             .submitted
             .as_ref()
@@ -2399,8 +2429,14 @@ mod tests {
     #[test]
     fn failed_or_changed_facts_do_not_inherit_an_old_available_offer() {
         let script = Arc::new(Script::default());
+        let mut initial = facts();
+        initial.approved = Some(spaceterm_server::service::maintenance::RemoteBuild {
+            version: "0.1.0".into(),
+            commit: "a".repeat(40),
+            digest: "1".repeat(64),
+        });
         script.observes_offer(
-            facts(),
+            initial,
             RemoteUpdateOffer::Available(ServerCandidate {
                 version: "9.8.7".into(),
                 digest: "2".repeat(64),

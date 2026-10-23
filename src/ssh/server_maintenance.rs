@@ -316,6 +316,28 @@ fn replaceable(candidate: &str, approved: &str) -> Result<(), SshMaintenanceFail
     Ok(())
 }
 
+/// Classify only metadata from the shared verifier against the account's approved whole artifact.
+fn verified_update_offer(
+    facts: &MaintenanceFacts,
+    candidate: Option<&VerifiedArtifact>,
+) -> RemoteUpdateOffer {
+    let (true, Some(approved), Some(candidate)) =
+        (facts.status.installed, facts.approved.as_ref(), candidate)
+    else {
+        return RemoteUpdateOffer::Unavailable;
+    };
+    if candidate.digest() == approved.digest {
+        return RemoteUpdateOffer::UpToDate;
+    }
+    if replaceable(candidate.version(), &approved.version).is_err() {
+        return RemoteUpdateOffer::Unavailable;
+    }
+    RemoteUpdateOffer::Available(ServerCandidate {
+        version: candidate.version().to_owned(),
+        digest: candidate.digest().to_owned(),
+    })
+}
+
 /// Every route, discovery and artifact failure as one maintenance classification.
 fn failure(error: SshConnectFailure) -> SshMaintenanceFailure {
     match error {
@@ -530,12 +552,32 @@ impl<A: SshProcessAdapter> SshMaintenanceBackend for NativeSshConnectBackend<A> 
         authority: MaintenanceAuthority,
         cancellation: &SshCancellationToken,
         progress: &MaintenanceProgress<'_>,
-    ) -> Result<MaintenanceFacts, SshMaintenanceFailure> {
-        let (route, _) = self.bound(target, authority, cancellation, progress, None)?;
-        match self.exchange(&route, &Request::Observe, cancellation, None)? {
-            Reply::Facts(facts) => Ok(facts),
-            reply => Err(unexpected(reply)),
-        }
+    ) -> Result<RemoteMaintenanceObservation, SshMaintenanceFailure> {
+        let (route, discovery) = self.bound(target, authority, cancellation, progress, None)?;
+        // Reuse the artifact owner's full verification for the target this exact route validated.
+        // Verify before the account read, so local archive work cannot age facts then make them
+        // appear newer than a concurrent Check Status when this observation is published.
+        let candidate = discovery
+            .as_ref()
+            .and_then(|discovery| route.candidate(&discovery.target).ok());
+        let facts = match self.exchange(&route, &Request::Observe, cancellation, None)? {
+            Reply::Facts(facts) => facts,
+            reply => return Err(unexpected(reply)),
+        };
+        target
+            .continuity
+            .verify(&SshServerContinuity {
+                route: target.continuity.route,
+                account: facts.account,
+                build: facts.build.clone(),
+                server: facts.server,
+            })
+            .map_err(failure)?;
+        let update_offer = verified_update_offer(&facts, candidate.as_ref());
+        Ok(RemoteMaintenanceObservation {
+            facts,
+            update_offer,
+        })
     }
 
     fn prepare(
@@ -880,10 +922,10 @@ mod tests {
     ) {
         use crate::ssh::server_process::testing::backend_with_mechanisms;
         with_candidate("9.8.7", |root, digest| {
-            for same in [false, true] {
+            for (same, same_version) in [(false, false), (false, true), (true, true)] {
                 let mut current = facts();
                 let approved = current.approved.as_mut().unwrap();
-                approved.version = if same { "9.8.7" } else { "0.1.0" }.into();
+                approved.version = if same_version { "9.8.7" } else { "0.1.0" }.into();
                 approved.digest = if same { digest.into() } else { "1".repeat(64) };
                 let account = account(discovery(SERVER), Reply::Facts(current.clone()));
                 let (backend, _) = backend_with_mechanisms(
@@ -1474,7 +1516,10 @@ mod tests {
 
         let observed = observed.unwrap();
         assert_eq!(observed.facts.server, SERVER);
-        assert!(matches!(observed.update_offer, RemoteUpdateOffer::Unavailable));
+        assert!(matches!(
+            observed.update_offer,
+            RemoteUpdateOffer::Unavailable
+        ));
         for effect in ["ssh-prepare", "ssh-stage", "ssh-install"] {
             assert_eq!(account.ran(effect), 0, "observing asked for {effect}");
         }
