@@ -469,6 +469,56 @@ fn both_devices_compare_the_first_authenticated_exchange_across_exact_retries() 
 }
 
 #[test]
+fn a_pinned_enrollment_reply_cannot_substitute_the_invitation_identity() {
+    let fixture = Fixture::new();
+    fixture.enable();
+    let invitation = fixture.invite();
+    let other = fixture.invite();
+    let credential = DeviceCredential::generate().unwrap();
+    let mut enrollment =
+        Enrollment::prepare(&invitation, "Joining device".into(), &credential).unwrap();
+    let state = Arc::clone(&fixture.state);
+    let substituted = other.id();
+    let server = std::thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let tcp = loop {
+            if let Some((tcp, _generation)) = state.lock().unwrap().accept() {
+                break tcp;
+            }
+            assert!(Instant::now() < deadline, "WSS accept deadline");
+            std::thread::sleep(Duration::from_millis(2));
+        };
+        let (certificate, key, challenge) = {
+            let state = state.lock().unwrap();
+            let (certificate, key) = state.certificate();
+            (
+                certificate.to_vec(),
+                zeroize::Zeroizing::new(key.to_vec()),
+                state.challenge().unwrap(),
+            )
+        };
+        let mut ws = wss::accept(tcp, &certificate, &key).unwrap();
+        wss::send(&mut ws, &challenge).unwrap();
+        let authentication: wire::Authentication = wss::receive(&mut ws).unwrap();
+        let wire::Answer::Claim(mut claim) = state
+            .lock()
+            .unwrap()
+            .authenticate(&challenge, &authentication)
+            .unwrap()
+        else {
+            panic!()
+        };
+        // Change only the response at the network boundary. The signed claim,
+        // exchange hash, device identity and original deadline remain genuine.
+        claim.invitation_id = substituted;
+        wss::send(&mut ws, &Ok::<_, DirectError>(wire::Answer::Claim(claim))).unwrap();
+    });
+    assert_eq!(enrollment.submit(), Err(DirectError::Substituted));
+    server.join().unwrap();
+    assert_eq!(enrollment.comparison_code(), None);
+}
+
+#[test]
 fn losing_the_first_wss_reply_still_compares_the_original_authenticated_exchange() {
     let fixture = Fixture::new();
     fixture.enable();
