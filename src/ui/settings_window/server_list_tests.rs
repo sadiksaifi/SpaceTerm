@@ -920,6 +920,49 @@ fn an_ssh_server_without_a_verified_candidate_claims_no_update(cx: &mut TestAppC
     assert!(!rendered("settings-server-version-update", servers.cx));
 }
 
+/// The read verified the candidate SpaceTerm includes, and its digest equals the approved
+/// build's, so penguin is up to date: the Version row says so and offers no update. A later read
+/// that verified a different candidate names that candidate's own version and offers Update
+/// Server. A read after the update finds the candidate approved, and the offer is gone again.
+#[gpui::test]
+fn the_ssh_version_row_follows_the_verified_candidate(cx: &mut TestAppContext) {
+    let owner = Arc::new(HeldRead::unread());
+    owner.report_offer("1.3.0", RUNNING_SERVICE, RemoteUpdateOffer::UpToDate);
+    let operations: Arc<dyn RemoteServerOperations> = owner.clone();
+    let servers = open_servers_saved(true, &["penguin"], false, Some(operations), None, cx);
+    select("penguin", servers.cx);
+
+    assert_eq!(
+        version_announcement(servers.cx).as_deref(),
+        Some("Version 1.3.0, Up to date")
+    );
+    assert!(!rendered("settings-server-version-update", servers.cx));
+
+    owner.report_offer(
+        "1.3.0",
+        RUNNING_SERVICE,
+        RemoteUpdateOffer::Available(ServerCandidate {
+            version: "1.3.2".to_owned(),
+            digest: "b".repeat(64),
+        }),
+    );
+    servers.cx.run_until_parked();
+    assert_eq!(
+        version_announcement(servers.cx).as_deref(),
+        Some("Version 1.3.0, 1.3.2 available"),
+        "the badge names the verified candidate, not this SpaceTerm's version"
+    );
+    assert!(rendered("settings-server-version-update", servers.cx));
+
+    owner.report_offer("1.3.2", RUNNING_SERVICE, RemoteUpdateOffer::UpToDate);
+    servers.cx.run_until_parked();
+    assert_eq!(
+        version_announcement(servers.cx).as_deref(),
+        Some("Version 1.3.2, Up to date")
+    );
+    assert!(!rendered("settings-server-version-update", servers.cx));
+}
+
 struct RecordingMovement;
 
 impl crate::platform::window_movement::WindowMovementFactory for RecordingMovement {

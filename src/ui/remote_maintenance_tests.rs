@@ -3,6 +3,7 @@
 use super::*;
 use crate::local_server::service::ServiceStartup;
 use crate::local_server::service::maintenance::RemoteActivation;
+use crate::ssh::server_connection::ServerCandidate;
 use crate::ssh::server_operations::{RemoteOperationHandle, RemoteUpdateOffer};
 
 fn remote_build(version: &str, digit: char) -> RemoteBuild {
@@ -61,6 +62,27 @@ fn update(machine: &str, state: &RemoteOperationState) -> MaintenancePresentatio
     present(machine, state, MaintenanceRow::Update, None)
 }
 
+/// The update row as a read with `offer` presents it.
+fn update_with(
+    machine: &str,
+    state: &RemoteOperationState,
+    offer: &RemoteUpdateOffer,
+) -> MaintenancePresentation {
+    present_offered(machine, state, MaintenanceRow::Update, None, offer)
+}
+
+/// A verified server archive this client holds, with its own version.
+fn candidate(version: &str, digit: char) -> ServerCandidate {
+    ServerCandidate {
+        version: version.to_owned(),
+        digest: std::iter::repeat_n(digit, 64).collect(),
+    }
+}
+
+fn available(version: &str, digit: char) -> RemoteUpdateOffer {
+    RemoteUpdateOffer::Available(candidate(version, digit))
+}
+
 /// Opening the Servers section reaches no computer, so the row says what it has not read and
 /// offers the one explicit read. Reading starts nothing.
 #[test]
@@ -98,7 +120,7 @@ fn a_stopped_server_offers_start_and_no_other_step_that_starts_it() {
     );
     assert_eq!(service.state, Some("Stopped"));
     assert!(service.explanation.contains("Start Server"));
-    let update = update("penguin", &stopped);
+    let update = update_with("penguin", &stopped, &available("1.5.0", 'b'));
     assert_eq!(update.actions, vec![RemoteAction::Update]);
     assert!(
         update.explanation.contains("keeps the server stopped"),
@@ -137,7 +159,7 @@ fn a_running_server_offers_the_steps_that_ask_before_ending_its_work() {
         "Start ends no work, so it asks nothing"
     );
     assert_eq!(
-        update("penguin", &running).actions,
+        update_with("penguin", &running, &available("1.5.0", 'b')).actions,
         vec![RemoteAction::Update]
     );
 }
@@ -181,6 +203,70 @@ fn no_update_is_offered_without_a_verified_candidate() {
             !update.explanation.contains("transfers"),
             "nor describes one, got {:?}",
             update.explanation
+        );
+    }
+}
+
+/// A verified candidate whose digest equals the approved build is no update: the row says the
+/// server is up to date and offers nothing to install. One that differs names its own version,
+/// which can differ from SpaceTerm's, and offers Update Server. A candidate SpaceTerm couldn't
+/// verify offers nothing.
+#[test]
+fn the_update_offer_follows_the_verified_candidate() {
+    let running = RemoteOperationState::Read(Box::new(facts(status(true, true, false))));
+
+    let current = update_with("penguin", &running, &RemoteUpdateOffer::UpToDate);
+    assert_eq!(current.state, Some("Up to Date"));
+    assert!(current.actions.is_empty(), "got {:?}", current.actions);
+
+    let newer = update_with("penguin", &running, &available("1.5.2", 'b'));
+    assert_eq!(newer.actions, vec![RemoteAction::Update]);
+    assert!(
+        newer.explanation.contains("1.5.2"),
+        "the offer names the candidate's own version, got {:?}",
+        newer.explanation
+    );
+
+    let unverified = update_with("penguin", &running, &RemoteUpdateOffer::Unavailable);
+    assert!(unverified.actions.is_empty());
+    assert_eq!(unverified.state, None);
+
+    assert!(
+        !menu_actions_for(
+            std::slice::from_ref(&running),
+            None,
+            &RemoteUpdateOffer::UpToDate
+        )
+        .contains(&RemoteAction::Update),
+        "an up-to-date server's heading offers no update"
+    );
+}
+
+/// An unresolved original keeps its own journey whatever a read found about updating: an update
+/// SpaceTerm couldn't confirm still offers Finish, even beside an up-to-date candidate.
+#[test]
+fn an_unresolved_update_keeps_its_steps_whatever_the_offer() {
+    let unfinished = RemoteOperationState::Unconfirmed {
+        kind: SubmittedKind::Update {
+            candidate: "b".repeat(64),
+        },
+    };
+    for offer in [
+        RemoteUpdateOffer::Unchecked,
+        RemoteUpdateOffer::UpToDate,
+        available("1.5.0", 'b'),
+    ] {
+        assert_eq!(
+            present_machine(
+                "penguin",
+                std::slice::from_ref(&unfinished),
+                MaintenanceRow::Update,
+                None,
+                &offer
+            )
+            .actions,
+            vec![RemoteAction::Finish, RemoteAction::Discard],
+            "{offer:?} leaves the original's steps alone"
         );
     }
 }
@@ -562,7 +648,7 @@ fn the_machine_menu_carries_the_operations_without_inline_affordances() {
         menu_actions_for(
             std::slice::from_ref(&running),
             None,
-            &RemoteUpdateOffer::Unchecked
+            &available("1.5.0", 'b')
         ),
         vec![
             RemoteAction::Stop,
