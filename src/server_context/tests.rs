@@ -34,7 +34,10 @@ fn facts(at: u64, status: ObservedServerStatus) -> LastKnownFacts {
 fn selection_and_last_known_facts_survive_relaunch_without_connection_authority() {
     let (paths, filesystem) = storage();
     let key = ServerKey::Ssh("penguin".into());
-    let expected = facts(20, ObservedServerStatus::Running);
+    let expected = LastKnownFacts {
+        worktree_location: Some("/owning-server-only/{repository}/{branch}".into()),
+        ..facts(20, ObservedServerStatus::Running)
+    };
     {
         let mut context = ServerContext::load(paths.clone()).unwrap();
         context.select(key.clone()).unwrap();
@@ -51,6 +54,68 @@ fn selection_and_last_known_facts_survive_relaunch_without_connection_authority(
             .keys()
             .all(|path| path.file_name() == Some(OsStr::new(FILE)))
     );
+}
+
+#[test]
+fn malformed_worktree_location_observations_preserve_the_prior_retained_record() {
+    let (paths, filesystem) = storage();
+    let key = ServerKey::Ssh("penguin".into());
+    let mut context = ServerContext::load(paths.clone()).unwrap();
+    let expected = LastKnownFacts {
+        worktree_location: Some("~/worktrees/{repository}/{branch}".into()),
+        ..facts(20, ObservedServerStatus::Running)
+    };
+    context.remember(key.clone(), expected.clone()).unwrap();
+    let prior = filesystem.files.lock().unwrap().values.clone();
+    let oversized = format!("/{}{{branch}}", "a".repeat(1024));
+    for template in [
+        "",
+        "~/worktrees/{unknown}/{branch}",
+        "~/worktrees/{repository}",
+        "worktrees/{branch}",
+        "~/../{branch}",
+        "~/\n/{branch}",
+        "~/\0/{branch}",
+        &oversized,
+    ] {
+        let invalid = LastKnownFacts {
+            observed_at: 21,
+            worktree_location: Some(template.into()),
+            ..expected.clone()
+        };
+        assert_eq!(
+            context.remember(key.clone(), invalid),
+            Err(ContextError::Malformed)
+        );
+        assert_eq!(context.facts(&key), Some(&expected));
+    }
+    assert_eq!(filesystem.files.lock().unwrap().values, prior);
+    assert_eq!(
+        ServerContext::load(paths).unwrap().facts(&key),
+        Some(&expected)
+    );
+}
+
+#[test]
+fn a_missing_retained_worktree_location_loads_as_unknown() {
+    let (paths, filesystem) = storage();
+    let key = ServerKey::Ssh("penguin".into());
+    let mut context = ServerContext::load(paths.clone()).unwrap();
+    context
+        .remember(key.clone(), facts(20, ObservedServerStatus::Running))
+        .unwrap();
+    {
+        let mut files = filesystem.files.lock().unwrap();
+        let bytes = &mut files.values.values_mut().next().unwrap().0;
+        let mut document: serde_json::Value = serde_json::from_slice(bytes).unwrap();
+        document["facts"][0]["facts"]
+            .as_object_mut()
+            .unwrap()
+            .remove("worktree_location");
+        *bytes = serde_json::to_vec(&document).unwrap();
+    }
+    let restored = ServerContext::load(paths).unwrap();
+    assert_eq!(restored.facts(&key).unwrap().worktree_location, None);
 }
 
 #[test]

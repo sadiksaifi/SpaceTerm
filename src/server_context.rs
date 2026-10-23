@@ -75,6 +75,9 @@ pub(crate) struct LastKnownFacts {
     pub(crate) starts_automatically: Option<bool>,
     pub(crate) running_sessions: Option<u32>,
     pub(crate) git: GitToolStatus,
+    /// Last observed display copy. Edits and writability checks require the owning server.
+    #[serde(default)]
+    pub(crate) worktree_location: Option<String>,
 }
 
 impl std::fmt::Debug for LastKnownFacts {
@@ -89,6 +92,11 @@ impl LastKnownFacts {
             .into_iter()
             .flatten()
             .any(|value| value.len() > 512 || value.chars().any(char::is_control))
+        {
+            return Err(ContextError::Malformed);
+        }
+        if let Some(template) = &self.worktree_location
+            && spaceterm_server::worktree::path_template::validate(template).is_err()
         {
             return Err(ContextError::Malformed);
         }
