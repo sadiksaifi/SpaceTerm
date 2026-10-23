@@ -10,15 +10,15 @@
 //!
 //! Losing the connection to a server changes nothing on it. While SpaceTerm can't reach a server,
 //! the rows show what that server last reported, dimmed and dated, and offer no step that would
-//! change it. A server never read shows its access as unknown rather than off.
+//! change it. A server never read shows its access as unknown rather than off. What each server
+//! reported is retained with its other last-known facts, so it shows again after relaunch.
 
-use std::collections::BTreeMap;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::prelude::*;
-use gpui::{AnyElement, Context, ElementId, SharedString, Task, Window, accesskit, div};
+use gpui::{AnyElement, App, Context, ElementId, SharedString, Task, Window, accesskit, div};
 use spaceterm_ui::{
     Alert, AlertIntent, AlertOutcome, Button, ButtonSize, ButtonVariant, ComboBoxItem, Icon,
     IconName, ModalAction, ModalActionEmphasis, ModalActionIntent, ModalActionRole, ModalId,
@@ -28,9 +28,12 @@ use spaceterm_ui::{
 use super::SettingsWindow;
 use super::catalog::SettingsSectionId;
 use super::server_list::ServerChoice;
+use super::server_selection;
 use crate::local_server::LocalServer;
 use crate::local_server::direct::{DEFAULT_PORT, NetworkPolicy, PairingId};
-use crate::server_context::ServerKey;
+use crate::server_context::{
+    LastKnownFacts, NetworkAccessFacts, NetworkListenerFacts, PairedDeviceFacts, PairedDevicesFacts,
+};
 use crate::ui::appearance::{ChromeAppearance, gpui_color};
 use crate::ui::chrome_icons::IconRole;
 use crate::ui::chrome_typography::{ChromeTextStyleExt as _, TextRole};
@@ -68,14 +71,86 @@ impl Change {
     }
 }
 
-/// What a server last reported about its network access and its devices, each with when it
-/// reported it in Unix seconds. It is display only: nothing here says what the server does now,
-/// and no step acts on it. `None` is a part the server never reported.
+/// What the presented server last reported about its network access and its devices, each with
+/// when it reported it in Unix seconds, as SpaceTerm retained it. It is display only: nothing
+/// here says what the server does now, and no step acts on it. `None` is a part the server never
+/// reported.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 struct LastKnown {
     access: Option<(u64, AccessState)>,
     devices: Option<(u64, Vec<Device>)>,
 }
+
+impl LastKnown {
+    fn from_facts(facts: &LastKnownFacts) -> Self {
+        Self {
+            access: facts.network_access.as_ref().map(|access| {
+                let listener = match access.listener {
+                    NetworkListenerFacts::Off => Listener::Off,
+                    NetworkListenerFacts::Listening(address) => Listener::Listening(address),
+                    NetworkListenerFacts::AddressGone => Listener::AddressGone,
+                    NetworkListenerFacts::Failed => Listener::Failed,
+                };
+                let state = AccessState {
+                    server_name: access.server_name.clone().into(),
+                    policy: access.policy,
+                    listener,
+                    addresses: access.addresses.clone(),
+                };
+                (access.observed_at, state)
+            }),
+            devices: facts.paired_devices.as_ref().map(|paired| {
+                let devices = paired
+                    .devices
+                    .iter()
+                    .map(|device| Device {
+                        pairing: device.pairing,
+                        name: device.name.clone().into(),
+                        fingerprint: device.fingerprint.clone().into(),
+                        last_connected_at: device.last_connected_at,
+                    })
+                    .collect();
+                (paired.observed_at, devices)
+            }),
+        }
+    }
+}
+
+/// `state` as retained facts, reported at `observed_at`.
+fn access_facts(observed_at: u64, state: &AccessState) -> NetworkAccessFacts {
+    NetworkAccessFacts {
+        observed_at,
+        server_name: state.server_name.to_string(),
+        policy: state.policy,
+        listener: match state.listener {
+            Listener::Off => NetworkListenerFacts::Off,
+            Listener::Listening(address) => NetworkListenerFacts::Listening(address),
+            Listener::AddressGone => NetworkListenerFacts::AddressGone,
+            Listener::Failed => NetworkListenerFacts::Failed,
+        },
+        addresses: state.addresses.clone(),
+    }
+}
+
+/// `devices` as retained facts, listed at `observed_at`.
+fn devices_facts(observed_at: u64, devices: &[Device]) -> PairedDevicesFacts {
+    PairedDevicesFacts {
+        observed_at,
+        devices: devices
+            .iter()
+            .map(|device| PairedDeviceFacts {
+                pairing: device.pairing,
+                name: device.name.to_string(),
+                fingerprint: device.fingerprint.to_string(),
+                last_connected_at: device.last_connected_at,
+            })
+            .collect(),
+    }
+}
+
+/// How long an unchanged live reading goes before it is retained again with its new time, so a
+/// server's shown time stays close to when SpaceTerm last reached it without a write every poll.
+const UNCHANGED_RETENTION: u64 = 60;
 
 /// The access the rows show: the live reading, or what the server last reported while SpaceTerm
 /// can't reach it.
@@ -97,8 +172,8 @@ pub(super) struct DirectAccess {
     reading: Option<Result<AccessState, AccessFailure>>,
     /// The devices the live server listed. `None` while it isn't live or didn't list them.
     devices: Option<Vec<Device>>,
-    /// What each server last reported, so a server SpaceTerm can't reach keeps showing it.
-    last_known: BTreeMap<ServerKey, LastKnown>,
+    /// What the presented server last reported, as SpaceTerm retained it.
+    known: LastKnown,
     change: Option<Change>,
     /// Why the person's latest step didn't take effect.
     problem: Option<AccessFailure>,
@@ -115,7 +190,7 @@ impl DirectAccess {
             generation: 0,
             reading: None,
             devices: None,
-            last_known: BTreeMap::new(),
+            known: LastKnown::default(),
             change: None,
             problem: None,
             unpairing: Vec::new(),
@@ -129,6 +204,7 @@ impl DirectAccess {
         self.generation = self.generation.wrapping_add(1);
         self.reading = None;
         self.devices = None;
+        self.known = LastKnown::default();
         self.change = None;
         self.problem = None;
         self.unpairing.clear();
@@ -141,10 +217,6 @@ impl DirectAccess {
     }
 
     fn receive(&mut self, state: AccessState, devices: Option<Vec<Device>>) {
-        if let Some(key) = self.target.as_ref().map(ServerChoice::key) {
-            self.last_known.entry(key).or_default().access =
-                Some((crate::ui::direct_access::unix_now(), state.clone()));
-        }
         self.reading = Some(Ok(state));
         if let Some(devices) = devices {
             self.receive_devices(devices);
@@ -155,10 +227,6 @@ impl DirectAccess {
     fn receive_devices(&mut self, devices: Vec<Device>) {
         self.unpairing
             .retain(|pairing| devices.iter().any(|device| device.pairing == *pairing));
-        if let Some(key) = self.target.as_ref().map(ServerChoice::key) {
-            self.last_known.entry(key).or_default().devices =
-                Some((crate::ui::direct_access::unix_now(), devices.clone()));
-        }
         self.devices = Some(devices);
     }
 
@@ -178,11 +246,12 @@ impl DirectAccess {
                 observed_at: None,
             });
         }
-        let known = self.last_known.get(&self.target.as_ref()?.key())?;
-        let (observed_at, access) = known.access.as_ref()?;
+        self.target.as_ref()?;
+        let (observed_at, access) = self.known.access.as_ref()?;
         Some(Shown {
             policy: access.policy,
-            devices: known
+            devices: self
+                .known
                 .devices
                 .as_ref()
                 .map(|(_, devices)| devices.as_slice()),
@@ -278,9 +347,65 @@ impl SettingsWindow {
     fn direct_access_server_name(&self) -> SharedString {
         self.direct_access
             .state()
+            .or_else(|| {
+                let (_, access) = self.direct_access.known.access.as_ref()?;
+                Some(access)
+            })
             .map(|state| state.server_name.clone())
             .filter(|name| !name.is_empty())
             .unwrap_or_else(|| self.selected_server_name())
+    }
+
+    /// Shows what SpaceTerm retained about the presented server, including a record that loaded
+    /// after Settings opened.
+    fn reload_known_access(&mut self, cx: &App) {
+        self.direct_access.known = self
+            .direct_access
+            .target
+            .as_ref()
+            .and_then(|target| server_selection::facts(&target.key(), cx))
+            .map(|facts| LastKnown::from_facts(&facts))
+            .unwrap_or_default();
+    }
+
+    /// Retains what the presented server returned in this reading: `state` and `devices` are only
+    /// the parts it returned now, each timed now. A part it didn't return keeps what was retained,
+    /// and the server's other last-known facts stay as they are.
+    fn retain_direct_access(
+        &self,
+        state: Option<&AccessState>,
+        devices: Option<&[Device]>,
+        cx: &mut App,
+    ) {
+        let Some(key) = self.direct_access.target.as_ref().map(ServerChoice::key) else {
+            return;
+        };
+        let now = crate::ui::direct_access::unix_now();
+        // A reading that says something new is retained at once; an unchanged one only once its
+        // retained time is old enough to renew.
+        let renew = |at: u64| now.saturating_sub(at) >= UNCHANGED_RETENTION;
+        // With no record yet the general facts stay unobserved: status Unknown, time zero.
+        let mut facts = server_selection::facts(&key, cx).unwrap_or_default();
+        let mut changed = false;
+        if let Some(state) = state
+            && facts.network_access.as_ref().is_none_or(|known| {
+                renew(known.observed_at) || *known != access_facts(known.observed_at, state)
+            })
+        {
+            facts.network_access = Some(access_facts(now, state));
+            changed = true;
+        }
+        if let Some(devices) = devices
+            && facts.paired_devices.as_ref().is_none_or(|known| {
+                renew(known.observed_at) || *known != devices_facts(known.observed_at, devices)
+            })
+        {
+            facts.paired_devices = Some(devices_facts(now, devices));
+            changed = true;
+        }
+        if changed {
+            server_selection::remember(key, facts, cx);
+        }
     }
 
     /// Whether the selected server lets other devices connect, as it last said. While SpaceTerm
@@ -335,6 +460,7 @@ impl SettingsWindow {
         };
         if self.direct_access.target != target {
             self.direct_access.start_over(target.clone());
+            self.reload_known_access(cx);
         }
         if target.is_none() || self.direct_access.poll.is_some() {
             return;
@@ -363,19 +489,27 @@ impl SettingsWindow {
                     None => None,
                 };
                 let Ok(()) = settings.update(cx, |settings, cx| {
-                    let state = &mut settings.direct_access;
-                    if state.generation != generation {
+                    if settings.direct_access.generation != generation {
                         return;
                     }
                     // A change in flight answers for itself; a reading taken meanwhile may
                     // describe the server before it.
-                    if state.change.is_none() {
+                    if settings.direct_access.change.is_none() {
                         match read {
-                            Some((Ok(status), devices)) => state.receive(status, devices),
-                            Some((Err(failure), _)) => state.lose(Some(failure)),
-                            None => state.lose(None),
+                            Some((Ok(status), devices)) => {
+                                settings.retain_direct_access(
+                                    Some(&status),
+                                    devices.as_deref(),
+                                    cx,
+                                );
+                                settings.direct_access.receive(status, devices);
+                            }
+                            Some((Err(failure), _)) => settings.direct_access.lose(Some(failure)),
+                            None => settings.direct_access.lose(None),
                         }
                     }
+                    // A record that loads after Settings opens shows from the next reading on.
+                    settings.reload_known_access(cx);
                     cx.notify();
                 }) else {
                     return;
@@ -669,14 +803,17 @@ impl SettingsWindow {
                 .spawn(async move { control.set_policy(policy) })
                 .await;
             let _ = settings.update(cx, |settings, cx| {
-                let state = &mut settings.direct_access;
-                if state.generation != generation {
+                if settings.direct_access.generation != generation {
                     return;
                 }
-                state.change = None;
+                settings.direct_access.change = None;
                 match applied {
-                    Ok(status) => state.receive(status, None),
-                    Err(failure) => state.problem = Some(failure),
+                    Ok(status) => {
+                        settings.retain_direct_access(Some(&status), None, cx);
+                        settings.direct_access.receive(status, None);
+                        settings.reload_known_access(cx);
+                    }
+                    Err(failure) => settings.direct_access.problem = Some(failure),
                 }
                 cx.notify();
             });
@@ -871,7 +1008,9 @@ impl SettingsWindow {
                 if settings.direct_access.generation == generation
                     && let Ok(devices) = devices
                 {
+                    settings.retain_direct_access(None, Some(&devices), cx);
                     settings.direct_access.receive_devices(devices);
+                    settings.reload_known_access(cx);
                     cx.notify();
                 }
             });
