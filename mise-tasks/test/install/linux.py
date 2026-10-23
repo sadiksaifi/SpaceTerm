@@ -176,8 +176,38 @@ shutil.copyfile(source, arguments[arguments.index("--output") + 1])
         subprocess.run(["desktop-file-validate", str(entry)], check=True)
         executable = str(self.target / "bin/spaceterm").replace("$", "\\\\$")
         executable = executable.replace('"', '\\\\"')
-        self.assertIn(f'Exec="{executable}"\n', entry.read_text())
+        self.assertIn(f'Exec="{executable}" %u\n', entry.read_text())
         self.assert_no_leftovers()
+
+    def test_installed_desktop_entry_delivers_an_invitation_as_one_argument(self):
+        self.installed()
+        recorded = self.root / "invitation-arguments.json"
+        executable = self.target / "bin/spaceterm"
+        executable.write_text(
+            "#!/usr/bin/python3\nimport json, sys\nfrom pathlib import Path\n"
+            f"Path({str(recorded)!r}).write_text(json.dumps(sys.argv[1:]))\n"
+        )
+        entry = self.data_home / f"applications/{APPLICATION_ID}.desktop"
+        link = "spaceterm://pair/fixture-one-use-secret"
+        launched = subprocess.run(
+            [
+                "/usr/bin/python3",
+                "-c",
+                "from gi.repository import Gio; import sys; "
+                "app = Gio.DesktopAppInfo.new_from_filename(sys.argv[1]); "
+                "assert app is not None and app.supports_uris(); "
+                "assert app.launch_uris([sys.argv[2]], None)",
+                str(entry),
+                link,
+            ],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(launched.returncode, 0, launched.stderr)
+        deadline = time.monotonic() + 5
+        while not recorded.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertEqual(json.loads(recorded.read_text()), [link])
 
     def test_installer_replaces_an_earlier_release_and_the_updaters_leftovers(self):
         self.installed()
