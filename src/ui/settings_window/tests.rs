@@ -2382,9 +2382,12 @@ fn assert_the_footer_closes_only_the_content_column(
         let footer = cx.debug_bounds("settings-footer").unwrap();
         let status = cx.debug_bounds("settings-save-status").unwrap();
         // The heading ends on the content gutter. On Servers and Git the server picker sits
-        // beside it and ends on the gutter instead.
+        // beside it and its chevron ends on the gutter instead.
         let gutter = cx
-            .debug_bounds(super::server_list::PICKER_SELECTOR)
+            .debug_bounds(leaked_owned(format!(
+                "{}-disclosure",
+                super::server_list::PICKER_SELECTOR
+            )))
             .or_else(|| cx.debug_bounds(leaked_owned(format!("{}-heading", section.selector()))))
             .unwrap();
         assert_eq!(

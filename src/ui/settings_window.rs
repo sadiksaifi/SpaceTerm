@@ -83,7 +83,7 @@ use crate::ui::sidebar_window::{
 };
 
 use crate::ui::sidebar_window::form::{
-    CaptionTone, FormGroup, FormRow, FormRowLayout, Stepper, action_button, reset_button,
+    CaptionTone, CardEnds, FormGroup, FormRow, FormRowLayout, Stepper, action_button, reset_button,
     row_horizontal_inset, section_heading,
 };
 use catalog::SettingsRowId;
@@ -1170,8 +1170,11 @@ impl SettingsWindow {
     ) -> AnyElement {
         let section = self.active_section;
         // Servers and Git act on one server, which the same picker chooses on both.
-        let picker = matches!(section, SettingsSectionId::Servers | SettingsSectionId::Git)
-            .then(|| self.render_server_picker(&settings.chrome, cx));
+        let picker =
+            matches!(section, SettingsSectionId::Servers | SettingsSectionId::Git).then(|| {
+                let flush = DetailHeading::toolbar_on_gutter(window, cx);
+                self.render_server_picker(&settings.chrome, flush, cx)
+            });
         let close_owner = cx.weak_entity();
         let close: spaceterm_ui::WindowCloseHandler = Rc::new(move |window, cx| {
             let handle = window.window_handle();
@@ -1351,9 +1354,10 @@ impl SettingsWindow {
         // Each group title is one card. A search orders rows by how well they match, which can
         // split a group's rows apart, so a later row joins the card its group already has.
         let mut groups: Vec<(&'static str, Vec<SettingsRowId>, Vec<AnyElement>)> = Vec::new();
-        for row in rows {
+        for &row in &rows {
             let title = row.descriptor().group;
-            let rendered = self.render_row(row, appearance, window, cx);
+            let ends = CardEnds::of(&rows, &row, |other| other.descriptor().group == title);
+            let rendered = self.render_row(row, ends, appearance, window, cx);
             // Each paired device has a row of its own under Devices. They follow every catalog
             // row of their card, so the card's row bounds still pair with its catalog rows.
             let devices = if row == SettingsRowId::PairedDevices {
@@ -1444,9 +1448,11 @@ const WEIGHTS: [(u16, &str); 6] = [
 ];
 
 impl SettingsWindow {
+    /// Renders `row`, which touches the card edges `ends` names.
     fn render_row(
         &mut self,
         row: SettingsRowId,
+        ends: CardEnds,
         appearance: &ChromeAppearance,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -1480,7 +1486,7 @@ impl SettingsWindow {
         } else {
             appearance
         };
-        let control = self.render_control(row, content_appearance, window, cx);
+        let control = self.render_control(row, ends, content_appearance, window, cx);
         let mut rendered = FormRow::new(
             descriptor.selector,
             descriptor.label(self.permission_access.naming()),
@@ -1515,6 +1521,7 @@ impl SettingsWindow {
     fn render_control(
         &mut self,
         row: SettingsRowId,
+        ends: CardEnds,
         appearance: &ChromeAppearance,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -1559,8 +1566,8 @@ impl SettingsWindow {
             SettingsRowId::EndAllSessions => self.render_end_all_sessions(appearance, cx),
             SettingsRowId::NetworkAccess => self.render_network_access(appearance, cx),
             SettingsRowId::PairedDevices => self.render_paired_devices(appearance, cx),
-            SettingsRowId::AllServers => self.render_all_servers(appearance, window, cx),
-            SettingsRowId::AddServer => self.render_add_server_row(appearance, cx),
+            SettingsRowId::AllServers => self.render_all_servers(ends, appearance, window, cx),
+            SettingsRowId::AddServer => self.render_add_server_row(ends, appearance, cx),
             SettingsRowId::UpdateStatus => self.render_update_status(cx),
             SettingsRowId::AutomaticUpdateDownloads => self.render_automatic_update_downloads(cx),
             SettingsRowId::UpdateCheckInterval => self.render_update_check_interval(cx),
@@ -2399,9 +2406,8 @@ fn row_layout(row: SettingsRowId) -> FormRowLayout {
     match row {
         SettingsRowId::TerminalTheme
         | SettingsRowId::InstalledThemes
-        | SettingsRowId::AllServers
-        | SettingsRowId::AddServer
         | SettingsRowId::SettingsFile => FormRowLayout::Full,
+        SettingsRowId::AllServers | SettingsRowId::AddServer => FormRowLayout::Items,
         _ => FormRowLayout::Beside,
     }
 }

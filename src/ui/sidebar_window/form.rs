@@ -104,6 +104,70 @@ pub(crate) enum FormRowLayout {
     /// Content spanning the row with no label of its own, for content that presents itself, such
     /// as a preview or a gallery.
     Full,
+    /// Content made of rows of its own, such as a list, reaching the card's edges. Each of its
+    /// rows keeps the inset a row carries through [`row_insets`] and, after the first, draws
+    /// [`row_separator`], so they read as rows of the card.
+    Items,
+}
+
+/// The inset a card's row keeps on every side, for rows an [`FormRowLayout::Items`] row draws.
+pub(crate) fn row_insets<E: Styled>(item: E, appearance: &ChromeAppearance) -> E {
+    item.px(row_horizontal_padding(appearance))
+        .py(row_vertical_inset(appearance))
+}
+
+/// Which of its card's edges a row touches. GPUI clips a card's rows to a rectangle, so a row
+/// whose fill reaches the card's edges rounds the corners it shares with the card itself.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct CardEnds {
+    /// The row is the card's first, under its top edge.
+    pub(crate) top: bool,
+    /// The row is the card's last, above its bottom edge.
+    pub(crate) bottom: bool,
+}
+
+impl CardEnds {
+    /// Where `row` sits among `rows`, of which `same_card` picks the ones sharing its card.
+    pub(crate) fn of<T: PartialEq>(rows: &[T], row: &T, same_card: impl Fn(&T) -> bool) -> Self {
+        Self {
+            top: rows.iter().find(|other| same_card(other)) == Some(row),
+            bottom: rows.iter().rev().find(|other| same_card(other)) == Some(row),
+        }
+    }
+
+    /// The part of these ends a row at `index` of `count` rows inside this row touches.
+    pub(crate) fn nth(self, index: usize, count: usize) -> Self {
+        Self {
+            top: self.top && index == 0,
+            bottom: self.bottom && index + 1 == count,
+        }
+    }
+
+    /// Rounds the corners `item` shares with its card, inside the card's border.
+    pub(crate) fn round<E: Styled>(self, mut item: E) -> E {
+        let radius = RadiusRole::Card.pixels() - px(HAIRLINE);
+        if self.top {
+            item = item.rounded_t(radius);
+        }
+        if self.bottom {
+            item = item.rounded_b(radius);
+        }
+        item
+    }
+}
+
+/// The hairline a card draws above each of its rows after the first. It starts at the row's
+/// inset and runs to the card's edge. Its row must be positioned relative.
+pub(crate) fn row_separator(appearance: &ChromeAppearance) -> gpui::Div {
+    div()
+        .absolute()
+        .top_0()
+        .left(row_horizontal_padding(appearance))
+        .right_0()
+        .h(px(HAIRLINE))
+        .bg(gpui_color(
+            appearance.separator(spaceterm_ui::ControlHost::Card),
+        ))
 }
 
 /// One titled run of related rows. An empty title draws no heading.
@@ -155,32 +219,22 @@ impl FormGroup {
         let card_selector = format!("{selector}-card");
         let card_background = settings.surface(SettingsSurfaceRole::Card).paint;
         let card_edge = settings.card_edge();
-        let row_separator = settings.separator(SettingsSurfaceRole::Card);
         let row_inset = row_horizontal_padding(appearance);
         let separator_selector = card_selector.clone();
         let footnote_selector = format!("{selector}-footnote");
-        let rows = self
-            .rows
-            .into_iter()
-            .enumerate()
-            .map(|(index, row)| {
-                let separator_selector = separator_selector.clone();
-                div().relative().w_full().child(row).when(index > 0, |row| {
-                    row.child(
-                        div()
-                            .debug_selector(move || {
-                                format!("{separator_selector}-separator-{index}")
-                            })
-                            .absolute()
-                            .top_0()
-                            .left(row_inset)
-                            .right_0()
-                            .h(px(HAIRLINE))
-                            .bg(gpui_color(row_separator)),
-                    )
+        let rows =
+            self.rows
+                .into_iter()
+                .enumerate()
+                .map(|(index, row)| {
+                    let separator_selector = separator_selector.clone();
+                    div().relative().w_full().child(row).when(index > 0, |row| {
+                        row.child(row_separator(appearance).debug_selector(move || {
+                            format!("{separator_selector}-separator-{index}")
+                        }))
+                    })
                 })
-            })
-            .collect::<Vec<_>>();
+                .collect::<Vec<_>>();
         div()
             .debug_selector(move || selector.clone())
             .flex()
@@ -374,7 +428,8 @@ impl FormRow {
         );
         let reset_slot_width = reset_slot_width(appearance);
         let above = self.layout == FormRowLayout::Above;
-        let full = self.layout == FormRowLayout::Full;
+        let items = self.layout == FormRowLayout::Items;
+        let full = self.layout == FormRowLayout::Full || items;
         let description_selector = format!("{selector}-description");
         let caption_color = match self.tone {
             CaptionTone::Guidance => secondary,
@@ -519,7 +574,11 @@ impl FormRow {
             );
         // A row whose content takes the whole width has no label column to stack guidance in, so
         // it keeps its own line underneath.
-        let trailing_caption = self.description.filter(|_| above || full).map(caption);
+        let trailing_caption = self
+            .description
+            .filter(|_| above || full)
+            .map(caption)
+            .map(|caption| caption.when(items, |caption| row_insets(caption, appearance)));
         let row_selector = self.selector.clone();
         div()
             .debug_selector(move || row_selector.to_string())
@@ -530,11 +589,13 @@ impl FormRow {
             // A row that can't be used now reads as unavailable at a glance; its group's footnote
             // says why.
             .when(self.dimmed, |row| row.opacity(0.45))
-            .px(row_horizontal_padding(appearance))
-            .py(if full {
-                row_horizontal_padding(appearance)
-            } else {
-                row_vertical_inset(appearance)
+            // Items carry the row inset themselves, so their fills reach the card's edges.
+            .when(!items, |row| {
+                row.px(row_horizontal_padding(appearance)).py(if full {
+                    row_horizontal_padding(appearance)
+                } else {
+                    row_vertical_inset(appearance)
+                })
             })
             .when(self.highlighted, |row| {
                 row.bg(gpui_color(highlighted_row_background(appearance)))
@@ -882,6 +943,26 @@ pub(crate) fn action_button(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn card_ends_name_the_first_and_last_row_of_each_card() {
+        // A search can interleave two cards' rows; each card still has one first and one last.
+        let rows = [("a", 1), ("b", 2), ("a", 3), ("b", 4), ("a", 5)];
+        let ends = |row| CardEnds::of(&rows, &row, |other| other.0 == row.0);
+        let edges = |top, bottom| CardEnds { top, bottom };
+
+        assert_eq!(ends(("a", 1)), edges(true, false));
+        assert_eq!(ends(("a", 3)), edges(false, false));
+        assert_eq!(ends(("a", 5)), edges(false, true));
+        assert_eq!(ends(("b", 2)), edges(true, false));
+        assert_eq!(ends(("b", 4)), edges(false, true));
+        let alone = edges(true, true);
+        assert_eq!(alone.nth(0, 1), alone);
+        assert_eq!(alone.nth(0, 3), edges(true, false));
+        assert_eq!(alone.nth(1, 3), edges(false, false));
+        assert_eq!(alone.nth(2, 3), edges(false, true));
+        assert_eq!(edges(false, false).nth(0, 1), edges(false, false));
+    }
 
     struct FormLabelFixture {
         label: &'static str,

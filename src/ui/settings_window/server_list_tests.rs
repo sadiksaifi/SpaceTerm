@@ -1772,3 +1772,129 @@ fn end_all_sessions_is_unavailable_on_a_server_without_it(cx: &mut TestAppContex
     );
     assert!(bravo.submitted().is_empty());
 }
+
+fn bounds(selector: &str, cx: &mut VisualTestContext) -> gpui::Bounds<gpui::Pixels> {
+    let selector: &'static str = Box::leak(selector.to_owned().into_boxed_str());
+    cx.debug_bounds(selector)
+        .unwrap_or_else(|| panic!("{selector} was not rendered"))
+}
+
+#[gpui::test]
+fn all_servers_rows_keep_the_edges_and_insets_of_the_rows_around_them(cx: &mut TestAppContext) {
+    let servers = open_servers(true, &["penguin"], cx);
+    let cx = servers.cx;
+    let status = super::super::catalog::SettingsRowId::ServerStatus
+        .descriptor()
+        .selector;
+    let label = bounds(&format!("{status}-label"), cx);
+    let control = bounds("settings-server-status", cx);
+    let row = bounds(status, cx);
+
+    for index in 0..2 {
+        let item = format!("{}-{index}", super::LIST_SELECTOR);
+        assert_eq!(
+            bounds(&format!("{item}-indicator"), cx).left(),
+            label.left(),
+            "a listed server's status should start on the labels' edge"
+        );
+        assert_eq!(
+            bounds(&format!("{item}-check"), cx).right(),
+            control.right(),
+            "a listed server's checkmark should end on the controls' edge"
+        );
+        assert_eq!(
+            bounds(&item, cx).size.height,
+            row.size.height,
+            "a listed server should be as tall as a described row"
+        );
+    }
+    assert_eq!(
+        bounds(&format!("{}-1", super::LIST_SELECTOR), cx).top(),
+        bounds(&format!("{}-0", super::LIST_SELECTOR), cx).bottom(),
+        "listed servers should meet at a separator, as a card's rows do"
+    );
+    assert_eq!(
+        bounds(&format!("{}-icon", super::ADD_SERVER_SELECTOR), cx).left(),
+        label.left(),
+        "Add Server's plus should start on the labels' edge"
+    );
+    assert_eq!(
+        bounds(&format!("{}-disclosure", super::PICKER_SELECTOR), cx).right(),
+        control.right(),
+        "the picker's chevron should end on the controls' edge"
+    );
+}
+
+/// The corners of the hover fill painted over `selector` while the pointer rests on it.
+fn hovered_corners(selector: &str, cx: &mut VisualTestContext) -> gpui::Corners<gpui::Pixels> {
+    let item = bounds(selector, cx);
+    cx.simulate_mouse_move(item.center(), None, Modifiers::none());
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        let card = crate::ui::appearance::chrome(cx).host_colors(spaceterm_ui::ControlHost::Card);
+        let hover =
+            gpui::Background::from(crate::ui::appearance::gpui_color(card.row_hover_background));
+        let scale = window.scale_factor();
+        let quad = window
+            .painted_quads()
+            .into_iter()
+            .find(|quad| quad.bounds == item.scale(scale) && quad.background == hover)
+            .unwrap_or_else(|| panic!("{selector} should paint a hover fill"));
+        let corners = quad.corner_radii;
+        gpui::Corners {
+            top_left: gpui::px(corners.top_left.0 / scale),
+            top_right: gpui::px(corners.top_right.0 / scale),
+            bottom_right: gpui::px(corners.bottom_right.0 / scale),
+            bottom_left: gpui::px(corners.bottom_left.0 / scale),
+        }
+    })
+}
+
+#[gpui::test]
+fn a_hovered_row_rounds_only_the_corners_it_shares_with_its_card(cx: &mut TestAppContext) {
+    let servers = open_servers(true, &["penguin"], cx);
+    let cx = servers.cx;
+    let card = crate::ui::chrome_geometry::RadiusRole::Card.pixels()
+        - gpui::px(crate::ui::chrome_geometry::HAIRLINE);
+    let square = gpui::px(0.0);
+
+    let first = hovered_corners(&format!("{}-0", super::LIST_SELECTOR), cx);
+    assert_eq!(
+        (first.top_left, first.top_right, first.bottom_left),
+        (card, card, square),
+        "the card's first row should round only its top corners"
+    );
+    let middle = hovered_corners(&format!("{}-1", super::LIST_SELECTOR), cx);
+    assert_eq!(
+        (middle.top_left, middle.bottom_right),
+        (square, square),
+        "a row between others should stay square"
+    );
+    let last = hovered_corners(super::ADD_SERVER_SELECTOR, cx);
+    assert_eq!(
+        (last.top_left, last.bottom_left, last.bottom_right),
+        (square, card, card),
+        "the card's last row should round only its bottom corners"
+    );
+}
+
+#[gpui::test]
+fn the_picker_keeps_clear_of_client_drawn_window_controls(cx: &mut TestAppContext) {
+    let servers = open_servers(true, &["penguin"], cx);
+    let cx = servers.cx;
+    cx.simulate_decorations(gpui::Decorations::Client {
+        tiling: gpui::Tiling::default(),
+    });
+    cx.simulate_button_layout(Some(gpui::WindowButtonLayout {
+        left: [None; 3],
+        right: [Some(gpui::WindowButton::Close), None, None],
+    }));
+    cx.run_until_parked();
+
+    let picker = bounds(super::PICKER_SELECTOR, cx);
+    let close = bounds("window-close", cx);
+    assert!(
+        picker.right() < close.left(),
+        "the picker's hover surface should stop before Close, got {picker:?} beside {close:?}"
+    );
+}
