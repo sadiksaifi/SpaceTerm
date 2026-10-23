@@ -19,6 +19,7 @@ mod microphone;
 mod permission_access;
 mod server_list;
 mod server_location;
+mod server_selection;
 pub(crate) mod server_update;
 pub(crate) mod servers;
 mod sidebar;
@@ -88,6 +89,7 @@ use editor::{SaveStatus, SettingsEditor};
 use keybindings::ShortcutRows;
 use microphone::MicrophoneAccessRow;
 use permission_access::{PermissionAccessChanges, PermissionAccessRows};
+pub(crate) use server_selection::configure_server_context;
 pub(crate) use server_update::update_offered;
 /// The server control window shares the service row's progress and authorization wording.
 pub(crate) use servers::{
