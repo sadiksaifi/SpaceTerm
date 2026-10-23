@@ -873,7 +873,8 @@ fn native_account_server_maintenance_observe(cx: &mut gpui::TestAppContext) {
         &cancellation,
         &|phase| eprintln!("native maintenance phase: {phase:?}"),
     )
-    .unwrap_or_else(|error| panic!("unexpected maintenance classification: {error:?}"));
+    .unwrap_or_else(|error| panic!("unexpected maintenance classification: {error:?}"))
+    .facts;
     eprintln!(
         "native maintenance facts: status={:?}, startup={:?}, approved={:?}, activation={:?}",
         facts.status,
@@ -984,6 +985,7 @@ fn native_account_server_maintenance_originals(cx: &mut gpui::TestAppContext) {
     };
     let observe = |authority| {
         SshMaintenanceBackend::observe(&backend, &target, authority, &cancellation, &|_| {})
+            .map(|observation| observation.facts)
     };
     // Each run submits fresh originals. Reusing one identity would make the service replay its
     // retained outcome instead of dispatching, which is the guarantee this test relies on
