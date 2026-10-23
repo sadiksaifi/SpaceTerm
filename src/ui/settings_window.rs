@@ -716,14 +716,13 @@ impl SettingsWindow {
             })
             .detach();
         }
-        let ssh_hosts = crate::ui::ssh_servers::host_source(cx);
         let ssh_servers = crate::ui::ssh_servers::installed(cx)
-            .map(|connections| ssh_servers::SshServerRows::new(connections, ssh_hosts, window, cx));
+            .map(|connections| ssh_servers::SshServerRows::new(connections, cx));
         let ssh_maintenance = crate::ssh::server_operations::installed(cx).map(|operations| {
             ssh_maintenance::SshMaintenanceRows::new(operations, window.window_handle(), cx)
         });
         let direct_routes = crate::ui::direct_servers::installed(cx)
-            .map(|connections| direct_routes::DirectRouteRows::new(connections, window, cx));
+            .map(|connections| direct_routes::DirectRouteRows::new(connections, cx));
         let presentation = crate::desktop_profile::DesktopPresentation::get(cx);
         let this_computer = presentation.wording().this_computer;
         let available_sections = SettingsSectionId::ALL
@@ -842,7 +841,6 @@ impl SettingsWindow {
             self.check_local_server(cx);
             self.check_server_service(cx);
             self.check_server_update(cx);
-            self.read_ssh_hosts(cx);
         }
         self.sync_server_location(cx);
     }
