@@ -466,6 +466,8 @@ struct PasteConfirmationOwnership {
 
 pub(crate) struct TerminalPane {
     terminal_session: PaneTerminalSessionLifecycle,
+    readiness: super::terminal_readiness::Readiness,
+    readiness_requested: bool,
     window_handle: gpui::AnyWindowHandle,
     text_clipboard: Rc<dyn crate::terminal::native_services::clipboard::TextClipboard>,
     native_service_focus_epoch: Cell<u64>,
@@ -620,6 +622,7 @@ impl TerminalPane {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let readiness = super::terminal_readiness::Readiness::for_window(window, cx);
         let (visibility_sender, visibility_receiver) = async_channel::bounded(1);
         let visibility_source = lifecycle_dependencies.visibility.capture(
             window,
@@ -717,6 +720,7 @@ impl TerminalPane {
         )
         .detach();
         cx.observe_window_bounds(window, |pane, window, cx| {
+            pane.readiness.invalidate_layout();
             pane.update_backing_scale(window.scale_factor(), window, cx);
         })
         .detach();
@@ -759,6 +763,8 @@ impl TerminalPane {
 
         Self {
             terminal_session: PaneTerminalSessionLifecycle::new(session_factory),
+            readiness,
+            readiness_requested: false,
             window_handle: window.window_handle(),
             text_clipboard: native_service_adapters.text_clipboard,
             native_service_focus_epoch: Cell::new(0),
@@ -935,6 +941,7 @@ impl TerminalPane {
         }
         let was_presentable = self.render_lifecycle.can_present();
         self.product_focus = product_focus;
+        self.readiness.dirty(cx.entity_id());
         let pane_visible = product_focus.active_tab && product_focus.pane_visible;
         let _ = self
             .render_lifecycle
@@ -1478,6 +1485,8 @@ impl TerminalPane {
         // The placeholder already measured this grid without starting a presentation worker.
         // Revisit those bounds even when acceptance changes no layout dimensions.
         self.last_geometry = None;
+        self.readiness_requested = true;
+        self.readiness.dirty(cx.entity_id());
         cx.notify();
     }
 
@@ -1576,6 +1585,7 @@ impl TerminalPane {
         if self.native_attention_pane.is_none() {
             return;
         }
+        self.readiness_requested = false;
         self.end_find_state();
         self.paste_confirmation_owner.take();
         if let Some(confirmation) = self.pending_paste.take()
@@ -1677,6 +1687,7 @@ impl TerminalPane {
         self.invalidate_preedit_layout();
         self.reset_hidden_input();
         self.evict_presentation_resources(cx);
+        self.evict_readiness_cache(cx);
         self.last_geometry = None;
         self.render_lifecycle.reset_session_presentations();
         let _ = self.render_lifecycle.observe_snapshot(cleared.generation);
@@ -2022,7 +2033,103 @@ impl TerminalPane {
             return;
         }
 
-        self.start_session(geometry, cx);
+        if (self.server_backed() || self.readiness_requested)
+            && self.readiness.registered(cx.entity_id())
+        {
+            self.readiness_requested = true;
+            self.readiness.dirty(cx.entity_id());
+        } else {
+            self.start_session(geometry, cx);
+        }
+    }
+
+    pub(crate) fn readiness(&self) -> &super::terminal_readiness::Readiness {
+        &self.readiness
+    }
+
+    pub(crate) fn readiness_visibility(&self) -> (bool, bool) {
+        let visible = self.render_lifecycle.can_present();
+        (visible, visible && self.product_focus.focused_pane)
+    }
+
+    /// Starts a presentation worker from a current validated allocation, then warms CPU text
+    /// only. Output processing belongs to the server and its connection worker, not this queue.
+    pub(crate) fn prepare_readiness(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        may_start: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> (bool, bool) {
+        if self.native_attention_pane.is_none()
+            || self.terminal_session.session_factory.is_pending()
+        {
+            return (false, true);
+        }
+        if !self.readiness_requested && self.terminal_session.session.is_none() {
+            return (false, true);
+        }
+        if super::appearance_runtime::current(cx).generation != self.appearance.generation {
+            self.refresh_appearance(window, cx);
+        }
+        self.update_backing_scale(window.scale_factor(), window, cx);
+        let bounds = TERMINAL_PADDING.grid_bounds(bounds);
+        let geometry = terminal_geometry(
+            bounds,
+            self.cell_width,
+            self.line_height,
+            self.backing_scale,
+        );
+        let mut started = false;
+        if self.terminal_session.session.is_none() && !self.terminal_session.session_start_attempted
+        {
+            if !may_start {
+                return (false, false);
+            }
+            self.last_geometry = Some(geometry);
+            self.start_session(geometry, cx);
+            started = true;
+        } else if self.last_geometry != Some(geometry) {
+            self.last_geometry = Some(geometry);
+            if let Some(session) = &self.terminal_session.session {
+                session.resize(geometry);
+            }
+        }
+        if self.terminal_session.connection_interrupted || self.screen.rows.is_empty() {
+            return (started, true);
+        }
+        let screen =
+            ScreenSnapshot::projected_for_renderer(&self.screen, &self.appearance.terminal);
+        let cell = TerminalGeometry::fitted_cell_size(
+            LogicalSize::new(f32::from(bounds.size.width), f32::from(bounds.size.height)),
+            LogicalCellSize::new(f32::from(self.cell_width), self.line_height),
+            geometry.grid(),
+        );
+        let done = self.render_cache.update(cx, |cache, _| {
+            cache.prepare_background_text(
+                &screen,
+                &self.terminal_fonts,
+                px(self.font_size),
+                px(cell.width),
+                px(cell.height),
+                window.scale_factor(),
+                window,
+            )
+        });
+        (started, done)
+    }
+
+    pub(crate) fn readiness_cache_cost(&self, cx: &App) -> usize {
+        self.render_cache
+            .read(cx)
+            .retained_bytes()
+            .saturating_add(self.fallback_render_cache.read(cx).retained_bytes())
+    }
+
+    pub(crate) fn evict_readiness_cache(&mut self, cx: &mut Context<Self>) {
+        self.render_cache.update(cx, |cache, _| cache.evict());
+        self.fallback_render_cache
+            .update(cx, |cache, _| cache.evict());
     }
 
     fn start_session(&mut self, geometry: TerminalGeometry, cx: &mut Context<Self>) {
@@ -2103,9 +2210,10 @@ impl TerminalPane {
     fn evict_presentation_resources(&mut self, cx: &mut Context<Self>) {
         self.latest_presentation_operation = None;
         self.grid_presentation.evict();
-        self.render_cache.update(cx, |cache, _| cache.evict());
+        self.render_cache.update(cx, |cache, _| cache.retain_text());
         self.fallback_render_cache
-            .update(cx, |cache, _| cache.evict());
+            .update(cx, |cache, _| cache.retain_text());
+        self.readiness.dirty(cx.entity_id());
         self.graphics_cache.update(cx, |cache, cx| cache.clear(cx));
         self.grid_bounds = None;
     }
@@ -2300,6 +2408,7 @@ impl TerminalPane {
                 let caption_changed =
                     !self.server_backed() && self.accept_metadata(Arc::clone(&screen.metadata));
                 self.screen = screen;
+                self.readiness.dirty(cx.entity_id());
                 self.screen_session_epoch = self.terminal_session.session_epoch;
                 const OPERATION: &str = "receive-terminal-graphics";
                 match self.screen.graphics.failure {
@@ -2811,6 +2920,7 @@ impl TerminalPane {
         self.sync_scrollbar(cx);
         self.pending_accessibility_notifications
             .insert(AccessibilityNotification::Value);
+        self.readiness.dirty(cx.entity_id());
         cx.notify();
     }
 
@@ -2845,6 +2955,7 @@ impl TerminalPane {
                 ));
             }
         }
+        self.readiness.dirty(cx.entity_id());
         cx.notify();
     }
 

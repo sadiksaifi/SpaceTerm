@@ -95,6 +95,132 @@ impl TerminalGridCache {
         *self = Self::new();
     }
 
+    /// Retains reusable shaping while dropping absolute frame geometry on hide.
+    pub(crate) fn retain_text(&mut self) {
+        self.prepared_geometry = Vec::new();
+        self.prepared_visible_geometry = None;
+        self.preedit = None;
+        self.symbol_plans = SymbolPlanCache::default();
+    }
+
+    /// Accounts retained row data and shaped glyph allocations conservatively. Shared row/text
+    /// storage can be counted twice, so the window budget never depends on Arc uniqueness.
+    pub(crate) fn retained_bytes(&self) -> usize {
+        use std::mem::size_of;
+        let mut bytes = self.row_inputs.capacity() * size_of::<PreparedRowInputCacheEntry>()
+            + self.prepared_rows.len() * size_of::<Arc<RowPaintInput>>()
+            + self.prepared_text.capacity() * size_of::<PreparedRowTextCacheEntry>();
+        for entry in &self.row_inputs {
+            bytes += entry.source.len() * size_of::<CellSnapshot>();
+            bytes += entry
+                .source
+                .iter()
+                .map(|cell| {
+                    cell.text.capacity()
+                        + cell.hyperlink.as_ref().map_or(0, |link| {
+                            std::mem::size_of::<crate::terminal::HyperlinkTarget>()
+                                + link.value.capacity()
+                        })
+                })
+                .sum::<usize>();
+            let row = &entry.prepared;
+            bytes += size_of::<RowPaintInput>()
+                + row.font_resolution_identity.capacity()
+                + row.fragments.capacity() * size_of::<TextFragment>()
+                + row.symbols.capacity() * size_of::<SymbolPaintInput>()
+                + (row.backgrounds.capacity() + row.selections.capacity())
+                    * size_of::<BackgroundSpan>()
+                + (row.under_text_decorations.capacity() + row.over_text_decorations.capacity())
+                    * size_of::<DecorationSpan>();
+            for fragment in &row.fragments {
+                bytes += fragment.text.len()
+                    + fragment.runs.capacity() * size_of::<TextRun>()
+                    + fragment.paint_runs.len() * size_of::<TextPaintRun>();
+            }
+        }
+        for entry in &self.prepared_text {
+            bytes += size_of::<PreparedRowText>()
+                + entry.prepared.text.capacity() * size_of::<PreparedShapedText>();
+            for text in &entry.prepared.text {
+                bytes += size_of::<ShapedLine>()
+                    + text.line.text.len()
+                    + text.line.runs.capacity() * size_of::<gpui::ShapedRun>()
+                    + text
+                        .line
+                        .runs
+                        .iter()
+                        .map(|run| run.glyphs.capacity() * size_of::<gpui::ShapedGlyph>())
+                        .sum::<usize>();
+            }
+        }
+        bytes
+    }
+
+    /// Shapes at most one row in a background turn. It uses the same source, style and geometry
+    /// keys as visible prepaint, and never calls glyph rasterization or painting.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the validated text preparation inputs"
+    )]
+    pub(crate) fn prepare_background_text(
+        &mut self,
+        screen: &Arc<ScreenSnapshot>,
+        fonts: &TerminalFonts,
+        font_size: Pixels,
+        cell_width: Pixels,
+        line_height: Pixels,
+        scale_factor: f32,
+        window: &mut Window,
+    ) -> bool {
+        // Avoid an unbounded text-system call for an unusually large screen or grapheme row.
+        if screen.rows.iter().map(|row| row.len()).sum::<usize>() > 65_536
+            || screen
+                .rows
+                .iter()
+                .any(|row| row.iter().map(|cell| cell.text.len()).sum::<usize>() > 65_536)
+        {
+            self.evict();
+            return true;
+        }
+        let rows = self.prepare(
+            &screen.rows,
+            &screen.colors,
+            fonts,
+            &Arc::from([]),
+            TerminalGridMetrics {
+                cell_width,
+                line_height,
+                scale_factor,
+            },
+        );
+        let key = PreparedRowTextKey {
+            font_size,
+            cell_width,
+        };
+        self.prepared_text.truncate(rows.len());
+        for (index, source) in rows.iter().enumerate() {
+            if self
+                .prepared_text
+                .get(index)
+                .is_some_and(|entry| entry.key == key && row_text_shape_eq(source, &entry.source))
+            {
+                continue;
+            }
+            let entry = PreparedRowTextCacheEntry {
+                source: Arc::clone(source),
+                key,
+                prepared: Arc::new(prepare_row_text(source, font_size, window.text_system())),
+            };
+            if index < self.prepared_text.len() {
+                self.prepared_text[index] = entry;
+            } else {
+                self.prepared_text.push(entry);
+            }
+            return index + 1 == rows.len();
+        }
+        true
+    }
+
     fn prepare(
         &mut self,
         rows: &Arc<[RowSnapshot]>,
@@ -6952,6 +7078,85 @@ mod tests {
                 );
             })
             .expect("the test window should remain available");
+    }
+
+    #[gpui::test]
+    fn readiness_background_text_is_sliced_reused_and_invalidated_without_gpu_work(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let test_window = cx.add_window(|_, _| gpui::EmptyView);
+        test_window
+            .update(cx, |_, window, _| {
+                let fonts = test_terminal_fonts(&"Menlo".into());
+                let mut screen =
+                    ScreenSnapshot::empty(crate::local_path::LocalPathSemantics::Posix);
+                Arc::make_mut(&mut screen).rows = Arc::from([
+                    Arc::<[CellSnapshot]>::from([cell("a")]),
+                    Arc::<[CellSnapshot]>::from([cell("b")]),
+                ]);
+                let mut cache = TerminalGridCache::new();
+                assert!(!cache.prepare_background_text(
+                    &screen,
+                    &fonts,
+                    px(14.0),
+                    px(8.0),
+                    px(20.0),
+                    1.0,
+                    window
+                ));
+                assert_eq!(
+                    cache.prepared_text.len(),
+                    1,
+                    "one background call shapes at most one row"
+                );
+                assert!(cache.prepare_background_text(
+                    &screen,
+                    &fonts,
+                    px(14.0),
+                    px(8.0),
+                    px(20.0),
+                    1.0,
+                    window
+                ));
+                let first = Arc::clone(&cache.prepared_text[0].prepared);
+                assert!(cache.retained_bytes() > 0);
+                cache.retain_text();
+                let rows = cache.prepare(
+                    &screen.rows,
+                    &screen.colors,
+                    &fonts,
+                    &Arc::from([]),
+                    grid_metrics(),
+                );
+                let geometry = cache.prepare_visible_geometry(
+                    &rows,
+                    2,
+                    prepared_grid_layout(&fonts, px(14.0), px(8.0)),
+                    window,
+                );
+                assert!(
+                    Arc::ptr_eq(&first, &cache.prepared_text[0].prepared),
+                    "first visible prepaint reuses hidden shaping"
+                );
+                assert_eq!(geometry[0].text[0].line.text.as_ref(), "a");
+                cache.retain_text();
+                cache.prepare_background_text(
+                    &screen,
+                    &fonts,
+                    px(15.0),
+                    px(8.0),
+                    px(20.0),
+                    1.0,
+                    window,
+                );
+                assert!(
+                    !Arc::ptr_eq(&first, &cache.prepared_text[0].prepared),
+                    "font size invalidates preparation"
+                );
+                assert!(window.painted_quads().is_empty());
+                assert!(painted_glyphs(window).is_empty());
+            })
+            .unwrap();
     }
 
     #[gpui::test]

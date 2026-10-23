@@ -376,6 +376,7 @@ struct SharedStripControls {
 
 pub(crate) struct TabManager {
     tabs: TabCollection<Entity<TabView>>,
+    readiness: super::terminal_readiness::Readiness,
     session_factory: WorkspaceTerminalSessionFactory,
     pane_construction: PaneConstruction,
     active: bool,
@@ -466,6 +467,7 @@ impl TabManager {
         });
         Self {
             tabs,
+            readiness: super::terminal_readiness::Readiness::for_window(window, cx),
             session_factory,
             pane_construction,
             active: true,
@@ -735,6 +737,7 @@ impl TabManager {
             || self.sidebar_width != sidebar_width
             || self.top_chrome_width != top_chrome_width
         {
+            self.readiness.invalidate_layout();
             self.sidebar_visible = visible;
             self.sidebar_reveal = reveal;
             self.sidebar_width = sidebar_width;
@@ -826,9 +829,17 @@ impl TabManager {
     fn sync_terminal_focus_blocker(&self, cx: &mut Context<Self>) {
         let blocker = self.terminal_focus_blocker();
         let active_tab_id = self.tabs.active_tab_id();
-        for (tab_id, view) in self.tabs.iter() {
+        let display = self.visible_tab_ids();
+        let workspace = cx.entity_id();
+        for (index, (tab_id, view)) in self.tabs.iter().enumerate() {
+            let order = display
+                .iter()
+                .position(|id| *id == tab_id)
+                .unwrap_or(display.len() + index);
             let active = self.active && tab_id == active_tab_id;
+            let identity = view.entity_id();
             view.update(cx, |view, cx| {
+                view.readiness_navigation(workspace, identity, order, active, cx);
                 view.set_focus_branch(active, blocker, cx);
             });
         }
@@ -2122,6 +2133,7 @@ impl TabManager {
 impl Render for TabManager {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         debug_assert!(self.tabs.len() > 0);
+        self.sync_terminal_focus_blocker(cx);
         let ids = self.visible_tab_ids();
         self.tab_reorder
             .refresh(&self.tab_bar_scroll_handle, &ids, window, cx);
@@ -2206,6 +2218,17 @@ impl Render for TabManager {
             )
             .child(
                 div()
+                    .on_children_prepainted({
+                        let readiness = self.readiness.clone();
+                        let active = self.active;
+                        move |children, _, _| {
+                            // The stage's available rectangle wins over an active Tab's minimum
+                            // size, which can overflow it. Hidden targets validate their own minimum.
+                            if active && let Some(stage) = children.last() {
+                                readiness.measured(stage.size);
+                            }
+                        }
+                    })
                     .id("tab-manager-content")
                     .debug_selector(|| "tab-manager-content".to_owned())
                     .flex_1()

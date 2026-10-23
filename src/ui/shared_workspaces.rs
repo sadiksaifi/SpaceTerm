@@ -961,6 +961,7 @@ mod development {
         panes: BTreeMap<PaneId, Id>,
         views: BTreeMap<PaneId, ServerPaneView>,
         screen_focus: BTreeMap<PaneId, gpui::FocusHandle>,
+        pending_starts: std::cell::RefCell<std::collections::BTreeSet<PaneId>>,
     }
 
     impl Drop for SharedPanes {
@@ -986,6 +987,7 @@ mod development {
                 panes: BTreeMap::new(),
                 views: BTreeMap::new(),
                 screen_focus: BTreeMap::new(),
+                pending_starts: Default::default(),
             }
         }
 
@@ -1005,6 +1007,11 @@ mod development {
             {
                 self.edits.retire_alias(previous);
             }
+            if self.edits.provisional(server) {
+                self.pending_starts.borrow_mut().insert(pane_id);
+            } else if self.pending_starts.borrow_mut().remove(&pane_id) {
+                state.start_created();
+            }
             self.views.insert(pane_id, ServerPaneView::new(state));
             self.screen_focus.insert(pane_id, screen_focus);
         }
@@ -1013,8 +1020,24 @@ mod development {
             if let Some(previous) = self.panes.remove(&pane_id) {
                 self.edits.retire_alias(previous);
             }
+            self.pending_starts.borrow_mut().remove(&pane_id);
             self.views.remove(&pane_id);
             self.screen_focus.remove(&pane_id);
+        }
+
+        /// A provisional creation already owns its startup intent. Only a confirmed Pane
+        /// receives selection or control acquisition.
+        pub(crate) fn select(&self, pane_id: PaneId) {
+            if self
+                .panes
+                .get(&pane_id)
+                .is_some_and(|id| self.edits.provisional(*id))
+            {
+                return;
+            }
+            if let Some(view) = self.views.get(&pane_id) {
+                view.select();
+            }
         }
 
         pub(crate) fn server_pane(&self, pane_id: PaneId) -> Option<Id> {
@@ -2513,6 +2536,7 @@ mod development {
             session_dormant: std::sync::atomic::AtomicBool,
             generation: std::sync::atomic::AtomicU64,
             selections: std::sync::atomic::AtomicUsize,
+            created_starts: std::sync::atomic::AtomicUsize,
             take_overs: std::sync::atomic::AtomicUsize,
             restored_starts: std::sync::atomic::AtomicUsize,
             retries: std::sync::atomic::AtomicUsize,
@@ -2529,6 +2553,7 @@ mod development {
                     session_dormant: std::sync::atomic::AtomicBool::new(false),
                     generation: std::sync::atomic::AtomicU64::new(0),
                     selections: std::sync::atomic::AtomicUsize::new(0),
+                    created_starts: std::sync::atomic::AtomicUsize::new(0),
                     take_overs: std::sync::atomic::AtomicUsize::new(0),
                     restored_starts: std::sync::atomic::AtomicUsize::new(0),
                     retries: std::sync::atomic::AtomicUsize::new(0),
@@ -2575,6 +2600,12 @@ mod development {
                 self.set(status);
             }
 
+            /// How many bound creations requested startup independently of selection.
+            pub(crate) fn created_starts(&self) -> usize {
+                self.created_starts
+                    .load(std::sync::atomic::Ordering::SeqCst)
+            }
+
             /// How many times a person's explicit action asked the server for this Pane.
             pub(crate) fn selections(&self) -> usize {
                 self.selections.load(std::sync::atomic::Ordering::SeqCst)
@@ -2615,6 +2646,11 @@ mod development {
 
             fn connection_generation(&self) -> u64 {
                 self.generation.load(std::sync::atomic::Ordering::SeqCst)
+            }
+
+            fn start_created(&self) {
+                self.created_starts
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             }
 
             fn select(&self) {
