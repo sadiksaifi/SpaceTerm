@@ -65,6 +65,7 @@ mod platform;
     )
 )]
 mod repository_status;
+mod server_settings;
 #[cfg(feature = "desktop")]
 mod settings;
 #[cfg_attr(

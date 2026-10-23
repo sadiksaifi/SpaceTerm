@@ -119,6 +119,7 @@ pub enum Error {
     Branch,
     Unavailable,
     Interrupted,
+    Template(path_template::WorktreePathTemplateError),
 }
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Settings {
@@ -135,12 +136,30 @@ impl Default for Settings {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Read {
-    Poll { id: u64 },
-    Context { root: PathBuf },
+    Poll {
+        id: u64,
+    },
+    Context {
+        root: PathBuf,
+    },
     Settings,
-    SeedLocation { template: String },
-    CheckRemoval { root: PathBuf, path: PathBuf },
-    Location { root: PathBuf, location: String },
+    /// The owning server's Git installation, even when it owns no Workspaces.
+    Git,
+    /// Checks a draft without changing Server Settings or creating folders.
+    ValidateLocationTemplate {
+        template: String,
+    },
+    SeedLocation {
+        template: String,
+    },
+    CheckRemoval {
+        root: PathBuf,
+        path: PathBuf,
+    },
+    Location {
+        root: PathBuf,
+        location: String,
+    },
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ReadReply {
@@ -153,6 +172,8 @@ pub enum ReadReply {
         branches: Branches,
     },
     Settings(Settings),
+    Git(crate::repository::GitToolStatus),
+    LocationTemplate,
     Location(PathBuf),
     Removal(Removal),
 }

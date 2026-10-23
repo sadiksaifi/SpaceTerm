@@ -1108,7 +1108,9 @@ fn worktree_location_is_seeded_once_and_validated_by_the_owning_server() {
                 template: "~/missing-placeholder".into()
             }
         ),
-        Outcome::WorktreeFailed(Error::Location)
+        Outcome::WorktreeFailed(Error::Template(
+            spaceterm_server::worktree::path_template::WorktreePathTemplateError::MissingBranch
+        ))
     );
     assert!(matches!(
         finish_write(

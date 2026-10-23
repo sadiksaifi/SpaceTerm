@@ -116,6 +116,22 @@ fn read_git(
     settings: Settings,
     token: &SshCancellationToken,
 ) -> Result<PreparedRead, Error> {
+    let reply = match &read {
+        Read::Git => Some(ReadReply::Git(
+            crate::runtime::server::repositories::git_status(token),
+        )),
+        Read::ValidateLocationTemplate { template } => {
+            crate::server_settings::validate_location_template(template)?;
+            Some(ReadReply::LocationTemplate)
+        }
+        _ => None,
+    };
+    if let Some(reply) = reply {
+        return Ok(PreparedRead {
+            reply,
+            approval: None,
+        });
+    }
     let (git, home) = git(None, token)?;
     let mut approval = None;
     let reply = match read {

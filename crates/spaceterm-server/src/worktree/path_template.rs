@@ -2,6 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub const DEFAULT_WORKTREE_PATH_TEMPLATE: &str = "~/.worktrees/{repository}/{branch}";
@@ -9,7 +10,7 @@ pub const DEFAULT_WORKTREE_PATH_TEMPLATE: &str = "~/.worktrees/{repository}/{bra
 /// Keeps a template a short line a person can read and edit.
 const MAX_TEMPLATE_LENGTH: usize = 1024;
 
-#[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Error, Eq, PartialEq, Serialize, Deserialize)]
 pub enum WorktreePathTemplateError {
     #[error("the template is empty")]
     Empty,
@@ -25,6 +26,10 @@ pub enum WorktreePathTemplateError {
     UnknownPlaceholder,
     #[error("the template does not name the branch")]
     MissingBranch,
+    #[error("the template contains a control character")]
+    InvalidCharacter,
+    #[error("the server cannot write to this folder")]
+    NotWritable,
 }
 
 /// Checks that `template` expands to one absolute directory per branch.
@@ -70,6 +75,9 @@ fn parse(template: &str) -> Result<(bool, Vec<Piece<'_>>), WorktreePathTemplateE
     if template.len() > MAX_TEMPLATE_LENGTH {
         return Err(WorktreePathTemplateError::TooLong);
     }
+    if template.chars().any(char::is_control) {
+        return Err(WorktreePathTemplateError::InvalidCharacter);
+    }
     let (from_home, rest) = match template.strip_prefix('~') {
         Some(rest) if rest.starts_with('/') => (true, rest),
         Some(_) => return Err(WorktreePathTemplateError::NotAbsolute),
@@ -82,6 +90,9 @@ fn parse(template: &str) -> Result<(bool, Vec<Piece<'_>>), WorktreePathTemplateE
     let mut pieces = Vec::new();
     let mut remaining = rest;
     while let Some(open) = remaining.find('{') {
+        if remaining[..open].contains('}') {
+            return Err(WorktreePathTemplateError::UnknownPlaceholder);
+        }
         if open > 0 {
             pieces.push(Piece::Text(&remaining[..open]));
         }
@@ -97,6 +108,9 @@ fn parse(template: &str) -> Result<(bool, Vec<Piece<'_>>), WorktreePathTemplateE
         remaining = &after[close + 1..];
     }
     if !remaining.is_empty() {
+        if remaining.contains('}') {
+            return Err(WorktreePathTemplateError::UnknownPlaceholder);
+        }
         pieces.push(Piece::Text(remaining));
     }
     if !pieces.iter().any(|piece| matches!(piece, Piece::Branch)) {
@@ -151,6 +165,10 @@ mod tests {
             ("~/wt/{branch", UnclosedBrace),
             ("~/wt/{name}", UnknownPlaceholder),
             ("~/wt/{repository}", MissingBranch),
+            ("~/wt/}{branch}", UnknownPlaceholder),
+            ("~/wt/{branch}}", UnknownPlaceholder),
+            ("~/wt/\0{branch}", InvalidCharacter),
+            ("~/wt/\n{branch}", InvalidCharacter),
         ] {
             assert_eq!(validate(template), Err(error), "{template:?}");
         }
