@@ -148,6 +148,11 @@ pub(crate) trait RemoteServerOperations: Send + Sync {
     /// asking. Starts, stages, installs and stops nothing.
     fn refresh(&self, destination: &SshDestination);
 
+    /// Changes only automatic startup on the saved connection's exact account route. An entry
+    /// already working or holding an original admits no independent change. A lost reply is
+    /// reported without retrying; refresh may read the current policy afterwards.
+    fn set_automatic_start(&self, destination: &SshDestination, enabled: bool);
+
     /// Describes `request` without performing it, then waits for a confirmation.
     fn describe(&self, destination: &SshDestination, request: RemoteMaintenanceRequest);
 
@@ -300,6 +305,8 @@ struct Entry {
 enum Work {
     /// Reads the service facts.
     Read,
+    /// Changes startup policy once, without creating a retained service original.
+    SetAutomaticStart(bool),
     /// Reads the facts, then describes one change for exactly those facts.
     Describe(RemoteMaintenanceRequest),
     /// Submits one bound original, then reads its validated outcome.
@@ -602,6 +609,43 @@ impl RemoteServerOperations for SshServerOperations {
         };
         if let Some(admitted) = admitted {
             self.spawn(admitted, Work::Read);
+        }
+    }
+
+    fn set_automatic_start(&self, destination: &SshDestination, enabled: bool) {
+        let admitted = {
+            let Ok(mut state) = self.inner.state.lock() else {
+                return;
+            };
+            if state.entries.iter().any(|entry| {
+                entry.destination == *destination
+                    && !entry.removed
+                    && (entry.running || entry.submitted.is_some())
+            }) {
+                return;
+            }
+            // Only a currently saved connection supplies new host authority. A removed entry's
+            // retained target belongs solely to resolving its own original.
+            let Some(continuity) = self.inner.connections.continuity(destination) else {
+                return;
+            };
+            let Some(index) = self.admitting(&mut state, destination) else {
+                return;
+            };
+            state.entries[index].target = Some(MaintenanceTarget {
+                destination: destination.clone(),
+                continuity,
+            });
+            admit(
+                &mut state,
+                index,
+                MaintenancePhase::Authenticating,
+                MaintenanceAuthority::Requested,
+                None,
+            )
+        };
+        if let Some(admitted) = admitted {
+            self.spawn(admitted, Work::SetAutomaticStart(enabled));
         }
     }
 
@@ -1192,6 +1236,35 @@ fn run(
             Ok(facts) => read(&inner, &destination, generation, facts),
             Err(failure) => settle(&inner, &destination, generation, failure),
         },
+        Work::SetAutomaticStart(enabled) => {
+            // Recovery may not have adopted retained originals yet. Read their inventory before
+            // dispatch, so neither an unseen original nor unavailable storage grants new work.
+            let result = store
+                .load()
+                .map_err(|_| SshMaintenanceFailure::NotRetained)
+                .and_then(|records| {
+                    if records
+                        .iter()
+                        .any(|record| record.target.destination == destination && !record.removed)
+                    {
+                        return Err(SshMaintenanceFailure::NotRetained);
+                    }
+                    backend.set_automatic_start(&target, enabled, &cancellation, &progress)
+                });
+            match result {
+                Ok(facts) => read(&inner, &destination, generation, facts),
+                Err(failure) => {
+                    update(&inner, &destination, generation, |state, index| {
+                        let entry = &mut state.entries[index];
+                        entry.running = false;
+                        entry.state = RemoteOperationState::Failed {
+                            failure,
+                            kind: None,
+                        };
+                    });
+                }
+            }
+        }
         Work::Describe(request) => {
             describe(
                 &inner,
@@ -1804,6 +1877,9 @@ mod tests {
         applications: Mutex<VecDeque<Result<OperationOutcome, SshMaintenanceFailure>>>,
         resolutions: Mutex<VecDeque<Result<OperationOutcome, SshMaintenanceFailure>>>,
         observed: Mutex<Vec<MaintenanceAuthority>>,
+        automatic_start_results: Mutex<VecDeque<Result<MaintenanceFacts, SshMaintenanceFailure>>>,
+        automatic_start_calls: Mutex<Vec<(MaintenanceTarget, bool)>>,
+        automatic_start_gate: Mutex<Option<Gate>>,
         applied: Mutex<Vec<OperationSubmission>>,
         resolved: Mutex<Vec<([u8; 32], MaintenanceAuthority)>>,
         resolved_kinds: Mutex<Vec<SubmittedKind>>,
@@ -1844,12 +1920,22 @@ mod tests {
     impl SshMaintenanceBackend for Script {
         fn set_automatic_start(
             &self,
-            _: &MaintenanceTarget,
-            _: bool,
+            target: &MaintenanceTarget,
+            enabled: bool,
             _: &SshCancellationToken,
             _: &MaintenanceProgress<'_>,
         ) -> Result<MaintenanceFacts, SshMaintenanceFailure> {
-            Self::next(&self.observations)
+            self.automatic_start_calls
+                .lock()
+                .unwrap()
+                .push((target.clone(), enabled));
+            let result = Self::next(&self.automatic_start_results);
+            let gate = self.automatic_start_gate.lock().unwrap().take();
+            if let Some(gate) = gate {
+                gate.entered.send_blocking(()).unwrap();
+                gate.release.recv_blocking().unwrap();
+            }
+            result
         }
         fn observe(
             &self,
@@ -2196,6 +2282,257 @@ mod tests {
         );
         owner.confirm(handle);
         (owner, connections, intents)
+    }
+
+    #[test]
+    fn automatic_start_binds_the_saved_target_and_preserves_returned_stop_without_lifecycle_work() {
+        for enabled in [false, true] {
+            let script = Arc::new(Script::default());
+            let mut expected = facts();
+            expected.status.enabled = enabled;
+            expected.status.running = false;
+            expected.status.stopped = true;
+            script
+                .automatic_start_results
+                .lock()
+                .unwrap()
+                .push_back(Ok(expected.clone()));
+            let (entered, arrived) = async_channel::unbounded();
+            let (release, held) = async_channel::unbounded();
+            *script.automatic_start_gate.lock().unwrap() = Some(Gate {
+                entered,
+                release: held,
+            });
+            let records = Arc::new(Records::default());
+            let (connections, _) = connected();
+            let owner = SshServerOperations::new(script.clone(), records.clone(), connections);
+            let settings = owner.subscribe();
+            owner.set_automatic_start(&destination(), enabled);
+            arrived.recv_blocking().unwrap();
+            assert!(matches!(
+                owner.state(&destination()),
+                RemoteOperationState::Working { kind: None, .. }
+            ));
+            owner.set_automatic_start(&destination(), !enabled);
+            drop(settings);
+            release.send_blocking(()).unwrap();
+            eventually(|| matches!(owner.state(&destination()), RemoteOperationState::Read(_)));
+            let RemoteOperationState::Read(actual) = owner.state(&destination()) else {
+                unreachable!()
+            };
+            assert_eq!(*actual, expected);
+            assert_eq!(
+                *script.automatic_start_calls.lock().unwrap(),
+                vec![(
+                    MaintenanceTarget {
+                        destination: destination(),
+                        continuity: pin()
+                    },
+                    enabled
+                )]
+            );
+            assert!(script.observed.lock().unwrap().is_empty());
+            assert!(script.applied.lock().unwrap().is_empty());
+            assert!(script.resolved.lock().unwrap().is_empty());
+            assert!(records.operations.lock().unwrap().is_empty());
+            assert_eq!(records.writes.load(Ordering::SeqCst), 0);
+        }
+    }
+
+    #[test]
+    fn a_lost_automatic_start_reply_is_not_retried_by_resume_or_refresh() {
+        let script = Arc::new(Script::default());
+        script
+            .automatic_start_results
+            .lock()
+            .unwrap()
+            .push_back(Err(SshMaintenanceFailure::Unconfirmed));
+        let records = Arc::new(Records::default());
+        let (connections, _) = connected();
+        let owner = SshServerOperations::new(script.clone(), records.clone(), connections);
+        owner.set_automatic_start(&destination(), false);
+        eventually(|| {
+            matches!(
+                owner.state(&destination()),
+                RemoteOperationState::Failed {
+                    failure: SshMaintenanceFailure::Unconfirmed,
+                    kind: None
+                }
+            )
+        });
+        eventually(|| script.releases.load(Ordering::SeqCst) == 1);
+        owner.resume(&destination());
+        script.observes(Ok(facts()));
+        owner.refresh(&destination());
+        eventually(|| matches!(owner.state(&destination()), RemoteOperationState::Read(_)));
+        assert_eq!(script.automatic_start_calls.lock().unwrap().len(), 1);
+        assert_eq!(
+            *script.observed.lock().unwrap(),
+            vec![MaintenanceAuthority::Requested]
+        );
+        assert!(script.applied.lock().unwrap().is_empty());
+        assert!(script.resolved.lock().unwrap().is_empty());
+        assert!(records.operations.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn automatic_start_failures_keep_no_submitted_kind() {
+        for failure in [
+            SshMaintenanceFailure::NeedsPerson(InteractionReason::Authentication),
+            SshMaintenanceFailure::Changed(ContinuityChange::ServerChanged),
+            SshMaintenanceFailure::Refused(MaintenanceRefusal::AuthorizationRequired),
+        ] {
+            let script = Arc::new(Script::default());
+            script
+                .automatic_start_results
+                .lock()
+                .unwrap()
+                .push_back(Err(failure));
+            let records = Arc::new(Records::default());
+            let (connections, _) = connected();
+            let owner = SshServerOperations::new(script.clone(), records.clone(), connections);
+            owner.set_automatic_start(&destination(), false);
+            eventually(
+                || matches!(owner.state(&destination()), RemoteOperationState::Failed { failure: actual, kind: None } if actual == failure),
+            );
+            assert_eq!(script.automatic_start_calls.lock().unwrap().len(), 1);
+            assert!(records.operations.lock().unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn automatic_start_refuses_an_original_before_startup_recovery_adopts_it() {
+        let script = Arc::new(Script::default());
+        let records = Arc::new(Records::default());
+        let original = record(None);
+        records.operations.lock().unwrap().push(original.clone());
+        let (connections, _) = connected();
+        let owner = SshServerOperations::new(script.clone(), records.clone(), connections);
+        owner.set_automatic_start(&destination(), false);
+        eventually(|| {
+            matches!(
+                owner.state(&destination()),
+                RemoteOperationState::Failed {
+                    failure: SshMaintenanceFailure::NotRetained,
+                    kind: None
+                }
+            )
+        });
+        assert!(script.automatic_start_calls.lock().unwrap().is_empty());
+        assert_eq!(records.only(), original);
+        assert_eq!(records.writes.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn automatic_start_refuses_unreadable_originals_and_leaves_removed_originals_alone() {
+        let script = Arc::new(Script::default());
+        let records = Arc::new(Records::default());
+        *records.fails.lock().unwrap() = Some(SshIntentStoreError::Unavailable);
+        let (connections, _) = connected();
+        let owner = SshServerOperations::new(script.clone(), records.clone(), connections);
+        owner.set_automatic_start(&destination(), false);
+        eventually(|| {
+            matches!(
+                owner.state(&destination()),
+                RemoteOperationState::Failed {
+                    failure: SshMaintenanceFailure::NotRetained,
+                    kind: None
+                }
+            )
+        });
+        assert!(script.automatic_start_calls.lock().unwrap().is_empty());
+        *records.fails.lock().unwrap() = None;
+        let mut sealed = record(None);
+        sealed.removed = true;
+        records.operations.lock().unwrap().push(sealed.clone());
+        script
+            .automatic_start_results
+            .lock()
+            .unwrap()
+            .push_back(Ok(facts()));
+        owner.set_automatic_start(&destination(), true);
+        eventually(|| matches!(owner.state(&destination()), RemoteOperationState::Read(_)));
+        assert_eq!(script.automatic_start_calls.lock().unwrap().len(), 1);
+        assert_eq!(records.only(), sealed);
+        assert_eq!(records.writes.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn an_unresolved_original_refuses_an_independent_automatic_start_change() {
+        let script = Arc::new(Script::default());
+        let records = Arc::new(Records::default());
+        let (owner, _, _) = submit(&script, &records, Err(SshMaintenanceFailure::Unconfirmed));
+        eventually(|| {
+            matches!(
+                owner.state(&destination()),
+                RemoteOperationState::Unconfirmed { .. }
+            )
+        });
+        let original = records.only();
+        owner.set_automatic_start(&destination(), false);
+        assert!(script.automatic_start_calls.lock().unwrap().is_empty());
+        assert!(matches!(
+            owner.state(&destination()),
+            RemoteOperationState::Unconfirmed { .. }
+        ));
+        assert_eq!(records.only(), original);
+        script.resolves(Ok(outcome(OperationResolution::Completed)));
+        owner.resume(&destination());
+        resolved(owner.as_ref());
+        assert_eq!(
+            *script.resolved.lock().unwrap(),
+            vec![(original.operation, MaintenanceAuthority::Requested)]
+        );
+    }
+
+    #[test]
+    fn a_removed_connections_late_automatic_start_reply_cannot_replace_a_new_connections_facts() {
+        let script = Arc::new(Script::default());
+        let mut disabled = facts();
+        disabled.status.enabled = false;
+        script
+            .automatic_start_results
+            .lock()
+            .unwrap()
+            .extend([Ok(disabled), Ok(facts())]);
+        let (entered, arrived) = async_channel::unbounded();
+        let (release, held) = async_channel::unbounded();
+        *script.automatic_start_gate.lock().unwrap() = Some(Gate {
+            entered,
+            release: held,
+        });
+        let records = Arc::new(Records::default());
+        let (connections, _) = connected();
+        let owner = SshServerOperations::new(script.clone(), records.clone(), connections.clone());
+        owner.set_automatic_start(&destination(), false);
+        arrived.recv_blocking().unwrap();
+        connections.remove(&destination());
+        assert!(owner.entries().is_empty());
+        owner.set_automatic_start(&destination(), true);
+        assert_eq!(script.automatic_start_calls.lock().unwrap().len(), 1);
+        connections.connect(destination());
+        eventually(|| connections.continuity(&destination()).is_some());
+        owner.set_automatic_start(&destination(), true);
+        eventually(|| matches!(owner.state(&destination()), RemoteOperationState::Read(_)));
+        eventually(|| script.releases.load(Ordering::SeqCst) == 1);
+        release.send_blocking(()).unwrap();
+        eventually(|| script.releases.load(Ordering::SeqCst) == 2);
+        let RemoteOperationState::Read(actual) = owner.state(&destination()) else {
+            panic!("old reply replaced the new connection's state")
+        };
+        assert_eq!(*actual, facts());
+        assert_eq!(owner.entries().len(), 1);
+        assert_eq!(
+            script
+                .automatic_start_calls
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(_, enabled)| *enabled)
+                .collect::<Vec<_>>(),
+            vec![false, true]
+        );
+        assert!(records.operations.lock().unwrap().is_empty());
     }
 
     #[test]
