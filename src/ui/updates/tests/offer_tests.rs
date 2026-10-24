@@ -107,7 +107,9 @@ fn server_attention_counts_preserve_existing_warning_precedence() {
     );
     let offer = server("macbookpro", ServerUpdateAction::Ssh(ssh("macbookpro")));
     assert_eq!(
-        pill(None, None, &[attention.clone()]).unwrap().1,
+        pill(None, None, std::slice::from_ref(&attention))
+            .unwrap()
+            .1,
         PillTone::Warning
     );
     assert_eq!(
