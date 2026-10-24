@@ -4486,6 +4486,40 @@ fn top_workspace_chooser_should_remain_available_with_the_sidebar_collapsed(
     assert_eq!(panel.top(), chooser.bottom() + px(4.0));
 }
 
+#[gpui::test]
+fn the_sidebar_offers_application_commands_when_the_desktop_has_no_menu_bar(
+    cx: &mut TestAppContext,
+) {
+    use crate::desktop_profile::{DesktopPresentation, HostFeature, testing_presentation};
+
+    let (_, _, cx) = workspace_manager(cx);
+    assert!(cx.debug_bounds("application-menu").is_none());
+    cx.update(|window, cx| {
+        cx.set_global(testing_presentation().without_features(&[HostFeature::ApplicationMenuBar]));
+        window.refresh();
+    });
+    cx.run_until_parked();
+    click("application-menu", cx);
+    for selector in [
+        "application-menu-command-palette",
+        "application-menu-add-server",
+        "application-menu-keyboard-shortcuts",
+        "application-menu-about",
+    ] {
+        assert!(
+            cx.debug_bounds(selector).is_some(),
+            "{selector} must remain reachable"
+        );
+    }
+    cx.simulate_keystrokes("escape");
+    cx.update(|window, cx| {
+        cx.set_global::<DesktopPresentation>(testing_presentation());
+        window.refresh();
+    });
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("application-menu").is_none());
+}
+
 /// Disabled parity while Remote is unavailable is covered by
 /// `top_combo_box_unavailable_remote_should_reject_acceptance_and_keep_terminal_input_blocked`.
 #[gpui::test]

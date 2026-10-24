@@ -1379,7 +1379,7 @@ impl SettingsWindow {
             }
         }
         let server_footnote = self.server_card_footnote(cx);
-        let network_footnote = self.network_access_footnote();
+        let network_footnote = self.network_access_footnote(cx);
         let git_footnote = self.server_git_footnote();
         self.row_bounds.borrow_mut().clear();
         let rendered = groups

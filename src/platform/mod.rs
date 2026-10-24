@@ -642,3 +642,6 @@ pub(crate) fn runtime_local_filesystem() -> local_filesystem::LocalFilesystemAut
         std::sync::Arc::new(unix_local_identity::UnixLocalIdentity),
     )
 }
+
+#[cfg(all(feature = "desktop", any(target_os = "macos", target_os = "linux")))]
+mod unix_local_time;

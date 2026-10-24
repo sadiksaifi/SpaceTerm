@@ -86,6 +86,7 @@ fn desktop_profile(
             Rc::new(super::macos_shortcut_glyphs::MacosShortcutFormatter),
             crate::desktop_profile::ShortcutSelection::NativeMenu,
             &[],
+            super::unix_local_time::local_time,
         ),
         locale,
     )

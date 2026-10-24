@@ -1024,12 +1024,9 @@ impl WorkspaceSidebar {
         let new_workspace_menu = Tooltip::new("new-workspace-tooltip", new_workspace_tooltip)
             .debug_selector("new-workspace-tooltip")
             .attach(new_workspace_menu, TooltipTargetVisibility::Visible);
-        // Linux desktops have no global menu bar, so the footer carries the application commands
-        // a menu bar would.
-        #[cfg(target_os = "linux")]
-        let application_menu = Some(application_menu(presentation, footer_icon_size));
-        #[cfg(not(target_os = "linux"))]
-        let application_menu: Option<AnyElement> = None;
+        let application_menu = (!presentation
+            .has_feature(crate::desktop_profile::HostFeature::ApplicationMenuBar))
+        .then(|| application_menu(presentation, footer_icon_size));
         let sidebar = div()
             .id("workspace-sidebar")
             .debug_selector(|| "workspace-sidebar".to_owned())
@@ -1979,9 +1976,7 @@ fn machine_menu_entries(section: &MachineSection) -> Vec<MenuEntry<MachineMenuCo
     entries
 }
 
-/// The footer creation menu's rows, built from the shared creation descriptors.
-/// An application command the Linux sidebar footer offers in place of a menu bar.
-#[cfg(target_os = "linux")]
+/// An application command the sidebar footer offers in place of a menu bar.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ApplicationMenuCommand {
     CommandPalette,
@@ -1990,7 +1985,6 @@ enum ApplicationMenuCommand {
     About,
 }
 
-#[cfg(target_os = "linux")]
 impl ApplicationMenuCommand {
     const ALL: [Self; 4] = [
         Self::CommandPalette,
@@ -2033,7 +2027,6 @@ impl ApplicationMenuCommand {
     }
 }
 
-#[cfg(target_os = "linux")]
 fn application_menu(
     presentation: &crate::desktop_profile::DesktopPresentation,
     icon_size: Pixels,

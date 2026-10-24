@@ -531,7 +531,9 @@ fn native_verification_dependency(source: &str) -> Option<&'static str> {
             "ComboBoxKeybindingProfile::Linux",
             "ExplicitComboBoxProfile",
         )
-        .replace("TextInputKeybindingProfile::Linux", "ExplicitTextProfile");
+        .replace("TextInputKeybindingProfile::Linux", "ExplicitTextProfile")
+        // Remote server facts and their display names select no client adapter.
+        .replace("\"Linux\"", "\"Remote Operating System\"");
     let compact: String = source
         .chars()
         .filter(|character| !character.is_whitespace())
@@ -593,6 +595,7 @@ fn portable_verification_guard_rejects_native_dependencies_and_allows_suite_wiri
         "mod native_evidence {\ninclude!(\"../platform/macos_adapter_tests/session.rs\");\n}",
         "include!(\"../platform/macos_adapter_tests/session.rs\"); use libc::kill;",
         "use crate::platform::linux_pty::LinuxPtyHost;",
+        "use crate::platform::LinuxAdapter;",
         "use crate::platform::unix_pty::UnixNativePtyAdapterFactory;",
         "let profile = crate::keybindings::TerminalConventions::Linux;",
         "use std::os::linux::fs::MetadataExt;",
@@ -623,6 +626,8 @@ fn portable_verification_guard_rejects_native_dependencies_and_allows_suite_wiri
         "#[cfg_attr(\n    not(target_os = \"macos\"),\n    allow(dead_code, reason = \"only a native Adapter consumes it\")\n)]\nstruct Endpoint;",
         "#![cfg_attr(not(target_os = \"macos\"), allow(dead_code, reason = \"only a native Adapter consumes it\"))]",
         "let profile = TextInputKeybindingProfile::Linux;",
+        r#"let facts = json!({"operating_system": "Linux"});"#,
+        r#"match remote_os { "linux" => "Linux", _ => "Unknown" }"#,
     ] {
         assert!(
             native_verification_dependency(&portable_verification_source(wiring)).is_none(),

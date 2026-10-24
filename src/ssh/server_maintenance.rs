@@ -920,7 +920,6 @@ mod tests {
     fn observation_compares_the_verified_whole_artifact_and_uses_its_own_version(
         cx: &mut gpui::TestAppContext,
     ) {
-        use crate::ssh::server_process::testing::backend_with_mechanisms;
         with_candidate("9.8.7", |root, digest| {
             for (same, same_version) in [(false, false), (false, true), (true, true)] {
                 let mut current = facts();
@@ -928,14 +927,10 @@ mod tests {
                 approved.version = if same_version { "9.8.7" } else { "0.1.0" }.into();
                 approved.digest = if same { digest.into() } else { "1".repeat(64) };
                 let account = account(discovery(SERVER), Reply::Facts(current.clone()));
-                let (backend, _) = backend_with_mechanisms(
+                let (backend, _) = backend(
                     cx.background_executor.clone(),
                     account.clone(),
                     SshServerArtifacts::new(Some(root.into())),
-                    Arc::new(
-                        crate::platform::unix_host_config_filesystem::UnixHostConfigFilesystem,
-                    ),
-                    Arc::new(crate::ssh::server_process::testing::FakeBootstrap),
                 );
                 let observed = backend
                     .observe(
@@ -966,7 +961,6 @@ mod tests {
     fn invalid_or_downgrade_candidates_leave_valid_service_facts_without_an_offer(
         cx: &mut gpui::TestAppContext,
     ) {
-        use crate::ssh::server_process::testing::backend_with_mechanisms;
         with_candidate("0.1.0", |root, _| {
             let mut current = facts();
             current.approved.as_mut().unwrap().version = "0.2.0".into();
@@ -976,14 +970,10 @@ mod tests {
                         .unwrap();
                 }
                 let account = account(discovery(SERVER), Reply::Facts(current.clone()));
-                let (backend, _) = backend_with_mechanisms(
+                let (backend, _) = backend(
                     cx.background_executor.clone(),
                     account.clone(),
                     SshServerArtifacts::new(Some(root.into())),
-                    Arc::new(
-                        crate::platform::unix_host_config_filesystem::UnixHostConfigFilesystem,
-                    ),
-                    Arc::new(crate::ssh::server_process::testing::FakeBootstrap),
                 );
                 let observed = backend
                     .observe(

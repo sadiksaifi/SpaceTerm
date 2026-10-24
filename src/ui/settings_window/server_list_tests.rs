@@ -437,9 +437,9 @@ fn an_inactive_ssh_server_offers_check_status_and_connect_and_dims_its_settings(
         footnote(&servers).as_deref(),
         Some("Connect to penguin to change these settings.")
     );
-    let network = servers
-        .window
-        .read_with(servers.cx, |settings, _| settings.network_access_footnote());
+    let network = servers.window.read_with(servers.cx, |settings, cx| {
+        settings.network_access_footnote(cx)
+    });
     assert_eq!(
         network.as_deref(),
         Some("Connect to penguin to change its network access.")

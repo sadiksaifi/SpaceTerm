@@ -66,12 +66,23 @@ pub(crate) enum ShortcutSelection {
     TerminalSurface,
 }
 
-/// An application feature a desktop may have no equivalent for.
+/// A desktop capability supplied by host composition.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum HostFeature {
+    ApplicationMenuBar,
     Updates,
     MicrophoneAccess,
     SystemPermissions,
+}
+
+/// A local calendar time: year, month from 0, day of the month, hour and minute.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct LocalTime {
+    pub(crate) year: i32,
+    pub(crate) month: usize,
+    pub(crate) day: u32,
+    pub(crate) hour: u32,
+    pub(crate) minute: u32,
 }
 
 #[derive(Clone)]
@@ -84,6 +95,7 @@ pub(crate) struct DesktopPresentation {
     /// Features this desktop has no equivalent for; their surfaces are omitted rather than shown
     /// as unavailable.
     absent_features: &'static [HostFeature],
+    local_time: fn(u64) -> Option<LocalTime>,
 }
 
 struct PresentedShortcut {
@@ -106,6 +118,7 @@ impl DesktopPresentation {
         formatter: Rc<dyn ShortcutFormatter>,
         selection: ShortcutSelection,
         absent_features: &'static [HostFeature],
+        local_time: fn(u64) -> Option<LocalTime>,
     ) -> Self {
         Self {
             wording,
@@ -114,6 +127,7 @@ impl DesktopPresentation {
             shortcuts: Vec::new(),
             layout: KeyboardLayout::default(),
             absent_features,
+            local_time,
         }
     }
 
@@ -132,6 +146,10 @@ impl DesktopPresentation {
 
     pub(crate) fn get(cx: &App) -> &Self {
         cx.global::<Self>()
+    }
+
+    pub(crate) fn local_time(&self, unix_seconds: u64) -> Option<LocalTime> {
+        (self.local_time)(unix_seconds)
     }
 
     pub(crate) const fn wording(&self) -> DesktopWording {
@@ -407,6 +425,7 @@ pub(crate) fn testing_presentation() -> DesktopPresentation {
         Rc::new(TestingShortcutFormatter),
         ShortcutSelection::NativeMenu,
         &[],
+        |_| None,
     );
     let profile = default_keymap::profile(
         crate::platform::keyboard_layout::testing::us(),
@@ -624,6 +643,7 @@ mod tests {
                 Rc::new(TestingShortcutFormatter),
                 ShortcutSelection::TerminalSurface,
                 &[],
+                |_| None,
             );
             terminal.refresh(cx);
             assert_eq!(
