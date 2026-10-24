@@ -72,8 +72,13 @@ impl HoverFade {
                 if region.transition.hovered != hovered {
                     // The layout moved under a still pointer. Hover changes outside event
                     // dispatch, so it catches up on the next frame with the latest measurement.
-                    let state = state.clone();
+                    // The platform can keep that frame's callbacks after the window closes, so the
+                    // callback holds the region weakly and does nothing once it is gone.
+                    let state = state.downgrade();
                     window.on_next_frame(move |_, cx| {
+                        let Some(state) = state.upgrade() else {
+                            return;
+                        };
                         let measured = state.read(cx).measured;
                         set_hovered(&state, measured, HoverCause::Layout, cx);
                     });
@@ -292,6 +297,63 @@ fn ease(raw: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A region that appears under a still pointer waits for the next frame to take its hover.
+    /// Closing the window before that frame keeps none of its state alive, although the platform
+    /// can keep the frame's callbacks.
+    #[gpui::test]
+    fn a_closed_window_keeps_no_region_waiting_for_its_next_frame(cx: &mut gpui::TestAppContext) {
+        use std::cell::{Cell, RefCell};
+        use std::rc::Rc;
+
+        use gpui::{Context, Modifiers, WeakEntity, div, point, px};
+
+        struct Region {
+            shown: Rc<Cell<bool>>,
+            seen: Rc<RefCell<Option<WeakEntity<HoverRegion>>>>,
+        }
+
+        impl Render for Region {
+            fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                let mut root = div().size_full();
+                if self.shown.get() {
+                    let fade = HoverFade::new("region", window, cx);
+                    *self.seen.borrow_mut() = Some(fade.state.downgrade());
+                    root = root.child(div().relative().size_full().child(fade.tracker()));
+                }
+                root
+            }
+        }
+
+        let shown = Rc::new(Cell::new(false));
+        let seen = Rc::new(RefCell::new(None));
+        let (view, cx) = cx.add_window_view({
+            let shown = Rc::clone(&shown);
+            let seen = Rc::clone(&seen);
+            move |window, _| {
+                // The test platform keeps its active window, as a native platform can keep a
+                // closed window's frame callbacks.
+                window.activate_window();
+                Region { shown, seen }
+            }
+        });
+        cx.simulate_mouse_move(point(px(10.0), px(10.0)), None, Modifiers::none());
+
+        // The region appears under the still pointer, and its hover waits for the next frame.
+        shown.set(true);
+        view.update(cx, |_, cx| cx.notify());
+        let region = seen.borrow().clone().expect("the region should render");
+        assert!(region.upgrade().is_some());
+
+        drop(view);
+        cx.update(|window, _| window.remove_window());
+        cx.run_until_parked();
+
+        assert!(
+            region.upgrade().is_none(),
+            "a closed window's region should not outlive it"
+        );
+    }
 
     #[test]
     fn hover_should_ease_in_faster_than_it_eases_out() {
