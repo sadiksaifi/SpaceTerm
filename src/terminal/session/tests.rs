@@ -939,6 +939,51 @@ fn shell_exit_should_flush_a_pending_synchronized_output_transaction() {
     session.shutdown();
 }
 
+/// A resize clears a prompt the shell redraws. The session publishes the resized screen only once
+/// the shell has drawn the prompt again, so the prompt never blinks out while a Pane resizes.
+#[test]
+fn resizing_at_a_redrawable_prompt_should_publish_only_the_redrawn_prompt() {
+    let (result, reader_steps, records) = start_scripted_session(ScriptedPtyOptions::default());
+    let (mut session, events, _accessibility) = result.unwrap();
+    reader_steps
+        .send(ReaderStep::Bytes(
+            b"QA_RESIZE_MARKER\r\n\x1b]133;A;redraw=1\x07~\r\n> \x1b]133;B\x07".to_vec(),
+        ))
+        .unwrap();
+    receive_event(
+        &events,
+        "the prompt",
+        |event| matches!(event, TerminalSessionEvent::Screen(screen) if screen_text(screen).contains("~")),
+    );
+
+    session.resize(geometry(81, 24, 8.0, 20.0));
+    records.wait_for("the PTY resize", |state| state.resizes.len() == 1);
+    // Captured from zsh after SIGWINCH: it erases from the prompt and prints PS1 again.
+    reader_steps
+        .send(ReaderStep::Bytes(
+            b"\r\r\x1b[A\x1b[0m\x1b[J\x1b]133;A;redraw=1\x07~\r\n> \x1b]133;B\x07".to_vec(),
+        ))
+        .unwrap();
+
+    let TerminalSessionEvent::Screen(resized) =
+        receive_event(&events, "the resized screen", |event| {
+            matches!(event, TerminalSessionEvent::Screen(_))
+        })
+    else {
+        unreachable!()
+    };
+    assert_eq!(
+        resized.rows[0].len(),
+        81,
+        "the next screen must be the resized one"
+    );
+    assert!(
+        screen_text(&resized).contains("~"),
+        "the resized screen must show the redrawn prompt, not the cleared one"
+    );
+    session.shutdown();
+}
+
 #[test]
 fn session_snapshots_reuse_rows_unchanged_by_later_output() {
     let (result, reader_steps, _records) = start_scripted_session(ScriptedPtyOptions::default());

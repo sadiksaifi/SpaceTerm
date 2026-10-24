@@ -55,7 +55,7 @@ use crate::terminal::identity::{self, XtGetTcapObserver};
 use crate::terminal::key::{InputModifiers, KeyAction, KeyInput, OptionAsAltPolicy, PhysicalKey};
 use crate::terminal::keyboard_protocol::KeyboardProtocolEncoder;
 use crate::terminal::metadata::{
-    MetadataTracker, TerminalMetadataContext, TerminalMetadataSnapshot,
+    MetadataTracker, PromptZone, TerminalMetadataContext, TerminalMetadataSnapshot,
 };
 #[cfg(test)]
 use crate::terminal::pointer_input::WheelPhase;
@@ -69,6 +69,10 @@ const MAX_SCROLLBACK_ROWS: usize = 10_000;
 // Match Ghostty's application default in third_party/ghostty/src/config/Config.zig.
 const MAX_SCROLLBACK_BYTES: usize = 50_000_000;
 pub(crate) const MAX_SYNCHRONIZED_OUTPUT_DURATION: Duration = Duration::from_secs(1);
+/// The longest a resize that cleared a redrawable prompt waits for the shell to draw it again.
+pub(crate) const PROMPT_REDRAW_HOLD: Duration = Duration::from_millis(200);
+/// How long shell output must pause before a redraw without a prompt-end mark counts as drawn.
+pub(crate) const PROMPT_REDRAW_SETTLE: Duration = Duration::from_millis(30);
 const REPEAT_CLICK_DISTANCE_PX: f64 = 5.0;
 const REPEAT_CLICK_INTERVAL: Duration = Duration::from_millis(500);
 const SELECTION_AUTOSCROLL_INTERVAL: Duration = Duration::from_millis(15);
@@ -695,6 +699,79 @@ fn rows_have_selection(rows: &[RowSnapshot]) -> bool {
     rows.iter().any(|row| row.iter().any(|cell| cell.selected))
 }
 
+/// Ghostty's prompt redraw on resize, followed from OSC 133, and the wait for a cleared prompt to
+/// be drawn again.
+#[derive(Debug)]
+struct PromptRedraw {
+    /// Whether the shell redraws its prompt after a resize, so Ghostty clears it. Ghostty assumes
+    /// it does until an OSC 133 `redraw` option says otherwise.
+    shell_redraws: bool,
+    /// When a resize cleared the prompt, while the shell has not drawn it again.
+    cleared_at: Option<Instant>,
+    /// When the shell last wrote output since then.
+    last_output: Option<Instant>,
+}
+
+impl Default for PromptRedraw {
+    fn default() -> Self {
+        Self {
+            shell_redraws: true,
+            cleared_at: None,
+            last_output: None,
+        }
+    }
+}
+
+impl PromptRedraw {
+    /// Follows one OSC 133 mark. The end of the prompt, or a command, ends the wait.
+    fn observe(&mut self, mark: &str) {
+        let mut fields = mark.split(';');
+        match fields.next() {
+            Some("A") => {
+                if let Some(redraw) = fields.find_map(|field| field.strip_prefix("redraw=")) {
+                    self.shell_redraws = redraw != "0";
+                }
+            }
+            Some("B" | "I" | "C" | "D") => {
+                self.release();
+            }
+            _ => {}
+        }
+    }
+
+    fn cleared(&mut self, now: Instant) {
+        self.cleared_at = Some(now);
+        self.last_output = None;
+    }
+
+    fn note_output(&mut self, now: Instant) {
+        if self.cleared_at.is_some() {
+            self.last_output = Some(now);
+        }
+    }
+
+    fn waiting(&self) -> bool {
+        self.cleared_at.is_some()
+    }
+
+    /// When the wait ends without a prompt-end mark: once the shell's output pauses, as a shell
+    /// that marks no prompt end has finished its redraw by then, and at the latest after
+    /// [`PROMPT_REDRAW_HOLD`], so a silent shell or continuous output cannot hold the screen.
+    fn deadline(&self) -> Option<Instant> {
+        let latest = self.cleared_at? + PROMPT_REDRAW_HOLD;
+        Some(
+            self.last_output
+                .map_or(latest, |output| (output + PROMPT_REDRAW_SETTLE).min(latest)),
+        )
+    }
+
+    /// Ends the wait, and reports whether there was one.
+    fn release(&mut self) -> bool {
+        self.last_output = None;
+        self.cleared_at.take().is_some()
+    }
+}
+
 pub(crate) struct TerminalEmulator {
     local_file_emissions: Rc<RefCell<LocalFileEmissionRegistry>>,
     terminal: Terminal<'static, 'static>,
@@ -759,6 +836,7 @@ pub(crate) struct TerminalEmulator {
     active_reading_baseline: Option<Rc<ReadingBaseline>>,
     server_reading_enabled: bool,
     synchronized_output_last_activity: Option<Instant>,
+    prompt_redraw: PromptRedraw,
     find: TerminalFindState,
     applied_appearance: TerminalAppearanceUpdate,
     reported_appearance: Rc<Cell<Appearance>>,
@@ -1232,6 +1310,7 @@ impl TerminalEmulator {
             active_reading_baseline: None,
             server_reading_enabled: false,
             synchronized_output_last_activity: None,
+            prompt_redraw: PromptRedraw::default(),
             find: TerminalFindState::default(),
             applied_appearance: initial_appearance,
             reported_appearance,
@@ -1302,6 +1381,7 @@ impl TerminalEmulator {
                     self.metadata.set_reported_directory(&directory);
                 }
                 MetadataEvent::SemanticPrompt(value) => {
+                    self.prompt_redraw.observe(&value);
                     let was_running =
                         self.metadata
                             .snapshot()
@@ -1335,6 +1415,9 @@ impl TerminalEmulator {
         }
         if !bytes.is_empty() {
             self.find.invalidate();
+        }
+        if !bytes.is_empty() {
+            self.prompt_redraw.note_output(now);
         }
         let synchronized_after = self.terminal.mode(Mode::SYNC_OUTPUT).unwrap_or(false);
         self.synchronized_output_last_activity = match (synchronized_before, synchronized_after) {
@@ -1401,9 +1484,16 @@ impl TerminalEmulator {
         Ok(())
     }
 
+    /// When held output is presented even if its producer has not finished: a synchronized output
+    /// transaction, or a prompt cleared by a resize that the shell has not drawn again.
     pub(crate) fn synchronized_output_deadline(&self) -> Option<Instant> {
-        self.synchronized_output_last_activity
-            .map(|last_activity| last_activity + MAX_SYNCHRONIZED_OUTPUT_DURATION)
+        let synchronized = self
+            .synchronized_output_last_activity
+            .map(|last_activity| last_activity + MAX_SYNCHRONIZED_OUTPUT_DURATION);
+        synchronized
+            .into_iter()
+            .chain(self.prompt_redraw.deadline())
+            .min()
     }
 
     pub(crate) fn presentation_generation(&self) -> PresentationGeneration {
@@ -1422,8 +1512,9 @@ impl TerminalEmulator {
 
     pub(crate) fn end_synchronized_output(&mut self) -> Result<bool, Error> {
         self.synchronized_output_last_activity = None;
+        let prompt_redraw = self.prompt_redraw.release();
         if !self.terminal.mode(Mode::SYNC_OUTPUT)? {
-            return Ok(false);
+            return Ok(prompt_redraw);
         }
         self.terminal.set_mode(Mode::SYNC_OUTPUT, false)?;
         Ok(true)
@@ -1443,6 +1534,15 @@ impl TerminalEmulator {
         geometry: TerminalGeometry,
         winsize_changed: bool,
     ) -> Result<(), Error> {
+        self.resize_for_pty_at(geometry, winsize_changed, Instant::now())
+    }
+
+    pub(crate) fn resize_for_pty_at(
+        &mut self,
+        geometry: TerminalGeometry,
+        winsize_changed: bool,
+        now: Instant,
+    ) -> Result<(), Error> {
         if self.application_pointer_generation.is_some() && geometry == self.geometry {
             return Ok(());
         }
@@ -1457,11 +1557,22 @@ impl TerminalEmulator {
         let grid = geometry.grid();
         let cell = geometry.backing_cell_size();
         if winsize_changed {
+            // Ghostty clears the prompt for the shell to draw again when the cursor is not in
+            // command output. Presenting the screen in between would blink the prompt out.
+            let clears_prompt = self.prompt_redraw.shell_redraws
+                && matches!(
+                    self.metadata.snapshot().prompt_zone,
+                    PromptZone::Prompt | PromptZone::CommandInput
+                )
+                && self.terminal.active_screen()? == Screen::Primary;
             self.capture_accessibility_if_needed()?;
             self.accessibility_capture_needed = true;
             self.terminal
                 .resize(grid.cols, grid.rows, cell.width, cell.height)?;
             self.capture_accessibility_if_needed()?;
+            if clears_prompt {
+                self.prompt_redraw.cleared(now);
+            }
         } else {
             debug_assert_eq!(grid, self.geometry.grid());
             debug_assert_eq!(cell, self.geometry.backing_cell_size());
@@ -2796,7 +2907,7 @@ impl TerminalEmulator {
         if let Some(error) = self.graphics_failure {
             return Err(error);
         }
-        if self.terminal.mode(Mode::SYNC_OUTPUT)? {
+        if self.terminal.mode(Mode::SYNC_OUTPUT)? || self.prompt_redraw.waiting() {
             return Ok(None);
         }
 
