@@ -2079,10 +2079,13 @@ impl SettingsWindow {
             return false;
         }
         match self.selected_server() {
+            // A failed read shows the confirmed setting without offering to change it.
             Some(ServerChoice::Local) => self.server_service.as_ref().is_some_and(|row| {
-                row.state
-                    .working
-                    .is_none_or(|action| action == ServiceAction::Check)
+                row.state.status.is_some()
+                    && row
+                        .state
+                        .working
+                        .is_none_or(|action| action == ServiceAction::Check)
             }),
             Some(ServerChoice::Ssh(_)) => self
                 .maintenance_presentation(MaintenanceRow::Service)

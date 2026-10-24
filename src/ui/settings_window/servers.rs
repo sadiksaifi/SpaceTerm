@@ -1200,6 +1200,9 @@ pub(super) struct ServerServiceRow {
     /// A change to automatic start the person asked for while a read or an earlier change ran,
     /// and the window that asked. It follows once the service is idle.
     queued_automatic_start: Option<(bool, gpui::AnyWindowHandle)>,
+    /// Whether the service started the server on its own as of the last read that could tell,
+    /// kept while a later read fails.
+    last_confirmed_automatic_start: Option<bool>,
     /// Start Server was chosen while a read ran. It follows once the reads finish, if they still
     /// offer it.
     start_requested: bool,
@@ -1220,20 +1223,26 @@ impl ServerServiceRow {
             },
             automatic_start: AutomaticStart::default(),
             queued_automatic_start: None,
+            last_confirmed_automatic_start: None,
             start_requested: false,
             _operation: None,
         }
     }
 
+    /// Whether the service starts the server on its own, as it last confirmed: the latest read,
+    /// or the read before it while the latest one failed. `None` while no service is installed or
+    /// none was ever read.
+    fn confirmed_automatic_start(&self) -> Option<bool> {
+        match self.state.status {
+            Some(status) => status.installed.then_some(status.enabled),
+            None => self.last_confirmed_automatic_start,
+        }
+    }
+
     /// Whether the service starts the server on its own, as the switch shows it: a change the
-    /// person asked for, until the service answers it, otherwise what the service reported.
+    /// person asked for, until the service answers it, otherwise what the service confirmed.
     pub(super) fn automatic_start_shown(&self) -> Option<bool> {
-        let reported = self
-            .state
-            .status
-            .filter(|status| status.installed)
-            .map(|status| status.enabled);
-        reported.map(|reported| {
+        self.confirmed_automatic_start().map(|reported| {
             self.queued_automatic_start
                 .map(|(enabled, _)| enabled)
                 .or(self.automatic_start.requested)
@@ -1661,10 +1670,12 @@ impl SettingsWindow {
         let Some((enabled, window)) = row.queued_automatic_start.take() else {
             return;
         };
+        // Only the latest read's own status admits the change. An earlier operation's failure
+        // it still shows doesn't make the read fail.
         let reported = row
             .state
             .status
-            .filter(|status| row.state.failure.is_none() && status.installed)
+            .filter(|status| status.installed)
             .map(|status| status.enabled);
         if reported.is_some_and(|reported| reported != enabled) {
             self.change_automatic_start(enabled, false, window, cx);
@@ -1798,7 +1809,10 @@ impl SettingsWindow {
                         .local_operations
                         .update(cx, |owner, _| owner.service = Some(state.clone()));
                     if let Some(row) = &mut settings.server_service {
+                        // A read that fails keeps the setting the service last confirmed.
+                        let confirmed = row.confirmed_automatic_start();
                         row.state = state;
+                        row.last_confirmed_automatic_start = confirmed;
                     }
                     settings.continue_automatic_start(cx);
                     settings.continue_requested_start(cx);

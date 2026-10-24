@@ -1963,3 +1963,60 @@ fn the_server_row_keeps_its_height_with_or_without_a_button(cx: &mut TestAppCont
         with_button.size
     );
 }
+
+/// A read that fails while a Start automatically change waits returns the switch to the setting
+/// the service last confirmed, and changes nothing.
+#[gpui::test]
+fn a_failed_read_returns_a_waiting_switch_to_the_confirmed_setting(cx: &mut TestAppContext) {
+    let (window, _server, service, cx) = open_servers_with_service(Ok(running()), cx);
+    assert!(starts_automatically(cx), "the service starts on its own");
+
+    service.report(Err(ServerError::ServiceUnavailable));
+    cx.update(|presenting, cx| {
+        window.update(cx, |settings, cx| {
+            settings.check_server_service(cx);
+            settings.set_local_automatic_start(false, presenting, cx);
+        });
+    });
+    cx.run_until_parked();
+
+    assert!(
+        service.changes().is_empty(),
+        "nothing was asked of the service"
+    );
+    assert!(
+        starts_automatically(cx),
+        "the switch returns to the On the service last confirmed"
+    );
+}
+
+/// A read that succeeds makes the Start automatically change that waited on it, even while an
+/// earlier operation's failure is still shown.
+#[gpui::test]
+fn a_successful_read_makes_a_waiting_change_after_an_earlier_failure(cx: &mut TestAppContext) {
+    let (window, _server, service, cx) = open_servers_with_service(Ok(running()), cx);
+    service.refuse_next(ServerError::ServiceUnavailable);
+    choose(STOP_SELECTOR, cx);
+    click_modal(STOP_CONFIRM_SELECTOR, cx);
+    assert_eq!(service.changes(), [ServiceCall::Stop]);
+    assert_eq!(
+        service_presentation(&window, cx).tone,
+        CaptionTone::Error,
+        "the refused Stop explains itself"
+    );
+
+    cx.update(|presenting, cx| {
+        window.update(cx, |settings, cx| {
+            settings.check_server_service(cx);
+            settings.set_local_automatic_start(false, presenting, cx);
+        });
+    });
+    cx.run_until_parked();
+
+    assert_eq!(
+        service.changes(),
+        [ServiceCall::Stop, ServiceCall::SetAutomaticStart(false)],
+        "the successful read lets the waiting change through"
+    );
+    assert!(!starts_automatically(cx));
+}
