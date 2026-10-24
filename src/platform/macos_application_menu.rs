@@ -854,6 +854,8 @@ mod tests {
         assert_eq!(
             labels(view_menu().owned()),
             [
+                "Command Palette…",
+                "|",
                 "Toggle Sidebar",
                 "Toggle Sidebar Focus",
                 "|",
@@ -914,6 +916,7 @@ mod tests {
             [
                 "New Workspace",
                 "New Remote Workspace",
+                "Add Server…",
                 "Open Local Directory…",
                 "Open Remote Directory…",
                 "Switch Workspace",
@@ -943,6 +946,7 @@ mod tests {
             [
                 NewWorkspace.name(),
                 crate::ui::NewRemoteWorkspace.name(),
+                crate::ui::settings_window::AddServer.name(),
                 crate::ui::OpenLocalDirectory.name(),
                 crate::ui::OpenRemoteDirectory.name(),
                 SwitchWorkspace.name(),
