@@ -50,6 +50,12 @@ const MENU_ITEM_ICONS: &[MenuItemIcon] = &[
     MenuItemIcon {
         menu: "File",
         submenu: None,
+        item: "Add Server…",
+        symbol: "server.rack",
+    },
+    MenuItemIcon {
+        menu: "File",
+        submenu: None,
         item: "Open Local Directory…",
         symbol: "folder",
     },
@@ -160,6 +166,12 @@ const MENU_ITEM_ICONS: &[MenuItemIcon] = &[
         submenu: Some("Find"),
         item: "Find Previous",
         symbol: "chevron.up",
+    },
+    MenuItemIcon {
+        menu: "View",
+        submenu: None,
+        item: "Command Palette…",
+        symbol: "command",
     },
     MenuItemIcon {
         menu: "View",
