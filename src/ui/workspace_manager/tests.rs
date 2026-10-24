@@ -6430,7 +6430,13 @@ pub(crate) fn assert_scroll_shortcuts_from_sidebar_focus(
         let calls = records.commands();
         let calls = calls[before..]
             .iter()
-            .filter(|call| !matches!(call.command, RecordedCommand::Focus(_)))
+            // Focus restoration also refreshes readiness demand for hidden Panes.
+            .filter(|call| {
+                !matches!(
+                    call.command,
+                    RecordedCommand::Focus(_) | RecordedCommand::SetPreparationDemand(_)
+                )
+            })
             .map(|call| (call.session_id, &call.command))
             .collect::<Vec<_>>();
         assert_eq!(

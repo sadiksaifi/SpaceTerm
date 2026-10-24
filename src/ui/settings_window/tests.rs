@@ -2708,9 +2708,9 @@ fn rendered_control_selector(row: SettingsRowId) -> Option<String> {
             SettingsRowId::ServerVersion => "settings-server-version",
             SettingsRowId::ServerAutoStart => "settings-server-auto-start",
             SettingsRowId::EndAllSessions => "settings-server-end-all-sessions",
-            // The fixture's local server offers no network operations, so the switch is shown
-            // unavailable and Devices waits for access to be on.
-            SettingsRowId::NetworkAccess => "settings-network-access",
+            // The fixture has no network observation, so the row says Unknown. Devices waits
+            // for access to be on.
+            SettingsRowId::NetworkAccess => "settings-network-access-unknown",
             SettingsRowId::PairedDevices => return None,
             // The list and its add action span the card, with no control column.
             SettingsRowId::AllServers | SettingsRowId::AddServer => return None,
