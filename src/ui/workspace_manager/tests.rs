@@ -2520,163 +2520,66 @@ fn client_window_controls_remain_operable_during_close_confirmation(cx: &mut Tes
     }
 }
 
-/// The dismissal choice's default button, which keeps the client in the menu bar.
-fn keep_choice() -> String {
-    format!(
-        "Quit {}",
-        crate::application_identity::ApplicationIdentity::current().display_name()
-    )
-}
-
 #[gpui::test]
-fn command_q_offers_keeping_the_client_in_the_menu_bar_or_cancelling(cx: &mut TestAppContext) {
+fn command_q_preserves_busy_desktop_close_confirmation(cx: &mut TestAppContext) {
     let (_, records, application_quit, cx) = workspace_manager_with_application_actions(cx);
     cx.update(|_, cx| crate::status_menu::set_available(cx, true));
     redraw(cx);
+    // Desktop-owned busy work still asks its existing Close Window question.
     cx.simulate_keystrokes("cmd-q");
     cx.run_until_parked();
-
-    let (title, detail) = cx.pending_prompt().expect("Command-Q asks first");
-    let name = crate::application_identity::ApplicationIdentity::current().display_name();
-    assert_eq!(title, "Are you sure you want to quit?");
-    assert_eq!(
-        detail,
-        format!("{name} stays in the menu bar, and your Terminal Sessions keep running.")
+    assert!(
+        !cx.has_pending_prompt(),
+        "dismissal must not ask a quit question"
     );
-
-    // Cancel changes nothing.
-    cx.simulate_prompt_answer("Cancel");
-    cx.run_until_parked();
-    assert!(!cx.has_pending_prompt());
-    assert_eq!(cx.update(|_, cx| cx.windows().len()), 1);
+    assert!(
+        cx.debug_bounds("modal-action-close-confirmation-cancel")
+            .is_some()
+    );
     assert!(records.dropped_session_ids().is_empty());
-    assert_eq!(application_quit.requests(), 0);
     assert_eq!(application_quit.confirmations(), 0);
 }
 
 #[gpui::test]
-fn a_native_dismissal_offers_the_same_choice_and_an_exit_does_not(cx: &mut TestAppContext) {
+fn native_dismissal_preserves_busy_desktop_close_confirmation(cx: &mut TestAppContext) {
     use crate::platform::application_quit::{ApplicationQuitDecision, ApplicationQuitRequest};
-
-    let (_, _, application_quit, cx) = workspace_manager_with_application_actions(cx);
+    let (_, records, application_quit, cx) = workspace_manager_with_application_actions(cx);
     cx.update(|_, cx| crate::status_menu::set_available(cx, true));
     redraw(cx);
-
-    // The Dock's Quit asks, and the host keeps running until the person chooses.
     assert_eq!(
         application_quit.simulate_native_request(ApplicationQuitRequest::Dismissal),
         ApplicationQuitDecision::Cancel
     );
     cx.run_until_parked();
-    let (title, _) = cx.pending_prompt().expect("the Dock's Quit asks first");
-    assert_eq!(title, "Are you sure you want to quit?");
-    // A second request while the person chooses asks nothing more.
-    application_quit.simulate_native_request(ApplicationQuitRequest::Dismissal);
-    cx.simulate_keystrokes("cmd-q");
-    cx.run_until_parked();
-    cx.simulate_prompt_answer("Cancel");
-    cx.run_until_parked();
     assert!(!cx.has_pending_prompt());
-
-    // An installed update or ending session exits through the quit policy alone.
-    application_quit.simulate_native_request(ApplicationQuitRequest::Exit);
-    cx.run_until_parked();
-    let (title, _) = cx.pending_prompt().expect("running work still asks");
-    assert_eq!(title, "Quit SpaceTerm?");
-    cx.simulate_prompt_answer("Cancel");
-    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("modal-action-close-confirmation-cancel")
+            .is_some()
+    );
+    assert!(records.dropped_session_ids().is_empty());
     assert_eq!(application_quit.confirmations(), 0);
 }
 
 #[gpui::test]
-fn command_q_without_a_status_area_keeps_the_windows_open(cx: &mut TestAppContext) {
-    let (manager, records, application_quit, cx) = workspace_manager_with_application_actions(cx);
+fn command_q_without_a_status_area_confirms_actual_exit(cx: &mut TestAppContext) {
+    let (_, records, application_quit, cx) = workspace_manager_with_application_actions(cx);
     redraw(cx);
     cx.simulate_keystrokes("cmd-q");
     cx.run_until_parked();
-
-    // Nothing could reach a windowless client, so keeping it closes no window, and says so.
-    let (title, detail) = cx.pending_prompt().expect("Command-Q asks first");
     let name = crate::application_identity::ApplicationIdentity::current().display_name();
-    assert_eq!(title, "Are you sure you want to quit?");
-    assert!(detail.starts_with(&format!(
-        "The menu bar isn't available, so {name} stays open."
-    )));
-    cx.simulate_prompt_answer(&format!("Keep {name} Open"));
+    let (title, detail) = cx.pending_prompt().expect("actual exit always asks");
+    assert_eq!(title, format!("Quit {name}?"));
+    assert!(detail.contains("Your Terminal Sessions keep running on the server"));
+    cx.simulate_prompt_answer("Cancel");
     cx.run_until_parked();
-    assert!(!cx.has_pending_prompt());
-    assert!(manager.read_with(cx, |manager, _| {
-        manager.close_confirmation.pending().is_none()
-    }));
     assert_eq!(cx.update(|_, cx| cx.windows().len()), 1);
     assert!(records.dropped_session_ids().is_empty());
     assert_eq!(application_quit.confirmations(), 0);
-}
-
-#[gpui::test]
-fn keeping_the_client_closes_the_window_through_its_own_confirmation_without_quitting(
-    cx: &mut TestAppContext,
-) {
-    let (manager, records, application_quit, cx) = workspace_manager_with_application_actions(cx);
-    cx.update(|_, cx| crate::status_menu::set_available(cx, true));
-    redraw(cx);
     cx.simulate_keystrokes("cmd-q");
     cx.run_until_parked();
-    cx.simulate_prompt_answer(&keep_choice());
+    cx.simulate_prompt_answer("Quit");
     cx.run_until_parked();
-
-    // The window's running work asks first, exactly as its close button does.
-    assert_eq!(
-        manager.read_with(cx, |manager, _| manager
-            .close_confirmation
-            .pending()
-            .map(|pending| pending.target)),
-        Some(CloseTarget::Window)
-    );
-    assert_eq!(application_quit.requests(), 0);
-    click("modal-action-close-confirmation-cancel", cx);
-    assert!(records.dropped_session_ids().is_empty());
-    assert_eq!(application_quit.requests(), 0);
-    assert_eq!(application_quit.confirmations(), 0);
-}
-
-/// Space and Return keep the client, and Escape cancels. Command-Q never exits the client; only
-/// the status item's Quit does.
-#[gpui::test]
-fn keyboard_answers_to_command_q_keep_or_cancel_without_quitting(cx: &mut TestAppContext) {
-    let (manager, records, application_quit, cx) = workspace_manager_with_application_actions(cx);
-    cx.update(|_, cx| {
-        crate::ui::application_prompt::install(cx);
-        crate::status_menu::set_available(cx, true);
-    });
-    redraw(cx);
-    let pending_close = |cx: &mut VisualTestContext| {
-        manager.read_with(cx, |manager, _| {
-            manager
-                .close_confirmation
-                .pending()
-                .map(|pending| pending.target)
-        })
-    };
-    for key in ["escape", "space", "enter"] {
-        cx.simulate_keystrokes("cmd-q");
-        cx.run_until_parked();
-        assert!(cx.update(|window, cx| spaceterm_ui::window_modal_is_open(window, cx)));
-        cx.simulate_keystrokes(key);
-        cx.simulate_event(gpui::KeyUpEvent {
-            keystroke: Keystroke::parse(key).unwrap(),
-        });
-        cx.run_until_parked();
-        assert_eq!(application_quit.confirmations(), 0, "{key} quit");
-        if key == "escape" {
-            assert_eq!(pending_close(cx), None, "Escape cancels");
-            continue;
-        }
-        // Keeping closes the window, whose running work asks first.
-        assert_eq!(pending_close(cx), Some(CloseTarget::Window), "{key} keeps");
-        click("modal-action-close-confirmation-cancel", cx);
-    }
-    assert!(records.dropped_session_ids().is_empty());
+    assert_eq!(application_quit.confirmations(), 1);
 }
 
 /// A Quit confirmed while a status-menu Stop or Restart runs waits for it, then checks the
@@ -2688,7 +2591,7 @@ fn quit_waiting_for_a_server_operation_asks_again_about_new_work(cx: &mut TestAp
     cx.cx.update(crate::status_menu::begin_operation);
     cx.dispatch_action(crate::app::QuitApplication);
     cx.run_until_parked();
-    cx.simulate_prompt_answer("Quit SpaceTerm");
+    cx.simulate_prompt_answer("Quit");
     cx.run_until_parked();
     assert_eq!(
         application_quit.confirmations(),
@@ -2747,7 +2650,7 @@ fn quit_action_should_cancel_safely_and_confirm_once(cx: &mut TestAppContext) {
     );
     cx.run_until_parked();
     assert!(cx.has_pending_prompt());
-    cx.simulate_prompt_answer("Quit SpaceTerm");
+    cx.simulate_prompt_answer("Quit");
     cx.run_until_parked();
 
     assert_eq!(application_quit.requests(), 4);

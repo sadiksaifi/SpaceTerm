@@ -16,7 +16,7 @@ use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
 use super::application_quit::{
     ApplicationQuitAdapter, ApplicationQuitDecision, ApplicationQuitError, ApplicationQuitHandler,
-    ApplicationQuitRequest, DismissalAnswer, DismissalPrompt, present_window_dismissal,
+    ApplicationQuitRequest, QuitAnswer, QuitPrompt, present_window_quit,
 };
 use super::macos_alert::{AlertSeverity, application_alert};
 
@@ -128,24 +128,23 @@ impl ApplicationQuitAdapter for MacosApplicationQuitAdapter {
         self.install_on_delegate((*delegate).as_ref(), handler)
     }
 
-    /// GPUI's alert focuses its last button, so Space would quit completely. This sheet focuses
-    /// the default answer instead.
-    fn present_dismissal(
+    /// Focus the default Quit button for both Return and Space.
+    fn present_confirmation(
         &self,
-        prompt: &DismissalPrompt,
+        prompt: &QuitPrompt,
         window: &mut gpui::Window,
         cx: &mut gpui::App,
-    ) -> gpui::Task<Option<DismissalAnswer>> {
+    ) -> gpui::Task<Option<QuitAnswer>> {
         let (Some(mtm), Some(sheet_window)) = (MainThreadMarker::new(), native_window(window))
         else {
-            return present_window_dismissal(prompt, window, cx);
+            return present_window_quit(prompt, window, cx);
         };
-        let alert = dismissal_alert(prompt, mtm);
+        let alert = quit_alert(prompt, mtm);
         // As with GPUI's own prompts, the sheet begins after this window update, because AppKit
         // reports the key window change back into GPUI while it presents.
         cx.spawn(async move |_| {
-            let responses = begin_dismissal_sheet(&alert, &sheet_window);
-            dismissal_answer(responses.recv().await.ok()?)
+            let responses = begin_quit_sheet(&alert, &sheet_window);
+            quit_answer(responses.recv().await.ok()?)
         })
     }
 
@@ -174,23 +173,32 @@ fn native_window(window: &gpui::Window) -> Option<Retained<NSWindow>> {
     view.window()
 }
 
-/// Builds the dismissal alert: the default answer, then Cancel.
-fn dismissal_alert(prompt: &DismissalPrompt, mtm: MainThreadMarker) -> Retained<NSAlert> {
-    // Every answer keeps Terminal Sessions running, so nothing is lost.
-    let alert = application_alert(AlertSeverity::Standard, mtm);
+/// Builds the quit warning: the default Quit button, then Cancel.
+fn quit_alert(prompt: &QuitPrompt, mtm: MainThreadMarker) -> Retained<NSAlert> {
+    let alert = application_alert(
+        if prompt.destructive {
+            AlertSeverity::Caution
+        } else {
+            AlertSeverity::Standard
+        },
+        mtm,
+    );
     alert.setMessageText(&NSString::from_str(&prompt.title));
     alert.setInformativeText(&NSString::from_str(&prompt.detail));
-    let keep = alert.addButtonWithTitle(&NSString::from_str(&prompt.keep));
-    alert.addButtonWithTitle(&NSString::from_str(DismissalAnswer::CANCEL_LABEL));
-    let keep: &NSView = &keep;
-    alert.window().setInitialFirstResponder(Some(keep));
+    let quit = alert.addButtonWithTitle(&NSString::from_str("Quit"));
+    if prompt.destructive {
+        quit.setHasDestructiveAction(true);
+    }
+    alert.addButtonWithTitle(&NSString::from_str(QuitAnswer::CANCEL_LABEL));
+    let quit: &NSView = &quit;
+    alert.window().setInitialFirstResponder(Some(quit));
     alert
 }
 
 /// Presents `alert` as a sheet on `sheet_window` and returns the channel that receives its one
 /// response. Beginning the sheet lays the alert out, and that layout can clear the default
 /// button's Return, so both key equivalents are bound once the sheet has begun.
-fn begin_dismissal_sheet(
+fn begin_quit_sheet(
     alert: &NSAlert,
     sheet_window: &NSWindow,
 ) -> async_channel::Receiver<NSModalResponse> {
@@ -211,11 +219,11 @@ fn begin_dismissal_sheet(
 
 /// Reads AppKit's response, which names each button by the order it was added. Ending the sheet
 /// any other way answers nothing.
-fn dismissal_answer(response: NSModalResponse) -> Option<DismissalAnswer> {
+fn quit_answer(response: NSModalResponse) -> Option<QuitAnswer> {
     if response == NSAlertFirstButtonReturn {
-        Some(DismissalAnswer::Keep)
+        Some(QuitAnswer::Quit)
     } else if response == NSAlertSecondButtonReturn {
-        Some(DismissalAnswer::Cancel)
+        Some(QuitAnswer::Cancel)
     } else {
         None
     }
@@ -343,7 +351,7 @@ fn request_from_event(event: &AnyObject) -> ApplicationQuitRequest {
         if reason.is_null() {
             ApplicationQuitRequest::Dismissal
         } else {
-            ApplicationQuitRequest::Exit
+            ApplicationQuitRequest::SessionEnd
         }
     }
 }
@@ -381,7 +389,10 @@ pub(in crate::platform) mod tests {
                     msg_send![class, descriptorWithTypeCode: u32::from_be_bytes(*b"logo")];
                 let _: () = msg_send![&*event, setParamDescriptor: &*reason, forKeyword: QUIT_REASON_KEYWORD];
             }
-            assert_eq!(request_from_event(&event), ApplicationQuitRequest::Exit);
+            assert_eq!(
+                request_from_event(&event),
+                ApplicationQuitRequest::SessionEnd
+            );
         });
     }
 
@@ -405,27 +416,27 @@ pub(in crate::platform) mod tests {
     /// Presents each sheet on a real window that stays off screen, lets AppKit lay it out and draw
     /// it, then answers it by a click or a key and reads the answer the production mapping
     /// delivers.
-    pub(in crate::platform) fn dismissal_sheet_delivers_each_answer_and_keys_keep_by_default() {
+    pub(in crate::platform) fn quit_sheet_delivers_each_answer_and_keys_quit_by_default() {
         use objc2_app_kit::{
             NSBackingStoreType, NSEvent, NSEventModifierFlags, NSEventType, NSWindowStyleMask,
         };
         use objc2_foundation::{NSDate, NSPoint, NSRect, NSRunLoop, NSSize};
 
         let mtm = objc2::MainThreadMarker::new().expect("native test must run on the main thread");
-        let prompt = DismissalPrompt {
-            title: "Are you sure you want to quit?".to_owned(),
+        let prompt = QuitPrompt {
+            title: "Quit SpaceTerm?".to_owned(),
             detail: "SpaceTerm stays in the menu bar, and your Terminal Sessions keep running."
                 .to_owned(),
-            keep: "Quit SpaceTerm".to_owned(),
+            destructive: false,
         };
         let settle =
             || NSRunLoop::currentRunLoop().runUntilDate(&NSDate::dateWithTimeIntervalSinceNow(0.3));
         for (answering, expected) in [
-            (Answering::Click(0), DismissalAnswer::Keep),
-            (Answering::Click(1), DismissalAnswer::Cancel),
-            (Answering::Key("\r", 36), DismissalAnswer::Keep),
-            (Answering::Key(" ", 49), DismissalAnswer::Keep),
-            (Answering::Key("\u{1b}", 53), DismissalAnswer::Cancel),
+            (Answering::Click(0), QuitAnswer::Quit),
+            (Answering::Click(1), QuitAnswer::Cancel),
+            (Answering::Key("\r", 36), QuitAnswer::Quit),
+            (Answering::Key(" ", 49), QuitAnswer::Quit),
+            (Answering::Key("\u{1b}", 53), QuitAnswer::Cancel),
         ] {
             // SAFETY: The window is created and released on the main thread, and AppKit does not
             // release it on close because the test owns it.
@@ -442,8 +453,8 @@ pub(in crate::platform) mod tests {
                 )
             };
             unsafe { host.setReleasedWhenClosed(false) };
-            let alert = dismissal_alert(&prompt, mtm);
-            let responses = begin_dismissal_sheet(&alert, &host);
+            let alert = quit_alert(&prompt, mtm);
+            let responses = begin_quit_sheet(&alert, &host);
             settle();
             let sheet = alert.window();
             sheet.displayIfNeeded();
@@ -465,16 +476,16 @@ pub(in crate::platform) mod tests {
             assert_eq!(
                 laid_out,
                 [
-                    ("Quit SpaceTerm".to_owned(), "\r".to_owned()),
+                    ("Quit".to_owned(), "\r".to_owned()),
                     ("Cancel".to_owned(), "\u{1b}".to_owned()),
                 ]
             );
             // Space presses the focused button, so focus rests on the default answer.
             let focus = sheet.firstResponder().expect("the sheet focuses a button");
-            let keep: &NSView = &buttons.objectAtIndex(0);
+            let quit: &NSView = &buttons.objectAtIndex(0);
             assert!(std::ptr::eq(
                 Retained::as_ptr(&focus).cast::<()>(),
-                (keep as *const NSView).cast::<()>()
+                (quit as *const NSView).cast::<()>()
             ));
 
             match answering {
@@ -507,7 +518,7 @@ pub(in crate::platform) mod tests {
                 .try_recv()
                 .unwrap_or_else(|_| panic!("{answering:?} answers the sheet"));
             assert_eq!(
-                dismissal_answer(response),
+                quit_answer(response),
                 Some(expected),
                 "{answering:?}: {response}"
             );

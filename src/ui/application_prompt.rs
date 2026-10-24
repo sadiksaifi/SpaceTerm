@@ -5,7 +5,8 @@ use gpui::{
     RenderablePromptHandle, Window, div,
 };
 use spaceterm_ui::{
-    Alert, AlertIntent, AlertOutcome, ModalAction, ModalActionEmphasis, ModalActionRole, ModalId,
+    Alert, AlertIntent, AlertOutcome, ModalAction, ModalActionEmphasis, ModalActionIntent,
+    ModalActionRole, ModalId,
 };
 
 pub(crate) fn install(cx: &mut App) {
@@ -43,6 +44,9 @@ fn build(
                 role,
                 format!("application-prompt-{index}"),
             );
+            if level == PromptLevel::Critical && role == ModalActionRole::Affirmative {
+                action = action.with_intent(ModalActionIntent::Destructive);
+            }
             if Some(index) == default {
                 action = action
                     .with_emphasis(ModalActionEmphasis::Prominent)

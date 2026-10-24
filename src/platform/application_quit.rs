@@ -11,8 +11,8 @@ pub(crate) enum ApplicationQuitDecision {
 /// Why the host asked the application to quit.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ApplicationQuitRequest {
-    /// The person asked to quit, such as from the Dock. They choose whether the client stays in
-    /// its menu bar or status area, quits, or keeps its windows.
+    /// The person asked to quit, such as from the Dock. Close windows when the status item
+    /// remains available; otherwise confirm exiting the client.
     #[cfg_attr(
         not(target_os = "macos"),
         allow(
@@ -21,9 +21,17 @@ pub(crate) enum ApplicationQuitRequest {
         )
     )]
     Dismissal,
-    /// The client chose to exit, such as from Quit SpaceTerm or an installed update, or the
-    /// person's session is ending. The quit policy runs without asking about the status area.
+    /// The client chose to exit, such as from its status item or an installed update.
     Exit,
+    /// The operating system is logging out, restarting, or shutting down. Never prompt.
+    #[cfg_attr(
+        not(target_os = "macos"),
+        allow(
+            dead_code,
+            reason = "Linux session shutdown terminates the process outside application Quit"
+        )
+    )]
+    SessionEnd,
 }
 
 /// The host's name for the place a windowless client stays reachable.
@@ -47,46 +55,48 @@ impl StatusAreaName {
     }
 }
 
-/// The words of the dismissal choice. Its default answer, which keeps the client running, comes
-/// before Cancel. Only the status item's own Quit exits the client completely.
+/// The warning for an actual client exit. Quit is the default answer.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct DismissalPrompt {
+pub(crate) struct QuitPrompt {
     pub(crate) title: String,
     pub(crate) detail: String,
-    /// The default answer, which keeps the client running.
-    pub(crate) keep: String,
+    pub(crate) destructive: bool,
 }
 
-/// The person's answer to the dismissal choice.
+/// The person's answer to the quit warning.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum DismissalAnswer {
-    Keep,
+pub(crate) enum QuitAnswer {
+    Quit,
     Cancel,
 }
 
-impl DismissalAnswer {
+impl QuitAnswer {
     pub(crate) const CANCEL_LABEL: &str = "Cancel";
 }
 
-/// Presents the dismissal choice through GPUI's prompt for this window.
-pub(crate) fn present_window_dismissal(
-    prompt: &DismissalPrompt,
+/// Presents the quit warning through GPUI's prompt for this window.
+pub(crate) fn present_window_quit(
+    prompt: &QuitPrompt,
     window: &mut Window,
     cx: &mut App,
-) -> Task<Option<DismissalAnswer>> {
+) -> Task<Option<QuitAnswer>> {
     let answer = window.prompt(
-        PromptLevel::Info,
+        if prompt.destructive {
+            PromptLevel::Critical
+        } else {
+            PromptLevel::Info
+        },
         &prompt.title,
         Some(&prompt.detail),
         &[
-            PromptButton::ok(prompt.keep.clone()),
-            PromptButton::cancel(DismissalAnswer::CANCEL_LABEL),
+            PromptButton::ok("Quit"),
+            PromptButton::cancel(QuitAnswer::CANCEL_LABEL),
         ],
         cx,
     );
     cx.spawn(async move |_| match answer.await.ok()? {
-        0 => Some(DismissalAnswer::Keep),
-        1 => Some(DismissalAnswer::Cancel),
+        0 => Some(QuitAnswer::Quit),
+        1 => Some(QuitAnswer::Cancel),
         _ => None,
     })
 }
@@ -172,18 +182,17 @@ pub(crate) trait ApplicationQuitAdapter {
 
     fn install(&self, handler: ApplicationQuitHandler) -> Result<(), ApplicationQuitError>;
 
-    /// Asks the dismissal choice in `window`. Initial keyboard focus, Return, and Space choose
-    /// Keep, and Escape chooses Cancel.
-    fn present_dismissal(
+    /// Asks the quit warning in `window`. Return and Space choose Quit; Escape cancels.
+    fn present_confirmation(
         &self,
-        prompt: &DismissalPrompt,
+        prompt: &QuitPrompt,
         window: &mut Window,
         cx: &mut App,
-    ) -> Task<Option<DismissalAnswer>> {
-        present_window_dismissal(prompt, window, cx)
+    ) -> Task<Option<QuitAnswer>> {
+        present_window_quit(prompt, window, cx)
     }
 
-    /// Asks the application to exit through the quit policy, without the dismissal choice.
+    /// Asks the application to exit through the quit policy.
     fn request_quit(&self, cx: &mut App);
 
     fn confirm_quit(&self, cx: &mut App);
@@ -197,12 +206,20 @@ pub(crate) mod testing {
 
     #[derive(Default)]
     pub(crate) struct RecordingApplicationQuitAdapter {
+        last_window: Option<LastWindowPolicy>,
         handler: RefCell<Option<ApplicationQuitHandler>>,
         requests: Rc<Cell<usize>>,
         confirmations: Rc<Cell<usize>>,
     }
 
     impl RecordingApplicationQuitAdapter {
+        pub(crate) fn with_last_window_policy(policy: LastWindowPolicy) -> Self {
+            Self {
+                last_window: Some(policy),
+                ..Self::default()
+            }
+        }
+
         pub(crate) fn requests(&self) -> usize {
             self.requests.get()
         }
@@ -226,6 +243,10 @@ pub(crate) mod testing {
     }
 
     impl ApplicationQuitAdapter for RecordingApplicationQuitAdapter {
+        fn last_window_policy(&self) -> LastWindowPolicy {
+            self.last_window.unwrap_or(LastWindowPolicy::KeepRunning)
+        }
+
         fn install(&self, handler: ApplicationQuitHandler) -> Result<(), ApplicationQuitError> {
             let mut installed = self.handler.borrow_mut();
             if installed.is_some() {

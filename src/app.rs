@@ -15,7 +15,7 @@ use crate::platform::application_menu::{
 };
 use crate::platform::application_quit::{
     ApplicationQuitAdapter, ApplicationQuitDecision, ApplicationQuitHandler,
-    ApplicationQuitRequest, DismissalAnswer, DismissalPrompt, StatusAreaName,
+    ApplicationQuitRequest, QuitAnswer, QuitPrompt, StatusAreaName,
 };
 use crate::platform::control_socket::ControlSocketProbe;
 use crate::ssh::command::{
@@ -330,7 +330,16 @@ pub(crate) fn init(
         == crate::platform::application_quit::LastWindowPolicy::Quit;
     let adapter = application_quit.clone();
     let pending = Rc::new(std::cell::Cell::new(false));
-    cx.on_window_closed(move |cx, _| {
+    cx.on_window_closed(move |cx, id| {
+        if let Some(index) = cx
+            .default_global::<QuitPromptHosts>()
+            .0
+            .iter()
+            .position(|host| *host == id)
+        {
+            cx.default_global::<QuitPromptHosts>().0.remove(index);
+            return;
+        }
         if cx.windows().is_empty() && !pending.replace(true) {
             let adapter = adapter.clone();
             let pending = pending.clone();
@@ -482,7 +491,8 @@ fn install_application_quit(
         adapter: Rc::downgrade(&adapter),
         state: RefCell::new(ApplicationQuitCoordinatorState::Idle),
         status_area: adapter.status_area_name(),
-        exit_ends_sessions: crate::local_startup::owned_foreground(),
+        sessions: crate::local_startup::owned_foreground()
+            .then(|| Arc::new(DevelopmentQuitSessions) as Arc<dyn QuitSessions>),
     });
     let handler = Rc::clone(&coordinator);
     adapter.install(ApplicationQuitHandler::new(
@@ -524,9 +534,9 @@ pub(crate) enum ApplicationQuitSaveOutcome {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ApplicationQuitCoordinatorState {
     Idle,
-    /// The person is choosing between keeping the client in its status area and quitting.
-    Choosing,
+    Observing,
     Prompting,
+    SessionEnding,
     WaitingForSettings,
     WaitingForUpdater,
     /// Waiting for a Stop or Restart the status item admitted.
@@ -539,13 +549,42 @@ struct ApplicationQuitCoordinator {
     status_area: StatusAreaName,
     /// Source Development's foreground Server and its Terminal Sessions end with the client.
     /// An installed client exits while its independently supervised Server keeps running.
-    exit_ends_sessions: bool,
+    sessions: Option<Arc<dyn QuitSessions>>,
+}
+
+/// Observes the run's authoritative live Sessions independently of open client windows.
+trait QuitSessions: Send + Sync {
+    fn observe(
+        &self,
+    ) -> Result<spaceterm_server::hierarchy::CloseInventory, spaceterm_server::ServerError>;
+}
+
+struct DevelopmentQuitSessions;
+
+impl QuitSessions for DevelopmentQuitSessions {
+    fn observe(
+        &self,
+    ) -> Result<spaceterm_server::hierarchy::CloseInventory, spaceterm_server::ServerError> {
+        use spaceterm_server::{
+            LocalServer, ServerError,
+            pane::{Reply, Request},
+        };
+        let identity = crate::application_identity::ApplicationIdentity::current().directory_name();
+        let server = LocalServer::for_identity(identity)?;
+        let mut connection = server.connect_pane()?;
+        match connection.exchange(&Request::Inventory)? {
+            Reply::Inventory { inventory, .. } => inventory
+                .close
+                .ok_or(ServerError::MissingRequiredCapability),
+            _ => Err(ServerError::Protocol),
+        }
+    }
 }
 
 #[derive(Clone)]
 struct ApplicationQuitSnapshot {
-    facts: crate::close_confirmation::ApplicationCloseFacts,
     panes: Vec<ApplicationQuitPane>,
+    sessions: Option<spaceterm_server::hierarchy::CloseInventory>,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -556,15 +595,28 @@ struct ApplicationQuitPane {
 
 impl ApplicationQuitSnapshot {
     fn authorizes(&self, current: &Self) -> bool {
-        current.panes.iter().all(|current| {
-            self.panes.iter().any(|authorized| {
-                authorized.window == current.window
-                    && authorized.facts.workspace_id == current.facts.workspace_id
-                    && authorized.facts.tab_id == current.facts.tab_id
-                    && authorized.facts.pane_id == current.facts.pane_id
-                    && (!current.facts.has_running_work || authorized.facts.has_running_work)
+        let sessions_authorized = match (&self.sessions, &current.sessions) {
+            (None, None) => true,
+            (Some(authorized), Some(current)) => {
+                authorized.boot == current.boot
+                    && current
+                        .sessions
+                        .iter()
+                        .filter(|pane| pane.session.is_some())
+                        .all(|pane| authorized.sessions.contains(pane))
+            }
+            _ => false,
+        };
+        sessions_authorized
+            && current.panes.iter().all(|current| {
+                self.panes.iter().any(|authorized| {
+                    authorized.window == current.window
+                        && authorized.facts.workspace_id == current.facts.workspace_id
+                        && authorized.facts.tab_id == current.facts.tab_id
+                        && authorized.facts.pane_id == current.facts.pane_id
+                        && (!current.facts.has_running_work || authorized.facts.has_running_work)
+                })
             })
-        })
     }
 }
 
@@ -577,6 +629,10 @@ impl ApplicationQuitCoordinator {
         match request {
             ApplicationQuitRequest::Dismissal => self.dismiss(cx),
             ApplicationQuitRequest::Exit => self.exit(cx),
+            ApplicationQuitRequest::SessionEnd => {
+                *self.state.borrow_mut() = ApplicationQuitCoordinatorState::SessionEnding;
+                return ApplicationQuitDecision::Proceed;
+            }
         }
         ApplicationQuitDecision::Cancel
     }
@@ -586,69 +642,95 @@ impl ApplicationQuitCoordinator {
             && !application_has_pending_close_confirmation(cx)
     }
 
-    /// Exits the client, asking first when the quit policy requires it.
+    /// Every actual user exit requires the quit warning, including an idle or windowless client.
     fn exit(self: &Rc<Self>, cx: &mut App) {
-        if !self.ready(cx) {
-            return;
-        }
-        let snapshot = application_quit_snapshot(cx);
-        if snapshot.facts.requires_confirmation() {
-            self.present_confirmation(snapshot, cx);
-        } else {
-            self.wait_for_settings(None, cx);
+        if self.ready(cx) {
+            self.observe(None, cx);
         }
     }
 
-    /// Lets the person choose between keeping the client in its menu bar or status area and
-    /// changing nothing. Keeping closes every window as Close All Windows does. Only the status
-    /// item's own Quit exits the client completely.
     fn dismiss(self: &Rc<Self>, cx: &mut App) {
         if !self.ready(cx) {
             return;
         }
-        let Some(adapter) = self.adapter.upgrade() else {
+        if crate::status_menu::available(cx) {
+            close_all_windows(cx);
+        } else {
+            self.exit(cx);
+        }
+    }
+
+    fn observe(self: &Rc<Self>, authorization: Option<ApplicationQuitSnapshot>, cx: &mut App) {
+        let Some(sessions) = self.sessions.clone() else {
+            self.review(authorization, application_quit_snapshot(cx), cx);
             return;
         };
-        let reach = DismissalReach {
-            status_area: crate::status_menu::available(cx),
-            windows: !cx.windows().is_empty(),
-        };
-        let prompt = dismissal_prompt(self.status_area, self.exit_ends_sessions, reach);
-        // With no window open, a window of its own asks and closes with the answer.
-        let existing = open_active_window(cx).or_else(|| cx.windows().into_iter().next());
-        let (window, host) = match existing {
-            Some(window) => (window, None),
-            None => match open_dismissal_host(cx) {
-                Ok(host) => (host.into(), Some(host)),
-                Err(_) => {
-                    eprintln!("failed to open a window for the quit choice");
-                    return;
-                }
-            },
-        };
-        *self.state.borrow_mut() = ApplicationQuitCoordinatorState::Choosing;
-        let answer = window.update(cx, |_, window, cx| {
-            window.activate_window();
-            adapter.present_dismissal(&prompt, window, cx)
-        });
-        let Ok(answer) = answer else {
-            *self.state.borrow_mut() = ApplicationQuitCoordinatorState::Idle;
-            close_dismissal_host(host, cx);
-            return;
-        };
+        *self.state.borrow_mut() = ApplicationQuitCoordinatorState::Observing;
+        let read = cx
+            .background_executor()
+            .spawn(async move { sessions.observe() });
         let coordinator = Rc::clone(self);
         cx.spawn(async move |cx| {
-            let answer = answer.await;
+            let result = read.await;
             cx.update(|cx| {
-                close_dismissal_host(host, cx);
-                if *coordinator.state.borrow() != ApplicationQuitCoordinatorState::Choosing {
+                if *coordinator.state.borrow() != ApplicationQuitCoordinatorState::Observing {
                     return;
                 }
                 *coordinator.state.borrow_mut() = ApplicationQuitCoordinatorState::Idle;
-                // Without a status item nothing could reach a windowless client, so keeping it
-                // leaves its windows open, as the choice said.
-                if answer == Some(DismissalAnswer::Keep) && reach.status_area {
-                    close_all_windows(cx);
+                match result {
+                    Ok(sessions) => {
+                        let mut snapshot = application_quit_snapshot(cx);
+                        snapshot.sessions = Some(sessions);
+                        coordinator.review(authorization, snapshot, cx);
+                    }
+                    Err(_) => coordinator.observation_failed(cx),
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn review(
+        self: &Rc<Self>,
+        authorization: Option<ApplicationQuitSnapshot>,
+        current: ApplicationQuitSnapshot,
+        cx: &mut App,
+    ) {
+        if application_has_pending_close_confirmation(cx) {
+            return;
+        }
+        if authorization
+            .as_ref()
+            .is_some_and(|authorization| authorization.authorizes(&current))
+        {
+            self.finish(current, cx);
+        } else {
+            self.present_confirmation(current, cx);
+        }
+    }
+
+    fn observation_failed(self: &Rc<Self>, cx: &mut App) {
+        let Ok((window, host)) = quit_confirmation_window(cx) else {
+            return;
+        };
+        *self.state.borrow_mut() = ApplicationQuitCoordinatorState::Prompting;
+        let answer = window.update(cx, |_, window, cx| {
+            window.activate_window();
+            window.prompt(PromptLevel::Warning, "Couldn't check Terminal Sessions",
+                Some("SpaceTerm couldn't read this development run's server. Try quitting again when the server is reachable so you can review the Terminal Sessions that would end."),
+                &[PromptButton::cancel("Cancel")], cx)
+        });
+        let coordinator = Rc::clone(self);
+        cx.spawn(async move |cx| {
+            if let Ok(answer) = answer {
+                let _ = answer.await;
+            }
+            cx.update(|cx| {
+                if *coordinator.state.borrow() == ApplicationQuitCoordinatorState::Prompting {
+                    *coordinator.state.borrow_mut() = ApplicationQuitCoordinatorState::Idle;
+                    cancel_quit_prompt(host, cx);
+                } else {
+                    close_quit_prompt_host(host, cx);
                 }
             });
         })
@@ -661,62 +743,62 @@ impl ApplicationQuitCoordinator {
         outcome: ApplicationQuitSaveOutcome,
         cx: &mut App,
     ) {
-        let mut state = self.state.borrow_mut();
-        if *state != ApplicationQuitCoordinatorState::WaitingForSettings {
+        if *self.state.borrow() != ApplicationQuitCoordinatorState::WaitingForSettings {
             return;
         }
-        *state = ApplicationQuitCoordinatorState::Idle;
-        drop(state);
         if matches!(outcome, ApplicationQuitSaveOutcome::Failed) {
+            *self.state.borrow_mut() = ApplicationQuitCoordinatorState::Idle;
             return;
         }
-        if application_has_pending_close_confirmation(cx) {
+        // The save completion can run inside the Settings Window's update. Read and prompt
+        // after that window returns to GPUI so a changed target can be confirmed there again.
+        let coordinator = Rc::clone(self);
+        cx.defer(move |cx| {
+            if *coordinator.state.borrow() != ApplicationQuitCoordinatorState::WaitingForSettings {
+                return;
+            }
+            *coordinator.state.borrow_mut() = ApplicationQuitCoordinatorState::Idle;
+            if !application_has_pending_close_confirmation(cx) {
+                coordinator.observe(authorization, cx);
+            }
+        });
+    }
+
+    fn finish(self: &Rc<Self>, current: ApplicationQuitSnapshot, cx: &mut App) {
+        let coordinator = Rc::clone(self);
+        let updater_authorization = current.clone();
+        if crate::updates::prepare_before_quit(
+            cx,
+            Rc::new(move |cx| {
+                if *coordinator.state.borrow() != ApplicationQuitCoordinatorState::WaitingForUpdater
+                {
+                    return;
+                }
+                *coordinator.state.borrow_mut() = ApplicationQuitCoordinatorState::Idle;
+                coordinator.wait_for_settings(Some(updater_authorization.clone()), cx);
+            }),
+        ) {
+            *self.state.borrow_mut() = ApplicationQuitCoordinatorState::WaitingForUpdater;
             return;
         }
-        let current = application_quit_snapshot(cx);
-        let authorized = authorization.map_or_else(
-            || !current.facts.requires_confirmation(),
-            |authorization| authorization.authorizes(&current),
-        );
-        if authorized {
+        // An admitted Stop or Restart finishes before the client exits. The client stays
+        // usable meanwhile, so the wait ends with the same checks and save as this one.
+        if crate::status_menu::operations_running(cx) {
+            *self.state.borrow_mut() = ApplicationQuitCoordinatorState::WaitingForOperations;
             let coordinator = Rc::clone(self);
-            let updater_authorization = current.clone();
-            if crate::updates::prepare_before_quit(
-                cx,
-                Rc::new(move |cx| {
-                    if *coordinator.state.borrow()
-                        != ApplicationQuitCoordinatorState::WaitingForUpdater
-                    {
-                        return;
-                    }
-                    *coordinator.state.borrow_mut() = ApplicationQuitCoordinatorState::Idle;
-                    coordinator.wait_for_settings(Some(updater_authorization.clone()), cx);
-                }),
-            ) {
-                *self.state.borrow_mut() = ApplicationQuitCoordinatorState::WaitingForUpdater;
-                return;
-            }
-            // An admitted Stop or Restart finishes before the client exits. The client stays
-            // usable meanwhile, so the wait ends with the same checks and save as this one.
-            if crate::status_menu::operations_running(cx) {
-                *self.state.borrow_mut() = ApplicationQuitCoordinatorState::WaitingForOperations;
-                let coordinator = Rc::clone(self);
-                crate::status_menu::after_operations(cx, move |cx| {
-                    if *coordinator.state.borrow()
-                        != ApplicationQuitCoordinatorState::WaitingForOperations
-                    {
-                        return;
-                    }
-                    *coordinator.state.borrow_mut() = ApplicationQuitCoordinatorState::Idle;
-                    coordinator.wait_for_settings(Some(current), cx);
-                });
-                return;
-            }
-            if let Some(adapter) = self.adapter.upgrade() {
-                adapter.confirm_quit(cx);
-            }
-        } else {
-            self.present_confirmation(current, cx);
+            crate::status_menu::after_operations(cx, move |cx| {
+                if *coordinator.state.borrow()
+                    != ApplicationQuitCoordinatorState::WaitingForOperations
+                {
+                    return;
+                }
+                *coordinator.state.borrow_mut() = ApplicationQuitCoordinatorState::Idle;
+                coordinator.wait_for_settings(Some(current), cx);
+            });
+            return;
+        }
+        if let Some(adapter) = self.adapter.upgrade() {
+            adapter.confirm_quit(cx);
         }
     }
 
@@ -742,58 +824,39 @@ impl ApplicationQuitCoordinator {
         }
         *state = ApplicationQuitCoordinatorState::Prompting;
         drop(state);
-        let windows = workspace_windows(cx);
-        let confirmation_window = open_active_window(cx)
-            .and_then(|window| window.downcast::<WorkspaceManager>())
-            .or_else(|| windows.into_iter().next());
-        let Some(confirmation_window) = confirmation_window else {
+        let Ok((confirmation_window, host)) = quit_confirmation_window(cx) else {
             *self.state.borrow_mut() = ApplicationQuitCoordinatorState::Idle;
             return;
         };
-        let count = snapshot.facts.pane_count;
-        let noun = if count == 1 { "Pane" } else { "Panes" };
-        // The caution level is for an answer that stops running commands. Otherwise the Terminal
-        // Sessions keep running, and the alert shows the application icon.
-        let (level, detail) = if self.exit_ends_sessions {
-            (
-                PromptLevel::Critical,
-                format!(
-                    "Quit with {count} open {noun}? This development run ends with SpaceTerm, so its Terminal Sessions end and any running commands stop."
-                ),
-            )
-        } else {
-            (
-                PromptLevel::Info,
-                format!(
-                    "Quit with {count} open {noun}? Their windows close, and the SpaceTerm Server keeps their Terminal Sessions running."
-                ),
-            )
+        let Some(adapter) = self.adapter.upgrade() else {
+            *self.state.borrow_mut() = ApplicationQuitCoordinatorState::Idle;
+            cancel_quit_prompt(host, cx);
+            return;
         };
+        let prompt = quit_prompt(self.status_area, snapshot.sessions.as_ref());
         let prompt = confirmation_window.update(cx, |_, window, cx| {
             window.activate_window();
-            window.prompt(
-                level,
-                "Quit SpaceTerm?",
-                Some(&detail),
-                &[
-                    PromptButton::ok("Quit SpaceTerm"),
-                    PromptButton::cancel("Cancel"),
-                ],
-                cx,
-            )
+            adapter.present_confirmation(&prompt, window, cx)
         });
         let Ok(prompt) = prompt else {
             *self.state.borrow_mut() = ApplicationQuitCoordinatorState::Idle;
+            cancel_quit_prompt(host, cx);
             return;
         };
         let coordinator = Rc::clone(self);
         cx.spawn(async move |cx| {
-            let confirmed = prompt.await == Ok(0);
+            let confirmed = prompt.await == Some(QuitAnswer::Quit);
             cx.update(|cx| {
+                if *coordinator.state.borrow() != ApplicationQuitCoordinatorState::Prompting {
+                    close_quit_prompt_host(host, cx);
+                    return;
+                }
                 if confirmed {
+                    close_quit_prompt_host(host, cx);
                     coordinator.wait_for_settings(Some(snapshot), cx);
                 } else {
                     *coordinator.state.borrow_mut() = ApplicationQuitCoordinatorState::Idle;
+                    cancel_quit_prompt(host, cx);
                 }
             });
         })
@@ -801,38 +864,35 @@ impl ApplicationQuitCoordinator {
     }
 }
 
-/// How the client can be reached when the dismissal choice is asked.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct DismissalReach {
-    /// The session shows the client's status item.
-    status_area: bool,
-    /// Some window is open.
-    windows: bool,
-}
+/// Temporary warning windows never trigger another last-window quit when they close.
+#[derive(Default)]
+struct QuitPromptHosts(Vec<gpui::WindowId>);
+impl gpui::Global for QuitPromptHosts {}
 
-/// Presents the dismissal choice when no window is open. It shows nothing of its own and closes
-/// with the answer, so asking never opens a Workspace Window or leaves a window behind.
-struct DismissalHost;
+/// Presents a quit warning without creating a Workspace or Terminal Session.
+struct QuitPromptHost;
 
-impl gpui::Render for DismissalHost {
+impl gpui::Render for QuitPromptHost {
     fn render(&mut self, _: &mut Window, cx: &mut gpui::Context<Self>) -> impl gpui::IntoElement {
         use gpui::Styled as _;
-        gpui::div()
-            .size_full()
-            .bg(crate::ui::appearance::gpui_color(
-                crate::ui::appearance::chrome(cx)
-                    .colors
-                    .title_bar_background,
-            ))
+        spaceterm_ui::ModalLayer::new(
+            gpui::div()
+                .size_full()
+                .bg(crate::ui::appearance::gpui_color(
+                    crate::ui::appearance::chrome(cx)
+                        .colors
+                        .title_bar_background,
+                )),
+        )
     }
 }
 
-const DISMISSAL_HOST_WIDTH: f32 = 480.0;
-const DISMISSAL_HOST_HEIGHT: f32 = 280.0;
+const QUIT_PROMPT_HOST_WIDTH: f32 = 480.0;
+const QUIT_PROMPT_HOST_HEIGHT: f32 = 280.0;
 
-fn open_dismissal_host(cx: &mut App) -> gpui::Result<gpui::WindowHandle<DismissalHost>> {
+fn open_quit_prompt_host(cx: &mut App) -> gpui::Result<gpui::WindowHandle<QuitPromptHost>> {
     let title = crate::application_identity::ApplicationIdentity::current().display_name();
-    let window_size = size(px(DISMISSAL_HOST_WIDTH), px(DISMISSAL_HOST_HEIGHT));
+    let window_size = size(px(QUIT_PROMPT_HOST_WIDTH), px(QUIT_PROMPT_HOST_HEIGHT));
     let host = cx.open_window(
         WindowOptions {
             app_id: window_application_id(),
@@ -851,51 +911,85 @@ fn open_dismissal_host(cx: &mut App) -> gpui::Result<gpui::WindowHandle<Dismissa
             is_minimizable: false,
             ..WindowOptions::default()
         },
-        |_, cx| cx.new(|_| DismissalHost),
+        |_, cx| cx.new(|_| QuitPromptHost),
     )?;
+    cx.default_global::<QuitPromptHosts>()
+        .0
+        .push(host.window_id());
     cx.activate(true);
     Ok(host)
 }
 
-fn close_dismissal_host(host: Option<gpui::WindowHandle<DismissalHost>>, cx: &mut App) {
+fn close_quit_prompt_host(host: Option<gpui::WindowHandle<QuitPromptHost>>, cx: &mut App) {
     if let Some(host) = host {
         let _ = host.update(cx, |_, window, _| window.remove_window());
     }
 }
 
-/// What the dismissal choice says on this host. Keeping leaves an installed client's Server and
-/// Terminal Sessions running. Source Development's run ends only when its status item quits it.
-fn dismissal_prompt(
+/// Cancel must leave the client reachable if the status item disappeared. Reopen its normal
+/// presentation before removing the warning host so no intermediate last-window close can quit.
+fn cancel_quit_prompt(host: Option<gpui::WindowHandle<QuitPromptHost>>, cx: &mut App) {
+    let prompt: Option<gpui::AnyWindowHandle> = host.map(Into::into);
+    let otherwise_windowless = |cx: &App| {
+        cx.windows()
+            .into_iter()
+            .all(|window| Some(window) == prompt)
+    };
+    if !crate::status_menu::available(cx) && otherwise_windowless(cx) {
+        activate_default_window(cx, None);
+        // If normal presentation is temporarily unavailable, retain the visible host rather
+        // than leave a client that has neither a window nor a status item.
+        if otherwise_windowless(cx) {
+            if let Some(host) = host {
+                // The retained host is now the client's reachable window. Its next native
+                // close must follow normal last-window policy instead of being suppressed.
+                cx.default_global::<QuitPromptHosts>()
+                    .0
+                    .retain(|id| *id != host.window_id());
+            }
+            return;
+        }
+    }
+    close_quit_prompt_host(host, cx);
+}
+
+fn quit_confirmation_window(
+    cx: &mut App,
+) -> gpui::Result<(
+    gpui::AnyWindowHandle,
+    Option<gpui::WindowHandle<QuitPromptHost>>,
+)> {
+    match open_active_window(cx).or_else(|| cx.windows().into_iter().next()) {
+        Some(window) => Ok((window, None)),
+        None => open_quit_prompt_host(cx).map(|host| (host.into(), Some(host))),
+    }
+}
+
+fn quit_prompt(
     status_area: StatusAreaName,
-    exit_ends_sessions: bool,
-    reach: DismissalReach,
-) -> DismissalPrompt {
+    sessions: Option<&spaceterm_server::hierarchy::CloseInventory>,
+) -> QuitPrompt {
     let name = crate::application_identity::ApplicationIdentity::current().display_name();
-    let place = status_area.phrase();
-    let (detail, keep) = match (reach.status_area, exit_ends_sessions) {
-        (true, false) => (
-            format!("{name} stays in the {place}, and your Terminal Sessions keep running."),
-            format!("Quit {name}"),
-        ),
-        (true, true) => (
+    let detail = match sessions {
+        Some(sessions) => {
+            let count = sessions
+                .sessions
+                .iter()
+                .filter(|pane| pane.session.is_some())
+                .count();
             format!(
-                "{name} stays in the {place}. Quitting from the {place} ends this run's Server \
-                 and Terminal Sessions."
-            ),
-            format!("Quit {name}"),
-        ),
-        (false, _) => (
-            format!(
-                "The {place} isn't available, so {name} stays open. Your Terminal Sessions keep \
-                 running."
-            ),
-            format!("Keep {name} Open"),
+                "This development build runs its own server, so quitting stops it too. Its {count} Terminal Sessions end, and any commands running in them stop."
+            )
+        }
+        None => format!(
+            "{name} closes and leaves the {}. Your Terminal Sessions keep running on the server, so everything is where you left it when you open {name} again.",
+            status_area.phrase()
         ),
     };
-    DismissalPrompt {
-        title: "Are you sure you want to quit?".to_owned(),
+    QuitPrompt {
+        title: format!("Quit {name}?"),
         detail,
-        keep,
+        destructive: sessions.is_some(),
     }
 }
 
@@ -908,11 +1002,9 @@ fn application_has_pending_close_confirmation(cx: &App) -> bool {
 }
 
 fn application_quit_snapshot(cx: &App) -> ApplicationQuitSnapshot {
-    let mut facts = crate::close_confirmation::ApplicationCloseFacts::default();
     let mut panes = Vec::new();
     for window in workspace_windows(cx) {
         if let Ok(manager) = window.read(cx) {
-            facts.merge(manager.application_close_facts(cx));
             panes.extend(
                 manager
                     .application_pane_facts(cx)
@@ -921,7 +1013,10 @@ fn application_quit_snapshot(cx: &App) -> ApplicationQuitSnapshot {
             );
         }
     }
-    ApplicationQuitSnapshot { facts, panes }
+    ApplicationQuitSnapshot {
+        panes,
+        sessions: None,
+    }
 }
 
 pub(crate) fn open(
@@ -1610,74 +1705,22 @@ mod tests {
         )
     }
 
-    const WINDOWED: DismissalReach = DismissalReach {
-        status_area: true,
-        windows: true,
-    };
-
     #[test]
-    fn the_dismissal_choice_offers_keeping_or_cancelling() {
+    fn quit_warning_uses_the_build_name_and_platform_status_area() {
         let name = crate::application_identity::ApplicationIdentity::current().display_name();
-        let windowless = DismissalReach {
-            status_area: true,
-            windows: false,
-        };
-        let unreachable = DismissalReach {
-            status_area: false,
-            windows: true,
-        };
-        let cases = [
-            (
-                StatusAreaName::MenuBar,
-                false,
-                WINDOWED,
-                format!("{name} stays in the menu bar, and your Terminal Sessions keep running."),
-                format!("Quit {name}"),
-            ),
-            (
-                StatusAreaName::MenuBar,
-                false,
-                windowless,
-                format!("{name} stays in the menu bar, and your Terminal Sessions keep running."),
-                format!("Quit {name}"),
-            ),
-            (
-                StatusAreaName::StatusArea,
-                false,
-                WINDOWED,
-                format!(
-                    "{name} stays in the status area, and your Terminal Sessions keep running."
-                ),
-                format!("Quit {name}"),
-            ),
-            (
-                StatusAreaName::MenuBar,
-                false,
-                unreachable,
-                format!(
-                    "The menu bar isn't available, so {name} stays open. Your Terminal Sessions keep running."
-                ),
-                format!("Keep {name} Open"),
-            ),
-            (
-                StatusAreaName::MenuBar,
-                true,
-                WINDOWED,
-                format!(
-                    "{name} stays in the menu bar. Quitting from the menu bar ends this run's Server and Terminal Sessions."
-                ),
-                format!("Quit {name}"),
-            ),
-        ];
-        for (status_area, exit_ends_sessions, reach, detail, keep) in cases {
+        for (status_area, place) in [
+            (StatusAreaName::MenuBar, "menu bar"),
+            (StatusAreaName::StatusArea, "status area"),
+        ] {
+            let prompt = quit_prompt(status_area, None);
+            assert_eq!(prompt.title, format!("Quit {name}?"));
             assert_eq!(
-                dismissal_prompt(status_area, exit_ends_sessions, reach),
-                DismissalPrompt {
-                    title: "Are you sure you want to quit?".to_owned(),
-                    detail,
-                    keep,
-                }
+                prompt.detail,
+                format!(
+                    "{name} closes and leaves the {place}. Your Terminal Sessions keep running on the server, so everything is where you left it when you open {name} again."
+                )
             );
+            assert!(!prompt.destructive);
         }
     }
 
@@ -1697,29 +1740,168 @@ mod tests {
     }
 
     #[gpui::test]
-    fn a_windowless_dismissal_asks_in_a_window_it_closes_with_the_answer(cx: &mut TestAppContext) {
+    fn windowless_dismissal_is_silent_and_actual_exit_always_asks(cx: &mut TestAppContext) {
         let quit = windowless_client(cx);
-        let name = crate::application_identity::ApplicationIdentity::current().display_name();
-        for answer in ["Cancel".to_owned(), format!("Quit {name}")] {
-            assert_eq!(
-                quit.simulate_native_request(ApplicationQuitRequest::Dismissal),
-                ApplicationQuitDecision::Cancel
-            );
+        quit.simulate_native_request(ApplicationQuitRequest::Dismissal);
+        cx.run_until_parked();
+        assert!(!cx.has_pending_prompt());
+        assert!(cx.update(|cx| cx.windows().is_empty()));
+        for answer in ["Cancel", "Quit"] {
+            quit.simulate_native_request(ApplicationQuitRequest::Exit);
             cx.run_until_parked();
-            let (title, _) = cx.pending_prompt().expect("the request asks first");
-            assert_eq!(title, "Are you sure you want to quit?");
+            let (title, _) = cx
+                .pending_prompt()
+                .expect("even an idle client confirms exit");
+            let name = crate::application_identity::ApplicationIdentity::current().display_name();
+            assert_eq!(title, format!("Quit {name}?"));
             let windows = cx.update(|cx| cx.windows());
-            assert_eq!(windows.len(), 1, "one window presents the choice");
+            assert_eq!(windows.len(), 1);
             assert!(windows[0].downcast::<WorkspaceManager>().is_none());
+            cx.simulate_prompt_answer(answer);
+            cx.run_until_parked();
+            assert!(cx.update(|cx| cx.windows().is_empty()));
+        }
+        assert_eq!(quit.confirmations(), 1);
+    }
 
-            cx.simulate_prompt_answer(&answer);
+    type QuitReading =
+        Result<spaceterm_server::hierarchy::CloseInventory, spaceterm_server::ServerError>;
+
+    struct ScriptedQuitSessions(std::sync::Mutex<std::collections::VecDeque<QuitReading>>);
+    impl QuitSessions for ScriptedQuitSessions {
+        fn observe(&self) -> QuitReading {
+            self.0
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("unexpected server observation")
+        }
+    }
+
+    fn development_quit_coordinator(
+        cx: &mut TestAppContext,
+        readings: Vec<QuitReading>,
+    ) -> (
+        Rc<ApplicationQuitCoordinator>,
+        Rc<crate::platform::application_quit::testing::RecordingApplicationQuitAdapter>,
+    ) {
+        let quit = windowless_client(cx);
+        let adapter: Rc<dyn ApplicationQuitAdapter> = quit.clone();
+        let coordinator = Rc::new(ApplicationQuitCoordinator {
+            adapter: Rc::downgrade(&adapter),
+            state: RefCell::new(ApplicationQuitCoordinatorState::Idle),
+            status_area: StatusAreaName::MenuBar,
+            sessions: Some(Arc::new(ScriptedQuitSessions(std::sync::Mutex::new(
+                readings.into(),
+            )))),
+        });
+        (coordinator, quit)
+    }
+
+    fn quit_sessions(
+        boot: u8,
+        sessions: &[Option<u8>],
+    ) -> spaceterm_server::hierarchy::CloseInventory {
+        use spaceterm_server::hierarchy::{CloseInventory, ConfirmedPane};
+        CloseInventory {
+            boot: [boot; 32],
+            sessions: sessions
+                .iter()
+                .enumerate()
+                .map(|(index, session)| ConfirmedPane {
+                    id: [index as u8 + 1; 32],
+                    session: session.map(|id| [id; 32]),
+                })
+                .collect(),
+            controls: None,
+        }
+    }
+
+    #[gpui::test]
+    fn development_quit_counts_live_server_sessions_without_windows(cx: &mut TestAppContext) {
+        let sessions = quit_sessions(1, &[Some(1), None, Some(3), Some(4)]);
+        let (coordinator, quit) =
+            development_quit_coordinator(cx, vec![Ok(sessions.clone()), Ok(sessions)]);
+        assert!(cx.update(|cx| workspace_windows(cx).is_empty()));
+        cx.update(|cx| coordinator.exit(cx));
+        cx.run_until_parked();
+        let (_, detail) = cx
+            .pending_prompt()
+            .expect("server-owned work confirms without windows");
+        assert_eq!(
+            detail,
+            "This development build runs its own server, so quitting stops it too. Its 3 Terminal Sessions end, and any commands running in them stop."
+        );
+        cx.simulate_prompt_answer("Quit");
+        cx.run_until_parked();
+        assert_eq!(quit.confirmations(), 1);
+        assert!(cx.update(|cx| workspace_windows(cx).is_empty()));
+    }
+
+    #[gpui::test]
+    fn development_quit_rechecks_hidden_sessions_after_confirmation(cx: &mut TestAppContext) {
+        for changed in [quit_sessions(1, &[Some(2)]), quit_sessions(2, &[Some(1)])] {
+            let (coordinator, quit) = development_quit_coordinator(
+                cx,
+                vec![Ok(quit_sessions(1, &[Some(1)])), Ok(changed)],
+            );
+            cx.update(|cx| coordinator.exit(cx));
+            cx.run_until_parked();
+            cx.simulate_prompt_answer("Quit");
             cx.run_until_parked();
             assert!(
-                cx.update(|cx| cx.windows().is_empty()),
-                "{answer} leaves no window"
+                cx.has_pending_prompt(),
+                "a replacement or restarted server needs fresh approval"
             );
-            assert_eq!(quit.confirmations(), 0, "{answer} keeps the client");
+            assert_eq!(quit.confirmations(), 0);
+            cx.simulate_prompt_answer("Cancel");
+            cx.run_until_parked();
         }
+    }
+
+    #[gpui::test]
+    fn development_quit_fails_safely_when_server_observation_fails(cx: &mut TestAppContext) {
+        for readings in [
+            vec![Err(spaceterm_server::ServerError::NotRunning)],
+            vec![
+                Ok(quit_sessions(1, &[])),
+                Err(spaceterm_server::ServerError::NotRunning),
+            ],
+        ] {
+            let initial_succeeds = readings.len() > 1;
+            let (coordinator, quit) = development_quit_coordinator(cx, readings);
+            cx.update(|cx| coordinator.exit(cx));
+            cx.run_until_parked();
+            if initial_succeeds {
+                cx.simulate_prompt_answer("Quit");
+                cx.run_until_parked();
+            }
+            assert_eq!(
+                cx.pending_prompt().unwrap().0,
+                "Couldn't check Terminal Sessions"
+            );
+            assert_eq!(quit.confirmations(), 0);
+            cx.simulate_prompt_answer("Cancel");
+            cx.run_until_parked();
+            assert_eq!(
+                *coordinator.state.borrow(),
+                ApplicationQuitCoordinatorState::Idle
+            );
+        }
+    }
+
+    #[gpui::test]
+    fn system_session_end_never_prompts_even_during_another_quit(cx: &mut TestAppContext) {
+        let quit = windowless_client(cx);
+        quit.simulate_native_request(ApplicationQuitRequest::Exit);
+        cx.run_until_parked();
+        assert_eq!(
+            quit.simulate_native_request(ApplicationQuitRequest::SessionEnd),
+            ApplicationQuitDecision::Proceed
+        );
+        cx.simulate_prompt_answer("Quit");
+        cx.run_until_parked();
+        assert_eq!(quit.confirmations(), 0);
     }
 
     #[gpui::test]
@@ -1759,6 +1941,45 @@ mod tests {
         });
         cx.run_until_parked();
         assert_eq!(quit.0.get(), 1);
+    }
+
+    #[gpui::test]
+    fn quit_cancel_keeps_a_window_reachable_when_restoration_is_unavailable(
+        cx: &mut TestAppContext,
+    ) {
+        let quit = Rc::new(crate::platform::application_quit::testing::RecordingApplicationQuitAdapter::with_last_window_policy(
+            crate::platform::application_quit::LastWindowPolicy::Quit,
+        ));
+        cx.update(crate::ui::init).unwrap();
+        cx.update(|cx| init(cx, application_menu(), quit.clone()).unwrap());
+        quit.simulate_native_request(ApplicationQuitRequest::Exit);
+        cx.run_until_parked();
+        assert!(cx.has_pending_prompt());
+        cx.simulate_prompt_answer("Cancel");
+        cx.run_until_parked();
+        assert!(!cx.has_pending_prompt());
+        let window = cx.update(|cx| {
+            assert_eq!(
+                cx.windows().len(),
+                1,
+                "an unavailable normal window cannot leave the client unreachable"
+            );
+            cx.windows()[0]
+        });
+        cx.update(|cx| {
+            window
+                .update(cx, |_, window, _| window.remove_window())
+                .unwrap()
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.has_pending_prompt(),
+            "closing the retained window still follows quit policy"
+        );
+        assert_eq!(quit.confirmations(), 0);
+        cx.simulate_prompt_answer("Cancel");
+        cx.run_until_parked();
+        assert_eq!(cx.update(|cx| cx.windows().len()), 1);
     }
 
     /// Counts quit requests under one last-window policy.
@@ -1875,6 +2096,14 @@ mod tests {
         cx.update(|cx| crate::status_menu::set_available(cx, false));
         cx.run_until_parked();
         assert_eq!(quit.requests(), 1, "nothing reaches the client any more");
+        assert!(
+            cx.has_pending_prompt(),
+            "status loss still needs exit approval"
+        );
+        cx.simulate_prompt_answer("Cancel");
+        cx.run_until_parked();
+        assert!(!cx.has_pending_prompt());
+        assert_eq!(quit.confirmations(), 0);
     }
 
     #[gpui::test]
@@ -1886,6 +2115,9 @@ mod tests {
         cx.update(|cx| init(cx, application_menu(), quit.clone()).unwrap());
         cx.update(crate::status_menu::begin_operation);
         cx.update(|cx| cx.dispatch_action(&QuitApplication));
+        cx.run_until_parked();
+        assert!(cx.has_pending_prompt());
+        cx.simulate_prompt_answer("Quit");
         cx.run_until_parked();
         assert_eq!(quit.confirmations(), 0, "a running Stop is never cut off");
 
@@ -2548,6 +2780,14 @@ mod runtime_tests {
         cx.run_until_parked();
         cx.update(|cx| cx.dispatch_action(&QuitApplication));
         cx.run_until_parked();
+        assert!(cx.has_pending_prompt());
+        assert_eq!(
+            updater.cancellations.get(),
+            0,
+            "Cancel must keep startup intact"
+        );
+        cx.simulate_prompt_answer("Quit");
+        cx.run_until_parked();
         assert_eq!(updater.cancellations.get(), 1);
         assert_eq!(quit.confirmations(), 0);
         if delayed_download_cancellation {
@@ -2862,6 +3102,118 @@ mod runtime_tests {
     }
 
     #[gpui::test]
+    fn last_linux_window_quit_cancel_restores_workspace_window(cx: &mut gpui::TestAppContext) {
+        windowless_quit_cancel_restores_workspace_window(cx, false);
+    }
+
+    #[gpui::test]
+    fn status_area_loss_quit_cancel_restores_workspace_window(cx: &mut gpui::TestAppContext) {
+        windowless_quit_cancel_restores_workspace_window(cx, true);
+    }
+
+    fn windowless_quit_cancel_restores_workspace_window(
+        cx: &mut gpui::TestAppContext,
+        lose_status_area: bool,
+    ) {
+        let quit = Rc::new(crate::platform::application_quit::testing::RecordingApplicationQuitAdapter::with_last_window_policy(
+            crate::platform::application_quit::LastWindowPolicy::Quit,
+        ));
+        let mut host = host_with_settings();
+        let adapters = &mut Rc::get_mut(&mut host).unwrap().adapters;
+        adapters.application_quit = quit.clone();
+        adapters.local_server = crate::ui::launch_testing::unanswered();
+        let original = cx.update(|cx| {
+            let original = start_application(cx, &host).unwrap();
+            install_headless_window_actions(cx, Rc::clone(&host));
+            crate::status_menu::set_available(cx, lose_status_area);
+            original
+        });
+        cx.run_until_parked();
+        cx.update(|cx| {
+            original
+                .update(cx, |_, window, _| window.remove_window())
+                .unwrap()
+        });
+        cx.run_until_parked();
+        if lose_status_area {
+            assert!(!cx.has_pending_prompt());
+            cx.update(|cx| crate::status_menu::set_available(cx, false));
+            cx.run_until_parked();
+        }
+        assert!(cx.has_pending_prompt());
+        cx.update(|cx| {
+            assert!(
+                workspace_windows(cx).is_empty(),
+                "displaying the warning creates no Workspace Window"
+            );
+            assert_eq!(cx.windows().len(), 1);
+            assert!(cx.windows()[0].downcast::<QuitPromptHost>().is_some());
+        });
+        assert_eq!(quit.confirmations(), 0);
+        cx.simulate_prompt_answer("Cancel");
+        cx.run_until_parked();
+        assert!(
+            !cx.has_pending_prompt(),
+            "Cancel must not start another quit"
+        );
+        cx.update(|cx| {
+            let restored = workspace_windows(cx);
+            assert_eq!(
+                restored.len(),
+                1,
+                "Cancel restores reachable presentation without a status item"
+            );
+            assert_eq!(
+                cx.windows().len(),
+                1,
+                "the temporary warning host closes after restoration"
+            );
+            assert_ne!(restored[0], original);
+            assert!(
+                restored[0]
+                    .update(cx, |_, window, _| window.is_window_active())
+                    .unwrap()
+            );
+        });
+        assert_eq!(quit.requests(), 1);
+        assert_eq!(quit.confirmations(), 0);
+    }
+
+    #[gpui::test]
+    fn application_and_dock_quit_close_server_windows_without_a_dialog(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let quit = Rc::new(
+            crate::platform::application_quit::testing::RecordingApplicationQuitAdapter::default(),
+        );
+        let host = {
+            let mut wiring = parts(Rc::default(), Rc::default());
+            wiring.adapters.application_quit = quit.clone();
+            HostComposition::new(wiring).unwrap()
+        };
+        cx.update(|cx| {
+            start_application(cx, &host).unwrap();
+        });
+        cx.run_until_parked();
+        cx.update(|cx| crate::status_menu::set_available(cx, true));
+        for dock in [false, true] {
+            if dock {
+                cx.update(|cx| {
+                    open(cx, &host).unwrap();
+                });
+                cx.run_until_parked();
+                quit.simulate_native_request(ApplicationQuitRequest::Dismissal);
+            } else {
+                cx.update(|cx| cx.dispatch_action(&DismissApplication));
+            }
+            cx.run_until_parked();
+            assert!(!cx.has_pending_prompt());
+            assert!(cx.update(|cx| cx.windows().is_empty()));
+            assert_eq!(quit.confirmations(), 0);
+        }
+    }
+
+    #[gpui::test]
     fn window_dispatched_quit_includes_the_dispatching_workspace(cx: &mut gpui::TestAppContext) {
         let quit = Rc::new(
             crate::platform::application_quit::testing::RecordingApplicationQuitAdapter::default(),
@@ -2872,7 +3224,7 @@ mod runtime_tests {
             crate::ui::launch_testing::unanswered();
         let workspace = cx.update(|cx| start_application(cx, &host).unwrap());
         present_desktop_work(workspace, cx);
-        assert!(cx.update(|cx| application_quit_snapshot(cx).facts.requires_confirmation()));
+        assert!(cx.update(|cx| !application_quit_snapshot(cx).panes.is_empty()));
 
         cx.update(|cx| {
             workspace
@@ -2920,8 +3272,7 @@ mod runtime_tests {
         });
         cx.run_until_parked();
 
-        // Only Settings remains. A window that presents no Workspace has no work to confirm, so
-        // quit must proceed rather than wait on it.
+        // A Settings-only client still confirms exit, then saves Settings and finishes.
         assert_eq!(cx.update(|cx| cx.windows().len()), 1);
         // TestAppContext does not deliver another App action with only Settings open. The native
         // adapter invokes the same installed quit coordinator and records its deferred decision.
@@ -2929,6 +3280,9 @@ mod runtime_tests {
             quit.simulate_native_request(ApplicationQuitRequest::Exit),
             ApplicationQuitDecision::Cancel
         );
+        cx.run_until_parked();
+        assert!(cx.has_pending_prompt());
+        cx.simulate_prompt_answer("Quit");
         cx.run_until_parked();
         assert!(!cx.has_pending_prompt());
         assert_eq!(quit.requests(), 2);
@@ -2973,7 +3327,7 @@ mod runtime_tests {
             adapter: Rc::downgrade(&adapter),
             state: RefCell::new(ApplicationQuitCoordinatorState::WaitingForSettings),
             status_area: StatusAreaName::MenuBar,
-            exit_ends_sessions: false,
+            sessions: None,
         });
 
         let decision = cx.update(|cx| coordinator.request(ApplicationQuitRequest::Dismissal, cx));
@@ -2991,7 +3345,7 @@ mod runtime_tests {
             adapter: Rc::downgrade(&adapter),
             state: RefCell::new(ApplicationQuitCoordinatorState::WaitingForSettings),
             status_area: StatusAreaName::MenuBar,
-            exit_ends_sessions: false,
+            sessions: None,
         });
 
         cx.update(|cx| {
@@ -3020,11 +3374,11 @@ mod runtime_tests {
             },
         };
         let authorized = ApplicationQuitSnapshot {
-            facts: Default::default(),
+            sessions: None,
             panes: vec![pane(1, true), pane(2, false)],
         };
         let current = ApplicationQuitSnapshot {
-            facts: Default::default(),
+            sessions: None,
             panes: vec![pane(1, false), pane(2, true)],
         };
 
@@ -3115,6 +3469,10 @@ mod runtime_tests {
             application_quit.simulate_native_request(ApplicationQuitRequest::Exit),
             ApplicationQuitDecision::Cancel
         );
+        cx.run_until_parked();
+        assert!(cx.has_pending_prompt(), "idle clients still confirm exit");
+        cx.simulate_prompt_answer("Quit");
+        cx.run_until_parked();
         assert_eq!(application_quit.confirmations(), 1);
         assert!(!cx.has_pending_prompt());
     }
@@ -3161,7 +3519,7 @@ mod runtime_tests {
             .update(|cx| cx.dispatch_action(&QuitApplication));
         settings_cx.run_until_parked();
         assert!(settings_cx.has_pending_prompt());
-        settings_cx.simulate_prompt_answer("Quit SpaceTerm");
+        settings_cx.simulate_prompt_answer("Quit");
         settings_cx.cx.update(|cx| {
             open(cx, &host)
                 .unwrap()
