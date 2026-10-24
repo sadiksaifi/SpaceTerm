@@ -338,16 +338,33 @@ impl<'alloc: 'cb, 'cb> Terminal<'alloc, 'cb> {
         cell_width_px: u32,
         cell_height_px: u32,
     ) -> Result<()> {
+        self.resize_with_prompt_redraw(cols, rows, cell_width_px, cell_height_px)
+            .map(|_| ())
+    }
+
+    /// Resize and report whether the active primary screen cleared a prompt
+    /// for the shell to redraw. This uses the engine's cursor semantics and
+    /// prompt policy, including for pixel-only winsize changes.
+    pub fn resize_with_prompt_redraw(
+        &mut self,
+        cols: u16,
+        rows: u16,
+        cell_width_px: u32,
+        cell_height_px: u32,
+    ) -> Result<bool> {
+        let mut prompt_cleared = false;
         let result = unsafe {
-            ffi::ghostty_terminal_resize(
+            ffi::ghostty_terminal_resize_with_prompt_redraw(
                 self.inner.as_raw(),
                 cols,
                 rows,
                 cell_width_px,
                 cell_height_px,
+                &mut prompt_cleared,
             )
         };
-        from_result(result)
+        from_result(result)?;
+        Ok(prompt_cleared)
     }
 
     /// Perform a full reset of the terminal (RIS).
@@ -2236,6 +2253,25 @@ mod tests {
                 .unwrap()
                 .is_set(style::PaletteIndex::RED)
         );
+    }
+
+    #[test]
+    fn resize_reports_cleared_prompts_only_for_the_active_primary_screen() {
+        let mut terminal = Terminal::new(Options {
+            cols: 80,
+            rows: 24,
+            max_scrollback: 0,
+            max_scrollback_bytes: 50_000_000,
+        })
+        .unwrap();
+        terminal.vt_write(b"\x1b]133;A;redraw=1\x07> \x1b]133;B\x07");
+        assert!(terminal.resize_with_prompt_redraw(81, 24, 8, 16).unwrap());
+
+        terminal.vt_write(b"\x1b[?1049halt screen");
+        assert!(!terminal.resize_with_prompt_redraw(82, 24, 8, 16).unwrap());
+
+        terminal.vt_write(b"\x1b[?1049l");
+        assert!(terminal.resize_with_prompt_redraw(83, 24, 8, 16).unwrap());
     }
 
     #[test]

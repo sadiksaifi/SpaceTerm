@@ -1,13 +1,21 @@
 diff --git a/src/terminal/Screen.zig b/src/terminal/Screen.zig
-index 007e727..b706a30 100644
 --- a/src/terminal/Screen.zig
 +++ b/src/terminal/Screen.zig
-@@ -2107,14 +2107,29 @@ pub inline fn resize(
+@@ -2022,6 +2022,9 @@
+     /// currently at a prompt. This detects OSC133 prompts lines and clears
+     /// them. If set to `.last`, only the most recent prompt line is cleared.
+     prompt_redraw: osc.semantic_prompt.Redraw = .false,
++
++    /// Reports whether this successful resize cleared a redrawable prompt.
++    prompt_cleared: ?*bool = null,
+ };
+ 
+ const resize_tw = tripwire.module(enum {
+@@ -2107,14 +2110,29 @@
          self.cursor.hyperlink = null;
      }
  
--    // Perform the resize operation.
-     try tw.check(.pages);
++    try tw.check(.pages);
 +
 +    // Clear the prompt while its physical rows still have their old width.
 +    // Each cleared row becomes a hard line, so reflow preserves the number
@@ -23,7 +31,8 @@ index 007e727..b706a30 100644
 +        if (cleared_prompt) self.cursor.page_pin.x = old_cursor_x;
 +    }
 +
-+    // Perform the resize operation.
+     // Perform the resize operation.
+-    try tw.check(.pages);
      try self.pages.resize(.{
          .rows = opts.rows,
          .cols = opts.cols,
@@ -34,7 +43,7 @@ index 007e727..b706a30 100644
              .y = self.cursor.y,
              .pin = self.cursor.page_pin,
          },
-@@ -2135,11 +2150,7 @@ pub inline fn resize(
+@@ -2135,11 +2153,7 @@
      // If our cursor was updated, we do a full reload so all our cursor
      // state is correct.
      self.cursorReload();
@@ -47,11 +56,16 @@ index 007e727..b706a30 100644
  
      // Restore the cursor style.
      self.cursor.style = cursor_style;
-@@ -2232,13 +2243,12 @@ pub inline fn resize(
+@@ -2230,15 +2244,15 @@
+             page.hyperlink_set.release(page.memory, cursor_hyperlink_id);
+         }
      }
- }
- 
+-}
+-
 -fn clearPromptForRedraw(
++    if (opts.prompt_cleared) |out| out.* = cleared_prompt;
++}
++
 +pub fn clearPromptForRedraw(
      self: *Screen,
      redraw: osc.semantic_prompt.Redraw,
@@ -65,7 +79,7 @@ index 007e727..b706a30 100644
      //
      // We check cursor.semantic_content rather than page_row.semantic_prompt
      // because some shells (e.g., Nu) mark input areas with OSC 133 B but don't
-@@ -2253,13 +2263,14 @@ fn clearPromptForRedraw(
+@@ -2253,13 +2267,14 @@
          switch (redraw) {
              .false => unreachable,
  
@@ -86,7 +100,7 @@ index 007e727..b706a30 100644
              },
  
              .true => {
-@@ -2277,19 +2288,25 @@ fn clearPromptForRedraw(
+@@ -2277,19 +2292,25 @@
                      };
                  };
  
@@ -103,8 +117,9 @@ index 007e727..b706a30 100644
 +                self.clearPromptRows(start);
              },
          }
+-    }
 +        return true;
-     }
++    }
 +    return false;
 +}
 +
@@ -123,10 +138,9 @@ index 007e727..b706a30 100644
  
  /// Set a style attribute for the current cursor.
 diff --git a/src/terminal/Terminal.zig b/src/terminal/Terminal.zig
-index 5e7dca5..f127020 100644
 --- a/src/terminal/Terminal.zig
 +++ b/src/terminal/Terminal.zig
-@@ -2103,12 +2103,8 @@ pub fn semanticPrompt(
+@@ -2103,12 +2103,8 @@
                  .prompt = cmd.readOption(.prompt_kind) orelse .initial,
              });
  
@@ -141,17 +155,143 @@ index 5e7dca5..f127020 100644
  
              click: {
                  // Handle click_events as a priority over cl. click_events
-@@ -4067,7 +4063,12 @@ pub fn resize(
+@@ -3985,6 +3981,8 @@
+ ///
+ /// Cell pixel dimensions must already be scaled for the current display DPI.
+ pub const Resize = struct {
++    /// Reports whether the resize cleared a prompt on the active primary screen.
++    prompt_cleared: ?*bool = null,
+     cols: size.CellCountInt,
+     rows: size.CellCountInt,
+     cell_size_px: ?struct {
+@@ -4036,6 +4034,7 @@
+     // Screen and scrolling-region invariants require non-zero dimensions.
+     // Validate before changing any terminal state.
+     if (opts.cols == 0 or opts.rows == 0) return error.InvalidValue;
++    if (opts.prompt_cleared) |out| out.* = false;
+ 
+     // Pixel geometry and synchronized output are updated on every valid
+     // resize attempt, including one that doesn't change the grid dimensions.
+@@ -4067,7 +4066,13 @@
      self.modes.set(.synchronized_output, false);
  
      // If our cols/rows didn't change, skip grid work but still apply pixels.
 -    if (self.cols == opts.cols and self.rows == opts.rows) return;
 +    if (self.cols == opts.cols and self.rows == opts.rows) {
 +        if (self.screens.active_key == .primary) {
-+            _ = self.screens.active.clearPromptForRedraw(self.flags.shell_redraws_prompt);
++            const cleared = self.screens.active.clearPromptForRedraw(self.flags.shell_redraws_prompt);
++            if (opts.prompt_cleared) |out| out.* = cleared;
 +        }
 +        return;
 +    }
  
      // Build replacement tabstops without touching the current table. Keep
      // ownership here until every fallible resize operation has succeeded.
+@@ -4087,11 +4092,13 @@
+     // and alt fails than the reverse.
+     try tw.check(.primary_screen);
+     const primary = self.screens.get(.primary).?;
++    var prompt_cleared = false;
+     try primary.resize(.{
+         .cols = opts.cols,
+         .rows = opts.rows,
+         .reflow = self.modes.get(.wraparound),
+         .prompt_redraw = self.flags.shell_redraws_prompt,
++        .prompt_cleared = &prompt_cleared,
+     });
+ 
+     // Alternate screen, if it exists, doesn't reflow. The primary resize
+@@ -4164,6 +4171,10 @@
+     // No more failures are allowed after this point because the screens have
+     // committed their new sizes and the remaining Terminal state must follow.
+     errdefer comptime unreachable;
++
++    if (opts.prompt_cleared) |out| {
++        out.* = self.screens.active_key == .primary and prompt_cleared;
++    }
+ 
+     // All fallible work is complete. Replace the old tabstop table only now.
+     if (new_tabstops) |v| {
+diff --git a/src/terminal/c/terminal.zig b/src/terminal/c/terminal.zig
+--- a/src/terminal/c/terminal.zig
++++ b/src/terminal/c/terminal.zig
+@@ -1563,9 +1563,22 @@
+     cell_width_px: u32,
+     cell_height_px: u32,
+ ) callconv(lib.calling_conv) Result {
++    return resize_with_prompt_redraw(terminal_, cols, rows, cell_width_px, cell_height_px, null);
++}
++
++pub fn resize_with_prompt_redraw(
++    terminal_: Terminal,
++    cols: size.CellCountInt,
++    rows: size.CellCountInt,
++    cell_width_px: u32,
++    cell_height_px: u32,
++    prompt_cleared: ?*bool,
++) callconv(lib.calling_conv) Result {
++    if (prompt_cleared) |out| out.* = false;
+     const wrapper = terminal_ orelse return .invalid_value;
+     wrapper.accessibility_revision +%= 1;
+     wrapper.stream.handler.resize(.{
++        .prompt_cleared = prompt_cleared,
+         .cols = cols,
+         .rows = rows,
+         .cell_size_px = .{
+diff --git a/src/terminal/c/main.zig b/src/terminal/c/main.zig
+--- a/src/terminal/c/main.zig
++++ b/src/terminal/c/main.zig
+@@ -195,6 +195,7 @@
+ pub const terminal_clear_screen = terminal.clear_screen;
+ pub const terminal_reset = terminal.reset;
+ pub const terminal_resize = terminal.resize;
++pub const terminal_resize_with_prompt_redraw = terminal.resize_with_prompt_redraw;
+ pub const terminal_set = terminal.set;
+ pub const terminal_vt_write = terminal.vt_write;
+ pub const terminal_vt_write_until_ground = terminal.vt_write_until_ground;
+diff --git a/src/lib_vt.zig b/src/lib_vt.zig
+--- a/src/lib_vt.zig
++++ b/src/lib_vt.zig
+@@ -324,6 +324,7 @@
+         @export(&c.terminal_clear_screen, .{ .name = "ghostty_terminal_clear_screen" });
+         @export(&c.terminal_reset, .{ .name = "ghostty_terminal_reset" });
+         @export(&c.terminal_resize, .{ .name = "ghostty_terminal_resize" });
++        @export(&c.terminal_resize_with_prompt_redraw, .{ .name = "ghostty_terminal_resize_with_prompt_redraw" });
+         @export(&c.terminal_set, .{ .name = "ghostty_terminal_set" });
+         @export(&c.terminal_vt_write, .{ .name = "ghostty_terminal_vt_write" });
+         @export(&c.terminal_vt_write_until_ground, .{ .name = "ghostty_terminal_vt_write_until_ground" });
+diff --git a/include/ghostty/vt/terminal.h b/include/ghostty/vt/terminal.h
+--- a/include/ghostty/vt/terminal.h
++++ b/include/ghostty/vt/terminal.h
+@@ -2099,6 +2099,31 @@
+                                       uint32_t cell_height_px);
+ 
+ /**
++ * Resize the terminal and report whether it cleared a redrawable prompt.
++ *
++ * This has the same behavior and error results as ghostty_terminal_resize().
++ * On success, prompt_cleared reports whether the active primary screen cleared
++ * its prompt for the shell to redraw. Alternate-screen resizes report false.
++ *
++ * @param terminal The terminal handle
++ * @param cols New width in cells (must be greater than zero)
++ * @param rows New height in cells (must be greater than zero)
++ * @param cell_width_px Width of a single cell in pixels
++ * @param cell_height_px Height of a single cell in pixels
++ * @param prompt_cleared Optional output pointer, valid only on success
++ * @return GHOSTTY_SUCCESS on success, or an error code on failure
++ *
++ * @ingroup terminal
++ */
++GHOSTTY_API GhosttyResult ghostty_terminal_resize_with_prompt_redraw(
++    GhosttyTerminal terminal,
++    uint16_t cols,
++    uint16_t rows,
++    uint32_t cell_width_px,
++    uint32_t cell_height_px,
++    bool* prompt_cleared);
++
++/**
+  * Set an option on the terminal.
+  *
+  * Configures terminal callbacks and associated state such as the

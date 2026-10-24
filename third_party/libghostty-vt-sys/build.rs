@@ -294,7 +294,13 @@ fn verify_required_source_exports(ghostty_dir: &Path) {
                 "ghostty_accessibility_state_set_selection",
             ],
         ),
-        ("terminal.h", &["ghostty_terminal_clear_screen"] as &[_]),
+        (
+            "terminal.h",
+            &[
+                "ghostty_terminal_clear_screen",
+                "ghostty_terminal_resize_with_prompt_redraw",
+            ] as &[_],
+        ),
     ] {
         let source = std::fs::read_to_string(ghostty_dir.join("include/ghostty/vt").join(header))
             .expect("patched Ghostty header must exist");
@@ -324,6 +330,7 @@ fn verify_required_library_exports(
         "ghostty_accessibility_state_update",
         "ghostty_accessibility_state_set_selection",
         "ghostty_terminal_clear_screen",
+        "ghostty_terminal_resize_with_prompt_redraw",
     ];
     for library in requested_libraries {
         let output = Command::new("nm")

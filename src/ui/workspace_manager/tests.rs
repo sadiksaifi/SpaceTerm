@@ -3447,6 +3447,126 @@ fn toggling_the_sidebar_should_slide_it_while_the_terminal_resizes_once(cx: &mut
     assert_eq!(resizes(), before + 2);
 }
 
+/// Where this frame paints the stage's base surface inside `region`, in scaled pixels: each fill
+/// and each side of each border, clipped as drawn.
+fn stage_paint(
+    region: gpui::Bounds<Pixels>,
+    cx: &mut VisualTestContext,
+) -> Vec<gpui::Bounds<gpui::ScaledPixels>> {
+    use gpui::{Bounds, point};
+
+    cx.update(|window, cx| {
+        let appearance = crate::ui::appearance::chrome(cx);
+        let surface = crate::ui::workspace_frame::base_surface(&appearance.colors);
+        let color = gpui_color(appearance.surface(crate::appearance::SurfaceRole::Base, surface));
+        let region = region.scale(window.scale_factor());
+        let mut painted = Vec::new();
+        for quad in window.painted_quads() {
+            let bounds = quad.bounds;
+            let mut parts = Vec::new();
+            if quad.background == gpui::Background::from(color) {
+                parts.push(bounds);
+            }
+            if quad.border_color == gpui::Hsla::from(color) {
+                let widths = quad.border_widths;
+                let (left, right) = (bounds.left() + widths.left, bounds.right() - widths.right);
+                parts.extend([
+                    Bounds::from_corners(bounds.origin, point(left, bounds.bottom())),
+                    Bounds::from_corners(point(right, bounds.top()), bounds.bottom_right()),
+                    Bounds::from_corners(
+                        point(left, bounds.top()),
+                        point(right, bounds.top() + widths.top),
+                    ),
+                    Bounds::from_corners(
+                        point(left, bounds.bottom() - widths.bottom),
+                        point(right, bounds.bottom()),
+                    ),
+                ]);
+            }
+            let clip = quad.content_mask.bounds.intersect(&region);
+            painted.extend(
+                parts
+                    .into_iter()
+                    .map(|part| part.intersect(&clip))
+                    .filter(|part| !part.is_empty()),
+            );
+        }
+        painted
+    })
+}
+
+/// Asserts that the stage paints its base surface somewhere, never over the Pane, and never twice
+/// over the same pixels, so a translucent Pane shows the same backdrop in every frame.
+fn assert_stage_paints_only_its_frame(
+    state: &str,
+    stage: gpui::Bounds<Pixels>,
+    pane: gpui::Bounds<Pixels>,
+    cx: &mut VisualTestContext,
+) {
+    let painted = stage_paint(stage, cx);
+    let pane = pane.scale(cx.update(|window, _| window.scale_factor()));
+    assert!(
+        !painted.is_empty(),
+        "{state}: the stage must paint its edges"
+    );
+    for (index, part) in painted.iter().enumerate() {
+        assert!(
+            !part.intersects(&pane),
+            "{state}: the stage paints its surface over the Pane: {part:?} {pane:?}"
+        );
+        for other in &painted[index + 1..] {
+            assert!(
+                !part.intersects(other),
+                "{state}: the stage paints its surface twice: {part:?} {other:?}"
+            );
+        }
+    }
+}
+
+/// The stage paints its base surface only as a frame around the Panes, while the sidebar slides
+/// as at rest, so a translucent Pane keeps its color.
+#[gpui::test]
+fn a_sliding_stage_should_paint_only_its_frame_around_the_panes(cx: &mut TestAppContext) {
+    use crate::ui::drag_and_drop::AnimatePresence;
+
+    let (manager, _records, cx) = workspace_manager(cx);
+    let window_edge_inset = workspace_frame(cx).window_edge_inset();
+    cx.update(|_, cx| cx.set_global(AnimatePresence));
+
+    for (motion, rest) in [("hiding", "hidden"), ("showing", "shown")] {
+        cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| manager.toggle_sidebar(window, cx))
+        });
+        let (_, stage, pane, _) = sidebar_motion_frame(cx);
+        assert_stage_paints_only_its_frame(motion, stage, pane, cx);
+
+        // The frame is drawn where the stage is, from its leading edge to the window's edges.
+        let mut edge = |side: &'static str| {
+            cx.debug_bounds(side)
+                .unwrap_or_else(|| panic!("{motion}: the sliding stage must paint {side}"))
+        };
+        let leading = edge("tab-manager-moving-stage-leading-edge");
+        let bottom = edge("tab-manager-moving-stage-bottom-edge");
+        let trailing = edge("tab-manager-moving-stage-trailing-edge");
+        assert!(
+            leading.left() == stage.left() && leading.size.width > px(0.0),
+            "{motion}: the leading edge must start the stage: {leading:?} {stage:?}"
+        );
+        assert!(
+            bottom.size.height == window_edge_inset && bottom.bottom() == stage.bottom(),
+            "{motion}: the bottom edge must reach the window's edge: {bottom:?} {stage:?}"
+        );
+        assert!(
+            trailing.size.width == window_edge_inset && trailing.right() == stage.right(),
+            "{motion}: the trailing edge must reach the window's edge: {trailing:?} {stage:?}"
+        );
+
+        finish_slides(cx);
+        let (_, stage, pane, _) = sidebar_presentation(cx);
+        assert_stage_paints_only_its_frame(rest, stage, pane, cx);
+    }
+}
+
 #[gpui::test]
 fn every_frame_of_a_sidebar_toggle_should_keep_the_terminal_size(cx: &mut TestAppContext) {
     toggle_the_sidebar_frame_by_frame(None, None, false, cx);

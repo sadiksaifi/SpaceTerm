@@ -80,6 +80,8 @@ pub(crate) struct PaneFrames {
     frames: BTreeMap<PaneId, (Bounds<Pixels>, Bounds<Pixels>)>,
     /// Device pixels per Pane Layout pixel.
     scale_factor: f32,
+    /// How many times wider than the Pane Layout this frame draws it.
+    stretch: f32,
     /// The closing places of removed Panes, in Pane Layout coordinates.
     pub(crate) closing: Vec<Bounds<Pixels>>,
     /// Whether any Pane or closing place is still moving.
@@ -95,6 +97,7 @@ impl Default for PaneFrames {
         Self {
             frames: BTreeMap::new(),
             scale_factor: 1.0,
+            stretch: 1.0,
             closing: Vec::new(),
             moving: false,
             raised: None,
@@ -125,7 +128,20 @@ impl PaneFrames {
         for place in &mut self.closing {
             *place = stretch(*place);
         }
+        self.stretch = scale;
         self.moving = true;
+    }
+
+    /// Where this frame draws `place`, a part of the Pane Layout such as a Split's gap, so that its
+    /// edges meet the drawn edges of the Panes beside it.
+    pub(crate) fn present_place(&self, place: Bounds<Pixels>) -> Bounds<Pixels> {
+        let edge = |x: Pixels| {
+            x + ((x * self.stretch - x) * self.scale_factor).round() / self.scale_factor
+        };
+        Bounds::from_corners(
+            point(edge(place.left()), place.top()),
+            point(edge(place.right()), place.bottom()),
+        )
     }
 
     /// How far the Pane `pane_id` is drawn inside each edge of its laid-out place, in whole device

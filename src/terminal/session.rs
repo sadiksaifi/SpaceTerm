@@ -1614,6 +1614,11 @@ impl TerminalWorker {
     }
 
     fn receive_next_command(&mut self) -> Option<Command> {
+        // Presentation deadlines must advance even when PTY readers keep the queue nonempty.
+        // The emulator separately enforces the prompt cap and synchronized-output inactivity.
+        if !self.release_synchronized_output_if_due(Instant::now()) {
+            return None;
+        }
         if self
             .input
             .deadline()

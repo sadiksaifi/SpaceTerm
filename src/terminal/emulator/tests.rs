@@ -963,7 +963,11 @@ fn row_text(snapshot: &ScreenSnapshot, row: usize) -> String {
         .collect()
 }
 
+/// Reads every grid row after advancing held output through its presentation deadlines.
 fn all_grid_rows(emulator: &mut TerminalEmulator) -> Vec<String> {
+    while let Some(deadline) = emulator.synchronized_output_deadline() {
+        emulator.expire_synchronized_output(deadline).unwrap();
+    }
     emulator.scroll_to(0);
     let first = emulator.snapshot().unwrap().unwrap();
     let visible = first.rows.len();
@@ -1740,6 +1744,11 @@ fn zsh_prompt_redraw_after_column_growth_preserves_command_output() {
     emulator.resize(geometry(150, 20, 10.0, 20.0)).unwrap();
     emulator.feed(b"\r\r\x1b[A\x1b[A\x1b[0m\x1b[27m\x1b[24m\x1b[J");
     emulator.feed(prompt);
+    // This redraw carries no prompt-end mark, so the session releases it at the deadline.
+    assert!(emulator.snapshot().unwrap().is_none());
+    emulator
+        .expire_synchronized_output(emulator.synchronized_output_deadline().unwrap())
+        .unwrap();
     let snapshot = emulator.snapshot().unwrap().unwrap();
 
     assert!(
@@ -1762,6 +1771,10 @@ fn zsh_prompt_redraw_after_column_growth_preserves_command_output() {
     emulator.resize(geometry(50, 20, 10.0, 20.0)).unwrap();
     emulator.feed(b"\r\r\x1b[A\x1b[0m\x1b[27m\x1b[24m\x1b[J");
     emulator.feed(prompt);
+    assert!(emulator.snapshot().unwrap().is_none());
+    emulator
+        .expire_synchronized_output(emulator.synchronized_output_deadline().unwrap())
+        .unwrap();
     let shrunk = emulator.snapshot().unwrap().unwrap();
     assert!(
         shrunk.rows.iter().any(|row| row
@@ -1787,6 +1800,11 @@ fn zsh_prompt_redraw_at_screen_bottom_preserves_command_output() {
     emulator.resize(geometry(150, 5, 10.0, 20.0)).unwrap();
     emulator.feed(b"\r\r\x1b[A\x1b[A\x1b[0m\x1b[27m\x1b[24m\x1b[J");
     emulator.feed(prompt);
+    // This redraw carries no prompt-end mark, so the session releases it at the deadline.
+    assert!(emulator.snapshot().unwrap().is_none());
+    emulator
+        .expire_synchronized_output(emulator.synchronized_output_deadline().unwrap())
+        .unwrap();
     let snapshot = emulator.snapshot().unwrap().unwrap();
 
     assert!(
@@ -2277,6 +2295,238 @@ fn same_grid_resize_with_pixel_winsize_change_clears_idle_prompt_without_shell_o
             " ".repeat(20),
         ]
     );
+}
+
+/// A resize clears a prompt the shell redraws. The screen keeps presenting the prompt it had until
+/// the shell has drawn it again, so the prompt never blinks out while a Pane resizes.
+#[test]
+fn resize_should_hold_a_cleared_prompt_until_the_shell_redraws_it() {
+    let mut emulator = emulator(20, 4);
+    emulator.feed(b"QA_RESIZE_MARKER\r\n\x1b]133;A;redraw=1\x07~\r\n> \x1b]133;B\x07");
+    let before = emulator.snapshot().unwrap().unwrap();
+    assert_eq!(row_text(&before, 2).trim_end(), ">");
+
+    let resized = Instant::now();
+    emulator
+        .resize_for_pty_at(geometry(24, 4, 10.0, 20.0), true, resized)
+        .unwrap();
+    assert!(
+        emulator.snapshot().unwrap().is_none(),
+        "the cleared prompt must not be presented"
+    );
+
+    // Captured from zsh after SIGWINCH: it erases from the prompt and prints PS1 again.
+    emulator.feed_at(
+        b"\r\r\x1b[A\x1b[0m\x1b[J\x1b]133;A;redraw=1\x07~\r\n",
+        resized,
+    );
+    assert!(
+        emulator.snapshot().unwrap().is_none(),
+        "a partly redrawn prompt must not be presented"
+    );
+    emulator.feed_at(b"> \x1b]133;B\x07", resized);
+    let redrawn = emulator.snapshot().unwrap().unwrap();
+    assert!(redrawn.damage.resize);
+    assert_eq!(
+        (0..3)
+            .map(|row| row_text(&redrawn, row).trim_end().to_owned())
+            .collect::<Vec<_>>(),
+        ["QA_RESIZE_MARKER", "~", ">"]
+    );
+}
+
+#[test]
+fn a_held_prompt_redraw_should_release_when_the_shell_stays_silent() {
+    let mut emulator = emulator(20, 4);
+    emulator.feed(b"QA_RESIZE_MARKER\r\n\x1b]133;A;redraw=1\x07~\r\n> \x1b]133;B\x07");
+    let _ = emulator.snapshot().unwrap();
+    let resized = Instant::now();
+    emulator
+        .resize_for_pty_at(geometry(24, 4, 10.0, 20.0), true, resized)
+        .unwrap();
+    assert!(emulator.snapshot().unwrap().is_none());
+
+    assert!(
+        !emulator
+            .expire_synchronized_output(resized + PROMPT_REDRAW_HOLD - Duration::from_millis(1))
+            .unwrap()
+    );
+    assert!(emulator.snapshot().unwrap().is_none());
+    assert!(
+        emulator
+            .expire_synchronized_output(resized + PROMPT_REDRAW_HOLD)
+            .unwrap()
+    );
+    let released = emulator.snapshot().unwrap().unwrap();
+    assert!(released.damage.resize);
+    assert_eq!(row_text(&released, 0).trim_end(), "QA_RESIZE_MARKER");
+}
+
+#[test]
+fn a_layout_resize_should_keep_an_unfinished_prompt_redraw_held() {
+    let mut emulator = emulator(20, 4);
+    emulator.feed(b"\x1b]133;A;redraw=1\x07> \x1b]133;B\x07");
+    let resized = Instant::now();
+    emulator
+        .resize_for_pty_at(geometry(24, 4, 10.0, 20.0), true, resized)
+        .unwrap();
+    emulator.feed_at(b"\x1b[?2026h", resized);
+    let deadline = emulator.synchronized_output_deadline();
+    let layout = TerminalGeometry::from_viewport(
+        LogicalSize::new(240.5, 80.0),
+        LogicalCellSize::new(10.0, 20.0),
+        BackingScale::ONE,
+        CellGridSize::new(1, 1),
+    );
+
+    emulator
+        .resize_for_pty_at(layout, false, resized + Duration::from_millis(10))
+        .unwrap();
+
+    assert_eq!(emulator.synchronized_output_deadline(), deadline);
+    assert!(emulator.snapshot().unwrap().is_none());
+    emulator.feed_at(b"\x1b[?2026$p", resized);
+    assert_eq!(emulator.take_pty_responses(), b"\x1b[?2026;2$y");
+    emulator.feed_at(b"\r> \x1b]133;B\x07", resized);
+    assert_eq!(
+        row_text(&emulator.snapshot().unwrap().unwrap(), 0).trim_end(),
+        ">"
+    );
+}
+
+#[test]
+fn prompt_redraw_expiry_should_preserve_an_active_synchronized_transaction() {
+    let mut emulator = emulator(20, 4);
+    emulator.feed(b"\x1b]133;A;redraw=1\x07> \x1b]133;B\x07");
+    let resized = Instant::now();
+    emulator
+        .resize_for_pty_at(geometry(24, 4, 10.0, 20.0), true, resized)
+        .unwrap();
+    emulator.feed_at(b"\x1b[?2026h\rpartial", resized);
+
+    assert!(
+        emulator
+            .expire_synchronized_output(resized + PROMPT_REDRAW_SETTLE)
+            .unwrap()
+    );
+    assert!(emulator.snapshot().unwrap().is_none());
+    assert_eq!(
+        emulator.synchronized_output_deadline(),
+        Some(resized + MAX_SYNCHRONIZED_OUTPUT_DURATION)
+    );
+    emulator.feed_at(b"\x1b[?2026$p", resized + PROMPT_REDRAW_SETTLE);
+    assert_eq!(emulator.take_pty_responses(), b"\x1b[?2026;1$y");
+    emulator.feed_at(b" redraw\x1b[?2026l", resized + PROMPT_REDRAW_HOLD);
+    assert_eq!(
+        row_text(&emulator.snapshot().unwrap().unwrap(), 0).trim_end(),
+        "partial redraw"
+    );
+}
+
+#[test]
+fn a_bare_prompt_mark_should_restore_redraw_after_a_disabled_prompt() {
+    for new_geometry in [geometry(24, 4, 10.0, 20.0), geometry(20, 4, 11.0, 20.0)] {
+        for option in ["", ";redraw=invalid"] {
+            let mut emulator = emulator(20, 4);
+            emulator.feed(b"\x1b]133;A;redraw=0\x07old\x1b]133;B\x07\r\n");
+            emulator.feed(format!("\x1b]133;A{option}\x07> \x1b]133;B\x07").as_bytes());
+
+            emulator.resize(new_geometry).unwrap();
+
+            assert!(emulator.snapshot().unwrap().is_none(), "option={option:?}");
+            emulator.feed(b"\r> \x1b]133;B\x07");
+            assert_eq!(
+                row_text(&emulator.snapshot().unwrap().unwrap(), 1).trim_end(),
+                ">"
+            );
+        }
+    }
+}
+
+#[test]
+fn resize_should_follow_the_engine_prompt_state_after_a_terminal_reset() {
+    let mut emulator = emulator(20, 4);
+    emulator.feed(b"\x1b]133;A;redraw=1\x07> \x1b]133;B\x07");
+    // RIS resets Ghostty's cursor semantics, but does not emit an OSC metadata event.
+    emulator.feed(b"\x1bccommand output");
+
+    emulator.resize(geometry(24, 4, 10.0, 20.0)).unwrap();
+
+    assert_eq!(
+        row_text(&emulator.snapshot().unwrap().unwrap(), 0).trim_end(),
+        "command output"
+    );
+}
+
+/// Bash redraws its prompt without a prompt-end mark. Its redraw is presented once its output
+/// pauses, and typing that keeps output flowing cannot hold the screen past the longest wait.
+#[test]
+fn a_prompt_redraw_without_an_end_mark_should_release_once_output_pauses() {
+    let mut emulator = emulator(40, 4);
+    emulator.feed(b"QA_RESIZE_MARKER\r\n\x1b]133;A;redraw=last\x07bash> ");
+    let _ = emulator.snapshot().unwrap();
+    let resized = Instant::now();
+    emulator
+        .resize_for_pty_at(geometry(44, 4, 10.0, 20.0), true, resized)
+        .unwrap();
+
+    let redrawn = resized + Duration::from_millis(5);
+    emulator.feed_at(b"\r\x1b[Kbash> ", redrawn);
+    assert!(
+        !emulator
+            .expire_synchronized_output(redrawn + PROMPT_REDRAW_SETTLE - Duration::from_millis(1))
+            .unwrap()
+    );
+    assert!(
+        emulator
+            .expire_synchronized_output(redrawn + PROMPT_REDRAW_SETTLE)
+            .unwrap()
+    );
+    let released = emulator.snapshot().unwrap().unwrap();
+    assert_eq!(row_text(&released, 1).trim_end(), "bash>");
+
+    emulator
+        .resize_for_pty_at(geometry(40, 4, 10.0, 20.0), true, resized)
+        .unwrap();
+    let mut typed = resized;
+    while typed < resized + PROMPT_REDRAW_HOLD {
+        emulator.feed_at(b"x", typed);
+        typed += Duration::from_millis(10);
+    }
+    assert!(
+        emulator
+            .expire_synchronized_output(resized + PROMPT_REDRAW_HOLD)
+            .unwrap(),
+        "continuous output must not hold the screen past the longest wait"
+    );
+}
+
+/// Ghostty clears only a marked prompt the shell has not said it cannot redraw, and only while the
+/// cursor is not in command output, so every other resize presents at once.
+#[test]
+fn resize_should_present_at_once_when_no_prompt_is_cleared() {
+    for (name, bytes) in [
+        ("no semantic prompt", &b"QA_RESIZE_MARKER\r\n~\r\n> "[..]),
+        (
+            "redraw disabled",
+            &b"QA_RESIZE_MARKER\r\n\x1b]133;A;redraw=0\x07~\r\n> \x1b]133;B\x07"[..],
+        ),
+        (
+            "command output",
+            &b"\x1b]133;A;redraw=1\x07> \x1b]133;B\x07sleep\r\n\x1b]133;C\x07running"[..],
+        ),
+    ] {
+        let mut emulator = emulator(20, 4);
+        emulator.feed(bytes);
+        let _ = emulator.snapshot().unwrap();
+        emulator
+            .resize_for_pty_at(geometry(24, 4, 10.0, 20.0), true, Instant::now())
+            .unwrap();
+        assert!(
+            emulator.snapshot().unwrap().is_some(),
+            "{name}: the resize must present at once"
+        );
+    }
 }
 
 #[test]

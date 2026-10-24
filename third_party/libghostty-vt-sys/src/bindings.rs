@@ -560,7 +560,7 @@ unsafe extern "C" {
     pub fn ghostty_accessibility_state_free(state: *mut AccessibilityState);
 }
 unsafe extern "C" {
-    #[doc = " Retain dirty row identities and topology before visual rendering.\n\n Call this before Ghostty render-state update clears page/row dirty bits\n when semantic extraction is deferred. It does not extract text, invoke\n callbacks, or decode compressed pages. Later state_update calls retain\n their bounded topology and row extraction behavior."]
+    #[doc = " Retain dirty row identities and topology before rendering or compression.\n\n Call this before Ghostty render-state update clears page/row dirty bits\n when semantic extraction is deferred. It does not extract text, invoke\n callbacks, or decode compressed pages. Later state_update calls retain\n their bounded topology and row extraction behavior. Capture before and\n after resizing so rows exposed from history retain mutation coverage."]
     pub fn ghostty_accessibility_state_capture(
         state: *mut AccessibilityState,
         terminal: Terminal,
@@ -3470,15 +3470,15 @@ pub mod TerminalData {
     pub const CURSOR_AT_PROMPT: Type = 39;
     #[doc = " The configured maximum decoded bytes per Kitty clipboard protocol\n (OSC 5522) write transaction. See\n GHOSTTY_TERMINAL_OPT_CLIPBOARD_WRITE_MAX_BYTES.\n\n Output type: size_t *"]
     pub const CLIPBOARD_WRITE_MAX_BYTES: Type = 40;
-    #[doc = " Whether the effective foreground is an OSC override.\n\n Output type: bool *"]
+    #[doc = " Whether the effective foreground is an OSC override.\n Output type: bool *"]
     pub const COLOR_FOREGROUND_OVERRIDDEN: Type = 41;
-    #[doc = " Whether the effective background is an OSC override.\n\n Output type: bool *"]
+    #[doc = " Whether the effective background is an OSC override.\n Output type: bool *"]
     pub const COLOR_BACKGROUND_OVERRIDDEN: Type = 42;
-    #[doc = " Whether the effective cursor color is an OSC override.\n\n Output type: bool *"]
+    #[doc = " Whether the effective cursor color is an OSC override.\n Output type: bool *"]
     pub const COLOR_CURSOR_OVERRIDDEN: Type = 43;
-    #[doc = " Palette indices whose effective values are OSC overrides.\n\n Output type: GhosttyColorPaletteMask *"]
+    #[doc = " Palette indices whose effective values are OSC overrides.\n Output type: GhosttyColorPaletteMask *"]
     pub const COLOR_PALETTE_OVERRIDES: Type = 44;
-    #[doc = " The configured maximum decoded bytes per Kitty clipboard protocol\n (OSC 5522) write transaction. See\n GHOSTTY_TERMINAL_OPT_CLIPBOARD_WRITE_MAX_BYTES.\n\n Output type: size_t *"]
+    #[doc = " Palette indices whose effective values are OSC overrides.\n Output type: GhosttyColorPaletteMask *"]
     pub const MAX_VALUE: Type = 2147483647;
 }
 unsafe extern "C" {
@@ -3510,6 +3510,17 @@ unsafe extern "C" {
         rows: u16,
         cell_width_px: u32,
         cell_height_px: u32,
+    ) -> Result::Type;
+}
+unsafe extern "C" {
+    #[doc = " Resize the terminal and report whether it cleared a redrawable prompt.\n\n This has the same behavior and error results as ghostty_terminal_resize().\n On success, prompt_cleared reports whether the active primary screen cleared\n its prompt for the shell to redraw. Alternate-screen resizes report false.\n\n"]
+    pub fn ghostty_terminal_resize_with_prompt_redraw(
+        terminal: Terminal,
+        cols: u16,
+        rows: u16,
+        cell_width_px: u32,
+        cell_height_px: u32,
+        prompt_cleared: *mut bool,
     ) -> Result::Type;
 }
 unsafe extern "C" {
