@@ -462,7 +462,7 @@ pub(in crate::platform) mod tests {
         // An installed build's Quit is the default for Return and the focused button for Space. A
         // Development run's Quit ends its Terminal Sessions, so focus rests on Cancel and Return
         // answers nothing.
-        let cases: [(bool, &str, usize, [(Answering, Option<QuitAnswer>); 5]); 2] = [
+        let cases = [
             (
                 false,
                 "\r",
