@@ -2386,7 +2386,7 @@ fn closed_screen_lane_skips_snapshot_and_accessibility_without_stopping_runtime(
 
 #[test]
 fn synchronized_output_deadline_should_publish_only_after_output_stalls() {
-    let (_command_tx, commands) = mpsc::channel();
+    let (command_tx, commands) = mpsc::channel();
     let (_reader_events, reader_event_rx) = mpsc::sync_channel(PTY_OUTPUT_QUEUE_CAPACITY);
     let records = ScriptedPtyRecords::default();
     let (events, receiver) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
@@ -2414,13 +2414,22 @@ fn synchronized_output_deadline_should_publish_only_after_output_stalls() {
     assert!(worker.publish_screen());
     let _ = receiver.try_recv().unwrap();
 
-    let started = Instant::now();
+    let started = Instant::now() - Duration::from_millis(1100);
     worker.emulator.feed_at(b"\x1b[?2026hlong", started);
     assert!(worker.publish_screen());
     assert!(receiver.try_recv().is_err());
 
     let progressed = started + Duration::from_millis(900);
     worker.emulator.feed_at(b" remote redraw", progressed);
+    command_tx.send(Command::ReaderReady(None)).unwrap();
+    loop {
+        let command = worker.receive_next_command().unwrap();
+        if matches!(command, Command::ReaderReady(None)) {
+            break;
+        }
+        assert!(worker.process_command(command));
+    }
+    assert!(receiver.try_recv().is_err());
     assert!(worker.release_synchronized_output_if_due(started + MAX_SYNCHRONIZED_OUTPUT_DURATION));
     assert!(
         receiver.try_recv().is_err(),
@@ -2434,6 +2443,77 @@ fn synchronized_output_deadline_should_publish_only_after_output_stalls() {
         panic!("the synchronized-output deadline must publish a screen")
     };
     assert!(screen_text(&screen).contains("long remote redraw"));
+    worker.finish();
+}
+
+#[test]
+fn queued_reader_commands_should_not_extend_the_prompt_redraw_cap() {
+    let (command_tx, commands) = mpsc::channel();
+    let (_reader_tx, reader_events) = mpsc::sync_channel(PTY_OUTPUT_QUEUE_CAPACITY);
+    let (events, receiver) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
+    let (accessibility, accessibility_receiver) = async_channel::bounded(1);
+    let now = Instant::now();
+    let resized = now - Duration::from_millis(200);
+    let mut worker = TerminalWorker {
+        metadata_state: TerminalSessionMetadataState::default(),
+        permission_request_state: TerminalSessionPermissionRequestState::default(),
+        native_pty: direct_native_pty(ScriptedPtyRecords::default()),
+        input: PtyInput::default(),
+        emulator: TerminalEmulator::new(test_geometry()).unwrap(),
+        server_reading: None,
+        commands,
+        reader_events,
+        events: events.into(),
+        accessibility,
+        pending_command: None,
+        terminal_input_focused: true,
+        focus_reporting_enabled: false,
+        held_keys: HeldKeys::default(),
+        schedules: WorkerSchedules::new(resized, ScheduleInput::default()),
+        osc52_filter: Osc52Filter::default(),
+        permission_requests: PermissionRequestFilter::default(),
+        clipboard: WorkerClipboard::default(),
+    };
+    worker
+        .emulator
+        .feed_at(b"\x1b]133;A;redraw=last\x07bash> ", resized);
+    assert!(worker.publish_screen());
+    let _ = receiver.try_recv().unwrap();
+    worker.schedules.mark_presented(resized);
+    worker
+        .emulator
+        .resize_for_pty_at(geometry(81, 24, 8.0, 20.0), true, resized)
+        .unwrap();
+    // The last output is recent, so only the absolute cap can release presentation.
+    worker.emulator.feed_at(b"\rbash> background output", now);
+    assert!(worker.publish_screen());
+    assert!(receiver.try_recv().is_err());
+    for _ in 0..8 {
+        command_tx.send(Command::ReaderReady(None)).unwrap();
+    }
+
+    loop {
+        let command = worker.receive_next_command().unwrap();
+        if matches!(command, Command::ReaderReady(None)) {
+            break;
+        }
+        assert!(worker.process_command(command));
+    }
+
+    let TerminalSessionEvent::Screen(screen) = receiver
+        .try_recv()
+        .expect("queued readers must not starve the prompt deadline")
+    else {
+        panic!("the prompt deadline must publish a screen")
+    };
+    assert!(screen_text(&screen).contains("bash> background output"));
+    assert!(worker.process_command(Command::PublishAccessibility));
+    while accessibility_receiver.is_empty() {
+        assert!(worker.process_command(Command::AccessibilityContinue));
+    }
+    let model = accessibility_receiver.try_recv().unwrap();
+    assert!(model.text().contains("bash> background output"));
+    assert_eq!(model.generation(), screen.generation);
     worker.finish();
 }
 
