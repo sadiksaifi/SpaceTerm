@@ -836,6 +836,59 @@ mod tests {
         SshServerArtifacts::new(None)
     }
 
+    /// The signed fixture files only; host configuration and private keys remain unavailable.
+    struct CandidateFiles(std::collections::BTreeMap<std::path::PathBuf, Vec<u8>>);
+
+    impl CandidateFiles {
+        fn at(root: &std::path::Path) -> Self {
+            Self(
+                ["artifact.tar.gz", "artifact.sig", "artifact.sha256"]
+                    .into_iter()
+                    .map(|name| {
+                        let path = root.join("x86_64-unknown-linux-gnu").join(name);
+                        let bytes = std::fs::read(&path).unwrap();
+                        (path, bytes)
+                    })
+                    .collect(),
+            )
+        }
+    }
+
+    impl crate::ssh::host_config::HostConfigFilesystem for CandidateFiles {
+        fn canonicalize(
+            &self,
+            path: &std::path::Path,
+        ) -> Result<std::path::PathBuf, crate::ssh::host_config::HostConfigFilesystemError>
+        {
+            self.0
+                .contains_key(path)
+                .then(|| path.to_path_buf())
+                .ok_or(crate::ssh::host_config::HostConfigFilesystemError::Missing)
+        }
+
+        fn read_file_limited(
+            &self,
+            path: &std::path::Path,
+            maximum_bytes: usize,
+        ) -> Result<Vec<u8>, crate::ssh::host_config::HostConfigFilesystemError> {
+            use crate::ssh::host_config::HostConfigFilesystemError;
+            let bytes = self.0.get(path).ok_or(HostConfigFilesystemError::Missing)?;
+            if bytes.len() > maximum_bytes {
+                return Err(HostConfigFilesystemError::Unavailable);
+            }
+            Ok(bytes.clone())
+        }
+
+        fn read_directory_limited(
+            &self,
+            _: &std::path::Path,
+            _: usize,
+        ) -> Result<Vec<std::path::PathBuf>, crate::ssh::host_config::HostConfigFilesystemError>
+        {
+            Err(crate::ssh::host_config::HostConfigFilesystemError::Missing)
+        }
+    }
+
     /// Real archive verification with the repository's public nonproduction signing seed.
     /// The executable is inert fixture data: candidate inspection neither extracts nor runs it.
     fn with_candidate(version: &str, run: impl FnOnce(&std::path::Path, &str)) {
@@ -920,6 +973,7 @@ mod tests {
     fn observation_compares_the_verified_whole_artifact_and_uses_its_own_version(
         cx: &mut gpui::TestAppContext,
     ) {
+        use crate::ssh::server_process::testing::{FakeBootstrap, backend_with_mechanisms};
         with_candidate("9.8.7", |root, digest| {
             for (same, same_version) in [(false, false), (false, true), (true, true)] {
                 let mut current = facts();
@@ -927,10 +981,12 @@ mod tests {
                 approved.version = if same_version { "9.8.7" } else { "0.1.0" }.into();
                 approved.digest = if same { digest.into() } else { "1".repeat(64) };
                 let account = account(discovery(SERVER), Reply::Facts(current.clone()));
-                let (backend, _) = backend(
+                let (backend, _) = backend_with_mechanisms(
                     cx.background_executor.clone(),
                     account.clone(),
                     SshServerArtifacts::new(Some(root.into())),
+                    Arc::new(CandidateFiles::at(root)),
+                    Arc::new(FakeBootstrap),
                 );
                 let observed = backend
                     .observe(
@@ -961,6 +1017,7 @@ mod tests {
     fn invalid_or_downgrade_candidates_leave_valid_service_facts_without_an_offer(
         cx: &mut gpui::TestAppContext,
     ) {
+        use crate::ssh::server_process::testing::{FakeBootstrap, backend_with_mechanisms};
         with_candidate("0.1.0", |root, _| {
             let mut current = facts();
             current.approved.as_mut().unwrap().version = "0.2.0".into();
@@ -970,10 +1027,12 @@ mod tests {
                         .unwrap();
                 }
                 let account = account(discovery(SERVER), Reply::Facts(current.clone()));
-                let (backend, _) = backend(
+                let (backend, _) = backend_with_mechanisms(
                     cx.background_executor.clone(),
                     account.clone(),
                     SshServerArtifacts::new(Some(root.into())),
+                    Arc::new(CandidateFiles::at(root)),
+                    Arc::new(FakeBootstrap),
                 );
                 let observed = backend
                     .observe(
