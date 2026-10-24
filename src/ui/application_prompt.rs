@@ -155,35 +155,52 @@ mod tests {
             PromptWindow { focus }
         });
         cx.run_until_parked();
-        for (key, answer) in [("escape", 1), ("enter", 0)] {
+        // A Critical prompt's affirmative action is destructive, so focus rests on the safe
+        // Cancel and both Escape and Return cancel. An Informational prompt's default answers
+        // Return. Choosing the destructive action itself still answers it.
+        for (level, key, answer) in [
+            (PromptLevel::Critical, Some("escape"), 1),
+            (PromptLevel::Critical, Some("enter"), 1),
+            (PromptLevel::Critical, None, 0),
+            (PromptLevel::Info, Some("escape"), 1),
+            (PromptLevel::Info, Some("enter"), 0),
+        ] {
             let mut result = cx.update(|window, cx| {
                 window.prompt(
-                    PromptLevel::Critical,
+                    level,
                     "Quit SpaceTerm?",
                     Some("Running commands will stop."),
-                    &[
-                        PromptButton::ok("Quit SpaceTerm"),
-                        PromptButton::cancel("Cancel"),
-                    ],
+                    &[PromptButton::ok("Quit"), PromptButton::cancel("Cancel")],
                     cx,
                 )
             });
             cx.run_until_parked();
-            assert!(
-                cx.debug_bounds("modal-action-application-prompt-0")
-                    .is_some()
-            );
+            let quit = cx
+                .debug_bounds("modal-action-application-prompt-0")
+                .expect("Quit is offered");
             assert!(
                 cx.debug_bounds("modal-action-application-prompt-1")
                     .is_some()
             );
             assert!(cx.update(|window, cx| spaceterm_ui::window_modal_is_open(window, cx)));
-            cx.simulate_keystrokes(key);
-            cx.simulate_event(gpui::KeyUpEvent {
-                keystroke: gpui::Keystroke::parse(key).unwrap(),
-            });
+            match key {
+                Some(key) => {
+                    cx.simulate_keystrokes(key);
+                    cx.simulate_event(gpui::KeyUpEvent {
+                        keystroke: gpui::Keystroke::parse(key).unwrap(),
+                    });
+                }
+                None => {
+                    cx.simulate_mouse_move(quit.center(), None, gpui::Modifiers::none());
+                    cx.simulate_click(quit.center(), gpui::Modifiers::none());
+                }
+            }
             cx.run_until_parked();
-            assert_eq!(result.try_recv().unwrap(), Some(answer));
+            assert_eq!(
+                result.try_recv().unwrap(),
+                Some(answer),
+                "{level:?} answered by {key:?}"
+            );
             assert!(!cx.update(|window, cx| spaceterm_ui::window_modal_is_open(window, cx)));
             assert!(cx.update(|window, cx| root.read(cx).focus.is_focused(window)));
             assert!(!cx.update(|window, _| window.has_active_prompt()));

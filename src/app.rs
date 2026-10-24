@@ -3102,7 +3102,7 @@ mod runtime_tests {
     }
 
     #[gpui::test]
-    fn last_linux_window_quit_cancel_restores_workspace_window(cx: &mut gpui::TestAppContext) {
+    fn last_window_quit_cancel_restores_workspace_window(cx: &mut gpui::TestAppContext) {
         windowless_quit_cancel_restores_workspace_window(cx, false);
     }
 

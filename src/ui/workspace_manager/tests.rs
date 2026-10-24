@@ -10160,7 +10160,8 @@ fn a_machine_heading_should_offer_only_the_original_settings_reports(cx: &mut Te
         .expect("Settings should open");
     let mut settings_cx = VisualTestContext::from_window(settings_window, cx);
     settings_cx.run_until_parked();
-    // OK on the selected server's Status row retires the stop's result.
+    // OK in the selected server's Server row menu retires the stop's result.
+    click("settings-server-menu", &mut settings_cx);
     click(
         crate::ui::remote_maintenance::RemoteAction::Acknowledge.selector(),
         &mut settings_cx,

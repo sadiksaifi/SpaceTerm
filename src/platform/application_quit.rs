@@ -55,7 +55,8 @@ impl StatusAreaName {
     }
 }
 
-/// The warning for an actual client exit. Quit is the default answer.
+/// The warning for an actual client exit. Installed builds make Quit the default answer;
+/// destructive Development exits focus Cancel.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct QuitPrompt {
     pub(crate) title: String,
@@ -182,7 +183,8 @@ pub(crate) trait ApplicationQuitAdapter {
 
     fn install(&self, handler: ApplicationQuitHandler) -> Result<(), ApplicationQuitError>;
 
-    /// Asks the quit warning in `window`. Return and Space choose Quit; Escape cancels.
+    /// Asks the quit warning in `window`. Installed builds default to Quit. A destructive
+    /// Development exit focuses Cancel, and Escape always cancels.
     fn present_confirmation(
         &self,
         prompt: &QuitPrompt,

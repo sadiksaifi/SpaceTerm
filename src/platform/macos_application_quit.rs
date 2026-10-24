@@ -128,7 +128,9 @@ impl ApplicationQuitAdapter for MacosApplicationQuitAdapter {
         self.install_on_delegate((*delegate).as_ref(), handler)
     }
 
-    /// Focus the default Quit button for both Return and Space.
+    /// An installed build focuses the default Quit button for both Return and Space. A
+    /// Development run's quit ends its Terminal Sessions, so it focuses the safe Cancel and Return
+    /// quits nothing.
     fn present_confirmation(
         &self,
         prompt: &QuitPrompt,
@@ -140,10 +142,11 @@ impl ApplicationQuitAdapter for MacosApplicationQuitAdapter {
             return present_window_quit(prompt, window, cx);
         };
         let alert = quit_alert(prompt, mtm);
+        let destructive = prompt.destructive;
         // As with GPUI's own prompts, the sheet begins after this window update, because AppKit
         // reports the key window change back into GPUI while it presents.
         cx.spawn(async move |_| {
-            let responses = begin_quit_sheet(&alert, &sheet_window);
+            let responses = begin_quit_sheet(&alert, &sheet_window, destructive);
             quit_answer(responses.recv().await.ok()?)
         })
     }
@@ -173,7 +176,7 @@ fn native_window(window: &gpui::Window) -> Option<Retained<NSWindow>> {
     view.window()
 }
 
-/// Builds the quit warning: the default Quit button, then Cancel.
+/// Builds the quit warning: Quit, then Cancel. An installed build's Quit is the default.
 fn quit_alert(prompt: &QuitPrompt, mtm: MainThreadMarker) -> Retained<NSAlert> {
     let alert = application_alert(
         if prompt.destructive {
@@ -186,21 +189,27 @@ fn quit_alert(prompt: &QuitPrompt, mtm: MainThreadMarker) -> Retained<NSAlert> {
     alert.setMessageText(&NSString::from_str(&prompt.title));
     alert.setInformativeText(&NSString::from_str(&prompt.detail));
     let quit = alert.addButtonWithTitle(&NSString::from_str("Quit"));
-    if prompt.destructive {
+    let cancel = alert.addButtonWithTitle(&NSString::from_str(QuitAnswer::CANCEL_LABEL));
+    // A quit that ends Terminal Sessions rests on the safe Cancel, as every destructive
+    // SpaceTerm alert does.
+    let focused: &NSView = if prompt.destructive {
         quit.setHasDestructiveAction(true);
-    }
-    alert.addButtonWithTitle(&NSString::from_str(QuitAnswer::CANCEL_LABEL));
-    let quit: &NSView = &quit;
-    alert.window().setInitialFirstResponder(Some(quit));
+        &cancel
+    } else {
+        &quit
+    };
+    alert.window().setInitialFirstResponder(Some(focused));
     alert
 }
 
 /// Presents `alert` as a sheet on `sheet_window` and returns the channel that receives its one
 /// response. Beginning the sheet lays the alert out, and that layout can clear the default
-/// button's Return, so both key equivalents are bound once the sheet has begun.
+/// button's Return, so the key equivalents are bound once the sheet has begun. A `destructive`
+/// Quit has no default, so Return never ends Terminal Sessions.
 fn begin_quit_sheet(
     alert: &NSAlert,
     sheet_window: &NSWindow,
+    destructive: bool,
 ) -> async_channel::Receiver<NSModalResponse> {
     let (answered, responses) = async_channel::bounded(1);
     let completion = RcBlock::new(move |response: NSModalResponse| {
@@ -210,7 +219,7 @@ fn begin_quit_sheet(
     let buttons = alert.buttons();
     buttons
         .objectAtIndex(0)
-        .setKeyEquivalent(&NSString::from_str("\r"));
+        .setKeyEquivalent(&NSString::from_str(if destructive { "" } else { "\r" }));
     buttons
         .objectAtIndex(1)
         .setKeyEquivalent(&NSString::from_str("\u{1b}"));
@@ -423,108 +432,149 @@ pub(in crate::platform) mod tests {
         use objc2_foundation::{NSDate, NSPoint, NSRect, NSRunLoop, NSSize};
 
         let mtm = objc2::MainThreadMarker::new().expect("native test must run on the main thread");
-        let prompt = QuitPrompt {
+        let prompt = |destructive| QuitPrompt {
             title: "Quit SpaceTerm?".to_owned(),
             detail: "SpaceTerm stays in the menu bar, and your Terminal Sessions keep running."
                 .to_owned(),
-            destructive: false,
+            destructive,
         };
         let settle =
             || NSRunLoop::currentRunLoop().runUntilDate(&NSDate::dateWithTimeIntervalSinceNow(0.3));
-        for (answering, expected) in [
-            (Answering::Click(0), QuitAnswer::Quit),
-            (Answering::Click(1), QuitAnswer::Cancel),
-            (Answering::Key("\r", 36), QuitAnswer::Quit),
-            (Answering::Key(" ", 49), QuitAnswer::Quit),
-            (Answering::Key("\u{1b}", 53), QuitAnswer::Cancel),
-        ] {
-            // SAFETY: The window is created and released on the main thread, and AppKit does not
-            // release it on close because the test owns it.
-            let host = unsafe {
-                NSWindow::initWithContentRect_styleMask_backing_defer(
-                    NSWindow::alloc(mtm),
-                    NSRect::new(
-                        NSPoint::new(-20_000.0, -20_000.0),
-                        NSSize::new(600.0, 400.0),
-                    ),
-                    NSWindowStyleMask::Titled,
-                    NSBackingStoreType::Buffered,
+        let press = |sheet: &NSWindow, characters: &str, code: u16| {
+            let characters = NSString::from_str(characters);
+            for kind in [NSEventType::KeyDown, NSEventType::KeyUp] {
+                let event = NSEvent::keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode(
+                    kind,
+                    NSPoint::new(0.0, 0.0),
+                    NSEventModifierFlags::empty(),
+                    0.0,
+                    sheet.windowNumber(),
+                    None,
+                    &characters,
+                    &characters,
                     false,
+                    code,
                 )
-            };
-            unsafe { host.setReleasedWhenClosed(false) };
-            let alert = quit_alert(&prompt, mtm);
-            let responses = begin_quit_sheet(&alert, &host);
-            settle();
-            let sheet = alert.window();
-            sheet.displayIfNeeded();
-            assert!(
-                host.attachedSheet().is_some(),
-                "the alert begins as a sheet"
-            );
-
-            let buttons = alert.buttons();
-            let laid_out = buttons
-                .iter()
-                .map(|button| {
-                    (
-                        button.title().to_string(),
-                        button.keyEquivalent().to_string(),
-                    )
-                })
-                .collect::<Vec<_>>();
-            assert_eq!(
-                laid_out,
-                [
-                    ("Quit".to_owned(), "\r".to_owned()),
-                    ("Cancel".to_owned(), "\u{1b}".to_owned()),
-                ]
-            );
-            // Space presses the focused button, so focus rests on the default answer.
-            let focus = sheet.firstResponder().expect("the sheet focuses a button");
-            let quit: &NSView = &buttons.objectAtIndex(0);
-            assert!(std::ptr::eq(
-                Retained::as_ptr(&focus).cast::<()>(),
-                (quit as *const NSView).cast::<()>()
-            ));
-
-            match answering {
-                // SAFETY: The button is live on the main thread, and a nil sender is allowed.
-                Answering::Click(index) => unsafe {
-                    buttons.objectAtIndex(index).performClick(None)
-                },
-                Answering::Key(characters, code) => {
-                    let characters = NSString::from_str(characters);
-                    for kind in [NSEventType::KeyDown, NSEventType::KeyUp] {
-                        let event = NSEvent::keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode(
-                            kind,
-                            NSPoint::new(0.0, 0.0),
-                            NSEventModifierFlags::empty(),
-                            0.0,
-                            sheet.windowNumber(),
-                            None,
-                            &characters,
-                            &characters,
-                            false,
-                            code,
-                        )
-                        .expect("AppKit builds a key event");
-                        sheet.sendEvent(&event);
-                    }
-                }
+                .expect("AppKit builds a key event");
+                sheet.sendEvent(&event);
             }
-            settle();
-            let response = responses
-                .try_recv()
-                .unwrap_or_else(|_| panic!("{answering:?} answers the sheet"));
-            assert_eq!(
-                quit_answer(response),
-                Some(expected),
-                "{answering:?}: {response}"
-            );
-            assert!(host.attachedSheet().is_none(), "the answer ends the sheet");
-            assert!(responses.try_recv().is_err(), "the sheet answers once");
-            host.close();
+        };
+        // An installed build's Quit is the default for Return and the focused button for Space. A
+        // Development run's Quit ends its Terminal Sessions, so focus rests on Cancel and Return
+        // answers nothing.
+        let cases: [(bool, &str, usize, [(Answering, Option<QuitAnswer>); 5]); 2] = [
+            (
+                false,
+                "\r",
+                0,
+                [
+                    (Answering::Click(0), Some(QuitAnswer::Quit)),
+                    (Answering::Click(1), Some(QuitAnswer::Cancel)),
+                    (Answering::Key("\r", 36), Some(QuitAnswer::Quit)),
+                    (Answering::Key(" ", 49), Some(QuitAnswer::Quit)),
+                    (Answering::Key("\u{1b}", 53), Some(QuitAnswer::Cancel)),
+                ],
+            ),
+            (
+                true,
+                "",
+                1,
+                [
+                    (Answering::Click(0), Some(QuitAnswer::Quit)),
+                    (Answering::Click(1), Some(QuitAnswer::Cancel)),
+                    (Answering::Key("\r", 36), None),
+                    (Answering::Key(" ", 49), Some(QuitAnswer::Cancel)),
+                    (Answering::Key("\u{1b}", 53), Some(QuitAnswer::Cancel)),
+                ],
+            ),
+        ];
+        for (destructive, quit_key, focused, answers) in cases {
+            for (answering, expected) in answers {
+                // SAFETY: The window is created and released on the main thread, and AppKit does
+                // not release it on close because the test owns it.
+                let host = unsafe {
+                    NSWindow::initWithContentRect_styleMask_backing_defer(
+                        NSWindow::alloc(mtm),
+                        NSRect::new(
+                            NSPoint::new(-20_000.0, -20_000.0),
+                            NSSize::new(600.0, 400.0),
+                        ),
+                        NSWindowStyleMask::Titled,
+                        NSBackingStoreType::Buffered,
+                        false,
+                    )
+                };
+                unsafe { host.setReleasedWhenClosed(false) };
+                let alert = quit_alert(&prompt(destructive), mtm);
+                let responses = begin_quit_sheet(&alert, &host, destructive);
+                settle();
+                let sheet = alert.window();
+                sheet.displayIfNeeded();
+                assert!(
+                    host.attachedSheet().is_some(),
+                    "the alert begins as a sheet"
+                );
+
+                let buttons = alert.buttons();
+                let laid_out = buttons
+                    .iter()
+                    .map(|button| {
+                        (
+                            button.title().to_string(),
+                            button.keyEquivalent().to_string(),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    laid_out,
+                    [
+                        ("Quit".to_owned(), quit_key.to_owned()),
+                        ("Cancel".to_owned(), "\u{1b}".to_owned()),
+                    ]
+                );
+                // Space presses the focused button.
+                let focus = sheet.firstResponder().expect("the sheet focuses a button");
+                let focused_button: &NSView = &buttons.objectAtIndex(focused);
+                assert!(std::ptr::eq(
+                    Retained::as_ptr(&focus).cast::<()>(),
+                    (focused_button as *const NSView).cast::<()>()
+                ));
+
+                match answering {
+                    // SAFETY: The button is live on the main thread, and a nil sender is allowed.
+                    Answering::Click(index) => unsafe {
+                        buttons.objectAtIndex(index).performClick(None)
+                    },
+                    Answering::Key(characters, code) => press(&sheet, characters, code),
+                }
+                settle();
+                let Some(expected) = expected else {
+                    assert!(
+                        responses.try_recv().is_err(),
+                        "{answering:?} answers nothing when Quit is destructive"
+                    );
+                    assert!(host.attachedSheet().is_some(), "the sheet stays open");
+                    press(&sheet, "\u{1b}", 53);
+                    settle();
+                    assert_eq!(
+                        responses.try_recv().ok().and_then(quit_answer),
+                        Some(QuitAnswer::Cancel)
+                    );
+                    host.close();
+                    continue;
+                };
+                let response = responses
+                    .try_recv()
+                    .unwrap_or_else(|_| panic!("{answering:?} answers the sheet"));
+                assert_eq!(
+                    quit_answer(response),
+                    Some(expected),
+                    "{answering:?}: {response}"
+                );
+                assert!(host.attachedSheet().is_none(), "the answer ends the sheet");
+                assert!(responses.try_recv().is_err(), "the sheet answers once");
+                host.close();
+            }
         }
     }
 
