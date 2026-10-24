@@ -571,11 +571,36 @@ fn a_server_spaceterm_has_never_read_shows_its_access_as_unknown(cx: &mut TestAp
     );
     assert!(!access_on(&window, cx));
     assert!(reads("Unknown", cx));
-    assert!(reads("to change its network access.", cx));
+    assert!(reads("SpaceTerm can't reach the server right now.", cx));
     assert!(
-        !reads("Shown values are from", cx),
+        !reads("These are the last known settings, from", cx),
         "nothing was read, so nothing is shown as last known"
     );
+}
+
+#[gpui::test]
+fn navigation_keeps_network_access_live_until_a_read_actually_fails(cx: &mut TestAppContext) {
+    let access = ScriptedAccess::listening();
+    access.pair(3, "MacBook", None);
+    let (window, cx) = open_servers(&access, cx);
+
+    click("settings-navigation-settings-section-interface", cx);
+    assert!(
+        window.read_with(cx, |settings, _| settings.network_access_live()),
+        "leaving Servers suspends observation without discarding the confirmed reading"
+    );
+
+    click(NAVIGATION_SELECTOR, cx);
+    assert!(reads("Listening on 192.168.1.20:9231.", cx));
+    assert!(reads("Devices: 1 paired", cx));
+    assert!(!reads("to change its network access.", cx));
+
+    click("settings-navigation-settings-section-interface", cx);
+    access.become_unreachable();
+    click(NAVIGATION_SELECTOR, cx);
+    assert!(!window.read_with(cx, |settings, _| settings.network_access_live()));
+    assert!(access_on(&window, cx));
+    assert!(reads("These are the last known settings, from", cx));
 }
 
 #[gpui::test]
@@ -595,7 +620,7 @@ fn a_server_spaceterm_loses_keeps_its_last_known_access_and_devices(cx: &mut Tes
     assert!(open(ACCESS_SELECTOR, cx));
     assert!(reads("Devices: 1 paired", cx));
     assert!(open(&format!("{DEVICE_SELECTOR}-0"), cx));
-    assert!(reads("Shown values are from", cx));
+    assert!(reads("These are the last known settings, from", cx));
     assert!(
         !reads("Listening on", cx),
         "a server SpaceTerm can't reach isn't reported as listening now"
@@ -612,7 +637,7 @@ fn a_server_last_read_as_off_stays_off_and_says_when(cx: &mut TestAppContext) {
 
     assert!(open(ACCESS_SELECTOR, cx), "the last reading still shows");
     assert!(!access_on(&window, cx));
-    assert!(reads("Shown values are from", cx));
+    assert!(reads("These are the last known settings, from", cx));
 }
 
 #[gpui::test]
@@ -730,7 +755,7 @@ fn after_relaunch_a_server_out_of_reach_shows_its_retained_access(cx: &mut TestA
     assert!(open(ACCESS_SELECTOR, cx));
     assert!(reads("Devices: 1 paired", cx));
     assert!(open(&format!("{DEVICE_SELECTOR}-0"), cx));
-    assert!(reads("Shown values are from", cx));
+    assert!(reads("These are the last known settings, from", cx));
     assert!(reads("Last known address: 192.168.1.20:9231.", cx));
 }
 
@@ -745,7 +770,7 @@ fn retained_access_that_loads_after_settings_opens_replaces_unknown(cx: &mut Tes
     reread(cx);
 
     assert!(access_on(&window, cx));
-    assert!(reads("Shown values are from", cx));
+    assert!(reads("These are the last known settings, from", cx));
 }
 
 #[gpui::test]

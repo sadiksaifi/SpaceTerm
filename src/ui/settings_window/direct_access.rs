@@ -29,11 +29,13 @@ use super::SettingsWindow;
 use super::catalog::SettingsSectionId;
 use super::server_list::ServerChoice;
 use super::server_selection;
-use crate::local_server::LocalServer;
+use super::servers::LocalServerStatus;
 use crate::local_server::direct::{DEFAULT_PORT, NetworkPolicy, PairingId};
+use crate::local_server::{LocalServer, ServerError};
 use crate::server_context::{
     LastKnownFacts, NetworkAccessFacts, NetworkListenerFacts, PairedDeviceFacts, PairedDevicesFacts,
 };
+use crate::ssh::server_connection::RemoteConnectionStatus;
 use crate::ui::appearance::{ChromeAppearance, gpui_color};
 use crate::ui::chrome_icons::IconRole;
 use crate::ui::chrome_typography::{ChromeTextStyleExt as _, TextRole};
@@ -426,6 +428,50 @@ impl SettingsWindow {
         if self.network_access_live() {
             return None;
         }
+        let stopped = match self.direct_access.target.as_ref()? {
+            ServerChoice::Local => {
+                self.server_service
+                    .as_ref()
+                    .and_then(|row| row.state.status)
+                    .is_some_and(|status| status.stopped)
+                    || self.local_server.as_ref().is_some_and(|row| {
+                        matches!(
+                            row.current_status(),
+                            LocalServerStatus::Failed(ServerError::Stopped)
+                        )
+                    })
+            }
+            ServerChoice::Ssh(destination) => {
+                self.current_ssh_read(destination)
+                    .is_some_and(|facts| facts.status.stopped)
+                    || self.ssh_servers.as_ref().is_some_and(|rows| {
+                        matches!(
+                            rows.connections.status(destination),
+                            RemoteConnectionStatus::Stopped
+                        )
+                    })
+            }
+            ServerChoice::Direct(_) => false,
+        };
+        if !stopped
+            && matches!(
+                self.direct_access.reading,
+                Some(Err(AccessFailure::Unreachable))
+            )
+        {
+            let observed = self
+                .direct_access
+                .shown()
+                .and_then(|shown| shown.observed_at)
+                .map(|at| {
+                    format!(
+                        " These are the last known settings, from {}.",
+                        super::server_card::observed_time(at, cx)
+                    )
+                })
+                .unwrap_or_default();
+            return Some(format!("SpaceTerm can't reach the server right now.{observed}").into());
+        }
         let name = self.selected_server_name();
         let ask = match &self.direct_access.target {
             Some(ServerChoice::Local) => {
@@ -452,15 +498,16 @@ impl SettingsWindow {
     /// Follows the selected server's network access while Servers shows it. Selection, section
     /// and connection changes call this; rendering never does.
     pub(super) fn sync_direct_access(&mut self, cx: &mut Context<Self>) {
-        let target = if self.active_section == SettingsSectionId::Servers {
-            self.selected_server()
-                .filter(|target| !matches!(target, ServerChoice::Direct(_)))
-        } else {
-            None
-        };
+        let target = self
+            .selected_server()
+            .filter(|target| !matches!(target, ServerChoice::Direct(_)));
         if self.direct_access.target != target {
             self.direct_access.start_over(target.clone());
             self.reload_known_access(cx);
+        }
+        if self.active_section != SettingsSectionId::Servers {
+            self.direct_access.poll = None;
+            return;
         }
         if target.is_none() || self.direct_access.poll.is_some() {
             return;
