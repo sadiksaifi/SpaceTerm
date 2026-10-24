@@ -770,6 +770,7 @@ impl TabManager {
             rest_margin,
             rest_inset,
             margin: rest_margin + rest_inset - offset - inset,
+            inset,
             offset,
         }
     }
@@ -2238,8 +2239,13 @@ impl Render for TabManager {
                     .when(edge.offset == px(0.0), |content| content.overflow_hidden())
                     .ml(edge.rest_margin)
                     // No top edge: the chrome above carries that space. No leading edge beside a
-                    // sidebar: the sidebar chip's trailing margin is already that gap.
-                    .border_color(stage_color)
+                    // sidebar: the sidebar chip's trailing margin is already that gap. A moving
+                    // stage keeps these widths, so its layout holds, and paints its edges itself.
+                    .border_color(if edge.offset == px(0.0) {
+                        stage_color
+                    } else {
+                        gpui::rgba(0x0000_0000)
+                    })
                     .border_b(frame.window_edge_inset())
                     .border_r(frame.window_edge_inset())
                     .border_l(edge.rest_inset)
@@ -2255,17 +2261,54 @@ impl Render for TabManager {
                             .inset_0(),
                     )
                     // The stage as this frame draws it, from its leading edge to the window's
-                    // edges.
+                    // edges. Like the stage at rest, it paints only its edges, so translucent
+                    // Panes show the same backdrop while they move. Each corner is painted once.
                     .when(edge.offset != px(0.0), |content| {
+                        let window_edge_inset = frame.window_edge_inset();
                         content.child(
                             div()
                                 .debug_selector(|| "tab-manager-moving-stage".to_owned())
                                 .absolute()
                                 .top_0()
                                 .left(edge.margin - edge.rest_margin - edge.rest_inset)
-                                .right(-frame.window_edge_inset())
-                                .bottom(-frame.window_edge_inset())
-                                .bg(stage_color),
+                                .right(-window_edge_inset)
+                                .bottom(-window_edge_inset)
+                                .child(
+                                    div()
+                                        .debug_selector(|| {
+                                            "tab-manager-moving-stage-leading-edge".to_owned()
+                                        })
+                                        .absolute()
+                                        .top_0()
+                                        .left_0()
+                                        .bottom(window_edge_inset)
+                                        .w(edge.inset)
+                                        .bg(stage_color),
+                                )
+                                .child(
+                                    div()
+                                        .debug_selector(|| {
+                                            "tab-manager-moving-stage-bottom-edge".to_owned()
+                                        })
+                                        .absolute()
+                                        .left_0()
+                                        .right_0()
+                                        .bottom_0()
+                                        .h(window_edge_inset)
+                                        .bg(stage_color),
+                                )
+                                .child(
+                                    div()
+                                        .debug_selector(|| {
+                                            "tab-manager-moving-stage-trailing-edge".to_owned()
+                                        })
+                                        .absolute()
+                                        .top_0()
+                                        .right_0()
+                                        .bottom(window_edge_inset)
+                                        .w(window_edge_inset)
+                                        .bg(stage_color),
+                                ),
                         )
                     })
                     .child(StageOffset {
@@ -2335,6 +2378,8 @@ struct StageLeadingEdge {
     rest_inset: Pixels,
     /// The leading margin this frame draws.
     margin: Pixels,
+    /// The leading inset this frame draws.
+    inset: Pixels,
     /// How far this frame draws the stage's content leading of where it rests, in whole device
     /// pixels.
     offset: Pixels,

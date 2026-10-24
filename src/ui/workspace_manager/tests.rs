@@ -3447,6 +3447,57 @@ fn toggling_the_sidebar_should_slide_it_while_the_terminal_resizes_once(cx: &mut
     assert_eq!(resizes(), before + 2);
 }
 
+/// The stage paints its base surface only as a frame, so a translucent Pane shows the same
+/// backdrop while the sidebar slides as it does at rest.
+#[gpui::test]
+fn a_sliding_stage_should_paint_only_its_frame_around_the_panes(cx: &mut TestAppContext) {
+    use crate::ui::drag_and_drop::AnimatePresence;
+
+    let (manager, _records, cx) = workspace_manager(cx);
+    let window_edge_inset = workspace_frame(cx).window_edge_inset();
+    cx.update(|_, cx| cx.set_global(AnimatePresence));
+
+    for motion in ["hiding", "showing"] {
+        cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| manager.toggle_sidebar(window, cx))
+        });
+        let (_, stage, pane, _) = sidebar_motion_frame(cx);
+        let mut edge = |side: &'static str| {
+            cx.debug_bounds(side)
+                .unwrap_or_else(|| panic!("{motion}: the sliding stage must paint {side}"))
+        };
+        let leading = edge("tab-manager-moving-stage-leading-edge");
+        let bottom = edge("tab-manager-moving-stage-bottom-edge");
+        let trailing = edge("tab-manager-moving-stage-trailing-edge");
+
+        assert!(
+            leading.left() == stage.left()
+                && leading.size.width > px(0.0)
+                && leading.right() <= pane.left(),
+            "{motion}: the leading edge must lie between the stage and the Pane: {leading:?} \
+             {stage:?} {pane:?}"
+        );
+        assert!(
+            bottom.size.height == window_edge_inset
+                && bottom.bottom() == stage.bottom()
+                && bottom.top() >= pane.bottom(),
+            "{motion}: the bottom edge must lie below the Pane: {bottom:?} {pane:?}"
+        );
+        assert!(
+            trailing.size.width == window_edge_inset
+                && trailing.right() == stage.right()
+                && trailing.left() >= pane.right()
+                && trailing.bottom() <= bottom.top(),
+            "{motion}: the trailing edge must lie beside the Pane: {trailing:?} {pane:?}"
+        );
+        assert!(
+            leading.bottom() <= bottom.top(),
+            "{motion}: the edges must not paint their corner twice: {leading:?} {bottom:?}"
+        );
+        finish_slides(cx);
+    }
+}
+
 #[gpui::test]
 fn every_frame_of_a_sidebar_toggle_should_keep_the_terminal_size(cx: &mut TestAppContext) {
     toggle_the_sidebar_frame_by_frame(None, None, false, cx);
