@@ -42,8 +42,7 @@ use super::{
 };
 use crate::appearance::Color;
 use crate::close_confirmation::{
-    ApplicationCloseFacts, ApplicationPaneFacts, CloseConfirmation, CloseHierarchy, CloseScope,
-    CloseTarget,
+    ApplicationPaneFacts, CloseConfirmation, CloseHierarchy, CloseScope, CloseTarget,
 };
 use crate::directory_selection::SystemDirectorySelection;
 use crate::domain::{
@@ -1772,10 +1771,6 @@ impl WorkspaceManager {
         }
         self.present_close_confirmation(CloseTarget::Window, window, cx);
         false
-    }
-
-    pub(crate) fn application_close_facts(&self, cx: &App) -> ApplicationCloseFacts {
-        self.close_hierarchy(cx).application_close_facts()
     }
 
     pub(crate) fn application_pane_facts(&self, cx: &App) -> Vec<ApplicationPaneFacts> {

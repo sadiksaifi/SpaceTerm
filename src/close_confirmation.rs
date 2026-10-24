@@ -81,36 +81,12 @@ pub(crate) struct PaneCloseFacts<'a> {
     pub(crate) metadata: &'a TerminalMetadataSnapshot,
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) struct ApplicationCloseFacts {
-    pub(crate) workspace_count: usize,
-    pub(crate) tab_count: usize,
-    pub(crate) pane_count: usize,
-    pub(crate) has_running_work: bool,
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct ApplicationPaneFacts {
     pub(crate) workspace_id: WorkspaceId,
     pub(crate) tab_id: TabId,
     pub(crate) pane_id: PaneId,
     pub(crate) has_running_work: bool,
-}
-
-impl ApplicationCloseFacts {
-    pub(crate) const fn requires_confirmation(self) -> bool {
-        self.workspace_count > 1
-            || self.tab_count > 1
-            || self.pane_count > 1
-            || self.has_running_work
-    }
-
-    pub(crate) fn merge(&mut self, other: Self) {
-        self.workspace_count += other.workspace_count;
-        self.tab_count += other.tab_count;
-        self.pane_count += other.pane_count;
-        self.has_running_work |= other.has_running_work;
-    }
 }
 
 impl PaneCloseFacts<'_> {
@@ -177,33 +153,6 @@ impl CloseHierarchy {
 
     pub(crate) fn affected_pane_count(&self, target: CloseTarget) -> usize {
         self.matching_panes(target).count()
-    }
-
-    pub(crate) fn application_close_facts(&self) -> ApplicationCloseFacts {
-        let mut workspaces = Vec::new();
-        let mut tabs = Vec::new();
-        let mut has_running_work = false;
-        for &HierarchyPane {
-            workspace,
-            tab,
-            running,
-            ..
-        } in &self.panes
-        {
-            if !workspaces.contains(&workspace) {
-                workspaces.push(workspace);
-            }
-            if !tabs.contains(&(workspace, tab)) {
-                tabs.push((workspace, tab));
-            }
-            has_running_work |= running;
-        }
-        ApplicationCloseFacts {
-            workspace_count: workspaces.len(),
-            tab_count: tabs.len(),
-            pane_count: self.panes.len(),
-            has_running_work,
-        }
     }
 
     pub(crate) fn application_pane_facts(&self) -> impl Iterator<Item = ApplicationPaneFacts> + '_ {
@@ -531,15 +480,6 @@ mod tests {
         ] {
             assert_eq!(hierarchy.requires_confirmation(scope), Some(true));
         }
-        assert_eq!(
-            hierarchy.application_close_facts(),
-            ApplicationCloseFacts {
-                workspace_count: 1,
-                tab_count: 1,
-                pane_count: 2,
-                has_running_work: true,
-            }
-        );
         assert_eq!(hierarchy.requires_confirmation(target(2)), Some(false));
         assert_eq!(hierarchy.requires_confirmation(target(3)), None);
         let mut confirmation = CloseConfirmation::default();
@@ -586,59 +526,6 @@ mod tests {
         ] {
             assert_eq!(scope.resolve(1), expected);
             assert_eq!(scope.resolve(2), CloseContinuation::Remove);
-        }
-    }
-
-    #[test]
-    fn application_quit_confirmation_covers_structure_and_running_work() {
-        for (facts, expected) in [
-            (
-                ApplicationCloseFacts {
-                    workspace_count: 1,
-                    tab_count: 1,
-                    pane_count: 1,
-                    has_running_work: false,
-                },
-                false,
-            ),
-            (
-                ApplicationCloseFacts {
-                    workspace_count: 2,
-                    tab_count: 2,
-                    pane_count: 2,
-                    has_running_work: false,
-                },
-                true,
-            ),
-            (
-                ApplicationCloseFacts {
-                    workspace_count: 1,
-                    tab_count: 2,
-                    pane_count: 2,
-                    has_running_work: false,
-                },
-                true,
-            ),
-            (
-                ApplicationCloseFacts {
-                    workspace_count: 1,
-                    tab_count: 1,
-                    pane_count: 2,
-                    has_running_work: false,
-                },
-                true,
-            ),
-            (
-                ApplicationCloseFacts {
-                    workspace_count: 1,
-                    tab_count: 1,
-                    pane_count: 1,
-                    has_running_work: true,
-                },
-                true,
-            ),
-        ] {
-            assert_eq!(facts.requires_confirmation(), expected);
         }
     }
 }

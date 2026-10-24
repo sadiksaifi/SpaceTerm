@@ -266,6 +266,18 @@ fn open_servers_saved<'a>(
 
 pub(in crate::ui::settings_window) fn click(selector: &str, cx: &mut VisualTestContext) {
     let selector: &'static str = Box::leak(selector.to_owned().into_boxed_str());
+    // Every step but the Server row's one button lives in its ⋯ menu.
+    if cx.debug_bounds(selector).is_none()
+        && cx
+            .debug_bounds(super::super::server_card::MENU_SELECTOR)
+            .is_some()
+    {
+        click_at(super::super::server_card::MENU_SELECTOR, cx);
+    }
+    click_at(selector, cx);
+}
+
+fn click_at(selector: &'static str, cx: &mut VisualTestContext) {
     let position = cx
         .debug_bounds(selector)
         .unwrap_or_else(|| panic!("{selector} was not rendered"))
@@ -275,9 +287,24 @@ pub(in crate::ui::settings_window) fn click(selector: &str, cx: &mut VisualTestC
     cx.run_until_parked();
 }
 
+/// Whether `selector` is on the page, or offered in the Server row's ⋯ menu. It opens the menu
+/// to look and closes it again without choosing anything.
 fn rendered(selector: &str, cx: &mut VisualTestContext) -> bool {
     let selector: &'static str = Box::leak(selector.to_owned().into_boxed_str());
-    cx.debug_bounds(selector).is_some()
+    if cx.debug_bounds(selector).is_some() {
+        return true;
+    }
+    if cx
+        .debug_bounds(super::super::server_card::MENU_SELECTOR)
+        .is_none()
+    {
+        return false;
+    }
+    click_at(super::super::server_card::MENU_SELECTOR, cx);
+    let offered = cx.debug_bounds(selector).is_some();
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    offered
 }
 
 /// Waits for the registry's workers, repainting as their results arrive.
@@ -424,7 +451,6 @@ fn an_inactive_ssh_server_offers_check_status_and_connect_and_dims_its_settings(
 
     for row in [
         "settings-row-server-status",
-        "settings-row-server-version",
         "settings-row-server-auto-start",
         "settings-row-end-all-sessions",
         "settings-row-network-access",
@@ -523,7 +549,9 @@ fn check_status_observes_an_inactive_server_once_and_leaves_a_presented_one_alon
         )
     });
     assert!(
-        A11yTree::read(servers.cx).find_text("1.4.0").is_some(),
+        A11yTree::read(servers.cx)
+            .find_text("Version 1.4.0")
+            .is_some(),
         "the observed version replaces Unknown"
     );
     assert_eq!(
@@ -566,7 +594,9 @@ fn after_disconnect_the_card_presents_the_facts_last_observed(cx: &mut TestAppCo
     click("settings-ssh-server-disconnect", servers.cx);
 
     assert!(
-        A11yTree::read(servers.cx).find_text("1.4.0").is_some(),
+        A11yTree::read(servers.cx)
+            .find_text("Version 1.4.0")
+            .is_some(),
         "the version stays presented"
     );
     let footnote = footnote(&servers).unwrap_or_default();
@@ -696,15 +726,12 @@ impl RemoteServerOperations for HeldRead {
     fn resume_retained(&self) {}
 }
 
-/// Whether the Version row announces `version`.
+/// Whether the Server row's subtitle names `version`.
 fn version_reads(version: &str, cx: &mut VisualTestContext) -> bool {
     let exact = format!("Version {version}");
-    let with_badge = format!("Version {version},");
-    A11yTree::read(cx).with_role("Status").iter().any(|node| {
-        node["aria"]["label"]
-            .as_str()
-            .is_some_and(|label| label == exact || label.starts_with(&with_badge))
-    })
+    let with_update = format!("Version {version} \u{b7}");
+    version_announcement(cx)
+        .is_some_and(|subtitle| subtitle == exact || subtitle.starts_with(&with_update))
 }
 
 /// A service read, such as Check Now leaves, names the build approved when it ran. Once
@@ -891,14 +918,16 @@ fn a_later_read_replaces_an_earlier_check_status(cx: &mut TestAppContext) {
     );
 }
 
-/// The Version row's announcement, such as "Version 1.4.0, 1.5.0 available".
+/// The Server row's subtitle, such as "Version 1.4.0 · 1.5.0 is available".
 fn version_announcement(cx: &mut VisualTestContext) -> Option<String> {
-    A11yTree::read(cx)
-        .with_role("Status")
-        .into_iter()
-        .filter_map(|node| node["aria"]["label"].as_str())
-        .find(|label| label.starts_with("Version "))
-        .map(str::to_owned)
+    A11yTree::read(cx).in_order().iter().find_map(|node| {
+        ["label", "value"].into_iter().find_map(|field| {
+            node["aria"][field]
+                .as_str()
+                .filter(|text| text.starts_with("Version "))
+                .map(str::to_owned)
+        })
+    })
 }
 
 /// A read names the build approved on penguin but no verified candidate, so SpaceTerm knows of
@@ -934,7 +963,7 @@ fn the_ssh_version_row_follows_the_verified_candidate(cx: &mut TestAppContext) {
 
     assert_eq!(
         version_announcement(servers.cx).as_deref(),
-        Some("Version 1.3.0, Up to date")
+        Some("Version 1.3.0")
     );
     assert!(!rendered("settings-server-version-update", servers.cx));
 
@@ -949,8 +978,8 @@ fn the_ssh_version_row_follows_the_verified_candidate(cx: &mut TestAppContext) {
     servers.cx.run_until_parked();
     assert_eq!(
         version_announcement(servers.cx).as_deref(),
-        Some("Version 1.3.0, 1.3.2 available"),
-        "the badge names the verified candidate, not this SpaceTerm's version"
+        Some("Version 1.3.0 \u{b7} 1.3.2 is available"),
+        "the subtitle names the verified candidate, not this SpaceTerm's version"
     );
     assert!(rendered("settings-server-version-update", servers.cx));
 
@@ -958,7 +987,7 @@ fn the_ssh_version_row_follows_the_verified_candidate(cx: &mut TestAppContext) {
     servers.cx.run_until_parked();
     assert_eq!(
         version_announcement(servers.cx).as_deref(),
-        Some("Version 1.3.2, Up to date")
+        Some("Version 1.3.2")
     );
     assert!(!rendered("settings-server-version-update", servers.cx));
 }

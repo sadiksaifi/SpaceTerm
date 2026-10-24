@@ -2705,7 +2705,6 @@ fn rendered_control_selector(row: SettingsRowId) -> Option<String> {
             SettingsRowId::GitHubCli => "settings-row-github-cli-control",
             SettingsRowId::ServerWorktreeLocation => "settings-server-worktree-location-frame",
             SettingsRowId::ServerStatus => "settings-server-status",
-            SettingsRowId::ServerVersion => "settings-server-version",
             SettingsRowId::ServerAutoStart => "settings-server-auto-start",
             SettingsRowId::EndAllSessions => "settings-server-end-all-sessions",
             // The fixture has no network observation, so the row says Unknown. Devices waits

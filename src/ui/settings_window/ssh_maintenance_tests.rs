@@ -35,9 +35,9 @@ use crate::ui::appearance_runtime;
 use crate::ui::settings_window::SettingsWindow;
 
 const NAVIGATION_SELECTOR: &str = "settings-navigation-settings-section-servers";
-/// The rows of the card that carry the selected server's service and its update.
+/// The Server row, which carries the selected server's service and its update.
 const SERVICE_ROW: &str = "settings-row-server-status";
-const UPDATE_ROW: &str = "settings-row-server-version";
+const UPDATE_ROW: &str = SERVICE_ROW;
 /// The notice that this client couldn't read or write its record of these operations.
 const OPERATIONS_PERSISTENCE: &str = "settings-server-notice-operations-record";
 /// The notice for the removed connection's unresolved operation.
@@ -643,6 +643,18 @@ fn open_maintenance<'a>(cx: &'a mut TestAppContext) -> Servers<'a> {
 
 fn click(selector: &str, cx: &mut VisualTestContext) {
     let selector: &'static str = Box::leak(selector.to_owned().into_boxed_str());
+    // Every step but the Server row's one button lives in its ⋯ menu.
+    if cx.debug_bounds(selector).is_none()
+        && cx
+            .debug_bounds(super::super::server_card::MENU_SELECTOR)
+            .is_some()
+    {
+        click_at(super::super::server_card::MENU_SELECTOR, cx);
+    }
+    click_at(selector, cx);
+}
+
+fn click_at(selector: &'static str, cx: &mut VisualTestContext) {
     let position = cx
         .debug_bounds(selector)
         .unwrap_or_else(|| panic!("{selector} was not rendered"))
@@ -652,9 +664,24 @@ fn click(selector: &str, cx: &mut VisualTestContext) {
     cx.run_until_parked();
 }
 
+/// Whether `selector` is on the page, or offered in the Server row's ⋯ menu. It opens the menu
+/// to look and closes it again without choosing anything.
 fn rendered(selector: &str, cx: &mut VisualTestContext) -> bool {
     let selector: &'static str = Box::leak(selector.to_owned().into_boxed_str());
-    cx.debug_bounds(selector).is_some()
+    if cx.debug_bounds(selector).is_some() {
+        return true;
+    }
+    if cx
+        .debug_bounds(super::super::server_card::MENU_SELECTOR)
+        .is_none()
+    {
+        return false;
+    }
+    click_at(super::super::server_card::MENU_SELECTOR, cx);
+    let offered = cx.debug_bounds(selector).is_some();
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    offered
 }
 
 fn modal_action(selector: &str) -> &'static str {
@@ -962,7 +989,7 @@ fn only_a_verified_newer_build_offers_update_server(cx: &mut TestAppContext) {
 
     assert!(rendered(VERSION_UPDATE, servers.cx));
     assert!(
-        explains("1.5.0 available", servers.cx),
+        explains("1.5.0 is available", servers.cx),
         "the badge names the verified build, not this SpaceTerm's version"
     );
     assert!(servers.operations.calls().is_empty());
@@ -1061,10 +1088,15 @@ fn an_unconfirmed_operation_is_resolved_and_never_repeated(cx: &mut TestAppConte
     assert!(explains("The server on penguin stopped", servers.cx));
 }
 
-/// While an operation is underway, its row reports the phase and the other row offers nothing.
+/// While an operation is underway, the Server row keeps the state, names the work under its
+/// label once it runs longer than a second, and offers no update meanwhile.
 #[gpui::test]
-fn progress_names_the_phase_and_only_one_row_reports_it(cx: &mut TestAppContext) {
+fn progress_names_the_phase_in_one_place(cx: &mut TestAppContext) {
     let servers = open_maintenance(cx);
+    let resting = servers
+        .cx
+        .debug_bounds(SERVICE_ROW)
+        .expect("the Server row renders");
     servers.operations.set(
         "penguin",
         RemoteOperationState::Working {
@@ -1074,16 +1106,27 @@ fn progress_names_the_phase_and_only_one_row_reports_it(cx: &mut TestAppContext)
         },
     );
     servers.cx.run_until_parked();
+    servers
+        .cx
+        .executor()
+        .advance_clock(std::time::Duration::from_millis(1_100));
+    servers.cx.run_until_parked();
 
-    assert!(rendered(
+    assert!(rendered("settings-server-progress-track", servers.cx));
+    assert!(!rendered(
         "settings-server-status-progress-track",
         servers.cx
     ));
-    assert!(!rendered(
-        "settings-server-version-progress-track",
-        servers.cx
-    ));
-    assert!(explains("Stopping the server on penguin", servers.cx));
+    assert_eq!(
+        servers
+            .cx
+            .debug_bounds(SERVICE_ROW)
+            .expect("the Server row renders")
+            .size,
+        resting.size,
+        "naming the work keeps the row's height"
+    );
+    assert!(explains("Stopping the server\u{2026}", servers.cx));
     assert!(rendered(
         "settings-ssh-server-maintenance-cancel",
         servers.cx
@@ -1116,7 +1159,7 @@ fn assistive_technology_hears_the_machine_each_step_acts_on(cx: &mut TestAppCont
         "the state is announced with the machine it reports"
     );
     assert_eq!(
-        tree.node("Update Server\u{2026}")["aria"]["description"],
+        tree.node("Update\u{2026}")["aria"]["description"],
         "Transfers the verified server version SpaceTerm includes to penguin, then asks before it \
          replaces the approved one."
     );
@@ -1488,7 +1531,6 @@ fn the_detail_presents_the_controls_above_the_facts(cx: &mut TestAppContext) {
     };
     let order = [
         SERVICE_ROW,
-        UPDATE_ROW,
         "settings-row-server-auto-start",
         "settings-row-end-all-sessions",
         "settings-row-network-access",

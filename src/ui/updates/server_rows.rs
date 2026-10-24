@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use gpui::{App, Context, SharedString, Task};
+use gpui::{App, Context, SharedString, Subscription, Task};
 
 use crate::application_identity::ApplicationIdentity;
 use crate::direct_connections::{DirectConnections, DirectRouteStatus};
@@ -98,10 +98,13 @@ pub(crate) struct ServerUpdates {
     _read: Option<Task<()>>,
     _followers: Vec<Task<()>>,
     _direct: Option<DirectChanges>,
+    _local: Subscription,
 }
 
 impl ServerUpdates {
     pub(crate) fn new(cx: &mut Context<Self>) -> Self {
+        let local = settings_window::local_operations::LocalServerOperations::get(cx);
+        let local = cx.subscribe(&local, |inventory, _, _, cx| inventory.refresh(cx));
         let sources = Sources {
             ssh: crate::ui::ssh_servers::installed(cx),
             direct: crate::ui::direct_servers::installed(cx),
@@ -152,6 +155,7 @@ impl ServerUpdates {
             _read: None,
             _followers: followers,
             _direct: direct,
+            _local: local,
         };
         inventory.refresh(cx);
         inventory

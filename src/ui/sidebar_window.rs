@@ -11,9 +11,8 @@ use gpui::{
     Window, WindowBounds, WindowKind, WindowOptions, accesskit, div, px,
 };
 use spaceterm_ui::{
-    Button, ButtonMetrics, ButtonPaint, ButtonVariantStyle, ClientWindowControls, HoverFade, Icon,
-    IconName, WindowCloseHandler, WindowDragRegion, WindowDragRegionEvent,
-    WindowDragRegionResponse,
+    Button, ButtonMetrics, ButtonVariant, ClientWindowControls, HoverFade, Icon, IconName,
+    WindowCloseHandler, WindowDragRegion, WindowDragRegionEvent, WindowDragRegionResponse,
 };
 
 use crate::platform::window_movement::{
@@ -573,7 +572,8 @@ impl<'a, T: SidebarOwner> Sidebar<'a, T> {
 }
 
 /// A quiet command at the foot of the sidebar, such as About. It dispatches its action instead of
-/// selecting a section.
+/// selecting a section, so it is a borderless button: only its text and icon change color, and it
+/// has no selected state.
 pub(crate) fn render_footer_action(
     selector: String,
     label: SharedString,
@@ -581,26 +581,6 @@ pub(crate) fn render_footer_action(
     action: Box<dyn gpui::Action>,
     appearance: &ChromeAppearance,
 ) -> AnyElement {
-    let colors = appearance.host_colors(spaceterm_ui::ControlHost::Panel);
-    // The chip a section row rests on, so the action lights exactly as a row does.
-    let chip =
-        navigation_chip_paint(false, true, colors).raised_on(appearance, colors.panel_background);
-    let fill = |fill: Option<crate::appearance::Color>| fill.map_or(gpui::rgba(0), gpui_color);
-    let paint = |background, foreground, icon| {
-        ButtonPaint::new(background, gpui_color(foreground), gpui::rgba(0))
-            .icon_foreground(gpui_color(icon))
-    };
-    let normal = paint(fill(chip.fill), colors.text_secondary, colors.row_icon);
-    // An inactive window does not light under the pointer.
-    let hovered = if appearance.active {
-        paint(
-            fill(chip.hover_fill),
-            colors.row_hover_foreground,
-            colors.row_hover_icon,
-        )
-    } else {
-        normal
-    };
     let text = appearance.typography.style(TextRole::Secondary);
     let line_height = f32::from(text.line_height) / f32::from(text.size);
     let metrics = ButtonMetrics::new(navigation_row_height(appearance))
@@ -615,10 +595,7 @@ pub(crate) fn render_footer_action(
         .w_full()
         .child(
             Button::new(SharedString::from(selector.clone()), label)
-                .contextual_style(
-                    ButtonVariantStyle::new(normal, hovered, hovered, normal),
-                    gpui_color(colors.focus_ring),
-                )
+                .variant(ButtonVariant::Bare)
                 .contextual_metrics(metrics)
                 .full_width(true)
                 .align_start()

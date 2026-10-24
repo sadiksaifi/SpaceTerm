@@ -12,7 +12,7 @@ struct InstalledOperations(Entity<LocalServerOperations>);
 impl Global for InstalledOperations {}
 
 #[derive(Clone, Copy)]
-pub(super) enum CompletedOperation {
+pub(crate) enum CompletedOperation {
     Service,
     Update,
 }
@@ -25,7 +25,7 @@ pub(super) struct UpdateCompletion {
 /// Retains admitted progress and typed outcomes across Settings Window replacement. Preparation
 /// and destructive confirmation stay with the window that requested them.
 #[derive(Default)]
-pub(super) struct LocalServerOperations {
+pub(crate) struct LocalServerOperations {
     pub(super) service: Option<ServiceState>,
     pub(super) update: Option<UpdateState>,
     /// Admitted failures survive passive reads; a successful read still clears a read failure.
@@ -38,7 +38,7 @@ pub(super) struct LocalServerOperations {
 impl EventEmitter<CompletedOperation> for LocalServerOperations {}
 
 impl LocalServerOperations {
-    pub(super) fn get(cx: &mut App) -> Entity<Self> {
+    pub(crate) fn get(cx: &mut App) -> Entity<Self> {
         if let Some(installed) = cx.try_global::<InstalledOperations>() {
             return installed.0.clone();
         }
