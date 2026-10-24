@@ -997,6 +997,8 @@ fn connect_on_a_disconnected_paired_server_reaches_only_that_route(cx: &mut Test
     let (_, cx) = open_servers_with(&access, Some(direct.clone()), cx);
 
     select_paired_server(cx);
+    // Connect lives in the Server row's ⋯ menu.
+    click(MENU_SELECTOR, cx);
     click(
         crate::ui::direct_servers::DirectServerAction::Connect.selector(),
         cx,

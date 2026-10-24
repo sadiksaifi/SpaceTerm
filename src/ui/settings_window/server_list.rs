@@ -201,16 +201,24 @@ impl SettingsWindow {
                 .count()
                 > 1
         };
+        let selected = self.selected_server();
         named
             .iter()
             .map(|(name, choice)| {
                 let state = self.server_state(choice);
+                // The selected server's card names its own work, so its entry keeps its state.
+                let (status, working) = match state.operation {
+                    Some(verb) if selected.as_ref() != Some(choice) => {
+                        (SharedString::new_static(verb), true)
+                    }
+                    _ => (state.short, state.working),
+                };
                 ListedServer {
                     name: name.clone(),
                     detail: self.server_detail(choice, cx),
-                    status: state.short,
+                    status,
                     tone: state.tone,
-                    working: state.working,
+                    working,
                     shares_name: shared(name),
                     choice: choice.clone(),
                 }
@@ -333,7 +341,6 @@ impl SettingsWindow {
     fn presents_server_row(&self, row: SettingsRowId, selected: Option<&ServerChoice>) -> bool {
         match row {
             SettingsRowId::ServerStatus
-            | SettingsRowId::ServerVersion
             | SettingsRowId::EndAllSessions
             | SettingsRowId::GitTool
             | SettingsRowId::ServerWorktreeLocation => selected.is_some(),

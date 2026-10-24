@@ -57,8 +57,9 @@ fn a_local_server_waiting_for_startup_authorization_says_so() {
     assert_eq!(state.state.as_ref(), "Needs authorization");
 }
 
+/// A step underway names itself apart from the state, which keeps reading as last observed.
 #[test]
-fn a_local_service_step_underway_reads_as_its_verb() {
+fn a_local_service_step_underway_keeps_the_state_and_names_its_verb() {
     for (action, verb) in [
         (ServiceAction::Start, "Starting\u{2026}"),
         (ServiceAction::Stop, "Stopping\u{2026}"),
@@ -71,20 +72,42 @@ fn a_local_service_step_underway_reads_as_its_verb() {
             false,
         );
 
-        assert_eq!(state.state.as_ref(), verb);
-        assert!(state.working);
+        assert_eq!(state.state.as_ref(), "Running");
+        assert_eq!(state.operation, Some(verb));
+        assert!(!state.checking);
+        assert!(state.live);
     }
 }
 
+/// A passive read keeps the state as last observed, so a running server stays live.
 #[test]
-fn an_update_still_running_reads_as_updating_when_settings_reopens() {
+fn a_local_service_read_keeps_a_running_server_live() {
+    let state = local_state(
+        CONNECTED,
+        Some((
+            Some(ServicePhase::Running),
+            Some(ServiceAction::Check),
+            false,
+        )),
+        false,
+    );
+
+    assert_eq!(state.state.as_ref(), "Running");
+    assert!(state.checking);
+    assert_eq!(state.operation, None);
+    assert!(state.live);
+}
+
+#[test]
+fn an_update_still_running_names_updating_when_settings_reopens() {
     let state = local_state(
         LocalServerStatus::Failed(ServerError::ActivationUnresolved),
-        Some((Some(ServicePhase::Running), None, false)),
+        Some((Some(ServicePhase::Stopped), None, false)),
         true,
     );
 
-    assert_eq!(state.state.as_ref(), "Updating\u{2026}");
+    assert_eq!(state.state.as_ref(), "Stopped");
+    assert_eq!(state.operation, Some("Updating\u{2026}"));
 }
 
 #[test]
@@ -144,7 +167,7 @@ fn an_ssh_server_reads_by_its_connection() {
 }
 
 #[test]
-fn an_ssh_connection_or_maintenance_underway_reads_as_its_verb() {
+fn an_ssh_connection_reads_as_its_verb_and_maintenance_names_itself_apart() {
     let installing = ssh_state(
         &RemoteConnectionStatus::Working {
             phase: ConnectPhase::Installing,
@@ -165,8 +188,22 @@ fn an_ssh_connection_or_maintenance_underway_reads_as_its_verb() {
         None,
         None,
     );
-    assert_eq!(stopping.state.as_ref(), "Stopping\u{2026}");
+    assert_eq!(stopping.state.as_ref(), "Connected over SSH");
+    assert_eq!(stopping.operation, Some("Stopping\u{2026}"));
     assert!(stopping.live, "the server stays connected while it stops");
+
+    let reading = ssh_state(
+        &RemoteConnectionStatus::Connected {
+            protocol_major: 1,
+            facts: facts(),
+        },
+        Some(None),
+        None,
+        None,
+    );
+    assert_eq!(reading.state.as_ref(), "Connected over SSH");
+    assert!(reading.checking);
+    assert_eq!(reading.operation, None);
 }
 
 #[test]

@@ -143,10 +143,8 @@ pub(super) enum SettingsRowId {
     ShowPullRequests,
     /// Whether the GitHub CLI is installed and logged in.
     GitHubCli,
-    /// The selected server's state, its connection and the steps it allows.
+    /// The selected server: its state, version and update, and the steps they allow.
     ServerStatus,
-    /// The selected server's version and its update.
-    ServerVersion,
     /// Whether the selected server starts on its own when its computer or account starts.
     ServerAutoStart,
     /// Ends every live Terminal Session on the selected server, keeping its organization.
@@ -218,7 +216,6 @@ impl SettingsRowId {
             | Self::ServerWorktreeLocation
             // The server rows hold status and actions, not a preference of this client.
             | Self::ServerStatus
-            | Self::ServerVersion
             | Self::ServerAutoStart
             | Self::EndAllSessions
             | Self::NetworkAccess
@@ -644,11 +641,22 @@ const PREFERENCE_ROWS: &[SettingsRowDescriptor] = &[
         id: SettingsRowId::ServerStatus,
         section: SettingsSectionId::Servers,
         group: super::server_list::SERVER_GROUP,
-        label: "Status",
+        label: "Server",
         keywords: &[
             "server",
             "spaceterm server",
             "status",
+            "version",
+            "update",
+            "update server",
+            "server update",
+            "upgrade",
+            "check now",
+            "needs update",
+            "incompatible",
+            "restore",
+            "return to previous version",
+            "finish update",
             "running",
             "start server",
             "stop server",
@@ -670,25 +678,6 @@ const PREFERENCE_ROWS: &[SettingsRowDescriptor] = &[
             "this computer",
         ],
         selector: "settings-row-server-status",
-    },
-    SettingsRowDescriptor {
-        id: SettingsRowId::ServerVersion,
-        section: SettingsSectionId::Servers,
-        group: super::server_list::SERVER_GROUP,
-        label: "Version",
-        keywords: &[
-            "version",
-            "update",
-            "update server",
-            "server update",
-            "upgrade",
-            "check now",
-            "needs update",
-            "incompatible",
-            "return to previous version",
-            "finish update",
-        ],
-        selector: "settings-row-server-version",
     },
     SettingsRowDescriptor {
         id: SettingsRowId::ServerAutoStart,
@@ -1099,7 +1088,7 @@ mod tests {
     }
 
     /// The complete preference row identity set, so the catalog cannot silently omit one.
-    const EVERY_PREFERENCE_ROW: [SettingsRowId; 41] = [
+    const EVERY_PREFERENCE_ROW: [SettingsRowId; 40] = [
         SettingsRowId::AppearanceMode,
         SettingsRowId::Opacity,
         SettingsRowId::Blur,
@@ -1126,7 +1115,6 @@ mod tests {
         SettingsRowId::GitHubCli,
         SettingsRowId::ServerWorktreeLocation,
         SettingsRowId::ServerStatus,
-        SettingsRowId::ServerVersion,
         SettingsRowId::ServerAutoStart,
         SettingsRowId::EndAllSessions,
         SettingsRowId::NetworkAccess,
@@ -1435,7 +1423,6 @@ mod tests {
                     | SettingsRowId::GitHubCli
                     | SettingsRowId::ServerWorktreeLocation
                     | SettingsRowId::ServerStatus
-                    | SettingsRowId::ServerVersion
                     | SettingsRowId::ServerAutoStart
                     | SettingsRowId::EndAllSessions
                     | SettingsRowId::NetworkAccess
@@ -1503,7 +1490,7 @@ mod tests {
         for (query, row) in [
             ("stop server", SettingsRowId::ServerStatus),
             ("uninstall server", SettingsRowId::ServerStatus),
-            ("update server", SettingsRowId::ServerVersion),
+            ("update server", SettingsRowId::ServerStatus),
             ("start at login", SettingsRowId::ServerAutoStart),
             ("end all", SettingsRowId::EndAllSessions),
             ("invite device", SettingsRowId::PairedDevices),

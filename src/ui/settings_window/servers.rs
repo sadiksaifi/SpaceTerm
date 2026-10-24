@@ -247,7 +247,11 @@ pub(super) struct LocalServerPresentation {
 /// Owns the offered server, the last status, and the pending operation.
 pub(super) struct LocalServerRow {
     control: Result<Arc<dyn LocalServerControl>, ServerError>,
+    /// The last result. A check keeps it in place until the check answers, so a refresh never
+    /// makes a connected server read as disconnected.
     status: LocalServerStatus,
+    /// A check awaits its result.
+    checking: bool,
     /// Returns the background result to GPUI. Dropping the window drops it, and a late result then
     /// has nowhere to land.
     _operation: Option<Task<()>>,
@@ -264,6 +268,7 @@ impl LocalServerRow {
         Self {
             control,
             status: LocalServerStatus::NotChecked,
+            checking: false,
             _operation: None,
         }
     }
@@ -308,6 +313,7 @@ impl LocalServerRow {
         if self.control.is_err() {
             presentation.check = false;
         }
+        presentation.working |= self.checking;
         presentation
     }
 }
@@ -366,7 +372,7 @@ pub(super) fn present(status: LocalServerStatus) -> LocalServerPresentation {
                     CaptionTone::Error,
                 ),
                 // The refusal is scoped to this connection. The server and its Terminal Sessions
-                // keep running, and the Server version row offers any verified update.
+                // keep running, and the Server row offers any verified update.
                 ServerError::IncompatibleProtocol => (
                     SharedString::new_static(INCOMPATIBLE_PROTOCOL),
                     CaptionTone::Error,
@@ -377,7 +383,7 @@ pub(super) fn present(status: LocalServerStatus) -> LocalServerPresentation {
                 ),
                 ServerError::ActivationUnresolved => guidance(
                     "An update you confirmed hasn\u{2019}t finished, so SpaceTerm doesn\u{2019}t \
-                     connect yet. Choose Finish Update under Server version below.",
+                     connect yet. Choose Finish Update for the server above.",
                 ),
                 // A deliberate Stop is a state the person chose, not a fault.
                 ServerError::Stopped => guidance(STOPPED_GUIDANCE),
@@ -1182,6 +1188,8 @@ fn authorization_caption(
 pub(super) struct AutomaticStart {
     pub(super) working: bool,
     pub(super) failure: Option<ServerError>,
+    /// What the change underway asks for, which the switch shows until the service answers.
+    pub(super) requested: Option<bool>,
 }
 
 /// Presents the offered service and owns passive reads.
@@ -1189,6 +1197,12 @@ pub(super) struct ServerServiceRow {
     control: Result<Arc<dyn ServerServiceControl>, ServerError>,
     pub(super) state: ServiceState,
     pub(super) automatic_start: AutomaticStart,
+    /// A change to automatic start the person asked for while a read or an earlier change ran,
+    /// and the window that asked. It follows once the service is idle.
+    queued_automatic_start: Option<(bool, gpui::AnyWindowHandle)>,
+    /// Start Server was chosen while a read ran. It follows once the reads finish, if they still
+    /// offer it.
+    start_requested: bool,
     /// The window owns passive reads; admitted changes belong to LocalServerOperations.
     _operation: Option<Task<()>>,
 }
@@ -1205,8 +1219,26 @@ impl ServerServiceRow {
                 ..ServiceState::default()
             },
             automatic_start: AutomaticStart::default(),
+            queued_automatic_start: None,
+            start_requested: false,
             _operation: None,
         }
+    }
+
+    /// Whether the service starts the server on its own, as the switch shows it: a change the
+    /// person asked for, until the service answers it, otherwise what the service reported.
+    pub(super) fn automatic_start_shown(&self) -> Option<bool> {
+        let reported = self
+            .state
+            .status
+            .filter(|status| status.installed)
+            .map(|status| status.enabled);
+        reported.map(|reported| {
+            self.queued_automatic_start
+                .map(|(enabled, _)| enabled)
+                .or(self.automatic_start.requested)
+                .unwrap_or(reported)
+        })
     }
 
     pub(super) fn presentation(&self) -> ServicePresentation {
@@ -1323,24 +1355,30 @@ impl SettingsWindow {
         let Some(row) = &mut self.local_server else {
             return;
         };
-        if matches!(row.status, LocalServerStatus::Checking) {
+        if row.checking {
             return;
         }
         let Ok(control) = &row.control else {
             return;
         };
         let control = Arc::clone(control);
-        row.status = LocalServerStatus::Checking;
+        row.checking = true;
+        // Only a server never checked has nothing to show meanwhile.
+        if matches!(row.status, LocalServerStatus::NotChecked) {
+            row.status = LocalServerStatus::Checking;
+        }
         let result = cx.background_spawn(async move { control.refresh() });
         row._operation = Some(cx.spawn(async move |settings, cx| {
             let result = result.await;
             let _ = settings.update(cx, |settings, cx| {
                 if let Some(row) = &mut settings.local_server {
+                    row.checking = false;
                     row.status = match result {
                         Ok(connection) => LocalServerStatus::Connected(connection),
                         Err(error) => LocalServerStatus::Failed(error),
                     };
                 }
+                settings.continue_requested_start(cx);
                 cx.notify();
             });
         }));
@@ -1414,9 +1452,7 @@ impl SettingsWindow {
 
     /// Whether the connection row has an action running.
     pub(super) fn local_server_working(&self) -> bool {
-        self.local_server
-            .as_ref()
-            .is_some_and(|row| matches!(row.status, LocalServerStatus::Checking))
+        self.local_server.as_ref().is_some_and(|row| row.checking)
     }
 
     /// Reads the service as the section comes into view. A running action keeps its place.
@@ -1434,6 +1470,13 @@ impl SettingsWindow {
         cx: &mut Context<Self>,
     ) {
         if !self.server_service_ready(action) {
+            // Start chosen while the Servers rows only read waits for them, as Update does.
+            if action == ServiceAction::Start && self.server_only_reading() {
+                if let Some(row) = &mut self.server_service {
+                    row.start_requested = true;
+                }
+                cx.notify();
+            }
             return;
         }
         match action {
@@ -1453,6 +1496,45 @@ impl SettingsWindow {
             ServiceAction::AuthorizeInstall | ServiceAction::AuthorizeStart => {
                 self.confirm_startup_authorization(action, window, cx);
             }
+        }
+    }
+
+    /// Whether the Servers rows are only reading the server, with nothing underway that changes
+    /// it.
+    fn server_only_reading(&self) -> bool {
+        let service_reads = self.server_service.as_ref().is_some_and(|row| {
+            row.control.is_ok()
+                && row
+                    .state
+                    .working
+                    .is_none_or(|action| action == ServiceAction::Check)
+        });
+        let update_reads = self.server_update.as_ref().is_none_or(|row| {
+            row.state
+                .working
+                .is_none_or(|step| step == super::server_update::UpdateStep::Check)
+        });
+        service_reads && update_reads
+    }
+
+    /// Starts the server once the reads that held Start Server back finish, if the service still
+    /// offers it. A read that found it running or couldn't read the service drops the request.
+    pub(super) fn continue_requested_start(&mut self, cx: &mut Context<Self>) {
+        let requested = self
+            .server_service
+            .as_ref()
+            .is_some_and(|row| row.start_requested);
+        if !requested || !self.server_service_ready(ServiceAction::Start) {
+            return;
+        }
+        if let Some(row) = &mut self.server_service {
+            row.start_requested = false;
+        }
+        let offered = self
+            .server_service_presentation()
+            .is_some_and(|presentation| presentation.actions.contains(&ServiceAction::Start));
+        if offered {
+            self.run_server_service(ServiceAction::Start, cx);
         }
     }
 
@@ -1519,11 +1601,22 @@ impl SettingsWindow {
             return;
         };
         if row.automatic_start.working || row.state.working.is_some() {
+            // A read or an earlier change finishes first. The switch shows the change meanwhile,
+            // and the change follows once the service answers. Other work changes the service,
+            // so it takes no change.
+            if !authorize
+                && (row.automatic_start.working || row.state.working == Some(ServiceAction::Check))
+            {
+                row.queued_automatic_start = Some((enabled, window));
+                cx.notify();
+            }
             return;
         }
+        row.queued_automatic_start = None;
         row.automatic_start = AutomaticStart {
             working: true,
             failure: None,
+            requested: Some(enabled),
         };
         let changed = cx.background_spawn(async move {
             if authorize {
@@ -1538,6 +1631,7 @@ impl SettingsWindow {
                     return;
                 };
                 row.automatic_start.working = false;
+                row.automatic_start.requested = None;
                 match changed {
                     Ok(status) => row.state.status = Some(status),
                     // Only the person's confirmation asks for a password, once per change.
@@ -1546,9 +1640,35 @@ impl SettingsWindow {
                     }
                     Err(error) => row.automatic_start.failure = Some(error),
                 }
+                settings.continue_automatic_start(cx);
+                settings.continue_requested_start(cx);
                 cx.notify();
             });
         }));
+        cx.notify();
+    }
+
+    /// Makes the automatic start change the person asked for while a read or an earlier change
+    /// ran, once the service is idle. A read that couldn't confirm the service drops it, so the
+    /// switch returns to what the service last reported.
+    fn continue_automatic_start(&mut self, cx: &mut Context<Self>) {
+        let Some(row) = self.server_service.as_mut() else {
+            return;
+        };
+        if row.automatic_start.working || row.state.working.is_some() {
+            return;
+        }
+        let Some((enabled, window)) = row.queued_automatic_start.take() else {
+            return;
+        };
+        let reported = row
+            .state
+            .status
+            .filter(|status| row.state.failure.is_none() && status.installed)
+            .map(|status| status.enabled);
+        if reported.is_some_and(|reported| reported != enabled) {
+            self.change_automatic_start(enabled, false, window, cx);
+        }
         cx.notify();
     }
 
@@ -1680,6 +1800,8 @@ impl SettingsWindow {
                     if let Some(row) = &mut settings.server_service {
                         row.state = state;
                     }
+                    settings.continue_automatic_start(cx);
+                    settings.continue_requested_start(cx);
                     cx.notify();
                 });
             }));
@@ -1931,6 +2053,14 @@ pub(super) mod testing {
                 prompt: Mutex::new(Prompt::Approve),
                 calls: Mutex::new(Vec::new()),
             })
+        }
+
+        /// Changes what the service reports, as the operating system would.
+        pub(in crate::ui::settings_window) fn report(
+            &self,
+            status: Result<ServiceStatus, ServerError>,
+        ) {
+            *self.status.lock().expect("status") = status;
         }
 
         /// Sets what the next authorization prompt does.

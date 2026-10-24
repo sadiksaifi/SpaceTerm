@@ -179,7 +179,7 @@ fn read_facts(
     })
 }
 
-/// Whether the Server version row offers Update Server for `service`, for a surface that opens
+/// Whether the Server row offers Update Server for `service`, for a surface that opens
 /// the journey from elsewhere. Reads only, so it stages, installs, and starts nothing. Blocking.
 pub(crate) fn update_offered(service: &Service) -> bool {
     ServerUpdateControl::read(service).is_ok_and(|facts| {
@@ -279,17 +279,6 @@ impl UpdateStep {
                 "Returning the server to its previous version\u{2026}",
             ),
             Self::Finish => ("Finishing", "Finishing the update you confirmed\u{2026}"),
-        }
-    }
-
-    /// The verb the Version row shows while the step runs.
-    pub(super) const fn verb(self) -> &'static str {
-        match self {
-            Self::Check | Self::PrepareReturn => "Checking\u{2026}",
-            Self::Prepare => "Verifying\u{2026}",
-            Self::Update { .. } => "Updating\u{2026}",
-            Self::Return => "Returning\u{2026}",
-            Self::Finish => "Finishing\u{2026}",
         }
     }
 
@@ -813,6 +802,7 @@ impl SettingsWindow {
             self.confirm_change(prepared, cx);
         }
         self.continue_requested_update(cx);
+        self.continue_requested_start(cx);
         cx.notify();
     }
 

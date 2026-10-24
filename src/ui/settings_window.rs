@@ -14,7 +14,7 @@ mod end_sessions;
 mod git;
 mod import;
 mod keybindings;
-mod local_operations;
+pub(crate) mod local_operations;
 mod microphone;
 mod notices;
 mod permission_access;
@@ -470,8 +470,12 @@ pub(crate) struct SettingsWindow {
     /// Follows the presented server's facts, so a server SpaceTerm later disconnects from shows
     /// them.
     server_facts: server_facts::FactsFollower,
-    /// Check Now underway on the Version row, for the server it was asked for.
+    /// Check Now underway on the Server row, for the server it was asked for.
     version_check: Option<server_card::VersionCheck>,
+    /// A read of the selected server, which the Server row shows as Checking once it runs long.
+    check_progress: server_card::DelayedProgress,
+    /// An operation changing the selected server, which the Server row names once it runs long.
+    operation_progress: server_card::DelayedProgress,
     /// The SSH server whose automatic start the person last asked to change, and to what.
     ssh_automatic_start: Option<(crate::domain::SshDestination, bool)>,
     /// The status last observed for each listed server, which a server SpaceTerm isn't connected
@@ -829,6 +833,8 @@ impl SettingsWindow {
             hidden_notices: notices::HiddenNotices::default(),
             server_facts: server_facts::FactsFollower::default(),
             version_check: None,
+            check_progress: server_card::DelayedProgress::default(),
+            operation_progress: server_card::DelayedProgress::default(),
             ssh_automatic_start: None,
             retained_status: std::collections::BTreeMap::new(),
             this_computer,
@@ -1486,6 +1492,9 @@ impl SettingsWindow {
         } else {
             appearance
         };
+        if row == SettingsRowId::ServerStatus {
+            self.track_server_progress(cx);
+        }
         let control = self.render_control(row, ends, content_appearance, window, cx);
         let mut rendered = FormRow::new(
             descriptor.selector,
@@ -1499,6 +1508,9 @@ impl SettingsWindow {
         .dimmed(self.row_dimmed(row));
         if let Some((description, message)) = self.server_row_text(row, cx) {
             rendered = rendered.description(description).message(message);
+            if row == SettingsRowId::ServerStatus {
+                rendered = rendered.status_line(self.server_progress_indicator(cx));
+            }
         } else if row == SettingsRowId::UpdateStatus {
             rendered = rendered.description(self.update_status(cx).summary);
         } else if let Some(permission) = permission_access::row_permission(row) {
@@ -1561,7 +1573,6 @@ impl SettingsWindow {
             }
             SettingsRowId::ServerWorktreeLocation => self.render_server_location(appearance, cx),
             SettingsRowId::ServerStatus => self.render_server_status(appearance, cx),
-            SettingsRowId::ServerVersion => self.render_server_version(appearance, cx),
             SettingsRowId::ServerAutoStart => self.render_auto_start(appearance, cx),
             SettingsRowId::EndAllSessions => self.render_end_all_sessions(appearance, cx),
             SettingsRowId::NetworkAccess => self.render_network_access(appearance, cx),
@@ -2422,16 +2433,9 @@ impl SettingsWindow {
     /// on. Its card's footnote says why.
     fn row_dimmed(&self, row: SettingsRowId) -> bool {
         match row {
-            // This account's service and an SSH account's maintenance route change the version
-            // without a connection, and this account's service changes automatic start. A paired
-            // connection carries no such authority, and Terminal Sessions need the server itself.
-            SettingsRowId::ServerVersion => {
-                matches!(
-                    self.selected_server(),
-                    Some(server_list::ServerChoice::Direct(_))
-                ) && !self.selected_server_live()
-            }
-            // An SSH account's route changes automatic start without a connection too.
+            // This account's service changes automatic start without a connection, and so does an
+            // SSH account's route. A paired connection carries no such authority, and Terminal
+            // Sessions need the server itself.
             SettingsRowId::ServerAutoStart => {
                 matches!(
                     self.selected_server(),
@@ -2459,8 +2463,9 @@ impl SettingsWindow {
     ) -> Option<(SharedString, Option<(SharedString, CaptionTone)>)> {
         let error = |message: Option<SharedString>| message.map(|text| (text, CaptionTone::Error));
         Some(match row {
-            SettingsRowId::ServerStatus => (self.status_description(cx), self.status_message()),
-            SettingsRowId::ServerVersion => (self.version_description(cx), self.version_message()),
+            // The Server row keeps one line under its label; longer explanations go in the card's
+            // footnote.
+            SettingsRowId::ServerStatus => (self.server_subtitle(cx), None),
             SettingsRowId::ServerAutoStart => (
                 self.auto_start_description(),
                 error(self.auto_start_error()),

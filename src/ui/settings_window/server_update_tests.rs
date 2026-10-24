@@ -1,4 +1,4 @@
-//! The Server version row and its Update Server journey, driven through a scripted service.
+//! The Server row's Update Server journey, driven through a scripted service.
 
 use std::rc::Rc;
 use std::sync::Arc;
@@ -82,7 +82,17 @@ fn open(facts: UpdateFacts, cx: &mut TestAppContext) -> Harness<'_> {
     }
 }
 
+/// Clicks `selector` on the page, or in the Server row's ⋯ menu, where every step but the row's
+/// one button lives.
 fn click(selector: &'static str, cx: &mut VisualTestContext) {
+    let menu = super::super::server_card::MENU_SELECTOR;
+    if cx.debug_bounds(selector).is_none() && cx.debug_bounds(menu).is_some() {
+        click_at(menu, cx);
+    }
+    click_at(selector, cx);
+}
+
+fn click_at(selector: &'static str, cx: &mut VisualTestContext) {
     let position = cx
         .debug_bounds(selector)
         .unwrap_or_else(|| panic!("{selector} was not rendered"))
@@ -176,6 +186,11 @@ fn a_confirmed_update_replaces_the_running_server_once(cx: &mut TestAppContext) 
         presentation.explanation
     );
     assert_eq!(presentation.actions, [UpdateAction::Update]);
+    assert_eq!(
+        spaceterm_ui::a11y_testing::A11yTree::read(harness.cx).node("Update\u{2026}")["aria"]["role"],
+        "Button",
+        "the row's one button reads Update…"
+    );
 
     click(UPDATE_SELECTOR, harness.cx);
     assert!(alert_open(UPDATE_CONFIRM_SELECTOR, harness.cx));
@@ -344,6 +359,12 @@ fn a_failed_update_offers_return_only_when_the_service_proves_it_safe(cx: &mut T
     assert_eq!(
         presentation.actions,
         [UpdateAction::Return, UpdateAction::Check]
+    );
+    assert_eq!(
+        spaceterm_ui::a11y_testing::A11yTree::read(harness.cx).node("Restore 1.4.0\u{2026}")["aria"]
+            ["role"],
+        "Button",
+        "the safe return is the row's one button and names the version it returns to"
     );
 
     click(RETURN_SELECTOR, harness.cx);
@@ -518,7 +539,7 @@ fn another_surface_starts_the_same_journey_once_the_row_reads(cx: &mut TestAppCo
     assert!(!alert_open(UPDATE_CONFIRM_SELECTOR, harness.cx));
     assert_eq!(harness.update.changes(), [UpdateCall::PrepareUpdate]);
     assert!(rendered(
-        super::super::server_card::VERSION_SELECTOR,
+        super::super::server_card::STATUS_SELECTOR,
         harness.cx
     ));
 }
@@ -681,11 +702,9 @@ fn updating_a_stopped_server_after_settings_reopens_keeps_it_stopped(cx: &mut Te
 }
 
 /// Check Now checks for a newer SpaceTerm first, because server builds ship inside it, and reads
-/// the server only once that check settles. The row says Checking the whole time.
+/// the server only once that check settles. The server reads as checking the whole time.
 #[gpui::test]
 fn check_now_reads_the_server_after_spaceterm_finishes_checking(cx: &mut TestAppContext) {
-    use spaceterm_ui::a11y_testing::A11yTree;
-
     let adapter = Rc::new(crate::updates::testing::RecordingAdapter::available());
     cx.update(|cx| crate::updates::ApplicationUpdates::install(adapter.clone(), cx));
     let mut facts = available();
@@ -694,14 +713,16 @@ fn check_now_reads_the_server_after_spaceterm_finishes_checking(cx: &mut TestApp
     }
     let harness = open(facts, cx);
     let reads = harness.update.reads();
+    let window = harness.window.clone();
     let checking = |cx: &mut VisualTestContext| {
-        A11yTree::read(cx).with_role("Status").iter().any(|node| {
-            node["aria"]["label"].as_str().is_some_and(|label| {
-                label.starts_with("Version") && label.ends_with("Checking\u{2026}")
-            })
+        window.read_with(cx, |settings, _| {
+            settings
+                .server_state(&super::super::server_list::ServerChoice::Local)
+                .checking
         })
     };
 
+    click(super::super::server_card::MENU_SELECTOR, harness.cx);
     click(UPDATE_CHECK_SELECTOR, harness.cx);
 
     assert_eq!(
@@ -727,4 +748,34 @@ fn check_now_reads_the_server_after_spaceterm_finishes_checking(cx: &mut TestApp
         harness.update.changes().is_empty(),
         "checking changes nothing"
     );
+}
+
+/// A failed update read before the approved build reads again still names both builds from the
+/// update's own record: the subtitle says what didn't update, and the safe return names the
+/// version it returns to.
+#[gpui::test]
+fn a_failed_update_names_its_builds_from_its_own_record(cx: &mut TestAppContext) {
+    use spaceterm_ui::a11y_testing::A11yTree;
+
+    let harness = open(
+        UpdateFacts {
+            status: Err(ServerError::ActivationUnresolved),
+            approved: None,
+            activation: Some(activation(
+                ActivationPhase::Failed { can_return: true },
+                false,
+            )),
+            ..available()
+        },
+        cx,
+    );
+
+    let tree = A11yTree::read(harness.cx);
+    assert!(
+        tree.find_text("Couldn't update to 1.5.0 \u{b7} Still on 1.4.0")
+            .is_some(),
+        "the subtitle names both builds"
+    );
+    assert_eq!(tree.node("Restore 1.4.0\u{2026}")["aria"]["role"], "Button");
+    assert!(rendered(RETURN_SELECTOR, harness.cx));
 }

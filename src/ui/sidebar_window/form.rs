@@ -322,6 +322,10 @@ pub(crate) struct FormRow {
     highlighted: bool,
     matched_indices: Vec<usize>,
     layout: FormRowLayout,
+    /// The guidance reports a status on one line, so the row's height never changes.
+    status_line: bool,
+    /// What leads a status line, such as a progress ring.
+    status_accessory: Option<AnyElement>,
 }
 
 impl FormRow {
@@ -342,6 +346,8 @@ impl FormRow {
             highlighted: false,
             matched_indices: Vec::new(),
             layout: FormRowLayout::Beside,
+            status_line: false,
+            status_accessory: None,
         }
     }
 
@@ -362,6 +368,14 @@ impl FormRow {
     /// selects. An error is announced as an alert.
     pub(crate) fn message(mut self, message: Option<(SharedString, CaptionTone)>) -> Self {
         self.message = message;
+        self
+    }
+
+    /// Keeps the guidance under the label to one line that reports a status, led by
+    /// `accessory` such as a progress ring, so the row's height stays the same whatever it says.
+    pub(crate) fn status_line(mut self, accessory: Option<AnyElement>) -> Self {
+        self.status_line = true;
+        self.status_accessory = accessory;
         self
     }
 
@@ -519,7 +533,26 @@ impl FormRow {
                                 .children(self.reset),
                         ),
                 )
-                .children(self.description.clone().filter(|_| !above).map(&caption))
+                .children(
+                    self.description
+                        .clone()
+                        .filter(|_| !above)
+                        .map(|description| {
+                            if self.status_line {
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .items_center()
+                                    .min_w_0()
+                                    .gap(appearance.spacing(6.0))
+                                    .children(self.status_accessory)
+                                    .child(caption(description).min_w_0().truncate())
+                                    .into_any_element()
+                            } else {
+                                caption(description).into_any_element()
+                            }
+                        }),
+                )
                 .into_any_element()
         });
         let (label_above, label_beside) = if above { (label, None) } else { (None, label) };
