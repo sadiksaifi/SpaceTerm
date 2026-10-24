@@ -296,10 +296,15 @@ fn inventory_observers_receive_unpainted_pane_metadata_without_claiming_control(
         ),
         "observing metadata must not replace the controller"
     );
-    assert!(matches!(
-        host.request([1; 32], [1; 32], Request::Poll { lease }),
-        Reply::Unchanged
-    ));
+    // Hidden Panes still announce accessibility revisions without publishing screen rows.
+    let polled = host.request([1; 32], [1; 32], Request::Poll { lease });
+    assert!(
+        matches!(
+            polled,
+            Reply::Unchanged | Reply::AccessibilityRevision { .. }
+        ),
+        "the controller can poll the unpainted Pane without receiving a Screen: {polled:?}"
+    );
     host.shutdown().unwrap();
 }
 

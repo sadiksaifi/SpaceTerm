@@ -754,7 +754,7 @@ fn picker_rows(name: &str, cx: &mut VisualTestContext) -> Vec<String> {
 /// where each one is, so choosing one never means guessing.
 #[gpui::test]
 fn the_picker_tells_apart_servers_that_share_a_name(cx: &mut TestAppContext) {
-    let (direct, routes) = crate::direct_connections::tests::offline_routes_at(&[
+    let (direct, routes) = crate::direct_connections::tests::disconnected_routes_at(&[
         ("studio", "wss://192.168.1.10:9231"),
         ("studio", "wss://192.168.1.11:9231"),
     ]);
