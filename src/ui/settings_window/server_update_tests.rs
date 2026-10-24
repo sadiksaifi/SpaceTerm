@@ -28,7 +28,7 @@ use crate::ui::settings_window::servers::testing::{
 use crate::ui::settings_window::servers::{
     LocalServerControl, OfferedServer, ServerServiceControl,
 };
-use crate::ui::sidebar_window::form::CaptionTone;
+use crate::ui::sidebar_window::{SidebarOwner, form::CaptionTone};
 
 const NAVIGATION_SELECTOR: &str = "settings-navigation-settings-section-servers";
 
@@ -778,4 +778,63 @@ fn a_failed_update_names_its_builds_from_its_own_record(cx: &mut TestAppContext)
     );
     assert_eq!(tree.node("Restore 1.4.0\u{2026}")["aria"]["role"], "Button");
     assert!(rendered(RETURN_SELECTOR, harness.cx));
+}
+
+/// Returning to Servers reads the update again. While that read runs, the failed update's
+/// Restore is unavailable rather than taking a click it would drop. Once the read finishes, it
+/// asks to restore.
+#[gpui::test]
+fn restore_waits_for_the_update_read_after_returning_to_servers(cx: &mut TestAppContext) {
+    let harness = open(
+        UpdateFacts {
+            status: Ok(stopped()),
+            activation: Some(activation(
+                ActivationPhase::Failed { can_return: true },
+                false,
+            )),
+            ..available()
+        },
+        cx,
+    );
+    // Reads the published tree as the last frame drew it, without running background work.
+    let restore_disabled = |cx: &mut VisualTestContext| {
+        let tree: serde_json::Value = cx.update(|window, _| {
+            serde_json::from_str(&window.debug_a11y_tree_json().expect("a published tree"))
+                .expect("a valid tree")
+        });
+        tree["nodes"]
+            .as_object()
+            .expect("published nodes")
+            .values()
+            .find(|node| node["aria"]["label"] == "Restore 1.4.0\u{2026}")
+            .expect("Restore is the row's button")["aria"]["disabled"]
+            == true
+    };
+    spaceterm_ui::a11y_testing::A11yTree::read(harness.cx);
+    assert!(
+        !restore_disabled(harness.cx),
+        "a settled read offers Restore"
+    );
+
+    harness.window.update(harness.cx, |settings, cx| {
+        settings.select_section(super::super::SettingsSectionId::Interface, cx);
+        settings.select_section(super::super::SettingsSectionId::Servers, cx);
+    });
+    assert_eq!(
+        harness.window.read_with(harness.cx, |settings, _| {
+            settings.server_update.as_ref().unwrap().state.working
+        }),
+        Some(UpdateStep::Check),
+        "the update read is held"
+    );
+    assert!(restore_disabled(harness.cx), "Restore waits for the read");
+
+    harness.cx.run_until_parked();
+    assert!(
+        !restore_disabled(harness.cx),
+        "the finished read offers Restore"
+    );
+    click(RETURN_SELECTOR, harness.cx);
+    assert!(alert_open(RETURN_CONFIRM_SELECTOR, harness.cx));
+    assert_eq!(harness.update.changes(), [UpdateCall::PrepareReturn]);
 }

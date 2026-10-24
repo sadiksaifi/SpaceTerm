@@ -1910,8 +1910,17 @@ impl SettingsWindow {
         let owner = cx.weak_entity();
         let busy = view.busy;
         let restore = view.restore.clone();
+        // Restore prepares through the update row, which takes no step while it reads, so it
+        // waits for that read rather than taking a click it would drop.
+        let reading_update = self
+            .server_update
+            .as_ref()
+            .is_some_and(|row| row.state.working.is_some());
         let button = view.button.map(|step| {
             let owner = owner.clone();
+            let waits = busy
+                || (reading_update
+                    && step == StatusStep::Version(VersionStep::Local(UpdateAction::Return)));
             let label: SharedString = match (&step, &restore) {
                 (
                     StatusStep::Version(
@@ -1947,8 +1956,7 @@ impl SettingsWindow {
             })
             .size(ButtonSize::Regular)
             .tab_stop(true)
-            // Work underway changes the server, so the step waits until it finishes.
-            .disabled(busy)
+            .disabled(waits)
             .debug_selector(status_step_selector(&step))
             .accessibility_description(description)
             .on_activate(move |_, window, cx| {
