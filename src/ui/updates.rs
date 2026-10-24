@@ -857,10 +857,12 @@ enum PillCommand {
 /// opens the Updates menu, which keeps every row.
 #[derive(Clone, Debug, PartialEq)]
 enum UpdatePill {
-    /// The client's step leads. `servers` counts servers that also ask for action.
+    /// The client's step leads. `servers` counts servers that also ask for action, and `offered`
+    /// records whether one of them offers a verified update.
     Client {
         step: ControlPresentation,
         servers: usize,
+        offered: bool,
     },
     /// One server's update or attention leads.
     Server {
@@ -869,7 +871,8 @@ enum UpdatePill {
         action: ServerUpdateAction,
     },
     /// Several servers ask for action. Updates happen one server at a time, so the menu chooses.
-    Servers(usize),
+    /// `offered` records whether one of them offers a verified update.
+    Servers { count: usize, offered: bool },
 }
 
 impl UpdatePill {
@@ -882,10 +885,14 @@ impl UpdatePill {
                 .map(|action| (row, action))
         });
         let count = asking.clone().count();
+        let offered = asking
+            .clone()
+            .any(|(_, action)| action.need() == Some(ServerNeed::Update));
         if let Some(step) = client {
             return Some(Self::Client {
                 step,
                 servers: count,
+                offered,
             });
         }
         match count {
@@ -895,7 +902,7 @@ impl UpdatePill {
                 detail: row.detail.clone(),
                 action: action.clone(),
             }),
-            count => Some(Self::Servers(count)),
+            count => Some(Self::Servers { count, offered }),
         }
     }
 
@@ -906,14 +913,14 @@ impl UpdatePill {
                 Some(ServerNeed::Attention) => "Server Needs Attention".into(),
                 _ => "Update Server".into(),
             },
-            Self::Servers(count) => format!("Update {count} Servers").into(),
+            Self::Servers { count, .. } => format!("Update {count} Servers").into(),
         }
     }
 
     /// The full sentence behind the compact label, for the tooltip and assistive technology.
     fn description(&self) -> SharedString {
         match self {
-            Self::Client { step, servers } => {
+            Self::Client { step, servers, .. } => {
                 let step = step.status.clone().unwrap_or_else(|| step.label.clone());
                 match servers {
                     0 => step,
@@ -925,19 +932,22 @@ impl UpdatePill {
                 }
             }
             Self::Server { name, detail, .. } => format!("{name}: {detail}").into(),
-            Self::Servers(count) => format!("{count} servers need action").into(),
+            Self::Servers { count, .. } => format!("{count} servers need action").into(),
         }
     }
 
+    /// Warnings lead. Otherwise a prominent client step or a verified server update offer is the
+    /// action to take now, even behind the client's progress or retry.
     fn tone(&self) -> PillTone {
         match self {
             Self::Client { step, .. } if step.reminder == Some(ControlReminder::Overdue) => {
                 PillTone::Warning
             }
-            Self::Client { step, .. } if step.prominent => PillTone::Primary,
+            Self::Client { step, offered, .. } if step.prominent || *offered => PillTone::Primary,
             Self::Server { action, .. } if action.need() == Some(ServerNeed::Attention) => {
                 PillTone::Warning
             }
+            Self::Server { .. } | Self::Servers { offered: true, .. } => PillTone::Primary,
             _ => PillTone::Neutral,
         }
     }
@@ -956,7 +966,7 @@ impl UpdatePill {
         match self {
             Self::Client { step, .. } => PillCommand::Client(step.command),
             Self::Server { action, .. } => PillCommand::Server(action.clone()),
-            Self::Servers(_) => PillCommand::Menu,
+            Self::Servers { .. } => PillCommand::Menu,
         }
     }
 
@@ -972,6 +982,8 @@ mod tests {
     use crate::appearance::{Appearance, builtin_chrome_base};
     use crate::ui::MachineTarget;
 
+    mod offer_tests;
+
     const PENDING: Option<&str> = Some("0.4.2");
 
     fn resolve(state: UpdateState) -> Option<ControlPresentation> {
@@ -986,8 +998,8 @@ mod tests {
         "0.4.2".to_owned()
     }
 
-    /// Progress glyphs only appear on the ordinary button, in every state from normal to disabled,
-    /// so the installed accent ring has to stay readable on each of its fills.
+    /// Neutral and disabled progress glyphs keep the installed accent, which must remain readable
+    /// on every ordinary fill. Enabled Primary pills inherit the button foreground instead.
     #[test]
     fn the_progress_ring_stays_readable_on_every_ordinary_button_fill() {
         const MINIMUM_GRAPHIC_CONTRAST: f64 = 3.0;
@@ -1288,7 +1300,7 @@ mod tests {
             pill(None, None, &with(&update)),
             Some((
                 "Update Server".to_owned(),
-                PillTone::Neutral,
+                PillTone::Primary,
                 None,
                 PillCommand::Server(ServerUpdateAction::Ssh(ssh("macbookpro")))
             ))
@@ -1310,7 +1322,7 @@ mod tests {
             pill(None, None, &both),
             Some((
                 "Update 2 Servers".to_owned(),
-                PillTone::Neutral,
+                PillTone::Primary,
                 None,
                 PillCommand::Menu
             ))

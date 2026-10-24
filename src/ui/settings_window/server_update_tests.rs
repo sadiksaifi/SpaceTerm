@@ -3,7 +3,7 @@
 use std::rc::Rc;
 use std::sync::Arc;
 
-use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext};
+use gpui::{AppContext as _, Entity, Modifiers, TestAppContext, VisualTestContext};
 
 use super::testing::{Outcome, ScriptedUpdate, UpdateCall, approved, available, included};
 use super::{
@@ -169,6 +169,16 @@ fn dropdown_local_update_opens_the_existing_confirmation_without_activation(
 #[gpui::test]
 fn a_confirmed_update_replaces_the_running_server_once(cx: &mut TestAppContext) {
     let mut harness = open(available(), cx);
+    let inventory_refreshes = Rc::new(std::cell::Cell::new(0));
+    let (inventory, _observation) = harness.cx.update(|_, cx| {
+        let inventory = cx.new(crate::ui::updates::server_rows::ServerUpdates::new);
+        let refreshes = inventory_refreshes.clone();
+        let observation = cx.observe(&inventory, move |_, _| {
+            refreshes.set(refreshes.get() + 1);
+        });
+        (inventory, observation)
+    });
+    harness.cx.run_until_parked();
     let presentation = harness.presentation();
     assert_eq!(presentation.state, "Update Available");
     assert!(
@@ -196,6 +206,7 @@ fn a_confirmed_update_replaces_the_running_server_once(cx: &mut TestAppContext) 
     assert!(alert_open(UPDATE_CONFIRM_SELECTOR, harness.cx));
     assert_eq!(harness.update.changes(), [UpdateCall::PrepareUpdate]);
 
+    let before_completion = inventory_refreshes.get();
     click_modal(UPDATE_CONFIRM_SELECTOR, harness.cx);
     assert_eq!(
         harness.update.changes(),
@@ -206,6 +217,11 @@ fn a_confirmed_update_replaces_the_running_server_once(cx: &mut TestAppContext) 
     assert!(presentation.actions.is_empty());
     // The replaced server is read afresh by the other rows.
     assert!(harness.server.refreshes() >= 2);
+    assert!(
+        inventory_refreshes.get() > before_completion,
+        "the Updates inventory must refresh when the admitted local update completes"
+    );
+    drop(inventory);
     assert!(harness.service.changes().is_empty());
 }
 

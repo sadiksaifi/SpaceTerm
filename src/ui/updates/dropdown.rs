@@ -194,9 +194,21 @@ fn server_sections(rows: Vec<ServerUpdateRow>) -> Vec<MenuEntry<UpdatesMenuActio
         .collect()
 }
 
-/// The pill's leading glyph. Icons take the pill's foreground; the progress ring keeps the
-/// installed accent because the disabled foreground of Checking and Stopping is too faint for it.
-fn pill_glyph(glyph: ControlGlyph, glyph_size: Pixels) -> impl FnOnce(Rgba) -> AnyElement {
+/// The pill's leading glyph. Icons take the pill's foreground. On an enabled Primary fill the
+/// progress ring takes that foreground too, because the installed accent disappears against it.
+/// Elsewhere the ring keeps the installed accent, because the disabled foreground of Checking and
+/// Stopping is too faint for it.
+fn pill_glyph(
+    glyph: ControlGlyph,
+    glyph_size: Pixels,
+    inherited: bool,
+) -> impl FnOnce(Rgba) -> AnyElement {
+    let ring = move |state| {
+        ProgressRing::new("update-control-progress", "Update", state)
+            .size(ProgressSize::Compact)
+            .when(inherited, ProgressRing::inherited)
+            .into_any_element()
+    };
     move |foreground| match glyph {
         ControlGlyph::Download => {
             Icon::new(IconName::Download, glyph_size, foreground).into_any_element()
@@ -207,20 +219,11 @@ fn pill_glyph(glyph: ControlGlyph, glyph_size: Pixels) -> impl FnOnce(Rgba) -> A
         ControlGlyph::Warning => {
             Icon::new(IconName::CircleAlert, glyph_size, foreground).into_any_element()
         }
-        ControlGlyph::Progress(fraction) => {
-            let state = DeterminateProgress::new(f64::from(fraction))
-                .map_or(ProgressState::Indeterminate, ProgressState::Determinate);
-            ProgressRing::new("update-control-progress", "Update", state)
-                .size(ProgressSize::Compact)
-                .into_any_element()
-        }
-        ControlGlyph::Activity => ProgressRing::new(
-            "update-control-progress",
-            "Update",
-            ProgressState::Indeterminate,
-        )
-        .size(ProgressSize::Compact)
-        .into_any_element(),
+        ControlGlyph::Progress(fraction) => ring(
+            DeterminateProgress::new(f64::from(fraction))
+                .map_or(ProgressState::Indeterminate, ProgressState::Determinate),
+        ),
+        ControlGlyph::Activity => ring(ProgressState::Indeterminate),
     }
 }
 
@@ -292,6 +295,7 @@ impl Render for UpdateControl {
                 .into_any_element(),
             command => {
                 let enabled = !matches!(command, PillCommand::Client(None));
+                let inherited = enabled && pill.tone() == PillTone::Primary;
                 let dot = appearance.spacing(5.0);
                 ComboButton::new("update-control", label, entries)
                     .variant(variant)
@@ -299,7 +303,7 @@ impl Render for UpdateControl {
                     .shape(ButtonShape::Capsule)
                     .disabled(!enabled)
                     .when_some(pill.glyph(), |button, glyph| {
-                        button.leading(pill_glyph(glyph, glyph_size))
+                        button.leading(pill_glyph(glyph, glyph_size, inherited))
                     })
                     .accessibility_description(description.clone())
                     .tooltip(
