@@ -50,6 +50,12 @@ const MENU_ITEM_ICONS: &[MenuItemIcon] = &[
     MenuItemIcon {
         menu: "File",
         submenu: None,
+        item: "Add Server…",
+        symbol: "server.rack",
+    },
+    MenuItemIcon {
+        menu: "File",
+        submenu: None,
         item: "Open Local Directory…",
         symbol: "folder",
     },
@@ -160,6 +166,12 @@ const MENU_ITEM_ICONS: &[MenuItemIcon] = &[
         submenu: Some("Find"),
         item: "Find Previous",
         symbol: "chevron.up",
+    },
+    MenuItemIcon {
+        menu: "View",
+        submenu: None,
+        item: "Command Palette…",
+        symbol: "command",
     },
     MenuItemIcon {
         menu: "View",
@@ -854,6 +866,8 @@ mod tests {
         assert_eq!(
             labels(view_menu().owned()),
             [
+                "Command Palette…",
+                "|",
                 "Toggle Sidebar",
                 "Toggle Sidebar Focus",
                 "|",
@@ -914,6 +928,7 @@ mod tests {
             [
                 "New Workspace",
                 "New Remote Workspace",
+                "Add Server…",
                 "Open Local Directory…",
                 "Open Remote Directory…",
                 "Switch Workspace",
@@ -943,6 +958,7 @@ mod tests {
             [
                 NewWorkspace.name(),
                 crate::ui::NewRemoteWorkspace.name(),
+                crate::ui::settings_window::AddServer.name(),
                 crate::ui::OpenLocalDirectory.name(),
                 crate::ui::OpenRemoteDirectory.name(),
                 SwitchWorkspace.name(),

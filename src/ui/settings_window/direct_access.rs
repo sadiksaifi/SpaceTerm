@@ -422,7 +422,7 @@ impl SettingsWindow {
     }
 
     /// The Network Access card's footnote while its rows can't change.
-    pub(super) fn network_access_footnote(&self) -> Option<SharedString> {
+    pub(super) fn network_access_footnote(&self, cx: &App) -> Option<SharedString> {
         if self.network_access_live() {
             return None;
         }
@@ -440,7 +440,7 @@ impl SettingsWindow {
             .map(|at| {
                 format!(
                     " Shown values are from {}.",
-                    super::server_card::observed_time(at)
+                    super::server_card::observed_time(at, cx)
                 )
             });
         Some(SharedString::from(format!(

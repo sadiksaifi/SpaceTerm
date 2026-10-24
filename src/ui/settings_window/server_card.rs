@@ -18,6 +18,7 @@ use super::server_list::{ServerChoice, status_dot, tone_color};
 use super::server_selection;
 use super::server_update::UpdateAction;
 use super::servers::{LocalServerStatus, ServiceAction, ServicePhase};
+use crate::desktop_profile::LocalTime;
 use crate::direct_connections::{DirectRouteStatus, RefusalReason};
 use crate::local_server::ServerError;
 use crate::local_server::service::control::Action as ServiceControlAction;
@@ -545,7 +546,7 @@ impl SettingsWindow {
         let observed = server_selection::facts(&choice.key(), cx)
             .map(|facts| facts.observed_at)
             .filter(|at| *at > 0)
-            .map(|at| format!(" Shown values are from {}.", observed_time(at)));
+            .map(|at| format!(" Shown values are from {}.", observed_time(at, cx)));
         Some(SharedString::from(format!(
             "{ask}{}",
             observed.unwrap_or_default()
@@ -999,42 +1000,13 @@ impl SettingsWindow {
 
 /// When the shown values were observed, in this computer's local time: "08:15" today, or
 /// "Oct 21, 08:15" on another day.
-pub(super) fn observed_time(at: u64) -> String {
+pub(super) fn observed_time(at: u64, cx: &App) -> String {
+    let calendar = crate::desktop_profile::DesktopPresentation::get(cx);
     let now = crate::ui::direct_access::unix_now();
-    match (local_time(at), local_time(now)) {
+    match (calendar.local_time(at), calendar.local_time(now)) {
         (Some(at), Some(now)) => clock_text(at, now),
         _ => "earlier".to_owned(),
     }
-}
-
-/// A local calendar time: year, month from 0, day of the month, hour and minute.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) struct LocalTime {
-    year: i32,
-    month: usize,
-    day: u32,
-    hour: u32,
-    minute: u32,
-}
-
-fn local_time(unix_seconds: u64) -> Option<LocalTime> {
-    let seconds = libc::time_t::try_from(unix_seconds).ok()?;
-    // SAFETY: `tm` is a plain C struct that localtime_r fully initializes on success, and both
-    // pointers stay valid for the call.
-    let tm = unsafe {
-        let mut tm: libc::tm = std::mem::zeroed();
-        if libc::localtime_r(&seconds, &mut tm).is_null() {
-            return None;
-        }
-        tm
-    };
-    Some(LocalTime {
-        year: tm.tm_year,
-        month: usize::try_from(tm.tm_mon).ok()?,
-        day: u32::try_from(tm.tm_mday).ok()?,
-        hour: u32::try_from(tm.tm_hour).ok()?,
-        minute: u32::try_from(tm.tm_min).ok()?,
-    })
 }
 
 pub(super) fn clock_text(at: LocalTime, now: LocalTime) -> String {

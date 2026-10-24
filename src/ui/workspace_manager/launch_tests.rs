@@ -1299,9 +1299,14 @@ fn the_new_workspace_menu_creates_and_opens_a_server_workspace(cx: &mut TestAppC
     );
     assert_eq!(active_server_workspace(&harness, cx), Some(CREATED));
     assert_eq!(
-        harness.panes.pane([63; 32]).selections(),
+        harness.panes.pane([63; 32]).created_starts(),
         1,
-        "the person's own creation opens its Pane"
+        "the person's own creation starts its Pane after the server binds it"
+    );
+    assert_eq!(
+        harness.panes.pane([63; 32]).selections(),
+        0,
+        "binding a creation must not select it again to acquire control or start a retained shell"
     );
     assert!(!cx.update(|window, cx| window_combo_box_is_open(window, cx)));
 }

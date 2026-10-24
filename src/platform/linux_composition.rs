@@ -179,9 +179,11 @@ fn desktop_profile(
             Rc::new(super::linux_shortcut_text::LinuxShortcutFormatter),
             crate::desktop_profile::ShortcutSelection::TerminalSurface,
             &[
+                HostFeature::ApplicationMenuBar,
                 HostFeature::MicrophoneAccess,
                 HostFeature::SystemPermissions,
             ],
+            super::unix_local_time::local_time,
         ),
         locale,
     )
@@ -442,6 +444,7 @@ mod tests {
             );
             assert!(presentation.has_feature(HostFeature::Updates));
             for feature in [
+                HostFeature::ApplicationMenuBar,
                 HostFeature::MicrophoneAccess,
                 HostFeature::SystemPermissions,
             ] {

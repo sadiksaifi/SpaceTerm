@@ -877,7 +877,7 @@ impl AddServerSheet {
                 };
                 let (destination, offer_id) = (destination.clone(), *offer_id);
                 if let Some(ssh) = &self.ssh {
-                    // A Linux installation may ask for sudo, which appears here.
+                    // The remote installation may ask for sudo, which appears here.
                     crate::ui::ssh_servers::present_prompts_in(window, cx);
                     ssh.install_for_flow(&destination, offer_id);
                 }

@@ -4195,8 +4195,15 @@ mod tests {
                 .focused_terminal_has_input_focus(window, cx)
         }));
         // Only the Active Tab's terminal hears the menu take focus and give it back.
+        // Readiness can also ask inactive Panes to prepare screens without giving them input.
+        let commands = records
+            .commands()
+            .into_iter()
+            .skip(commands_before)
+            .filter(|call| !matches!(call.command, RecordedCommand::SetPreparationDemand(_)))
+            .collect::<Vec<_>>();
         assert_eq!(
-            records.commands()[commands_before..],
+            commands,
             [
                 RecordedCall {
                     session_id: 2,

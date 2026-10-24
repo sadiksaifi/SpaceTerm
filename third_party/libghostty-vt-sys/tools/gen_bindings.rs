@@ -1,8 +1,8 @@
 use std::env;
 use std::path::PathBuf;
 
-use bindgen::EnumVariation;
 use bindgen::callbacks::{EnumVariantValue, IntKind, ItemInfo, ItemKind, ParseCallbacks};
+use bindgen::{EnumVariation, RustEdition, RustTarget};
 
 use heck::ToShoutySnakeCase;
 
@@ -22,9 +22,16 @@ fn main() {
     let mut builder = bindgen::Builder::default()
         .header(header.to_string_lossy())
         .clang_arg(format!("-I{}", include_dir.to_string_lossy()))
+        // The headers use explicit int-backed enums in C++11. Older libclang
+        // versions fall back to implementation-defined enum signedness in C.
+        .clang_args(["-x", "c++", "-std=c++11"])
+        .rust_target(RustTarget::stable(90, 0).expect("supported Rust target"))
+        .rust_edition(RustEdition::Edition2024)
         .allowlist_function("[Gg]hostty.*")
         .allowlist_type("[Gg]hostty.*")
         .allowlist_var("GHOSTTY_.*")
+        // This header sizing helper expands through host-specific limits.h macros.
+        .blocklist_var("GHOSTTY_ENUM_MAX_VALUE")
         .generate_cstr(true)
         .derive_default(true)
         .size_t_is_usize(true)

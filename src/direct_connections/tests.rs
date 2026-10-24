@@ -375,16 +375,16 @@ pub(crate) fn offline_routes(labels: &[&str]) -> (DirectConnections, Vec<DirectR
     (connections, ids)
 }
 
-/// Offline saved routes, in order, each named and reached at the endpoint given, such as two
-/// servers with one name on different addresses.
-pub(crate) fn offline_routes_at(
+/// Disconnected saved routes for picker tests, with no connection intent that could start a
+/// native route job and wake GPUI's deterministic scheduler.
+pub(crate) fn disconnected_routes_at(
     routes: &[(&str, &str)],
 ) -> (DirectConnections, Vec<DirectRouteId>) {
     let routes: Vec<_> = routes
         .iter()
         .map(|(label, endpoint)| (*label, Some(*endpoint)))
         .collect();
-    let (connections, ids, _, _) = offline_fixture_reached(&routes);
+    let (connections, ids, _, _) = offline_fixture_reached(&routes, false);
     (connections, ids)
 }
 
@@ -409,12 +409,13 @@ fn offline_fixture_routes(
     Arc<MemoryRecords>,
 ) {
     let routes: Vec<_> = labels.iter().map(|label| (*label, None)).collect();
-    offline_fixture_reached(&routes)
+    offline_fixture_reached(&routes, true)
 }
 
 /// Offline saved routes named as given, each at its own endpoint when one is given.
 fn offline_fixture_reached(
     routes: &[(&str, Option<&str>)],
+    active: bool,
 ) -> (
     DirectConnections,
     Vec<DirectRouteId>,
@@ -461,7 +462,7 @@ fn offline_fixture_reached(
         if let Some(endpoint) = endpoint {
             route.route.endpoint = (*endpoint).to_owned();
         }
-        route.active = true;
+        route.active = active;
         ids.push(route.route.id);
         records.0.lock().unwrap().routes.push(route);
         credentials

@@ -2063,7 +2063,7 @@ pub(super) mod testing {
             if let Some(error) = self.refusal.lock().expect("refusal").take() {
                 return Err(error);
             }
-            // Starting at boot needs lingering, as the Linux service does.
+            // This fixture requires authorization for starting at boot.
             if enabled
                 && self.startup == ServiceStartup::AtBoot
                 && !*self.authorized.lock().expect("authorized")
