@@ -963,10 +963,11 @@ fn row_text(snapshot: &ScreenSnapshot, row: usize) -> String {
         .collect()
 }
 
-/// Reads every grid row, after releasing output held for a synchronized update or a prompt redraw
-/// as the session does at its deadline.
+/// Reads every grid row after advancing held output through its presentation deadlines.
 fn all_grid_rows(emulator: &mut TerminalEmulator) -> Vec<String> {
-    emulator.end_synchronized_output().unwrap();
+    while let Some(deadline) = emulator.synchronized_output_deadline() {
+        emulator.expire_synchronized_output(deadline).unwrap();
+    }
     emulator.scroll_to(0);
     let first = emulator.snapshot().unwrap().unwrap();
     let visible = first.rows.len();
@@ -1744,7 +1745,10 @@ fn zsh_prompt_redraw_after_column_growth_preserves_command_output() {
     emulator.feed(b"\r\r\x1b[A\x1b[A\x1b[0m\x1b[27m\x1b[24m\x1b[J");
     emulator.feed(prompt);
     // This redraw carries no prompt-end mark, so the session releases it at the deadline.
-    emulator.end_synchronized_output().unwrap();
+    assert!(emulator.snapshot().unwrap().is_none());
+    emulator
+        .expire_synchronized_output(emulator.synchronized_output_deadline().unwrap())
+        .unwrap();
     let snapshot = emulator.snapshot().unwrap().unwrap();
 
     assert!(
@@ -1767,7 +1771,10 @@ fn zsh_prompt_redraw_after_column_growth_preserves_command_output() {
     emulator.resize(geometry(50, 20, 10.0, 20.0)).unwrap();
     emulator.feed(b"\r\r\x1b[A\x1b[0m\x1b[27m\x1b[24m\x1b[J");
     emulator.feed(prompt);
-    emulator.end_synchronized_output().unwrap();
+    assert!(emulator.snapshot().unwrap().is_none());
+    emulator
+        .expire_synchronized_output(emulator.synchronized_output_deadline().unwrap())
+        .unwrap();
     let shrunk = emulator.snapshot().unwrap().unwrap();
     assert!(
         shrunk.rows.iter().any(|row| row
@@ -1794,7 +1801,10 @@ fn zsh_prompt_redraw_at_screen_bottom_preserves_command_output() {
     emulator.feed(b"\r\r\x1b[A\x1b[A\x1b[0m\x1b[27m\x1b[24m\x1b[J");
     emulator.feed(prompt);
     // This redraw carries no prompt-end mark, so the session releases it at the deadline.
-    emulator.end_synchronized_output().unwrap();
+    assert!(emulator.snapshot().unwrap().is_none());
+    emulator
+        .expire_synchronized_output(emulator.synchronized_output_deadline().unwrap())
+        .unwrap();
     let snapshot = emulator.snapshot().unwrap().unwrap();
 
     assert!(
@@ -2350,6 +2360,102 @@ fn a_held_prompt_redraw_should_release_when_the_shell_stays_silent() {
     let released = emulator.snapshot().unwrap().unwrap();
     assert!(released.damage.resize);
     assert_eq!(row_text(&released, 0).trim_end(), "QA_RESIZE_MARKER");
+}
+
+#[test]
+fn a_layout_resize_should_keep_an_unfinished_prompt_redraw_held() {
+    let mut emulator = emulator(20, 4);
+    emulator.feed(b"\x1b]133;A;redraw=1\x07> \x1b]133;B\x07");
+    let resized = Instant::now();
+    emulator
+        .resize_for_pty_at(geometry(24, 4, 10.0, 20.0), true, resized)
+        .unwrap();
+    emulator.feed_at(b"\x1b[?2026h", resized);
+    let deadline = emulator.synchronized_output_deadline();
+    let layout = TerminalGeometry::from_viewport(
+        LogicalSize::new(240.5, 80.0),
+        LogicalCellSize::new(10.0, 20.0),
+        BackingScale::ONE,
+        CellGridSize::new(1, 1),
+    );
+
+    emulator
+        .resize_for_pty_at(layout, false, resized + Duration::from_millis(10))
+        .unwrap();
+
+    assert_eq!(emulator.synchronized_output_deadline(), deadline);
+    assert!(emulator.snapshot().unwrap().is_none());
+    emulator.feed_at(b"\x1b[?2026$p", resized);
+    assert_eq!(emulator.take_pty_responses(), b"\x1b[?2026;2$y");
+    emulator.feed_at(b"\r> \x1b]133;B\x07", resized);
+    assert_eq!(
+        row_text(&emulator.snapshot().unwrap().unwrap(), 0).trim_end(),
+        ">"
+    );
+}
+
+#[test]
+fn prompt_redraw_expiry_should_preserve_an_active_synchronized_transaction() {
+    let mut emulator = emulator(20, 4);
+    emulator.feed(b"\x1b]133;A;redraw=1\x07> \x1b]133;B\x07");
+    let resized = Instant::now();
+    emulator
+        .resize_for_pty_at(geometry(24, 4, 10.0, 20.0), true, resized)
+        .unwrap();
+    emulator.feed_at(b"\x1b[?2026h\rpartial", resized);
+
+    assert!(
+        emulator
+            .expire_synchronized_output(resized + PROMPT_REDRAW_SETTLE)
+            .unwrap()
+    );
+    assert!(emulator.snapshot().unwrap().is_none());
+    assert_eq!(
+        emulator.synchronized_output_deadline(),
+        Some(resized + MAX_SYNCHRONIZED_OUTPUT_DURATION)
+    );
+    emulator.feed_at(b"\x1b[?2026$p", resized + PROMPT_REDRAW_SETTLE);
+    assert_eq!(emulator.take_pty_responses(), b"\x1b[?2026;1$y");
+    emulator.feed_at(b" redraw\x1b[?2026l", resized + PROMPT_REDRAW_HOLD);
+    assert_eq!(
+        row_text(&emulator.snapshot().unwrap().unwrap(), 0).trim_end(),
+        "partial redraw"
+    );
+}
+
+#[test]
+fn a_bare_prompt_mark_should_restore_redraw_after_a_disabled_prompt() {
+    for new_geometry in [geometry(24, 4, 10.0, 20.0), geometry(20, 4, 11.0, 20.0)] {
+        for option in ["", ";redraw=invalid"] {
+            let mut emulator = emulator(20, 4);
+            emulator.feed(b"\x1b]133;A;redraw=0\x07old\x1b]133;B\x07\r\n");
+            emulator.feed(format!("\x1b]133;A{option}\x07> \x1b]133;B\x07").as_bytes());
+
+            emulator.resize(new_geometry).unwrap();
+
+            assert!(emulator.snapshot().unwrap().is_none(), "option={option:?}");
+            emulator.feed(b"\r> \x1b]133;B\x07");
+            assert_eq!(
+                row_text(&emulator.snapshot().unwrap().unwrap(), 1).trim_end(),
+                ">"
+            );
+        }
+    }
+}
+
+#[test]
+fn resize_should_follow_the_engine_prompt_state_after_a_terminal_reset() {
+    let mut emulator = emulator(20, 4);
+    emulator.feed(b"\x1b]133;A;redraw=1\x07> \x1b]133;B\x07");
+    // RIS resets Ghostty's cursor semantics, but does not emit an OSC metadata event.
+    emulator.feed(b"\x1bccommand output");
+
+    emulator.resize(geometry(24, 4, 10.0, 20.0)).unwrap();
+
+    assert_eq!(
+        row_text(&emulator.snapshot().unwrap().unwrap(), 0).trim_end(),
+        "command output"
+    );
 }
 
 /// Bash redraws its prompt without a prompt-end mark. Its redraw is presented once its output
