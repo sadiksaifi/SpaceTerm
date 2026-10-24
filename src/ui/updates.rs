@@ -998,8 +998,8 @@ mod tests {
         "0.4.2".to_owned()
     }
 
-    /// Progress glyphs only appear on the ordinary button, in every state from normal to disabled,
-    /// so the installed accent ring has to stay readable on each of its fills.
+    /// Neutral and disabled progress glyphs keep the installed accent, which must remain readable
+    /// on every ordinary fill. Enabled Primary pills inherit the button foreground instead.
     #[test]
     fn the_progress_ring_stays_readable_on_every_ordinary_button_fill() {
         const MINIMUM_GRAPHIC_CONTRAST: f64 = 3.0;

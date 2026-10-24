@@ -327,7 +327,7 @@ impl RemoteServerOperations for ObservedOperations {
     }
 }
 
-fn recorded_servers(names: Vec<&'static str>, cx: &mut TestAppContext) -> Arc<ObservedOperations> {
+fn observed_servers(names: Vec<&'static str>) -> (SshServerConnections, Arc<ObservedOperations>) {
     let operations = ObservedOperations::new(&names);
     let connections =
         SshServerConnections::new(Arc::new(Computers), Arc::new(Saved(names.clone())));
@@ -355,6 +355,11 @@ fn recorded_servers(names: Vec<&'static str>, cx: &mut TestAppContext) -> Arc<Ob
         );
         std::thread::sleep(Duration::from_millis(1));
     }
+    (connections, operations)
+}
+
+fn recorded_servers(names: Vec<&'static str>, cx: &mut TestAppContext) -> Arc<ObservedOperations> {
+    let (connections, operations) = observed_servers(names);
     cx.update(|cx| {
         crate::ui::ssh_servers::install(connections, None, cx);
         crate::ssh::server_operations::install(operations.clone(), cx);
@@ -596,4 +601,177 @@ fn server_offer_behind_client_progress_retry_and_checking_paints_primary(cx: &mu
         primary_fill("update-control-menu", PointerState::Normal, visual);
     }
     assert_eq!(adapter.downloads.get(), 1);
+}
+
+// Record the real rendering boundary because Window exposes painted quads but no path accessor.
+// No rasterizer or native window is involved.
+struct ProgressScene {
+    paths: Arc<Mutex<Vec<gpui::Path<gpui::ScaledPixels>>>>,
+    atlas: Arc<gpui::HeadlessAtlas>,
+}
+
+impl gpui::PlatformHeadlessRenderer for ProgressScene {
+    fn render_scene_to_image(
+        &mut self,
+        scene: &gpui::Scene,
+        _: gpui::Size<gpui::DevicePixels>,
+    ) -> anyhow::Result<image::RgbaImage> {
+        *self.paths.lock().unwrap() = scene.paths.clone();
+        Ok(image::RgbaImage::new(1, 1))
+    }
+
+    fn render_scene(
+        &mut self,
+        scene: &gpui::Scene,
+        _: gpui::Size<gpui::DevicePixels>,
+    ) -> anyhow::Result<()> {
+        *self.paths.lock().unwrap() = scene.paths.clone();
+        Ok(())
+    }
+
+    fn sprite_atlas(&self) -> Arc<dyn gpui::PlatformAtlas> {
+        self.atlas.clone()
+    }
+}
+
+fn recorded_color(color: gpui::Rgba) -> crate::appearance::Color {
+    crate::appearance::Color {
+        r: (color.r * 255.0).round() as u8,
+        g: (color.g * 255.0).round() as u8,
+        b: (color.b * 255.0).round() as u8,
+        a: (color.a * 255.0).round() as u8,
+    }
+}
+
+#[test]
+fn rendered_progress_rings_stay_readable_on_primary_and_keep_neutral_and_disabled_accent() {
+    use crate::updates::UpdateEvent;
+    use crate::updates::testing::RecordingAdapter;
+    use gpui::AppContext as _;
+
+    for appearance in [Appearance::Light, Appearance::Dark] {
+        let paths = Arc::new(Mutex::new(Vec::new()));
+        let mut cx = gpui::HeadlessAppContext::with_platform(
+            Arc::new(gpui::NoopTextSystem),
+            Arc::new(()),
+            {
+                let paths = paths.clone();
+                move || {
+                    Ok(Some(Box::new(ProgressScene {
+                        paths: paths.clone(),
+                        atlas: Arc::default(),
+                    })))
+                }
+            },
+        );
+        let (connections, operations) = observed_servers(vec!["penguin"]);
+        let adapter = Rc::new(RecordingAdapter::available());
+        let updates = cx.update(|cx| {
+            let mut document = crate::settings::SettingsDocument::default();
+            document.appearance.mode = appearance.into();
+            document.updates.automatic_downloads = false;
+            let settings = crate::settings::Settings::load(MemoryStorage::with_document(&document));
+            let platform = RecordingAppearancePlatform::default();
+            platform.set_system_appearance(Some(appearance));
+            platform.set_reduced_motion(true);
+            platform.set_require_opaque_surfaces(true);
+            crate::ui::appearance_runtime::install(settings.clone(), Rc::new(platform), cx)
+                .unwrap();
+            ApplicationUpdates::install(adapter.clone(), cx);
+            crate::ui::init(cx).unwrap();
+            crate::ui::ssh_servers::install(connections, None, cx);
+            crate::ssh::server_operations::install(operations.clone(), cx);
+            let updates = service(cx).unwrap();
+            updates.update(cx, |updates, cx| {
+                updates.attach_settings(settings);
+                updates.check(false, cx);
+            });
+            updates
+        });
+        adapter.emit(UpdateEvent::Available(version()));
+        cx.run_until_parked();
+        cx.update(|cx| updates.update(cx, |updates, cx| updates.download(cx)));
+        let window = cx
+            .open_window(gpui::size(px(800.0), px(600.0)), |window, cx| {
+                cx.new(|cx| TitleBarControl(cx.new(|cx| UpdateControl::new(window, cx))))
+            })
+            .unwrap();
+        cx.update_window(window.into(), |_, window, _| window.activate_window())
+            .unwrap();
+        cx.run_until_parked();
+
+        for phase in ["Downloading", "Verifying", "Checking", "Neutral"] {
+            match phase {
+                "Downloading" => adapter.emit(UpdateEvent::Downloading {
+                    received: 1,
+                    total: 4,
+                }),
+                "Verifying" => adapter.emit(UpdateEvent::Verifying),
+                "Checking" => {
+                    adapter.emit(UpdateEvent::Finished);
+                    cx.run_until_parked();
+                    cx.update(|cx| updates.update(cx, |updates, cx| updates.check(false, cx)));
+                }
+                "Neutral" => {
+                    adapter.emit(UpdateEvent::Available(version()));
+                    cx.run_until_parked();
+                    cx.update(|cx| updates.update(cx, |updates, cx| updates.download(cx)));
+                    operations.completed("penguin");
+                }
+                _ => unreachable!(),
+            }
+            cx.run_until_parked();
+            for state in [
+                PointerState::Normal,
+                PointerState::Hovered,
+                PointerState::Pressed,
+            ] {
+                cx.update_window(window.into(), |_, window, cx| {
+                    window.draw(cx).clear(cx);
+                    let capsule = window.painted_quads().into_iter().find(|quad| {
+                        !quad.background.is_transparent() && quad.bounds.size.width > quad.bounds.size.height && quad.bounds.size.height > px(10.0).scale(window.scale_factor())
+                    }).expect("the actual UpdateControl paints its leading capsule");
+                    let outside = point(px(700.0), px(500.0));
+                    let center = capsule.bounds.center();
+                    let position = if matches!(state, PointerState::Normal) { outside } else { point(px(center.x.as_f32() / window.scale_factor()), px(center.y.as_f32() / window.scale_factor())) };
+                    window.dispatch_event(gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent { position, pressed_button: None, modifiers: Modifiers::none() }), cx);
+                    if matches!(state, PointerState::Pressed) {
+                        window.dispatch_event(gpui::PlatformInput::MouseDown(gpui::MouseDownEvent { position, button: MouseButton::Left, modifiers: Modifiers::none(), click_count: 1, first_mouse: false }), cx);
+                    }
+                    window.draw(cx).clear(cx);
+                    window.simulate_next_frame(cx);
+                    window.draw(cx).clear(cx);
+                    window.render_to_image().unwrap();
+                    let quads = window.painted_quads();
+                    let fill = quads.iter().find(|quad| quad.bounds == capsule.bounds && !quad.background.is_transparent()).expect("the progress capsule retains its fill");
+                    let fill = recorded_color(gpui::Rgba::from(fill.background.as_solid().unwrap()));
+                    let colors = &crate::ui::appearance::chrome(cx).title_bar_controls.colors;
+                    let (expected_fill, expected_ink) = match (phase, state) {
+                        ("Checking", _) => (colors.primary_disabled_background, colors.progress_indicator),
+                        ("Neutral", PointerState::Normal) => (colors.element_background, colors.progress_indicator),
+                        ("Neutral", PointerState::Hovered) => (colors.element_hover, colors.progress_indicator),
+                        ("Neutral", _) => (colors.element_active, colors.progress_indicator),
+                        (_, PointerState::Normal) => (colors.primary_background, colors.primary_foreground),
+                        (_, PointerState::Hovered) => (colors.primary_hover_background, colors.primary_hover_foreground),
+                        _ => (colors.primary_pressed_background, colors.primary_pressed_foreground),
+                    };
+                    assert_eq!(fill, expected_fill, "{appearance:?} {phase} {state:?}");
+                    let paths = paths.lock().unwrap();
+                    let inks: Vec<_> = paths.iter().filter(|path| !path.bounds.intersect(&capsule.bounds).is_empty()).map(|path| recorded_color(gpui::Rgba::from(path.color.as_solid().unwrap()))).collect();
+                    let figure = inks.iter().max_by_key(|ink| ink.a).expect("the actual progress ring must paint a path");
+                    // Determinate arcs have one opaque indicator. Spinner strokes share their
+                    // leading end, where their actual recorded alpha layers compose together.
+                    let background = fill.source_over(colors.title_bar_background);
+                    let visible_ink = inks.iter().filter(|ink| (ink.r, ink.g, ink.b) == (figure.r, figure.g, figure.b)).fold(background, |surface, ink| ink.source_over(surface));
+                    let contrast = visible_ink.contrast_ratio(background);
+                    assert!(contrast >= 3.0, "{appearance:?} {phase} {state:?}: rendered progress contrast {contrast:.2}:1");
+                    assert_eq!((figure.r, figure.g, figure.b), (expected_ink.r, expected_ink.g, expected_ink.b), "{appearance:?} {phase} {state:?}");
+                    drop(paths);
+                    window.dispatch_event(gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent { position: outside, pressed_button: Some(MouseButton::Left), modifiers: Modifiers::none() }), cx);
+                    window.dispatch_event(gpui::PlatformInput::MouseUp(gpui::MouseUpEvent { position: outside, button: MouseButton::Left, modifiers: Modifiers::none(), click_count: 1 }), cx);
+                }).unwrap();
+                cx.run_until_parked();
+            }
+        }
+    }
 }
