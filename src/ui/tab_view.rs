@@ -3445,10 +3445,42 @@ impl Render for TabView {
         if self.pane_frames.moving {
             window.request_animation_frame();
         }
+        // A Split's spacer leaves its gap unpainted while Panes move across it. When only the stage
+        // stretches the Panes, each gap is painted where the stretch draws it instead.
+        let mut stretched_gaps = Vec::new();
         if let Some(layout_size) = self.pane_layout_size {
+            let panes_moving = self.pane_frames.moving;
             self.pane_frames
                 .stretch(px(layout_size.width()), self.stage_stretch);
+            if self.stage_stretch != px(0.0) && !panes_moving && zoom_state == ZoomState::Restored {
+                lay_out_split_gaps(
+                    self.tab.root(),
+                    Bounds::new(
+                        Point::default(),
+                        gpui::size(px(layout_size.width()), px(layout_size.height())),
+                    ),
+                    pane_gap(cx),
+                    &mut stretched_gaps,
+                );
+            }
         }
+        let base = gpui_color(appearance.surface(
+            crate::appearance::SurfaceRole::Base,
+            super::workspace_frame::base_surface(&appearance.colors),
+        ));
+        let stretched_gaps = stretched_gaps
+            .into_iter()
+            .map(|place| {
+                let place = self.pane_frames.present_place(place);
+                div()
+                    .absolute()
+                    .left(place.left())
+                    .top(place.top())
+                    .w(place.size.width)
+                    .h(place.size.height)
+                    .bg(base)
+            })
+            .collect::<Vec<_>>();
         // Removed Panes take the material of the Pane that keeps focus.
         let terminal_background = self
             .tab
@@ -3577,6 +3609,7 @@ impl Render for TabView {
                 }
             })
             .child(content)
+            .children(stretched_gaps)
             .children(closing)
             .child({
                 let view = cx.entity().downgrade();
@@ -4599,36 +4632,68 @@ fn lay_out_panes(
             second,
             ..
         } => {
-            let (first_bounds, second_bounds) = match axis {
-                SplitAxis::Horizontal => {
-                    let extent = px((f32::from(bounds.size.width) - gap).max(0.0) * ratio);
-                    (
-                        Bounds::from_corners(
-                            bounds.origin,
-                            point(bounds.left() + extent, bounds.bottom()),
-                        ),
-                        Bounds::from_corners(
-                            point(bounds.left() + extent + px(gap), bounds.top()),
-                            bounds.bottom_right(),
-                        ),
-                    )
-                }
-                SplitAxis::Vertical => {
-                    let extent = px((f32::from(bounds.size.height) - gap).max(0.0) * ratio);
-                    (
-                        Bounds::from_corners(
-                            bounds.origin,
-                            point(bounds.right(), bounds.top() + extent),
-                        ),
-                        Bounds::from_corners(
-                            point(bounds.left(), bounds.top() + extent + px(gap)),
-                            bounds.bottom_right(),
-                        ),
-                    )
-                }
-            };
+            let (first_bounds, _, second_bounds) = split_places(axis, ratio, bounds, gap);
             lay_out_panes(first, first_bounds, gap, places);
             lay_out_panes(second, second_bounds, gap, places);
+        }
+    }
+}
+
+/// The places of every Split's gap in `tree` laid out across `bounds`.
+fn lay_out_split_gaps(
+    tree: PaneTreeRef<'_>,
+    bounds: Bounds<Pixels>,
+    gap: f32,
+    gaps: &mut Vec<Bounds<Pixels>>,
+) {
+    if let PaneNodeRef::Split {
+        axis,
+        ratio,
+        first,
+        second,
+        ..
+    } = tree.node()
+    {
+        let (first_bounds, gap_bounds, second_bounds) = split_places(axis, ratio, bounds, gap);
+        gaps.push(gap_bounds);
+        lay_out_split_gaps(first, first_bounds, gap, gaps);
+        lay_out_split_gaps(second, second_bounds, gap, gaps);
+    }
+}
+
+/// The places of a Split's first side, its gap, and its second side across `bounds`.
+fn split_places(
+    axis: SplitAxis,
+    ratio: f32,
+    bounds: Bounds<Pixels>,
+    gap: f32,
+) -> (Bounds<Pixels>, Bounds<Pixels>, Bounds<Pixels>) {
+    match axis {
+        SplitAxis::Horizontal => {
+            let extent = px((f32::from(bounds.size.width) - gap).max(0.0) * ratio);
+            let first_end = bounds.left() + extent;
+            let second_start = first_end + px(gap);
+            (
+                Bounds::from_corners(bounds.origin, point(first_end, bounds.bottom())),
+                Bounds::from_corners(
+                    point(first_end, bounds.top()),
+                    point(second_start, bounds.bottom()),
+                ),
+                Bounds::from_corners(point(second_start, bounds.top()), bounds.bottom_right()),
+            )
+        }
+        SplitAxis::Vertical => {
+            let extent = px((f32::from(bounds.size.height) - gap).max(0.0) * ratio);
+            let first_end = bounds.top() + extent;
+            let second_start = first_end + px(gap);
+            (
+                Bounds::from_corners(bounds.origin, point(bounds.right(), first_end)),
+                Bounds::from_corners(
+                    point(bounds.left(), first_end),
+                    point(bounds.right(), second_start),
+                ),
+                Bounds::from_corners(point(bounds.left(), second_start), bounds.bottom_right()),
+            )
         }
     }
 }
@@ -8410,6 +8475,107 @@ mod tests {
             PaneNodeRef::Split { ratio, .. } => ratio,
             PaneNodeRef::Leaf { .. } => f32::NAN,
         })
+    }
+
+    /// How many fills of the base surface this frame paints at each point.
+    fn base_fills_at(points: &[Point<Pixels>], cx: &mut VisualTestContext) -> Vec<usize> {
+        cx.update(|window, cx| {
+            let appearance = super::super::appearance::chrome(cx);
+            let base = appearance.surface(
+                crate::appearance::SurfaceRole::Base,
+                super::super::workspace_frame::base_surface(&appearance.colors),
+            );
+            let fill = gpui::Background::from(gpui_color(base));
+            let quads = window.painted_quads();
+            points
+                .iter()
+                .map(|point| {
+                    let point = point.scale(window.scale_factor());
+                    quads
+                        .iter()
+                        .filter(|quad| {
+                            quad.background == fill
+                                && quad
+                                    .bounds
+                                    .intersect(&quad.content_mask.bounds)
+                                    .contains(&point)
+                        })
+                        .count()
+                })
+                .collect()
+        })
+    }
+
+    /// The centres of the gaps between Pane 1 and Pane 2 beside it, and Pane 2 and Pane 3 below it,
+    /// as this frame draws the Panes.
+    fn nested_gap_centres(cx: &mut VisualTestContext) -> [Point<Pixels>; 2] {
+        let first = cx.debug_bounds("pane-surface-1").expect("Pane 1 surface");
+        let second = cx.debug_bounds("pane-surface-2").expect("Pane 2 surface");
+        let third = cx.debug_bounds("pane-surface-3").expect("Pane 3 surface");
+        [
+            point((first.right() + second.left()) / 2.0, second.center().y),
+            point(second.center().x, (second.bottom() + third.top()) / 2.0),
+        ]
+    }
+
+    /// The stage stretches the Panes as the sidebar slides. Each Split's gap keeps the base surface
+    /// it has at rest, so the gaps keep their color.
+    #[gpui::test]
+    fn split_gaps_should_keep_their_surface_while_the_stage_stretches(cx: &mut TestAppContext) {
+        let (view, cx) = split_gap_view(cx);
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                view.split_pane(PaneId::new(1), SplitAxis::Horizontal, window, cx);
+            });
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                view.split_pane(PaneId::new(2), SplitAxis::Vertical, window, cx);
+            });
+        });
+        cx.run_until_parked();
+        let centres = nested_gap_centres(cx);
+        let rest = base_fills_at(&centres, cx);
+        assert!(
+            rest.iter().all(|fills| *fills > 0),
+            "each gap paints the base surface at rest: {rest:?}"
+        );
+
+        view.update(cx, |view, cx| view.present_stage_stretch(px(48.7), cx));
+        cx.run_until_parked();
+        let stretched_centres = nested_gap_centres(cx);
+        assert_ne!(
+            stretched_centres, centres,
+            "the stage must stretch the Panes"
+        );
+        assert_eq!(
+            base_fills_at(&stretched_centres, cx),
+            rest,
+            "each gap must keep its base surface while the stage stretches"
+        );
+
+        // The painted gap meets each drawn Pane to the device pixel, without a seam or an overlap.
+        for scale in [1.0, 1.25, 1.75] {
+            cx.simulate_scale_factor_change(scale);
+            cx.run_until_parked();
+            let first = cx.debug_bounds("pane-surface-1").expect("Pane 1 surface");
+            let second = cx.debug_bounds("pane-surface-2").expect("Pane 2 surface");
+            let half_pixel = px(0.5 / scale);
+            let y = second.center().y;
+            let edges = [
+                point(first.right() - half_pixel, y),
+                point(first.right() + half_pixel, y),
+                point(second.left() - half_pixel, y),
+                point(second.left() + half_pixel, y),
+            ];
+            assert_eq!(
+                base_fills_at(&edges, cx),
+                [0, rest[0], rest[0], 0],
+                "the gap must fill exactly the space between the drawn Panes at {scale}: \
+                 {first:?} {second:?}"
+            );
+        }
     }
 
     /// Nested Splits keep the frame's gap rhythm at both densities, and each gap is empty base
