@@ -253,7 +253,7 @@ fn addresses(available: &[&str], suggested: Option<&str>) -> NetworkAddresses {
 }
 
 fn policy(text: &str) -> Option<NetworkPolicy> {
-    Some(NetworkPolicy::new(address(text)).expect("a concrete address"))
+    Some(NetworkPolicy::new(address(text)).expect("an address the server can listen at"))
 }
 
 fn device(id: u8, name: &str, last_connected_at: Option<u64>) -> Device {
@@ -572,6 +572,40 @@ fn an_address_chosen_while_off_keeps_its_port_for_turning_on(cx: &mut TestAppCon
         Some(&(policy("192.168.1.21:9300"), true))
     );
     assert!(reads("Listening on 192.168.1.21:9300.", cx));
+}
+
+/// Access off with every interface kept, as `0.0.0.0:9300` or `[::]:9300`: turning it on again
+/// without choosing an address listens on every interface again, at the same port.
+fn turning_on_keeps_a_wildcard_listener(kept: &str, cx: &mut TestAppContext) {
+    let access = ScriptedAccess::with_state(AccessState {
+        server_name: SERVER.into(),
+        policy: None,
+        configured: Some(address(kept)),
+        listener: Listener::Off,
+        addresses: Some(addresses(
+            &["192.168.1.20", "192.168.1.21"],
+            Some("192.168.1.20"),
+        )),
+    });
+    let (_, cx) = open_servers(&access, cx);
+
+    click(ACCESS_SELECTOR, cx);
+
+    assert_eq!(
+        access.requests(),
+        vec![(policy(kept), true)],
+        "turning access on keeps the listener on every interface"
+    );
+}
+
+#[gpui::test]
+fn turning_on_keeps_an_ipv4_wildcard_listener(cx: &mut TestAppContext) {
+    turning_on_keeps_a_wildcard_listener("0.0.0.0:9300", cx);
+}
+
+#[gpui::test]
+fn turning_on_keeps_an_ipv6_wildcard_listener(cx: &mut TestAppContext) {
+    turning_on_keeps_a_wildcard_listener("[::]:9300", cx);
 }
 
 #[gpui::test]

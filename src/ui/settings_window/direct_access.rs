@@ -264,13 +264,19 @@ impl DirectAccess {
 
 /// The address the switch turns access on at: the one the person chose, otherwise the one the
 /// server kept from before while it is still there, otherwise the one the server's routing table
-/// suggests, otherwise its first address. `None` when it has none.
+/// suggests, otherwise its first address. A kept listener on every interface, such as `0.0.0.0`,
+/// is always still there. `None` when it has none.
 pub(super) fn address_to_use(state: &AccessState, chosen: Option<IpAddr>) -> Option<IpAddr> {
     let addresses = state.addresses.as_ref()?;
     let available = |address: &IpAddr| addresses.available.contains(address);
     chosen
         .filter(available)
-        .or_else(|| state.configured.map(|kept| kept.ip()).filter(available))
+        .or_else(|| {
+            state
+                .configured
+                .map(|kept| kept.ip())
+                .filter(|kept| kept.is_unspecified() || available(kept))
+        })
         .or(addresses.suggested)
         .or_else(|| addresses.available.first().copied())
 }
