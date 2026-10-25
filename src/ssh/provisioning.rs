@@ -104,6 +104,7 @@ pub(crate) enum IncompatibilityKind {
     Protocol,
     Capability,
     Platform,
+    Installation,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RefusalKind {
@@ -320,11 +321,22 @@ impl<A: SshProcessAdapter> NativeSshSetup<A> {
         let discovery = loop {
             match discovered {
                 Discovery::Existing(discovery) => break discovery,
-                Discovery::Missing { account, target } => {
+                Discovery::NeedsInstallation {
+                    account,
+                    target,
+                    retained,
+                } => {
                     let artifact = self
                         .config
                         .artifacts
                         .candidate(self.config.filesystem.as_ref(), &target)?;
+                    if retained.as_ref().is_some_and(|previous| {
+                        previous.version != artifact.version || previous.commit != artifact.commit
+                    }) {
+                        return Err(SetupFailure::Incompatible(
+                            IncompatibilityKind::Installation,
+                        ));
+                    }
                     session.approve(
                         request.approvals.as_ref(),
                         SetupOffer::Installation {
@@ -340,7 +352,8 @@ impl<A: SshProcessAdapter> NativeSshSetup<A> {
                     discovered = session.discover(&ssh_cancellation)?;
                     if current.digest != artifact.digest
                         || !matches!(&discovered,
-                    Discovery::Missing { account: current_account, target: current_target } if *current_account == account && current_target == &target)
+                    Discovery::NeedsInstallation { account: current_account, target: current_target, retained: current_retained }
+                        if *current_account == account && current_target == &target && current_retained == &retained)
                     {
                         continue;
                     }
@@ -348,7 +361,18 @@ impl<A: SshProcessAdapter> NativeSshSetup<A> {
                     session.install(&artifact, &ssh_cancellation)?;
                     match session.discover(&ssh_cancellation) {
                         Ok(Discovery::Existing(discovery))
-                            if discovery.account == account && discovery.target == target =>
+                            if discovery.installed
+                                && discovery.account == account
+                                && discovery.target == target
+                                && discovery.server.is_some()
+                                && discovery.version == artifact.version
+                                && discovery.commit == artifact.commit
+                                && retained.as_ref().is_none_or(|previous| {
+                                    discovery.server == previous.server
+                                        && discovery.stopped == previous.stopped
+                                        && discovery.version == previous.version
+                                        && discovery.commit == previous.commit
+                                }) =>
                         {
                             break discovery;
                         }
@@ -367,7 +391,7 @@ impl<A: SshProcessAdapter> NativeSshSetup<A> {
             )?;
             let current = match session.discover(&ssh_cancellation)? {
                 Discovery::Existing(current) => current,
-                Discovery::Missing { .. } => {
+                Discovery::NeedsInstallation { .. } => {
                     return Err(SetupFailure::Refused(RefusalKind::ServerChanged));
                 }
             };
@@ -983,6 +1007,7 @@ impl ServerArtifactCatalog {
             signature,
             digest,
             version: metadata.version,
+            commit: metadata.commit,
             platform,
         })
     }
@@ -1011,6 +1036,7 @@ pub(super) struct VerifiedArtifact {
     signature: Vec<u8>,
     digest: String,
     version: String,
+    commit: String,
     platform: (String, String),
 }
 fn identity() -> &'static str {
@@ -1032,7 +1058,11 @@ fn platform(target: &str) -> Result<(String, String), SetupFailure> {
 }
 enum Discovery {
     Existing(Box<AccountDiscovery>),
-    Missing { account: u32, target: String },
+    NeedsInstallation {
+        account: u32,
+        target: String,
+        retained: Option<Box<AccountDiscovery>>,
+    },
 }
 fn parse_discovery(bytes: &[u8]) -> Result<Discovery, SetupFailure> {
     if bytes.len() > MAX_DISCOVERY {
@@ -1051,15 +1081,23 @@ fn parse_discovery(bytes: &[u8]) -> Result<Discovery, SetupFailure> {
                 .filter(|account| *account != 0)
                 .ok_or(SetupFailure::Refused(RefusalKind::InstallRefused))?;
             platform(target)?;
-            return Ok(Discovery::Missing {
+            return Ok(Discovery::NeedsInstallation {
                 account,
                 target: (*target).to_owned(),
+                retained: None,
             });
         }
     }
     let discovery: AccountDiscovery = serde_json::from_slice(bytes)
         .map_err(|_| SetupFailure::Unavailable(UnavailableKind::ServiceUnavailable))?;
     validate_discovery(&discovery)?;
+    if !discovery.installed {
+        return Ok(Discovery::NeedsInstallation {
+            account: discovery.account,
+            target: discovery.target.clone(),
+            retained: Some(Box::new(discovery)),
+        });
+    }
     Ok(Discovery::Existing(Box::new(discovery)))
 }
 fn validate_discovery(discovery: &AccountDiscovery) -> Result<(), SetupFailure> {

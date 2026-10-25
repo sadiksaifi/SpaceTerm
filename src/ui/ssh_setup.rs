@@ -192,6 +192,12 @@ pub(crate) fn problem(failure: &SetupFailure) -> SetupProblem {
         retry,
     };
     match failure {
+        // The kept build is changed only on that computer, after which trying again can help.
+        SetupFailure::Incompatible(IncompatibilityKind::Installation) => fixed(
+            "Different Build",
+            incompatibility_detail(IncompatibilityKind::Installation),
+            true,
+        ),
         SetupFailure::Incompatible(kind) => fixed("Incompatible", incompatibility_detail(*kind), false),
         SetupFailure::Refused(RefusalKind::MissingArtifact) => {
             fixed("Not Included", refusal_detail(RefusalKind::MissingArtifact), false)
@@ -243,6 +249,9 @@ const fn incompatibility_detail(kind: IncompatibilityKind) -> &'static str {
         IncompatibilityKind::Capability => "This server needs an update.",
         IncompatibilityKind::Platform => {
             "SpaceTerm Server is unavailable for this computer\u{2019}s operating system or processor."
+        }
+        IncompatibilityKind::Installation => {
+            "That computer keeps a SpaceTerm Server build that differs from the one this SpaceTerm includes, so nothing was installed. Set up with the matching version of SpaceTerm, or manage the server on that computer, then try again."
         }
     }
 }

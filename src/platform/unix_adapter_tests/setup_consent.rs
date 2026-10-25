@@ -64,6 +64,7 @@ struct ProcessAdapter {
     active: Arc<AtomicUsize>,
     resolved: Arc<Mutex<Vec<u8>>>,
     effects_succeed: Arc<AtomicBool>,
+    installed_discovery: Arc<Mutex<Option<Vec<u8>>>>,
     stall: Arc<(Mutex<StalledObservation>, Condvar)>,
 }
 enum FixtureProcess {
@@ -189,7 +190,12 @@ impl SshProcessAdapter for ProcessAdapter {
                 .push(request.arguments().to_vec());
             let action = request.arguments().last().unwrap().to_string_lossy();
             if self.effects_succeed.load(Ordering::SeqCst) && action.contains("ssh-install") {
-                *self.discovery.lock().unwrap() = serde_json::to_vec(&discovery(false)).unwrap();
+                *self.discovery.lock().unwrap() = self
+                    .installed_discovery
+                    .lock()
+                    .unwrap()
+                    .clone()
+                    .unwrap_or_else(|| serde_json::to_vec(&discovery(false)).unwrap());
                 (true, vec![], vec![])
             } else if self.effects_succeed.load(Ordering::SeqCst) && action.contains("setup-start")
             {
@@ -284,6 +290,7 @@ impl Fixture {
             filesystem: secure_filesystem,
             authentications: Arc::default(),
             effects_succeed: Arc::default(),
+            installed_discovery: Arc::default(),
             stall: Arc::default(),
             active: Arc::default(),
             resolved: Arc::new(Mutex::new(
@@ -471,6 +478,235 @@ fn setup_reoffers_changed_signed_bytes_without_reauthenticating() {
     assert_eq!(fixture.adapter.authentications.load(Ordering::SeqCst), 1);
     assert_eq!(fixture.prompts.load(Ordering::SeqCst), 1);
     assert_eq!(fixture.backend.process_counts().active(), 0);
+}
+
+#[test]
+fn uninstalled_stopped_server_offers_installation_before_startup_without_effects_on_decline() {
+    let mut remote = discovery(false);
+    remote.installed = false;
+    remote.enabled = false;
+    remote.start_observation = None;
+    let fixture = Fixture::new(serde_json::to_vec(&remote).unwrap());
+    write_signed_package(&fixture.catalog, b"authenticated executable");
+    let offers = Arc::new(Mutex::new(Vec::new()));
+    let observed = Arc::clone(&offers);
+
+    let result = fixture.setup(Arc::new(Approvals(move |offer, _: &CancellationToken| {
+        observed.lock().unwrap().push(offer);
+        false
+    })));
+
+    assert_eq!(result, Err(SetupFailure::Cancelled));
+    assert_eq!(
+        offers.lock().unwrap().as_slice(),
+        [SetupOffer::Installation {
+            version: "1.0.0".into(),
+            platform: ("linux".into(), "x86_64".into()),
+        }]
+    );
+    assert!(fixture.adapter.effects.lock().unwrap().is_empty());
+    assert_eq!(fixture.adapter.authentications.load(Ordering::SeqCst), 1);
+    assert_eq!(fixture.prompts.load(Ordering::SeqCst), 1);
+    let counts = fixture.backend.process_counts();
+    assert_eq!(counts.active(), 0);
+    assert_eq!(counts.spawned, counts.reaped);
+}
+
+#[test]
+fn uninstalled_stopped_server_reoffers_changed_retained_identity_or_stop() {
+    #[derive(Clone, Copy)]
+    enum Change {
+        Identity,
+        Stop,
+    }
+    for change in [Change::Identity, Change::Stop] {
+        let mut remote = discovery(false);
+        remote.installed = false;
+        remote.enabled = false;
+        remote.start_observation = None;
+        let fixture = Fixture::new(serde_json::to_vec(&remote).unwrap());
+        write_signed_package(&fixture.catalog, b"authenticated executable");
+        let source = Arc::clone(&fixture.adapter.discovery);
+        let offers = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&offers);
+
+        let result = fixture.setup(Arc::new(Approvals(move |offer, _: &CancellationToken| {
+            assert!(matches!(offer, SetupOffer::Installation { .. }));
+            if observed.fetch_add(1, Ordering::SeqCst) == 0 {
+                let mut changed = remote.clone();
+                match change {
+                    Change::Identity => changed.server = Some([4; 32]),
+                    Change::Stop => changed.stopped = false,
+                }
+                *source.lock().unwrap() = serde_json::to_vec(&changed).unwrap();
+                true
+            } else {
+                false
+            }
+        })));
+
+        assert_eq!(result, Err(SetupFailure::Cancelled));
+        assert_eq!(offers.load(Ordering::SeqCst), 2);
+        assert!(fixture.adapter.effects.lock().unwrap().is_empty());
+        assert_eq!(fixture.adapter.authentications.load(Ordering::SeqCst), 1);
+        assert_eq!(fixture.prompts.load(Ordering::SeqCst), 1);
+        let counts = fixture.backend.process_counts();
+        assert_eq!(counts.active(), 0);
+        assert_eq!(counts.spawned, counts.reaped);
+    }
+}
+
+#[test]
+fn uninstalled_stopped_server_refuses_candidate_version_or_commit_mismatch_before_an_offer() {
+    for change_commit in [false, true] {
+        let mut remote = discovery(false);
+        remote.installed = false;
+        remote.enabled = false;
+        remote.start_observation = None;
+        if change_commit {
+            remote.commit = "b".repeat(40);
+        } else {
+            remote.version = "2.0.0".into();
+        }
+        let fixture = Fixture::new(serde_json::to_vec(&remote).unwrap());
+        write_signed_package(&fixture.catalog, b"authenticated executable");
+
+        let result = fixture.setup(Arc::new(Approvals(|_, _: &CancellationToken| {
+            panic!("a different retained build must not be offered as the candidate")
+        })));
+
+        assert_eq!(
+            result,
+            Err(SetupFailure::Incompatible(
+                IncompatibilityKind::Installation
+            ))
+        );
+        assert!(fixture.adapter.effects.lock().unwrap().is_empty());
+        assert_eq!(fixture.adapter.authentications.load(Ordering::SeqCst), 1);
+        assert_eq!(fixture.prompts.load(Ordering::SeqCst), 1);
+        let counts = fixture.backend.process_counts();
+        assert_eq!(counts.active(), 0);
+        assert_eq!(counts.spawned, counts.reaped);
+    }
+}
+
+#[test]
+fn uninstalled_stopped_server_reinstall_then_start_then_network_uses_one_authentication() {
+    let mut remote = discovery(false);
+    remote.installed = false;
+    remote.enabled = false;
+    remote.start_observation = None;
+    let fixture = Fixture::new(serde_json::to_vec(&remote).unwrap());
+    write_signed_package(&fixture.catalog, b"authenticated executable");
+    fixture
+        .adapter
+        .effects_succeed
+        .store(true, Ordering::SeqCst);
+    let mut network = status();
+    network.policy = Some(NetworkPolicy::new("192.0.2.9:9231".parse().unwrap()).unwrap());
+    *fixture.adapter.status.lock().unwrap() = Some(network);
+    let active = Arc::clone(&fixture.adapter.active);
+    let offers = Arc::new(Mutex::new(Vec::new()));
+    let observed = Arc::clone(&offers);
+
+    let result = fixture.setup(Arc::new(Approvals(move |offer, _: &CancellationToken| {
+        assert_eq!(active.load(Ordering::SeqCst), 1);
+        let accept = !matches!(offer, SetupOffer::Network { .. });
+        observed.lock().unwrap().push(offer);
+        accept
+    })));
+
+    assert_eq!(
+        result,
+        Err(SetupFailure::Unconfirmed(SetupOperation::Start))
+    );
+    assert_eq!(
+        offers.lock().unwrap().as_slice(),
+        [
+            SetupOffer::Installation {
+                version: "1.0.0".into(),
+                platform: ("linux".into(), "x86_64".into()),
+            },
+            SetupOffer::Startup,
+            SetupOffer::Network {
+                address: SetupAddress::parse("configured.example").unwrap(),
+                bind: "192.0.2.9:9231".parse().unwrap(),
+                current: Some("192.0.2.9:9231".parse().unwrap()),
+                enabled: false,
+            },
+        ]
+    );
+    assert_eq!(fixture.adapter.effects.lock().unwrap().len(), 2);
+    assert_eq!(fixture.adapter.authentications.load(Ordering::SeqCst), 1);
+    assert_eq!(fixture.prompts.load(Ordering::SeqCst), 1);
+    let counts = fixture.backend.process_counts();
+    assert_eq!(counts.active(), 0);
+    assert_eq!(counts.spawned, counts.reaped);
+}
+
+#[test]
+fn uninstalled_stopped_server_refuses_changed_retained_facts_after_reinstallation() {
+    #[derive(Clone, Copy)]
+    enum Change {
+        Identity,
+        Stop,
+        Version,
+        Commit,
+    }
+    for change in [
+        Change::Identity,
+        Change::Stop,
+        Change::Version,
+        Change::Commit,
+    ] {
+        let mut remote = discovery(false);
+        remote.installed = false;
+        remote.enabled = false;
+        remote.start_observation = None;
+        let fixture = Fixture::new(serde_json::to_vec(&remote).unwrap());
+        write_signed_package(&fixture.catalog, b"authenticated executable");
+        fixture
+            .adapter
+            .effects_succeed
+            .store(true, Ordering::SeqCst);
+        let mut installed = discovery(false);
+        match change {
+            Change::Identity => {
+                installed.server = Some([4; 32]);
+                installed.start_observation.as_mut().unwrap().server = [4; 32];
+            }
+            Change::Stop => {
+                installed.stopped = false;
+                installed.start_observation.as_mut().unwrap().stopped = false;
+            }
+            Change::Version => {
+                installed.version = "2.0.0".into();
+                installed.start_observation.as_mut().unwrap().version = "2.0.0".into();
+            }
+            Change::Commit => {
+                installed.commit = "b".repeat(40);
+                installed.start_observation.as_mut().unwrap().commit = "b".repeat(40);
+            }
+        }
+        *fixture.adapter.installed_discovery.lock().unwrap() =
+            Some(serde_json::to_vec(&installed).unwrap());
+
+        let result = fixture.setup(Arc::new(Approvals(|offer, _: &CancellationToken| {
+            assert!(matches!(offer, SetupOffer::Installation { .. }));
+            true
+        })));
+
+        assert_eq!(
+            result,
+            Err(SetupFailure::Unconfirmed(SetupOperation::Install))
+        );
+        assert_eq!(fixture.adapter.effects.lock().unwrap().len(), 1);
+        assert_eq!(fixture.adapter.authentications.load(Ordering::SeqCst), 1);
+        assert_eq!(fixture.prompts.load(Ordering::SeqCst), 1);
+        let counts = fixture.backend.process_counts();
+        assert_eq!(counts.active(), 0);
+        assert_eq!(counts.spawned, counts.reaped);
+    }
 }
 
 #[test]
