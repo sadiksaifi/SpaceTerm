@@ -7,6 +7,7 @@ fn signed_dirty_source_versions_are_admitted_only_for_matching_nonproduction_bui
     let root = temporary();
     for identity in ["spaceterm-development", "spaceterm-preflight", "spaceterm"] {
         for (case, version) in [
+            ("clean", "dev.aaaaaaaaaaaa"),
             ("dirty", "dev.aaaaaaaaaaaa.dirty"),
             ("other-commit", "dev.bbbbbbbbbbbb.dirty"),
             ("extra-suffix", "dev.aaaaaaaaaaaa.dirty.dirty"),
@@ -21,6 +22,9 @@ fn signed_dirty_source_versions_are_admitted_only_for_matching_nonproduction_bui
                         manifest["version"] = version.into();
                         entries[0].1 = serde_json::to_vec(&manifest).unwrap();
                     });
+                    if identity == "spaceterm" {
+                        test_support::sign_with_previous_production_trust(archive, signature);
+                    }
                     let service = Service::for_identity(identity).unwrap();
                     let pin = digest(&std::fs::read(archive).unwrap());
                     let result = service.inspect_candidate(
@@ -30,7 +34,7 @@ fn signed_dirty_source_versions_are_admitted_only_for_matching_nonproduction_bui
                         1,
                         &["workspace_policy"],
                     );
-                    if identity != "spaceterm" && case == "dirty" {
+                    if case == "clean" || (identity != "spaceterm" && case == "dirty") {
                         assert_eq!(result.unwrap().version, version);
                     } else {
                         assert_eq!(result, Err(ServerError::RuntimeUnavailable));
