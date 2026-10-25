@@ -330,10 +330,15 @@ def verify_tree(tree, expected, *, native=True):
         )
     except (OSError, subprocess.TimeoutExpired):
         raise TaskError("the installed server headless check failed") from None
+    # Independently signed older server artifacts retain their original success message.
     if (
         result.returncode
         or result.stderr
-        or result.stdout != b"Installed server PTY and shell resources verified.\n"
+        or result.stdout
+        not in (
+            b"Server checks passed.\n",
+            b"Installed server PTY and shell resources verified.\n",
+        )
     ):
         raise TaskError("the installed server headless check failed")
 
