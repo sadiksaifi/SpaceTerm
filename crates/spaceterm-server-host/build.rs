@@ -9,7 +9,11 @@ fn main() {
         std::env::var_os("CARGO_MANIFEST_DIR").expect("Cargo supplies the manifest directory"),
     )
     .join("../..");
-    for input in ["SPACETERM_PACKAGED", "SPACETERM_RELEASE_TAG"] {
+    for input in [
+        "SPACETERM_PACKAGED",
+        "SPACETERM_RELEASE_TAG",
+        "SPACETERM_SERVER_SOURCE_STATE",
+    ] {
         println!("cargo:rerun-if-env-changed={input}");
     }
     for path in identity::watched_paths(&root).expect("Git build identity is required") {

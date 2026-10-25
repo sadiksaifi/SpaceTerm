@@ -105,8 +105,12 @@ def prepare(destination, identity):
         fcntl.flock(lock, fcntl.LOCK_EX)
         _portable_paths(ROOT)
         digest = _source(ROOT)[2]
-        previous = os.environ.get("CARGO_TARGET_DIR")
-        os.environ["CARGO_TARGET_DIR"] = str(cache / identity)
+        overrides = {
+            "CARGO_TARGET_DIR": str(cache / identity),
+            "SPACETERM_SERVER_SOURCE_STATE": digest,
+        }
+        previous = {name: os.environ.get(name) for name in overrides}
+        os.environ.update(overrides)
         try:
             with tempfile.TemporaryDirectory(dir=cache, prefix=".catalog-") as temporary:
                 collected = Path(temporary)
@@ -125,9 +129,10 @@ def prepare(destination, identity):
                     (entry / "artifact.sha256").write_text(sha256(archive) + "\n")
                 stage_catalog(None, None, destination, identity, source=collected, require_all=True)
         finally:
-            if previous is None:
-                os.environ.pop("CARGO_TARGET_DIR", None)
-            else:
-                os.environ["CARGO_TARGET_DIR"] = previous
+            for name, value in previous.items():
+                if value is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = value
     print(f"Prepared {identity} server catalog from source SHA256 {digest}")
     return destination
