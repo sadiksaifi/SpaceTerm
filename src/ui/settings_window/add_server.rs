@@ -14,6 +14,7 @@
 
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
+use std::sync::Arc;
 
 use gpui::prelude::*;
 use gpui::{
@@ -48,7 +49,9 @@ use crate::ui::chrome_geometry::RadiusRole;
 use crate::ui::chrome_typography::{ChromeTextStyleExt as _, TextRole};
 use crate::ui::direct_access::{code_speech, code_text};
 use crate::ui::direct_servers::DirectChanges;
-use crate::ui::ssh_setup::{SetupProblem, SshPromptActivity, SshPromptEvent, SshSetupFactory};
+use crate::ui::ssh_setup::{
+    SetupProblem, SshHostSource, SshPromptActivity, SshPromptEvent, SshSetupFactory,
+};
 
 pub(super) const MODAL_ID: &str = "add-server";
 pub(super) const METHOD_SELECTOR: &str = "add-server-method";
@@ -347,7 +350,8 @@ pub(super) struct AddServerSheet {
     host: Entity<TextInput>,
     address: Entity<TextInput>,
     link: Entity<TextInput>,
-    /// The hosts this computer's SSH configuration names, read when the sheet opens.
+    /// The hosts this computer's SSH configuration names. Empty until discovery, which starts
+    /// when the sheet opens, answers.
     hosts: Vec<SshDestination>,
     /// Whether the typed host was refused when the person last chose Set Up.
     host_invalid: bool,
@@ -381,6 +385,7 @@ pub(super) struct AddServerSheet {
     _direct_changes: Option<DirectChanges>,
     _work: Option<Task<()>>,
     _setup: Option<Task<()>>,
+    _discovery: Option<Task<()>>,
 }
 
 impl AddServerSheet {
@@ -490,11 +495,9 @@ impl AddServerSheet {
                 })
             })
         });
-        // Reading SSH configuration reaches no host.
-        let hosts = ssh
+        let discovery = ssh
             .as_ref()
-            .map(|factory| factory.hosts())
-            .unwrap_or_default();
+            .map(|factory| Self::discover_hosts(factory.hosts(), cx));
         Self {
             settings,
             window: window.window_handle(),
@@ -504,7 +507,7 @@ impl AddServerSheet {
             host,
             address,
             link,
-            hosts,
+            hosts: Vec::new(),
             host_invalid: false,
             address_invalid: false,
             preview: None,
@@ -524,7 +527,36 @@ impl AddServerSheet {
             _direct_changes: direct_changes,
             _work: None,
             _setup: None,
+            _discovery: discovery,
         }
+    }
+
+    /// Reads the configured SSH hosts on a thread of their own, since a slow or unavailable
+    /// volume can hold a read indefinitely, and fills the SSH Hosts menu with them once they
+    /// arrive. Reading reaches no host. The hosts change only the menu, never what the person
+    /// typed. A sheet that closes first takes nothing, and a read that can't start or ends
+    /// without an answer leaves the menu empty, as a configuration naming no hosts does.
+    fn discover_hosts(source: Arc<dyn SshHostSource>, cx: &mut Context<Self>) -> Task<()> {
+        let (found, hosts) = async_channel::bounded(1);
+        let started = std::thread::Builder::new()
+            .name("spaceterm-ssh-hosts".to_owned())
+            .spawn(move || {
+                let _ = found.try_send(source.hosts());
+            });
+        cx.spawn(async move |sheet, cx| {
+            if started.is_err() {
+                return;
+            }
+            let Ok(hosts) = hosts.recv().await else {
+                return;
+            };
+            let _ = sheet.update(cx, |sheet, cx| {
+                if !sheet.closed {
+                    sheet.hosts = hosts;
+                    cx.notify();
+                }
+            });
+        })
     }
 
     /// Fills in `request`'s value when the sheet is waiting for one, then presents the sheet. Work

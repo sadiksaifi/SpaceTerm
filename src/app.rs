@@ -199,14 +199,28 @@ where
     ) -> Option<Arc<dyn crate::ssh::askpass::AskPassAttemptFactory>> {
         self.askpass.create(window, cx).ok()
     }
-    fn hosts(&self) -> Vec<crate::domain::SshDestination> {
-        crate::ssh::host_config::discover_ssh_hosts(
-            self.filesystem.as_ref(),
-            &crate::ssh::host_config::HostConfigRoots {
+    fn hosts(&self) -> Arc<dyn crate::ui::ssh_setup::SshHostSource> {
+        Arc::new(NativeSshHosts {
+            filesystem: Arc::clone(&self.filesystem),
+            roots: crate::ssh::host_config::HostConfigRoots {
                 user: self.home.join(".ssh/config"),
                 system: PathBuf::from("/etc/ssh/ssh_config"),
                 home: self.home.clone(),
             },
+        })
+    }
+}
+
+struct NativeSshHosts {
+    filesystem: Arc<dyn HostConfigFilesystem>,
+    roots: crate::ssh::host_config::HostConfigRoots,
+}
+
+impl crate::ui::ssh_setup::SshHostSource for NativeSshHosts {
+    fn hosts(&self) -> Vec<crate::domain::SshDestination> {
+        crate::ssh::host_config::discover_ssh_hosts(
+            self.filesystem.as_ref(),
+            &self.roots,
             crate::ssh::host_config::HostDiscoveryLimits::default(),
         )
         .hosts

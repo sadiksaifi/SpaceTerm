@@ -75,6 +75,12 @@ pub(crate) fn prompt_settled(window: WindowId, cancelled: bool, cx: &mut App) {
     }
 }
 
+/// Lists the aliases this computer's OpenSSH configuration names, without reaching a host.
+/// Reading can block on the filesystem, so callers run it off the UI thread.
+pub(crate) trait SshHostSource: Send + Sync {
+    fn hosts(&self) -> Vec<SshDestination>;
+}
+
 /// Creates the setup backend, presents OpenSSH's prompts in a window and lists configured hosts.
 /// Creating any of them contacts no computer.
 pub(crate) trait SshSetupFactory {
@@ -84,8 +90,8 @@ pub(crate) trait SshSetupFactory {
     /// OpenSSH's prompts presented in `window`.
     fn prompts(&self, window: &Window, cx: &mut App) -> Option<Arc<dyn AskPassAttemptFactory>>;
 
-    /// The aliases this computer's OpenSSH configuration names, read without reaching a host.
-    fn hosts(&self) -> Vec<SshDestination>;
+    /// The source of the configured host list. Creating it reads nothing.
+    fn hosts(&self) -> Arc<dyn SshHostSource>;
 }
 
 struct InstalledSshSetup(Rc<dyn SshSetupFactory>);

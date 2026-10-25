@@ -4,7 +4,7 @@
 use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::rc::Rc;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use gpui::{Entity, TestAppContext, VisualTestContext};
@@ -109,7 +109,67 @@ impl AskPassAttemptFactory for NoPrompts {
     }
 }
 
-struct Setup(Arc<Computers>);
+/// This computer's OpenSSH configuration as a test scripts it. Reading waits until the test
+/// releases it, as a read of a slow or unavailable volume does.
+struct Hosts {
+    listed: Vec<SshDestination>,
+    released: Mutex<bool>,
+    release: Condvar,
+    /// Whether a read has returned its hosts.
+    answered: std::sync::atomic::AtomicBool,
+}
+
+impl Hosts {
+    /// A configuration naming no hosts, read at once.
+    fn none() -> Arc<Self> {
+        Arc::new(Self {
+            listed: Vec::new(),
+            released: Mutex::new(true),
+            release: Condvar::new(),
+            answered: std::sync::atomic::AtomicBool::new(false),
+        })
+    }
+
+    /// A configuration naming `aliases`, whose read waits for [`Self::release`].
+    fn held(aliases: &[&str]) -> Arc<Self> {
+        Arc::new(Self {
+            listed: aliases
+                .iter()
+                .map(|alias| SshDestination::new((*alias).to_owned()).unwrap())
+                .collect(),
+            released: Mutex::new(false),
+            release: Condvar::new(),
+            answered: std::sync::atomic::AtomicBool::new(false),
+        })
+    }
+
+    fn release(&self) {
+        *self.released.lock().unwrap() = true;
+        self.release.notify_all();
+    }
+
+    fn answered(&self) -> bool {
+        self.answered.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+impl SshHostSource for Hosts {
+    fn hosts(&self) -> Vec<SshDestination> {
+        let released = self.released.lock().unwrap();
+        // A test that fails before releasing the read still ends its thread.
+        let (released, _) = self
+            .release
+            .wait_timeout_while(released, Duration::from_secs(10), |released| !*released)
+            .unwrap();
+        drop(released);
+        let listed = self.listed.clone();
+        self.answered
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        listed
+    }
+}
+
+struct Setup(Arc<Computers>, Arc<Hosts>);
 impl SshSetupFactory for Setup {
     fn backend(&self) -> Option<Arc<dyn SshSetupBackend>> {
         Some(Arc::clone(&self.0) as Arc<dyn SshSetupBackend>)
@@ -117,8 +177,8 @@ impl SshSetupFactory for Setup {
     fn prompts(&self, _: &Window, _: &mut App) -> Option<Arc<dyn AskPassAttemptFactory>> {
         Some(Arc::new(NoPrompts))
     }
-    fn hosts(&self) -> Vec<SshDestination> {
-        Vec::new()
+    fn hosts(&self) -> Arc<dyn SshHostSource> {
+        Arc::clone(&self.1) as Arc<dyn SshHostSource>
     }
 }
 
@@ -137,17 +197,21 @@ fn open_settings(
 ) -> (Sheet<'_>, DirectRouteId) {
     let (direct, route) = crate::direct_connections::tests::offline("studio");
     let computers = Computers::scripted(outcomes(route));
-    (open_settings_using(computers, direct, cx), route)
+    (
+        open_settings_using(computers, Hosts::none(), direct, cx),
+        route,
+    )
 }
 
 /// Opens Settings as [`open_settings`] does, with the direct registry `direct` and no scripted
 /// setups.
 fn open_settings_with(direct: DirectConnections, cx: &mut TestAppContext) -> Sheet<'_> {
-    open_settings_using(Arc::default(), direct, cx)
+    open_settings_using(Arc::default(), Hosts::none(), direct, cx)
 }
 
 fn open_settings_using(
     computers: Arc<Computers>,
+    hosts: Arc<Hosts>,
     direct: DirectConnections,
     cx: &mut TestAppContext,
 ) -> Sheet<'_> {
@@ -158,7 +222,7 @@ fn open_settings_using(
     let platform = RecordingAppearancePlatform::default();
     platform.set_system_appearance(Some(Appearance::Dark));
     let installed = direct.clone();
-    let factory = Rc::new(Setup(Arc::clone(&computers)));
+    let factory = Rc::new(Setup(Arc::clone(&computers), hosts));
     cx.update(|cx| {
         appearance_runtime::install(settings, Rc::new(platform), cx)
             .expect("appearance runtime should install");
@@ -219,6 +283,18 @@ impl Sheet<'_> {
     fn fill(&mut self, host: &str, address: &str) {
         self.type_into(HOST_SELECTOR, host);
         self.type_into(ADDRESS_SELECTOR, address);
+    }
+
+    /// The Host and Network Address fields' values.
+    fn typed(&mut self) -> (String, String) {
+        self.cx.update(|window, cx| {
+            let sheet = open_sheet(window, cx).expect("the sheet is open");
+            let sheet = sheet.read(cx);
+            (
+                sheet.host.read(cx).value().to_owned(),
+                sheet.address.read(cx).value().to_owned(),
+            )
+        })
     }
 
     /// Shows an SSH sign-in prompt in the sheet's window, then has the person dismiss it, as the
@@ -728,6 +804,100 @@ fn declining_a_sign_in_after_an_installation_reports_the_unconfirmed_installatio
     sheet.settle(|sheet| sheet.title() == "Couldn\u{2019}t Add \u{201C}penguin\u{201D}");
 
     assert!(sheet.says("couldn\u{2019}t confirm the installation"));
+}
+
+/// Reading the SSH configuration can wait on a slow volume. The sheet opens and both methods work
+/// meanwhile, and the hosts that arrive later fill only the SSH Hosts menu, leaving what the
+/// person typed as it was.
+#[gpui::test]
+fn add_server_stays_usable_while_ssh_hosts_are_read(cx: &mut TestAppContext) {
+    let (direct, _) = crate::direct_connections::tests::offline("studio");
+    let hosts = Hosts::held(&["penguin-alias"]);
+    let mut sheet = open_settings_using(Arc::default(), Arc::clone(&hosts), direct, cx);
+    sheet.begin(AddServerRequest::Ssh(None));
+
+    assert_eq!(sheet.title(), "Add Server");
+    assert!(
+        sheet.cx.debug_bounds(HOSTS_MENU_SELECTOR).is_none(),
+        "no hosts are listed before the read answers"
+    );
+    sheet.fill("me@build.local", "192.168.1.20");
+    assert!(!sheet.disabled("Set Up"), "the SSH method works meanwhile");
+    sheet.begin(AddServerRequest::Invitation(Some(invitation("studio"))));
+    assert!(sheet.says("127.0.0.1:9231"), "and so does an invitation");
+    assert!(!sheet.disabled("Join"));
+    sheet.begin(AddServerRequest::Ssh(None));
+
+    hosts.release();
+    sheet.settle(|sheet| sheet.cx.debug_bounds(HOSTS_MENU_SELECTOR).is_some());
+    let trigger = sheet
+        .cx
+        .debug_bounds(HOSTS_MENU_SELECTOR)
+        .expect("the SSH Hosts menu is offered")
+        .center();
+    sheet.cx.simulate_click(trigger, gpui::Modifiers::none());
+    sheet.cx.run_until_parked();
+
+    let alias = format!("{HOST_CHOICE_SELECTOR}-0");
+    assert!(
+        sheet
+            .cx
+            .debug_bounds(Box::leak(alias.into_boxed_str()))
+            .is_some(),
+        "the menu lists the configured host"
+    );
+    assert!(
+        A11yTree::read(sheet.cx).find("penguin-alias").is_some(),
+        "the listed host reads by its alias"
+    );
+    sheet.cx.update(spaceterm_ui::dismiss_active_menu);
+    sheet.cx.run_until_parked();
+
+    assert!(sheet.open(), "closing the menu leaves the sheet open");
+    assert_eq!(
+        sheet.typed(),
+        ("me@build.local".to_owned(), "192.168.1.20".to_owned()),
+        "the listed hosts change nothing the person typed"
+    );
+    assert!(sheet.computers.asked().is_empty());
+}
+
+/// A sheet closed while the SSH configuration is still being read takes nothing from the read
+/// when it answers.
+#[gpui::test]
+fn closing_add_server_while_ssh_hosts_are_read_takes_nothing_from_the_read(
+    cx: &mut TestAppContext,
+) {
+    let (direct, _) = crate::direct_connections::tests::offline("studio");
+    let hosts = Hosts::held(&["penguin-alias"]);
+    let mut sheet = open_settings_using(Arc::default(), Arc::clone(&hosts), direct, cx);
+    sheet.begin(AddServerRequest::Ssh(None));
+
+    sheet.cx.simulate_keystrokes("escape");
+    sheet.cx.run_until_parked();
+    assert!(
+        !sheet.open(),
+        "Escape closes the sheet while the read waits"
+    );
+
+    hosts.release();
+    // The read answers on its own thread, after the sheet closed.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !hosts.answered() {
+        assert!(
+            Instant::now() < deadline,
+            "the held read answers once released"
+        );
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    sheet.cx.run_until_parked();
+
+    assert!(!sheet.open(), "the answer reopens nothing");
+    assert!(
+        sheet.cx.debug_bounds(HOSTS_MENU_SELECTOR).is_none(),
+        "no host list appears from the closed sheet's read"
+    );
+    assert!(sheet.computers.asked().is_empty());
 }
 
 #[test]
