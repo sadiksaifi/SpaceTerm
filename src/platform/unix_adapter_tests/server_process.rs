@@ -182,7 +182,7 @@ impl AskPassAttemptFactory for NativeBroker {
         attempt
     }
 }
-/// One explicitly selected disposable account, its own client state and the real adapters.
+/// One explicitly selected account, test-owned client transport state and real adapters.
 struct NativeFixture {
     destination: SshDestination,
     /// What the person running this expects of the account: stopped, missing or ready.
@@ -762,42 +762,68 @@ fn native_acceptance_catalog() -> PathBuf {
     catalog
 }
 
+/// The runner binds the owner's published inventory to both accounts and one compiled identity.
+/// This authorizes installation only; the fixture performs no reset or service removal.
+fn native_acceptance_scope() -> u32 {
+    let scope = std::env::var("SPACETERM_SSH_NATIVE_SCOPE")
+        .expect("set the owner-confirmed sdk:LOCAL_UID:sdk:REMOTE_UID:IDENTITY scope");
+    let fields = scope.split(':').collect::<Vec<_>>();
+    assert_eq!(fields.len(), 5, "invalid owner-confirmed acceptance scope");
+    assert_eq!(fields[0], "sdk");
+    assert_eq!(fields[2], "sdk");
+    assert_eq!(
+        fields[4],
+        identity(),
+        "confirm exactly the compiled identity"
+    );
+    let local_uid: u32 = fields[1].parse().expect("explicit source UID required");
+    let remote_uid: u32 = fields[3]
+        .parse()
+        .expect("explicit destination UID required");
+    assert!(local_uid != 0 && remote_uid != 0);
+    for (option, expected) in [("-un", "sdk".to_owned()), ("-u", local_uid.to_string())] {
+        let actual = std::process::Command::new("/usr/bin/id")
+            .arg(option)
+            .output()
+            .unwrap();
+        assert!(actual.status.success(), "source account proof unavailable");
+        assert_eq!(actual.stdout, format!("{expected}\n").as_bytes());
+    }
+    remote_uid
+}
+
 fn native_acceptance_account(
     backend: &NativeSshConnectBackend<ObservedAdapter>,
     destination: &SshDestination,
+    expected_uid: u32,
     cancellation: &SshCancellationToken,
 ) -> u32 {
     let route = backend
         .route(destination, ConnectMode::Requested, cancellation, &|_| {})
         .unwrap_or_else(|error| panic!("account preflight: {}", failure_name(&error)));
     // Read-only proof on the same authenticated route that will receive the installation.
-    // Account creation, GUI login and Linux linger belong to the owner's access plan.
+    // Freshness belongs to real account state, independently of client XDG directories.
+    // The parent owns exact service cleanup and its recorded inventory before this check.
     let output = route
         .run(
-            r#"python3 - <<'PY'
+            &r#"python3 - <<'PY'
 import os, pathlib, pwd, stat, subprocess, sys
 uid = os.geteuid()
 account = pwd.getpwuid(uid)
-assert uid != 0 and account.pw_name == 'st648server'
+assert uid == EXPECTED_UID and uid != 0 and account.pw_name == 'sdk'
 home = pathlib.Path(account.pw_dir)
 assert os.environ.get('HOME') == str(home)
-expected = '/Users/st648server' if sys.platform == 'darwin' else '/home/st648server'
-assert str(home) == expected
 metadata = home.lstat()
 assert stat.S_ISDIR(metadata.st_mode) and metadata.st_uid == uid
-assert stat.S_IMODE(metadata.st_mode) == 0o700
-marker = home / '.spaceterm-ssh-acceptance'
-metadata = marker.lstat()
-assert stat.S_ISREG(metadata.st_mode) and metadata.st_uid == uid
-assert stat.S_IMODE(metadata.st_mode) == 0o600
-assert marker.read_text() == 'st648server\n'
-for identity in ('spaceterm-development', 'spaceterm-preflight', 'spaceterm'):
-    paths = (
-        home / '.local/share' / identity / 'server',
-        home / 'Library/LaunchAgents' / ('io.github.sadiksaifi.' + identity + '.server.plist'),
-        home / '.config/systemd/user' / ('io.github.sadiksaifi.' + identity + '.server.service'),
-    )
-    assert all(not path.exists() and not path.is_symlink() for path in paths)
+identity = 'EXPECTED_IDENTITY'
+temporary = pathlib.Path('/private/tmp' if sys.platform == 'darwin' else '/tmp')
+paths = (
+    home / '.local/share' / identity / 'server/service.json',
+    home / 'Library/LaunchAgents' / ('io.github.sadiksaifi.' + identity + '.server.plist'),
+    home / '.config/systemd/user' / ('io.github.sadiksaifi.' + identity + '.server.service'),
+    temporary / (identity + '-server-' + str(uid)) / 's',
+)
+assert all(not path.exists() and not path.is_symlink() for path in paths)
 if sys.platform == 'darwin':
     subprocess.run(['/bin/launchctl', 'print', 'gui/' + str(uid)], check=True,
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
@@ -808,7 +834,9 @@ else:
     assert linger.stdout == b'yes\n'
     assert pathlib.Path('/run/user/' + str(uid) + '/bus').is_socket()
 print(uid)
-PY"#,
+PY"#
+                .replace("EXPECTED_UID", &expected_uid.to_string())
+                .replace("EXPECTED_IDENTITY", identity()),
             Vec::new(),
             OBSERVATION,
             cancellation,
@@ -816,21 +844,22 @@ PY"#,
         .unwrap_or_else(|error| panic!("account preflight: {}", failure_name(&error)));
     assert!(
         output.exit.is_success(),
-        "requires a fresh st648server account, private marker and native service manager"
+        "requires the confirmed sdk UID, absent selected service policy/registration/endpoint and native service manager"
     );
     std::str::from_utf8(&output.stdout)
         .ok()
         .and_then(|text| text.trim().parse().ok())
-        .expect("account preflight must identify the disposable UID")
+        .expect("account preflight must identify the confirmed UID")
 }
 
 #[gpui::test]
-#[ignore = "installs into an owner-provisioned fresh st648server account; requires matching signed packages"]
+#[ignore = "installs into an owner-confirmed sdk account and build identity with fresh service state; requires matching signed packages"]
 fn native_account_server_install_acceptance(cx: &mut gpui::TestAppContext) {
     use spaceterm_server::{
         hierarchy::{CloseTarget, Mutation, Outcome},
         pane::{PaneSize, Reply, Request},
     };
+    let expected_account = native_acceptance_scope();
     assert_eq!(
         std::env::var("SPACETERM_SSH_NATIVE_INSTALL").as_deref(),
         Ok("1"),
@@ -846,7 +875,7 @@ fn native_account_server_install_acceptance(cx: &mut gpui::TestAppContext) {
     ] {
         assert!(
             std::env::var_os(key).is_none(),
-            "acceptance requires isolated client state and the real catalog"
+            "acceptance requires test-owned client transport state and the real catalog"
         );
     }
     assert!(
@@ -857,14 +886,6 @@ fn native_account_server_install_acceptance(cx: &mut gpui::TestAppContext) {
         std::env::var("SPACETERM_DEVELOPMENT_CLIENT").as_deref(),
         Ok("ssh-native-install-acceptance"),
         "use a dedicated fixture client identity"
-    );
-    let account = std::process::Command::new("/usr/bin/id")
-        .arg("-un")
-        .output()
-        .unwrap();
-    assert!(
-        account.status.success() && account.stdout == b"st648client\n",
-        "run as the disposable st648client account"
     );
     let NativeFixture {
         destination,
@@ -877,7 +898,8 @@ fn native_account_server_install_acceptance(cx: &mut gpui::TestAppContext) {
         SshServerArtifacts::new(Some(native_acceptance_catalog())),
     );
     let cancellation = SshCancellationToken::default();
-    let account = native_acceptance_account(&backend, &destination, &cancellation);
+    let account =
+        native_acceptance_account(&backend, &destination, expected_account, &cancellation);
     let observed = backend
         .observe(&destination, None, &cancellation, &|_| {})
         .unwrap_or_else(|error| panic!("fresh observation: {}", failure_name(&error)));
