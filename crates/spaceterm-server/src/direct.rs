@@ -16,6 +16,12 @@ pub(crate) mod tests;
 mod wire;
 mod wss;
 
+pub(super) fn setup_generation(operation: &[u8; 32]) -> u64 {
+    let mut generation = [0; 8];
+    generation.copy_from_slice(&operation[..8]);
+    u64::from_be_bytes(generation)
+}
+
 pub type PairingId = [u8; 32];
 pub type ClaimId = [u8; 32];
 pub type OperationId = [u8; 32];
@@ -69,6 +75,7 @@ impl NetworkPolicy {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DirectStatus {
+    pub setup_generation: u64,
     pub pin: ServerPin,
     pub policy: Option<NetworkPolicy>,
     pub server_name: String,

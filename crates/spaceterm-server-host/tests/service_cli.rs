@@ -46,7 +46,7 @@ fn service_controls_refuse_foreign_and_malformed_identities() {
             "service-enable-linger",
             "service-serve",
             "ssh-discover",
-            "ssh-prepare",
+            "setup-start",
             "ssh-enable-linger",
             "ssh-enable-linger-password",
         ] {
@@ -92,7 +92,7 @@ fn malformed_service_invocations_return_bounded_errors() {
         vec!["status", identity, "--confirm"],
         vec!["setup-state", identity, "--confirm"],
         vec!["ssh-discover", identity, "--confirm"],
-        vec!["ssh-prepare", identity, "--confirm"],
+        vec!["setup-start", identity, "--confirm"],
         vec!["ssh-enable-linger", identity, "--confirm"],
         vec!["ssh-enable-linger-password", identity, "--confirm"],
         vec![

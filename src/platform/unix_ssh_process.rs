@@ -295,7 +295,7 @@ mod tests {
     #[test]
     fn discovery_commands_quote_the_action_and_application_identity() {
         let adapter = UnixSshProcessAdapter;
-        for action in ["ssh-discover", "ssh-prepare", "setup-direct-status"] {
+        for action in ["ssh-discover", "setup-start", "setup-direct-status"] {
             let script = adapter.locator(IDENTITY, action, action == "ssh-discover");
             assert!(
                 script.ends_with(&format!(

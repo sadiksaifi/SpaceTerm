@@ -10,6 +10,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SetupRequest {
+    /// Encoded big-endian in operation[..8]; the remaining 24 bytes are client randomness.
+    pub generation: u64,
     pub pin: ServerPin,
     pub expected_policy: Option<NetworkPolicy>,
     pub operation: [u8; 32],
@@ -58,6 +60,7 @@ pub fn prepare_direct(
     match manage(
         identity,
         Management::PrepareSetup {
+            generation: request.generation,
             pin: request.pin,
             expected_policy: request.expected_policy,
             policy,
@@ -82,6 +85,7 @@ pub fn setup_direct(
     let paired = match manage(
         identity,
         Management::Setup {
+            generation: request.generation,
             pin: request.pin,
             expected_policy: request.expected_policy,
             policy,
@@ -164,6 +168,7 @@ pub struct AccountDiscovery {
     pub enabled: bool,
     pub running: bool,
     pub stopped: bool,
+    pub start_observation: Option<crate::service::SetupStartObservation>,
     pub protocol_majors: Vec<u16>,
     pub capabilities: Vec<String>,
     pub target: String,
@@ -179,7 +184,9 @@ pub fn discover(identity: &str) -> Result<AccountDiscovery, ServerError> {
         Err(ServerError::NotSetUp) => None,
         Err(error) => return Err(error),
     };
-    let status = crate::service::Service::for_identity(identity)?.status()?;
+    let service = crate::service::Service::for_identity(identity)?;
+    let status = service.passive_status()?;
+    let start_observation = service.setup_start_observation()?;
     Ok(AccountDiscovery {
         schema: 1,
         // SAFETY: geteuid has no preconditions.
@@ -190,6 +197,7 @@ pub fn discover(identity: &str) -> Result<AccountDiscovery, ServerError> {
         enabled: status.enabled,
         running: status.running,
         stopped: status.stopped,
+        start_observation,
         protocol_majors: vec![protocol::MAJOR],
         capabilities: vec!["workspace_policy".into()],
         target: String::new(),

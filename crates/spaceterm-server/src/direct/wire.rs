@@ -118,6 +118,7 @@ pub enum Management {
     Status,
     /// Temporary provisioning, admitted only over owning-account IPC.
     PrepareSetup {
+        generation: u64,
         pin: ServerPin,
         expected_policy: Option<NetworkPolicy>,
         policy: NetworkPolicy,
@@ -126,6 +127,7 @@ pub enum Management {
         name: ClientName,
     },
     Setup {
+        generation: u64,
         pin: ServerPin,
         expected_policy: Option<NetworkPolicy>,
         policy: NetworkPolicy,

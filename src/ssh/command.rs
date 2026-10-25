@@ -18,6 +18,7 @@ use crate::domain::SshDestination;
 const MINIMUM_OPENSSH_VERSION: OpenSshVersion = OpenSshVersion::new(8, 2);
 const MAX_PROBE_STREAM_BYTES: usize = 4 * 1024;
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+pub(crate) const SETUP_READY_PREAMBLE: &[u8] = b"spaceterm-setup-ready-v1\n";
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(crate) struct OpenSshVersion {
@@ -221,10 +222,17 @@ impl SshCommandContext {
     /// One setup command, using normal OpenSSH configuration without sharing a master.
     pub(crate) fn setup(
         executable: OpenSshExecutable,
+        configuration: &Path,
         destination: &SshDestination,
         command: ValidatedRemoteShellCommand,
-    ) -> SshCommandSpec {
-        let mut arguments = vec!["-T".into()];
+    ) -> Result<SshCommandSpec, RemoteShellCommandError> {
+        validate_setup_configuration_path(configuration)?;
+        validate_setup_configuration_path(executable.as_path())?;
+        let mut arguments = vec![
+            "-F".into(),
+            configuration.as_os_str().to_owned(),
+            "-T".into(),
+        ];
         for option in [
             "ControlMaster=no",
             "ControlPath=none",
@@ -243,9 +251,18 @@ impl SshCommandContext {
         arguments.extend([
             "--".into(),
             destination.as_str().into(),
-            command.argument.into(),
+            format!(
+                "/bin/sh -c {}",
+                quote_for_posix_shell(&format!(
+                    "printf '%s\\n' spaceterm-setup-ready-v1; exec {}",
+                    command.argument
+                ))
+            )
+            .into(),
         ]);
-        SshCommandSpec::new(executable, arguments)
+        let mut command = SshCommandSpec::new(executable, arguments);
+        command.setup_preamble = true;
+        Ok(command)
     }
     pub(crate) fn authorization_prompt(
         helper: PathBuf,
@@ -259,10 +276,11 @@ impl SshCommandContext {
 
     pub(crate) fn setup_cleanup(
         executable: OpenSshExecutable,
+        configuration: &Path,
         destination: &SshDestination,
         command: ValidatedRemoteShellCommand,
-    ) -> SshCommandSpec {
-        let mut spec = Self::setup(executable, destination, command);
+    ) -> Result<SshCommandSpec, RemoteShellCommandError> {
+        let mut spec = Self::setup(executable, configuration, destination, command)?;
         spec.arguments.splice(
             0..0,
             [
@@ -274,8 +292,41 @@ impl SshCommandContext {
                 "ConnectTimeout=5".into(),
             ],
         );
-        spec
+        Ok(spec)
     }
+}
+
+pub(crate) fn validate_setup_configuration_path(
+    path: &Path,
+) -> Result<(), RemoteShellCommandError> {
+    if !path.is_absolute()
+        || !path.to_str().is_some_and(|path| {
+            path.chars().all(|character| {
+                character.is_alphanumeric() || matches!(character, '/' | '.' | '_' | '-')
+            })
+        })
+    {
+        return Err(RemoteShellCommandError::UnsafeConfiguration);
+    }
+    Ok(())
+}
+
+pub(crate) fn setup_configuration(
+    home: &Path,
+    quiet: bool,
+) -> Result<Vec<u8>, RemoteShellCommandError> {
+    let user = home.join(".ssh/config");
+    let user = user
+        .to_str()
+        .filter(|_| is_safe_absolute_path(&user))
+        .ok_or(RemoteShellCommandError::UnsafeConfiguration)?;
+    let user = user.replace('\\', "\\\\").replace('"', "\\\"");
+    let interaction = if quiet {
+        "    BatchMode yes\n    StrictHostKeyChecking yes\n"
+    } else {
+        ""
+    };
+    Ok(format!("Host *\n{interaction}    ControlMaster no\n    ControlPath none\n    ControlPersist no\n    IgnoreUnknown ForkAfterAuthentication,SessionType\n    ForkAfterAuthentication no\n    ClearAllForwardings yes\n    PermitLocalCommand no\nInclude \"{user}\"\nHost *\nInclude /etc/ssh/ssh_config\n").into_bytes())
 }
 
 fn is_safe_absolute_path(path: &Path) -> bool {
@@ -290,6 +341,7 @@ fn push_option(arguments: &mut Vec<OsString>, option: OsString) {
 pub(crate) struct SshCommandSpec {
     executable: OpenSshExecutable,
     arguments: Vec<OsString>,
+    setup_preamble: bool,
 }
 
 impl SshCommandSpec {
@@ -297,6 +349,7 @@ impl SshCommandSpec {
         Self {
             executable,
             arguments,
+            setup_preamble: false,
         }
     }
 
@@ -312,12 +365,17 @@ impl SshCommandSpec {
     pub(crate) fn arguments(&self) -> &[OsString] {
         &self.arguments
     }
+    pub(super) fn has_setup_preamble(&self) -> bool {
+        self.setup_preamble
+    }
 }
 
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
 pub(crate) enum RemoteShellCommandError {
     #[error("the remote server command is too long or contains NUL")]
     CommandTooLong,
+    #[error("the temporary SSH configuration path is unsafe")]
+    UnsafeConfiguration,
 }
 
 pub(crate) struct ValidatedRemoteShellCommand {
@@ -583,7 +641,13 @@ mod tests {
     fn setup_should_use_user_configuration_without_reusing_or_creating_a_master() {
         let destination = SshDestination::new("jump-alias".into()).unwrap();
         let command = ValidatedRemoteShellCommand::server_script("exec server").unwrap();
-        let spec = SshCommandContext::setup(executable(), &destination, command);
+        let spec = SshCommandContext::setup(
+            executable(),
+            Path::new("/fixture/config"),
+            &destination,
+            command,
+        )
+        .unwrap();
         let arguments = arguments(&spec);
         for option in [
             "ControlMaster=no",
@@ -599,12 +663,50 @@ mod tests {
         assert!(
             !arguments
                 .iter()
-                .any(|arg| matches!(arg.as_str(), "-F" | "-S" | "-N"))
+                .any(|arg| matches!(arg.as_str(), "-S" | "-N"))
         );
-        assert!(arguments.ends_with(&[
-            "--".into(),
-            "jump-alias".into(),
-            "/bin/sh -c 'exec server'".into()
-        ]));
+        assert!(
+            arguments
+                .windows(2)
+                .any(|pair| pair == ["-F", "/fixture/config"])
+        );
+        assert_eq!(arguments[arguments.len() - 2], "jump-alias");
+        assert!(
+            arguments
+                .last()
+                .unwrap()
+                .contains("spaceterm-setup-ready-v1")
+        );
+        assert!(spec.has_setup_preamble());
+    }
+
+    #[test]
+    fn setup_refuses_paths_that_openssh_cannot_safely_forward_to_generated_jumps() {
+        for path in [
+            "/fixture/config root",
+            "/fixture/config;command",
+            "/fixture/config%h",
+        ] {
+            let command = ValidatedRemoteShellCommand::server_script("exec server").unwrap();
+            assert!(
+                SshCommandContext::setup(
+                    executable(),
+                    Path::new(path),
+                    &SshDestination::new("jump".into()).unwrap(),
+                    command
+                )
+                .is_err()
+            );
+        }
+        let command = ValidatedRemoteShellCommand::server_script("exec server").unwrap();
+        assert!(
+            SshCommandContext::setup(
+                OpenSshExecutable::new("/fixture/ssh executable".into()).unwrap(),
+                Path::new("/fixture/config"),
+                &SshDestination::new("jump".into()).unwrap(),
+                command
+            )
+            .is_err()
+        );
     }
 }

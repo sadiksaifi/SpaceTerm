@@ -27,11 +27,13 @@ impl DirectConnections {
         &self,
         endpoint: String,
         pin: direct::ServerPin,
+        generation: u64,
     ) -> Result<SetupEnrollment, DirectError> {
         if pin.build != self.0.identity {
             return Err(DirectError::WrongServer);
         }
-        let operation = random_id()?;
+        let mut operation = random_id()?;
+        operation[..8].copy_from_slice(&generation.to_be_bytes());
         let key = random_id()?;
         let credential = DeviceCredential::generate()?;
         // Resume validates the pinned endpoint without opening a connection.
@@ -403,14 +405,35 @@ mod tests {
     }
 
     #[test]
+    fn setup_retains_the_observed_generation_in_its_exact_cleanup_claim_before_dispatch() {
+        let (owner, records, network) = fixture(true);
+        let prepared = owner
+            .prepare_setup(
+                "wss://127.0.0.1:9231/spaceterm".into(),
+                saved(1, 2).route.paired.pin,
+                0x0102_0304_0506_0708,
+            )
+            .unwrap();
+        let retained = records.load().unwrap();
+        let pending = &retained.pending[0];
+        assert!(
+            matches!(&pending.authority, records::Authority::Enrollment { claim, .. }
+            if claim == &prepared.operation() && claim[..8] == [1, 2, 3, 4, 5, 6, 7, 8])
+        );
+        assert_eq!(pending.operation, prepared.operation());
+        assert_eq!(network.connections.load(Ordering::Acquire), 0);
+        assert!(network.cancellations.lock().unwrap().is_empty());
+    }
+
+    #[test]
     fn account_confirmed_setup_cancellation_retires_only_its_credential_without_wss() {
         let (owner, records, network) = fixture(true);
         let pin = saved(1, 2).route.paired.pin;
         let prepared = owner
-            .prepare_setup("wss://127.0.0.1:9231/spaceterm".into(), pin.clone())
+            .prepare_setup("wss://127.0.0.1:9231/spaceterm".into(), pin.clone(), 0)
             .unwrap();
         let other = owner
-            .prepare_setup("wss://127.0.0.1:9232/spaceterm".into(), pin)
+            .prepare_setup("wss://127.0.0.1:9232/spaceterm".into(), pin, 0)
             .unwrap();
         let original = records.load().unwrap();
         let key = original
@@ -456,7 +479,7 @@ mod tests {
         let (owner, records, network) = publication_fixture();
         let pin = saved(1, 2).route.paired.pin;
         let prepared = owner
-            .prepare_setup("wss://127.0.0.1:9231/spaceterm".into(), pin)
+            .prepare_setup("wss://127.0.0.1:9231/spaceterm".into(), pin, 0)
             .unwrap();
         let operation = prepared.operation();
         let key = records.load().unwrap().pending[0].credential_key().unwrap();
@@ -496,6 +519,7 @@ mod tests {
             .prepare_setup(
                 "wss://127.0.0.1:9231/spaceterm".into(),
                 saved(1, 2).route.paired.pin,
+                0,
             )
             .unwrap();
         assert_eq!(
@@ -512,7 +536,11 @@ mod tests {
         let (owner, records, network) = publication_fixture();
         let paired = saved(1, 2).route.paired;
         let prepared = owner
-            .prepare_setup("wss://127.0.0.1:9231/spaceterm".into(), paired.pin.clone())
+            .prepare_setup(
+                "wss://127.0.0.1:9231/spaceterm".into(),
+                paired.pin.clone(),
+                0,
+            )
             .unwrap();
         records.mode.store(1, Ordering::Release);
         let id = owner
@@ -542,7 +570,11 @@ mod tests {
             let (owner, records, network) = publication_fixture();
             let paired = saved(1, 2).route.paired;
             let prepared = owner
-                .prepare_setup("wss://127.0.0.1:9231/spaceterm".into(), paired.pin.clone())
+                .prepare_setup(
+                    "wss://127.0.0.1:9231/spaceterm".into(),
+                    paired.pin.clone(),
+                    0,
+                )
                 .unwrap();
             let id = prepared.operation();
             records.mode.store(mode, Ordering::Release);
@@ -574,7 +606,11 @@ mod tests {
         let (owner, records, _) = fixture(false);
         let paired = saved(1, 2).route.paired;
         let prepared = owner
-            .prepare_setup("wss://127.0.0.1:9231/spaceterm".into(), paired.pin.clone())
+            .prepare_setup(
+                "wss://127.0.0.1:9231/spaceterm".into(),
+                paired.pin.clone(),
+                0,
+            )
             .unwrap();
         let id = owner
             .complete_setup(
@@ -596,7 +632,11 @@ mod tests {
         let (owner, records, network) = fixture(true);
         let paired = saved(1, 2).route.paired;
         let prepared = owner
-            .prepare_setup("wss://127.0.0.1:9231/spaceterm".into(), paired.pin.clone())
+            .prepare_setup(
+                "wss://127.0.0.1:9231/spaceterm".into(),
+                paired.pin.clone(),
+                0,
+            )
             .unwrap();
         let original = records.load().unwrap();
         assert!(matches!(&original.pending[0].authority,
@@ -620,7 +660,11 @@ mod tests {
         let (owner, records, network) = fixture(false);
         let paired = saved(1, 2).route.paired;
         let prepared = owner
-            .prepare_setup("wss://127.0.0.1:9231/spaceterm".into(), paired.pin.clone())
+            .prepare_setup(
+                "wss://127.0.0.1:9231/spaceterm".into(),
+                paired.pin.clone(),
+                0,
+            )
             .unwrap();
         assert_eq!(
             owner.complete_setup(

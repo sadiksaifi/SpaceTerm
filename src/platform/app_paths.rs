@@ -8,7 +8,8 @@ use thiserror::Error;
 
 use super::app_directories::{AppDirectories, AppDirectoryRoot, DirectoryError};
 use super::secure_filesystem::{
-    SecureDirectory, SecureEntryIdentity, SecureFilesystem, SecureFilesystemError,
+    SecureCommitOutcome, SecureDirectory, SecureEntryIdentity, SecureFilesystem,
+    SecureFilesystemError,
 };
 
 const RUNTIME_OWNER_CREATION_ATTEMPTS: usize = 128;
@@ -258,9 +259,49 @@ impl RuntimeOwner {
             .map_err(|_| AppPathsError::FilesystemUnavailable)?
             .push(TrackedRuntimeArtifact {
                 name,
-                socket_identity: identity,
+                identity,
+                kind: RuntimeArtifactKind::Socket,
             });
         Ok(())
+    }
+
+    pub(crate) fn create_private_file(
+        &self,
+        name: &str,
+        bytes: &[u8],
+    ) -> Result<PathBuf, AppPathsError> {
+        validate_child_name(name)?;
+        self.verify_identity()?;
+        let mut nonce = [0; 16];
+        getrandom::fill(&mut nonce).map_err(|_| AppPathsError::FilesystemUnavailable)?;
+        let prepared = self.filesystem.prepare_private_file(
+            &self.directory,
+            OsStr::new(name),
+            bytes,
+            nonce,
+        )?;
+        let published = self.filesystem.commit_private_file(prepared, None)?;
+        if published.outcome == SecureCommitOutcome::Conflict {
+            return Err(AppPathsError::UnsafePath);
+        }
+        let identity = published
+            .published_identity
+            .ok_or(AppPathsError::FilesystemUnavailable)?;
+        if let Err(error) = self.verify_identity() {
+            let _ =
+                self.filesystem
+                    .remove_private_file(&self.directory, OsStr::new(name), &identity);
+            return Err(error);
+        }
+        self.artifacts
+            .lock()
+            .map_err(|_| AppPathsError::FilesystemUnavailable)?
+            .push(TrackedRuntimeArtifact {
+                name: name.into(),
+                identity,
+                kind: RuntimeArtifactKind::File,
+            });
+        Ok(self.path.join(name))
     }
 
     fn cleanup(&self) -> Result<(), AppPathsError> {
@@ -270,11 +311,18 @@ impl RuntimeOwner {
             .lock()
             .map_err(|_| AppPathsError::FilesystemUnavailable)?;
         for artifact in artifacts.iter() {
-            let result = self.filesystem.remove_socket(
-                &self.directory,
-                &artifact.name,
-                &artifact.socket_identity,
-            );
+            let result = match artifact.kind {
+                RuntimeArtifactKind::Socket => self.filesystem.remove_socket(
+                    &self.directory,
+                    &artifact.name,
+                    &artifact.identity,
+                ),
+                RuntimeArtifactKind::File => self.filesystem.remove_private_file(
+                    &self.directory,
+                    &artifact.name,
+                    &artifact.identity,
+                ),
+            };
             match result {
                 Ok(()) | Err(SecureFilesystemError::Missing) => {}
                 Err(error) => return Err(error.into()),
@@ -302,7 +350,14 @@ impl Drop for RuntimeOwner {
 #[derive(Clone)]
 struct TrackedRuntimeArtifact {
     name: OsString,
-    socket_identity: SecureEntryIdentity,
+    identity: SecureEntryIdentity,
+    kind: RuntimeArtifactKind,
+}
+
+#[derive(Clone, Copy)]
+enum RuntimeArtifactKind {
+    Socket,
+    File,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
@@ -515,6 +570,54 @@ mod tests {
                     .unwrap()
         );
         assert_eq!(events.last(), Some(&"remove-owner"));
+    }
+
+    #[test]
+    fn runtime_file_cleanup_removes_only_the_published_file() {
+        let filesystem = Arc::new(RecordingFilesystem::default());
+        let paths = resolve(&environment(), Some("/runtime"), 200, filesystem.clone());
+        let owner = paths.create_runtime_owner("s").unwrap();
+        let path = owner
+            .create_private_file("config", b"ControlPersist no\n")
+            .unwrap();
+        assert!(filesystem.files.lock().unwrap().values.contains_key(&path));
+        drop(owner);
+        assert!(!filesystem.files.lock().unwrap().values.contains_key(&path));
+        assert_eq!(
+            filesystem.events.lock().unwrap().last(),
+            Some(&"remove-owner")
+        );
+    }
+
+    #[test]
+    fn runtime_file_cleanup_preserves_a_successor_published_before_the_reply() {
+        let filesystem = Arc::new(RecordingFilesystem::default());
+        let paths = resolve(&environment(), Some("/runtime"), 200, filesystem.clone());
+        let owner = paths.create_runtime_owner("s").unwrap();
+        filesystem.files.lock().unwrap().successor_after_commit = Some(b"successor".to_vec());
+        let path = owner.create_private_file("config", b"original").unwrap();
+        drop(owner);
+        assert_eq!(
+            filesystem.files.lock().unwrap().values[&path].0,
+            b"successor"
+        );
+        assert!(!filesystem.events.lock().unwrap().contains(&"remove-owner"));
+    }
+
+    #[test]
+    fn runtime_file_creation_refuses_to_replace_a_previous_file() {
+        let filesystem = Arc::new(RecordingFilesystem::default());
+        let paths = resolve(&environment(), Some("/runtime"), 200, filesystem.clone());
+        let owner = paths.create_runtime_owner("s").unwrap();
+        let path = owner.create_private_file("config", b"original").unwrap();
+        assert_eq!(
+            owner.create_private_file("config", b"replacement"),
+            Err(AppPathsError::UnsafePath)
+        );
+        assert_eq!(
+            filesystem.files.lock().unwrap().values[&path].0,
+            b"original"
+        );
     }
 
     #[test]

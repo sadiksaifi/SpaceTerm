@@ -262,6 +262,7 @@ impl State {
             _ => self.listener_state.clone(),
         };
         DirectStatus {
+            setup_generation: self.record.setup_generation,
             pin: self.pin.clone(),
             policy: self.record.policy.clone(),
             server_name: Self::server_name(),
@@ -279,6 +280,7 @@ impl State {
         let reply = match request {
             Management::Status => ManagementReply::Status(self.status()),
             Management::PrepareSetup {
+                generation,
                 pin,
                 expected_policy,
                 policy,
@@ -288,6 +290,9 @@ impl State {
             } => {
                 if actor.is_some() {
                     return Err(DirectError::AuthenticationRefused);
+                }
+                if setup_generation(&operation) != generation {
+                    return Err(DirectError::Substituted);
                 }
                 self.check_setup(
                     &pin,
@@ -306,39 +311,34 @@ impl State {
                 {
                     return Err(DirectError::PolicyChanged);
                 }
-                if let Some(reservation) = self
+                if !self
                     .record
                     .setups
                     .iter()
-                    .find(|setup| setup.operation == operation)
+                    .any(|setup| setup.operation == operation)
                 {
-                    if reservation.cancelled {
+                    if generation != self.record.setup_generation {
                         return Err(DirectError::AlreadyDecided);
                     }
-                } else {
-                    if self.record.setups.len() >= storage::MAX_DEVICES
-                        || self
-                            .record
-                            .devices
-                            .iter()
-                            .any(|device| device.claim == operation)
-                    {
+                    if self.record.setups.len() >= storage::MAX_DEVICES {
                         return Err(DirectError::Capacity);
                     }
+                    let next_generation = generation.checked_add(1).ok_or(DirectError::Capacity)?;
                     let mut next = self.record.clone();
+                    next.setup_generation = next_generation;
                     next.setups.push(storage::SetupReservation {
                         operation,
                         expected_policy,
                         policy,
                         public_key,
                         name,
-                        cancelled: false,
                     });
                     self.commit(next)?;
                 }
                 ManagementReply::SetupPrepared
             }
             Management::Setup {
+                generation,
                 pin,
                 expected_policy,
                 policy,
@@ -349,6 +349,9 @@ impl State {
                 if actor.is_some() {
                     return Err(DirectError::AuthenticationRefused);
                 }
+                if setup_generation(&operation) != generation {
+                    return Err(DirectError::Substituted);
+                }
                 self.check_setup(
                     &pin,
                     &policy,
@@ -357,14 +360,25 @@ impl State {
                     public_key,
                     &name,
                 )?;
-                let reservation = self
+                if self
+                    .record
+                    .devices
+                    .iter()
+                    .any(|device| device.claim == operation && device.revoked)
+                {
+                    return Err(DirectError::Revoked);
+                }
+                if !self
                     .record
                     .setups
                     .iter()
-                    .find(|setup| setup.operation == operation)
-                    .ok_or(DirectError::InvalidRequest)?;
-                if reservation.cancelled {
-                    return Err(DirectError::AlreadyDecided);
+                    .any(|setup| setup.operation == operation)
+                {
+                    return Err(if generation < self.record.setup_generation {
+                        DirectError::AlreadyDecided
+                    } else {
+                        DirectError::InvalidRequest
+                    });
                 }
                 let info = if let Some(device) =
                     self.record.devices.iter().find(|d| d.claim == operation)
@@ -429,14 +443,6 @@ impl State {
                 if operation == [0; 32] {
                     return Err(DirectError::InvalidRequest);
                 }
-                if !self
-                    .record
-                    .setups
-                    .iter()
-                    .any(|setup| setup.operation == operation)
-                {
-                    return Err(DirectError::Expired);
-                }
                 if let Some(device) = self.record.devices.iter().find(|d| d.claim == operation) {
                     let pairing = device.info.pairing;
                     let cancellation = crypto::hash(&wire::transcript(
@@ -451,7 +457,7 @@ impl State {
                         Some(client),
                     ));
                 }
-                self.cancel_reservation(operation, None)?;
+                self.cancel_reservation(operation, None, true)?;
                 ManagementReply::SetupCancelled {
                     pin: self.pin.clone(),
                     operation,
@@ -627,23 +633,31 @@ impl State {
         &mut self,
         operation: OperationId,
         key: Option<[u8; 32]>,
+        account_local: bool,
     ) -> Result<(), DirectError> {
-        let index = self
+        if let Some(index) = self
             .record
             .setups
             .iter()
             .position(|setup| setup.operation == operation)
-            .ok_or(DirectError::Expired)?;
-        let setup = &self.record.setups[index];
-        if key.is_some_and(|key| key != setup.public_key) {
-            return Err(DirectError::Substituted);
-        }
-        if !setup.cancelled {
+        {
+            if key.is_some_and(|key| key != self.record.setups[index].public_key) {
+                return Err(DirectError::Substituted);
+            }
             let mut next = self.record.clone();
-            next.setups[index].cancelled = true;
-            self.commit(next)?;
+            next.setups.remove(index);
+            return self.commit(next);
         }
-        Ok(())
+        let generation = setup_generation(&operation);
+        if generation < self.record.setup_generation {
+            return Ok(());
+        }
+        if !account_local || generation != self.record.setup_generation {
+            return Err(DirectError::Expired);
+        }
+        let mut next = self.record.clone();
+        next.setup_generation = generation.checked_add(1).ok_or(DirectError::Capacity)?;
+        self.commit(next)
     }
     pub(crate) fn revoke(
         &mut self,
@@ -711,6 +725,7 @@ impl State {
                 .find(|d| d.info.pairing == target)
                 .ok_or(DirectError::AuthenticationRefused)?
                 .revoked = true;
+            next.setups.retain(|setup| setup.operation != device.claim);
             next.revocations.push(storage::Revocation {
                 actor,
                 receipt: receipt.clone(),
@@ -939,7 +954,7 @@ impl State {
                     .iter()
                     .any(|setup| setup.operation == *claim)
                 {
-                    self.cancel_reservation(*claim, Some(*key))?;
+                    self.cancel_reservation(*claim, Some(*key), false)?;
                     return Ok(wire::Answer::Cancelled(None));
                 }
                 if let Some(pending) = self.claims.iter_mut().find(|c| c.claim.id == *claim) {
@@ -959,6 +974,10 @@ impl State {
                         invitation.used = true;
                         return Ok(wire::Answer::Cancelled(None));
                     }
+                }
+                // A retired setup generation can never prepare or admit another operation.
+                if setup_generation(claim) < self.record.setup_generation {
+                    return Ok(wire::Answer::Cancelled(None));
                 }
                 Err(DirectError::Expired)
             }

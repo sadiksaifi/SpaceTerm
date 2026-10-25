@@ -1,4 +1,7 @@
 //! Opt-in provisioning acceptance through real OpenSSH, signed packages and paired WSS.
+#[path = "setup_consent.rs"]
+mod consent_tests;
+
 use super::*;
 use std::os::unix::fs::DirBuilderExt;
 use std::path::PathBuf;
@@ -593,6 +596,7 @@ struct ObservedAdapter {
     active: Arc<AtomicUsize>,
     sealed: Arc<AtomicBool>,
     cancel_after_spawn: Arc<Mutex<Option<CancellationToken>>>,
+    refused_start_observed: Arc<AtomicBool>,
 }
 impl ObservedAdapter {
     fn assert_closed(&self) {
@@ -630,7 +634,12 @@ impl SshProcessAdapter for ObservedAdapter {
         &self,
         process: &mut Self::Process,
     ) -> Result<Option<ProcessExit>, SshProcessMechanismError> {
-        crate::platform::unix_ssh_process::UnixSshProcessAdapter.try_status(process)
+        let status =
+            crate::platform::unix_ssh_process::UnixSshProcessAdapter.try_status(process)?;
+        if status.is_some_and(|exit| exit.code() == Some(86)) {
+            self.refused_start_observed.store(true, Ordering::SeqCst);
+        }
+        Ok(status)
     }
     fn signal(
         &self,
@@ -700,6 +709,19 @@ struct NativeFixture {
 }
 impl NativeFixture {
     fn new(name: &str, catalog: Option<PathBuf>, fail_credentials: bool) -> Self {
+        Self::with_runtime_name(
+            name,
+            catalog,
+            fail_credentials,
+            std::ffi::OsStr::new("runtime"),
+        )
+    }
+    fn with_runtime_name(
+        name: &str,
+        catalog: Option<PathBuf>,
+        fail_credentials: bool,
+        runtime_name: &std::ffi::OsStr,
+    ) -> Self {
         use crate::platform::{
             app_directories::{AppDirectories, AppDirectoryEnvironment},
             unix_secure_filesystem::UnixSecureFilesystem,
@@ -717,7 +739,7 @@ impl NativeFixture {
             xdg_data_home: Some(root.join("data").into()),
             xdg_state_home: Some(root.join("state").into()),
             xdg_cache_home: Some(root.join("cache").into()),
-            xdg_runtime_dir: Some(root.join("runtime").into()),
+            xdg_runtime_dir: Some(root.join(runtime_name).into()),
             ..Default::default()
         };
         let directories =
@@ -750,6 +772,13 @@ impl NativeFixture {
         &self,
         bootstrap: Arc<dyn SshServerBootstrap>,
     ) -> NativeSshSetup<ObservedAdapter> {
+        self.backend_with_home(bootstrap, PathBuf::from(std::env::var_os("HOME").unwrap()))
+    }
+    fn backend_with_home(
+        &self,
+        bootstrap: Arc<dyn SshServerBootstrap>,
+        home: PathBuf,
+    ) -> NativeSshSetup<ObservedAdapter> {
         NativeSshSetup::new(
             NativeSshSetupConfig {
                 paths: Arc::clone(&self.paths),
@@ -757,7 +786,7 @@ impl NativeFixture {
                     crate::platform::unix_host_config_filesystem::UnixHostConfigFilesystem,
                 ),
                 bootstrap,
-                home: PathBuf::from(std::env::var_os("HOME").unwrap()),
+                home,
                 startup: StartupSshEnvironment::from_environment(
                     |key| std::env::var_os(key),
                     "/usr/bin:/bin".into(),
@@ -1388,4 +1417,495 @@ impl Drop for UnavailableDirectory {
     fn drop(&mut self) {
         let _ = self.restore();
     }
+}
+
+struct ReplacementDuringStartup;
+impl SshServerBootstrap for ReplacementDuringStartup {
+    fn locator(&self, identity: &str, action: &str, missing: bool) -> String {
+        let script = crate::platform::unix_ssh_process::UnixSshProcessAdapter
+            .locator(identity, action, missing);
+        if action != "setup-start" {
+            return script;
+        }
+        let prefix = script
+            .rsplit_once("exec ")
+            .expect("native locator ends with its selected executable")
+            .0;
+        let replace_and_start = r#"import json,os,signal,stat,subprocess,sys
+identity_path,policy_path,binary,application=sys.argv[1:]
+request=sys.stdin.buffer.read(16385)
+assert len(request)<=16384
+approved=json.loads(request)
+assert approved['build']==application and approved['stopped']
+fd=os.open(identity_path,os.O_RDWR|os.O_NOFOLLOW)
+metadata=os.fstat(fd)
+assert stat.S_ISREG(metadata.st_mode) and metadata.st_uid==os.geteuid() and metadata.st_nlink==1 and stat.S_IMODE(metadata.st_mode)==0o600
+original=os.pread(fd,16385,0)
+record=json.loads(original)
+assert record['server']==approved['server']
+policy=open(policy_path,'rb').read()
+assert json.loads(policy)['stopped']
+record['server'][0]^=1
+assert any(record['server'])
+replacement=json.dumps(record,separators=(',',':')).encode()
+def write(data):
+    os.lseek(fd,0,os.SEEK_SET)
+    assert os.write(fd,data)==len(data)
+    os.ftruncate(fd,len(data))
+    os.fsync(fd)
+def interrupted(signum,frame):
+    raise InterruptedError()
+for signum in (signal.SIGHUP,signal.SIGTERM,signal.SIGINT):
+    signal.signal(signum,interrupted)
+try:
+    write(replacement)
+    result=subprocess.run([binary,'setup-start',application],input=request,stdout=subprocess.DEVNULL,stderr=subprocess.PIPE,timeout=10)
+    assert result.returncode!=0 and result.stderr.strip()==b'The server changed. Review and confirm again.'
+    assert open(policy_path,'rb').read()==policy
+finally:
+    current=os.stat(identity_path,follow_symlinks=False)
+    assert (current.st_dev,current.st_ino)==(metadata.st_dev,metadata.st_ino)
+    assert os.pread(fd,16385,0)==replacement
+    write(original)
+    os.close(fd)
+assert open(identity_path,'rb').read()==original
+raise SystemExit(86)
+"#;
+        let quoted = format!("'{}'", replace_and_start.replace('\'', "'\\''"));
+        format!(
+            "{prefix}python3 -c {quoted} \"$root/identity.json\" \"$policy\" \"$root/installations/$digest/bin/spaceterm-server\" '{identity}'\n"
+        )
+    }
+    fn install(
+        &self,
+        identity: &str,
+        length: usize,
+        signature: &[u8],
+        digest: &str,
+        password: bool,
+    ) -> String {
+        crate::platform::unix_ssh_process::UnixSshProcessAdapter
+            .install(identity, length, signature, digest, password)
+    }
+}
+
+#[test]
+#[ignore = "requires an owner-confirmed stopped disposable service; briefly replaces and restores only its server identity around the real conditional startup CLI"]
+fn native_server_setup_refuses_a_replacement_at_startup_dispatch_without_clearing_stop() {
+    assert_eq!(expected_state(), "stopped");
+    assert_eq!(
+        std::env::var("SPACETERM_SETUP_NATIVE_START_RACE").as_deref(),
+        Ok("1"),
+        "explicit temporary identity replacement authorization required"
+    );
+    let fixture = NativeFixture::new("start-race", None, true);
+    let (progress, phases) = fixture.progress();
+    let backend = fixture.backend_with_bootstrap(Arc::new(ReplacementDuringStartup));
+    let result = setup_with_approved_offers(&backend, (false, true), &progress);
+    assert_eq!(
+        result,
+        Err(SetupFailure::Unconfirmed(SetupOperation::Start))
+    );
+    assert!(
+        fixture
+            .adapter
+            .refused_start_observed
+            .load(Ordering::SeqCst),
+        "real conditional startup must refuse the changed server and preserve exact policy bytes"
+    );
+    fixture.assert_no_connection();
+    assert_eq!(fixture.credentials.inserts.load(Ordering::SeqCst), 0);
+    assert!(!phases.lock().unwrap().contains(&SetupPhase::Enrolling));
+    let still_stopped = backend.setup(
+        native_request(SetupApprovals::default()),
+        &CancellationToken::default(),
+        &progress,
+    );
+    assert!(matches!(
+        still_stopped,
+        Err(SetupFailure::StartupRequired { .. })
+    ));
+    fixture.adapter.assert_closed();
+    assert_eq!(backend.process_counts().active(), 0);
+}
+
+#[test]
+fn native_server_setup_refuses_unsafe_runtime_config_paths_before_spawning_ssh() {
+    use std::os::unix::ffi::OsStringExt;
+    for runtime in [
+        std::ffi::OsString::from("runtime space"),
+        std::ffi::OsString::from("runtime;touch shell-witness"),
+        std::ffi::OsString::from_vec(b"runtime-\xff".to_vec()),
+    ] {
+        let fixture = NativeFixture::with_runtime_name("unsafe-config", None, true, &runtime);
+        let backend = fixture.backend_with_home(
+            Arc::new(crate::platform::unix_ssh_process::UnixSshProcessAdapter),
+            fixture.root.clone(),
+        );
+        let result = backend.setup(
+            SetupRequest {
+                destination: SshDestination::new("fixture-target".into()).unwrap(),
+                endpoint: "192.0.2.1:9231".parse().unwrap(),
+                name: "Fixture".into(),
+                prompts: Arc::new(NoPrompt),
+                approvals: SetupApprovals::default(),
+            },
+            &CancellationToken::default(),
+            &SetupProgress::new(|_| {}),
+        );
+        assert_eq!(
+            result,
+            Err(SetupFailure::Unavailable(UnavailableKind::SshFailed))
+        );
+        assert_eq!(backend.process_counts().spawned, 0);
+        assert_eq!(fixture.adapter.spawns.load(Ordering::SeqCst), 0);
+        assert!(!fixture.root.join("shell-witness").exists());
+        fixture.assert_no_connection();
+        assert_eq!(fixture.credentials.inserts.load(Ordering::SeqCst), 0);
+    }
+}
+
+struct FixtureChild(Option<crate::platform::unix_ssh_process::UnixSshProcess>);
+impl FixtureChild {
+    fn spawn(executable: &str, arguments: Vec<std::ffi::OsString>, home: &std::path::Path) -> Self {
+        use crate::ssh::process::{SshProcessSpawnRequest, SshProcessStdio};
+        let request = SshProcessSpawnRequest::new(
+            executable.into(),
+            arguments,
+            home.into(),
+            vec![
+                ("HOME".into(), home.as_os_str().into()),
+                ("PATH".into(), "/usr/bin:/bin:/usr/sbin:/sbin".into()),
+            ],
+            SshProcessStdio::Null,
+            SshProcessStdio::Null,
+            SshProcessStdio::Null,
+        );
+        let spawned = crate::platform::unix_ssh_process::UnixSshProcessAdapter
+            .spawn(request)
+            .expect("fixture subprocess must launch");
+        Self(Some(spawned.into_process()))
+    }
+    fn running(&mut self) -> bool {
+        crate::platform::unix_ssh_process::UnixSshProcessAdapter
+            .try_status(self.0.as_mut().unwrap())
+            .unwrap()
+            .is_none()
+    }
+}
+impl Drop for FixtureChild {
+    fn drop(&mut self) {
+        if let Some(mut process) = self.0.take() {
+            let adapter = crate::platform::unix_ssh_process::UnixSshProcessAdapter;
+            let _ = adapter.signal(&mut process, ProcessSignal::Kill);
+            let _ = adapter.reap(process);
+        }
+    }
+}
+
+fn fixture_ssh(
+    config: &std::path::Path,
+    home: &std::path::Path,
+    arguments: &[std::ffi::OsString],
+) -> crate::ssh::process::CapturedProcessOutput {
+    use crate::ssh::{
+        command::SshCommandSpec,
+        process::{SshProcessEnvironment, run_captured_process},
+    };
+    // Configuration and master-control queries open no session, even when the config requests a fork.
+    let mut selected = vec!["-N".into(), "-F".into(), config.as_os_str().into()];
+    selected.extend_from_slice(arguments);
+    let command = SshCommandSpec::for_test("/usr/bin/ssh".into(), selected);
+    let environment = SshProcessEnvironment::new_without_authentication(home.into(), None).unwrap();
+    run_captured_process(
+        &crate::platform::unix_ssh_process::UnixSshProcessAdapter,
+        &command,
+        &environment,
+        Vec::new(),
+        16 * 1024,
+        &CancellationToken::default(),
+        Instant::now() + Duration::from_secs(3),
+    )
+    .expect("fixture SSH command must finish")
+}
+
+struct FixtureMasters {
+    config: PathBuf,
+    home: PathBuf,
+}
+impl Drop for FixtureMasters {
+    fn drop(&mut self) {
+        // Only this fixture's generated multiplexing sockets can be selected here.
+        let Ok(entries) = std::fs::read_dir(&self.home) else {
+            return;
+        };
+        for entry in entries.flatten().take(32) {
+            if entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.starts_with("mux-"))
+            {
+                let arguments = [
+                    "-S".into(),
+                    entry.path().into_os_string(),
+                    "-O".into(),
+                    "exit".into(),
+                    "fixture-hop".into(),
+                ];
+                let _ =
+                    std::panic::catch_unwind(|| fixture_ssh(&self.config, &self.home, &arguments));
+            }
+        }
+    }
+}
+
+struct BlockingDiscovery(PathBuf);
+impl SshServerBootstrap for BlockingDiscovery {
+    fn locator(&self, _: &str, action: &str, _: bool) -> String {
+        assert_eq!(
+            action, "ssh-discover",
+            "the blocking fixture permits discovery only"
+        );
+        let witness = self.0.to_str().unwrap().replace('\'', "'\\''");
+        format!(
+            "printf authenticated > '{witness}'; while :; do printf . || exit; /bin/sleep 0.05; done\n"
+        )
+    }
+    fn install(&self, _: &str, _: usize, _: &[u8], _: &str, _: bool) -> String {
+        panic!("the blocking fixture never installs a server")
+    }
+}
+
+struct SetupWorker {
+    cancellation: CancellationToken,
+    thread: Option<
+        std::thread::JoinHandle<Result<crate::direct_connections::DirectRouteId, SetupFailure>>,
+    >,
+}
+impl SetupWorker {
+    fn finish(&mut self) -> Result<crate::direct_connections::DirectRouteId, SetupFailure> {
+        self.cancellation.cancel();
+        self.thread
+            .take()
+            .unwrap()
+            .join()
+            .expect("native setup worker must finish")
+    }
+}
+impl Drop for SetupWorker {
+    fn drop(&mut self) {
+        self.cancellation.cancel();
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+fn fixture_account_name() -> String {
+    let mut entry = std::mem::MaybeUninit::<libc::passwd>::zeroed();
+    let mut result = std::ptr::null_mut();
+    let mut buffer = vec![0; 65536];
+    // SAFETY: all output pointers refer to live writable storage for getpwuid_r.
+    let status = unsafe {
+        libc::getpwuid_r(
+            libc::geteuid(),
+            entry.as_mut_ptr(),
+            buffer.as_mut_ptr().cast(),
+            buffer.len(),
+            &mut result,
+        )
+    };
+    assert_eq!(status, 0);
+    assert!(!result.is_null(), "the fixture requires an owning account");
+    // SAFETY: successful getpwuid_r initialized entry and its strings within the live buffer.
+    let account = unsafe { std::ffi::CStr::from_ptr(entry.assume_init().pw_name) }
+        .to_str()
+        .unwrap()
+        .to_owned();
+    assert!(
+        account
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"_-".contains(&byte))
+    );
+    account
+}
+
+#[test]
+#[ignore = "requires runnable /usr/sbin/sshd and ssh-keygen as the current nonroot account; uses only fixture keys, loopback listeners and private multiplexing sockets"]
+fn native_server_setup_proxyjump_cancellation_leaves_no_persistent_hop_and_preserves_an_unrelated_master()
+ {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    assert!(
+        std::path::Path::new("/usr/sbin/sshd").is_file(),
+        "native ProxyJump fixture requires /usr/sbin/sshd"
+    );
+    // SAFETY: geteuid has no preconditions.
+    assert_ne!(
+        unsafe { libc::geteuid() },
+        0,
+        "native setup runs as a nonroot account"
+    );
+    let fixture = NativeFixture::new("proxyjump", None, true);
+    let root = &fixture.root;
+    for name in ["host-key", "client-key"] {
+        let status = std::process::Command::new("/usr/bin/ssh-keygen")
+            .args(["-q", "-t", "ed25519", "-N", "", "-f"])
+            .arg(root.join(name))
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .expect("fixture requires ssh-keygen");
+        assert!(status.success(), "fixture key generation failed");
+    }
+    let account = fixture_account_name();
+    let reservation = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = reservation.local_addr().unwrap().port();
+    let sshd_config = root.join("sshd-config");
+    std::fs::write(&sshd_config, format!(
+        "Port {port}\nListenAddress 127.0.0.1\nHostKey {}/host-key\nPidFile {}/sshd-pid\nAuthorizedKeysFile {}/client-key.pub\nAllowUsers {account}\nStrictModes no\nUsePAM no\nPasswordAuthentication no\nKbdInteractiveAuthentication no\nPubkeyAuthentication yes\nAllowTcpForwarding yes\nAllowAgentForwarding no\nX11Forwarding no\nPrintMotd no\nLogLevel QUIET\n",
+        root.display(), root.display(), root.display())).unwrap();
+    let public = std::fs::read_to_string(root.join("host-key.pub")).unwrap();
+    let mut fields = public.split_whitespace();
+    let algorithm = fields.next().unwrap();
+    let key = fields.next().unwrap();
+    std::fs::write(
+        root.join("known-hosts"),
+        format!("[127.0.0.1]:{port} {algorithm} {key}\n"),
+    )
+    .unwrap();
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(root.join(".ssh"))
+        .unwrap();
+    let config = root.join(".ssh/config");
+    let mut file = std::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .mode(0o600)
+        .open(&config)
+        .unwrap();
+    write!(file,
+        "Host *\n ControlMaster auto\n ControlPath {}/mux-%C\n ControlPersist 600\n ForkAfterAuthentication yes\n BatchMode yes\n IdentitiesOnly yes\n IdentityFile {}/client-key\n UserKnownHostsFile {}/known-hosts\n GlobalKnownHostsFile /dev/null\n StrictHostKeyChecking yes\nHost fixture-hop fixture-target fixture-unrelated\n HostName 127.0.0.1\n Port {port}\n User {account}\nHost fixture-target\n ProxyJump fixture-hop\n",
+        root.display(), root.display(), root.display()).unwrap();
+    drop(file);
+    drop(reservation);
+    let mut sshd = FixtureChild::spawn(
+        "/usr/sbin/sshd",
+        vec![
+            "-D".into(),
+            "-e".into(),
+            "-f".into(),
+            sshd_config.into_os_string(),
+        ],
+        root,
+    );
+    wait_for("loopback sshd", || {
+        assert!(
+            sshd.running(),
+            "fixture sshd exited; check native account and sshd prerequisites"
+        );
+        std::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port)).is_ok()
+    });
+    let _masters = FixtureMasters {
+        config: config.clone(),
+        home: root.clone(),
+    };
+    let effective = fixture_ssh(&config, root, &["-G".into(), "fixture-target".into()]);
+    assert!(effective.exit.is_success());
+    let effective = String::from_utf8(effective.stdout).unwrap();
+    assert!(effective.lines().any(|line| line == "controlmaster auto"));
+    assert!(effective.lines().any(|line| line == "controlpersist 600"));
+    assert!(
+        effective
+            .lines()
+            .any(|line| line == "forkafterauthentication yes")
+    );
+    assert!(
+        effective
+            .lines()
+            .any(|line| line == "proxyjump fixture-hop")
+    );
+    let user_socket = root.join("user-master");
+    let mut user_master = FixtureChild::spawn(
+        "/usr/bin/ssh",
+        vec![
+            "-F".into(),
+            config.as_os_str().into(),
+            "-S".into(),
+            user_socket.as_os_str().into(),
+            "-M".into(),
+            "-N".into(),
+            "-oControlPersist=no".into(),
+            "-oForkAfterAuthentication=no".into(),
+            "fixture-unrelated".into(),
+        ],
+        root,
+    );
+    let check_master = || {
+        fixture_ssh(
+            &config,
+            root,
+            &[
+                "-S".into(),
+                user_socket.as_os_str().into(),
+                "-O".into(),
+                "check".into(),
+                "fixture-unrelated".into(),
+            ],
+        )
+        .exit
+        .is_success()
+    };
+    wait_for("unrelated fixture master", || {
+        assert!(user_master.running(), "unrelated fixture master exited");
+        user_socket.exists() && check_master()
+    });
+    let witness = root.join("proxy-authenticated");
+    let backend = Arc::new(
+        fixture.backend_with_home(Arc::new(BlockingDiscovery(witness.clone())), root.clone()),
+    );
+    let cancellation = CancellationToken::default();
+    let worker_cancellation = cancellation.clone();
+    let attempted = Arc::clone(&backend);
+    let thread = std::thread::spawn(move || {
+        attempted.setup(
+            SetupRequest {
+                destination: SshDestination::new("fixture-target".into()).unwrap(),
+                endpoint: "192.0.2.1:9231".parse().unwrap(),
+                name: "ProxyJump fixture".into(),
+                prompts: Arc::new(NoPrompt),
+                approvals: SetupApprovals::default(),
+            },
+            &worker_cancellation,
+            &SetupProgress::new(|_| {}),
+        )
+    });
+    let mut worker = SetupWorker {
+        cancellation,
+        thread: Some(thread),
+    };
+    wait_for("authenticated ProxyJump discovery", || witness.exists());
+    assert!(check_master(), "setup replaced the unrelated master");
+    assert_eq!(worker.finish(), Err(SetupFailure::Cancelled));
+    fixture.assert_no_connection();
+    let spawns = fixture.adapter.seal();
+    let counts = backend.process_counts();
+    assert_eq!(counts.active(), 0);
+    assert_eq!(counts.spawned, counts.reaped);
+    assert!(
+        check_master(),
+        "setup cancellation terminated the unrelated master"
+    );
+    assert!(user_master.running());
+    assert!(
+        !std::fs::read_dir(root).unwrap().flatten().any(|entry| entry
+            .file_name()
+            .to_str()
+            .is_some_and(|name| name.starts_with("mux-"))),
+        "setup or a ProxyJump hop left a persistent master socket"
+    );
+    assert_eq!(fixture.adapter.spawns.load(Ordering::SeqCst), spawns);
+    assert_eq!(backend.process_counts(), counts);
 }

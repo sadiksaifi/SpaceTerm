@@ -44,6 +44,8 @@ Linux first setup can return an authorization requirement before service registr
 
 Use Settings > Servers > Add Server with SSH Setup or an Invitation Link. [ADR 0029](adr/0029-enroll-remote-servers-through-add-server.md) owns setup authority, consent, completion and cancellation. Both methods save a paired WSS connection. Configure normal OpenSSH destinations outside SpaceTerm; SSH configuration is used only for setup.
 
+Setup rejects SSH executable or runtime configuration paths containing whitespace or shell metacharacters before starting SSH, because OpenSSH leaves them unquoted in generated hop commands. System SSH `Include` paths must be absolute because `-F` treats included files as user configuration and resolves relative system includes under `~/.ssh`; platform defaults already use absolute paths. User configuration includes retain normal OpenSSH behavior.
+
 Setup needs a reachable WSS IP address and deliberate network exposure authorization. SSH aliases and ProxyJump can reach a machine without making its WSS endpoint reachable. Installation and startup do not complete setup until credentials and the connection are saved, SSH resources close and WSS admission succeeds. If setup fails, review its reported service and pairing effects before retrying.
 
 Once added, select that server in either sidebar creation menu to create a Workspace or browse and select its directory. Terminal work, status, reconnect, relaunch, Retry and pairing cleanup use WSS. Manage the native service and server updates on the server's own machine.

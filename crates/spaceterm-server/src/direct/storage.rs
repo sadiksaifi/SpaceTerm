@@ -26,7 +26,6 @@ pub(super) struct SetupReservation {
     pub policy: NetworkPolicy,
     pub public_key: [u8; 32],
     pub name: ClientName,
-    pub cancelled: bool,
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -36,6 +35,7 @@ pub(super) struct Record {
     pub key: Vec<u8>,
     pub certificate: Vec<u8>,
     pub policy: Option<NetworkPolicy>,
+    pub setup_generation: u64,
     pub setups: Vec<SetupReservation>,
     pub devices: Vec<Device>,
     pub revocations: Vec<Revocation>,
@@ -80,6 +80,7 @@ impl Store {
                     key: key.expose_bytes().to_vec(),
                     certificate: certificate.der().to_vec(),
                     policy: None,
+                    setup_generation: 0,
                     setups: Vec::new(),
                     devices: Vec::new(),
                     revocations: Vec::new(),
@@ -114,6 +115,7 @@ impl Store {
             NetworkPolicy::new(setup.policy.bind).map_err(|_| DirectError::StorageUnavailable)?;
             if setup.operation == [0; 32]
                 || setup.public_key == [0; 32]
+                || setup_generation(&setup.operation) >= record.setup_generation
                 || !setups.insert(setup.operation)
             {
                 return Err(DirectError::StorageUnavailable);
@@ -122,9 +124,7 @@ impl Store {
                 .devices
                 .iter()
                 .find(|device| device.claim == setup.operation)
-                && (device.info.public_key != setup.public_key
-                    || device.info.name != setup.name
-                    || setup.cancelled)
+                && (device.info.public_key != setup.public_key || device.info.name != setup.name)
             {
                 return Err(DirectError::StorageUnavailable);
             }

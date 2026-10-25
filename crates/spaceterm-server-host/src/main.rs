@@ -34,7 +34,7 @@ enum Request<'a> {
     SetupDirectPrepare(&'a str),
     SetupDirect(&'a str),
     SetupDirectCancel,
-    SshPrepare,
+    SetupStart,
     SshInstall {
         archive: &'a Path,
         signature: &'a Path,
@@ -72,7 +72,7 @@ impl<'a> Request<'a> {
                 spaceterm_server::direct::NetworkPolicy::parse(address)?;
                 Ok(Self::SetupDirect(address))
             }
-            (Some("ssh-prepare"), []) => Ok(Self::SshPrepare),
+            (Some("setup-start"), []) => Ok(Self::SetupStart),
             (Some("ssh-enable-linger"), []) => Ok(Self::SshEnableLinger(
                 LingerAuthorization::RemoteNoninteractive,
             )),
@@ -154,7 +154,7 @@ fn run() -> Result<ExitCode, cli::Error> {
                setup-state IDENTITY                        Set up server state\n\
                status IDENTITY                             Connect to the server\n\
                ssh-discover IDENTITY                       Find the server\n\
-               ssh-prepare IDENTITY                        Start the server\n\
+               setup-start IDENTITY                        Start the approved server from stdin\n\
                ssh-install IDENTITY ARCHIVE SIGNATURE SHA256\n\
                setup-direct-status IDENTITY                Observe enrollment trust\n\
                setup-direct-prepare IDENTITY IP:PORT       Reserve setup enrollment from stdin\n\
@@ -227,8 +227,10 @@ fn run() -> Result<ExitCode, cli::Error> {
                 IDENTITY, request,
             )?)?;
         }
-        Request::SshPrepare => {
-            Service::for_identity(IDENTITY)?.connect()?;
+        Request::SetupStart => {
+            setup_pipe()?;
+            let approved = read_setup::<spaceterm_server::service::SetupStartObservation>()?;
+            write_setup(&Service::for_identity(IDENTITY)?.start_for_setup(&approved)?)?;
         }
         Request::SshInstall {
             archive,

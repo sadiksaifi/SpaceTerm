@@ -1,4 +1,4 @@
-use super::*;
+use crate::ssh::provisioning::*;
 use std::ffi::{OsStr, OsString};
 use std::io::Cursor;
 use std::path::Path;
@@ -89,6 +89,11 @@ impl SshProcessAdapter for ProcessAdapter {
                 .unwrap()
                 .push(request.arguments().to_vec());
             (false, vec![], vec![])
+        };
+        let stdout = if request.arguments() != [OsString::from("-V")] {
+            [crate::ssh::command::SETUP_READY_PREAMBLE, stdout.as_slice()].concat()
+        } else {
+            stdout
         };
         Ok(SpawnedSshProcess::new(
             ProcessExit::new(success, Some(if success { 0 } else { 1 })),
@@ -343,6 +348,15 @@ fn setup_reoffers_a_replacement_server_before_dispatching_startup() {
         target: "x86_64-unknown-linux-gnu".into(),
         version: "1.0.0".into(),
         commit: "a".repeat(40),
+        start_observation: Some(SetupStartObservation {
+            account: 501,
+            build: identity().into(),
+            server: [1; 32],
+            installation: "a".repeat(64),
+            version: "1.0.0".into(),
+            commit: "a".repeat(40),
+            stopped: true,
+        }),
     };
     let fixture = Fixture::new(serde_json::to_vec(&discovery).unwrap());
     let Err(SetupFailure::StartupRequired { approval }) = fixture.setup(SetupApprovals::default())
@@ -350,6 +364,7 @@ fn setup_reoffers_a_replacement_server_before_dispatching_startup() {
         panic!("setup must request startup authorization");
     };
     discovery.server = Some([2; 32]);
+    discovery.start_observation.as_mut().unwrap().server = [2; 32];
     *fixture.adapter.discovery.lock().unwrap() = serde_json::to_vec(&discovery).unwrap();
     assert!(matches!(
         fixture.setup(SetupApprovals {
@@ -383,6 +398,7 @@ fn setup_reoffers_changed_server_or_policy_before_preparing_network_exposure() {
             target: "x86_64-unknown-linux-gnu".into(),
             version: "1.0.0".into(),
             commit: "a".repeat(40),
+            start_observation: None,
         };
         let fixture = Fixture::new(serde_json::to_vec(&discovery).unwrap());
         let mut status = DirectStatus {
@@ -396,6 +412,7 @@ fn setup_reoffers_changed_server_or_policy_before_preparing_network_exposure() {
             server_name: "Remote".into(),
             listener: ListenerState::Off,
             network_addresses: Err(DirectError::Transport),
+            setup_generation: 0,
         };
         *fixture.adapter.status.lock().unwrap() = Some(status.clone());
         let Err(SetupFailure::NetworkAuthorizationRequired { approval, .. }) =
