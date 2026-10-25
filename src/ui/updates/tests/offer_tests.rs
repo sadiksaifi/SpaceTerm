@@ -48,7 +48,7 @@ fn genuine_offers_raise_local_and_ssh_pills_without_changing_their_targets() {
             ]
         ),
         Some((
-            "Update 2 Servers".into(),
+            "Review 2 Servers".into(),
             PillTone::Primary,
             None,
             PillCommand::Menu
@@ -115,7 +115,7 @@ fn server_attention_counts_preserve_existing_warning_precedence() {
     assert_eq!(
         pill(None, None, &[attention.clone(), other_attention]).unwrap(),
         (
-            "Update 2 Servers".into(),
+            "Review 2 Servers".into(),
             PillTone::Neutral,
             None,
             PillCommand::Menu
@@ -124,7 +124,7 @@ fn server_attention_counts_preserve_existing_warning_precedence() {
     assert_eq!(
         pill(None, None, &[attention.clone(), offer.clone()]).unwrap(),
         (
-            "Update 2 Servers".into(),
+            "Review 2 Servers".into(),
             PillTone::Primary,
             None,
             PillCommand::Menu
@@ -522,7 +522,7 @@ fn multiple_offer_menu_paints_primary_and_completion_keeps_the_other_server(
     manual_updates(cx);
     let operations = recorded_servers(vec!["penguin", "macbookpro"], cx);
     let visual = open_control(cx);
-    A11yTree::read(visual).node("Update 2 Servers");
+    A11yTree::read(visual).node("Review 2 Servers");
     assert!(visual.debug_bounds("update-control").is_none());
     primary_fill("update-control-menu", PointerState::Normal, visual);
 

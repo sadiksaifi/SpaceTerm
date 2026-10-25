@@ -2569,7 +2569,10 @@ fn command_q_without_a_status_area_confirms_actual_exit(cx: &mut TestAppContext)
     let name = crate::application_identity::ApplicationIdentity::current().display_name();
     let (title, detail) = cx.pending_prompt().expect("actual exit always asks");
     assert_eq!(title, format!("Quit {name}?"));
-    assert!(detail.contains("Your Terminal Sessions keep running on the server"));
+    assert!(
+        detail.is_empty(),
+        "the installed-build quit prompt is title-only"
+    );
     cx.simulate_prompt_answer("Cancel");
     cx.run_until_parked();
     assert_eq!(cx.update(|_, cx| cx.windows().len()), 1);
@@ -8534,7 +8537,7 @@ fn close_confirmation_publishes_text_before_actions_and_contains_accessibility(
     assert_eq!(dialog["aria"]["role"], "AlertDialog");
     assert_eq!(dialog["aria"]["modal"], true);
     let title = tree.text("Close Tab?");
-    let message = tree.text("Close 1 Pane? Running commands in these Panes will stop.");
+    let message = tree.text("Running commands in 1 Pane stop.");
     let content = tree.descendants(dialog);
     let position = |node: &serde_json::Value| {
         content
@@ -11757,7 +11760,7 @@ fn killing_the_active_workspace_should_open_its_neighbor_without_selecting_its_p
 }
 
 /// A neighbor whose Pane waits for first use takes the keyboard on the screen in the Pane's
-/// place, so Tab reaches Start New Shell and nothing starts until the person presses it.
+/// place, so Tab reaches Start Session and nothing starts until the person presses it.
 #[gpui::test]
 fn a_dormant_neighbor_should_take_the_keyboard_on_its_screen(cx: &mut TestAppContext) {
     use spaceterm_ui::a11y_testing::A11yTree;
@@ -11784,7 +11787,7 @@ fn a_dormant_neighbor_should_take_the_keyboard_on_its_screen(cx: &mut TestAppCon
         .map(|node| node["aria"]["label"].clone());
 
     assert_eq!(harness.active(cx), Some(WorkspaceId::new(2)));
-    assert_eq!(focused, Some(serde_json::json!("Start New Shell")));
+    assert_eq!(focused, Some(serde_json::json!("Start Session")));
     assert_eq!(
         harness.panes.pane(ATTACHED_BUILD_PANE).selections(),
         selections
@@ -12577,7 +12580,7 @@ mod shared_repositories {
 
         let removal = feature_removal_reads(
             pinned_through_an_alias(PinCheckState::Ready),
-            "Unpin the Directory to Remove",
+            "Unpin Directory to Remove",
             cx,
         );
         assert_eq!(removal, WorktreeRemoval::HoldsPinnedDirectory);

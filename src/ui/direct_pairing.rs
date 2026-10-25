@@ -1262,10 +1262,7 @@ mod tests {
 
         assert_eq!(*server.approved.lock().expect("approved"), vec![[3; 32]]);
         assert_eq!(host.read_with(cx, |host, _| host.paired), 1);
-        assert!(says(
-            "\u{201C}MacBook\u{201D} can now connect to \u{201C}studio\u{201D}.",
-            cx
-        ));
+        assert!(says("\"MacBook\" can connect to \"studio\".", cx));
     }
 
     #[gpui::test]

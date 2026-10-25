@@ -746,16 +746,7 @@ fn a_missing_capability_without_a_build_names_no_update(cx: &mut TestAppContext)
         .read_with(cx, |manager, _| manager.launch_presentation())
         .expect("the refusal is presented");
     assert_eq!(presentation.title, "Incompatible Server");
-    assert!(
-        presentation
-            .detail
-            .contains("doesn\u{2019}t support a feature this SpaceTerm requires")
-    );
-    assert!(
-        presentation
-            .detail
-            .contains("the server needs a version that supports it")
-    );
+    assert_eq!(presentation.detail, "This server needs an update.");
     assert!(cx.debug_bounds(launch::LAUNCH_UPDATE_SELECTOR).is_none());
     assert!(cx.debug_bounds(launch::LAUNCH_SETTINGS_SELECTOR).is_some());
 }

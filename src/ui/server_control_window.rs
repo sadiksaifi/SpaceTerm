@@ -266,11 +266,16 @@ impl Typography {
 fn reachable_size(name: &str, operation: Operation, content: &Content, cx: &App) -> Size<Pixels> {
     let mut later = vec![Content::of(name, operation, &Step::Working(operation))];
     // Start and Restart can need startup authorization, then continue as Start, and the
-    // operating system's prompt can be refused.
+    // operating system's prompt can be refused. Starting the server can fail under either
+    // operation's heading.
     if operation != Operation::Stop {
         let start = Operation::Start;
         later.push(Content::of(name, start, &Step::Working(start)));
         later.push(Content::of(name, start, &Step::Authorize));
+        later
+            .extend([operation, start].map(|failed| {
+                Content::of(name, failed, &Step::Failed(ServerError::StartupFailed))
+            }));
     }
     std::iter::once(content)
         .chain(&later)

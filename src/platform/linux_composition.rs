@@ -175,6 +175,7 @@ fn desktop_profile(
                     "Reinstall SpaceTerm to Update",
                     "Run the SpaceTerm install script to install the update.",
                 ),
+                overdue_read_only_update: "Update overdue. Reinstall with the install script.",
             },
             Rc::new(super::linux_shortcut_text::LinuxShortcutFormatter),
             crate::desktop_profile::ShortcutSelection::TerminalSurface,

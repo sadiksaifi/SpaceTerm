@@ -674,12 +674,7 @@ impl ControlPresentation {
                 overdue_failure: match state {
                     UpdateState::Failed { error } => Some(
                         match error {
-                            UpdateError::ReadOnly if wording.operating_system_name == "macOS" => {
-                                "Update overdue. Install SpaceTerm in Applications to update."
-                            }
-                            UpdateError::ReadOnly => {
-                                "Update overdue. Reinstall with the install script."
-                            }
+                            UpdateError::ReadOnly => wording.overdue_read_only_update,
                             UpdateError::Check => "Update overdue. Couldn't check for updates.",
                             UpdateError::Download => "Update overdue. Download failed. Try again.",
                             UpdateError::Installation => {
