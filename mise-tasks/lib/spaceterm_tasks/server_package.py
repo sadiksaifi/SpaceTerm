@@ -109,14 +109,17 @@ def document(data):
             or not re.fullmatch(r"[0-9a-f]{40}", value["commit"])
             or len(value["version"]) > 64
             or not re.fullmatch(
-                r"(?:dev\.[0-9a-f]{12}|(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*))",
+                r"(?:dev\.[0-9a-f]{12}(?:\.dirty)?|(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*))",
                 value["version"],
             )
         ):
             raise ValueError("invalid build")
     except (ValueError, TypeError, UnicodeError):
         raise TaskError("the server build document is malformed or unsupported") from None
-    if value["version"].startswith("dev.") and value["version"] != "dev." + value["commit"][:12]:
+    if value["version"].startswith("dev.") and (
+        value["version"].removesuffix(".dirty") != "dev." + value["commit"][:12]
+        or (value["identity"] == "spaceterm" and value["version"].endswith(".dirty"))
+    ):
         raise TaskError("the server version differs from its source commit")
     return value
 
@@ -569,7 +572,9 @@ def compatible_candidate(info, identity, *, target=None):
         raise TaskError("the server candidate is missing a required capability")
 
 
-def prepare_desktop_artifact(destination, identity, release_tag=None, *, catalog_destination=None):
+def prepare_desktop_artifact(
+    destination, identity, release_tag=None, *, catalog_destination=None, ssh_config=None
+):
     """Signing happens during candidate preparation; launch only consumes the resulting pair.
 
     An explicit pair reuses its signed bytes across client releases. Without that pair,
@@ -581,10 +586,19 @@ def prepare_desktop_artifact(destination, identity, release_tag=None, *, catalog
         raise TaskError("supply both SPACETERM_SERVER_ARCHIVE and SPACETERM_SERVER_SIGNATURE")
     if release_tag:
         require_clean_checkout()
+    source = os.environ.get("SPACETERM_SSH_SERVER_ARTIFACTS")
+    automatic = catalog_destination is not None and not release_tag and source is None
+    if automatic:
+        from spaceterm_tasks.server_builds import prepare
+
+        prepare(catalog_destination, identity, ssh_config=ssh_config)
+        if not archive:
+            local = Path(catalog_destination) / host_target()
+            archive, signature = local / "artifact.tar.gz", local / "artifact.sig"
     if not archive:
         archive, signature = package(identity, release_tag)
     environment = stage_desktop_artifact(archive, signature, destination, identity=identity)
-    if catalog_destination is not None:
+    if catalog_destination is not None and not automatic:
         from spaceterm_tasks.server_catalog import stage_catalog
 
         stage_catalog(
@@ -592,7 +606,7 @@ def prepare_desktop_artifact(destination, identity, release_tag=None, *, catalog
             environment["SPACETERM_SERVER_SIGNATURE"],
             catalog_destination,
             identity,
-            source=os.environ.get("SPACETERM_SSH_SERVER_ARTIFACTS"),
+            source=source,
             require_all=bool(release_tag),
         )
     return environment

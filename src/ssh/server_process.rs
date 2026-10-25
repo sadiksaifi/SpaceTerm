@@ -18,7 +18,7 @@ use super::command::{OpenSshExecutable, SshCommandContext, ValidatedRemoteShellC
 use super::control_connection::{
     ControlConnectionState, ControlConnectionTiming, OpenSshControlConnection,
 };
-use super::host_config::HostConfigFilesystem;
+use super::host_config::{HostConfigFilesystem, HostConfigFilesystemError};
 use super::process::{
     CapturedProcessError, SshProcessAdapter, SshProcessCleanup, SshProcessEnvironment,
     SshProcessSupervisor, run_captured_process, run_captured_transfer, spawn_account_bridge,
@@ -52,13 +52,29 @@ impl SshServerArtifacts {
         let directory = self
             .root
             .as_ref()
-            .ok_or(SshConnectFailure::Unavailable(
-                UnavailableKind::CandidateUnavailable,
-            ))?
+            .ok_or(SshConnectFailure::Refused(RefusalKind::MissingArtifact))?
             .join(target);
         let archive = directory.join("artifact.tar.gz");
-        let signature = directory.join("artifact.sig");
-        let digest_bytes = read_bounded(filesystem, &directory.join("artifact.sha256"), 65)?;
+        let signature_path = directory.join("artifact.sig");
+        let bytes = read_bounded(
+            filesystem,
+            &archive,
+            MAX_ARTIFACT,
+            RefusalKind::MissingArtifact,
+        )?;
+        // A present archive without its authentication material is an unverified package.
+        let signature = read_bounded(
+            filesystem,
+            &signature_path,
+            64,
+            RefusalKind::InvalidArtifact,
+        )?;
+        let digest_bytes = read_bounded(
+            filesystem,
+            &directory.join("artifact.sha256"),
+            65,
+            RefusalKind::InvalidArtifact,
+        )?;
         let digest = std::str::from_utf8(&digest_bytes)
             .map_err(|_| SshConnectFailure::Refused(RefusalKind::InvalidArtifact))?
             .trim()
@@ -67,7 +83,7 @@ impl SshServerArtifacts {
             .and_then(|service| {
                 service.inspect_candidate_for_target(
                     &archive,
-                    &signature,
+                    &signature_path,
                     &digest,
                     target,
                     1,
@@ -75,8 +91,6 @@ impl SshServerArtifacts {
                 )
             })
             .map_err(map_server_error)?;
-        let bytes = read_bounded(filesystem, &archive, MAX_ARTIFACT)?;
-        let signature = read_bounded(filesystem, &signature, 64)?;
         // Pin the bytes that cross SSH, rather than rereading a replaceable source after verification.
         if signature.len() != 64 || hex_digest(&bytes) != digest {
             return Err(SshConnectFailure::Refused(RefusalKind::InvalidArtifact));
@@ -110,10 +124,16 @@ fn read_bounded(
     filesystem: &dyn HostConfigFilesystem,
     path: &std::path::Path,
     limit: u64,
+    missing: RefusalKind,
 ) -> Result<Vec<u8>, SshConnectFailure> {
     let bytes = filesystem
-        .read_file_limited(path, limit as usize)
-        .map_err(|_| SshConnectFailure::Refused(RefusalKind::InvalidArtifact))?;
+        .read_artifact_file_limited(path, limit as usize)
+        .map_err(|error| {
+            SshConnectFailure::Refused(match error {
+                HostConfigFilesystemError::Missing => missing,
+                HostConfigFilesystemError::Unavailable => RefusalKind::InvalidArtifact,
+            })
+        })?;
     if bytes.len() as u64 > limit {
         return Err(SshConnectFailure::Refused(RefusalKind::InvalidArtifact));
     }
@@ -1941,6 +1961,94 @@ pub(crate) mod testing {
         (Arc::new(InstallerBackend(backend)), account, complete)
     }
 
+    /// Real archive verification with the repository's public nonproduction signing seed.
+    /// The executable is inert fixture data: candidate inspection neither extracts nor runs it.
+    pub(crate) fn with_candidate(version: &str, run: impl FnOnce(&std::path::Path, &str)) {
+        with_candidate_for(version, identity(), "x86_64-unknown-linux-gnu", run);
+    }
+
+    pub(super) fn with_candidate_for(
+        version: &str,
+        candidate_identity: &str,
+        target: &str,
+        run: impl FnOnce(&std::path::Path, &str),
+    ) {
+        use base64::Engine;
+        assert_ne!(
+            identity(),
+            "spaceterm",
+            "the fixture has no Release signing authority"
+        );
+        let root = std::env::temp_dir().join(format!(
+            "st-ssh-offer-{:x}",
+            u128::from_be_bytes(rand_bytes())
+        ));
+        struct Cleanup(std::path::PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _cleanup = Cleanup(root.clone());
+        let directory = root.join(target);
+        std::fs::create_dir_all(&directory).unwrap();
+        let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        let mut archive = tar::Builder::new(encoder);
+        let manifest = serde_json::json!({"schema":1,"identity":candidate_identity,"target":target,"commit":"a".repeat(40),"version":version,"protocol_major":1,"capabilities":["workspace_policy"]}).to_string();
+        let mut entries = vec![
+            ("build.json".to_owned(), manifest.into_bytes(), 0o644),
+            (
+                "bin/spaceterm-server".to_owned(),
+                b"inert signed executable".to_vec(),
+                0o755,
+            ),
+            (
+                "share/spaceterm/terminfo/x/xterm-spaceterm".to_owned(),
+                b"terminfo".to_vec(),
+                0o644,
+            ),
+        ];
+        for resource in serde_json::from_str::<Vec<String>>(include_str!(
+            "../../packaging/server-resources.json"
+        ))
+        .unwrap()
+        {
+            entries.push((resource, b"signed resource".to_vec(), 0o644));
+        }
+        for (name, bytes, mode) in entries {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(bytes.len() as u64);
+            header.set_mode(mode);
+            header.set_cksum();
+            archive
+                .append_data(&mut header, format!("server/{name}"), bytes.as_slice())
+                .unwrap();
+        }
+        let bytes = archive.into_inner().unwrap().finish().unwrap();
+        let trust: serde_json::Value = serde_json::from_str(include_str!(
+            "../../packaging/server-nonproduction-trust.json"
+        ))
+        .unwrap();
+        let seed = base64::engine::general_purpose::STANDARD
+            .decode(trust["seed"].as_str().unwrap())
+            .unwrap();
+        let key = ring::signature::Ed25519KeyPair::from_seed_unchecked(&seed).unwrap();
+        let digest = Sha256::digest(&bytes)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        std::fs::write(directory.join("artifact.tar.gz"), &bytes).unwrap();
+        std::fs::write(directory.join("artifact.sig"), key.sign(&bytes).as_ref()).unwrap();
+        std::fs::write(directory.join("artifact.sha256"), &digest).unwrap();
+        run(&root, &digest);
+    }
+
+    fn rand_bytes() -> [u8; 16] {
+        let mut bytes = [0; 16];
+        getrandom::fill(&mut bytes).unwrap();
+        bytes
+    }
+
     /// The discovery one installed, running server reports.
     pub(crate) fn discovery(server: [u8; 32]) -> AccountDiscovery {
         AccountDiscovery {
@@ -1964,9 +2072,309 @@ pub(crate) mod testing {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::platform::unix_host_config_filesystem::UnixHostConfigFilesystem;
+    use testing::{with_candidate, with_candidate_for};
 
     const ORIGINAL_ROUTE: &str = "hostname original.test\nuser tester\nport 22\n";
     const CHANGED_ROUTE: &str = "hostname replacement.test\nuser tester\nport 22\n";
+    const LINUX_TARGET: &str = "x86_64-unknown-linux-gnu";
+
+    #[gpui::test]
+    fn connect_offers_signed_clean_and_dirty_candidates_without_installing_before_consent(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use testing::{FakeBootstrap, backend_with_mechanisms};
+        for version in ["1.2.3", "dev.aaaaaaaaaaaa.dirty"] {
+            with_candidate(version, |root, _| {
+                let account = testing::FakeAccount::new(ORIGINAL_ROUTE, |command, _| {
+                    assert!(
+                        command.contains("ssh-discover"),
+                        "installation requires consent"
+                    );
+                    (
+                        b"SPACETERM_MISSING 501 x86_64-unknown-linux-gnu\n".to_vec(),
+                        0,
+                    )
+                });
+                let (backend, _) = backend_with_mechanisms(
+                    cx.background_executor.clone(),
+                    account.clone(),
+                    SshServerArtifacts::new(Some(root.into())),
+                    Arc::new(UnixHostConfigFilesystem),
+                    Arc::new(FakeBootstrap),
+                );
+                let destination = SshDestination::new("original-host".into()).unwrap();
+                assert!(
+                    matches!(
+                        backend.connect(&destination, ConnectMode::Requested, None,
+                            &SshCancellationToken::default(), &|_| {}),
+                        Err(SshConnectFailure::InstallationOffered(offer))
+                            if offer.version == version && offer.platform == ("linux".into(), "x86_64".into())
+                    ),
+                    "the signed {version} candidate must be offered"
+                );
+                assert_eq!(account.ran("ssh-discover"), 1);
+                assert_eq!(account.ran("ssh-install"), 0);
+                assert_eq!(account.ran("ssh-prepare"), 0);
+            });
+        }
+    }
+
+    #[test]
+    fn an_absent_archive_is_missing_but_missing_authentication_material_is_invalid() {
+        for (file, expected) in [
+            ("artifact.tar.gz", RefusalKind::MissingArtifact),
+            ("artifact.sig", RefusalKind::InvalidArtifact),
+            ("artifact.sha256", RefusalKind::InvalidArtifact),
+        ] {
+            with_candidate("1.2.3", |root, _| {
+                std::fs::remove_file(root.join(LINUX_TARGET).join(file)).unwrap();
+                assert!(
+                    matches!(
+                        SshServerArtifacts::new(Some(root.into()))
+                            .candidate(&UnixHostConfigFilesystem, LINUX_TARGET),
+                        Err(SshConnectFailure::Refused(kind)) if kind == expected
+                    ),
+                    "{file} must yield {expected:?}"
+                );
+            });
+        }
+    }
+
+    #[test]
+    fn unsigned_or_oversized_authentication_material_never_becomes_a_missing_package() {
+        for (file, bytes) in [
+            ("artifact.sig", vec![]),
+            ("artifact.sig", vec![0; 64]),
+            ("artifact.sig", vec![0; 65]),
+            ("artifact.sha256", vec![b'a'; 66]),
+            ("artifact.sha256", vec![0xff; 64]),
+        ] {
+            with_candidate("1.2.3", |root, _| {
+                std::fs::write(root.join(LINUX_TARGET).join(file), &bytes).unwrap();
+                assert!(
+                    matches!(
+                        SshServerArtifacts::new(Some(root.into()))
+                            .candidate(&UnixHostConfigFilesystem, LINUX_TARGET),
+                        Err(SshConnectFailure::Refused(RefusalKind::InvalidArtifact))
+                    ),
+                    "{file} with {} bytes must fail verification",
+                    bytes.len()
+                );
+            });
+        }
+    }
+
+    #[test]
+    fn linked_or_nonregular_package_files_fail_verification() {
+        for file in ["artifact.tar.gz", "artifact.sig", "artifact.sha256"] {
+            for shape in ["symlink", "dangling-symlink", "hardlink", "directory"] {
+                with_candidate("1.2.3", |root, _| {
+                    let source = root.join(LINUX_TARGET).join(file);
+                    let original = root.join("original");
+                    std::fs::rename(&source, &original).unwrap();
+                    match shape {
+                        "symlink" => std::os::unix::fs::symlink(&original, &source).unwrap(),
+                        "dangling-symlink" => {
+                            std::os::unix::fs::symlink(root.join("missing"), &source).unwrap();
+                        }
+                        "hardlink" => std::fs::hard_link(&original, &source).unwrap(),
+                        "directory" => std::fs::create_dir(&source).unwrap(),
+                        _ => unreachable!(),
+                    }
+                    assert!(
+                        matches!(
+                            SshServerArtifacts::new(Some(root.into()))
+                                .candidate(&UnixHostConfigFilesystem, LINUX_TARGET),
+                            Err(SshConnectFailure::Refused(RefusalKind::InvalidArtifact))
+                        ),
+                        "{file} as {shape} must fail verification"
+                    );
+                });
+            }
+        }
+    }
+
+    #[gpui::test]
+    fn connect_refuses_unverified_packages_before_offering_or_dispatching_installation(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use testing::{FakeBootstrap, backend_with_mechanisms};
+        for violation in ["tampered", "unsigned", "wrong-target", "wrong-identity"] {
+            let target = if violation == "wrong-target" {
+                "aarch64-apple-darwin"
+            } else {
+                LINUX_TARGET
+            };
+            let candidate_identity = if violation == "wrong-identity" {
+                "spaceterm"
+            } else {
+                identity()
+            };
+            with_candidate_for("1.2.3", candidate_identity, target, |root, _| {
+                let directory = root.join(target);
+                match violation {
+                    "tampered" => {
+                        let mut bytes = std::fs::read(directory.join("artifact.tar.gz")).unwrap();
+                        bytes.push(0);
+                        std::fs::write(directory.join("artifact.tar.gz"), &bytes).unwrap();
+                        std::fs::write(directory.join("artifact.sha256"), hex_digest(&bytes))
+                            .unwrap();
+                    }
+                    "unsigned" => std::fs::remove_file(directory.join("artifact.sig")).unwrap(),
+                    "wrong-target" => std::fs::rename(directory, root.join(LINUX_TARGET)).unwrap(),
+                    "wrong-identity" => {}
+                    _ => unreachable!(),
+                }
+                let account = testing::FakeAccount::new(ORIGINAL_ROUTE, |command, _| {
+                    assert!(
+                        command.contains("ssh-discover"),
+                        "no installation is authorized"
+                    );
+                    (
+                        b"SPACETERM_MISSING 501 x86_64-unknown-linux-gnu\n".to_vec(),
+                        0,
+                    )
+                });
+                let (backend, _) = backend_with_mechanisms(
+                    cx.background_executor.clone(),
+                    account.clone(),
+                    SshServerArtifacts::new(Some(root.into())),
+                    Arc::new(UnixHostConfigFilesystem),
+                    Arc::new(FakeBootstrap),
+                );
+                let destination = SshDestination::new("original-host".into()).unwrap();
+                assert!(
+                    matches!(
+                        backend.connect(
+                            &destination,
+                            ConnectMode::Requested,
+                            None,
+                            &SshCancellationToken::default(),
+                            &|_| {}
+                        ),
+                        Err(SshConnectFailure::Refused(RefusalKind::InvalidArtifact))
+                    ),
+                    "{violation} must fail verification before an installation is offered"
+                );
+                assert_eq!(account.ran("ssh-discover"), 1);
+                assert_eq!(account.ran("ssh-install"), 0);
+                assert_eq!(account.ran("ssh-prepare"), 0);
+            });
+        }
+    }
+
+    #[gpui::test]
+    fn connect_without_a_catalog_reports_a_missing_package_without_service_effects(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        for root in [None, Some("/fixture/missing-catalog".into())] {
+            let account = testing::FakeAccount::new(ORIGINAL_ROUTE, |command, _| {
+                assert!(
+                    command.contains("ssh-discover"),
+                    "only discovery is authorized"
+                );
+                (
+                    b"SPACETERM_MISSING 501 x86_64-unknown-linux-gnu\n".to_vec(),
+                    0,
+                )
+            });
+            let (backend, _) = testing::backend(
+                cx.background_executor.clone(),
+                account.clone(),
+                SshServerArtifacts::new(root),
+            );
+            let destination = SshDestination::new("original-host".into()).unwrap();
+            assert!(matches!(
+                backend.connect(
+                    &destination,
+                    ConnectMode::Requested,
+                    None,
+                    &SshCancellationToken::default(),
+                    &|_| {}
+                ),
+                Err(SshConnectFailure::Refused(RefusalKind::MissingArtifact))
+            ));
+            assert_eq!(account.ran("ssh-discover"), 1);
+            assert_eq!(account.ran("ssh-install"), 0);
+            assert_eq!(account.ran("ssh-prepare"), 0);
+        }
+    }
+
+    #[gpui::test]
+    fn connect_without_a_catalog_preserves_deliberate_stop_and_server_identity(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let account = testing::FakeAccount::new(ORIGINAL_ROUTE, |command, _| {
+            assert!(
+                command.contains("ssh-discover"),
+                "Stop forbids service effects"
+            );
+            let mut state = testing::discovery([9; 32]);
+            state.stopped = true;
+            state.running = false;
+            (serde_json::to_vec(&state).unwrap(), 0)
+        });
+        let (backend, _) = testing::backend(
+            cx.background_executor.clone(),
+            account.clone(),
+            SshServerArtifacts::new(None),
+        );
+        let destination = SshDestination::new("original-host".into()).unwrap();
+        assert!(matches!(
+            backend.connect(&destination, ConnectMode::Requested, None,
+                &SshCancellationToken::default(), &|_| {}),
+            Err(SshConnectFailure::Stopped(Some(continuity))) if continuity == account_continuity()
+        ));
+        assert_eq!(account.ran("ssh-discover"), 1);
+        assert_eq!(account.ran("ssh-prepare"), 0);
+        assert_eq!(account.ran("ssh-install"), 0);
+    }
+
+    #[gpui::test]
+    fn connect_reuses_a_running_server_before_consulting_the_catalog(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let account = testing::FakeAccount::new(ORIGINAL_ROUTE, |command, _| {
+            assert!(
+                command.contains("ssh-discover"),
+                "reuse permits no service effect"
+            );
+            (serde_json::to_vec(&testing::discovery([9; 32])).unwrap(), 0)
+        });
+        let (backend, _) = testing::backend(
+            cx.background_executor.clone(),
+            account.clone(),
+            SshServerArtifacts::new(None),
+        );
+        let destination = SshDestination::new("original-host".into()).unwrap();
+        let phases = Mutex::new(Vec::new());
+        // This process fixture has no pollable protocol bridge. Reaching Connecting proves
+        // that catalog absence did not block reuse; native checks cover Session admission.
+        assert!(matches!(
+            backend.connect(
+                &destination,
+                ConnectMode::Requested,
+                Some(&account_continuity()),
+                &SshCancellationToken::default(),
+                &|phase| phases.lock().unwrap().push(phase)
+            ),
+            Err(SshConnectFailure::Unavailable(
+                UnavailableKind::ServiceUnavailable
+            ))
+        ));
+        assert_eq!(
+            *phases.lock().unwrap(),
+            vec![
+                ConnectPhase::Authenticating,
+                ConnectPhase::Discovering,
+                ConnectPhase::Connecting,
+            ]
+        );
+        assert_eq!(account.ran("ssh-discover"), 1);
+        assert_eq!(account.ran("ssh-prepare"), 0);
+        assert_eq!(account.ran("ssh-install"), 0);
+    }
 
     fn account_continuity() -> SshServerContinuity {
         SshServerContinuity {

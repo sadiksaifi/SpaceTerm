@@ -42,7 +42,7 @@ def require_apple_silicon():
         raise TaskError("SpaceTerm packages only on Apple Silicon Macs")
 
 
-def package(release_tag=None):
+def package(release_tag=None, *, ssh_config=None):
     """Build, bundle, and verify one identity, then move the app and disk image into dist/."""
     require_apple_silicon()
     if release_tag:
@@ -51,10 +51,10 @@ def package(release_tag=None):
             (identity_directory("spaceterm") / "Packager.toml").read_text()
         )["macos"]["signing-identity"]
         macos_signing.signing_credentials(fingerprint, os.environ)
-    package_bundle(release_tag)
+    package_bundle(release_tag, ssh_config=ssh_config)
 
 
-def package_bundle(release_tag=None):
+def package_bundle(release_tag=None, *, ssh_config=None):
     name = selected_identity(release_tag)
     template = identity(name)
     version = release_version(release_tag) if release_tag else PREFLIGHT_VERSION
@@ -82,6 +82,7 @@ def package_bundle(release_tag=None):
             STAGE / "server-artifact",
             template["CFBundleIdentifier"].removeprefix("io.github.sadiksaifi."),
             release_tag,
+            ssh_config=ssh_config,
             catalog_destination=STAGE / "server-artifacts",
         )
     )

@@ -2,7 +2,7 @@
 
 use std::fs::OpenOptions;
 use std::io::Read;
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
 use crate::ssh::host_config::{HostConfigFilesystem, HostConfigFilesystemError};
@@ -57,6 +57,30 @@ impl HostConfigFilesystem for UnixHostConfigFilesystem {
             return Err(HostConfigFilesystemError::Unavailable);
         }
         Ok(Sha256::digest(&bytes).into())
+    }
+
+    fn read_artifact_file_limited(
+        &self,
+        path: &Path,
+        maximum_bytes: usize,
+    ) -> Result<Vec<u8>, HostConfigFilesystemError> {
+        let file = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_NOCTTY | libc::O_CLOEXEC)
+            .open(path)
+            .map_err(classify)?;
+        let metadata = file.metadata().map_err(classify)?;
+        if !metadata.is_file() || metadata.nlink() != 1 || metadata.len() > maximum_bytes as u64 {
+            return Err(HostConfigFilesystemError::Unavailable);
+        }
+        let mut contents = Vec::with_capacity(metadata.len() as usize);
+        file.take(maximum_bytes.saturating_add(1) as u64)
+            .read_to_end(&mut contents)
+            .map_err(classify)?;
+        if contents.len() > maximum_bytes {
+            return Err(HostConfigFilesystemError::Unavailable);
+        }
+        Ok(contents)
     }
 
     fn read_directory_limited(

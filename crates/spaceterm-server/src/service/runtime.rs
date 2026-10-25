@@ -374,16 +374,22 @@ impl Build {
         {
             return Err(ServerError::RuntimeUnavailable);
         }
-        let version = info
-            .version
-            .strip_prefix("dev.")
-            .is_some_and(|suffix| suffix == &info.commit[..12] && suffix.len() == 12)
-            || (info.version.split('.').count() == 3
-                && info.version.split('.').all(|part| {
-                    !part.is_empty()
-                        && (part == "0" || !part.starts_with('0'))
-                        && part.bytes().all(|v| v.is_ascii_digit())
-                }));
+        let version = info.version.strip_prefix("dev.").is_some_and(|suffix| {
+            let revision = if matches!(
+                info.identity.as_str(),
+                "spaceterm-development" | "spaceterm-preflight"
+            ) {
+                suffix.strip_suffix(".dirty").unwrap_or(suffix)
+            } else {
+                suffix
+            };
+            revision == &info.commit[..12]
+        }) || (info.version.split('.').count() == 3
+            && info.version.split('.').all(|part| {
+                !part.is_empty()
+                    && (part == "0" || !part.starts_with('0'))
+                    && part.bytes().all(|v| v.is_ascii_digit())
+            }));
         if info.schema != 1
             || info.identity != identity
             || info.target != target

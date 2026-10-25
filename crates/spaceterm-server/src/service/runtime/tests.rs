@@ -3,6 +3,50 @@ use std::os::unix::fs::PermissionsExt;
 use test_support::{COMMIT, VERSION, target, with_artifact};
 
 #[test]
+fn signed_dirty_source_versions_are_admitted_only_for_matching_nonproduction_builds() {
+    let root = temporary();
+    for identity in ["spaceterm-development", "spaceterm-preflight", "spaceterm"] {
+        for (case, version) in [
+            ("clean", "dev.aaaaaaaaaaaa"),
+            ("dirty", "dev.aaaaaaaaaaaa.dirty"),
+            ("other-commit", "dev.bbbbbbbbbbbb.dirty"),
+            ("extra-suffix", "dev.aaaaaaaaaaaa.dirty.dirty"),
+        ] {
+            with_artifact(
+                &root.join(identity).join(case),
+                identity,
+                |archive, signature| {
+                    rewrite(archive, signature, |entries| {
+                        let mut manifest: serde_json::Value =
+                            serde_json::from_slice(&entries[0].1).unwrap();
+                        manifest["version"] = version.into();
+                        entries[0].1 = serde_json::to_vec(&manifest).unwrap();
+                    });
+                    if identity == "spaceterm" {
+                        test_support::sign_with_previous_production_trust(archive, signature);
+                    }
+                    let service = Service::for_identity(identity).unwrap();
+                    let pin = digest(&std::fs::read(archive).unwrap());
+                    let result = service.inspect_candidate(
+                        archive,
+                        signature,
+                        &pin,
+                        1,
+                        &["workspace_policy"],
+                    );
+                    if case == "clean" || (identity != "spaceterm" && case == "dirty") {
+                        assert_eq!(result.unwrap().version, version);
+                    } else {
+                        assert_eq!(result, Err(ServerError::RuntimeUnavailable));
+                    }
+                },
+            );
+        }
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn previous_production_signatures_authorize_retained_nonproduction_runtimes_only() {
     let root = temporary();
     for identity in ["spaceterm-preflight", "spaceterm-development"] {

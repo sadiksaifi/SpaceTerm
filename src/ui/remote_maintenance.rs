@@ -1050,9 +1050,16 @@ fn failed(
             Some("Waiting for You"),
             selector(row, "waiting"),
             guidance(if reason == InteractionReason::FirstSignIn {
-                format!("Choose {} to sign in to {machine}.", plain(resolve.unwrap_or(RemoteAction::Check).label()))
+                format!(
+                    "Choose {} to sign in to {machine}.",
+                    plain(resolve.unwrap_or(RemoteAction::Check).label())
+                )
             } else {
-                format!("{} Choose {} to continue.", interaction(reason, machine), plain(resolve.unwrap_or(RemoteAction::Check).label()))
+                format!(
+                    "{} Choose {} to continue.",
+                    interaction(reason, machine),
+                    plain(resolve.unwrap_or(RemoteAction::Check).label())
+                )
             }),
             vec![resolve.unwrap_or(RemoteAction::Check)],
             false,
@@ -1107,9 +1114,6 @@ fn failed(
                     "Couldn't prepare the SSH connection. Choose {} when it answers again.",
                     plain(step.label())
                 ),
-                (UnavailableKind::CandidateUnavailable, None) => {
-                    "This SpaceTerm installation has no server update for that computer. Choose Check Now to try again.".to_owned()
-                }
                 _ => unavailable(kind, machine),
             }),
             vec![resolve.unwrap_or(RemoteAction::Check)],
@@ -1450,9 +1454,6 @@ fn unavailable(kind: UnavailableKind, machine: &str) -> String {
         UnavailableKind::HostUnreachable => format!("Couldn't reach {machine}."),
         UnavailableKind::SshFailed => "Check your SSH configuration.".to_owned(),
         UnavailableKind::ServiceUnavailable => format!("The server on {machine} did not answer."),
-        UnavailableKind::CandidateUnavailable => {
-            "This SpaceTerm has no verified server version for that computer.".to_owned()
-        }
     }
 }
 

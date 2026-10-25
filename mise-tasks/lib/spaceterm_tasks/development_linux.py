@@ -219,7 +219,9 @@ def register(prefix: Path, root: Path = ROOT) -> None:
     atomic_write(destination, contents)
 
 
-def stage_prefix(executable: Path, server: Path, root: Path = ROOT) -> Path:
+def stage_prefix(
+    executable: Path, server: Path, root: Path = ROOT, *, catalog: Path | None = None
+) -> Path:
     """Stage an installed layout beside Cargo's artifact and rename it into place."""
     parent = executable.parent.parent / "development-apps"
     parent.mkdir(parents=True, exist_ok=True)
@@ -237,6 +239,8 @@ def stage_prefix(executable: Path, server: Path, root: Path = ROOT) -> Path:
         )
         if compiled.returncode or not (resources / "terminfo" / "x" / "xterm-spaceterm").is_file():
             raise TaskError("tic did not produce the SpaceTerm terminfo entry")
+        if catalog is not None:
+            shutil.copytree(catalog, resources / "server-artifacts")
         prefix = parent / "development"
         shutil.rmtree(prefix, ignore_errors=True)
         staging.rename(prefix)
@@ -246,9 +250,14 @@ def stage_prefix(executable: Path, server: Path, root: Path = ROOT) -> Path:
     return prefix
 
 
-def launch(backend: str | None = None) -> int | None:
+def launch(backend: str | None = None, *, ssh_config=None) -> int | None:
     """Build and own the current client and foreground Server for this Development run."""
-    with development_run():
+    from spaceterm_tasks.server_builds import prepare
+
+    with (
+        development_run(),
+        tempfile.TemporaryDirectory(prefix="spaceterm-development-catalog-") as temporary,
+    ):
         environment = source_environment(os.environ)
         if backend == "wayland" and not environment.get("WAYLAND_DISPLAY"):
             raise TaskError("Wayland requires WAYLAND_DISPLAY")
@@ -259,6 +268,9 @@ def launch(backend: str | None = None) -> int | None:
         for tool in REQUIRED_TOOLS:
             if shutil.which(tool) is None:
                 raise TaskError(f"{tool} is required; run mise doctor project")
+        catalog = prepare(
+            Path(temporary) / "catalog", "spaceterm-development", ssh_config=ssh_config
+        )
         server = build_executable(
             "--package",
             "spaceterm-server-host",
@@ -267,7 +279,9 @@ def launch(backend: str | None = None) -> int | None:
             binary="spaceterm-server",
             env=environment,
         )
-        prefix = stage_prefix(build_executable("--locked", env=environment), server)
+        prefix = stage_prefix(
+            build_executable("--locked", env=environment), server, catalog=catalog
+        )
         try:
             register(prefix)
         except (OSError, ValueError, subprocess.CalledProcessError):

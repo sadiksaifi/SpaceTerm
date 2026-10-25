@@ -228,6 +228,16 @@ pub(crate) trait HostConfigFilesystem: Send + Sync {
         maximum_bytes: usize,
     ) -> Result<Vec<u8>, HostConfigFilesystemError>;
 
+    /// Read bounded artifact bytes from a single-link regular file, refusing a final symlink.
+    /// Native filesystems override this separately from SSH configuration's symlink policy.
+    fn read_artifact_file_limited(
+        &self,
+        path: &Path,
+        maximum_bytes: usize,
+    ) -> Result<Vec<u8>, HostConfigFilesystemError> {
+        self.read_file_limited(path, maximum_bytes)
+    }
+
     /// Hash a bounded regular file without exposing private key bytes to policy code.
     fn file_digest_limited(
         &self,
