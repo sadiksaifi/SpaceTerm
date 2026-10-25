@@ -594,6 +594,9 @@ pub(super) struct ServerUpdateRow {
     requested: bool,
     /// A confirmation is open. The row starts nothing else until the person answers it.
     asking: bool,
+    /// The service changed outside Settings while a version read ran. That read may have seen
+    /// the server before the change, so its answer is set aside and the version is read again.
+    read_outdated: bool,
     _operation: Option<Task<()>>,
 }
 
@@ -605,6 +608,7 @@ impl ServerUpdateRow {
             window,
             requested: false,
             asking: false,
+            read_outdated: false,
             _operation: None,
         }
     }
@@ -641,6 +645,19 @@ impl SettingsWindow {
     /// the service.
     pub(super) fn check_server_update(&mut self, cx: &mut Context<Self>) {
         self.run_update_step(UpdateStep::Check, cx);
+    }
+
+    /// Reads the version after the service changed outside Settings. A version read already
+    /// running may have seen the server before the change, so its answer is set aside and the
+    /// version is read again once it ends.
+    pub(super) fn reread_server_update(&mut self, cx: &mut Context<Self>) {
+        if let Some(row) = &mut self.server_update
+            && row.state.working == Some(UpdateStep::Check)
+        {
+            row.read_outdated = true;
+            return;
+        }
+        self.check_server_update(cx);
     }
 
     /// Another surface, such as the incompatible-server screen or the status item, asked for the
@@ -742,6 +759,16 @@ impl SettingsWindow {
         row._operation = Some(cx.spawn(async move |settings, cx| {
             let (prepared, failure, read) = result.await;
             let _ = settings.update(cx, |settings, cx| {
+                // A version read from before an outside change describes nothing current.
+                if step == UpdateStep::Check
+                    && let Some(row) = &mut settings.server_update
+                    && std::mem::take(&mut row.read_outdated)
+                {
+                    row.state.working = None;
+                    settings.check_server_update(cx);
+                    cx.notify();
+                    return;
+                }
                 settings.update_step_finished(prepared, failure, read, cx);
             });
         }));
@@ -1053,6 +1080,9 @@ pub(super) mod testing {
         /// The refusal the next preparation returns.
         refusal: Mutex<Option<ServerError>>,
         read_failure: Mutex<Option<ServerError>>,
+        /// What the next read answers, as a read the service began before a later change would,
+        /// ahead of what the service reports now.
+        earlier: Mutex<Option<UpdateFacts>>,
     }
 
     impl ScriptedUpdate {
@@ -1064,11 +1094,19 @@ pub(super) mod testing {
                 })),
                 refusal: Mutex::new(None),
                 read_failure: Mutex::new(None),
+                earlier: Mutex::new(None),
             })
         }
 
         fn shared(&self) -> std::sync::MutexGuard<'_, Shared> {
             self.shared.lock().expect("shared")
+        }
+
+        /// Makes the next read answer what the service reports now, even after a later change, as
+        /// a read that began before the change does.
+        pub(in crate::ui::settings_window) fn read_before_change(&self) {
+            let now = self.shared().facts().clone();
+            *self.earlier.lock().expect("earlier") = Some(now);
         }
 
         /// Changes what the service reports, as another surface would.
@@ -1114,6 +1152,9 @@ pub(super) mod testing {
             shared.calls.push(UpdateCall::Read);
             if let Some(error) = self.read_failure.lock().expect("read failure").take() {
                 return Err(error);
+            }
+            if let Some(earlier) = self.earlier.lock().expect("earlier").take() {
+                return Ok(earlier);
             }
             Ok(shared.facts().clone())
         }

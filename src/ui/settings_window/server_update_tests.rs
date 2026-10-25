@@ -23,7 +23,7 @@ use crate::settings::storage::testing::MemoryStorage;
 use crate::ui::appearance_runtime;
 use crate::ui::settings_window::SettingsWindow;
 use crate::ui::settings_window::servers::testing::{
-    ScriptedServer, ScriptedService, connected, not_installed, stopped,
+    ScriptedServer, ScriptedService, connected, not_installed, stopped, uninstalled,
 };
 use crate::ui::settings_window::servers::{
     LocalServerControl, OfferedServer, ServerServiceControl,
@@ -42,6 +42,14 @@ struct Harness<'a> {
 
 /// Opens Settings on the Servers section with a service and update control reporting `facts`.
 fn open(facts: UpdateFacts, cx: &mut TestAppContext) -> Harness<'_> {
+    let harness = open_unread(facts, cx);
+    click(NAVIGATION_SELECTOR, harness.cx);
+    harness
+}
+
+/// Opens Settings on its first section, as it opens, with a service and update control reporting
+/// `facts`. Nothing has read the server yet: Servers reads it once it is shown.
+fn open_unread(facts: UpdateFacts, cx: &mut TestAppContext) -> Harness<'_> {
     let status = facts.status;
     let update = ScriptedUpdate::new(facts);
     let service = ScriptedService::new(status);
@@ -72,7 +80,6 @@ fn open(facts: UpdateFacts, cx: &mut TestAppContext) -> Harness<'_> {
     });
     cx.update(|window, _| window.activate_window());
     cx.run_until_parked();
-    click(NAVIGATION_SELECTOR, cx);
     Harness {
         window,
         update,
@@ -857,4 +864,38 @@ fn restore_waits_for_the_update_read_after_returning_to_servers(cx: &mut TestApp
     click(RETURN_SELECTOR, harness.cx);
     assert!(alert_open(RETURN_CONFIRM_SELECTOR, harness.cx));
     assert_eq!(harness.update.changes(), [UpdateCall::PrepareReturn]);
+}
+
+/// The first version read Servers begins answers what it saw before the status item uninstalled
+/// the server. Settings sets that answer aside and reads again, so the version row says Not
+/// Installed and offers no update for a server that is gone.
+#[gpui::test]
+fn a_first_version_read_begun_before_a_status_item_uninstall_offers_no_stale_update(
+    cx: &mut TestAppContext,
+) {
+    use crate::ui::settings_window::SettingsSectionId;
+
+    let mut harness = open_unread(available(), cx);
+    // Showing Servers begins the first version read, which observes the installed server.
+    harness.update.read_before_change();
+    harness.window.update(harness.cx, |settings, cx| {
+        settings.select_section(SettingsSectionId::Servers, cx);
+    });
+    // The status item uninstalls the server while that read is still pending.
+    harness.update.change(|facts| {
+        facts.status = Ok(uninstalled());
+        facts.approved = None;
+    });
+    harness.service.report(Ok(uninstalled()));
+    harness
+        .cx
+        .update(|_, cx| crate::status_menu::operation_succeeded(cx, uninstalled()));
+    harness.cx.run_until_parked();
+
+    let presentation = harness.presentation();
+    assert_eq!(presentation.state, "Not Installed");
+    assert!(
+        !presentation.actions.contains(&UpdateAction::Update),
+        "a removed server offers no update"
+    );
 }

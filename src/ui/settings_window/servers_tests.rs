@@ -1095,6 +1095,25 @@ fn a_start_from_the_status_item_shows_the_server_running_in_open_settings(cx: &m
     assert_eq!(status(&window, cx), "Running");
 }
 
+/// A read Settings began before the status item started the server answers what it saw then.
+/// Settings sets that answer aside and reads again, so it shows the server running rather than
+/// stopped.
+#[gpui::test]
+fn a_read_begun_before_a_status_item_start_doesnt_leave_settings_stopped(cx: &mut TestAppContext) {
+    let (window, _server, service, cx) = open_servers_with_service(Ok(stopped()), cx);
+    assert_eq!(status(&window, cx), "Stopped");
+
+    // Settings begins a read, which observes the stopped server before the start.
+    service.read_before_change();
+    window.update(cx, |settings, cx| settings.check_server_service(cx));
+    // The status item starts the server while that read is still pending.
+    service.report(Ok(running()));
+    cx.update(|_, cx| crate::status_menu::operation_succeeded(cx, running()));
+    cx.run_until_parked();
+
+    assert_eq!(status(&window, cx), "Running");
+}
+
 /// Check Now reads the service again, so a start made where Settings didn't hear of it shows.
 #[gpui::test]
 fn check_now_reads_the_service_again(cx: &mut TestAppContext) {
