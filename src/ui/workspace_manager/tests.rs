@@ -473,6 +473,8 @@ fn new_desktop_manager(
     cx: &mut Context<WorkspaceManager>,
 ) -> WorkspaceManager {
     use_desktop_sessions(session_factory, cx);
+    // Every Workspace Window's update control reads this computer's server update state.
+    crate::ui::updates::server_rows::testing::install_up_to_date(cx);
     let mut manager =
         WorkspaceManager::new_with_adapters(home_directory, adapters, sidebar, window, cx);
     manager.present_desktop_workspace(window, cx);
@@ -12742,7 +12744,7 @@ fn open_remote_directory_should_pin_on_its_server_and_reuse_a_workspace_pinned_t
 #[gpui::test]
 fn a_late_directory_answer_should_never_override_newer_navigation(cx: &mut TestAppContext) {
     assert_eq!(
-        late_directory_answer_after("/srv/app", &["There"], cx),
+        late_directory_answer_after("/srv/app", &[Navigation::Workspace("There")], cx),
         ("There".to_owned(), Vec::new())
     );
 }
@@ -12752,7 +12754,14 @@ fn a_late_directory_answer_should_never_override_newer_navigation(cx: &mut TestA
 #[gpui::test]
 fn a_late_directory_answer_should_never_override_navigation_that_returned(cx: &mut TestAppContext) {
     assert_eq!(
-        late_directory_answer_after("/srv/app", &["There", "Here"], cx),
+        late_directory_answer_after(
+            "/srv/app",
+            &[
+                Navigation::Workspace("There"),
+                Navigation::Workspace("Here")
+            ],
+            cx
+        ),
         ("Here".to_owned(), Vec::new())
     );
 }
@@ -12764,7 +12773,7 @@ fn a_late_directory_creation_should_never_override_newer_navigation(cx: &mut Tes
     use spaceterm_server::hierarchy::Mutation;
 
     assert_eq!(
-        late_directory_answer_after("/srv/new", &["There"], cx),
+        late_directory_answer_after("/srv/new", &[Navigation::Workspace("There")], cx),
         (
             "There".to_owned(),
             vec![Mutation::CreateWorkspace {
@@ -12775,12 +12784,72 @@ fn a_late_directory_creation_should_never_override_newer_navigation(cx: &mut Tes
     );
 }
 
-/// Opens `directory` on penguin, whose "Far" is pinned to `/srv/app`, from "Here", selects each
-/// of `navigation` in the sidebar while penguin's answer is held back, then releases it. Returns
-/// the Active Workspace's name once the answer settles, with what penguin was asked to change.
+/// Selecting another Tab in the Active Workspace while penguin's server answers is newer
+/// navigation, which the answer naming a Workspace pinned there never overrides.
+#[gpui::test]
+fn a_late_directory_answer_should_never_override_a_newer_tab_selection(cx: &mut TestAppContext) {
+    assert_eq!(
+        late_directory_answer_after("/srv/app", &[Navigation::OtherTab], cx),
+        ("Here".to_owned(), Vec::new())
+    );
+}
+
+/// Moving to another Pane of the Active Tab while penguin's server answers is newer navigation
+/// too.
+#[gpui::test]
+fn a_late_directory_answer_should_never_override_a_newer_pane_focus(cx: &mut TestAppContext) {
+    assert_eq!(
+        late_directory_answer_after("/srv/app", &[Navigation::OtherPane], cx),
+        ("Here".to_owned(), Vec::new())
+    );
+}
+
+/// Opening Terminal Find in the same Pane while penguin's server answers moves the keyboard, so
+/// the answer leaves it in Find.
+#[gpui::test]
+fn a_late_directory_answer_should_never_take_the_keyboard_from_terminal_find(
+    cx: &mut TestAppContext,
+) {
+    assert_eq!(
+        late_directory_answer_after("/srv/app", &[Navigation::FindOpened], cx),
+        ("Here".to_owned(), Vec::new())
+    );
+}
+
+/// Opening and closing Terminal Find before penguin's server answers is still later keyboard
+/// intent, though the keyboard is back in the same terminal.
+#[gpui::test]
+fn a_late_directory_answer_should_never_override_terminal_find_that_closed(
+    cx: &mut TestAppContext,
+) {
+    assert_eq!(
+        late_directory_answer_after("/srv/app", &[Navigation::FindClosed], cx),
+        ("Here".to_owned(), Vec::new())
+    );
+}
+
+/// One explicit navigation a person makes while a directory answer is held back.
+#[derive(Clone, Copy)]
+enum Navigation {
+    /// Selects the named Workspace's sidebar row.
+    Workspace(&'static str),
+    /// Selects the Active Workspace's other Tab in the Tab strip.
+    OtherTab,
+    /// Clicks the Active Tab's other Pane.
+    OtherPane,
+    /// Opens Terminal Find in the Focused Pane and leaves it open.
+    FindOpened,
+    /// Opens Terminal Find in the Focused Pane, then closes it, returning to the terminal.
+    FindClosed,
+}
+
+/// Opens `directory` on penguin, whose "Far" is pinned to `/srv/app`, from "Here", which has a
+/// second Tab and a split Pane. Makes each of `navigation` while penguin's answer is held back,
+/// then releases it. Returns the Active Workspace's name once the answer settles, with what
+/// penguin was asked to change.
 fn late_directory_answer_after(
     directory: &str,
-    navigation: &[&str],
+    navigation: &[Navigation],
     cx: &mut TestAppContext,
 ) -> (String, Vec<spaceterm_server::hierarchy::Mutation>) {
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -12795,12 +12864,28 @@ fn late_directory_answer_after(
         ..workspace_adapters()
     };
     let (harness, cx) = MachineGroupsHarness::using(adapters, cx);
-    harness.publish(
-        ServerKey::LOCAL,
-        &harness.local,
-        &[("Here", 1), ("There", 2)],
-        cx,
-    );
+    // An active window reports each keyboard owner the person leaves.
+    cx.update(|window, _| window.activate_window());
+    let local = [("Here", 1), ("There", 2)];
+    harness.publish(ServerKey::LOCAL, &harness.local, &local, cx);
+    // "Here" gains a second Tab and a Pane split from its first.
+    let mut inventory = machine_inventory(harness.next_revision(), &local);
+    let here = &mut inventory.workspaces[0];
+    let mut tab = here.tabs[0].clone();
+    tab.id = [180; 32];
+    tab.root_pane = [181; 32];
+    tab.panes[0].id = [181; 32];
+    let mut split = here.tabs[0].panes[0].clone();
+    split.id = [182; 32];
+    split.source = Some(here.tabs[0].panes[0].id);
+    here.tabs[0].panes.push(split);
+    here.tabs.push(tab);
+    harness.local.set_inventory(inventory);
+    cx.update(|window, cx| {
+        harness.manager.update(cx, |manager, cx| {
+            manager.sync_shared_workspaces(ServerKey::LOCAL, window, cx);
+        })
+    });
     let route = named_route("penguin");
     let (key, penguin_edits) = harness.present_direct("penguin", route, &[("Far", 7)], cx);
     let mut inventory = machine_inventory(harness.next_revision(), &[("Far", 7)]);
@@ -12827,12 +12912,48 @@ fn late_directory_answer_after(
         "the server's answer is held back"
     );
 
-    for name in navigation {
-        let workspace_id = harness.named(name, cx);
-        click(
-            format!("workspace-row-{}-inactive", workspace_id.get()).leak(),
-            cx,
-        );
+    let terminal = |cx: &mut VisualTestContext| {
+        harness.manager.read_with(cx, |manager, cx| {
+            manager
+                .workspaces
+                .active()
+                .payload()
+                .read(cx)
+                .active_terminal_identity(cx)
+        })
+    };
+    for step in navigation {
+        let before = terminal(cx);
+        if let Navigation::FindOpened | Navigation::FindClosed = step {
+            cx.dispatch_action(crate::ui::OpenTerminalFind);
+            cx.run_until_parked();
+            assert!(cx.debug_bounds("terminal-find-bar").is_some());
+            if let Navigation::FindClosed = step {
+                cx.simulate_keystrokes("escape");
+                cx.run_until_parked();
+                assert!(cx.debug_bounds("terminal-find-bar").is_none());
+            }
+            continue;
+        }
+        let selector = match *step {
+            Navigation::Workspace(name) => {
+                format!("workspace-row-{}-inactive", harness.named(name, cx).get())
+            }
+            Navigation::OtherTab => (1..=20)
+                .map(|tab| format!("tab-item-{tab}-inactive"))
+                .find(|selector| cx.debug_bounds(selector.clone().leak()).is_some())
+                .expect("the Active Workspace shows its other Tab"),
+            Navigation::OtherPane => (1..=20)
+                .filter(|pane| *pane != before.1.get())
+                .map(|pane| format!("pane-surface-{pane}"))
+                .find(|selector| cx.debug_bounds(selector.clone().leak()).is_some())
+                .expect("the Active Tab shows its other Pane"),
+            Navigation::FindOpened | Navigation::FindClosed => unreachable!(),
+        };
+        click(selector.leak(), cx);
+        if !matches!(step, Navigation::Workspace(_)) {
+            assert_ne!(terminal(cx), before, "the person navigated within \"Here\"");
+        }
     }
     open.store(true, Ordering::Release);
     let deadline = Instant::now() + std::time::Duration::from_secs(5);

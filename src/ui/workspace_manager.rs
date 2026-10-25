@@ -196,10 +196,25 @@ pub(super) struct PendingServerDirectory {
     key: ServerKey,
     name: String,
     directory: PathBuf,
-    /// The activation epoch and Active Workspace when the person chose the directory. Any
-    /// activation while the server answers, even one returning to the same Workspace, is newer
-    /// navigation, which an existing pinned Workspace never overrides.
-    navigation: (u64, Option<WorkspaceId>),
+    /// Where navigation stood when the person chose the directory. Navigation while the server
+    /// answers wins over an existing pinned Workspace and over opening a new one.
+    navigation: NavigationMark,
+    /// What held the keyboard once the choice settled, after any chooser restored focus. `None`
+    /// until then. A later sidebar edit, Terminal Find, chooser or other owner wins as navigation
+    /// does.
+    keyboard: Option<Option<FocusHandle>>,
+    /// Whether the person moved the keyboard from that owner since, even if it came back.
+    keyboard_moved: bool,
+}
+
+/// Where a person's explicit navigation stands in this window: Workspace activations and the
+/// Active Workspace, then that Workspace's Tab activations, Active Tab, and Focused Pane changes.
+/// Any change, even one returning to the same place, is newer navigation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct NavigationMark {
+    activations: u64,
+    workspace: Option<WorkspaceId>,
+    within: Option<(u64, crate::domain::TabId, u64)>,
 }
 
 /// One question to the owning server about the directory a person chose in Open Remote
@@ -251,6 +266,8 @@ pub(crate) struct WorkspaceManager {
     /// right after that creation's submission runs, because newer navigation superseded the
     /// person's original choice.
     quiet_creation: Option<ServerKey>,
+    /// Follows the keyboard owner a pending Open Remote Directory settled on.
+    server_directory_keyboard: Option<gpui::Subscription>,
     operating_system_window_drag_platform: Rc<dyn OperatingSystemWindowDragPlatform>,
     window_drag_status: WindowDragRegionStatus,
     update_control: Entity<super::updates::UpdateControl>,
@@ -379,6 +396,7 @@ impl WorkspaceManager {
             pin_operation: 0,
             activation_epoch: 0,
             quiet_creation: None,
+            server_directory_keyboard: None,
             operating_system_window_drag_platform,
             window_drag_status: WindowDragRegionStatus::new(),
             update_control: cx.new(|cx| super::updates::UpdateControl::new(window, cx)),
@@ -1063,6 +1081,15 @@ impl WorkspaceManager {
                                     manager.pin_picker = None;
                                     manager.sync_terminal_focus_blocker(window, cx);
                                     manager.focus(window, cx);
+                                    // A directory still waiting for its server keeps the owner
+                                    // this restoration chose, not the closing chooser.
+                                    if manager
+                                        .pending_server_directory
+                                        .as_ref()
+                                        .is_some_and(|pending| pending.keyboard.is_none())
+                                    {
+                                        manager.settle_server_directory_keyboard(window, cx);
+                                    }
                                     cx.notify();
                                 });
                             }
@@ -1138,9 +1165,51 @@ impl WorkspaceManager {
             key,
             name,
             directory,
-            navigation: self.navigation(),
+            navigation: self.navigation(cx),
+            keyboard: None,
+            keyboard_moved: false,
         });
+        self.server_directory_keyboard = None;
+        // A chooser still open restores focus as it closes, which is not the person's intent, so
+        // the keyboard owner settles after that.
+        if self.pin_picker.is_none() {
+            self.settle_server_directory_keyboard(window, cx);
+        }
         self.continue_server_directory(window, cx);
+    }
+
+    /// Records what holds the keyboard for the pending Open Remote Directory, and follows the
+    /// person moving it elsewhere before the server answers.
+    fn settle_server_directory_keyboard(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let keyboard = window.focused(cx);
+        let Some(pending) = self.pending_server_directory.as_mut() else {
+            return;
+        };
+        pending.keyboard = Some(keyboard.clone());
+        pending.keyboard_moved = false;
+        self.server_directory_keyboard = keyboard.map(|owner| {
+            cx.on_blur(&owner, window, |manager, window, _| {
+                // Leaving SpaceTerm for another application moves no keyboard owner here.
+                if window.is_window_active()
+                    && let Some(pending) = manager.pending_server_directory.as_mut()
+                {
+                    pending.keyboard_moved = true;
+                }
+            })
+        });
+    }
+
+    /// Whether the pending Open Remote Directory still reflects the person's latest intent: no
+    /// newer navigation, and the keyboard where it settled, never moved since.
+    fn server_directory_intent_kept(&self, window: &Window, cx: &App) -> bool {
+        let Some(pending) = &self.pending_server_directory else {
+            return false;
+        };
+        self.navigation(cx) == pending.navigation
+            && pending
+                .keyboard
+                .as_ref()
+                .is_none_or(|keyboard| !pending.keyboard_moved && window.focused(cx) == *keyboard)
     }
 
     /// Asks the pending Workspace's server for it once that server's edits are ready, or
@@ -1153,7 +1222,7 @@ impl WorkspaceManager {
             key,
             name,
             directory,
-            navigation,
+            ..
         }) = self.pending_server_directory.clone()
         else {
             return;
@@ -1218,13 +1287,12 @@ impl WorkspaceManager {
                 }
             }
         };
+        let intent_kept = self.server_directory_intent_kept(window, cx);
         let refusal = match existing {
-            // The Workspace already exists, so nothing is created. Later navigation wins: a person
-            // who selected another Workspace while the server answered keeps that selection.
+            // The Workspace already exists, so nothing is created. Later navigation or keyboard
+            // intent wins: a person who moved elsewhere while the server answered stays there.
             Some(workspace_id) => {
-                if self.navigation() == navigation
-                    && self.activate_workspace(workspace_id, window, cx)
-                {
+                if intent_kept && self.activate_workspace(workspace_id, window, cx) {
                     self.focus(window, cx);
                     self.scroll_active_workspace_into_view(cx);
                 }
@@ -1249,7 +1317,7 @@ impl WorkspaceManager {
         } else if existing.is_none() {
             // The server still creates the Workspace the person asked for. After newer
             // navigation it joins the sidebar without taking the selection or the keyboard.
-            if self.navigation() != navigation {
+            if !intent_kept {
                 self.quiet_creation = Some(key);
             }
             self.sync_shared_workspaces(key, window, cx);
@@ -1259,14 +1327,21 @@ impl WorkspaceManager {
         cx.notify();
     }
 
-    /// Where navigation stands: the activation epoch and the Active Workspace.
-    fn navigation(&self) -> (u64, Option<WorkspaceId>) {
-        (self.activation_epoch, self.workspaces.active_workspace_id())
+    /// Where the person's explicit navigation stands now.
+    fn navigation(&self, cx: &App) -> NavigationMark {
+        NavigationMark {
+            activations: self.activation_epoch,
+            workspace: self.workspaces.active_workspace_id(),
+            within: self
+                .active_tab_manager()
+                .map(|manager| manager.read(cx).navigation(cx)),
+        }
     }
 
     fn finish_server_directory(&mut self) {
         self.pending_server_directory = None;
         self.server_directory_match = None;
+        self.server_directory_keyboard = None;
     }
 
     /// The owning server's answer to which of `pins` names `directory`, or `None` while it is

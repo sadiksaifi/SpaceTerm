@@ -457,6 +457,9 @@ struct PaneDrag {
 
 pub(crate) struct TabView {
     tab: Tab<Entity<TerminalPane>>,
+    /// Counts explicit changes of the Focused Pane, so a deferred completion can tell that the
+    /// person moved between Panes since it began.
+    focus_epoch: u64,
     session_factory: WorkspaceTerminalSessionFactory,
     pane_construction: PaneConstruction,
     /// Each Pane's laid-out place.
@@ -554,6 +557,7 @@ impl TabView {
 
         Self {
             tab,
+            focus_epoch: 0,
             session_factory,
             pane_construction,
             pane_bounds: BTreeMap::new(),
@@ -886,6 +890,11 @@ impl TabView {
         }
     }
 
+    /// How many explicit Focused Pane changes this Tab has had.
+    pub(crate) const fn focus_epoch(&self) -> u64 {
+        self.focus_epoch
+    }
+
     pub(crate) const fn focused_pane_id(&self) -> PaneId {
         self.tab.focused_pane_id()
     }
@@ -945,6 +954,7 @@ impl TabView {
             eprintln!("failed to focus Pane: {error}");
             return;
         }
+        self.focus_epoch = self.focus_epoch.wrapping_add(1);
 
         self.sync_terminal_focus(cx);
         cx.emit(TabViewEvent::PresentationChanged {
@@ -972,6 +982,7 @@ impl TabView {
         cx: &mut Context<Self>,
     ) {
         // Moving the keyboard to a Pane is an explicit selection of it.
+        self.focus_epoch = self.focus_epoch.wrapping_add(1);
         self.select_shared_pane(pane_id);
         self.sync_terminal_focus(cx);
         cx.emit(TabViewEvent::PresentationChanged {
