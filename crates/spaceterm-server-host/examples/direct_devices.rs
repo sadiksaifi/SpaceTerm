@@ -791,7 +791,8 @@ mod exercise {
             println!(
                 "PASS WSS Workspace creation, directory browsing, physical matching and attachment"
             );
-            let first = attached(select(&mut connection, pane, true)?)?;
+            let first = take(&mut connection, pane, DEVICE_NAME)?;
+            println!("PASS account-local owner explicitly took over the WSS-created Pane");
             command(
                 &mut connection,
                 first,
