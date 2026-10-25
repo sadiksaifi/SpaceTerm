@@ -264,8 +264,11 @@ def _peer(source, digest, identity, target, output, ssh_config):
     _sync_source(
         source, peer + ":" + shlex.quote(remote_source) + "/", ("-e", shlex.join(ssh)), failure
     )
+    # Noninteractive macOS SSH omits the Apple Silicon native tools, including OpenSSL 3.
+    native_prefix = "/opt/homebrew/bin:" if target == TARGETS["darwin"] else ""
     runner = (
-        'set -eu; export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH" PYTHONDONTWRITEBYTECODE=1; '
+        'set -eu; export PATH="$HOME/.local/bin:$HOME/.cargo/bin:'
+        f'{native_prefix}$PATH" PYTHONDONTWRITEBYTECODE=1; '
         f"cd {shlex.quote(remote_source)}; "
         "mise trust --yes .mise.toml; "
         f"exec mise exec -- python -m spaceterm_tasks.server_builds --native {shlex.quote(identity)} "
