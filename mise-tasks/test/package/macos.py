@@ -176,7 +176,14 @@ int main(int argc, char **argv) {{
     def package(self, release_tag=None, *, candidate_digest=None):
         # Client and server releases are independent. Release fixtures reuse an older server.
         server_tag = "v0.0.0" if release_tag else None
-        archive, _ = prepare(self.root, self.env, server_tag, self.fingerprint, self.credentials)
+        archive, _ = prepare(
+            self.root,
+            self.env,
+            server_tag,
+            self.fingerprint,
+            self.credentials,
+            include_catalog=True,
+        )
         digest = (
             candidate_digest
             if candidate_digest is not None
