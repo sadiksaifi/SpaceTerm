@@ -780,6 +780,90 @@ fn optional_custom_port_uses_the_requested_port_when_no_bind_is_configured() {
 }
 
 #[test]
+fn fresh_explicit_server_local_ip_uses_the_requested_interface_and_port() {
+    let mut remote = discovery(true);
+    remote.ssh_local_address = Some("100.69.199.110".parse().unwrap());
+    let fixture = Fixture::new(serde_json::to_vec(&remote).unwrap());
+    let mut current = status();
+    current.network_addresses = Ok(spaceterm_server::direct::NetworkAddresses {
+        available: vec![
+            "100.69.199.110".parse().unwrap(),
+            "192.168.1.41".parse().unwrap(),
+        ],
+        suggested: Some("100.69.199.110".parse().unwrap()),
+    });
+    *fixture.adapter.status.lock().unwrap() = Some(current);
+    let address = SetupAddress::parse("192.168.1.41:45366").unwrap();
+    let expected = address.clone();
+
+    let result = fixture.setup_at(
+        Some(address),
+        Arc::new(Approvals(move |offer, _: &CancellationToken| {
+            assert_eq!(
+                offer,
+                SetupOffer::Network {
+                    address: expected.clone(),
+                    bind: "192.168.1.41:45366".parse().unwrap(),
+                    current: None,
+                    enabled: false,
+                }
+            );
+            false
+        })),
+    );
+
+    assert_eq!(result, Err(SetupFailure::Cancelled));
+    assert!(fixture.adapter.effects.lock().unwrap().is_empty());
+    assert_eq!(fixture.adapter.authentications.load(Ordering::SeqCst), 1);
+    assert_eq!(fixture.prompts.load(Ordering::SeqCst), 1);
+    let counts = fixture.backend.process_counts();
+    assert_eq!(counts.active(), 0);
+    assert_eq!(counts.spawned, counts.reaped);
+}
+
+#[test]
+fn fresh_explicit_nonlocal_ip_preserves_the_authenticated_bind_for_nat() {
+    let mut remote = discovery(true);
+    remote.ssh_local_address = Some("100.69.199.110".parse().unwrap());
+    let fixture = Fixture::new(serde_json::to_vec(&remote).unwrap());
+    let mut current = status();
+    current.network_addresses = Ok(spaceterm_server::direct::NetworkAddresses {
+        available: vec![
+            "100.69.199.110".parse().unwrap(),
+            "192.168.1.41".parse().unwrap(),
+        ],
+        suggested: Some("192.168.1.41".parse().unwrap()),
+    });
+    *fixture.adapter.status.lock().unwrap() = Some(current);
+    let address = SetupAddress::parse("203.0.113.41:45366").unwrap();
+    let expected = address.clone();
+
+    let result = fixture.setup_at(
+        Some(address),
+        Arc::new(Approvals(move |offer, _: &CancellationToken| {
+            assert_eq!(
+                offer,
+                SetupOffer::Network {
+                    address: expected.clone(),
+                    bind: "100.69.199.110:45366".parse().unwrap(),
+                    current: None,
+                    enabled: false,
+                }
+            );
+            false
+        })),
+    );
+
+    assert_eq!(result, Err(SetupFailure::Cancelled));
+    assert!(fixture.adapter.effects.lock().unwrap().is_empty());
+    assert_eq!(fixture.adapter.authentications.load(Ordering::SeqCst), 1);
+    assert_eq!(fixture.prompts.load(Ordering::SeqCst), 1);
+    let counts = fixture.backend.process_counts();
+    assert_eq!(counts.active(), 0);
+    assert_eq!(counts.spawned, counts.reaped);
+}
+
+#[test]
 fn setup_discovery_times_out_before_the_slave_ready_preamble_and_reaps_the_attempt() {
     let fixture = Fixture::new(serde_json::to_vec(&discovery(true)).unwrap());
     fixture.adapter.stall.0.lock().unwrap().action = Some("ssh-discover");

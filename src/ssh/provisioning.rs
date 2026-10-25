@@ -420,6 +420,15 @@ impl<A: SshProcessAdapter> NativeSshSetup<A> {
                         || configured.is_unspecified()
                         || Some(*configured) == discovery.ssh_local_address
                 })
+                .or_else(|| {
+                    let requested = request
+                        .address
+                        .as_ref()
+                        .filter(|_| status.policy.is_none())?;
+                    let ip = requested.host().parse::<std::net::IpAddr>().ok()?;
+                    let observed = status.network_addresses.as_ref().ok()?;
+                    observed.available.contains(&ip).then_some(ip)
+                })
                 .or(discovery.ssh_local_address)
                 .ok_or(SetupFailure::Refused(RefusalKind::InvalidEndpoint))?;
             let bind = request
