@@ -13,7 +13,9 @@ use super::super::servers::{LocalServerControl, OfferedLocalServer, OfferedServe
 use crate::appearance::Appearance;
 use crate::domain::SshDestination;
 use crate::local_server::service::control::Action;
-use crate::local_server::service::maintenance::{MaintenanceFacts, PreparedChange, RemoteBuild};
+use crate::local_server::service::maintenance::{
+    MaintenanceFacts, PreparedChange, RemoteActivation, RemoteActivationPhase, RemoteBuild,
+};
 use crate::local_server::service::{ServiceStartup, ServiceStatus};
 use crate::platform::appearance::testing::RecordingAppearancePlatform;
 use crate::platform::window_movement::RecordingOperatingSystemWindowDragPlatform;
@@ -353,15 +355,23 @@ impl RemoteServerOperations for ScriptedOperations {
         );
     }
 
+    /// The description binds what the last read observed. Without a read, a Return describes the
+    /// stopped server a failed update leaves, and every other change a running one.
     fn describe(&self, destination: &SshDestination, request: RemoteMaintenanceRequest) {
         self.record(Call::Describe(request));
-        let running = !matches!(request, RemoteMaintenanceRequest::Return);
+        let (running, stopped) = match self.state(destination) {
+            RemoteOperationState::Read(facts) => (facts.status.running, facts.status.stopped),
+            _ => {
+                let running = !matches!(request, RemoteMaintenanceRequest::Return);
+                (running, !running)
+            }
+        };
         self.set(
             destination.as_str(),
             RemoteOperationState::Described {
                 handle: self.next_handle(),
                 request,
-                change: Box::new(change(running, !running)),
+                change: Box::new(change(running, stopped)),
             },
         );
     }
@@ -709,6 +719,26 @@ fn explains(text: &str, cx: &mut VisualTestContext) -> bool {
     })
 }
 
+/// The open confirmation's logical title and its text as assistive technology reads it: the
+/// heading first, then the body and any detail.
+fn confirmation_reads(cx: &mut VisualTestContext) -> (String, Vec<String>) {
+    let tree = A11yTree::read(cx);
+    let [alert] = tree.with_role("AlertDialog")[..] else {
+        panic!("one confirmation is open");
+    };
+    let text = tree
+        .descendants(alert)
+        .into_iter()
+        .filter(|node| node["aria"]["role"] == "Label")
+        .filter_map(|node| node["aria"]["value"].as_str().map(str::to_owned))
+        .collect();
+    let title = alert["aria"]["label"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    (title, text)
+}
+
 /// Check Now on the Version row.
 const CHECK_NOW: &str = super::super::server_card::VERSION_CHECK_SELECTOR;
 /// The Version row's steps for an SSH server's update journey.
@@ -1025,6 +1055,106 @@ fn updating_names_both_versions_and_asks_once(cx: &mut TestAppContext) {
         ]
     );
     assert!(explains("now runs 1.5.0 (bbbbbbb)", servers.cx));
+}
+
+/// Each confirmation asks its question as the heading and says what is lost beneath it. A change
+/// that ends no Terminal Session asks only the question, and every answer reaches the change the
+/// confirmation described.
+#[gpui::test]
+fn confirmations_ask_their_question_as_the_heading(cx: &mut TestAppContext) {
+    let servers = open_maintenance(cx);
+    let stopped = || facts(status(true, false, true));
+    let mut expected = Vec::new();
+
+    servers
+        .operations
+        .set("penguin", RemoteOperationState::Read(Box::new(stopped())));
+    servers.operations.offer("penguin", available());
+    servers.cx.run_until_parked();
+    click(VERSION_UPDATE, servers.cx);
+    assert_eq!(
+        confirmation_reads(servers.cx),
+        (
+            "Update Server".to_owned(),
+            vec!["Update the stopped penguin server to 1.5.0 (commit bbbbbbb)?".to_owned()]
+        )
+    );
+    assert!(servers.cx.debug_bounds("modal-alert-message").is_none());
+    click_modal("settings-ssh-server-update-confirm", servers.cx);
+    expected.extend([
+        Call::Describe(RemoteMaintenanceRequest::Update),
+        Call::Confirm(RemoteOperationHandle(1)),
+    ]);
+    assert_eq!(servers.operations.calls(), expected);
+
+    let mut failed = stopped();
+    failed.activation = Some(RemoteActivation {
+        operation: [9; 32],
+        previous: build("1.4.0", 'a'),
+        candidate: build("1.5.0", 'b'),
+        stopped: true,
+        phase: RemoteActivationPhase::Failed { can_return: true },
+        returned: false,
+    });
+    servers
+        .operations
+        .set("penguin", RemoteOperationState::Read(Box::new(failed)));
+    servers.cx.run_until_parked();
+    click("settings-server-version-return", servers.cx);
+    assert_eq!(
+        confirmation_reads(servers.cx),
+        (
+            "Return to Previous Version".to_owned(),
+            vec!["Return the penguin server to 1.4.0 (commit aaaaaaa)?".to_owned()]
+        )
+    );
+    assert!(servers.cx.debug_bounds("modal-alert-message").is_none());
+    click_modal("settings-ssh-server-return-confirm", servers.cx);
+    expected.extend([
+        Call::Describe(RemoteMaintenanceRequest::Return),
+        Call::Confirm(RemoteOperationHandle(2)),
+    ]);
+    assert_eq!(servers.operations.calls(), expected);
+
+    servers
+        .operations
+        .set("penguin", RemoteOperationState::Read(Box::new(stopped())));
+    servers.cx.run_until_parked();
+    choose("settings-ssh-server-service-uninstall", servers.cx);
+    assert_eq!(
+        confirmation_reads(servers.cx),
+        (
+            "Uninstall Server".to_owned(),
+            vec!["Uninstall the penguin server?".to_owned()]
+        )
+    );
+    assert!(servers.cx.debug_bounds("modal-alert-message").is_none());
+    click_modal("settings-ssh-server-uninstall-confirm", servers.cx);
+    expected.extend([
+        Call::Describe(RemoteMaintenanceRequest::Service(Action::Uninstall)),
+        Call::Confirm(RemoteOperationHandle(3)),
+    ]);
+    assert_eq!(servers.operations.calls(), expected);
+
+    servers
+        .operations
+        .set("penguin", paused(SubmittedKind::Service(Action::Stop)));
+    servers.cx.run_until_parked();
+    click(STATUS_DISCARD, servers.cx);
+    assert_eq!(
+        confirmation_reads(servers.cx),
+        (
+            "Discard".to_owned(),
+            vec![
+                "Discard the stop SpaceTerm sent to penguin?".to_owned(),
+                "SpaceTerm will stop checking this stop. You will lose the only remaining way to confirm its result on penguin.".to_owned(),
+            ]
+        )
+    );
+    let discarded = servers.operations.operation_of("penguin", false);
+    click_modal("settings-ssh-server-discard-confirm", servers.cx);
+    expected.push(Call::Discard(discarded));
+    assert_eq!(servers.operations.calls(), expected);
 }
 
 /// A validated result stays until the person acknowledges it, which is an ordinary dismissal.

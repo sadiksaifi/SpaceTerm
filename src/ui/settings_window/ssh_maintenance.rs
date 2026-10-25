@@ -480,8 +480,8 @@ impl SettingsWindow {
                     let alert = Alert::new(
                         ModalId::new(id),
                         confirmation.title,
-                        confirmation.title,
                         confirmation.message.clone(),
+                        confirmation.detail.clone(),
                         vec![
                             ModalAction::new(
                                 true,
@@ -499,8 +499,7 @@ impl SettingsWindow {
                             ),
                         ],
                     )
-                    .intent(AlertIntent::Critical)
-                    .detail(confirmation.detail.clone());
+                    .intent(AlertIntent::Critical);
                     let result = alert.present(window, cx, move |outcome, cx| {
                         let confirmed = matches!(
                             outcome,
