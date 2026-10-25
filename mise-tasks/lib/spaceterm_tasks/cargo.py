@@ -10,9 +10,15 @@ from spaceterm_tasks import ROOT, TaskError
 from spaceterm_tasks.processes import OWN_GROUP, stop_group, terminating_signals_raise
 
 
-def build_executable(*cargo_args, binary="spaceterm", env=None, portable_linux=False):
-    """Build `binary` and return Cargo's artifact path, never a stale guess under target/."""
+def build_executable(
+    *cargo_args, binary="spaceterm", env=None, portable_linux=False, target=None, metadata=None
+):
+    """Return Cargo's executable path and, if requested, its package's emitted metadata."""
     build = ["build"]
+    if target is not None:
+        if portable_linux:
+            raise TaskError("select either a headless target or the desktop Linux toolchain")
+        build = ["zigbuild", "--target", target]
     if portable_linux:
         from spaceterm_tasks.linux_toolchain import build_environment
 
@@ -36,12 +42,17 @@ def build_executable(*cargo_args, binary="spaceterm", env=None, portable_linux=F
             start_new_session=OWN_GROUP,
         )
         try:
-            executables = read_executables(process, binary)
+            packages = {}
+            outputs = {}
+            executables = read_executables(process, binary, packages=packages, outputs=outputs)
             returncode = process.wait()
         except BaseException:
             # An interrupted task must not leave Cargo, rustc, or Zig building in the background.
             stop_group(process)
             raise
+        finally:
+            if process.stdout is not None:
+                process.stdout.close()
     if returncode:
         raise TaskError(f"cargo build failed for {binary}")
     if len(executables) != 1:
@@ -49,10 +60,20 @@ def build_executable(*cargo_args, binary="spaceterm", env=None, portable_linux=F
     executable = executables.pop()
     if not os.access(executable, os.X_OK):
         raise TaskError(f"Cargo did not produce an executable {binary}")
+    if metadata is not None:
+        package_ids = packages.get(executable, set())
+        directories = {path for package in package_ids for path in outputs.get(package, set())}
+        if len(package_ids) != 1 or len(directories) != 1:
+            raise TaskError(f"Cargo did not report unambiguous build metadata for {binary}")
+        try:
+            data = (directories.pop() / metadata).read_bytes()
+        except OSError:
+            raise TaskError(f"Cargo build metadata is unavailable for {binary}") from None
+        return executable, data
     return executable
 
 
-def read_executables(process, binary):
+def read_executables(process, binary, *, packages=None, outputs=None):
     """Relay Cargo's diagnostics and collect the paths it reports for `binary`."""
     assert process.stdout is not None  # stdout=PIPE
     executables = set()
@@ -65,10 +86,15 @@ def read_executables(process, binary):
         rendered = message.get("message", {}).get("rendered")
         if rendered:
             print(rendered, end="", file=sys.stderr)
+        if message.get("reason") == "build-script-executed" and outputs is not None:
+            outputs.setdefault(message["package_id"], set()).add(Path(message["out_dir"]))
         if (
             message.get("reason") == "compiler-artifact"
             and message.get("target", {}).get("name") == binary
             and message.get("executable")
         ):
-            executables.add(Path(message["executable"]).resolve())
+            executable = Path(message["executable"]).resolve()
+            executables.add(executable)
+            if packages is not None:
+                packages.setdefault(executable, set()).add(message.get("package_id"))
     return executables

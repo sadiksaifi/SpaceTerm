@@ -209,6 +209,36 @@ def signer():
     return config["macos"]["signing-identity"]
 
 
+def compile_terminfo(destination, target):
+    """Compile target-compatible data with tic, including its extended capabilities."""
+    with tempfile.TemporaryDirectory(prefix="spaceterm-server-terminfo-") as temporary:
+        source = TERMINFO
+        if target == TARGETS["darwin"] and sys.platform != "darwin":
+            # The inherited Linux entry advertises 65536 pairs, requiring ncurses 6's
+            # 32-bit format. Advertise the legacy capacity that macOS can represent.
+            source = Path(temporary) / "server.terminfo"
+            source.write_text(TERMINFO.read_text().replace("\n", "\n\tpairs#32767,\n", 1))
+        checked(
+            ["tic", "-x", "-o", str(destination), str(source)],
+            "server terminfo compilation failed",
+        )
+    if target == TARGETS["darwin"]:
+        hexadecimal = destination / "78/xterm-spaceterm"
+        alphabetic = destination / "x/xterm-spaceterm"
+        if alphabetic.exists():
+            hexadecimal.parent.mkdir(exist_ok=True)
+            alphabetic.replace(hexadecimal)
+            alphabetic.parent.rmdir()
+        verify_foreign_terminfo(hexadecimal)
+        if hexadecimal.read_bytes()[:2] != b"\x1a\x01":
+            raise TaskError("the macOS server terminfo requires the legacy 16-bit format")
+    elif not (destination / "x/xterm-spaceterm").exists():
+        # Linux ncurses uses the first character, while macOS tic emits its hex value.
+        alphabetic = destination / "x/xterm-spaceterm"
+        alphabetic.parent.mkdir(exist_ok=True)
+        shutil.copyfile(destination / "78/xterm-spaceterm", alphabetic)
+
+
 def verify_foreign_terminfo(path):
     """Check portable table bounds; the native producer owns full terminfo decoding."""
     # ncurses term(5): 0x011a has 16-bit numbers, 0x021e has 32-bit numbers.
@@ -232,6 +262,124 @@ def verify_foreign_terminfo(path):
         end += numbers * (2 if magic == 0x011A else 4) + strings * 2 + table
         if path.stat().st_size < end:
             raise TaskError("the foreign server terminfo tables are truncated")
+
+
+def verify_macho_output(output):
+    """Require the pinned LLVM tool's complete Mach-O header and load-command output."""
+    if len(output) > 4 * 1024 * 1024:
+        raise TaskError("the macOS server inspection output is too large")
+    lines = output.splitlines()
+    rows = [line.split() for line in lines if line.startswith("MH_MAGIC")]
+    if len(rows) != 1 or rows[0][:5] != ["MH_MAGIC_64", "ARM64", "ALL", "0x00", "EXECUTE"]:
+        raise TaskError("the server must contain only Apple Silicon executable code")
+    try:
+        count = int(rows[0][5])
+    except (IndexError, ValueError):
+        raise TaskError("the macOS server load command count is invalid") from None
+    blocks = re.split(r"(?m)^Load command ([0-9]+)\n", output)
+    if not 0 < count <= 4096 or blocks[1::2] != [str(index) for index in range(count)]:
+        raise TaskError("the macOS server load commands are incomplete")
+    versions = []
+    dependencies = []
+    for block in blocks[2::2]:
+        commands = re.findall(r"(?m)^\s+cmd (LC_[A-Z0-9_]+)$", block)
+        if len(commands) != 1:
+            raise TaskError("the macOS server load command is invalid")
+        command = commands[0]
+        if command == "LC_BUILD_VERSION":
+            versions.append(
+                (
+                    re.findall(r"(?m)^\s+platform (\S+)$", block),
+                    re.findall(r"(?m)^\s+minos (\S+)$", block),
+                )
+            )
+        elif command in (
+            "LC_LOAD_DYLIB",
+            "LC_LOAD_WEAK_DYLIB",
+            "LC_REEXPORT_DYLIB",
+            "LC_LAZY_LOAD_DYLIB",
+            "LC_LOAD_UPWARD_DYLIB",
+        ):
+            names = re.findall(r"(?m)^\s+name (.+) \(offset [0-9]+\)$", block)
+            if len(names) != 1 or not names[0].startswith(("/usr/lib/", "/System/Library/")):
+                raise TaskError("the macOS server dependency is not a system library")
+            dependencies.append(names[0].lower())
+    if versions != [(["macos"], ["26.0"])]:
+        raise TaskError("the server requires the macOS 26 deployment target")
+    if not dependencies or any(
+        forbidden in name
+        for name in dependencies
+        for forbidden in ("appkit", "metal", "sparkle", "quartz", "opengl")
+    ):
+        raise TaskError("the server links a graphical or GPU dependency")
+
+
+def verify_macho_identity(output, identifier):
+    """Require the exact identity and ad-hoc flags emitted by pinned rcodesign."""
+    if (
+        len(output) > 4 * 1024 * 1024
+        or not output.startswith("CodeDirectoryBlob {\n")
+        or not output.endswith("}\n")
+        or re.findall(r'(?m)^    ident: "([^"\n]*)",$', output) != [identifier]
+        or output.count("    flags: CodeSignatureFlags(\n        ADHOC,\n    ),\n") != 1
+    ):
+        raise TaskError("the macOS server ad-hoc identity differs from its application identity")
+
+
+def verify_cross_build(tree, expected):
+    """Inspect a local cross-build; native execution checks belong to its target host."""
+    executable = tree / "bin/spaceterm-server"
+    library = checked(
+        ["rustc", "--print", "target-libdir"], "Rust host tools are unavailable", text=True
+    ).strip()
+    objdump = Path(library).parent / "bin/llvm-objdump"
+    if expected["target"] == TARGETS["darwin"]:
+        headers = checked(
+            [str(objdump), "--macho", "--private-headers", str(executable)],
+            "the macOS server load commands are unavailable",
+            text=True,
+        )
+        verify_macho_output(headers)
+        # rcodesign 0.29.0 verify rejects valid ad-hoc signatures because they have no
+        # CMS payload. Extract the producer's identity; native codesign owns verification.
+        identity = checked(
+            ["rcodesign", "-C", "/dev/null", "extract", "code-directory", str(executable)],
+            "the macOS server code identity is unavailable",
+            text=True,
+        )
+        verify_macho_identity(identity, f"io.github.sadiksaifi.{expected['identity']}.server")
+    else:
+        header = checked([str(objdump), "-f", str(executable)], "invalid server architecture")
+        if b"elf64-x86-64" not in header:
+            raise TaskError("the server must contain only x86_64 Linux code")
+        dependencies = checked(
+            [str(objdump), "-p", str(executable)], "server dependencies unavailable"
+        ).lower()
+        if any(
+            name in dependencies
+            for name in (
+                b"libx11",
+                b"libxcb",
+                b"libwayland",
+                b"libvulkan",
+                b"libegl",
+                b"libgl.",
+                b"libgtk",
+            )
+        ):
+            raise TaskError("the server links a graphical or GPU dependency")
+        symbols = checked(
+            [str(objdump), "-T", str(executable)], "server executable symbols could not be read"
+        )
+        required = max(
+            (
+                (int(major), int(minor))
+                for major, minor in re.findall(rb"GLIBC_(\d+)\.(\d+)", symbols)
+            ),
+            default=(0, 0),
+        )
+        if required > (2, 35):
+            raise TaskError("the server executable needs glibc newer than 2.35")
 
 
 def verify_tree(tree, expected, *, native=True):
@@ -265,8 +413,8 @@ def verify_tree(tree, expected, *, native=True):
         raise TaskError("the server directories do not match the supported layout")
     executable = tree / "bin/spaceterm-server"
     if not native:
-        # Catalogs authenticate foreign native bytes without executing them. Their
-        # producer performs native signature, deployment, dependency and --check checks.
+        # Catalogs authenticate foreign bytes without executing them. Local cross-builds
+        # receive the additional static producer checks in verify_cross_build.
         with executable.open("rb") as source:
             header = source.read(64)
         if expected["target"] == TARGETS["darwin"]:
@@ -379,9 +527,9 @@ def verified_copy(
     return tree, private, raw
 
 
-def verify(archive, signature, expected):
+def verify(archive, signature, expected, *, native=True):
     with tempfile.TemporaryDirectory(prefix="spaceterm-server-verify-") as temporary:
-        verified_copy(archive, signature, Path(temporary), expected)
+        verified_copy(archive, signature, Path(temporary), expected, native=native)
     print(json.dumps(expected, sort_keys=True))
 
 
@@ -443,8 +591,14 @@ def install(archive, signature, expected):
     return destination
 
 
-def package(identity, release_tag=None):
-    target = host_target()
+def package(identity, release_tag=None, *, target=None):
+    native_target = host_target()
+    target = native_target if target is None else target
+    if target not in TARGETS.values():
+        raise TaskError("the server package target is unsupported")
+    native = target == native_target
+    if release_tag and not native:
+        raise TaskError("release server packages require their native target host")
     if identity not in IDENTITIES or (identity == "spaceterm") != bool(release_tag):
         raise TaskError("only a validated release tag selects the release server identity")
     if release_tag:
@@ -452,12 +606,12 @@ def package(identity, release_tag=None):
     environment = macos_signing.signing_environment(packaged_environment(release_tag))
     if identity == "spaceterm-development":
         environment.pop("SPACETERM_PACKAGED", None)
-    if sys.platform == "darwin":
+    if target == TARGETS["darwin"]:
         environment["MACOSX_DEPLOYMENT_TARGET"] = "26.0"
         if release_tag:
             macos_signing.signing_credentials(signer(), os.environ)
     seed = artifact_signing_seed(identity)
-    executable = build_executable(
+    executable, metadata = build_executable(
         "--release",
         "--locked",
         "--package",
@@ -465,9 +619,16 @@ def package(identity, release_tag=None):
         "--no-default-features",
         binary="spaceterm-server",
         env=environment,
-        portable_linux=sys.platform == "linux",
+        target=(
+            "x86_64-unknown-linux-gnu.2.35"
+            if target == TARGETS["linux"]
+            else target
+            if not native
+            else None
+        ),
+        metadata="build-info.json",
     )
-    expected = build_info(executable)
+    expected = document(metadata)
     commit = checked(
         ["git", "rev-parse", "HEAD"], "candidate commit unavailable", cwd=ROOT, text=True
     ).strip()
@@ -477,6 +638,8 @@ def package(identity, release_tag=None):
         or expected["target"] != target
     ):
         raise TaskError("Cargo returned a different server build")
+    if native and build_info(executable) != expected:
+        raise TaskError("the executable differs from Cargo's server build metadata")
     DIST.mkdir(exist_ok=True)
     with tempfile.TemporaryDirectory(dir=DIST, prefix=".server-package-") as temporary:
         directory = Path(temporary)
@@ -488,12 +651,9 @@ def package(identity, release_tag=None):
         resources = tree / "share/spaceterm"
         shutil.copytree(SHELL_INTEGRATION, resources / "shell-integration")
         shutil.copyfile(NOTICES, resources / NOTICES.name)
-        checked(
-            ["tic", "-x", "-o", str(resources / "terminfo"), str(TERMINFO)],
-            "server terminfo compilation failed",
-        )
+        compile_terminfo(resources / "terminfo", target)
         (tree / "build.json").write_text(json.dumps(expected, sort_keys=True) + "\n")
-        if sys.platform == "darwin":
+        if target == TARGETS["darwin"]:
             identifier = f"io.github.sadiksaifi.{identity}.server"
             if release_tag:
                 requirement = f'=designated => identifier "{identifier}" and {macos_signing.certificate_requirement(signer())}'
@@ -514,7 +674,7 @@ def package(identity, release_tag=None):
                         "server code signing failed",
                         env=environment,
                     )
-            else:
+            elif native:
                 checked(
                     [
                         "codesign",
@@ -529,13 +689,33 @@ def package(identity, release_tag=None):
                     "server code signing failed",
                     env=environment,
                 )
-        verify_tree(tree, expected)
+            else:
+                signed = directory / "signed-server"
+                checked(
+                    [
+                        "rcodesign",
+                        "-C",
+                        "/dev/null",
+                        "sign",
+                        "--binary-identifier",
+                        identifier,
+                        str(server),
+                        str(signed),
+                    ],
+                    "server code signing failed",
+                    env=environment,
+                )
+                signed.replace(server)
+                server.chmod(0o755)
+        verify_tree(tree, expected, native=native)
+        if not native:
+            verify_cross_build(tree, expected)
         name = f"{identity}-server-{commit}-{target}.tar.gz"
         archive = directory / name
         signature = directory / f"{name}.sig"
         write_archive(tree, archive)
         release.sign_ed25519(seed, archive, signature)
-        verify(archive, signature, expected)
+        verify(archive, signature, expected, native=native)
         archive.replace(DIST / name)
         signature.replace(DIST / signature.name)
     print(f"Created signed server candidate {name}; nothing published")
@@ -572,9 +752,7 @@ def compatible_candidate(info, identity, *, target=None):
         raise TaskError("the server candidate is missing a required capability")
 
 
-def prepare_desktop_artifact(
-    destination, identity, release_tag=None, *, catalog_destination=None, ssh_config=None
-):
+def prepare_desktop_artifact(destination, identity, release_tag=None, *, catalog_destination=None):
     """Signing happens during candidate preparation; launch only consumes the resulting pair.
 
     An explicit pair reuses its signed bytes across client releases. Without that pair,
@@ -591,7 +769,7 @@ def prepare_desktop_artifact(
     if automatic:
         from spaceterm_tasks.server_builds import prepare
 
-        prepare(catalog_destination, identity, ssh_config=ssh_config)
+        prepare(catalog_destination, identity)
         if not archive:
             local = Path(catalog_destination) / host_target()
             archive, signature = local / "artifact.tar.gz", local / "artifact.sig"

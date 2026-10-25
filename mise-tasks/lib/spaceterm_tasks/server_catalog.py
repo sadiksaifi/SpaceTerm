@@ -1,7 +1,7 @@
 """Snapshot and authenticate the native server packages a packaged SSH client can offer.
 
 Catalogs never execute foreign code. Matching-host entries receive full native checks;
-foreign entries retain their producer's signed proof and portable resource/machine checks.
+foreign entries receive portable resource/machine checks and retain their signed bytes.
 """
 
 import os

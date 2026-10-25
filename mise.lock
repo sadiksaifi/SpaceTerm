@@ -13,9 +13,9 @@ backend = "cargo:cargo-sweep"
 specifiers = ["0.8.0"]
 
 [[tools."cargo:cargo-zigbuild"]]
-version = "0.23.4"
+version = "0.24.0"
 backend = "cargo:cargo-zigbuild"
-specifiers = ["0.23.4"]
+specifiers = ["0.24.0"]
 
 [[tools.cocogitto]]
 version = "7.0.0"
@@ -96,6 +96,49 @@ url_api = "https://api.github.com/repos/orhun/git-cliff/releases/assets/57348483
 checksum = "sha256:6ece2112b3f4af462190ecbea4aeb1315fff6af415629b597f84319073c31131"
 url = "https://github.com/orhun/git-cliff/releases/download/v2.14.2/git-cliff-2.14.2-x86_64-pc-windows-msvc.zip"
 url_api = "https://api.github.com/repos/orhun/git-cliff/releases/assets/573487227"
+
+[[tools."github:indygreg/apple-platform-rs"]]
+version = "apple-codesign/0.29.0"
+backend = "github:indygreg/apple-platform-rs"
+specifiers = ["apple-codesign/0.29.0"]
+
+[tools."github:indygreg/apple-platform-rs".options]
+asset_pattern = "apple-codesign-0.29.0-x86_64-unknown-linux-musl.tar.gz"
+
+[tools."github:indygreg/apple-platform-rs"."platforms.linux-arm64"]
+checksum = "sha256:dbe85cedd8ee4217b64e9a0e4c2aef92ab8bcaaa41f20bde99781ff02e600002"
+url = "https://github.com/indygreg/apple-platform-rs/releases/download/apple-codesign/0.29.0/apple-codesign-0.29.0-x86_64-unknown-linux-musl.tar.gz"
+url_api = "https://api.github.com/repos/indygreg/apple-platform-rs/releases/assets/209933462"
+
+[tools."github:indygreg/apple-platform-rs"."platforms.linux-arm64-musl"]
+checksum = "sha256:dbe85cedd8ee4217b64e9a0e4c2aef92ab8bcaaa41f20bde99781ff02e600002"
+url = "https://github.com/indygreg/apple-platform-rs/releases/download/apple-codesign/0.29.0/apple-codesign-0.29.0-x86_64-unknown-linux-musl.tar.gz"
+url_api = "https://api.github.com/repos/indygreg/apple-platform-rs/releases/assets/209933462"
+
+[tools."github:indygreg/apple-platform-rs"."platforms.linux-x64"]
+checksum = "sha256:dbe85cedd8ee4217b64e9a0e4c2aef92ab8bcaaa41f20bde99781ff02e600002"
+url = "https://github.com/indygreg/apple-platform-rs/releases/download/apple-codesign/0.29.0/apple-codesign-0.29.0-x86_64-unknown-linux-musl.tar.gz"
+url_api = "https://api.github.com/repos/indygreg/apple-platform-rs/releases/assets/209933462"
+
+[tools."github:indygreg/apple-platform-rs"."platforms.linux-x64-musl"]
+checksum = "sha256:dbe85cedd8ee4217b64e9a0e4c2aef92ab8bcaaa41f20bde99781ff02e600002"
+url = "https://github.com/indygreg/apple-platform-rs/releases/download/apple-codesign/0.29.0/apple-codesign-0.29.0-x86_64-unknown-linux-musl.tar.gz"
+url_api = "https://api.github.com/repos/indygreg/apple-platform-rs/releases/assets/209933462"
+
+[tools."github:indygreg/apple-platform-rs"."platforms.macos-arm64"]
+checksum = "sha256:dbe85cedd8ee4217b64e9a0e4c2aef92ab8bcaaa41f20bde99781ff02e600002"
+url = "https://github.com/indygreg/apple-platform-rs/releases/download/apple-codesign/0.29.0/apple-codesign-0.29.0-x86_64-unknown-linux-musl.tar.gz"
+url_api = "https://api.github.com/repos/indygreg/apple-platform-rs/releases/assets/209933462"
+
+[tools."github:indygreg/apple-platform-rs"."platforms.macos-x64"]
+checksum = "sha256:dbe85cedd8ee4217b64e9a0e4c2aef92ab8bcaaa41f20bde99781ff02e600002"
+url = "https://github.com/indygreg/apple-platform-rs/releases/download/apple-codesign/0.29.0/apple-codesign-0.29.0-x86_64-unknown-linux-musl.tar.gz"
+url_api = "https://api.github.com/repos/indygreg/apple-platform-rs/releases/assets/209933462"
+
+[tools."github:indygreg/apple-platform-rs"."platforms.windows-x64"]
+checksum = "sha256:dbe85cedd8ee4217b64e9a0e4c2aef92ab8bcaaa41f20bde99781ff02e600002"
+url = "https://github.com/indygreg/apple-platform-rs/releases/download/apple-codesign/0.29.0/apple-codesign-0.29.0-x86_64-unknown-linux-musl.tar.gz"
+url_api = "https://api.github.com/repos/indygreg/apple-platform-rs/releases/assets/209933462"
 
 [[tools."github:sparkle-project/Sparkle"]]
 version = "2.10.0"
@@ -323,8 +366,9 @@ backend = "core:rust"
 specifiers = ["1.98.1"]
 
 [tools.rust.options]
-components = "clippy,rustfmt"
+components = "clippy,llvm-tools,rustfmt"
 profile = "minimal"
+targets = "aarch64-apple-darwin,x86_64-unknown-linux-gnu"
 
 [[tools.shellcheck]]
 version = "0.11.0"

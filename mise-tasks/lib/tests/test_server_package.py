@@ -4,6 +4,7 @@ import base64
 import io
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -322,6 +323,105 @@ class ServerArchiveTests(unittest.TestCase):
             self.archive_with([("server/build.json", payload, tarfile.REGTYPE)])
             with self.assertRaises(TaskError):
                 self.unpack()
+
+
+class CrossBuildTests(unittest.TestCase):
+    def test_linux_target_terminfo_has_the_ncurses_character_directory(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = Path(temporary) / "terminfo"
+            server_package.compile_terminfo(destination, "x86_64-unknown-linux-gnu")
+            entry = destination / "x/xterm-spaceterm"
+            server_package.verify_foreign_terminfo(entry)
+            hexadecimal = destination / "78/xterm-spaceterm"
+            if hexadecimal.exists():
+                self.assertEqual(entry.read_bytes(), hexadecimal.read_bytes())
+
+    def test_foreign_release_and_unknown_target_are_rejected_before_build(self):
+        with patch.object(server_package, "host_target", return_value="aarch64-apple-darwin"):
+            with self.assertRaisesRegex(TaskError, "native target host"):
+                server_package.package("spaceterm", "v1.0.0", target="x86_64-unknown-linux-gnu")
+            with self.assertRaisesRegex(TaskError, "unsupported"):
+                server_package.package("spaceterm-preflight", target="other")
+
+    def test_mac_target_terminfo_is_legacy_and_preserves_extended_capabilities(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = Path(temporary) / "terminfo"
+            with patch.object(server_package, "sys", SimpleNamespace(platform="linux")):
+                server_package.compile_terminfo(destination, "aarch64-apple-darwin")
+            entry = destination / "78/xterm-spaceterm"
+            self.assertEqual(entry.read_bytes()[:2], bytes.fromhex("1a01"))
+            result = subprocess.run(
+                ["infocmp", "-x", "-1", "xterm-spaceterm"],
+                env={**os.environ, "TERMINFO": str(destination)},
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout
+            for name, expected in (("colors", 256), ("pairs", 32767), ("RGB", 8)):
+                match = re.search(rf"(?m)^\s*{name}#(0x[0-9a-fA-F]+|[0-9]+),", result)
+                self.assertIsNotNone(match)
+                assert match is not None
+                self.assertEqual(int(match[1], 0), expected)
+            for capability in ("Tc,", "Ms=", "Ss=", "Se="):
+                self.assertIn(capability, result)
+
+
+class MachoCrossBuildTests(unittest.TestCase):
+    def test_macos_load_commands_require_exact_deployment_and_safe_dependencies(self):
+        for minimum, dependency, valid in (
+            ("26.0", "/usr/lib/libSystem.B.dylib", True),
+            ("13.0", "/usr/lib/libSystem.B.dylib", False),
+            ("26.0", "/System/Library/Frameworks/Metal.framework/Metal", False),
+            ("26.0", "@rpath/foreign.dylib", False),
+        ):
+            output = f"""Mach header
+      magic cputype cpusubtype caps filetype ncmds sizeofcmds flags
+MH_MAGIC_64 ARM64 ALL 0x00 EXECUTE 2 80 NOUNDEFS DYLDLINK TWOLEVEL PIE
+Load command 0
+       cmd LC_BUILD_VERSION
+   cmdsize 24
+  platform macos
+       sdk 26.0
+     minos {minimum}
+    ntools 0
+Load command 1
+          cmd LC_LOAD_DYLIB
+      cmdsize 56
+         name {dependency} (offset 24)
+   time stamp 2 Thu Jan 1 1970
+      current version 1.0.0
+compatibility version 1.0.0
+"""
+            with self.subTest(minimum=minimum, dependency=dependency):
+                if valid:
+                    server_package.verify_macho_output(output)
+                    with self.assertRaises(TaskError):
+                        server_package.verify_macho_output(
+                            output.replace("Load command 1", "Load command 2")
+                        )
+                else:
+                    with self.assertRaises(TaskError):
+                        server_package.verify_macho_output(output)
+
+    def test_rcodesign_identity_requires_exact_identifier_and_adhoc_flags(self):
+        identifier = "io.github.sadiksaifi.spaceterm-preflight.server"
+        output = f'''CodeDirectoryBlob {{
+    flags: CodeSignatureFlags(
+        ADHOC,
+    ),
+    ident: "{identifier}",
+}}
+'''
+        server_package.verify_macho_identity(output, identifier)
+        for changed in (
+            output.replace(identifier, "foreign"),
+            output.replace("ADHOC", "RUNTIME"),
+            output.replace("    ident:", '    ident: "duplicate",\n    ident:'),
+            "",
+        ):
+            with self.subTest(changed=changed):
+                with self.assertRaises(TaskError):
+                    server_package.verify_macho_identity(changed, identifier)
 
 
 if __name__ == "__main__":

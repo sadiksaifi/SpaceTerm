@@ -250,7 +250,7 @@ def stage_prefix(
     return prefix
 
 
-def launch(backend: str | None = None, *, ssh_config=None) -> int | None:
+def launch(backend: str | None = None) -> int | None:
     """Build and own the current client and foreground Server for this Development run."""
     from spaceterm_tasks.server_builds import prepare
 
@@ -268,9 +268,7 @@ def launch(backend: str | None = None, *, ssh_config=None) -> int | None:
         for tool in REQUIRED_TOOLS:
             if shutil.which(tool) is None:
                 raise TaskError(f"{tool} is required; run mise doctor project")
-        catalog = prepare(
-            Path(temporary) / "catalog", "spaceterm-development", ssh_config=ssh_config
-        )
+        catalog = prepare(Path(temporary) / "catalog", "spaceterm-development")
         server = build_executable(
             "--package",
             "spaceterm-server-host",
