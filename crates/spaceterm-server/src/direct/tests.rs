@@ -2029,8 +2029,8 @@ fn client_clock_cannot_expire_or_reject_an_invitation_before_server_observation(
 }
 
 #[test]
-fn setup_binds_the_advertised_dns_endpoint_independently_of_the_exact_listener_policy() {
-    let fixture = Fixture::new();
+fn setup_preserves_distinct_public_and_listener_ports_across_reopen_and_exact_replay() {
+    let mut fixture = Fixture::new();
     let credential = DeviceCredential::generate().unwrap();
     let mut request = setup(&fixture, [104; 32], &credential);
     let Management::Setup {
@@ -2039,22 +2039,43 @@ fn setup_binds_the_advertised_dns_endpoint_independently_of_the_exact_listener_p
     else {
         panic!()
     };
-    *endpoint = format!("wss://server.example:{}/spaceterm", policy.bind.port());
     let bind = policy.bind;
+    let public_port = if bind.port() == 9443 { 9444 } else { 9443 };
+    *endpoint = format!("wss://public.example:{public_port}/spaceterm");
+    assert_ne!(public_port, bind.port());
     reserve(&fixture, &request);
-    let mut redirected = request.clone();
-    let Management::Setup { endpoint, .. } = &mut redirected else {
+
+    // A proxy/NAT endpoint and its exact upstream listener remain independently bound
+    // when the durable reservation is reloaded before admission.
+    fixture.state.lock().unwrap().stop();
+    fixture.state = host::State::open(&fixture.paths).unwrap();
+    for change_bind in [false, true] {
+        let mut substituted = request.clone();
+        let Management::Setup {
+            endpoint, policy, ..
+        } = &mut substituted
+        else {
+            panic!()
+        };
+        if change_bind {
+            policy.bind.set_port(public_port);
+        } else {
+            *endpoint = format!("wss://other.example:{public_port}/spaceterm");
+        }
+        assert!(matches!(
+            fixture.management(substituted),
+            Err(DirectError::Substituted)
+        ));
+    }
+    let ManagementReply::Setup(original) = fixture.management(request.clone()).unwrap() else {
         panic!()
     };
-    *endpoint = format!("wss://other.example:{}/spaceterm", bind.port());
-    assert!(matches!(
-        fixture.management(redirected),
-        Err(DirectError::Substituted)
-    ));
-    assert!(matches!(
-        fixture.management(request),
-        Ok(ManagementReply::Setup(_))
-    ));
+    fixture.state.lock().unwrap().stop();
+    fixture.state = host::State::open(&fixture.paths).unwrap();
+    let ManagementReply::Setup(repeated) = fixture.management(request).unwrap() else {
+        panic!()
+    };
+    assert_eq!(repeated, original);
     let ManagementReply::Status(status) = fixture.management(Management::Status).unwrap() else {
         panic!()
     };

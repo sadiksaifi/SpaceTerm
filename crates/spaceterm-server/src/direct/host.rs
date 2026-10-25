@@ -693,7 +693,7 @@ impl State {
         }
         NetworkPolicy::new(requested.policy.bind)?;
         let endpoint = Endpoint::from_url(&requested.endpoint)?;
-        if endpoint.url() != requested.endpoint || endpoint.port() != requested.policy.bind.port() {
+        if endpoint.url() != requested.endpoint {
             return Err(DirectError::InvalidAddress);
         }
         if let Some(policy) = &requested.expected_policy {

@@ -666,7 +666,7 @@ fn cancelling_during_approval_closes_authentication_before_setup_returns() {
 }
 
 #[test]
-fn optional_dns_override_changes_reachability_and_wss_port_without_changing_bind_ip() {
+fn optional_dns_override_preserves_configured_bind_with_an_independent_public_port() {
     let fixture = Fixture::new(serde_json::to_vec(&discovery(true)).unwrap());
     let mut current = status();
     current.policy = Some(NetworkPolicy::new("192.168.1.9:9231".parse().unwrap()).unwrap());
@@ -680,7 +680,7 @@ fn optional_dns_override_changes_reachability_and_wss_port_without_changing_bind
                 offer,
                 SetupOffer::Network {
                     address: expected.clone(),
-                    bind: "192.168.1.9:9443".parse().unwrap(),
+                    bind: "192.168.1.9:9231".parse().unwrap(),
                     current: Some("192.168.1.9:9231".parse().unwrap()),
                     enabled: false
                 }
@@ -689,5 +689,33 @@ fn optional_dns_override_changes_reachability_and_wss_port_without_changing_bind
         })),
     );
     assert_eq!(result, Err(SetupFailure::Cancelled));
+    assert_eq!(fixture.backend.process_counts().active(), 0);
+}
+
+#[test]
+fn optional_custom_port_uses_the_requested_port_when_no_bind_is_configured() {
+    let fixture = Fixture::new(serde_json::to_vec(&discovery(true)).unwrap());
+    *fixture.adapter.status.lock().unwrap() = Some(status());
+    let address = SetupAddress::parse("public.example:9443").unwrap();
+    let expected = address.clone();
+
+    let result = fixture.setup_at(
+        Some(address),
+        Arc::new(Approvals(move |offer, _: &CancellationToken| {
+            assert_eq!(
+                offer,
+                SetupOffer::Network {
+                    address: expected.clone(),
+                    bind: "192.0.2.9:9443".parse().unwrap(),
+                    current: None,
+                    enabled: false,
+                }
+            );
+            false
+        })),
+    );
+
+    assert_eq!(result, Err(SetupFailure::Cancelled));
+    assert!(fixture.adapter.effects.lock().unwrap().is_empty());
     assert_eq!(fixture.backend.process_counts().active(), 0);
 }

@@ -422,7 +422,11 @@ impl<A: SshProcessAdapter> NativeSshSetup<A> {
                 })
                 .or(discovery.ssh_local_address)
                 .ok_or(SetupFailure::Refused(RefusalKind::InvalidEndpoint))?;
-            let bind = SocketAddr::new(bind_ip, address.port());
+            let bind = request
+                .address
+                .as_ref()
+                .and_then(|_| status.policy.as_ref().map(|policy| policy.bind))
+                .unwrap_or_else(|| SocketAddr::new(bind_ip, address.port()));
             NetworkPolicy::new(bind)
                 .map_err(|_| SetupFailure::Refused(RefusalKind::InvalidEndpoint))?;
             if !status.enabled || status.policy.as_ref().map(|policy| policy.bind) != Some(bind) {

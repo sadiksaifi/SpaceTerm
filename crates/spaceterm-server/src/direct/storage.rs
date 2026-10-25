@@ -118,7 +118,7 @@ impl Store {
         for setup in &record.setups {
             let endpoint =
                 Endpoint::from_url(&setup.endpoint).map_err(|_| DirectError::StorageUnavailable)?;
-            if endpoint.port() != setup.policy.bind.port()
+            if endpoint.url() != setup.endpoint
                 || (setup.expected_enabled && setup.expected_policy.is_none())
             {
                 return Err(DirectError::StorageUnavailable);
