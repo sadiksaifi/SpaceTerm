@@ -197,9 +197,6 @@ pub enum Read {
     ValidateLocationTemplate {
         template: String,
     },
-    SeedLocation {
-        template: String,
-    },
     CheckRemoval {
         root: PathBuf,
         path: PathBuf,

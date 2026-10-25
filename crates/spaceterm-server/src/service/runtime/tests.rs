@@ -23,7 +23,7 @@ fn signed_dirty_source_versions_are_admitted_only_for_matching_nonproduction_bui
                         entries[0].1 = serde_json::to_vec(&manifest).unwrap();
                     });
                     if identity == "spaceterm" {
-                        test_support::sign_with_previous_production_trust(archive, signature);
+                        test_support::sign_with_production_trust(archive, signature);
                     }
                     let service = Service::for_identity(identity).unwrap();
                     let pin = digest(&std::fs::read(archive).unwrap());
@@ -42,94 +42,6 @@ fn signed_dirty_source_versions_are_admitted_only_for_matching_nonproduction_bui
                 },
             );
         }
-    }
-    std::fs::remove_dir_all(root).unwrap();
-}
-
-#[test]
-fn previous_production_signatures_authorize_retained_nonproduction_runtimes_only() {
-    let root = temporary();
-    for identity in ["spaceterm-preflight", "spaceterm-development"] {
-        with_artifact(&root.join(identity), identity, |archive, signature| {
-            let installed = provision(
-                &root.join(identity).join("installations"),
-                identity,
-                archive,
-                signature,
-                target(),
-                COMMIT,
-                VERSION,
-            )
-            .unwrap();
-            test_support::sign_with_previous_production_trust(archive, signature);
-            std::fs::write(
-                installed.directory.join("artifact.sig"),
-                std::fs::read(signature).unwrap(),
-            )
-            .unwrap();
-            assert_eq!(
-                describe(&installed.directory, identity).unwrap(),
-                (VERSION.to_owned(), COMMIT.to_owned())
-            );
-            // The identical authenticated legacy artifact grants no new candidate authority.
-            assert_eq!(
-                verify_candidate_installation(
-                    &installed.directory,
-                    identity,
-                    1,
-                    &["workspace_policy"]
-                ),
-                Err(ServerError::RuntimeUnavailable)
-            );
-            let service = Service::for_identity(identity).unwrap();
-            let pin = digest(&std::fs::read(archive).unwrap());
-            assert_eq!(
-                service.inspect_candidate(archive, signature, &pin, 1, &["workspace_policy"]),
-                Err(ServerError::RuntimeUnavailable)
-            );
-            let staging = root.join(identity).join("new-installations");
-            assert_eq!(
-                provision_candidate(
-                    &staging,
-                    identity,
-                    archive,
-                    signature,
-                    &pin,
-                    1,
-                    &["workspace_policy"]
-                ),
-                Err(ServerError::RuntimeUnavailable)
-            );
-            assert!(!staging.exists());
-            assert_eq!(
-                verify(&installed.directory, "spaceterm"),
-                Err(ServerError::RuntimeUnavailable)
-            );
-            let other = if identity == "spaceterm-preflight" {
-                "spaceterm-development"
-            } else {
-                "spaceterm-preflight"
-            };
-            assert_eq!(
-                verify(&installed.directory, other),
-                Err(ServerError::RuntimeUnavailable)
-            );
-            let legacy_signature = std::fs::read(signature).unwrap();
-            std::fs::write(installed.directory.join("artifact.sig"), [0; 64]).unwrap();
-            assert_eq!(
-                verify(&installed.directory, identity),
-                Err(ServerError::RuntimeUnavailable)
-            );
-            std::fs::write(installed.directory.join("artifact.sig"), legacy_signature).unwrap();
-            let resource = installed
-                .directory
-                .join("share/spaceterm/shell-integration/zsh/.zshenv");
-            std::fs::write(resource, b"tampered retained resource").unwrap();
-            assert_eq!(
-                verify(&installed.directory, identity),
-                Err(ServerError::RuntimeUnavailable)
-            );
-        });
     }
     std::fs::remove_dir_all(root).unwrap();
 }
@@ -267,6 +179,23 @@ fn remote_candidate_inspection_verifies_the_selected_target_without_executing_it
                     &["workspace_policy"]
                 ),
                 Err(ServerError::RuntimeUnavailable)
+            );
+            let bytes = std::fs::read(archive).unwrap();
+            let signature_bytes = std::fs::read(signature).unwrap();
+            std::fs::remove_file(archive).unwrap();
+            std::fs::remove_file(signature).unwrap();
+            assert_eq!(
+                crate::service::verify_candidate_bytes(
+                    "spaceterm-development",
+                    &bytes,
+                    &signature_bytes,
+                    &pin,
+                    remote_target,
+                    1,
+                    &["workspace_policy"],
+                ),
+                Ok(metadata),
+                "verification must use captured bytes without reopening or executing the source"
             );
             assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1);
         },

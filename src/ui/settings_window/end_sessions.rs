@@ -261,7 +261,6 @@ impl SettingsWindow {
                 // window hears of it, so each reading looks the writer up again.
                 let client = cx.update(|cx| match &target {
                     ServerChoice::Local => Client::get(cx),
-                    ServerChoice::Ssh(destination) => Client::presented_ssh(destination, cx),
                     ServerChoice::Direct(route) => Client::presented_direct(route, cx),
                 });
                 let availability = client.as_ref().map_or(Availability::Unknown, |client| {

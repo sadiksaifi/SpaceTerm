@@ -1,19 +1,11 @@
 //! How each server state reads on the card, in the picker and in All Servers.
 
-use super::super::servers::{LocalServerStatus, ServerConnection, ServiceAction, ServicePhase};
+use super::super::servers::{ConnectedServer, LocalServerStatus, ServiceAction, ServicePhase};
 use super::*;
-use crate::ssh::server_connection::{SshServerFacts, UnavailableKind};
+use crate::direct_connections::UnavailableReason;
 
 const CONNECTED: LocalServerStatus =
-    LocalServerStatus::Connected(ServerConnection { protocol_major: 1 });
-
-fn facts() -> SshServerFacts {
-    SshServerFacts {
-        platform: ("linux".into(), "x86_64".into()),
-        version: Some("1.4.0".into()),
-        starts_automatically: true,
-    }
-}
+    LocalServerStatus::Connected(ConnectedServer { protocol_major: 1 });
 
 #[test]
 fn a_running_local_server_reads_as_running_for_this_account_and_live() {
@@ -123,97 +115,45 @@ fn a_local_server_without_a_protocol_in_common_needs_an_update() {
 }
 
 #[test]
-fn an_ssh_server_reads_by_its_connection() {
+fn a_paired_server_reads_by_its_route() {
     for (status, state, short, live) in [
         (
-            RemoteConnectionStatus::Connected { facts: facts() },
-            "Connected over SSH",
-            "Connected \u{b7} SSH",
+            DirectRouteStatus::Connected,
+            "Connected over the network",
+            "Connected \u{b7} Paired",
             true,
         ),
         (
-            RemoteConnectionStatus::Inactive,
+            DirectRouteStatus::Disconnected,
             "Not connected",
             "Not connected",
             false,
         ),
         (
-            RemoteConnectionStatus::Incompatible {
-                kind: IncompatibilityKind::Protocol,
-            },
+            DirectRouteStatus::Refused(RefusalReason::Revoked),
+            "Unpaired",
+            "Unpaired",
+            false,
+        ),
+        (
+            DirectRouteStatus::Refused(RefusalReason::Incompatible),
             "Needs update",
             "Needs update",
             false,
         ),
         (
-            RemoteConnectionStatus::Unavailable {
-                kind: UnavailableKind::HostUnreachable,
-            },
+            DirectRouteStatus::Unavailable(UnavailableReason::Network),
             "Not reachable",
             "Not reachable",
             false,
         ),
-        (RemoteConnectionStatus::Stopped, "Stopped", "Stopped", false),
     ] {
-        let read = ssh_state(&status, None, None, None);
+        let read = direct_state(status);
 
         assert_eq!(read.state.as_ref(), state);
         assert_eq!(read.short.as_ref(), short);
         assert_eq!(read.live, live, "{state}");
     }
-}
-
-#[test]
-fn an_ssh_connection_reads_as_its_verb_and_maintenance_names_itself_apart() {
-    let installing = ssh_state(
-        &RemoteConnectionStatus::Working {
-            phase: ConnectPhase::Installing,
-            cancellable: true,
-        },
-        None,
-        None,
-        None,
-    );
-    assert_eq!(installing.state.as_ref(), "Installing\u{2026}");
-
-    let stopping = ssh_state(
-        &RemoteConnectionStatus::Connected { facts: facts() },
-        Some(Some(&SubmittedKind::Service(ServiceControlAction::Stop))),
-        None,
-        None,
-    );
-    assert_eq!(stopping.state.as_ref(), "Connected over SSH");
-    assert_eq!(stopping.operation, Some("Stopping\u{2026}"));
-    assert!(stopping.live, "the server stays connected while it stops");
-
-    let reading = ssh_state(
-        &RemoteConnectionStatus::Connected { facts: facts() },
-        Some(None),
-        None,
-        None,
-    );
-    assert_eq!(reading.state.as_ref(), "Connected over SSH");
-    assert!(reading.checking);
-    assert_eq!(reading.operation, None);
-}
-
-#[test]
-fn a_paired_server_reads_by_its_route() {
-    assert_eq!(
-        direct_state(DirectRouteStatus::Connected).state.as_ref(),
-        "Connected over the network"
-    );
-    assert_eq!(
-        direct_state(DirectRouteStatus::Connected).short.as_ref(),
-        "Connected \u{b7} Paired"
-    );
-    assert_eq!(
-        direct_state(DirectRouteStatus::Refused(RefusalReason::Revoked))
-            .state
-            .as_ref(),
-        "Unpaired"
-    );
-    assert!(!direct_state(DirectRouteStatus::Disconnected).live);
 }
 
 #[test]
@@ -245,59 +185,4 @@ fn reported_system_names_read_as_people_know_them() {
     assert_eq!(operating_system_name("linux").as_ref(), "Linux");
     assert_eq!(operating_system_name("macos").as_ref(), "macOS");
     assert_eq!(operating_system_name("FreeBSD").as_ref(), "FreeBSD");
-}
-
-#[test]
-fn a_service_read_tells_a_stopped_ssh_server_from_a_disconnected_one() {
-    let stopped = crate::local_server::service::ServiceStatus {
-        installed: true,
-        enabled: true,
-        running: false,
-        stopped: true,
-    };
-    let running = crate::local_server::service::ServiceStatus {
-        running: true,
-        stopped: false,
-        ..stopped
-    };
-
-    assert_eq!(
-        ssh_state(&RemoteConnectionStatus::Inactive, None, Some(stopped), None)
-            .state
-            .as_ref(),
-        "Stopped"
-    );
-    assert_eq!(
-        ssh_state(&RemoteConnectionStatus::Inactive, None, Some(running), None)
-            .state
-            .as_ref(),
-        "Running \u{b7} not connected"
-    );
-}
-
-/// A saved connection SpaceTerm isn't connected to shows the state last observed, and only that:
-/// it stays not live, so nothing a live server allows is offered.
-#[test]
-fn an_inactive_ssh_server_shows_its_last_observed_state_without_becoming_live() {
-    let stopped = ssh_state(
-        &RemoteConnectionStatus::Inactive,
-        None,
-        None,
-        Some(ObservedServerStatus::Stopped),
-    );
-    assert_eq!(stopped.state.as_ref(), "Stopped");
-    assert!(!stopped.live);
-
-    let running = ssh_state(
-        &RemoteConnectionStatus::Inactive,
-        None,
-        None,
-        Some(ObservedServerStatus::Running),
-    );
-    assert_eq!(running.state.as_ref(), "Running \u{b7} not connected");
-    assert_eq!(running.short.as_ref(), "Not connected");
-    assert!(
-        !running.live,
-        "a remembered Running never makes a server live"
-    );
 }

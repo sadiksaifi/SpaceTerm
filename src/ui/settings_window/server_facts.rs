@@ -2,8 +2,7 @@
 //! last-known facts.
 //!
 //! An observation comes only from something that actually reported on the server: this account's
-//! service, an SSH account's maintenance read, Check Status, a connection, or the server's own
-//! facts over a live connection. Showing a server SpaceTerm isn't connected to is not an
+//! service, a paired connection, or the server's own facts over a live connection. Showing a server SpaceTerm isn't connected to is not an
 //! observation, so it never replaces what was last observed. Nothing here connects to a server:
 //! the server's own facts are read only over a connection SpaceTerm already has. Each observation
 //! merges into the retained record, so facts another part of Settings keeps, such as Git and New
@@ -16,20 +15,13 @@ use spaceterm_server::worktree::{Read, ReadReply, ServerFacts};
 
 use super::SettingsWindow;
 use super::catalog::SettingsSectionId;
-use super::server_card::operating_system_name;
 use super::server_list::ServerChoice;
 use super::server_selection;
 use super::servers::{LocalServerStatus, ServicePhase};
 use crate::direct_connections::{DirectRouteStatus, RefusalReason};
-use crate::domain::SshDestination;
-use crate::local_server::ServerError;
-use crate::local_server::service::ServiceStatus;
-use crate::local_server::service::maintenance::MaintenanceFacts;
+use crate::server_connection::ServerError;
+use crate::server_connection::service::ServiceStatus;
 use crate::server_context::{LastKnownFacts, ObservedServerStatus};
-use crate::ssh::server_connection::{
-    IncompatibilityKind, RemoteConnectionStatus, ServerAvailability, SshServerFacts,
-};
-use crate::ssh::server_operations::{RemoteOperationState, RemoteUpdateOffer};
 use crate::ui::server_worktrees::Client;
 
 /// How often the presented server's observations are looked at again.
@@ -49,13 +41,10 @@ pub(super) struct FactsFollower {
 /// What something that reported on a server found. A part it didn't report is `None`.
 #[derive(Default)]
 pub(super) struct Observation {
-    /// When the report was made, in Unix seconds, when the report says. Otherwise it is now.
-    pub(super) observed_at: Option<u64>,
     pub(super) status: Option<ObservedServerStatus>,
     /// The server's own facts, read over a live connection.
     pub(super) server: Option<ServerFacts>,
     pub(super) version: Option<String>,
-    pub(super) operating_system: Option<String>,
     pub(super) starts_automatically: Option<bool>,
     pub(super) running_sessions: Option<u32>,
 }
@@ -65,7 +54,6 @@ impl Observation {
         self.status.is_none()
             && self.server.is_none()
             && self.version.is_none()
-            && self.operating_system.is_none()
             && self.starts_automatically.is_none()
             && self.running_sessions.is_none()
     }
@@ -105,25 +93,6 @@ pub(super) fn local_status(
     }
 }
 
-/// What an SSH server's connection or Check Status reported. Showing a saved connection that
-/// isn't active reports nothing.
-pub(super) fn ssh_status(connection: &RemoteConnectionStatus) -> Option<ObservedServerStatus> {
-    Some(match connection {
-        RemoteConnectionStatus::Connected { .. } => ObservedServerStatus::Running,
-        RemoteConnectionStatus::Checked { availability, .. } => match availability {
-            ServerAvailability::Running => ObservedServerStatus::Running,
-            ServerAvailability::NotRunning => ObservedServerStatus::Unavailable,
-            ServerAvailability::NotInstalled => ObservedServerStatus::NotInstalled,
-        },
-        RemoteConnectionStatus::Stopped => ObservedServerStatus::Stopped,
-        RemoteConnectionStatus::InstallationOffered { .. } => ObservedServerStatus::NotInstalled,
-        RemoteConnectionStatus::Incompatible {
-            kind: IncompatibilityKind::Protocol | IncompatibilityKind::Capability,
-        } => ObservedServerStatus::NeedsUpdate,
-        _ => return None,
-    })
-}
-
 /// What a paired server's connection reported.
 pub(super) fn direct_status(route: DirectRouteStatus) -> Option<ObservedServerStatus> {
     match route {
@@ -135,7 +104,7 @@ pub(super) fn direct_status(route: DirectRouteStatus) -> Option<ObservedServerSt
     }
 }
 
-/// The record `previous` becomes with `observed`, as of `observed_at`. A part the observation
+/// The record `previous` becomes with `observed`, as of `now`. A part the observation
 /// doesn't report keeps its previous value.
 pub(super) fn merged(
     previous: Option<LastKnownFacts>,
@@ -143,12 +112,9 @@ pub(super) fn merged(
     observed: Observation,
 ) -> LastKnownFacts {
     let previous = previous.unwrap_or_default();
-    // A report that carries its own time, such as Check Status, is as old as it says, so a result
-    // that finished while Settings was closed never reads as just observed.
-    let observed_at = observed.observed_at.unwrap_or(now).min(now);
     let server = observed.server;
     LastKnownFacts {
-        observed_at,
+        observed_at: now,
         status: observed.status.unwrap_or(previous.status),
         machine: server
             .as_ref()
@@ -157,7 +123,6 @@ pub(super) fn merged(
         operating_system: server
             .as_ref()
             .map(|facts| facts.operating_system.clone())
-            .or(observed.operating_system)
             .or(previous.operating_system.clone()),
         version: server
             .as_ref()
@@ -188,15 +153,6 @@ pub(super) fn changed(
             || (live
                 && next.observed_at.saturating_sub(previous.observed_at) >= UNCHANGED_RETENTION)
     })
-}
-
-/// The facts a connection or Check Status carries.
-fn connection_facts(connection: &RemoteConnectionStatus) -> Option<&SshServerFacts> {
-    match connection {
-        RemoteConnectionStatus::Connected { facts, .. }
-        | RemoteConnectionStatus::Checked { facts, .. } => Some(facts),
-        _ => None,
-    }
 }
 
 impl SettingsWindow {
@@ -233,63 +189,6 @@ impl SettingsWindow {
                     ..Observation::default()
                 }
             }
-            ServerChoice::Ssh(destination) => {
-                let connection = self
-                    .ssh_servers
-                    .as_ref()
-                    .map_or(RemoteConnectionStatus::Inactive, |rows| {
-                        rows.connections.status(destination)
-                    });
-                let read = self.current_ssh_read(destination);
-                let reported = connection_facts(&connection);
-                let connected = matches!(connection, RemoteConnectionStatus::Connected { .. });
-                let checked_at = match &connection {
-                    RemoteConnectionStatus::Checked { at, .. } => at
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .ok()
-                        .map(|elapsed| elapsed.as_secs()),
-                    _ => None,
-                };
-                // A connection is the most direct report. Otherwise an explicit service read
-                // reports the service, and Check Status what it found.
-                let status = match connection {
-                    RemoteConnectionStatus::Connected { .. } => Some(ObservedServerStatus::Running),
-                    _ => read
-                        .as_ref()
-                        .map(|facts| service_status(facts.status))
-                        .or_else(|| ssh_status(&connection)),
-                };
-                // Only Check Status says when it looked; a maintenance read or a connection reports
-                // the present.
-                let observed_at = (read.is_none() && !connected)
-                    .then_some(checked_at)
-                    .flatten();
-                let approved = read
-                    .as_ref()
-                    .and_then(|facts| facts.approved.as_ref())
-                    .map(|approved| approved.version.clone());
-                let reported_version = reported.and_then(|facts| facts.version.clone());
-                // A live connection reports the version the server runs now. Without one, a
-                // service read's approved build is the latest word, ahead of Check Status.
-                let version = if connected {
-                    reported_version.or(approved)
-                } else {
-                    approved.or(reported_version)
-                };
-                Observation {
-                    observed_at,
-                    status,
-                    version,
-                    operating_system: reported
-                        .map(|facts| operating_system_name(&facts.platform.0).to_string()),
-                    starts_automatically: read
-                        .as_ref()
-                        .map(|facts| facts.status.enabled)
-                        .or_else(|| reported.map(|facts| facts.starts_automatically)),
-                    running_sessions,
-                    ..Observation::default()
-                }
-            }
             ServerChoice::Direct(route) => Observation {
                 status: self
                     .saved_direct_servers()
@@ -300,56 +199,6 @@ impl SettingsWindow {
                 ..Observation::default()
             },
         }
-    }
-
-    /// The service read of `destination` while it is the latest word on the service. A Check
-    /// Status observed after it outdates it, as does any Check Status when the read carries no
-    /// time. An unresolved original keeps its own record and steps regardless.
-    pub(super) fn current_ssh_read(
-        &self,
-        destination: &SshDestination,
-    ) -> Option<Box<MaintenanceFacts>> {
-        let (facts, read_at) = self
-            .ssh_maintenance
-            .as_ref()?
-            .operations
-            .entries()
-            .into_iter()
-            .filter(|entry| entry.destination == *destination && !entry.removed)
-            .find_map(|entry| match entry.state {
-                RemoteOperationState::Read(facts) => Some((facts, entry.observed_at)),
-                _ => None,
-            })?;
-        let checked_at =
-            self.ssh_servers
-                .as_ref()
-                .and_then(|rows| match rows.connections.status(destination) {
-                    RemoteConnectionStatus::Checked { observed_at, .. } => Some(observed_at),
-                    _ => None,
-                });
-        match (read_at, checked_at) {
-            (_, None) => Some(facts),
-            (Some(read), Some(checked)) if read > checked => Some(facts),
-            _ => None,
-        }
-    }
-
-    /// What the current read of `destination` found about updating. A read Check Status has
-    /// since outdated says nothing about the server now, so it offers no update.
-    pub(super) fn ssh_update_offer(&self, destination: &SshDestination) -> RemoteUpdateOffer {
-        if self.current_ssh_read(destination).is_none() {
-            return RemoteUpdateOffer::Unchecked;
-        }
-        self.ssh_maintenance
-            .as_ref()
-            .map_or(RemoteUpdateOffer::Unchecked, |rows| {
-                let entries = rows.operations.entries();
-                crate::ui::remote_maintenance::read_update_offer(
-                    entries
-                        .iter()
-                        .filter(|entry| entry.destination == *destination && !entry.removed),
-                )
-            })
     }
 
     /// Follows the observations of the server Servers or Git presents. Selection, section and
@@ -469,7 +318,6 @@ impl SettingsWindow {
 fn client_for(target: &ServerChoice, cx: &mut App) -> Option<Client> {
     match target {
         ServerChoice::Local => Client::get(cx),
-        ServerChoice::Ssh(destination) => Client::presented_ssh(destination, cx),
         ServerChoice::Direct(route) => Client::presented_direct(route, cx),
     }
 }
@@ -568,45 +416,6 @@ mod tests {
         assert!(changed(Some(&earlier), &next, false));
         assert_eq!(next.status, ObservedServerStatus::Stopped);
         assert_eq!(next.starts_automatically, Some(false));
-    }
-
-    #[test]
-    fn an_inactive_saved_connection_reports_nothing_and_check_status_reports_what_it_found() {
-        assert_eq!(ssh_status(&RemoteConnectionStatus::Inactive), None);
-        let checked = RemoteConnectionStatus::Checked {
-            availability: ServerAvailability::NotInstalled,
-            facts: SshServerFacts {
-                platform: ("linux".into(), "x86_64".into()),
-                version: None,
-                starts_automatically: false,
-            },
-            at: std::time::SystemTime::UNIX_EPOCH,
-            observed_at: std::time::Instant::now(),
-        };
-        assert_eq!(
-            ssh_status(&checked),
-            Some(ObservedServerStatus::NotInstalled)
-        );
-        assert_eq!(
-            ssh_status(&RemoteConnectionStatus::Stopped),
-            Some(ObservedServerStatus::Stopped)
-        );
-    }
-
-    /// A Check Status that finished while Settings was closed keeps the time it looked.
-    #[test]
-    fn a_report_that_says_when_it_looked_keeps_that_time() {
-        let next = merged(
-            None,
-            1_000,
-            Observation {
-                observed_at: Some(400),
-                status: Some(ObservedServerStatus::Running),
-                ..Observation::default()
-            },
-        );
-
-        assert_eq!(next.observed_at, 400);
     }
 
     #[test]

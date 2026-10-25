@@ -1,4 +1,4 @@
-//! One fixture-only terminal exercise shared by the native IPC, SSH and WSS checks.
+//! One fixture-only terminal exercise shared by the native IPC and WSS checks.
 use spaceterm_server::{
     ServerError,
     pane::{

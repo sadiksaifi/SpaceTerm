@@ -287,7 +287,7 @@ mod tests {
     use crate::platform::testing::{RecordingFilesystem, resolve_app_paths};
 
     fn studio() -> ServerKey {
-        ServerKey::Ssh("studio".to_owned())
+        ServerKey::Direct([7; 32])
     }
 
     /// The window's selection with its worker run by hand over in-memory storage, so a test
@@ -368,7 +368,7 @@ mod tests {
             // Older than what the selection holds, as after the clock moves back.
             remember(studio(), observed(10), cx);
             remember(studio(), observed(20), cx);
-            remember(ServerKey::Ssh("gone".to_owned()), observed(30), cx);
+            remember(ServerKey::Direct([8; 32]), observed(30), cx);
             reconcile(vec![ServerKey::Local, studio()], cx);
         });
         assert_eq!(notified.get(), 0, "nothing changed, so nothing is told");
@@ -565,7 +565,7 @@ mod tests {
 
     #[gpui::test]
     fn removing_the_selected_server_presents_this_computer(cx: &mut gpui::TestAppContext) {
-        let studio = ServerKey::Ssh("studio".to_owned());
+        let studio = ServerKey::Direct([7; 32]);
         cx.update(|cx| {
             reconcile(vec![ServerKey::Local, studio.clone()], cx);
             select(studio.clone(), cx);
@@ -579,7 +579,7 @@ mod tests {
 
     #[gpui::test]
     fn an_older_observation_never_replaces_a_newer_one(cx: &mut gpui::TestAppContext) {
-        let studio = ServerKey::Ssh("studio".to_owned());
+        let studio = ServerKey::Direct([7; 32]);
         let observed = |observed_at, version: &str| LastKnownFacts {
             observed_at,
             version: Some(version.to_owned()),

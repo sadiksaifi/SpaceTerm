@@ -847,6 +847,7 @@ pub(super) struct AskPassTeardown {
     cancel_presentation: Arc<dyn Fn() + Send + Sync>,
     closed: AtomicBool,
     worker: Mutex<Option<JoinHandle<()>>>,
+    completed: Arc<(Mutex<bool>, std::sync::Condvar)>,
 }
 
 impl AskPassTeardown {
@@ -860,6 +861,7 @@ impl AskPassTeardown {
             cancel_presentation,
             closed: AtomicBool::new(false),
             worker: Mutex::new(Some(worker)),
+            completed: Arc::new((Mutex::new(false), std::sync::Condvar::new())),
         }
     }
 
@@ -869,16 +871,56 @@ impl AskPassTeardown {
         }
         self.stop.store(true, Ordering::Release);
         (self.cancel_presentation)();
-        let worker = self.worker.lock().ok().and_then(|mut worker| worker.take());
+        let worker = self
+            .worker
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take();
         let Some(worker) = worker else {
             return;
         };
-        let _ = thread::Builder::new()
+        let pending = Arc::new(Mutex::new(Some(worker)));
+        let cleanup = Arc::clone(&pending);
+        let completed = Arc::clone(&self.completed);
+        let result = thread::Builder::new()
             .name("spaceterm-askpass-cleanup".to_owned())
             .spawn(move || {
-                let _ = worker.join();
+                join_askpass_worker(&cleanup, &completed);
             });
+        if result.is_err() {
+            join_askpass_worker(&pending, &self.completed);
+        }
     }
+
+    /// Setup workers wait here before admitting WSS or reporting cancellation.
+    fn close_and_wait(&self) {
+        self.close();
+        let (completed, changed) = &*self.completed;
+        let mut completed = completed.lock().unwrap_or_else(|error| error.into_inner());
+        while !*completed {
+            completed = changed
+                .wait(completed)
+                .unwrap_or_else(|error| error.into_inner());
+        }
+    }
+}
+
+fn join_askpass_worker(
+    pending: &Mutex<Option<JoinHandle<()>>>,
+    completed: &(Mutex<bool>, std::sync::Condvar),
+) {
+    if let Some(worker) = pending
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .take()
+    {
+        let _ = worker.join();
+    }
+    *completed
+        .0
+        .lock()
+        .unwrap_or_else(|error| error.into_inner()) = true;
+    completed.1.notify_all();
 }
 
 impl Drop for AskPassTeardown {
@@ -1040,6 +1082,10 @@ impl AskPassLease for AskPassBrokerLifetime {
         self.teardown.close();
     }
 
+    fn finish(&self) {
+        self.teardown.close_and_wait();
+    }
+
     fn capability(&self) -> &[u8] {
         self.environment.capability.as_str().as_bytes()
     }
@@ -1090,6 +1136,9 @@ fn handle_verified_connection<S: Read + Write + ?Sized>(
 pub(crate) trait AskPassLease: Send + Sync {
     fn entries(&self) -> Vec<(&'static str, &OsStr)>;
     fn cancel(&self);
+    fn finish(&self) {
+        self.cancel();
+    }
     fn capability(&self) -> &[u8];
 }
 #[derive(Clone)]
@@ -1115,8 +1164,8 @@ impl AskPassBrokerLease {
             bytes: Zeroizing::new(self.0.capability().to_vec()),
         }
     }
-    pub(crate) fn cancel(&self) {
-        self.0.cancel();
+    pub(crate) fn finish(&self) {
+        self.0.finish();
     }
 }
 #[derive(Clone, Default)]
@@ -1646,5 +1695,39 @@ mod tests {
         assert!(completion.recv_timeout(Duration::from_secs(2)).unwrap());
         drop(teardown);
         assert_eq!(cancels.load(Ordering::Acquire), 1);
+    }
+
+    #[test]
+    fn setup_finish_waits_for_the_broker_worker_to_release_its_resources() {
+        let (release, released) = mpsc::sync_channel(1);
+        let (cancelled, cancellation) = mpsc::sync_channel(1);
+        let (finished, completion) = mpsc::sync_channel(1);
+        let released_resource = Arc::new(AtomicBool::new(false));
+        let resource = Arc::clone(&released_resource);
+        let worker = thread::spawn(move || {
+            released.recv().unwrap();
+            resource.store(true, Ordering::Release);
+        });
+        let teardown = Arc::new(AskPassTeardown::new(
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(move || {
+                cancelled.send(()).unwrap();
+            }),
+            worker,
+        ));
+        let owner = Arc::clone(&teardown);
+        let waiter = thread::spawn(move || {
+            owner.close_and_wait();
+            finished.send(()).unwrap();
+        });
+        cancellation.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(matches!(
+            completion.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
+        release.send(()).unwrap();
+        completion.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(released_resource.load(Ordering::Acquire));
+        waiter.join().unwrap();
     }
 }

@@ -12,6 +12,7 @@ use std::time::Instant;
 
 use gpui::{App, AppContext as _, Context, Entity, EventEmitter, Global, Task};
 
+use crate::cancellation::CancellationToken;
 use crate::repository_status::local_read::LocalRepositoryReader;
 use crate::repository_status::pull_request::{PullRequestQuery, pull_request_query};
 use crate::repository_status::pull_request_lookup::{GitHubCliLookup, GitHubHosts};
@@ -27,7 +28,6 @@ use crate::repository_status::{
     RepositoryWatch, RepositoryWatcher,
 };
 use crate::settings::Settings;
-use crate::ssh::cancellation::SshCancellationToken;
 
 /// What SpaceTerm last learned about the programs Repository Status runs.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -161,8 +161,8 @@ pub(crate) struct RepositoryStatusStore {
     watches: HashMap<RepositoryKey, Box<dyn RepositoryWatch>>,
     watch_events: async_channel::Sender<RepositoryKey>,
     /// Each count in flight and the token that stops it once nothing presents its repository.
-    counts: HashMap<RepositoryKey, (CountTicket, SshCancellationToken)>,
-    probes: HashMap<ProbeTicket, SshCancellationToken>,
+    counts: HashMap<RepositoryKey, (CountTicket, CancellationToken)>,
+    probes: HashMap<ProbeTicket, CancellationToken>,
     github_hosts: Arc<GitHubHosts>,
     /// Pull Requests for branches SpaceTerm Servers read. Only the parsed query comes from the
     /// server; the GitHub CLI, its login, and these answers stay on this client.
@@ -171,7 +171,7 @@ pub(crate) struct RepositoryStatusStore {
     server_github_cli: GitHubCliStatus,
     wake: Option<(Instant, Task<()>)>,
     next_interest: u64,
-    cancellation: SshCancellationToken,
+    cancellation: CancellationToken,
     _watch_task: Task<()>,
 }
 
@@ -220,7 +220,7 @@ impl RepositoryStatusStore {
             server_github_cli: GitHubCliStatus::Unknown,
             wake: None,
             next_interest: 0,
-            cancellation: SshCancellationToken::default(),
+            cancellation: CancellationToken::default(),
             _watch_task: watch_task,
         };
         if preferences.show_repository_status {
@@ -521,10 +521,8 @@ impl RepositoryStatusStore {
                 key,
                 fsmonitor,
             } => {
-                let cancellation = SshCancellationToken::linked(
-                    &self.cancellation,
-                    &SshCancellationToken::default(),
-                );
+                let cancellation =
+                    CancellationToken::linked(&self.cancellation, &CancellationToken::default());
                 let work: Box<dyn FnOnce() -> Result<ChangeSummary, RepositoryReadError> + Send> =
                     match (&key.machine, &key.root) {
                         (RepositoryMachine::Local, RepositoryRoot::Local(root)) => {
@@ -660,9 +658,9 @@ impl RepositoryStatusStore {
     }
 
     /// A cancellation for one probe, also cancelled with the store.
-    fn probe_cancellation(&mut self, ticket: &ProbeTicket) -> SshCancellationToken {
+    fn probe_cancellation(&mut self, ticket: &ProbeTicket) -> CancellationToken {
         let cancellation =
-            SshCancellationToken::linked(&self.cancellation, &SshCancellationToken::default());
+            CancellationToken::linked(&self.cancellation, &CancellationToken::default());
         self.probes.insert(ticket.clone(), cancellation.clone());
         cancellation
     }
@@ -857,7 +855,7 @@ mod server_pull_request_tests {
             &self,
             request: &ProgramRequest,
             stdout: &mut dyn FnMut(&[u8]),
-            _: &SshCancellationToken,
+            _: &CancellationToken,
         ) -> Result<ProgramExit, ProgramError> {
             self.requests.lock().unwrap().push(request.clone());
             let first = request

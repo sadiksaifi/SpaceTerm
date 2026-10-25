@@ -275,7 +275,7 @@ int main(int argc, char **argv) {{
             f'designated => identifier "io.github.sadiksaifi.spaceterm" and certificate leaf = H"{self.fingerprint.lower()}"',
         )
 
-    def test_verification_rejects_a_tampered_ssh_catalog(self):
+    def test_verification_rejects_a_tampered_server_catalog(self):
         self.compile_executable(self.artifact, "SpaceTerm Preflight")
         result = self.package()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

@@ -6,7 +6,7 @@
 mod support;
 
 use spaceterm_server::{
-    LocalServer, ServerError,
+    ServerConnection, ServerError,
     client_view::{ClientView, WorkspaceView},
     hierarchy::{Mutation, Outcome},
     pane::*,
@@ -26,7 +26,7 @@ const SIZE: PaneSize = PaneSize {
     cell_height: 18,
 };
 
-fn connect(client: &LocalServer) -> Result<PaneConnection, Box<dyn Error>> {
+fn connect(client: &ServerConnection) -> Result<PaneConnection, Box<dyn Error>> {
     let deadline = Instant::now() + Duration::from_secs(20);
     loop {
         match client.connect_pane() {
@@ -98,8 +98,8 @@ fn run() -> Result<(), Box<dyn Error>> {
     if installed.stopped {
         service.start()?;
     }
-    let first = LocalServer::for_development_client("update-smoke-a", 1)?;
-    let second = LocalServer::for_development_client("update-smoke-b", 1)?;
+    let first = ServerConnection::for_development_client("update-smoke-a", 1)?;
+    let second = ServerConnection::for_development_client("update-smoke-b", 1)?;
     first.setup()?;
     second.setup()?;
     let mut a = connect(&first)?;
@@ -202,7 +202,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         return Err("staging changed shared organization".into());
     }
     let created_while_staged = create_workspace(&mut b, "Created while staged")?;
-    let newcomer = LocalServer::for_development_client("update-smoke-c", 1)?;
+    let newcomer = ServerConnection::for_development_client("update-smoke-c", 1)?;
     newcomer.setup()?;
     let mut c = connect(&newcomer)?;
     if inventory(&mut c)?

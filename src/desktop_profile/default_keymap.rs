@@ -40,16 +40,8 @@ pub(crate) fn profile(
             Some(DefaultBinding::new("cmd-n", &[])),
         ),
         (
-            Command::NewRemoteWorkspace,
-            Some(DefaultBinding::new("cmd-shift-n", &[])),
-        ),
-        (
             Command::OpenLocalDirectory,
             Some(DefaultBinding::new("cmd-o", &[])),
-        ),
-        (
-            Command::OpenRemoteDirectory,
-            Some(DefaultBinding::new("cmd-shift-o", &[])),
         ),
         (Command::NewWorktree, None),
         (

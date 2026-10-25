@@ -1,4 +1,4 @@
-"""A packaged SSH catalog retains only authenticated target-specific server bytes."""
+"""A packaged server catalog retains only authenticated target-specific server bytes."""
 
 import json
 import os
@@ -105,18 +105,11 @@ int main(int argc, char **argv) {{
             executable.chmod(0o755)
         return (*archive_tree(ROOT, tree, info), info)
 
-    def test_native_headless_check_accepts_current_and_legacy_success(self):
-        for output in (
-            "Server checks passed.\n",
-            "Installed server PTY and shell resources verified.\n",
-        ):
-            with self.subTest(output=output):
-                archive, signature, info = self.artifact(self.target, check_stdout=output)
-                with tempfile.TemporaryDirectory(dir=self.root) as temporary:
-                    tree, _, _ = server_package.verified_copy(
-                        archive, signature, Path(temporary), info
-                    )
-                    self.assertEqual(json.loads((tree / "build.json").read_text()), info)
+    def test_native_headless_check_accepts_success(self):
+        archive, signature, info = self.artifact(self.target)
+        with tempfile.TemporaryDirectory(dir=self.root) as temporary:
+            tree, _, _ = server_package.verified_copy(archive, signature, Path(temporary), info)
+            self.assertEqual(json.loads((tree / "build.json").read_text()), info)
 
     def test_native_headless_check_rejects_unexpected_or_failed_responses(self):
         for output, error, status in (
@@ -125,7 +118,7 @@ int main(int argc, char **argv) {{
             ("Server checks passed.", "", 0),
             ("Server checks passed.\nExtra output.\n", "", 0),
             ("Server checks passed.\n", "", 1),
-            ("Installed server PTY and shell resources verified.\n", "warning\n", 0),
+            ("Server checks passed.\n", "warning\n", 0),
         ):
             with self.subTest(output=output, error=error, status=status):
                 archive, signature, info = self.artifact(

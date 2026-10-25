@@ -183,6 +183,8 @@ pub enum DirectError {
     Rejected,
     #[error("The claim changed. Review it before approving.")]
     ChangedClaim,
+    #[error("Network access changed. Review it before continuing setup.")]
+    PolicyChanged,
     #[error("The server or device did not match this connection.")]
     AuthenticationRefused,
     #[error("The server no longer matches this connection.")]
@@ -240,6 +242,10 @@ impl DeviceCredential {
     }
     pub fn expose_bytes(&self) -> &[u8] {
         &self.0
+    }
+    /// The public enrollment key. The private credential stays on its client device.
+    pub fn public_key(&self) -> Result<[u8; 32], DirectError> {
+        crypto::public(&self.0)
     }
     pub fn fingerprint(&self) -> String {
         crypto::public(&self.0)

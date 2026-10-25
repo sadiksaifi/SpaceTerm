@@ -278,6 +278,185 @@ impl State {
         self.expire()?;
         let reply = match request {
             Management::Status => ManagementReply::Status(self.status()),
+            Management::PrepareSetup {
+                pin,
+                expected_policy,
+                policy,
+                operation,
+                public_key,
+                name,
+            } => {
+                if actor.is_some() {
+                    return Err(DirectError::AuthenticationRefused);
+                }
+                self.check_setup(
+                    &pin,
+                    &policy,
+                    &expected_policy,
+                    operation,
+                    public_key,
+                    &name,
+                )?;
+                if !self
+                    .record
+                    .devices
+                    .iter()
+                    .any(|device| device.claim == operation)
+                    && self.record.policy != expected_policy
+                {
+                    return Err(DirectError::PolicyChanged);
+                }
+                if let Some(reservation) = self
+                    .record
+                    .setups
+                    .iter()
+                    .find(|setup| setup.operation == operation)
+                {
+                    if reservation.cancelled {
+                        return Err(DirectError::AlreadyDecided);
+                    }
+                } else {
+                    if self.record.setups.len() >= storage::MAX_DEVICES
+                        || self
+                            .record
+                            .devices
+                            .iter()
+                            .any(|device| device.claim == operation)
+                    {
+                        return Err(DirectError::Capacity);
+                    }
+                    let mut next = self.record.clone();
+                    next.setups.push(storage::SetupReservation {
+                        operation,
+                        expected_policy,
+                        policy,
+                        public_key,
+                        name,
+                        cancelled: false,
+                    });
+                    self.commit(next)?;
+                }
+                ManagementReply::SetupPrepared
+            }
+            Management::Setup {
+                pin,
+                expected_policy,
+                policy,
+                operation,
+                public_key,
+                name,
+            } => {
+                if actor.is_some() {
+                    return Err(DirectError::AuthenticationRefused);
+                }
+                self.check_setup(
+                    &pin,
+                    &policy,
+                    &expected_policy,
+                    operation,
+                    public_key,
+                    &name,
+                )?;
+                let reservation = self
+                    .record
+                    .setups
+                    .iter()
+                    .find(|setup| setup.operation == operation)
+                    .ok_or(DirectError::InvalidRequest)?;
+                if reservation.cancelled {
+                    return Err(DirectError::AlreadyDecided);
+                }
+                let info = if let Some(device) =
+                    self.record.devices.iter().find(|d| d.claim == operation)
+                {
+                    if device.revoked {
+                        return Err(DirectError::Revoked);
+                    }
+                    device.info.clone()
+                } else {
+                    if self.record.policy != expected_policy {
+                        return Err(DirectError::PolicyChanged);
+                    }
+                    if self.record.devices.len() >= storage::MAX_DEVICES {
+                        return Err(DirectError::Capacity);
+                    }
+                    let info = DeviceInfo {
+                        pairing: crypto::random()?,
+                        client: crypto::random()?,
+                        name,
+                        public_key,
+                        last_connected_at_unix_seconds: None,
+                    };
+                    let changed_policy = self.record.policy.as_ref() != Some(&policy);
+                    let generation = crypto::random()?;
+                    let mut next = self.record.clone();
+                    next.policy = Some(policy.clone());
+                    next.devices.push(storage::Device {
+                        claim: operation,
+                        info: info.clone(),
+                        revoked: false,
+                    });
+                    self.commit(next)?;
+                    if changed_policy {
+                        self.generation = generation;
+                        for registered in &self.connections {
+                            let _ = registered.stream.shutdown(std::net::Shutdown::Both);
+                        }
+                        self.connections.clear();
+                        self.invitations.clear();
+                        for pending in &mut self.claims {
+                            if pending.decision.is_none() {
+                                pending.decision = Some(Err(DirectError::AlreadyDecided));
+                            }
+                        }
+                        self.listen();
+                    }
+                    info
+                };
+                ManagementReply::Setup(PairedDevice {
+                    pin: self.pin.clone(),
+                    pairing: info.pairing,
+                    client: info.client,
+                })
+            }
+            Management::CancelSetup { pin, operation } => {
+                if actor.is_some() {
+                    return Err(DirectError::AuthenticationRefused);
+                }
+                if pin != self.pin {
+                    return Err(DirectError::PinMismatch);
+                }
+                if operation == [0; 32] {
+                    return Err(DirectError::InvalidRequest);
+                }
+                if !self
+                    .record
+                    .setups
+                    .iter()
+                    .any(|setup| setup.operation == operation)
+                {
+                    return Err(DirectError::Expired);
+                }
+                if let Some(device) = self.record.devices.iter().find(|d| d.claim == operation) {
+                    let pairing = device.info.pairing;
+                    let cancellation = crypto::hash(&wire::transcript(
+                        "cancel", &self.pin, &operation, &pairing,
+                    )?);
+                    let (_, client) = self.revoke(Some(pairing), cancellation, pairing)?;
+                    return Ok((
+                        ManagementReply::SetupCancelled {
+                            pin: self.pin.clone(),
+                            operation,
+                        },
+                        Some(client),
+                    ));
+                }
+                self.cancel_reservation(operation, None)?;
+                ManagementReply::SetupCancelled {
+                    pin: self.pin.clone(),
+                    operation,
+                }
+            }
             Management::SetPolicy(policy) => {
                 if let Some(policy) = &policy {
                     NetworkPolicy::new(policy.bind)?;
@@ -410,6 +589,61 @@ impl State {
             }
         };
         Ok((reply, None))
+    }
+    fn check_setup(
+        &self,
+        pin: &ServerPin,
+        policy: &NetworkPolicy,
+        expected_policy: &Option<NetworkPolicy>,
+        operation: OperationId,
+        public_key: [u8; 32],
+        name: &ClientName,
+    ) -> Result<(), DirectError> {
+        if pin != &self.pin {
+            return Err(DirectError::PinMismatch);
+        }
+        NetworkPolicy::new(policy.bind)?;
+        if let Some(policy) = expected_policy {
+            NetworkPolicy::new(policy.bind)?;
+        }
+        if operation == [0; 32] || public_key == [0; 32] {
+            return Err(DirectError::InvalidRequest);
+        }
+        if let Some(setup) = self
+            .record
+            .setups
+            .iter()
+            .find(|setup| setup.operation == operation)
+            && (setup.policy != *policy
+                || setup.expected_policy != *expected_policy
+                || setup.public_key != public_key
+                || setup.name != *name)
+        {
+            return Err(DirectError::Substituted);
+        }
+        Ok(())
+    }
+    fn cancel_reservation(
+        &mut self,
+        operation: OperationId,
+        key: Option<[u8; 32]>,
+    ) -> Result<(), DirectError> {
+        let index = self
+            .record
+            .setups
+            .iter()
+            .position(|setup| setup.operation == operation)
+            .ok_or(DirectError::Expired)?;
+        let setup = &self.record.setups[index];
+        if key.is_some_and(|key| key != setup.public_key) {
+            return Err(DirectError::Substituted);
+        }
+        if !setup.cancelled {
+            let mut next = self.record.clone();
+            next.setups[index].cancelled = true;
+            self.commit(next)?;
+        }
+        Ok(())
     }
     pub(crate) fn revoke(
         &mut self,
@@ -698,6 +932,15 @@ impl State {
                     return self
                         .revoke(Some(pairing), operation, pairing)
                         .map(|v| wire::Answer::Cancelled(Some(v.0)));
+                }
+                if self
+                    .record
+                    .setups
+                    .iter()
+                    .any(|setup| setup.operation == *claim)
+                {
+                    self.cancel_reservation(*claim, Some(*key))?;
+                    return Ok(wire::Answer::Cancelled(None));
                 }
                 if let Some(pending) = self.claims.iter_mut().find(|c| c.claim.id == *claim) {
                     if pending.claim.device_public_key != *key {

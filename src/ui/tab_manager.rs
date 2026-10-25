@@ -635,13 +635,6 @@ impl TabManager {
         self.sync_terminal_focus_blocker(cx);
     }
 
-    /// Tells each Pane that the person stopped its server, as the server's route reported.
-    pub(crate) fn server_stopped(&self, cx: &mut App) {
-        for (_, view) in self.tabs.iter() {
-            view.update(cx, |view, cx| view.server_stopped(cx));
-        }
-    }
-
     /// Reconnects each Pane the person's stop interrupted, once they started the server.
     pub(crate) fn server_started(&self, cx: &mut App) {
         for (_, view) in self.tabs.iter() {
@@ -7563,7 +7556,7 @@ mod tests {
     ) -> crate::terminal::metadata::TerminalMetadataContext {
         crate::terminal::metadata::TerminalMetadataContext::Remote(
             crate::terminal::metadata::RemoteTerminalMetadataContext::new(
-                crate::domain::SshDestination::new("tester@remote".into()).unwrap(),
+                "remote".to_owned(),
                 crate::domain::RemoteDirectory::new(directory.into()).unwrap(),
             ),
         )

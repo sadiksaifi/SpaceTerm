@@ -3,8 +3,7 @@ use crate::{ServerError, storage::Directory};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-/// Single-Tab, single-Pane creation order and layout are implicit in this slice's membership.
-/// The sole Tab and Pane are also the Roots. Shared editing extends this retained format in #537.
+/// First-Workspace seed and retained shared hierarchy. The seed's sole Tab and Pane are its Roots.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Organization {

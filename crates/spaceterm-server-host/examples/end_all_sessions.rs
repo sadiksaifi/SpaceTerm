@@ -13,7 +13,7 @@ mod support;
 mod exercise {
     use super::support::{await_output, command};
     use spaceterm_server::{
-        LocalServer, ServerError,
+        ServerConnection, ServerError,
         hierarchy::{Axis, CloseTarget, Id, Inventory, Mutation, Outcome},
         pane::{control::Controller, *},
     };
@@ -64,7 +64,7 @@ mod exercise {
     }
 
     fn mutate(
-        server: &LocalServer,
+        server: &ServerConnection,
         connection: &mut PaneConnection,
         mutation: Mutation,
     ) -> Result<Id> {
@@ -131,15 +131,15 @@ mod exercise {
         Ok(())
     }
 
-    fn named_clients(first: &str, second: &str) -> Result<(LocalServer, LocalServer)> {
+    fn named_clients(first: &str, second: &str) -> Result<(ServerConnection, ServerConnection)> {
         let previous = std::env::var_os("SPACETERM_DEVELOPMENT_CLIENT");
         // SAFETY: single-threaded startup, before connections or native PTY workers exist.
-        // LocalServer construction only resolves paths and captures this nonsecret name.
+        // ServerConnection construction only resolves paths and captures this nonsecret name.
         unsafe { std::env::set_var("SPACETERM_DEVELOPMENT_CLIENT", first) };
-        let a = LocalServer::for_identity(IDENTITY);
+        let a = ServerConnection::for_identity(IDENTITY);
         // SAFETY: the same single-threaded startup boundary still holds.
         unsafe { std::env::set_var("SPACETERM_DEVELOPMENT_CLIENT", second) };
-        let b = LocalServer::for_identity(IDENTITY);
+        let b = ServerConnection::for_identity(IDENTITY);
         // SAFETY: restore the launch environment before any worker is created.
         unsafe {
             match previous {

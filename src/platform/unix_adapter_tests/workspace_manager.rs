@@ -116,86 +116,93 @@ fn replaced_pinned_directory_is_rejected_between_picker_validation_and_activatio
     fs::remove_dir_all(root).unwrap();
 }
 
-/// Opening a symbolic link to a directory one of penguin's Workspaces is pinned to opens that
-/// Workspace: penguin's server compares the two directories, and nothing creates another
-/// Workspace or asks this computer's server.
+/// The paired server compares a selected symbolic link with its own pins before the client
+/// creates another Workspace.
 #[gpui::test]
-fn open_remote_directory_should_reuse_a_workspace_pinned_through_another_path(
+fn open_paired_server_directory_reuses_the_workspace_pinned_through_a_symlink(
     cx: &mut TestAppContext,
 ) {
-    // The owning server's directory worker answers from its own thread.
+    use crate::ui::server_worktrees::testing::{ScriptedReads, present_direct};
+    use crate::ui::shared_workspaces::testing::{ScriptedEdits, ScriptedPanes};
+    use crate::ui::shared_workspaces::{DirectServer, SharedEditSource, SharedPaneSessions};
+
     cx.executor().allow_parking();
     let root = std::env::temp_dir().join(format!(
-        "spaceterm-remote-directory-alias-{}",
+        "spaceterm-paired-directory-alias-{}",
         std::process::id()
     ));
-    let _ = std::fs::remove_dir_all(&root);
-    std::fs::create_dir_all(root.join("project")).unwrap();
-    std::fs::create_dir_all(root.join("elsewhere")).unwrap();
+    std::fs::create_dir(&root).unwrap();
+    std::fs::create_dir(root.join("project")).unwrap();
+    std::fs::create_dir(root.join("elsewhere")).unwrap();
     symlink(root.join("project"), root.join("alias")).unwrap();
     let adapters = WorkspaceManagerAdapters {
         server_directories: crate::ui::directory_picker::server_directory_testing::in_process(),
         ..workspace_adapters()
     };
     let (harness, cx) = MachineGroupsHarness::using(adapters, cx);
-    let (connections, _backend, penguin) = connecting_penguin(cx);
-    connections.connect(penguin.clone());
-    wait_until(|| connections.server(&penguin).is_some(), cx);
-    let (_, penguin_edits) = harness.present_ssh("penguin", &[("Other", 6), ("Far", 7)], cx);
-    let mut inventory = machine_inventory(harness.next_revision(), &[("Other", 6), ("Far", 7)]);
+    let route = [9; 32];
+    let workspaces = [("Other", 6), ("Far", 7)];
+    let mut inventory = machine_inventory(harness.next_revision(), &workspaces);
     inventory.workspaces[0].pinned_directory = Some(root.join("elsewhere"));
     inventory.workspaces[1].pinned_directory = Some(root.join("project"));
-    penguin_edits.set_inventory(inventory);
+    let edits = Rc::new(ScriptedEdits::new(Some(inventory)));
+    let key = cx.update(|window, cx| {
+        present_direct(
+            route,
+            Rc::clone(&edits),
+            ScriptedReads::new("~/worktrees/{branch}"),
+            cx,
+        );
+        harness.manager.update(cx, |manager, cx| {
+            let key = manager.present_server_workspaces(
+                ServerOrigin::Direct(DirectServer {
+                    route,
+                    name: "Penguin".into(),
+                }),
+                SharedEditSource::new(Rc::clone(&edits) as Rc<_>),
+                SharedPaneSessions::with_opener(
+                    ScriptedPanes::new(MachineGroupsHarness::session_factory()) as Rc<_>,
+                    &PaneConstruction::testing(),
+                ),
+                window,
+                cx,
+            );
+            manager.sync_shared_workspaces(key, window, cx);
+            key
+        })
+    });
+    harness.attach(key, &workspaces, cx);
     cx.update(|window, cx| {
         harness.manager.update(cx, |manager, cx| {
-            let key = manager
-                .shared
-                .key_of(&ServerOrigin::Ssh(penguin.clone()))
-                .unwrap();
-            manager.sync_shared_workspaces(key, window, cx);
+            manager.open_server_directory(key, String::new(), root.join("alias"), window, cx);
         })
     });
     cx.run_until_parked();
-
-    cx.simulate_keystrokes("cmd-shift-o");
-    cx.run_until_parked();
-    let flow = harness
-        .manager
-        .read_with(cx, |manager, _| manager.remote_workspace_flow.clone())
-        .expect("Open Remote Directory opens the flow");
-    choose_remote_directory(
-        &flow,
-        &connections,
-        &penguin,
-        &root.join("alias").display().to_string(),
-        cx,
-    );
-    // The server answers the comparison on its own thread before the flow finishes.
     let deadline = Instant::now() + std::time::Duration::from_secs(5);
     while harness
         .manager
-        .read_with(cx, |manager, _| manager.remote_workspace_flow.is_some())
+        .read_with(cx, |manager, _| manager.pending_server_directory.is_some())
     {
-        assert!(Instant::now() < deadline, "the flow finishes");
+        assert!(
+            Instant::now() < deadline,
+            "the owning server's directory comparison finishes"
+        );
         std::thread::sleep(std::time::Duration::from_millis(5));
         cx.run_until_parked();
     }
-
     let opened = harness.manager.read_with(cx, |manager, _| {
         let active = manager.workspaces.active_workspace_id()?;
-        (manager.machine(active) == Some(machine_groups::Machine::Ssh(penguin.clone())))
+        (manager.shared.owner(active) == Some(key))
             .then(|| manager.workspaces.active().name().to_owned())
     });
-    assert_eq!(
-        opened.as_deref(),
-        Some("Far"),
-        "the Workspace pinned there opens"
+    assert_eq!(opened.as_deref(), Some("Far"));
+    assert!(
+        edits.submitted().is_empty(),
+        "a matching pin must not create another Workspace"
     );
-    assert_eq!(
-        penguin_edits.submitted(),
-        Vec::new(),
-        "no other Workspace is created"
+    assert!(
+        harness.local.submitted().is_empty(),
+        "the local server receives no mutation"
     );
-    assert_eq!(harness.local.submitted(), Vec::new());
-    let _ = std::fs::remove_dir_all(&root);
+    std::fs::remove_dir_all(root).unwrap();
 }

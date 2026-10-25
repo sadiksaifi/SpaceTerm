@@ -3,7 +3,7 @@
 mod lifecycle;
 mod support;
 use lifecycle::{Server, connect, require_idle, size};
-use spaceterm_server::{LocalServer, ServerError, pane::*};
+use spaceterm_server::{ServerConnection, ServerError, pane::*};
 use std::{error::Error, time::Duration};
 use support::{attach, await_output, command};
 
@@ -21,7 +21,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     let major = std::env::args().nth(1).unwrap_or("1".into()).parse()?;
     let name = std::env::var("SPACETERM_DEVELOPMENT_CLIENT").unwrap_or("restore-smoke".into());
-    let client = LocalServer::for_development_client(&name, major)?;
+    let client = ServerConnection::for_development_client(&name, major)?;
     require_idle(&client)?;
     client.setup()?;
     let mut host = Server::start()?;
@@ -179,7 +179,7 @@ mod faults {
     }
     type OrganizationIds = ([u8; 32], [u8; 32], [u8; 32]);
 
-    pub fn exercise(client: &LocalServer) -> Result<OrganizationIds, Box<dyn Error>> {
+    pub fn exercise(client: &ServerConnection) -> Result<OrganizationIds, Box<dyn Error>> {
         let root = std::env::temp_dir().join(format!(
             "spaceterm-533-faults-{}-{}",
             std::process::id(),

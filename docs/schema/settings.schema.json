@@ -470,13 +470,7 @@
         "new_workspace": {
           "$ref": "#/$defs/shortcutOverride"
         },
-        "new_remote_workspace": {
-          "$ref": "#/$defs/shortcutOverride"
-        },
         "open_local_directory": {
-          "$ref": "#/$defs/shortcutOverride"
-        },
-        "open_remote_directory": {
           "$ref": "#/$defs/shortcutOverride"
         },
         "new_worktree": {
@@ -695,13 +689,6 @@
         "show_pull_requests": {
           "type": "boolean",
           "default": true
-        },
-        "worktree_path_template": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 1024,
-          "pattern": "^(~/|/)",
-          "default": "~/.worktrees/{repository}/{branch}"
         }
       }
     },

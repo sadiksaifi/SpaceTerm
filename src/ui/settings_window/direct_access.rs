@@ -1,10 +1,12 @@
 //! Network Access for the selected server: whether other devices may connect, at which of that
 //! server's addresses, and the devices paired with it.
 //!
-//! Network Access appears for this computer's server and SSH servers only. A paired connection
-//! carries no authority over its server's network. Every step runs over SpaceTerm's existing
-//! connection to the selected server, with the authority that connection already has, and the
-//! addresses offered are the ones that server reads from its own machine. The rows read the
+//! Network Access appears for this computer's server and every paired server. Every step runs
+//! over SpaceTerm's existing connection to the selected server, with the authority that
+//! connection already has, and the addresses offered are the ones that server reads from its own
+//! machine. A paired server's steps run over this computer's own network connection, so turning
+//! access off, moving its address or unpairing this computer says that this computer disconnects
+//! too. The rows read the
 //! server only while Servers shows it, and choosing another server starts over, so nothing read
 //! or chosen for one server reaches another.
 //!
@@ -30,12 +32,12 @@ use super::catalog::SettingsSectionId;
 use super::server_list::ServerChoice;
 use super::server_selection;
 use super::servers::LocalServerStatus;
-use crate::local_server::direct::{DEFAULT_PORT, NetworkPolicy, PairingId};
-use crate::local_server::{LocalServer, ServerError};
+use crate::direct_connections::DirectRouteId;
+use crate::server_connection::direct::{DEFAULT_PORT, NetworkPolicy, PairingId};
+use crate::server_connection::{ServerConnection, ServerError};
 use crate::server_context::{
     LastKnownFacts, NetworkAccessFacts, NetworkListenerFacts, PairedDeviceFacts, PairedDevicesFacts,
 };
-use crate::ssh::server_connection::RemoteConnectionStatus;
 use crate::ui::appearance::{ChromeAppearance, gpui_color};
 use crate::ui::chrome_icons::IconRole;
 use crate::ui::chrome_typography::{ChromeTextStyleExt as _, TextRole};
@@ -46,6 +48,8 @@ pub(super) const ACCESS_SELECTOR: &str = "settings-network-access";
 pub(super) const ADDRESS_SELECTOR: &str = "settings-network-address";
 pub(super) const TURN_OFF_CONFIRM_SELECTOR: &str = "settings-network-access-turn-off-confirm";
 pub(super) const TURN_OFF_CANCEL_SELECTOR: &str = "settings-network-access-turn-off-cancel";
+pub(super) const MOVE_CONFIRM_SELECTOR: &str = "settings-network-access-move-confirm";
+pub(super) const MOVE_CANCEL_SELECTOR: &str = "settings-network-access-move-cancel";
 pub(super) const DEVICES_SELECTOR: &str = "settings-paired-devices";
 pub(super) const INVITE_SELECTOR: &str = "settings-invite-device";
 /// Prefixes each paired device's row and Remove button, followed by its position.
@@ -323,24 +327,41 @@ impl SettingsWindow {
     fn direct_access_control(&self, target: &ServerChoice) -> Option<Arc<dyn DirectAccessControl>> {
         match target {
             ServerChoice::Local => self.local_server.as_ref()?.direct_access(),
-            ServerChoice::Ssh(_) => self
+            ServerChoice::Direct(_) => self
                 .direct_access_server(target)
                 .map(|server| Arc::new(server) as Arc<dyn DirectAccessControl>),
-            // A paired connection carries no authority over the server's network.
-            ServerChoice::Direct(_) => None,
         }
     }
 
-    /// The account connection a removal is recorded against, so its retries keep that exact
-    /// route and authority.
-    fn direct_access_server(&self, target: &ServerChoice) -> Option<LocalServer> {
+    /// The connection a removal is recorded against, so its retries keep that exact route and
+    /// authority.
+    fn direct_access_server(&self, target: &ServerChoice) -> Option<ServerConnection> {
         match target {
             ServerChoice::Local => self.local_server.as_ref()?.worktree_server(),
-            ServerChoice::Ssh(destination) => {
-                self.ssh_servers.as_ref()?.connections.server(destination)
-            }
-            ServerChoice::Direct(_) => None,
+            ServerChoice::Direct(route) => self.direct_routes.as_ref()?.connections.server(route),
         }
+    }
+
+    /// The paired route this computer reaches the presented server over, when it is one. A
+    /// change to that server's network reaches this computer's own connection.
+    fn own_route(&self) -> Option<DirectRouteId> {
+        match self.direct_access.target.as_ref()? {
+            ServerChoice::Direct(route) => Some(*route),
+            ServerChoice::Local => None,
+        }
+    }
+
+    /// The pairing this computer holds with the presented paired server.
+    fn own_pairing(&self) -> Option<PairingId> {
+        let route = self.own_route()?;
+        Some(
+            self.direct_routes
+                .as_ref()?
+                .connections
+                .route(&route)?
+                .paired
+                .pairing,
+        )
     }
 
     /// The selected server's name as the rows say it: the name the server gave, once it has.
@@ -439,16 +460,6 @@ impl SettingsWindow {
                         )
                     })
             }
-            ServerChoice::Ssh(destination) => {
-                self.current_ssh_read(destination)
-                    .is_some_and(|facts| facts.status.stopped)
-                    || self.ssh_servers.as_ref().is_some_and(|rows| {
-                        matches!(
-                            rows.connections.status(destination),
-                            RemoteConnectionStatus::Stopped
-                        )
-                    })
-            }
             ServerChoice::Direct(_) => false,
         };
         if !stopped
@@ -486,9 +497,7 @@ impl SettingsWindow {
     /// Follows the selected server's network access while Servers shows it. Selection, section
     /// and connection changes call this; rendering never does.
     pub(super) fn sync_direct_access(&mut self, cx: &mut Context<Self>) {
-        let target = self
-            .selected_server()
-            .filter(|target| !matches!(target, ServerChoice::Direct(_)));
+        let target = self.selected_server();
         if self.direct_access.target != target {
             self.direct_access.start_over(target.clone());
             self.reload_known_access(cx);
@@ -704,12 +713,14 @@ impl SettingsWindow {
     }
 
     /// Moves access to `address`, or turns it on there, keeping the chosen port.
-    fn choose_address(&mut self, address: IpAddr, _: &mut Window, cx: &mut Context<Self>) {
+    fn choose_address(&mut self, address: IpAddr, window: &mut Window, cx: &mut Context<Self>) {
         let on = self
             .direct_access
             .state()
             .is_some_and(|state| state.policy.is_some());
-        if on {
+        if on && self.own_route().is_some() {
+            self.confirm_move(address, window, cx);
+        } else if on {
             self.apply_address(address, Change::Moving, cx);
         } else {
             self.turn_on_network_access(Some(address), cx);
@@ -751,7 +762,66 @@ impl SettingsWindow {
         self.apply_policy(generation, control, Some(policy), change, cx);
     }
 
-    /// Asks before the selected server stops listening, naming the server and what ends.
+    /// Asks before a paired server moves its listener away from the address this computer uses,
+    /// which disconnects this computer and every other device using that address.
+    fn confirm_move(&mut self, address: IpAddr, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.network_access_live() {
+            return;
+        }
+        let generation = self.direct_access.generation;
+        let owner = cx.weak_entity();
+        let server = self.direct_access_server_name();
+        let title = "Change Network Address?";
+        let message = format!(
+            "This computer and other paired devices reach {server} at its current address, so they disconnect. Each needs a new invitation to reconnect at {address}."
+        );
+        let result = Alert::new(
+            ModalId::new("settings-network-access-move"),
+            title,
+            title,
+            message,
+            vec![
+                ModalAction::new(
+                    true,
+                    "Change Address",
+                    ModalActionRole::Affirmative,
+                    MOVE_CONFIRM_SELECTOR,
+                )
+                .with_intent(ModalActionIntent::Destructive)
+                .with_emphasis(ModalActionEmphasis::Prominent),
+                ModalAction::new(
+                    false,
+                    "Cancel",
+                    ModalActionRole::Cancel,
+                    MOVE_CANCEL_SELECTOR,
+                ),
+            ],
+        )
+        .intent(AlertIntent::Critical)
+        .present(window, cx, move |outcome, cx| {
+            if !matches!(
+                outcome,
+                AlertOutcome::Activated {
+                    action_id: true,
+                    ..
+                }
+            ) {
+                return;
+            }
+            let _ = owner.update(cx, |settings, cx| {
+                if settings.direct_access.generation == generation {
+                    settings.apply_address(address, Change::Moving, cx);
+                }
+            });
+        });
+        if result.is_err() {
+            eprintln!("failed to present the network address change confirmation");
+        }
+    }
+
+    /// Asks before the selected server stops listening, naming the server and what ends. On a
+    /// paired server this computer's own connection ends too, and only that server's own
+    /// computer can turn access on again.
     fn confirm_turn_off(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.network_access_live() {
             return;
@@ -765,19 +835,34 @@ impl SettingsWindow {
         let generation = self.direct_access.generation;
         let owner = cx.weak_entity();
         let title = "Turn Off Network Access?";
+        let own = self.own_route().is_some();
+        let message: SharedString = if own {
+            format!(
+                "Paired devices disconnect, including this computer. To turn access on again, use SpaceTerm on {}.",
+                self.direct_access_server_name()
+            )
+            .into()
+        } else {
+            "Paired devices connected over the network disconnect.".into()
+        };
+        let confirm = ModalAction::new(
+            true,
+            "Turn Off",
+            ModalActionRole::Affirmative,
+            TURN_OFF_CONFIRM_SELECTOR,
+        )
+        .with_emphasis(ModalActionEmphasis::Prominent);
         let result = Alert::new(
             ModalId::new("settings-network-access-turn-off"),
             title,
             title,
-            "Paired devices connected over the network disconnect.",
+            message,
             vec![
-                ModalAction::new(
-                    true,
-                    "Turn Off",
-                    ModalActionRole::Affirmative,
-                    TURN_OFF_CONFIRM_SELECTOR,
-                )
-                .with_emphasis(ModalActionEmphasis::Prominent),
+                if own {
+                    confirm.with_intent(ModalActionIntent::Destructive)
+                } else {
+                    confirm
+                },
                 ModalAction::new(
                     false,
                     "Cancel",
@@ -786,7 +871,11 @@ impl SettingsWindow {
                 ),
             ],
         )
-        .intent(AlertIntent::Informational)
+        .intent(if own {
+            AlertIntent::Critical
+        } else {
+            AlertIntent::Informational
+        })
         .present(window, cx, move |outcome, cx| {
             if !matches!(
                 outcome,
@@ -931,6 +1020,8 @@ impl SettingsWindow {
         let now = crate::ui::direct_access::unix_now();
         let colors = appearance.host_colors(spaceterm_ui::ControlHost::Card);
         let dimmed = !self.network_access_live();
+        let own_pairing = self.own_pairing();
+        let this_computer = self.this_computer;
         devices
             .into_iter()
             .enumerate()
@@ -938,7 +1029,11 @@ impl SettingsWindow {
                 let removing = self.direct_access.unpairing.contains(&device.pairing);
                 let selector = format!("{DEVICE_SELECTOR}-{index}");
                 let owner = cx.weak_entity();
-                let name = device.name.clone();
+                let name = if own_pairing == Some(device.pairing) {
+                    SharedString::from(format!("{} ({this_computer})", device.name))
+                } else {
+                    device.name.clone()
+                };
                 let control = if removing {
                     ProgressRing::new(
                         SharedString::from(format!("{selector}-progress")),
@@ -1061,11 +1156,20 @@ impl SettingsWindow {
         let generation = self.direct_access.generation;
         let owner = cx.weak_entity();
         let title = format!("Unpair \"{}\"?", device.name);
+        let message: SharedString = if self.own_pairing() == Some(device.pairing) {
+            format!(
+                "This is this computer. It disconnects from {} and needs a new invitation to reconnect.",
+                self.direct_access_server_name()
+            )
+            .into()
+        } else {
+            "It needs a new invitation to reconnect.".into()
+        };
         let result = Alert::new(
             ModalId::new("settings-paired-device-remove"),
             title.clone(),
             title,
-            "It needs a new invitation to reconnect.",
+            message,
             vec![
                 ModalAction::new(
                     true,
@@ -1135,12 +1239,22 @@ impl SettingsWindow {
             return;
         };
         let label = self.direct_access_server_name().to_string();
+        // A paired server's removal is recorded against this computer's own route: its own
+        // pairing as Unpair, which removes the saved connection at once, another as a revocation.
+        let own = self.own_route();
+        let own_pairing = self.own_pairing();
         self.direct_access.unpairing.push(pairing);
         self.direct_access.problem = None;
         self.direct_access.work = Some(cx.spawn(async move |settings, cx| {
             let recorded = cx
                 .background_executor()
-                .spawn(async move { registry.revoke_other(server, pairing, label) })
+                .spawn(async move {
+                    match own {
+                        Some(route) if own_pairing == Some(pairing) => registry.unpair_self(&route),
+                        Some(route) => registry.unpair(&route, pairing),
+                        None => registry.revoke_other(server, pairing, label),
+                    }
+                })
                 .await;
             let _ = settings.update(cx, |settings, cx| {
                 let state = &mut settings.direct_access;

@@ -377,8 +377,8 @@ impl State {
             self.creator_boot = Some(boot);
         }
     }
-    /// Legacy first-Pane opening has no shared-edit operation identity. It must not retire a
-    /// sequence a concurrent main-window edit has already reserved in its durable journal.
+    /// First-Workspace seeding has no shared-edit operation identity. It must not retire a
+    /// sequence a concurrent client edit has already reserved in its durable journal.
     pub fn ensure_first_workspace(&mut self, device: Id, directory: &Path) -> Result<(), Refusal> {
         if self.inventory.workspaces.is_empty() {
             self.edit(
@@ -393,7 +393,7 @@ impl State {
         }
         Ok(())
     }
-    pub fn from_legacy(org: &crate::organization::Organization) -> Self {
+    pub fn from_organization(org: &crate::organization::Organization) -> Self {
         org.shared.as_deref().cloned().unwrap_or_else(|| Self {
             home_directory: Some(org.starting_directory.clone()),
             names: vec![WorkspaceName {
@@ -442,8 +442,8 @@ impl State {
         &self,
         directory: &Path,
     ) -> Result<crate::organization::Organization, ServerError> {
-        // Legacy fields retain their original meaning for existing Development tooling.
-        // Shared organization is the authority once present, including an empty inventory.
+        // The envelope describes the first Workspace. Shared organization is authoritative,
+        // including when its inventory is empty.
         let mut org = crate::organization::Organization::first(directory.to_owned())?;
         if let Some(w) = self.inventory.workspaces.first() {
             let t = w
@@ -1530,7 +1530,7 @@ mod tests {
         state.acknowledge([2; 32], 2).unwrap();
         let envelope = state.envelope("/home/test".as_ref()).unwrap();
         let record = serde_json::from_slice(&serde_json::to_vec(&envelope).unwrap()).unwrap();
-        let mut recovered = State::from_legacy(&record);
+        let mut recovered = State::from_organization(&record);
         recovered.validate().unwrap();
         recovered.begin_boot([9; 32]);
         assert_eq!(
@@ -2349,7 +2349,7 @@ mod tests {
         let envelope = state.envelope("/tmp".as_ref()).unwrap();
         let reopened: crate::organization::Organization =
             serde_json::from_slice(&serde_json::to_vec(&envelope).unwrap()).unwrap();
-        let mut restored = State::from_legacy(&reopened);
+        let mut restored = State::from_organization(&reopened);
         restored.validate().unwrap();
         let tab = &restored.inventory.workspaces[0].tabs[0];
         assert_eq!(tab.root_pane, pane);

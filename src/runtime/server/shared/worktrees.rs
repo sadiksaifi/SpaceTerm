@@ -1,9 +1,9 @@
 //! Worktree writes reuse the retained mutation journal. A started write has no read cancellation.
 use super::*;
+use crate::cancellation::CancellationToken;
 use crate::repository_status::{
     ProgramError, ProgramExit, ProgramRequest, RepositoryProgramRunner, RepositoryToolDiscovery,
 };
-use crate::ssh::cancellation::SshCancellationToken;
 use crate::worktrees::git::{LocalWorktreeGit, RemovalExpectation, WorktreeRemoveError};
 use spaceterm_server::{
     hierarchy::{Mutation, Outcome},
@@ -67,7 +67,7 @@ impl RepositoryProgramRunner for WriteRunner {
         &self,
         request: &ProgramRequest,
         stdout: &mut dyn FnMut(&[u8]),
-        token: &SshCancellationToken,
+        token: &CancellationToken,
     ) -> Result<ProgramExit, ProgramError> {
         let mut request = request.clone();
         let write = request
@@ -81,7 +81,7 @@ impl RepositoryProgramRunner for WriteRunner {
             crate::platform::unix_repository_program::UnixRepositoryProgramRunner::new().run_locked(
                 &request,
                 &mut |_| {},
-                &SshCancellationToken::default(),
+                &CancellationToken::default(),
                 self.0.as_ref(),
             )
         } else {
@@ -97,7 +97,7 @@ impl RepositoryProgramRunner for WriteRunner {
 }
 fn git(
     lock: Option<std::fs::File>,
-    token: &SshCancellationToken,
+    token: &CancellationToken,
 ) -> Result<(LocalWorktreeGit, PathBuf), Error> {
     #[cfg(target_os = "macos")]
     let discovery = crate::platform::macos_repository_tools::MacosRepositoryToolDiscovery::new();
@@ -166,7 +166,7 @@ impl Drop for Writes {
 fn list(
     git: &LocalWorktreeGit,
     root: &Path,
-    token: &SshCancellationToken,
+    token: &CancellationToken,
 ) -> Result<crate::worktrees::WorktreeSnapshot, Error> {
     let directory = local_filesystem()
         .validate_directory(root)
@@ -229,20 +229,6 @@ impl SharedWorkspaceHost {
             Read::Settings => Ok(ReadReply::Settings(
                 self.state.worktree_settings.clone().unwrap_or_default(),
             )),
-            Read::SeedLocation { template } => {
-                if self.state.worktree_settings.is_none() {
-                    crate::server_settings::validate_location_template(&template)?;
-                    let mut next = self.state.clone();
-                    next.worktree_settings = Some(Settings {
-                        template,
-                        version: 0,
-                    });
-                    self.commit(next).map_err(|_| Error::Unavailable)?;
-                }
-                Ok(ReadReply::Settings(
-                    self.state.worktree_settings.clone().unwrap_or_default(),
-                ))
-            }
             Read::Poll { id } => {
                 let prepared = self.writes.reads.poll(connection, id)?;
                 if let Some(approval) = prepared.approval {
@@ -1072,7 +1058,7 @@ mod tests {
         let mut prototype = host();
         prototype.directory = git.0.clone();
         let mut restored = SharedWorkspaceHost::new(prototype);
-        restored.state = State::from_legacy(&serde_json::from_slice(&bytes).unwrap());
+        restored.state = State::from_organization(&serde_json::from_slice(&bytes).unwrap());
         restored.state.begin_boot(restored.prototype.boot);
         assert!(matches!(
             restored.request([1; 32], [1; 32], Request::Capabilities),

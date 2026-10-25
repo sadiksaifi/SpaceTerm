@@ -1,5 +1,5 @@
 //! One authenticated inventory subscription and durable edit journal per desktop client.
-use crate::local_server::{LocalServer, ServerError};
+use crate::server_connection::{ServerConnection, ServerError};
 use crate::terminal::server_session::PaneControls;
 use spaceterm_server::{
     hierarchy::{ClientJournal, Inventory, Mutation, RetainedOutcome},
@@ -74,24 +74,7 @@ impl Drop for SharedWorkspaceClient {
 }
 impl SharedWorkspaceClient {
     /// Pane control records last only as long as the server lists their Panes.
-    pub(crate) fn new(
-        server: LocalServer,
-        controls: Arc<PaneControls>,
-        legacy_location: String,
-    ) -> Self {
-        let legacy_location = server.is_account_local().then_some(legacy_location);
-        Self::connect(server, controls, legacy_location)
-    }
-
-    pub(crate) fn remote(server: LocalServer, controls: Arc<PaneControls>) -> Self {
-        Self::connect(server, controls, None)
-    }
-
-    fn connect(
-        server: LocalServer,
-        controls: Arc<PaneControls>,
-        legacy_location: Option<String>,
-    ) -> Self {
+    pub(crate) fn new(server: ServerConnection, controls: Arc<PaneControls>) -> Self {
         let snapshot = Arc::new(PublishedSnapshot::new(SharedWorkspaceSnapshot {
             end_all_sessions: false,
             worktree_writes: false,
@@ -118,7 +101,7 @@ impl SharedWorkspaceClient {
         }
         if std::thread::Builder::new()
             .name("spaceterm-shared-workspaces".into())
-            .spawn(move || run(server, controls, state, receiver, running, legacy_location))
+            .spawn(move || run(server, controls, state, receiver, running))
             .is_err()
         {
             snapshot.publish(|snapshot| snapshot.error = Some(ServerError::StartupFailed));
@@ -263,12 +246,11 @@ fn finish(
     })
 }
 fn run(
-    server: LocalServer,
+    server: ServerConnection,
     controls: Arc<PaneControls>,
     state: Arc<PublishedSnapshot>,
     commands: mpsc::Receiver<Mutation>,
     alive: Arc<AtomicBool>,
-    legacy_location: Option<String>,
 ) {
     let mut active: Option<(u64, Mutation)> = None;
     while alive.load(Ordering::Acquire) {
@@ -277,15 +259,6 @@ fn run(
             let mut connection = server.connect_shared_pane()?;
             let attachments = server.attachments()?;
             let mut journal = server.shared_journal()?;
-            if connection.worktree_writes()
-                && let Some(template) = &legacy_location
-            {
-                connection.exchange(&Request::WorktreeRead(
-                    spaceterm_server::worktree::Read::SeedLocation {
-                        template: template.clone(),
-                    },
-                ))?;
-            }
             // Authoritative reconciliation always precedes a retry of a previously submitted edit.
             let (initial, mut sequence) = inventory(&mut connection, &controls)?;
             state.publish(|s| {

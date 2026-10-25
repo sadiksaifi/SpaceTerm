@@ -6,10 +6,9 @@ pub mod control;
 mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
-pub mod maintenance;
 mod registration;
 mod runtime;
-pub use runtime::CandidateMetadata;
+pub use runtime::{CandidateMetadata, verify_candidate_bytes};
 
 use crate::{ServerError, host::Paths, storage::Directory};
 use serde::{Deserialize, Serialize};
@@ -339,8 +338,8 @@ impl Service {
         self.snapshot(&state)
     }
     #[cfg(feature = "client")]
-    pub(crate) fn local_server(&self) -> Result<crate::LocalServer, ServerError> {
-        crate::LocalServer::with_paths(self.paths.clone())
+    pub(crate) fn local_server(&self) -> Result<crate::ServerConnection, ServerError> {
+        crate::ServerConnection::with_paths(self.paths.clone())
     }
     /// Serialize normal launch with installation and explicit service controls.
     #[cfg(feature = "client")]
@@ -1559,7 +1558,7 @@ mod tests {
         fn no_provision() -> Result<PathBuf, ServerError> {
             panic!("retained policy must never select a different runtime")
         }
-        fn ready(outcome: StartupOutcome) -> crate::LocalServer {
+        fn ready(outcome: StartupOutcome) -> crate::ServerConnection {
             match outcome {
                 StartupOutcome::Ready { server, status } => {
                     assert_eq!(status.protocol_major, 1);

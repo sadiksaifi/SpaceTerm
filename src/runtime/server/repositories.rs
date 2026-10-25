@@ -1,10 +1,10 @@
 //! Cancellable, bounded reads of validated host directories, shared by every inventory subscriber.
 use crate::{
+    cancellation::CancellationToken,
     repository_status::{
         self as policy, ProbeOutcome, ProgramError, ProgramExit, ProgramRequest,
         RepositoryProgramRunner, RepositoryRoot, RepositoryToolDiscovery,
     },
-    ssh::cancellation::SshCancellationToken,
 };
 use spaceterm_server::{
     hierarchy::{Id, State},
@@ -31,7 +31,7 @@ mod pins;
 
 type Sources = BTreeSet<PathBuf>;
 struct Worker {
-    cancellation: SshCancellationToken,
+    cancellation: CancellationToken,
     handle: JoinHandle<()>,
     results: mpsc::Receiver<(GitToolStatus, DirectoryFacts)>,
     interests: mpsc::SyncSender<Sources>,
@@ -220,7 +220,7 @@ impl ServerRepositories {
         reconcile_membership(state, &self.snapshot);
         if !self.subscribers.is_empty() && self.worker.is_none() && Instant::now() >= self.next_read
         {
-            let cancellation = SshCancellationToken::default();
+            let cancellation = CancellationToken::default();
             let token = cancellation.clone();
             let sources = self.sources.clone();
             let sent_sources = sources.clone();
@@ -354,7 +354,7 @@ impl RepositoryProgramRunner for DeadlineRunner {
         &self,
         request: &ProgramRequest,
         stdout: &mut dyn FnMut(&[u8]),
-        token: &SshCancellationToken,
+        token: &CancellationToken,
     ) -> Result<ProgramExit, ProgramError> {
         let mut request = request.clone();
         request.deadline = Some(Instant::now() + Duration::from_secs(5));
@@ -365,7 +365,7 @@ impl RepositoryProgramRunner for DeadlineRunner {
 fn read(
     sources: Sources,
     interests: mpsc::Receiver<Sources>,
-    cancellation: SshCancellationToken,
+    cancellation: CancellationToken,
     sender: mpsc::SyncSender<(GitToolStatus, DirectoryFacts)>,
 ) {
     let (git, home, status) = discover_git(&cancellation);
@@ -388,11 +388,11 @@ fn read(
     read_sources(sources, interests, readers, status, cancellation, sender);
 }
 
-pub(super) fn git_status(cancellation: &SshCancellationToken) -> GitToolStatus {
+pub(super) fn git_status(cancellation: &CancellationToken) -> GitToolStatus {
     discover_git(cancellation).2
 }
 
-fn discover_git(cancellation: &SshCancellationToken) -> (Option<PathBuf>, PathBuf, GitToolStatus) {
+fn discover_git(cancellation: &CancellationToken) -> (Option<PathBuf>, PathBuf, GitToolStatus) {
     #[cfg(target_os = "macos")]
     let discovery = crate::platform::macos_repository_tools::MacosRepositoryToolDiscovery::new();
     #[cfg(target_os = "linux")]
@@ -431,7 +431,7 @@ type Changes = Result<ChangeSummary, RepositoryReadError>;
 struct ActiveRead {
     // Reject late results after a source or physical root is removed and reintroduced.
     id: u64,
-    cancellation: SshCancellationToken,
+    cancellation: CancellationToken,
 }
 struct DiscoveryJob {
     directory: PathBuf,
@@ -485,7 +485,7 @@ fn read_sources(
     interests: mpsc::Receiver<Sources>,
     readers: Option<Readers>,
     status: GitToolStatus,
-    cancellation: SshCancellationToken,
+    cancellation: CancellationToken,
     sender: mpsc::SyncSender<(GitToolStatus, DirectoryFacts)>,
 ) {
     let Some((repository, worktrees)) = readers else {
@@ -597,7 +597,7 @@ struct ReadSupervisor {
     count_jobs: mpsc::SyncSender<CountJob>,
     sender: mpsc::SyncSender<(GitToolStatus, DirectoryFacts)>,
     status: GitToolStatus,
-    cancellation: SshCancellationToken,
+    cancellation: CancellationToken,
 }
 impl ReadSupervisor {
     fn set_sources(&mut self, sources: Sources) {
@@ -676,7 +676,7 @@ impl ReadSupervisor {
             let read = self.directories.get_mut(&directory).unwrap();
             self.next_id = self.next_id.saturating_add(1);
             let cancellation =
-                SshCancellationToken::linked(&self.cancellation, &SshCancellationToken::default());
+                CancellationToken::linked(&self.cancellation, &CancellationToken::default());
             let job = DiscoveryJob {
                 directory: directory.clone(),
                 active: ActiveRead {
@@ -713,9 +713,9 @@ impl ReadSupervisor {
                 }
                 if count_capacity {
                     self.next_id = self.next_id.saturating_add(1);
-                    let cancellation = SshCancellationToken::linked(
+                    let cancellation = CancellationToken::linked(
                         &self.cancellation,
-                        &SshCancellationToken::default(),
+                        &CancellationToken::default(),
                     );
                     let job = CountJob {
                         root: root.clone(),
@@ -859,7 +859,7 @@ fn discover(
     repository: &policy::local_read::LocalRepositoryReader,
     worktrees: &crate::worktrees::git::LocalWorktreeGit,
     events: &mpsc::SyncSender<ReadEvent>,
-    cancellation: &SshCancellationToken,
+    cancellation: &CancellationToken,
 ) {
     let mut facts = DirectoryFacts {
         directory,
@@ -943,11 +943,7 @@ fn discover(
 }
 
 /// Bounded backpressure must remain cancellable when a subscriber stops draining publications.
-fn send<T>(
-    sender: &mpsc::SyncSender<T>,
-    mut value: T,
-    cancellation: &SshCancellationToken,
-) -> bool {
+fn send<T>(sender: &mpsc::SyncSender<T>, mut value: T, cancellation: &CancellationToken) -> bool {
     loop {
         if cancellation.is_cancelled() {
             return false;

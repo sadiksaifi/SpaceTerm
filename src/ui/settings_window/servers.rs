@@ -14,18 +14,18 @@ use spaceterm_ui::{
 use super::SettingsWindow;
 use super::server_update::ServerUpdateControl;
 use crate::application_identity::ApplicationIdentity;
-pub(super) use crate::local_server::service::ServiceStartup;
-use crate::local_server::service::{
+pub(super) use crate::server_connection::service::ServiceStartup;
+use crate::server_connection::service::{
     LingerAuthorization, RetainedInstallation, Service, ServiceStatus, control,
 };
-use crate::local_server::{AuthenticatedStatus, LocalServer, ServerError};
+use crate::server_connection::{AuthenticatedStatus, ServerConnection, ServerError};
 use crate::ui::direct_access::DirectAccessControl;
 use crate::ui::sidebar_window::form::CaptionTone;
 
 /// The blocking local server check the section runs on the background executor. The Workspace
 /// Window sets up and starts the server; this row only reports how it answers.
 pub(super) trait LocalServerControl: Send + Sync {
-    fn worktree_server(&self) -> Option<LocalServer> {
+    fn worktree_server(&self) -> Option<ServerConnection> {
         None
     }
     /// The server's direct network access, managed with this account's authority.
@@ -33,7 +33,7 @@ pub(super) trait LocalServerControl: Send + Sync {
         None
     }
     /// Connects using owning-account authority. Never creates an identity or starts a server.
-    fn refresh(&self) -> Result<ServerConnection, ServerError>;
+    fn refresh(&self) -> Result<ConnectedServer, ServerError>;
     fn lifetime(&self) -> ServerLifetime {
         ServerLifetime::Independent
     }
@@ -54,13 +54,13 @@ pub(super) enum ServerLifetime {
 pub(super) struct DevelopmentRunServer(pub(super) Arc<dyn LocalServerControl>);
 
 impl LocalServerControl for DevelopmentRunServer {
-    fn worktree_server(&self) -> Option<LocalServer> {
+    fn worktree_server(&self) -> Option<ServerConnection> {
         self.0.worktree_server()
     }
     fn direct_access(&self) -> Option<Arc<dyn DirectAccessControl>> {
         self.0.direct_access()
     }
-    fn refresh(&self) -> Result<ServerConnection, ServerError> {
+    fn refresh(&self) -> Result<ConnectedServer, ServerError> {
         self.0.refresh()
     }
     fn lifetime(&self) -> ServerLifetime {
@@ -73,25 +73,25 @@ pub(super) const DEVELOPMENT_RUN_DESCRIPTION: &str = "Servers run your Workspace
                                                        Terminal Sessions. This Development \
                                                        run\u{2019}s server ends when the run ends.";
 
-impl LocalServerControl for LocalServer {
-    fn worktree_server(&self) -> Option<LocalServer> {
+impl LocalServerControl for ServerConnection {
+    fn worktree_server(&self) -> Option<ServerConnection> {
         Some(self.clone())
     }
     fn direct_access(&self) -> Option<Arc<dyn DirectAccessControl>> {
         Some(Arc::new(self.clone()))
     }
-    fn refresh(&self) -> Result<ServerConnection, ServerError> {
-        LocalServer::refresh(self).map(ServerConnection::from)
+    fn refresh(&self) -> Result<ConnectedServer, ServerError> {
+        ServerConnection::refresh(self).map(ConnectedServer::from)
     }
 }
 
 /// What the section presents about an authenticated connection.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) struct ServerConnection {
+pub(super) struct ConnectedServer {
     pub(super) protocol_major: u16,
 }
 
-impl From<AuthenticatedStatus> for ServerConnection {
+impl From<AuthenticatedStatus> for ConnectedServer {
     fn from(status: AuthenticatedStatus) -> Self {
         Self {
             protocol_major: status.protocol_major,
@@ -191,7 +191,7 @@ pub(super) fn offered_local_server() -> OfferedLocalServer {
     let identity = ApplicationIdentity::current().directory_name();
     if crate::local_startup::owned_foreground() {
         return Some(OfferedServer {
-            connection: LocalServer::for_identity(identity).map(|server| {
+            connection: ServerConnection::for_identity(identity).map(|server| {
                 Arc::new(DevelopmentRunServer(Arc::new(server))) as Arc<dyn LocalServerControl>
             }),
             service: None,
@@ -212,7 +212,7 @@ pub(super) fn offered_local_server() -> OfferedLocalServer {
         }
     };
     Some(OfferedServer {
-        connection: LocalServer::for_identity(identity)
+        connection: ServerConnection::for_identity(identity)
             .map(|server| Arc::new(server) as Arc<dyn LocalServerControl>),
         service,
         update,
@@ -226,7 +226,7 @@ pub(super) enum LocalServerStatus {
     NotChecked,
     /// A check awaits its result.
     Checking,
-    Connected(ServerConnection),
+    Connected(ConnectedServer),
     Failed(ServerError),
 }
 
@@ -258,7 +258,7 @@ pub(super) struct LocalServerRow {
 }
 
 impl LocalServerRow {
-    pub(super) fn worktree_server(&self) -> Option<LocalServer> {
+    pub(super) fn worktree_server(&self) -> Option<ServerConnection> {
         self.control.as_ref().ok()?.worktree_server()
     }
     pub(super) fn direct_access(&self) -> Option<Arc<dyn DirectAccessControl>> {
@@ -1926,19 +1926,19 @@ pub(super) mod testing {
 
     use std::path::{Path, PathBuf};
 
-    use super::{LocalServerControl, ServerConnection, ServerServiceControl, ServiceStartup};
-    use crate::local_server::ServerError;
-    use crate::local_server::service::{RetainedInstallation, ServiceStatus};
+    use super::{ConnectedServer, LocalServerControl, ServerServiceControl, ServiceStartup};
+    use crate::server_connection::ServerError;
+    use crate::server_connection::service::{RetainedInstallation, ServiceStatus};
 
     /// A server whose answers the test sets and whose operations it counts.
     pub(in crate::ui::settings_window) struct ScriptedServer {
-        refresh: Mutex<Result<ServerConnection, ServerError>>,
+        refresh: Mutex<Result<ConnectedServer, ServerError>>,
         refreshes: AtomicUsize,
     }
 
     impl ScriptedServer {
         pub(in crate::ui::settings_window) fn new(
-            refresh: Result<ServerConnection, ServerError>,
+            refresh: Result<ConnectedServer, ServerError>,
         ) -> Arc<Self> {
             Arc::new(Self {
                 refresh: Mutex::new(refresh),
@@ -1948,7 +1948,7 @@ pub(super) mod testing {
 
         pub(in crate::ui::settings_window) fn answer_refresh(
             &self,
-            result: Result<ServerConnection, ServerError>,
+            result: Result<ConnectedServer, ServerError>,
         ) {
             *self.refresh.lock().expect("refresh answer") = result;
         }
@@ -1959,7 +1959,7 @@ pub(super) mod testing {
     }
 
     impl LocalServerControl for ScriptedServer {
-        fn refresh(&self) -> Result<ServerConnection, ServerError> {
+        fn refresh(&self) -> Result<ConnectedServer, ServerError> {
             self.refreshes.fetch_add(1, Ordering::SeqCst);
             *self.refresh.lock().expect("refresh answer")
         }
@@ -2250,8 +2250,8 @@ pub(super) mod testing {
     }
 
     /// An authenticated server speaking `protocol_major`.
-    pub(in crate::ui::settings_window) const fn connected(protocol_major: u16) -> ServerConnection {
-        ServerConnection { protocol_major }
+    pub(in crate::ui::settings_window) const fn connected(protocol_major: u16) -> ConnectedServer {
+        ConnectedServer { protocol_major }
     }
 }
 

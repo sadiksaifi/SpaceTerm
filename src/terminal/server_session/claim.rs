@@ -1028,7 +1028,7 @@ mod tests {
     #[test]
     fn a_reopened_presentation_retains_its_unconfirmed_start_without_blocking_other_panes() {
         let controls = PaneControls::default();
-        let server = LocalServer::for_identity("spaceterm-development").unwrap();
+        let server = ServerConnection::for_identity("spaceterm-development").unwrap();
         let open = |controls: &PaneControls, pane| {
             DevelopmentServerSessionFactory::for_origin(server.clone(), controls, None, None, pane)
         };
@@ -1062,7 +1062,7 @@ mod tests {
         );
     }
 
-    fn disconnected_direct_handle(route: u8, client: u8, server: u8) -> LocalServer {
+    fn disconnected_direct_handle(route: u8, client: u8, server: u8) -> ServerConnection {
         use spaceterm_server::direct::{
             DirectConnection, DirectConnector, DirectError, PairedDevice, ServerPin,
         };
@@ -1073,7 +1073,7 @@ mod tests {
                 Err(DirectError::Transport)
             }
         }
-        LocalServer::direct(
+        ServerConnection::direct(
             "spaceterm-development",
             [route; 32],
             PairedDevice {
@@ -1092,22 +1092,15 @@ mod tests {
     }
 
     #[gpui::test]
-    fn disconnect_and_connect_cannot_unlock_a_delayed_start_on_either_route(
+    fn disconnect_and_connect_cannot_unlock_a_delayed_start_on_a_paired_route(
         cx: &mut gpui::TestAppContext,
     ) {
         use crate::ui::server_worktrees::Client;
-        let destination = crate::domain::SshDestination::new("restored-host".into()).unwrap();
-        for direct in [false, true] {
+        {
             // A credential-bound handle with an offline connector keeps this writer fixture
-            // entirely in memory. Both presentation paths use the same validated fences.
+            // entirely in memory while retaining the validated pairing fences.
             let server = disconnected_direct_handle(31, 32, 6);
-            let client = cx.update(|cx| {
-                if direct {
-                    Client::for_direct([31; 32], server.clone(), cx)
-                } else {
-                    Client::for_ssh(&destination, server.clone(), cx)
-                }
-            });
+            let client = cx.update(|cx| Client::for_direct([31; 32], server.clone(), cx));
             let (factory, state) = DevelopmentServerSessionFactory::for_origin(
                 server.clone(),
                 &client.controls,
@@ -1117,24 +1110,13 @@ mod tests {
             );
             lose_start(&state);
             cx.update(|cx| {
-                if direct {
-                    Client::forget_direct(&[31; 32], cx);
-                    assert!(Client::direct(&[31; 32], cx).is_none());
-                } else {
-                    Client::forget_ssh(&destination, cx);
-                    assert!(Client::ssh(&destination, cx).is_none());
-                }
+                Client::forget_direct(&[31; 32], cx);
+                assert!(Client::direct(&[31; 32], cx).is_none());
             });
             drop(factory);
             drop(state);
             drop(client);
-            let client = cx.update(|cx| {
-                if direct {
-                    Client::for_direct([31; 32], server.clone(), cx)
-                } else {
-                    Client::for_ssh(&destination, server.clone(), cx)
-                }
-            });
+            let client = cx.update(|cx| Client::for_direct([31; 32], server.clone(), cx));
             let (_, state) = DevelopmentServerSessionFactory::for_origin(
                 server.clone(),
                 &client.controls,
@@ -1165,13 +1147,8 @@ mod tests {
 
             // Transport replacement with the same bound identities also retains the original.
             let same_identity = disconnected_direct_handle(31, 32, 6);
-            let replacement = cx.update(|cx| {
-                if direct {
-                    Client::for_direct([31; 32], same_identity.clone(), cx)
-                } else {
-                    Client::for_ssh(&destination, same_identity.clone(), cx)
-                }
-            });
+            let replacement =
+                cx.update(|cx| Client::for_direct([31; 32], same_identity.clone(), cx));
             let (_, replacement_state) = DevelopmentServerSessionFactory::for_origin(
                 same_identity,
                 &replacement.controls,
@@ -1186,13 +1163,7 @@ mod tests {
                 disconnected_direct_handle(31, 33, 6),
                 disconnected_direct_handle(31, 32, 7),
             ] {
-                let client = cx.update(|cx| {
-                    if direct {
-                        Client::for_direct([31; 32], other.clone(), cx)
-                    } else {
-                        Client::for_ssh(&destination, other.clone(), cx)
-                    }
-                });
+                let client = cx.update(|cx| Client::for_direct([31; 32], other.clone(), cx));
                 let (_, other_state) = DevelopmentServerSessionFactory::for_origin(
                     other,
                     &client.controls,
@@ -1202,15 +1173,7 @@ mod tests {
                 );
                 assert!(!other_state.start_unconfirmed());
             }
-            let other_destination =
-                crate::domain::SshDestination::new("independent-host".into()).unwrap();
-            let independent = cx.update(|cx| {
-                if direct {
-                    Client::for_direct([34; 32], server.clone(), cx)
-                } else {
-                    Client::for_ssh(&other_destination, server.clone(), cx)
-                }
-            });
+            let independent = cx.update(|cx| Client::for_direct([34; 32], server.clone(), cx));
             let (_, independent_state) = DevelopmentServerSessionFactory::for_origin(
                 server,
                 &independent.controls,
@@ -1228,9 +1191,8 @@ mod tests {
     #[gpui::test]
     fn an_unvalidated_route_cannot_dispatch_pane_requests(cx: &mut gpui::TestAppContext) {
         use crate::ui::server_worktrees::Client;
-        let server = LocalServer::for_identity("spaceterm-development").unwrap();
-        let destination = crate::domain::SshDestination::new("not-admitted".into()).unwrap();
-        let client = cx.update(|cx| Client::for_ssh(&destination, server, cx));
+        let server = ServerConnection::for_identity("spaceterm-development").unwrap();
+        let client = cx.update(|cx| Client::for_direct([31; 32], server, cx));
         let control = client.controls.pane([2; 32]);
         let presenter = control.reserve().activate(&AtomicBool::new(true));
         let mut sent = false;

@@ -196,7 +196,6 @@ fn filesystem_error(error: SecureFilesystemError) -> StorageError {
     match error {
         SecureFilesystemError::Unsafe => StorageError::Unsafe,
         SecureFilesystemError::Conflict => StorageError::Conflict,
-        SecureFilesystemError::TooLarge => StorageError::TooLarge,
         SecureFilesystemError::Missing
         | SecureFilesystemError::AlreadyExists
         | SecureFilesystemError::Unavailable => StorageError::Unavailable,

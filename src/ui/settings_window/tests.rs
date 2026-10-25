@@ -378,7 +378,7 @@ fn open_settings_with_capabilities(
             // Every section and row presents, so the shared layout checks cover Servers too.
             Some(super::servers::OfferedServer {
                 connection: Ok(super::servers::testing::ScriptedServer::new(Err(
-                    crate::local_server::ServerError::NotSetUp,
+                    crate::server_connection::ServerError::NotSetUp,
                 ))),
                 service: Some(Ok(super::servers::testing::ScriptedService::new(Ok(
                     super::servers::testing::not_installed(),

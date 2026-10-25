@@ -61,9 +61,6 @@ impl SettingsDocument {
         self.keybindings
             .validate()
             .map_err(|_| SettingsDocumentError::InvalidKeybindings)?;
-        self.git
-            .validate()
-            .map_err(|_| SettingsDocumentError::InvalidGit)?;
         let catalog = ThemeCatalog::from_terminal_themes(&self.terminal_themes)
             .map_err(|_| SettingsDocumentError::InvalidCatalog)?;
         validate_selection(&catalog, &self.appearance.terminal.themes)?;
@@ -137,19 +134,12 @@ fn validate_selection(
 
 pub(crate) fn parse_settings(bytes: &[u8]) -> Result<SettingsDocument, SettingsDocumentError> {
     preflight(bytes).map_err(SettingsDocumentError::from_preflight)?;
-    let mut value: serde_json::Value =
+    let value: serde_json::Value =
         serde_json::from_slice(bytes).map_err(|_| SettingsDocumentError::InvalidJson)?;
     match value
         .get("schema_version")
         .and_then(serde_json::Value::as_u64)
     {
-        Some(3) => {
-            migrate_v3_settings(&mut value)?;
-            migrate_v4_settings(&mut value)?;
-        }
-        Some(4) => migrate_v4_settings(&mut value)?,
-        Some(5) => migrate_v5_settings(&mut value)?,
-        Some(6) => migrate_v6_settings(&mut value)?,
         Some(version) if version == u64::from(SETTINGS_SCHEMA_VERSION) => {}
         Some(_) => return Err(SettingsDocumentError::UnsupportedVersion),
         None => return Err(SettingsDocumentError::InvalidJson),
@@ -159,79 +149,6 @@ pub(crate) fn parse_settings(bytes: &[u8]) -> Result<SettingsDocument, SettingsD
     document.select_builtin_for_missing_themes();
     document.validate()?;
     Ok(document)
-}
-
-fn migrate_v3_settings(value: &mut serde_json::Value) -> Result<(), SettingsDocumentError> {
-    let window = value
-        .pointer_mut("/appearance/window")
-        .and_then(serde_json::Value::as_object_mut)
-        .ok_or(SettingsDocumentError::InvalidJson)?;
-    if window.contains_key("opacity") {
-        return Err(SettingsDocumentError::InvalidJson);
-    }
-    let transparency: f64 = serde_json::from_value(
-        window
-            .remove("transparency")
-            .ok_or(SettingsDocumentError::InvalidJson)?,
-    )
-    .map_err(|_| SettingsDocumentError::InvalidJson)?;
-    if !transparency.is_finite() || !(0.0..=1.0).contains(&transparency) {
-        return Err(SettingsDocumentError::InvalidAppearance);
-    }
-    window.insert("opacity".into(), serde_json::json!(1.0 - transparency));
-    value["schema_version"] = serde_json::json!(4);
-    Ok(())
-}
-
-/// Version 5 adds the `git` preferences, which a version 4 document takes at their defaults.
-fn migrate_v4_settings(value: &mut serde_json::Value) -> Result<(), SettingsDocumentError> {
-    let document = value
-        .as_object_mut()
-        .ok_or(SettingsDocumentError::InvalidJson)?;
-    if document.contains_key("git") {
-        return Err(SettingsDocumentError::InvalidJson);
-    }
-    document.insert(
-        "schema_version".into(),
-        serde_json::json!(SETTINGS_SCHEMA_VERSION),
-    );
-    Ok(())
-}
-
-/// Version 6 adds `git.worktree_path_template`, which a version 5 document takes at its default.
-/// The version moves so that an older SpaceTerm reports a newer document as unsupported instead
-/// of malformed.
-fn migrate_v5_settings(value: &mut serde_json::Value) -> Result<(), SettingsDocumentError> {
-    let document = value
-        .as_object_mut()
-        .ok_or(SettingsDocumentError::InvalidJson)?;
-    if document
-        .get("git")
-        .and_then(serde_json::Value::as_object)
-        .is_some_and(|git| git.contains_key("worktree_path_template"))
-    {
-        return Err(SettingsDocumentError::InvalidJson);
-    }
-    document.insert(
-        "schema_version".into(),
-        serde_json::json!(SETTINGS_SCHEMA_VERSION),
-    );
-    Ok(())
-}
-
-/// Version 7 adds the `sidebar` preferences, which a version 6 document takes at their defaults.
-fn migrate_v6_settings(value: &mut serde_json::Value) -> Result<(), SettingsDocumentError> {
-    let document = value
-        .as_object_mut()
-        .ok_or(SettingsDocumentError::InvalidJson)?;
-    if document.contains_key("sidebar") {
-        return Err(SettingsDocumentError::InvalidJson);
-    }
-    document.insert(
-        "schema_version".into(),
-        serde_json::json!(SETTINGS_SCHEMA_VERSION),
-    );
-    Ok(())
 }
 
 pub(crate) fn export_settings(
@@ -366,8 +283,6 @@ pub(crate) enum SettingsDocumentError {
     InvalidAppearance,
     #[error("keybinding preferences are invalid")]
     InvalidKeybindings,
-    #[error("git preferences are invalid")]
-    InvalidGit,
     #[error("appearance catalog is invalid")]
     InvalidCatalog,
     #[error("settings document cannot be serialized")]

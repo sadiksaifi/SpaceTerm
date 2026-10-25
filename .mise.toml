@@ -514,20 +514,15 @@ run = [
 description = "Test shared Workspace integration and server Pane presentation in the main app"
 run = "cargo test --package spaceterm --lib --all-features --locked -- shared server_pane"
 
-[tasks."server:ssh:desktop:test"]
-description = "Test SSH account connections, retained intent and remote Pane presentation"
-usage = '''
-arg "[filter]" help="Run one regression instead of the SSH and Pane suites"
-'''
-run = "cargo test --package spaceterm --lib --all-features --locked -- {% if usage.filter %}{{usage.filter | quote}}{% else %}ssh::server terminal::server_session{% endif %}"
+[tasks."server:setup:test"]
+description = "Test temporary SSH provisioning and paired WSS setup admission"
+usage = 'arg "[filter]" help="Run one setup regression by its full name"'
+run = "cargo test --package spaceterm --lib --no-default-features --features native-tests --locked -- {% if usage.filter %}{{usage.filter | quote}}{% else %}ssh::provisioning direct_connections::setup{% endif %}"
 
-[tasks."server:ssh:native:test"]
-description = "Verify an explicitly selected SSH account server on the native host"
-run = "cargo test --package spaceterm --lib --all-features --locked -- ssh::server_process::unix_adapter_tests::native_account_server_connect --ignored --exact --nocapture"
-
-[tasks."server:ssh:install:native:test"]
-description = "Verify accepted installation and live Workspace reuse in owner-confirmed sdk account state"
-run = "cargo test --package spaceterm --lib --no-default-features --features native-tests --locked -- ssh::server_process::unix_adapter_tests::native_account_server_install_acceptance --ignored --exact --nocapture"
+[tasks."server:setup:native:test"]
+description = "Verify temporary provisioning and WSS admission in an owner-confirmed native account"
+usage = 'arg "[test]" default="native_server_setup_acceptance" help="Exact function name in the native setup fixture; see docs/local-server.md for scope and opt-ins"'
+run = "cargo test --package spaceterm --lib --no-default-features --features native-tests --locked -- ssh::provisioning::unix_adapter_tests::{{usage.test | quote}} --ignored --exact --nocapture"
 
 [tasks."server:worktree:smoke"]
 description = "Exercise owning-server Worktree writes and interrupted originals with the initial protocol major"
@@ -630,36 +625,6 @@ flag "--cleanup-exercise" help="Remove only the retained directory-recovery test
 '''
 run = "target/debug/examples/directory_recovery {{usage.major}} {% if usage.cleanup_exercise %}--cleanup{% endif %}"
 
-[tasks."server:maintenance:build"]
-description = "Build the remote maintenance check before native code signing"
-run = "cargo build --package spaceterm-server-host --features client --example server_maintenance --locked"
-
-[tasks."server:maintenance:smoke"]
-description = "Exercise remote maintenance originals against disposable Development service state"
-usage = '''
-arg "<previous-archive>" help="Verified signed initial server archive"
-arg "<previous-signature>" help="Initial archive signature"
-arg "<previous-sha256>" help="Initial complete archive SHA256"
-arg "<candidate-archive>" help="Verified signed different server archive"
-arg "<candidate-signature>" help="Candidate archive signature"
-arg "<candidate-sha256>" help="Candidate complete archive SHA256"
-flag "--confirm-disposable-development" help="Authorize replacement of disposable Development server work"
-'''
-run = "target/debug/examples/server_maintenance {{usage.previous_archive | quote}} {{usage.previous_signature | quote}} {{usage.previous_sha256 | quote}} {{usage.candidate_archive | quote}} {{usage.candidate_signature | quote}} {{usage.candidate_sha256 | quote}} {% if usage.confirm_disposable_development %}--confirm-disposable-development{% endif %}"
-[tasks."server:ssh:maintenance:native:test"]
-description = "Observe an explicitly selected SSH account server's maintenance state on the native host"
-run = "cargo test --package spaceterm --lib --all-features --locked -- ssh::server_process::unix_adapter_tests::native_account_server_maintenance_observe --ignored --exact --nocapture"
-
-[tasks."server:ssh:maintenance:native:originals"]
-description = "Stop, start and update an explicitly authorized disposable SSH account server"
-env = { SPACETERM_SSH_NATIVE_MAINTAIN = "1" }
-run = "cargo test --package spaceterm --lib --all-features --locked -- ssh::server_process::unix_adapter_tests::native_account_server_maintenance_originals --ignored --exact --nocapture"
-
-[tasks."server:ssh:maintenance:native:recovery"]
-description = "Finish a submitted SSH server original from a new client after the first one is lost"
-env = { SPACETERM_SSH_NATIVE_MAINTAIN = "1" }
-run = "cargo test --package spaceterm --lib --all-features --locked -- ssh::server_process::unix_adapter_tests::native_remote_original_finishes_after_the_client_is_lost --ignored --exact --nocapture"
-
 [tasks."server:direct:test"]
 description = "Test direct-network proof, exposure, enrollment and revocation boundaries"
 run = "cargo test --package spaceterm-server --features client --locked -- direct"
@@ -711,27 +676,8 @@ description = "Verify presentation on an explicitly selected existing foreground
 usage = '''
 arg "<server>" help="Expected Development server identity in hexadecimal"
 flag "--boot <boot>" help="Expected running server boot in hexadecimal"
-flag "--ssh <destination>" help="Use the existing SSH account bridge"
-flag "--remote-server <binary>" help="Absolute path of the prepared remote candidate server binary"
-flag "--account <uid>" help="Remote non-root account UID"
 '''
-run = '"${CARGO_TARGET_DIR:-target}/debug/examples/terminal_presentation" --run --expect-server {{usage.server | quote}} {% if usage.boot %}--expect-boot {{usage.boot | quote}}{% endif %} {% if usage.ssh %}--ssh {{usage.ssh | quote}}{% endif %} {% if usage.remote_server %}--remote-server {{usage.remote_server | quote}}{% endif %} {% if usage.account %}--account {{usage.account | quote}}{% endif %}'
-
-[tasks."server:compatibility:check"]
-description = "Check the real older-server process compatibility fixture"
-run = "cargo check --package spaceterm-server-host --features client --locked --example server_compatibility"
-
-[tasks."server:compatibility:build"]
-description = "Build the current client for an isolated older-server process fixture"
-run = "cargo build --package spaceterm-server-host --features client --locked --example server_compatibility"
-
-[tasks."server:compatibility:run:linux"]
-description = "Exercise an exact older Development server in disposable Linux namespaces"
-usage = '''
-arg "<installation>" help="Older server directory containing bin/spaceterm-server and share/spaceterm resources"
-arg "<commit>" help="Exact older server commit expected from --build-info"
-'''
-run = "python -m spaceterm_tasks.server_compatibility {{usage.installation | quote}} {{usage.commit | quote}}"
+run = '"${CARGO_TARGET_DIR:-target}/debug/examples/terminal_presentation" --run --expect-server {{usage.server | quote}} {% if usage.boot %}--expect-boot {{usage.boot | quote}}{% endif %}'
 
 [tasks."server:terminal-boundaries:test"]
 description = "Test desktop text admission, large grids and fresh-process startup recovery with fixture-owned PTYs"

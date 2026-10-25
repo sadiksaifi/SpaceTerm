@@ -150,7 +150,7 @@ fn repository_sources_follow_owning_prompts_while_osc7_keeps_live_directory_disp
     let retained_json = String::from_utf8(serde_json::to_vec(&retained).unwrap()).unwrap();
     assert!(!retained_json.contains("current_directory"));
     assert!(!retained_json.contains("repository_directory"));
-    let restored = State::from_legacy(
+    let restored = State::from_organization(
         &serde_json::from_slice(&serde_json::to_vec(&retained).unwrap()).unwrap(),
     );
     assert_eq!(
@@ -430,7 +430,7 @@ fn shared_git_reads_publish_external_changes_to_two_clients_and_retain_worktree_
     let mut retained = spaceterm_server::hierarchy::State::empty();
     retained.inventory = missing.clone();
     let envelope = retained.envelope(&git.0).unwrap();
-    let restored = spaceterm_server::hierarchy::State::from_legacy(&envelope);
+    let restored = spaceterm_server::hierarchy::State::from_organization(&envelope);
     assert!(restored.inventory.repositories.is_none());
     assert_eq!(
         restored
@@ -470,7 +470,7 @@ fn a_deleted_sole_worktree_rediscovers_its_repository_after_restart() {
     let bytes = serde_json::to_vec(&state.envelope(&git.0).unwrap()).unwrap();
     host.shutdown().unwrap();
     std::fs::remove_dir_all(&tree).unwrap();
-    let mut restored = State::from_legacy(&serde_json::from_slice(&bytes).unwrap());
+    let mut restored = State::from_organization(&serde_json::from_slice(&bytes).unwrap());
     restored.begin_boot([9; 32]);
     assert!(restored.inventory.repositories.is_none());
     let mut repositories = super::repositories::ServerRepositories::new([9; 32]);
@@ -754,7 +754,7 @@ fn repairing_an_unpinned_root_preserves_missing_worktree_membership_after_reads_
     state.inventory = after;
     let bytes = serde_json::to_vec(&state.envelope(&git.0).unwrap()).unwrap();
     host.shutdown().unwrap();
-    let mut restored = State::from_legacy(&serde_json::from_slice(&bytes).unwrap());
+    let mut restored = State::from_organization(&serde_json::from_slice(&bytes).unwrap());
     restored.begin_boot([9; 32]);
     let mut reads = super::repositories::ServerRepositories::new([9; 32]);
     reads.subscribe([1; 32]);
@@ -1218,27 +1218,17 @@ fn git_settings_read_the_owning_servers_tools_without_a_workspace() {
 }
 
 #[test]
-fn worktree_location_is_seeded_once_and_validated_by_the_owning_server() {
+fn worktree_location_uses_server_defaults_and_validates_explicit_edits() {
     use spaceterm_server::{
         hierarchy::Outcome,
         worktree::{Error, Operation, Read, ReadReply},
     };
     let mut host = SharedWorkspaceHost::new(host());
-    let read = |host: &mut SharedWorkspaceHost, template: &str| {
-        host.request(
-            [1; 32],
-            [1; 32],
-            Request::WorktreeRead(Read::SeedLocation {
-                template: template.into(),
-            }),
-        )
-    };
-    assert!(
-        matches!(read(&mut host,"~/first/{branch}"),Reply::WorktreeRead(Ok(ReadReply::Settings(s))) if s.template=="~/first/{branch}")
-    );
-    assert!(
-        matches!(read(&mut host,"~/later/{branch}"),Reply::WorktreeRead(Ok(ReadReply::Settings(s))) if s.template=="~/first/{branch}")
-    );
+    assert!(matches!(
+        host.request([1; 32], [1; 32], Request::WorktreeRead(Read::Settings)),
+        Reply::WorktreeRead(Ok(ReadReply::Settings(settings)))
+            if settings == spaceterm_server::worktree::Settings::default()
+    ));
     assert_eq!(
         finish_write(
             &mut host,

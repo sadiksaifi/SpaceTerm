@@ -16,8 +16,8 @@ use spaceterm_ui::{Button, ButtonSize, ButtonVariant, ProgressRing, ProgressSize
 
 use super::WorkspaceManager;
 use crate::domain::ValidatedLocalDirectory;
-use crate::local_server::{LocalServer, ServerError};
 use crate::platform::local_filesystem::LocalFilesystemAuthority;
+use crate::server_connection::{ServerConnection, ServerError};
 use crate::ui::appearance::gpui_color;
 use crate::ui::chrome_typography::{ChromeTextStyleExt as _, TextRole};
 use crate::ui::pane_lifecycle::PaneConstruction;
@@ -67,7 +67,7 @@ pub(crate) struct SharedServerConnection {
     pub(crate) edits: SharedEditSource,
     pub(crate) sessions: SharedPaneSessions,
     /// Retains attachments and arrangements across relaunch.
-    pub(crate) retained: Option<LocalServer>,
+    pub(crate) retained: Option<ServerConnection>,
 }
 
 /// Connects the Workspace Window to a ready server on the event thread.
@@ -101,8 +101,8 @@ impl LocalServerAdapters {
 struct AccountLaunch;
 
 impl AccountLaunch {
-    fn service() -> Result<crate::local_server::service::Service, ServerError> {
-        crate::local_server::service::Service::for_identity(
+    fn service() -> Result<crate::server_connection::service::Service, ServerError> {
+        crate::server_connection::service::Service::for_identity(
             crate::application_identity::ApplicationIdentity::current().directory_name(),
         )
     }
@@ -126,7 +126,8 @@ impl LocalLaunch for AccountLaunch {
     fn authorize(&self) -> Result<(), ServerError> {
         // The service asks the operating system for its one fixed authorization, for this
         // account only. No SpaceTerm code runs as root.
-        Self::service()?.enable_linger(crate::local_server::service::LingerAuthorization::Desktop)
+        Self::service()?
+            .enable_linger(crate::server_connection::service::LingerAuthorization::Desktop)
     }
 
     fn update_offered(&self) -> bool {
@@ -673,7 +674,7 @@ impl WorkspaceManager {
             return LaunchState::Ready;
         }
         // One device presents its servers in one Workspace Window. Another window comes forward
-        // instead; this one may already present an SSH server and adds the local one beside it.
+        // instead; this one may already present a paired server and adds the local one beside it.
         if let Some(existing) = crate::ui::shared_workspaces::presenting_window(cx)
             && existing.window_id() != window.window_handle().window_id()
         {
@@ -1016,7 +1017,7 @@ pub(crate) mod testing {
     use std::sync::{Arc, Mutex};
 
     use super::{LaunchOutcome, LocalLaunch, LocalServerAdapters, SharedServerConnector};
-    use crate::local_server::ServerError;
+    use crate::server_connection::ServerError;
 
     /// A ready server presenting one Workspace, "Default", whose Panes run in `session_factory`.
     pub(crate) fn presenting(

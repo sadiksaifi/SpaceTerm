@@ -1,8 +1,7 @@
 //! POSIX AskPass endpoint binding and peer authentication.
 
 use super::app_paths::{
-    ASKPASS_RUNTIME_OWNER_KIND, ASKPASS_RUNTIME_SOCKET_NAME, AppPaths, RegisteredRuntimeSocket,
-    RuntimeOwner,
+    ASKPASS_RUNTIME_OWNER_KIND, ASKPASS_RUNTIME_SOCKET_NAME, AppPaths, RuntimeOwner,
 };
 #[cfg(target_os = "linux")]
 use super::linux_peer_credentials as peer_credentials;
@@ -38,7 +37,7 @@ impl AskPassLocalIpc for UnixAskPassLocalIpc {
             .socket_path(ASKPASS_RUNTIME_SOCKET_NAME)
             .map_err(|_| AskPassUnavailable)?;
         let listener = UnixListener::bind(&socket_path).map_err(|_| AskPassUnavailable)?;
-        let socket = runtime_owner
+        runtime_owner
             .register_socket(ASKPASS_RUNTIME_SOCKET_NAME)
             .map_err(|_| AskPassUnavailable)?;
         listener
@@ -49,7 +48,6 @@ impl AskPassLocalIpc for UnixAskPassLocalIpc {
             address,
             Box::new(UnixAskPassListener {
                 listener,
-                _socket: socket,
                 _runtime_owner: runtime_owner,
             }),
         ))
@@ -58,7 +56,6 @@ impl AskPassLocalIpc for UnixAskPassLocalIpc {
 
 struct UnixAskPassListener {
     listener: UnixListener,
-    _socket: RegisteredRuntimeSocket,
     _runtime_owner: RuntimeOwner,
 }
 
@@ -380,7 +377,7 @@ mod tests {
         assert_ne!(runtime, temporary.join("spaceterm"));
         assert!(socket_path.exists());
         assert_eq!(fs::read_dir(&elsewhere).unwrap().count(), 0);
-        attempt.lease.cancel();
+        attempt.lease.finish();
     }
 
     #[test]
@@ -478,7 +475,7 @@ mod tests {
         );
         assert_eq!(attempt.lease.entries().count(), 6);
 
-        attempt.lease.cancel();
+        attempt.lease.finish();
         assert!(presenter.cancelled.load(Ordering::Acquire));
         for _ in 0..100 {
             let (_, socket_path) = parse_authenticated_endpoint(&endpoint).unwrap();

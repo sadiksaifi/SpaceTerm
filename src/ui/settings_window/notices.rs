@@ -1,7 +1,7 @@
 //! Notices at the top of Servers: work SpaceTerm is still finishing that no server row shows.
 //!
-//! An unpair a server hasn't confirmed (ADR 0038), an unresolved operation on a removed
-//! connection (ADR 0039), and a record SpaceTerm couldn't save each get one notice. Dismissing a
+//! An unpair a server hasn't confirmed (ADR 0038) and a record SpaceTerm couldn't save each get
+//! one notice. Dismissing a
 //! notice only hides it. It never cancels the retries behind it. A notice whose work waits for the
 //! person is hidden in this window only, so it returns the next time Settings opens.
 
@@ -13,13 +13,11 @@ use spaceterm_ui::{Button, ButtonSize, ButtonVariant, Icon, IconButton, IconName
 
 use super::SettingsWindow;
 use crate::direct_connections::{PendingUnpair, UnpairState};
-use crate::domain::SshDestination;
 use crate::ui::appearance::{ChromeAppearance, gpui_color};
 use crate::ui::chrome_geometry::{HAIRLINE, RadiusRole};
 use crate::ui::chrome_icons::IconRole;
 use crate::ui::chrome_typography::{ChromeTextStyleExt as _, TextRole};
 use crate::ui::direct_servers::UnpairAction;
-use crate::ui::remote_maintenance::RemoteAction;
 
 pub(super) const NOTICE_SELECTOR: &str = "settings-server-notice";
 
@@ -31,8 +29,6 @@ pub(super) struct HiddenNotices(HashSet<String>);
 #[derive(Clone, Debug)]
 enum NoticeStep {
     Unpair(PendingUnpair, UnpairAction),
-    Removed(SshDestination, RemoteAction),
-    RemoveAgain,
 }
 
 /// How a notice is hidden.
@@ -121,85 +117,6 @@ impl SettingsWindow {
                 dismissal,
             });
         }
-        for (destination, presentation) in self.removed_operations() {
-            let id = format!("removed-{}", destination.as_str());
-            if hidden.contains(&id) {
-                continue;
-            }
-            let steps = presentation
-                .actions
-                .iter()
-                .map(|action| {
-                    (
-                        action.label(),
-                        NoticeStep::Removed(destination.clone(), *action),
-                    )
-                })
-                .collect();
-            notices.push(Notice {
-                message: if presentation.state == Some("No Record") {
-                    format!(
-                        "SpaceTerm couldn't confirm the last change to {}.",
-                        destination.as_str()
-                    )
-                    .into()
-                } else {
-                    format!(
-                        "You removed {}. {} Nothing here reconnects it.",
-                        destination.as_str(),
-                        presentation.explanation
-                    )
-                    .into()
-                },
-                steps,
-                dismissal: Some(Dismissal::Window(id.clone())),
-                id,
-            });
-        }
-        if let Some(rows) = self.ssh_servers.as_ref() {
-            let unsaved = rows.connections.unsaved_removals();
-            if !unsaved.is_empty() && !hidden.contains("unsaved-removal") {
-                let names = unsaved
-                    .iter()
-                    .map(|destination| destination.as_str().to_owned())
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                notices.push(Notice {
-                    id: "unsaved-removal".to_owned(),
-                    message: SharedString::from(format!(
-                        "SpaceTerm couldn't save removing {names}."
-                    )),
-                    steps: vec![("Remove Again", NoticeStep::RemoveAgain)],
-                    dismissal: Some(Dismissal::Window("unsaved-removal".to_owned())),
-                });
-            } else if let Some(error) = rows.connections.persistence_error() {
-                let id = "ssh-record".to_owned();
-                if !hidden.contains(&id) {
-                    notices.push(Notice {
-                        message: crate::ui::ssh_servers::persistence_warning(error).into(),
-                        steps: Vec::new(),
-                        dismissal: Some(Dismissal::Window(id.clone())),
-                        id,
-                    });
-                }
-            }
-        }
-        if let Some(error) = self
-            .ssh_maintenance
-            .as_ref()
-            .and_then(|rows| rows.operations.persistence_error())
-        {
-            let id = "operations-record".to_owned();
-            if !hidden.contains(&id) {
-                notices.push(Notice {
-                    message: crate::ui::remote_maintenance::operations_persistence_warning(error)
-                        .into(),
-                    steps: Vec::new(),
-                    dismissal: Some(Dismissal::Window(id.clone())),
-                    id,
-                });
-            }
-        }
         if self
             .direct_routes
             .as_ref()
@@ -221,17 +138,6 @@ impl SettingsWindow {
     fn take_notice_step(&mut self, step: NoticeStep, cx: &mut Context<Self>) {
         match step {
             NoticeStep::Unpair(pending, action) => self.run_unpair_action(&pending, action, cx),
-            NoticeStep::Removed(destination, action) => {
-                self.request_removed_maintenance(destination, action, cx)
-            }
-            NoticeStep::RemoveAgain => {
-                if let Some(rows) = self.ssh_servers.as_ref() {
-                    for destination in rows.connections.unsaved_removals() {
-                        rows.connections.remove(&destination);
-                    }
-                }
-                cx.notify();
-            }
         }
     }
 
@@ -274,19 +180,13 @@ impl SettingsWindow {
                     .variant(ButtonVariant::Outline)
                     .size(ButtonSize::Regular)
                     .tab_stop(true)
-                    .debug_selector(match &step {
-                        // A removed connection's step reads as the step it takes on that machine.
-                        NoticeStep::Removed(destination, action) => {
-                            format!("{}-{}", action.selector(), destination.as_str())
-                        }
-                        _ => format!(
-                            "{selector}-{}",
-                            label
-                                .trim_end_matches('\u{2026}')
-                                .to_lowercase()
-                                .replace(' ', "-")
-                        ),
-                    })
+                    .debug_selector(format!(
+                        "{selector}-{}",
+                        label
+                            .trim_end_matches('\u{2026}')
+                            .to_lowercase()
+                            .replace(' ', "-")
+                    ))
                     .on_activate(move |_, _, cx| {
                         let step = step.clone();
                         let _ =

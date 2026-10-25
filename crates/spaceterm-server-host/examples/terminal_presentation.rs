@@ -31,24 +31,16 @@ mod exercise {
         lifecycle, presentation, repository, support, terminal_semantics::*, worktree_fixture,
     };
     use spaceterm_server::{
-        LocalServer, ServerError,
-        account_bridge::{AccountBridge, AccountBridgeIdentity, AccountConnector},
+        ServerConnection,
         hierarchy::{CloseTarget, Id, Mutation, Outcome},
         pane::{Lease, PaneConnection, Reply, Request},
     };
-    use std::{
-        os::unix::process::CommandExt,
-        process::{Command, Stdio},
-        sync::Arc,
-    };
-
     const IDENTITY: &str = "spaceterm-development";
     type Result<T> = std::result::Result<T, Failure>;
 
     struct Options {
         server: Id,
         boot: Option<Id>,
-        ssh: Option<(String, String, u32)>,
     }
     fn id(text: &str) -> Result<Id> {
         if text.len() != 64 || !text.is_ascii() {
@@ -67,8 +59,7 @@ mod exercise {
     impl Options {
         fn parse(args: &[String]) -> Result<Option<Self>> {
             let mut run = false;
-            let (mut server, mut boot, mut ssh, mut binary, mut account) =
-                (None, None, None, None, None);
+            let (mut server, mut boot) = (None, None);
             let mut args = args.iter();
             while let Some(arg) = args.next() {
                 let mut next = || {
@@ -81,100 +72,21 @@ mod exercise {
                     "--help" => return Ok(None),
                     "--expect-server" => server = Some(id(next()?)?),
                     "--expect-boot" => boot = Some(id(next()?)?),
-                    "--ssh" => ssh = Some(next()?.to_owned()),
-                    "--remote-server" => binary = Some(next()?.to_owned()),
-                    "--account" => {
-                        account = Some(
-                            next()?
-                                .parse::<u32>()
-                                .map_err(|_| Failure::from("invalid account"))?,
-                        )
-                    }
                     _ => return Err("unknown argument".into()),
                 }
             }
             if !run {
                 return Ok(None);
             }
-            let ssh = match (ssh, binary, account) {
-                (None, None, None) => None,
-                (Some(destination), Some(binary), Some(account))
-                    if !destination.is_empty()
-                        && !destination.starts_with('-')
-                        && destination.len() <= 256
-                        && destination.chars().all(|c| c.is_ascii_alphanumeric() || "_.:@%[]-".contains(c))
-                        && binary.starts_with('/')
-                        && binary.len() <= 4096
-                        && !binary.chars().any(char::is_control)
-                        && account != 0 => Some((destination, binary, account)),
-                _ => return Err("SSH requires a destination, absolute remote server binary and non-root account".into()),
-            };
             Ok(Some(Self {
                 server: server.ok_or("--expect-server is required")?,
                 boot,
-                ssh,
             }))
         }
     }
 
-    struct Ssh {
-        destination: String,
-        binary: String,
-        expected: AccountBridgeIdentity,
-    }
-    impl AccountConnector for Ssh {
-        fn connect(&self) -> std::result::Result<AccountBridge, ServerError> {
-            let remote = format!(
-                "exec '{}' ssh-connect {IDENTITY}",
-                self.binary.replace('\'', "'\\''")
-            );
-            let mut child = Command::new("ssh")
-                .args([
-                    "-T",
-                    "-o",
-                    "BatchMode=yes",
-                    "-o",
-                    "StrictHostKeyChecking=yes",
-                    "-o",
-                    "UpdateHostKeys=no",
-                    "-o",
-                    "AddKeysToAgent=no",
-                    "-o",
-                    "ConnectTimeout=10",
-                    "-o",
-                    "ServerAliveInterval=5",
-                    "-o",
-                    "ServerAliveCountMax=2",
-                    "-o",
-                    "ControlMaster=no",
-                    "-o",
-                    "ControlPath=none",
-                    "-o",
-                    "LogLevel=ERROR",
-                ])
-                .arg(&self.destination)
-                .arg(remote)
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::null())
-                .process_group(0)
-                .spawn()
-                .map_err(|_| ServerError::NotRunning)?;
-            let read = child.stdout.take().ok_or(ServerError::Protocol)?;
-            let write = child.stdin.take().ok_or(ServerError::Protocol)?;
-            let cleanup = Box::new(move || {
-                // SAFETY: this child is the leader of the process group created above.
-                unsafe {
-                    libc::kill(-(child.id() as i32), libc::SIGKILL);
-                }
-                let _ = child.wait();
-            });
-            AccountBridge::from_streams(Box::new(read), Box::new(write), cleanup, &self.expected)
-        }
-    }
-
     struct Scope<'a> {
-        server: &'a LocalServer,
+        server: &'a ServerConnection,
         boot: Id,
         workspace: Option<(Id, Option<Id>)>,
     }
@@ -224,7 +136,7 @@ mod exercise {
         }
     }
     fn accepted(
-        server: &LocalServer,
+        server: &ServerConnection,
         connection: &mut PaneConnection,
         mutation: Mutation,
     ) -> Result<Id> {
@@ -253,11 +165,8 @@ mod exercise {
     }
     pub fn run() -> Result<()> {
         let Some(options) = Options::parse(&std::env::args().skip(1).collect::<Vec<_>>())? else {
-            println!("Dry run: no storage, server or SSH access performed.");
+            println!("Dry run: no storage or server access performed.");
             println!("Use --run --expect-server HEX [--expect-boot HEX] for IPC.");
-            println!(
-                "Add --ssh DEST --remote-server /absolute/candidate/spaceterm-server --account UID for the SSH account bridge."
-            );
             println!(
                 "Requires an existing foreground Development server and python3 on its host. Creates and closes one test Workspace; never starts, installs or resets a server."
             );
@@ -269,58 +178,23 @@ mod exercise {
         )?
         .as_nanos();
         let name = format!("p612-{nonce:x}");
-        if options.ssh.is_none()
-            && stage(
-                "expected-local-server",
-                spaceterm_server::account_bridge::discover(IDENTITY),
-            )?
-            .server
-                != Some(options.server)
+        if stage(
+            "expected-local-server",
+            spaceterm_server::provisioning::discover(IDENTITY),
+        )?
+        .server
+            != Some(options.server)
         {
             return Err("expected server identity changed".into());
         }
-        let (server, observer) = if let Some((destination, binary, account)) = options.ssh {
-            let expected = AccountBridgeIdentity {
-                account,
-                build: IDENTITY.into(),
-                server: options.server,
-            };
-            let connector = Arc::new(Ssh {
-                destination,
-                binary,
-                expected: expected.clone(),
-            });
-            // SAFETY: both handles are constructed before this fixture starts threads or SSH.
-            unsafe {
-                std::env::set_var("SPACETERM_DEVELOPMENT_CLIENT", &name);
-            }
-            let server = stage(
-                "ssh-client",
-                LocalServer::remote(
-                    IDENTITY,
-                    options.server,
-                    expected.clone(),
-                    connector.clone(),
-                ),
-            )?;
-            // SAFETY: construction above does not start workers; each handle captures its name.
-            unsafe {
-                std::env::set_var("SPACETERM_DEVELOPMENT_CLIENT", format!("{name}-observer"));
-            }
-            let observer = stage(
-                "ssh-observer",
-                LocalServer::remote(IDENTITY, options.server, expected, connector),
-            )?;
-            (server, observer)
-        } else {
-            (
-                stage("ipc-client", LocalServer::for_development_client(&name, 1))?,
-                stage(
-                    "ipc-observer",
-                    LocalServer::for_development_client(&format!("{name}-observer"), 1),
-                )?,
-            )
-        };
+        let server = stage(
+            "ipc-client",
+            ServerConnection::for_development_client(&name, 1),
+        )?;
+        let observer = stage(
+            "ipc-observer",
+            ServerConnection::for_development_client(&format!("{name}-observer"), 1),
+        )?;
         // Client credentials are created by admission, without service registration or setup/reset.
         let mut connection = stage("presentation-connect", server.connect_pane())?;
         let mut observer = stage("observer-connect", observer.connect_pane())?;
@@ -386,33 +260,6 @@ mod exercise {
                     .unwrap()
                     .is_some()
             );
-        }
-        #[test]
-        fn ssh_scope_refuses_partial_routes_and_option_injection() {
-            let server = "12".repeat(32);
-            for route in [
-                vec!["--ssh", "penguin"],
-                vec![
-                    "--ssh",
-                    "-ProxyCommand=bad",
-                    "--remote-server",
-                    "/candidate/server",
-                    "--account",
-                    "1000",
-                ],
-                vec![
-                    "--ssh",
-                    "penguin",
-                    "--remote-server",
-                    "relative/server",
-                    "--account",
-                    "1000",
-                ],
-            ] {
-                let mut args = vec!["--run", "--expect-server", &server];
-                args.extend(route);
-                assert!(parse(&args).is_err());
-            }
         }
     }
 }

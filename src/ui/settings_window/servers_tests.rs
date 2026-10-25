@@ -22,9 +22,9 @@ use super::{
     present_service,
 };
 use crate::appearance::Appearance;
-use crate::local_server::ServerError;
 use crate::platform::appearance::testing::RecordingAppearancePlatform;
 use crate::platform::window_movement::RecordingOperatingSystemWindowDragPlatform;
+use crate::server_connection::ServerError;
 use crate::settings::SettingsDocument;
 use crate::settings::storage::testing::MemoryStorage;
 use crate::ui::appearance_runtime;
@@ -1207,8 +1207,7 @@ fn a_service_change_waits_for_the_connection_and_the_reverse(cx: &mut TestAppCon
 
 /// A step underway keeps the state and doesn't name itself before it has run a second. The test
 /// scheduler runs every runnable task before it advances its clock, so a local step can't be held
-/// past the delay here; `progress_names_the_phase_in_one_place` shows the named step with an SSH
-/// operation the operations owner holds.
+/// past the delay here.
 #[gpui::test]
 fn a_service_step_keeps_the_state_and_waits_before_naming_itself(cx: &mut TestAppContext) {
     let (window, _server, _service, cx) = open_servers_with_service(Ok(stopped()), cx);

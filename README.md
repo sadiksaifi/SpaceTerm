@@ -8,7 +8,7 @@ A native desktop terminal multiplexer for macOS and Linux, coming soon for Windo
 
 - **Workspaces** for local and remote terminal work
 - **Tabs and Panes** with recursive splits, focus, resize, and zoom
-- **Remote terminals** through your existing OpenSSH configuration
+- **Remote terminals** over paired secure WebSocket connections
 - **Keyboard-first navigation** through the Command Palette and Workspace Switcher
 
 ## Install macOS/Linux
@@ -50,6 +50,10 @@ flowchart TB
     W3T1 --> W3T1P2["Pane"]
     W3T2 --> W3T2P1["Pane"]
 ```
+
+## Add a remote server
+
+Open Settings > Servers > Add Server and use your existing OpenSSH configuration or an Invitation Link. SSH prepares and pairs the server, then closes. SpaceTerm uses the saved secure WebSocket connection for remote work. Create Workspaces and browse directories on your added servers from either sidebar creation menu.
 
 ## Copy and paste over SSH and tmux
 

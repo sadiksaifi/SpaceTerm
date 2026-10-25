@@ -11,7 +11,7 @@ use super::{
     GitHubCliStatus, GitToolStatus, ProgramError, ProgramRequest, RepositoryProgramRunner,
     ToolInventory,
 };
-use crate::ssh::cancellation::SshCancellationToken;
+use crate::cancellation::CancellationToken;
 
 const TOOL_CHECK_OUTPUT_LIMIT: usize = 64 * 1024;
 /// Every host's login state as JSON. The CLI exits 0 unless it fails.
@@ -30,7 +30,7 @@ pub(crate) fn check_tools(
     home: &Path,
     github_cli_passthrough: &[(OsString, OsString)],
     deadline: Instant,
-    cancellation: &SshCancellationToken,
+    cancellation: &CancellationToken,
 ) -> (GitToolStatus, GitHubCliStatus) {
     let git = inventory
         .git
@@ -172,7 +172,7 @@ mod tests {
             Path::new(HOME),
             &passthrough(),
             Instant::now(),
-            &SshCancellationToken::default(),
+            &CancellationToken::default(),
         );
         (statuses, runner.requests())
     }
@@ -188,7 +188,7 @@ mod tests {
             Path::new(HOME),
             &passthrough(),
             deadline,
-            &SshCancellationToken::default(),
+            &CancellationToken::default(),
         );
 
         let version = ToolVersion {

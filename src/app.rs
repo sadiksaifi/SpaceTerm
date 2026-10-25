@@ -17,10 +17,7 @@ use crate::platform::application_quit::{
     ApplicationQuitAdapter, ApplicationQuitDecision, ApplicationQuitHandler,
     ApplicationQuitRequest, QuitAnswer, QuitPrompt, StatusAreaName,
 };
-use crate::platform::control_socket::ControlSocketProbe;
-use crate::ssh::command::{
-    OpenSshExecutable, SshCapability, SshCapabilityProbe, SshUnavailableReason,
-};
+use crate::ssh::command::OpenSshExecutable;
 use crate::ssh::host_config::HostConfigFilesystem;
 use crate::ssh::process::SshProcessAdapter;
 use crate::ssh::startup_environment::StartupSshEnvironment;
@@ -41,10 +38,8 @@ pub(crate) struct StartupDependencies<A: SshProcessAdapter> {
     paths: Arc<AppPaths>,
     pub(crate) home_directory: PathBuf,
     ssh_environment: StartupSshEnvironment,
-    ssh_capability: SshCapability,
     executable: OpenSshExecutable,
     process_adapter: A,
-    control_socket_probe: Arc<dyn ControlSocketProbe>,
     host_config_filesystem: Arc<dyn HostConfigFilesystem>,
 }
 
@@ -89,7 +84,6 @@ impl<A: SshProcessAdapter> StartupDependencies<A> {
         paths: AppPaths,
         executable: OpenSshExecutable,
         process_adapter: A,
-        control_socket_probe: Arc<dyn ControlSocketProbe>,
         host_config_filesystem: Arc<dyn HostConfigFilesystem>,
     ) -> Result<Self, StartupDependenciesError> {
         let home_directory = path_environment
@@ -100,24 +94,12 @@ impl<A: SshProcessAdapter> StartupDependencies<A> {
         if !home_directory.is_absolute() {
             return Err(StartupDependenciesError::RelativeHome);
         }
-        let ssh_capability = SshCapabilityProbe::from_startup(
-            executable.clone(),
-            home_directory.clone(),
-            &ssh_environment,
-            process_adapter.clone(),
-        )
-        .map(|runner| runner.probe_blocking())
-        .unwrap_or(SshCapability::Unavailable(
-            SshUnavailableReason::ProbeFailed,
-        ));
         Ok(Self {
             paths: Arc::new(paths),
             home_directory,
             ssh_environment,
-            ssh_capability,
             executable,
             process_adapter,
-            control_socket_probe,
             host_config_filesystem,
         })
     }
@@ -131,152 +113,63 @@ impl<A: SshProcessAdapter> StartupDependencies<A> {
         )
     }
 
-    /// The desktop's SSH server connections. Construction has no effects: nothing connects,
-    /// reads retained intent, or discovers hosts until the first Workspace Window opens.
-    pub(crate) fn ssh_servers_factory(
+    /// Captures setup dependencies without contacting a server.
+    pub(crate) fn ssh_setup_factory(
         &self,
         askpass: Arc<dyn crate::ssh::askpass::AskPassWindowFactory>,
         artifacts: Option<PathBuf>,
-    ) -> Rc<dyn crate::ui::ssh_servers::SshServersFactory>
+        direct: crate::direct_connections::DirectConnections,
+    ) -> Rc<dyn crate::ui::ssh_setup::SshSetupFactory>
     where
-        A: crate::ssh::server_process::SshServerBootstrap + Clone + 'static,
+        A: crate::ssh::provisioning::SshServerBootstrap + Clone + 'static,
     {
-        Rc::new(NativeSshServersFactory {
+        Rc::new(NativeSshSetupFactory {
             paths: Arc::clone(&self.paths),
             home: self.home_directory.clone(),
             startup: self.ssh_environment.clone(),
-            capability: self.ssh_capability.clone(),
             executable: self.executable.clone(),
             adapter: self.process_adapter.clone(),
-            socket_probe: Arc::clone(&self.control_socket_probe),
-            host_config: Arc::clone(&self.host_config_filesystem),
+            filesystem: Arc::clone(&self.host_config_filesystem),
             askpass,
             artifacts,
+            direct,
         })
     }
 }
 
-/// Builds the native SSH server registry once a window can present SSH's prompts.
-struct NativeSshServersFactory<A: SshProcessAdapter> {
+struct NativeSshSetupFactory<A: SshProcessAdapter> {
     paths: Arc<AppPaths>,
     home: PathBuf,
     startup: StartupSshEnvironment,
-    capability: SshCapability,
     executable: OpenSshExecutable,
     adapter: A,
-    socket_probe: Arc<dyn ControlSocketProbe>,
-    host_config: Arc<dyn HostConfigFilesystem>,
-    askpass: Arc<dyn crate::ssh::askpass::AskPassWindowFactory>,
-    /// The installation's verified server packages, which the host composition located.
-    artifacts: Option<PathBuf>,
-}
-
-/// The hosts this computer's SSH configuration names, including SpaceTerm's managed hosts.
-struct ConfiguredSshHosts {
-    paths: Arc<AppPaths>,
-    roots: crate::ssh::host_config::HostConfigRoots,
     filesystem: Arc<dyn HostConfigFilesystem>,
+    askpass: Arc<dyn crate::ssh::askpass::AskPassWindowFactory>,
+    artifacts: Option<PathBuf>,
+    direct: crate::direct_connections::DirectConnections,
 }
-
-impl crate::ui::ssh_servers::SshHostSource for ConfiguredSshHosts {
-    fn discover(&self) -> crate::ssh::host_config::HostDiscovery {
-        crate::ssh::host_config::discover_ssh_hosts(
-            self.filesystem.as_ref(),
-            &self.roots,
-            crate::ssh::host_config::HostDiscoveryLimits::default(),
-        )
-    }
-
-    fn add_managed_host(
-        &self,
-        host: crate::ssh::managed_hosts::ManagedSshHost,
-    ) -> Result<(), crate::ui::ssh_host_form::ManagedHostFormBackendError> {
-        use crate::ssh::managed_hosts::{ManagedHostsError, ManagedHostsStore};
-        use crate::ui::ssh_host_form::ManagedHostFormBackendError;
-
-        // Discovery names every configured alias, so a new host never shadows one.
-        ManagedHostsStore::new(&self.paths)
-            .insert(host, &self.discover().hosts)
-            .map_err(|error| match error {
-                ManagedHostsError::AliasCollision => ManagedHostFormBackendError::AliasCollision,
-                _ => ManagedHostFormBackendError::SaveFailed,
-            })
-    }
-}
-
-impl<A> crate::ui::ssh_servers::SshServersFactory for NativeSshServersFactory<A>
+impl<A> crate::ui::ssh_setup::SshSetupFactory for NativeSshSetupFactory<A>
 where
-    A: SshProcessAdapter + crate::ssh::server_process::SshServerBootstrap + Clone + 'static,
+    A: SshProcessAdapter + crate::ssh::provisioning::SshServerBootstrap + Clone + 'static,
 {
-    fn create(
-        &self,
-        prompts: Arc<dyn crate::ssh::askpass::AskPassAttemptFactory>,
-        cx: &mut App,
-    ) -> Option<crate::ui::ssh_servers::CreatedSshServers> {
-        use crate::ssh::server_process::{
-            NativeSshConnectBackend, NativeSshServerConfig, SshServerArtifacts,
+    fn backend(&self) -> Option<Arc<dyn crate::ssh::provisioning::SshSetupBackend>> {
+        use crate::ssh::provisioning::{
+            NativeSshSetup, NativeSshSetupConfig, ServerArtifactCatalog,
         };
-        // Without a usable OpenSSH, no SSH server can be reached.
-        if !matches!(self.capability, SshCapability::Available(_)) {
-            return None;
-        }
-        let backend = NativeSshConnectBackend::new(NativeSshServerConfig {
-            paths: Arc::clone(&self.paths),
-            home: self.home.clone(),
-            startup: self.startup.clone(),
-            executable: self.executable.clone(),
-            adapter: self.adapter.clone(),
-            socket_probe: Arc::clone(&self.socket_probe),
-            filesystem: Arc::clone(&self.host_config),
-            // The host composition's process adapter also prepares the remote account.
-            bootstrap: Arc::new(self.adapter.clone()),
-            askpass: prompts,
-            executor: cx.background_executor().clone(),
-            artifacts: SshServerArtifacts::new(self.artifacts.clone()),
-        });
-        // One backend owns the authenticated routes, so maintenance reuses the route Connect
-        // already established rather than opening its own.
-        let backend = Arc::new(backend);
-        let connections = crate::ssh::server_connection::SshServerConnections::new(
-            Arc::clone(&backend) as Arc<_>,
-            Arc::new(
-                crate::ssh::server_intents::PrivateSshConnectionIntents::new(Arc::clone(
-                    &self.paths,
-                )),
-            ),
-        );
-        // A direct network unpair made over this computer's account or an SSH account resumes
-        // through the exact route it was made on, which this backend authenticates.
-        if let Some(direct) = crate::ui::direct_servers::installed(cx) {
-            let identity = crate::application_identity::ApplicationIdentity::current();
-            if let Ok(local) =
-                crate::local_server::LocalServer::for_identity(identity.directory_name())
-            {
-                direct.set_account_resolver(Arc::new(
-                    crate::direct_connections::account::NativeAccountRevocationResolver::new(
-                        identity.directory_name(),
-                        local,
-                        connections.clone(),
-                        Arc::clone(&backend),
-                    ),
-                ));
-            }
-        }
-        let operations = crate::ssh::server_operations::SshServerOperations::new(
-            backend,
-            Arc::new(
-                crate::ssh::server_operation_records::PrivateRemoteOperationRecords::new(
-                    Arc::clone(&self.paths),
-                ),
-            ),
-            connections.clone(),
-        );
-        Some(crate::ui::ssh_servers::CreatedSshServers {
-            connections,
-            operations: Some(operations),
-        })
+        Some(Arc::new(NativeSshSetup::new(
+            NativeSshSetupConfig {
+                paths: Arc::clone(&self.paths),
+                home: self.home.clone(),
+                startup: self.startup.clone(),
+                executable: self.executable.clone(),
+                adapter: self.adapter.clone(),
+                filesystem: Arc::clone(&self.filesystem),
+                bootstrap: Arc::new(self.adapter.clone()),
+                artifacts: ServerArtifactCatalog::new(self.artifacts.clone()),
+            },
+            self.direct.clone(),
+        )))
     }
-
     fn prompts(
         &self,
         window: &Window,
@@ -284,17 +177,22 @@ where
     ) -> Option<Arc<dyn crate::ssh::askpass::AskPassAttemptFactory>> {
         self.askpass.create(window, cx).ok()
     }
-
-    fn hosts(&self) -> Option<Arc<dyn crate::ui::ssh_servers::SshHostSource>> {
-        Some(Arc::new(ConfiguredSshHosts {
-            paths: Arc::clone(&self.paths),
-            roots: crate::ssh::host_config::HostConfigRoots {
-                managed: self.paths.managed_ssh_config(),
+    fn hosts(&self) -> Vec<crate::domain::SshDestination> {
+        crate::ssh::host_config::discover_ssh_hosts(
+            self.filesystem.as_ref(),
+            &crate::ssh::host_config::HostConfigRoots {
                 user: self.home.join(".ssh/config"),
+                system: PathBuf::from("/etc/ssh/ssh_config"),
                 home: self.home.clone(),
             },
-            filesystem: Arc::clone(&self.host_config),
-        }))
+            crate::ssh::host_config::HostDiscoveryLimits::default(),
+        )
+        .hosts
+        .into_iter()
+        .filter_map(|host| {
+            crate::domain::SshDestination::new(host.alias().as_str().to_owned()).ok()
+        })
+        .collect()
     }
 }
 
@@ -566,11 +464,11 @@ impl QuitSessions for DevelopmentQuitSessions {
         &self,
     ) -> Result<spaceterm_server::hierarchy::CloseInventory, spaceterm_server::ServerError> {
         use spaceterm_server::{
-            LocalServer, ServerError,
+            ServerConnection, ServerError,
             pane::{Reply, Request},
         };
         let identity = crate::application_identity::ApplicationIdentity::current().directory_name();
-        let server = LocalServer::for_identity(identity)?;
+        let server = ServerConnection::for_identity(identity)?;
         let mut connection = server.connect_pane()?;
         match connection.exchange(&Request::Inventory)? {
             Reply::Inventory { inventory, .. } => inventory
@@ -1049,17 +947,16 @@ pub(crate) fn open(
         .try_global::<crate::ui::appearance_runtime::AppearanceRuntime>()
         .map(|runtime| runtime.settings.snapshot().candidate.sidebar.default_state)
         .unwrap_or_default();
-    let ssh_servers = host.adapters.ssh_servers.clone();
+    let ssh_setup = host.adapters.ssh_setup.clone();
     let direct_servers = host.adapters.direct_servers.clone();
     let result = cx.open_window(workspace_window_options(host, cx), |window, cx| {
-        // The direct registry comes first, so the SSH backend can give it the account routes
-        // its unpair requests resume through.
+        // Both enrollment methods publish into this paired connection registry.
         if let Some(direct) = direct_servers.clone() {
             crate::ui::direct_servers::install(direct, cx);
         }
-        // The first Workspace Window can present SSH's prompts, so the registry begins here.
-        if let Some(factory) = ssh_servers.clone() {
-            crate::ui::ssh_servers::ensure(factory, window, cx);
+        // The Settings window supplies prompts for each explicit setup attempt.
+        if let Some(factory) = ssh_setup.clone() {
+            crate::ui::ssh_setup::install(factory, cx);
         }
         // Resuming is quiet: a route or unpair that needs a credential prompt waits for Resume.
         if let Some(direct) = crate::ui::direct_servers::installed(cx) {
@@ -1366,9 +1263,8 @@ pub(crate) struct ApplicationCapabilities {
     pub(crate) background_images: Option<Arc<crate::background_image::BackgroundImageStore>>,
     /// Launches and presents the account-local SpaceTerm Server in the Workspace Window.
     pub(crate) local_server: crate::ui::LocalServerAdapters,
-    /// Creates the desktop's SSH server connections from its first Workspace Window. `None`
-    /// offers no SSH servers.
-    pub(crate) ssh_servers: Option<Rc<dyn crate::ui::ssh_servers::SshServersFactory>>,
+    /// Supplies temporary SSH provisioning to Add Server.
+    pub(crate) ssh_setup: Option<Rc<dyn crate::ui::ssh_setup::SshSetupFactory>>,
     /// The desktop's direct network connections, installed by its first Workspace Window.
     /// `None` offers no direct network connections.
     pub(crate) direct_servers: Option<crate::direct_connections::DirectConnections>,
@@ -1654,7 +1550,6 @@ pub(crate) fn initialize_application(
         if let Some(adapters) = &host.adapters.repository_status {
             crate::ui::repository_status_store::install(&settings, adapters.clone(), cx);
         }
-        crate::ui::worktree_path_template::install(&settings, cx);
         if let Some(store) = &host.adapters.background_images {
             crate::ui::background_image_runtime::install(settings.clone(), Arc::clone(store), cx);
         }
@@ -2294,7 +2189,7 @@ mod runtime_tests {
                 repository_status: None,
                 background_images: None,
                 local_server: crate::ui::launch_testing::presenting(session_factory),
-                ssh_servers: None,
+                ssh_setup: None,
                 direct_servers: None,
                 server_context_paths: None,
             },

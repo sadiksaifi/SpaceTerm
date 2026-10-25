@@ -19,7 +19,7 @@ mod terminal_semantics;
 )]
 mod worktree_fixture;
 use spaceterm_server::{
-    LocalServer, ServerError,
+    ServerConnection, ServerError,
     hierarchy::{CloseTarget, Mutation, Outcome},
     pane::*,
 };
@@ -34,7 +34,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     {
         return Err(ServerError::NotInstalled.into());
     }
-    let server = LocalServer::for_development_client("persistent-pane-native", 1)?;
+    let server = ServerConnection::for_development_client("persistent-pane-native", 1)?;
     let mut first = server.connect_shared_pane()?;
     let baseline = repository::inventory(&mut first)?.0;
     let shutdown = std::env::args().any(|argument| argument == "--shutdown");

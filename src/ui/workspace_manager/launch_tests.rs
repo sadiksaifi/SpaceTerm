@@ -8,7 +8,7 @@ use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext};
 use spaceterm_server::hierarchy::{Axis, Inventory, Pane, Tab, Workspace};
 
 use super::*;
-use crate::local_server::ServerError;
+use crate::server_connection::ServerError;
 use crate::ui::shared_workspaces::testing::{ScriptedEdits, ScriptedPanes};
 use crate::ui::shared_workspaces::{SharedEditSource, SharedPaneSessions};
 use crate::ui::workspace_manager::launch::{
@@ -335,20 +335,20 @@ fn a_stopped_server_stays_stopped_until_start_server(cx: &mut TestAppContext) {
     assert_eq!(harness.launch_title(cx), None);
 }
 
-/// An SSH server presented while the local server is stopped makes this window the presenting
-/// one. Starting the local server afterward still adds its Workspaces here, beside the SSH
+/// A paired server presented while the local server is stopped makes this window the presenting
+/// one. Starting the local server afterward still adds its Workspaces here, beside the paired
 /// server's.
 #[gpui::test]
-fn a_local_server_started_after_an_ssh_server_joins_the_same_window(cx: &mut TestAppContext) {
+fn a_local_server_started_after_a_paired_server_joins_the_same_window(cx: &mut TestAppContext) {
     let (harness, cx) = launch_harness(vec![Ok(LaunchOutcome::Stopped), ready()], cx);
     cx.run_until_parked();
     assert_eq!(harness.launch_title(cx), Some(launch::STOPPED_TITLE));
 
-    present_ssh_server(&harness, inventory(), cx);
+    present_paired_server(&harness, inventory(), cx);
     assert_eq!(
         harness.shared_rows(cx),
         1,
-        "the SSH server's Workspace is presented"
+        "the paired server's Workspace is presented"
     );
 
     // The person starts the local server from outside this window.
@@ -361,17 +361,24 @@ fn a_local_server_started_after_an_ssh_server_joins_the_same_window(cx: &mut Tes
     assert_eq!(
         harness.shared_rows(cx),
         2,
-        "the local server's Workspace joins the window already presenting the SSH server"
+        "the local server's Workspace joins the window already presenting the paired server"
     );
 }
 
-/// Connects an SSH server publishing `inventory` to the window, as a saved connection does.
-fn present_ssh_server(harness: &LaunchHarness, inventory: Inventory, cx: &mut VisualTestContext) {
+/// Connects a paired server publishing `inventory` to the window, as a saved connection does.
+fn present_paired_server(
+    harness: &LaunchHarness,
+    inventory: Inventory,
+    cx: &mut VisualTestContext,
+) {
     let remote = Rc::new(ScriptedEdits::new(Some(inventory)));
     cx.update(|window, cx| {
         harness.manager.update(cx, |manager, cx| {
             let key = manager.present_server_workspaces(
-                ServerOrigin::Ssh(crate::domain::SshDestination::new("penguin".into()).unwrap()),
+                ServerOrigin::Direct(crate::ui::shared_workspaces::DirectServer {
+                    route: [9; 32],
+                    name: "penguin".into(),
+                }),
                 SharedEditSource::new(Rc::clone(&remote) as Rc<_>),
                 SharedPaneSessions::with_opener(
                     Rc::clone(&harness.panes) as Rc<_>,
@@ -491,7 +498,7 @@ fn a_failed_local_server_keeps_another_servers_workspaces_presented(cx: &mut Tes
     cx.run_until_parked();
     assert_eq!(workspace_controls_presented(cx), Vec::<&str>::new());
 
-    present_ssh_server(&harness, inventory(), cx);
+    present_paired_server(&harness, inventory(), cx);
     assert_eq!(harness.shared_rows(cx), 1);
     assert_eq!(
         workspace_controls_presented(cx).len(),
@@ -509,7 +516,7 @@ fn another_servers_inventory_without_attached_workspaces_keeps_workspace_control
     let (harness, cx) = launch_harness(vec![Err(ServerError::CandidateMissing)], cx);
     cx.run_until_parked();
 
-    present_ssh_server(
+    present_paired_server(
         &harness,
         Inventory {
             workspaces: Vec::new(),
@@ -1062,11 +1069,6 @@ fn the_creation_shortcut_takes_the_switcher_name_instead_of_the_highlight(cx: &m
 
     assert_eq!(created_names(&harness), ["fresh workspace"]);
     assert!(!cx.update(|window, cx| window_combo_box_is_open(window, cx)));
-    assert!(
-        harness
-            .manager
-            .read_with(cx, |manager, _| { manager.remote_workspace_flow.is_none() })
-    );
 }
 
 #[gpui::test]
@@ -1124,14 +1126,14 @@ fn creation_shortcuts_never_escape_a_modal(cx: &mut TestAppContext) {
         });
     });
     cx.run_until_parked();
-    cx.simulate_keystrokes("cmd-n cmd-shift-n");
+    cx.simulate_keystrokes("cmd-n cmd-o");
     cx.run_until_parked();
 
     assert!(cx.update(|window, cx| spaceterm_ui::window_modal_is_open(window, cx)));
     assert!(
         harness
             .manager
-            .read_with(cx, |manager, _| { manager.remote_workspace_flow.is_none() })
+            .read_with(cx, |manager, _| manager.pin_picker.is_none())
     );
     assert!(created_names(&harness).is_empty());
 }
@@ -1145,7 +1147,7 @@ fn creation_shortcuts_never_escape_the_switcher_input_context_menu(cx: &mut Test
     cx.simulate_mouse_up(input, MouseButton::Right, Modifiers::none());
     cx.run_until_parked();
     assert!(cx.update(|window, cx| spaceterm_ui::window_menu_is_open(window, cx)));
-    cx.simulate_keystrokes("cmd-n cmd-shift-n");
+    cx.simulate_keystrokes("cmd-n cmd-o");
     cx.run_until_parked();
     assert!(cx.update(|window, cx| spaceterm_ui::window_menu_is_open(window, cx)));
     assert!(created_names(&harness).is_empty());

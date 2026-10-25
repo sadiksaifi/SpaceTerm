@@ -50,7 +50,6 @@ fn capture_startup_dependencies(
         paths,
         executable,
         super::unix_ssh_process::UnixSshProcessAdapter,
-        Arc::new(super::unix_local_socket::UnixControlSocketProbe),
         Arc::new(super::unix_host_config_filesystem::UnixHostConfigFilesystem),
     )
 }
@@ -138,13 +137,14 @@ fn compose(
         paths,
         Arc::new(super::unix_local_identity::UnixLocalIdentity),
     );
-    let ssh_servers = startup.ssh_servers_factory(
+    let direct_servers = startup.direct_servers();
+    let ssh_setup = startup.ssh_setup_factory(
         Arc::new(super::unix_askpass_transport::AskPassWindowFactory::new(
             super::launch_host::running_executable(),
         )),
-        super::launch_host::ssh_server_artifacts(),
+        super::launch_host::server_artifact_catalog(),
+        direct_servers.clone(),
     );
-    let direct_servers = startup.direct_servers();
     let server_context_paths = startup.server_context_paths();
     let repository_status = super::repository_status_host::repository_status_adapters(
         &startup.home_directory,
@@ -201,7 +201,7 @@ fn compose(
             repository_status: Some(repository_status),
             background_images: Some(background_images),
             local_server: crate::ui::LocalServerAdapters::account(),
-            ssh_servers: Some(ssh_servers),
+            ssh_setup: Some(ssh_setup),
             direct_servers: Some(direct_servers),
             server_context_paths: Some(server_context_paths),
         },
@@ -431,12 +431,6 @@ mod tests {
                 Some("⌘B")
             );
             assert_eq!(presentation.shortcut(&NewWorkspace).as_deref(), Some("⌘N"));
-            assert_eq!(
-                presentation
-                    .shortcut(&crate::ui::NewRemoteWorkspace)
-                    .as_deref(),
-                Some("⇧⌘N")
-            );
             assert_eq!(presentation.shortcut(&CreateTab).as_deref(), Some("⌘T"));
             assert_eq!(
                 presentation.shortcut(&spaceterm_ui::EditCopy).as_deref(),

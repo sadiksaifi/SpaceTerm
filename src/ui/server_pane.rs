@@ -5,7 +5,7 @@
 //! shell's output paints or reaches assistive technology after another client takes control or the
 //! server restarts.
 
-use crate::local_server::ServerError;
+use crate::server_connection::ServerError;
 use gpui::prelude::*;
 use gpui::{AnyElement, App, SharedString, Stateful, div};
 use spaceterm_server::pane::control::Controller;
@@ -821,7 +821,7 @@ mod connection {
     use std::sync::Arc;
 
     use super::{Controller, Dormant, ScreenAnnouncements};
-    use crate::local_server::ServerError;
+    use crate::server_connection::ServerError;
     use crate::terminal::server_session::{DevelopmentPaneState, DevelopmentPaneStatus};
 
     /// What a Pane needs from the server connection behind it.
@@ -866,10 +866,6 @@ mod connection {
         /// Asks for a reconnection attempt now instead of at the next automatic one.
         fn retry(&self);
 
-        /// Records that the person stopped the server behind this Pane, as its route reported, so
-        /// the Pane stops reconnecting on its own until the server is started.
-        fn report_server_stopped(&self) {}
-
         /// Asks the server to make this client the Controlling Client.
         fn take_over(&self);
 
@@ -884,7 +880,7 @@ mod connection {
         fn directory_progress(&self) -> (bool, Option<&'static str>) {
             (false, None)
         }
-        fn directory_server(&self) -> Option<crate::local_server::LocalServer> {
+        fn directory_server(&self) -> Option<crate::server_connection::ServerConnection> {
             None
         }
         fn recovery_target(&self) -> Option<spaceterm_server::pane::directories::Target> {
@@ -931,10 +927,6 @@ mod connection {
             Self::retry(self);
         }
 
-        fn report_server_stopped(&self) {
-            Self::report_server_stopped(self);
-        }
-
         fn take_over(&self) {
             Self::take_over(self);
         }
@@ -949,7 +941,7 @@ mod connection {
         fn directory_progress(&self) -> (bool, Option<&'static str>) {
             Self::directory_progress(self)
         }
-        fn directory_server(&self) -> Option<crate::local_server::LocalServer> {
+        fn directory_server(&self) -> Option<crate::server_connection::ServerConnection> {
             Self::directory_server(self)
         }
         fn recovery_target(&self) -> Option<spaceterm_server::pane::directories::Target> {
@@ -1428,12 +1420,6 @@ mod connection {
                 return ServerPaneSync::default();
             }
             self.connection.retry();
-            self.sync()
-        }
-
-        /// Presents the person's stop of this Pane's server, which its route reported.
-        pub(crate) fn server_stopped_elsewhere(&mut self) -> ServerPaneSync {
-            self.connection.report_server_stopped();
             self.sync()
         }
 

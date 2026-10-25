@@ -1,5 +1,4 @@
 //! SpaceTerm Protocol admission, direct-network access and account server setup.
-pub mod account_bridge;
 pub mod attachments;
 #[cfg(feature = "client")]
 mod client;
@@ -12,6 +11,7 @@ mod host;
 pub mod organization;
 pub mod pane;
 mod protocol;
+pub mod provisioning;
 pub mod repository;
 pub mod service;
 #[cfg(feature = "client")]
@@ -21,7 +21,7 @@ mod transport;
 pub mod worktree;
 
 #[cfg(feature = "client")]
-pub use client::{ClientScope, LocalServer};
+pub use client::{ClientScope, ServerConnection};
 #[cfg(feature = "client")]
 pub use startup::{LocalStartup, StartupOutcome};
 
@@ -78,7 +78,7 @@ pub enum ServerError {
         "SpaceTerm was updated or moved after it opened. Quit and reopen SpaceTerm to continue."
     )]
     CandidateChanged,
-    #[error("The local server connection did not complete.")]
+    #[error("The server connection did not complete.")]
     Protocol,
     #[error("Reinstall SpaceTerm and try again.")]
     StartupFailed,

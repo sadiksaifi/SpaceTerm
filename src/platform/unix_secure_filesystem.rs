@@ -458,22 +458,6 @@ impl SecureFilesystem for UnixSecureFilesystem {
         Ok(SecureEntryIdentity(Arc::new(after)))
     }
 
-    fn verify_socket(
-        &self,
-        directory_handle: &SecureDirectory,
-        name: &OsStr,
-        identity_handle: &SecureEntryIdentity,
-    ) -> Result<(), SecureFilesystemError> {
-        let directory = directory(directory_handle)?;
-        verify_directory_entry(&directory)?;
-        let actual = socket_identity_at(&directory.file, name, Some(PRIVATE_FILE_MODE))?;
-        if &actual == identity(identity_handle)? {
-            Ok(())
-        } else {
-            Err(SecureFilesystemError::Unsafe)
-        }
-    }
-
     fn remove_socket(
         &self,
         directory_handle: &SecureDirectory,
@@ -559,9 +543,7 @@ fn as_io_error(error: SecureFilesystemError) -> io::Error {
         SecureFilesystemError::AlreadyExists => io::ErrorKind::AlreadyExists,
         SecureFilesystemError::Unsafe => io::ErrorKind::PermissionDenied,
         SecureFilesystemError::Conflict => io::ErrorKind::Other,
-        SecureFilesystemError::Unavailable | SecureFilesystemError::TooLarge => {
-            io::ErrorKind::Other
-        }
+        SecureFilesystemError::Unavailable => io::ErrorKind::Other,
     };
     io::Error::from(kind)
 }
@@ -1881,10 +1863,6 @@ mod tests {
         let identity = filesystem
             .register_socket(&directory, OsStr::new("endpoint"))
             .unwrap();
-        filesystem
-            .verify_socket(&directory, OsStr::new("endpoint"), &identity)
-            .unwrap();
-
         filesystem
             .remove_socket(&directory, OsStr::new("endpoint"), &identity)
             .unwrap();

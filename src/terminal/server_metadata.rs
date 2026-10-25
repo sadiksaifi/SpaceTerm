@@ -1,6 +1,6 @@
 //! Decode server presentation facts using locality supplied by the client's route.
 use super::{metadata::*, title::TitleGlyph};
-use crate::domain::{RemoteDirectory, SshDestination};
+use crate::domain::RemoteDirectory;
 use spaceterm_server::{ServerError, pane::metadata as wire};
 use std::{sync::Arc, time::Duration};
 
@@ -22,30 +22,22 @@ pub(crate) fn decode(
             ),
         )
     } else {
-        let destination = remote
-            .map(|r| r.destination().clone())
-            .or_else(|| {
-                wire.host
-                    .as_ref()
-                    .and_then(|host| SshDestination::new(host.clone()).ok())
-            })
-            .unwrap_or(SshDestination::new("server".into()).map_err(|_| ServerError::Protocol)?);
-        let user = remote
-            .and_then(|context| {
-                context
-                    .destination()
-                    .as_str()
-                    .rsplit_once('@')
-                    .map(|(user, _)| user)
-            })
-            .or(wire.user.as_deref());
+        let server_display = wire
+            .host
+            .as_deref()
+            .or_else(|| remote.map(RemoteTerminalMetadataContext::server_display))
+            .unwrap_or("server")
+            .to_owned();
         TerminalMetadataContext::Remote(
             RemoteTerminalMetadataContext::new(
-                destination,
+                server_display,
                 RemoteDirectory::new(wire.directory.clone())
                     .unwrap_or_else(|_| RemoteDirectory::home()),
             )
-            .with_machine(RemoteMachine::new(user, wire.home.as_deref())),
+            .with_machine(RemoteMachine::new(
+                wire.user.as_deref(),
+                wire.home.as_deref(),
+            )),
         )
     };
     Ok(Arc::new(TerminalMetadataSnapshot {

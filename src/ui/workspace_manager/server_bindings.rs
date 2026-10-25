@@ -1,13 +1,13 @@
 //! The SpaceTerm Servers whose Workspaces one Workspace Window presents.
 //!
-//! The account-local server and each connected SSH or direct network server publish their own inventory, answers,
-//! and attachments. Each one keeps its own binding, so a shared Workspace's edits, closes, and
+//! The account-local server and each connected paired server publish their own inventory,
+//! answers, and attachments. Each one keeps its own binding, so a shared Workspace's edits, closes, and
 //! Pane connections always reach the server that owns it, and losing one server leaves the
 //! others' Workspaces untouched.
 
 use gpui::Task;
 
-use crate::domain::{SshDestination, WorkspaceId};
+use crate::domain::WorkspaceId;
 use crate::ui::shared_workspaces::SharedWorkspaces;
 
 /// Names one presented server for the window's lifetime. Deferred answers, such as an alert's
@@ -24,8 +24,7 @@ impl ServerKey {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum ServerOrigin {
     Local,
-    Ssh(SshDestination),
-    /// A server reached over a direct network route, with the name it gave.
+    /// A server reached over a paired route, with the name it gave.
     Direct(crate::ui::shared_workspaces::DirectServer),
 }
 
@@ -34,7 +33,6 @@ impl ServerOrigin {
     pub(crate) fn remote_name(&self) -> Option<String> {
         match self {
             Self::Local => None,
-            Self::Ssh(destination) => Some(destination.as_str().to_owned()),
             Self::Direct(direct) => Some(direct.name.to_string()),
         }
     }

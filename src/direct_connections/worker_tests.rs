@@ -90,7 +90,7 @@ impl DirectNetwork for Network {
         route: &DirectRoute,
         _: DeviceCredential,
         _: Arc<AtomicBool>,
-    ) -> Result<LocalServer, DirectError> {
+    ) -> Result<ServerConnection, DirectError> {
         self.events.send(Event::Connect(route.id[0])).unwrap();
         if route.id[0] <= self.blocked_through {
             self.release.wait();

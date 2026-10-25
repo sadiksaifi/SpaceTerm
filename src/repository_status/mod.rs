@@ -30,7 +30,7 @@ use std::time::Instant;
 
 use thiserror::Error;
 
-use crate::ssh::cancellation::SshCancellationToken;
+use crate::cancellation::CancellationToken;
 
 mod preferences;
 
@@ -43,7 +43,7 @@ pub(crate) enum RepositoryMachine {
     Remote(RemoteMachineKey),
 }
 
-/// Opaque identity of one remote machine and account, as reached through a Control Connection.
+/// Opaque identity of one remote machine and account.
 #[derive(Clone, Eq, Hash, PartialEq)]
 pub(crate) struct RemoteMachineKey(Arc<str>);
 
@@ -245,7 +245,7 @@ pub(crate) enum ChangeState {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Freshness {
     Current,
-    /// Presented dimmed: a read failed, the Pane stopped, or the Control Connection is down.
+    /// Presented dimmed after a failed read, stopped Pane or lost server connection.
     LastKnown {
         as_of: Instant,
     },
@@ -347,7 +347,7 @@ pub(crate) trait RepositoryProgramRunner: Send + Sync + 'static {
         &self,
         request: &ProgramRequest,
         stdout: &mut dyn FnMut(&[u8]),
-        cancellation: &SshCancellationToken,
+        cancellation: &CancellationToken,
     ) -> Result<ProgramExit, ProgramError>;
 }
 

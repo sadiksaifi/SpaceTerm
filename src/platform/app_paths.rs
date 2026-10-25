@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 
 use thiserror::Error;
 
-use super::app_directories::{AppDirectories, AppDirectoryFile, AppDirectoryRoot, DirectoryError};
+use super::app_directories::{AppDirectories, AppDirectoryRoot, DirectoryError};
 use super::secure_filesystem::{
     SecureDirectory, SecureEntryIdentity, SecureFilesystem, SecureFilesystemError,
 };
@@ -14,8 +14,6 @@ use super::secure_filesystem::{
 const RUNTIME_OWNER_CREATION_ATTEMPTS: usize = 128;
 pub(crate) const ASKPASS_RUNTIME_OWNER_KIND: &str = "a";
 pub(crate) const ASKPASS_RUNTIME_SOCKET_NAME: &str = "a";
-pub(crate) const CONTROL_RUNTIME_OWNER_KIND: &str = "c";
-pub(crate) const CONTROL_RUNTIME_SOCKET_NAME: &str = "c";
 static NEXT_RUNTIME_OWNER: AtomicU64 = AtomicU64::new(0);
 
 const PRIVATE_RUNTIME_ATTEMPTS: usize = 8;
@@ -49,14 +47,6 @@ impl AppPaths {
         &self.directories
     }
 
-    pub(crate) fn managed_ssh_config(&self) -> PathBuf {
-        self.directories.managed_ssh_config().into_path()
-    }
-
-    pub(crate) fn managed_ssh_config_file(&self) -> AppDirectoryFile {
-        self.directories.managed_ssh_config()
-    }
-
     pub(crate) fn open_secure_root(
         &self,
         root: AppDirectoryRoot,
@@ -81,7 +71,7 @@ impl AppPaths {
 
     /// Opens the private runtime root. When `XDG_RUNTIME_DIR` is unset, another account can
     /// pre-create the predictable name in the shared temporary root; this process then uses an
-    /// unpredictable private sibling instead of losing AskPass and Control Connections.
+    /// unpredictable private sibling for AskPass sockets.
     fn runtime_directory(&self) -> Result<(PathBuf, SecureDirectory), AppPathsError> {
         let runtime_path = self
             .directories
@@ -187,7 +177,6 @@ impl AppPaths {
             directory,
             local_ipc_path_maximum: self.local_ipc_path_maximum,
             artifacts: Mutex::new(Vec::new()),
-            closed: false,
         }
     }
 }
@@ -233,7 +222,6 @@ pub(crate) struct RuntimeOwner {
     directory: SecureDirectory,
     local_ipc_path_maximum: NonZeroUsize,
     artifacts: Mutex<Vec<TrackedRuntimeArtifact>>,
-    closed: bool,
 }
 
 impl RuntimeOwner {
@@ -254,10 +242,7 @@ impl RuntimeOwner {
         Ok(path)
     }
 
-    pub(crate) fn register_socket(
-        &self,
-        name: &str,
-    ) -> Result<RegisteredRuntimeSocket, AppPathsError> {
+    pub(crate) fn register_socket(&self, name: &str) -> Result<(), AppPathsError> {
         validate_child_name(name)?;
         self.verify_identity()?;
         let name = OsString::from(name);
@@ -272,43 +257,10 @@ impl RuntimeOwner {
             .lock()
             .map_err(|_| AppPathsError::FilesystemUnavailable)?
             .push(TrackedRuntimeArtifact {
-                name: name.clone(),
-                socket_identity: Some(identity.clone()),
+                name,
+                socket_identity: identity,
             });
-        Ok(RegisteredRuntimeSocket {
-            filesystem: Arc::clone(&self.filesystem),
-            path: self.path.join(&name),
-            name,
-            socket_identity: identity,
-            runtime: self.runtime.clone(),
-            owner: self.directory.clone(),
-        })
-    }
-
-    pub(crate) fn remove_registered_socket(
-        &self,
-        socket: RegisteredRuntimeSocket,
-    ) -> Result<(), AppPathsError> {
-        self.verify_identity()?;
-        socket.verify()?;
-        if socket.path.parent() != Some(self.path.as_path()) {
-            return Err(AppPathsError::UnsafePath);
-        }
-        self.filesystem
-            .remove_socket(&self.directory, &socket.name, &socket.socket_identity)?;
-        self.artifacts
-            .lock()
-            .map_err(|_| AppPathsError::FilesystemUnavailable)?
-            .retain(|artifact| artifact.name != socket.name);
         Ok(())
-    }
-
-    pub(crate) fn close(mut self) -> Result<(), AppPathsError> {
-        let result = self.cleanup();
-        if result.is_ok() {
-            self.closed = true;
-        }
-        result
     }
 
     fn cleanup(&self) -> Result<(), AppPathsError> {
@@ -318,13 +270,11 @@ impl RuntimeOwner {
             .lock()
             .map_err(|_| AppPathsError::FilesystemUnavailable)?;
         for artifact in artifacts.iter() {
-            let result = match &artifact.socket_identity {
-                Some(identity) => {
-                    self.filesystem
-                        .remove_socket(&self.directory, &artifact.name, identity)
-                }
-                None => Err(SecureFilesystemError::Unsafe),
-            };
+            let result = self.filesystem.remove_socket(
+                &self.directory,
+                &artifact.name,
+                &artifact.socket_identity,
+            );
             match result {
                 Ok(()) | Err(SecureFilesystemError::Missing) => {}
                 Err(error) => return Err(error.into()),
@@ -345,42 +295,14 @@ impl RuntimeOwner {
 
 impl Drop for RuntimeOwner {
     fn drop(&mut self) {
-        if !self.closed {
-            let _ = self.cleanup();
-            self.closed = true;
-        }
+        let _ = self.cleanup();
     }
 }
 
 #[derive(Clone)]
 struct TrackedRuntimeArtifact {
     name: OsString,
-    socket_identity: Option<SecureEntryIdentity>,
-}
-
-pub(crate) struct RegisteredRuntimeSocket {
-    filesystem: Arc<dyn SecureFilesystem>,
-    path: PathBuf,
-    name: OsString,
     socket_identity: SecureEntryIdentity,
-    runtime: SecureDirectory,
-    owner: SecureDirectory,
-}
-
-impl RegisteredRuntimeSocket {
-    pub(crate) fn verify(&self) -> Result<(), AppPathsError> {
-        self.filesystem.verify_directory(&self.runtime)?;
-        self.filesystem.verify_directory(&self.owner)?;
-        self.filesystem
-            .verify_socket(&self.owner, &self.name, &self.socket_identity)?;
-        Ok(())
-    }
-}
-
-impl std::fmt::Debug for RegisteredRuntimeSocket {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("RegisteredRuntimeSocket(..)")
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
@@ -408,7 +330,6 @@ impl From<SecureFilesystemError> for AppPathsError {
         match error {
             SecureFilesystemError::Unsafe => Self::UnsafePath,
             SecureFilesystemError::Conflict
-            | SecureFilesystemError::TooLarge
             | SecureFilesystemError::Missing
             | SecureFilesystemError::AlreadyExists
             | SecureFilesystemError::Unavailable => Self::FilesystemUnavailable,
@@ -580,9 +501,8 @@ mod tests {
             .unwrap();
         assert!(owner.path().ends_with("a-z-10"));
         filesystem.create_socket(&owner.socket_path("a").unwrap());
-        let socket = owner.register_socket("a").unwrap();
-        owner.remove_registered_socket(socket).unwrap();
-        owner.close().unwrap();
+        owner.register_socket("a").unwrap();
+        drop(owner);
         let events = filesystem.events.lock().unwrap();
         assert!(
             events

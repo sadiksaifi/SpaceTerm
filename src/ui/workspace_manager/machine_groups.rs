@@ -1,11 +1,9 @@
 //! Groups the Workspace Window's Workspaces by the machine they run on.
 //!
-//! The account-local server's Workspaces form the local group. Every SSH server's group is named
-//! by its SSH Destination. A server reached over a direct network route forms its own group under
-//! the name it gave, apart from any SSH route to the same computer, because the two routes carry
-//! separate authority. Workspace order keeps each group together,
-//! the local one first, then the SSH machines and then the direct network servers by name, so the
-//! sidebar, the position shortcuts, and the Workspace Switcher present one order.
+//! The account-local server's Workspaces form the local group. Each paired server forms its own
+//! group under the name it gave. Workspace order keeps each group together, the local one first,
+//! then the paired servers by name, so the sidebar, the position shortcuts, and the Workspace
+//! Switcher present one order.
 
 use std::cmp::Ordering;
 
@@ -13,23 +11,14 @@ use gpui::{App, Context, Window};
 
 use super::{ServerBindings, ServerOrigin, WorkspaceManager};
 use crate::direct_connections::{DirectRouteId, DirectRouteStatus};
-use crate::domain::{SshDestination, WorkspaceEntry, WorkspaceId};
-use crate::ssh::server_connection::RemoteConnectionStatus;
-use crate::ssh::server_operations::RemoteOperationState;
-use crate::ui::remote_maintenance::{
-    menu_actions_for, observed_menu_actions, read_update_offer, working_state,
-};
+use crate::domain::{WorkspaceEntry, WorkspaceId};
 use crate::ui::workspace_sidebar::{MachineMenuCommand, MachineSection, MachineTarget};
-
-/// What a direct network server's heading says beside its name.
-const DIRECT_ROUTE: &str = "Direct network";
 
 /// The machine whose group a Workspace joins.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum Machine {
     Local,
-    Ssh(SshDestination),
-    /// A server reached over a direct network route, ordered by the name it gave.
+    /// A server reached over a paired route, ordered by the name it gave.
     Direct {
         name: String,
         route: DirectRouteId,
@@ -49,7 +38,6 @@ impl Machine {
     fn from_origin(origin: &ServerOrigin) -> Self {
         match origin {
             ServerOrigin::Local => Self::Local,
-            ServerOrigin::Ssh(destination) => Self::Ssh(destination.clone()),
             ServerOrigin::Direct(direct) => Self::Direct {
                 name: direct.name.to_string(),
                 route: direct.route,
@@ -60,8 +48,7 @@ impl Machine {
     const fn rank(&self) -> u8 {
         match self {
             Self::Local => 0,
-            Self::Ssh(_) => 1,
-            Self::Direct { .. } => 2,
+            Self::Direct { .. } => 1,
         }
     }
 }
@@ -73,12 +60,10 @@ fn by_name(a: &str, b: &str) -> Ordering {
         .then_with(|| a.cmp(b))
 }
 
-/// Group order: the local machine first, then each SSH machine by its destination, then each
-/// direct network server by its name, ignoring case.
+/// Group order: the local machine first, then each paired server by its name, ignoring case.
 impl Ord for Machine {
     fn cmp(&self, other: &Self) -> Ordering {
         match (self, other) {
-            (Self::Ssh(a), Self::Ssh(b)) => by_name(a.as_str(), b.as_str()),
             (
                 Self::Direct {
                     name: a,
@@ -141,8 +126,8 @@ impl WorkspaceManager {
 
     /// The sidebar's machine headings in Workspace order, or none while the Workspaces of one
     /// machine need no heading. Every presented server has its heading, even with no Workspaces,
-    /// so an empty or disconnected server stays visible. Reading the SSH servers' statuses
-    /// performs no remote work.
+    /// so an empty or disconnected server stays visible. Reading the paired routes' statuses
+    /// performs no network work.
     pub(super) fn machine_sections(&self, cx: &App) -> Vec<MachineSection> {
         let mut sections: Vec<(Machine, usize)> = Vec::new();
         for workspace in self.workspaces.iter() {
@@ -152,22 +137,6 @@ impl WorkspaceManager {
                 _ => sections.push((machine, 1)),
             }
         }
-        let connections = crate::ui::ssh_servers::installed(cx);
-        // Reading the submitted operations reaches no computer, as reading a connection's status
-        // does not.
-        let operations = crate::ssh::server_operations::installed(cx);
-        // A Saved Connection the person wants kept up has its heading before it connects, so a
-        // connection that waits for sign-in after relaunch shows that state here.
-        let intended = connections
-            .iter()
-            .flat_map(|connections| {
-                connections
-                    .connections()
-                    .into_iter()
-                    .map(|(destination, _)| destination)
-                    .filter(|destination| connections.intends(destination))
-            })
-            .map(Machine::Ssh);
         let presented = self
             .shared
             .keys()
@@ -191,19 +160,18 @@ impl WorkspaceManager {
                     })
             })
             .collect::<Vec<_>>();
-        let mut ssh_server = false;
+        let mut remote_server = false;
         for machine in presented
             .collect::<Vec<_>>()
             .into_iter()
-            .chain(intended)
             .chain(direct_intended)
         {
-            ssh_server |= !matches!(machine, Machine::Local);
+            remote_server |= !matches!(machine, Machine::Local);
             if let Err(position) = sections.binary_search_by(|(other, _)| other.cmp(&machine)) {
                 sections.insert(position, (machine, 0));
             }
         }
-        if sections.len() < 2 && !ssh_server {
+        if sections.len() < 2 && !remote_server {
             return Vec::new();
         }
         let this_computer = crate::desktop_profile::DesktopPresentation::get(cx)
@@ -214,7 +182,6 @@ impl WorkspaceManager {
             .map(|(machine, workspaces)| match machine {
                 Machine::Local => MachineSection {
                     label: this_computer.into(),
-                    route: None,
                     target: MachineTarget::Local,
                     status: None,
                     connects: false,
@@ -223,105 +190,8 @@ impl WorkspaceManager {
                     awaiting_connection: false,
                     // The footer's New Workspace already creates on this computer's server.
                     creates_workspaces: false,
-                    // The account-local server's own service and update controls live in its
-                    // Settings detail, which this heading opens.
-                    maintenance: Vec::new(),
                     workspaces,
                 },
-                Machine::Ssh(destination) => {
-                    let presented = self
-                        .shared
-                        .key_of(&ServerOrigin::Ssh(destination.clone()))
-                        .is_some();
-                    let saved = connections.as_ref().is_some_and(|connections| {
-                        connections
-                            .connections()
-                            .iter()
-                            .any(|(saved, _)| *saved == destination)
-                    });
-                    let intended = connections
-                        .as_ref()
-                        .is_some_and(|connections| connections.intends(&destination));
-                    // A heading controls a connection SpaceTerm presents or keeps trying.
-                    let controlled = presented || intended;
-                    let presentation = connections.as_ref().map(|connections| {
-                        let status = connections.status(&destination);
-                        let connected = matches!(status, RemoteConnectionStatus::Connected { .. });
-                        (connected, crate::ui::ssh_servers::present(&status))
-                    });
-                    let offers = |action| {
-                        controlled
-                            && presentation.as_ref().is_some_and(|(_, presentation)| {
-                                presentation.actions.contains(&action)
-                            })
-                    };
-                    // A saved connection's server is the one these steps act on, whether it is
-                    // presented now or not.
-                    // One destination can hold more than one unsettled original, so the
-                    // heading reads every state the owner holds for it rather than the first.
-                    let entries = operations.as_ref().filter(|_| saved).map(|operations| {
-                        operations
-                            .entries()
-                            .into_iter()
-                            .filter(|entry| !entry.removed && entry.destination == destination)
-                            .collect::<Vec<_>>()
-                    });
-                    // Only a read verifies a candidate, so its offer decides Update Server.
-                    let update_offer = read_update_offer(entries.iter().flatten());
-                    let maintenance = entries.map(|entries| {
-                        entries
-                            .into_iter()
-                            .map(|entry| entry.state)
-                            .collect::<Vec<_>>()
-                    });
-                    MachineSection {
-                        label: destination.as_str().to_owned().into(),
-                        route: None,
-                        // The heading reports the SSH server's connection, and an operation
-                        // underway on that server outranks it: it is what is happening to the
-                        // machine now.
-                        status: maintenance
-                            .as_ref()
-                            .and_then(|states| {
-                                states
-                                    .iter()
-                                    .find_map(|state| working_state(destination.as_str(), state))
-                            })
-                            .or_else(|| {
-                                presentation
-                                    .as_ref()
-                                    .filter(|(connected, _)| controlled && !connected)
-                                    .map(|(_, presentation)| presentation.state)
-                            }),
-                        connects: offers(crate::ui::ssh_servers::SshServerAction::Connect),
-                        // Disconnect withdraws a presented server whatever its state, such as one
-                        // stopped or failing after it connected, and ends reconnect intent.
-                        disconnects: controlled,
-                        awaiting_connection: !presented && intended,
-                        creates_workspaces: presented,
-                        maintenance: match &maintenance {
-                            Some(states)
-                                if states.iter().any(|state| {
-                                    !matches!(state, RemoteOperationState::Unread)
-                                }) =>
-                            {
-                                menu_actions_for(states, None, &update_offer)
-                            }
-                            // Before any maintenance read, the heading offers what the connection
-                            // already observed about that account's server.
-                            Some(_) => connections
-                                .as_ref()
-                                .map(|connections| {
-                                    observed_menu_actions(&connections.status(&destination))
-                                })
-                                .unwrap_or_default(),
-                            None => Vec::new(),
-                        },
-                        has_settings: saved,
-                        target: MachineTarget::Ssh(destination),
-                        workspaces,
-                    }
-                }
                 Machine::Direct { name, route } => {
                     let presented = self.direct_route_presented(&route);
                     let status = direct.as_ref().and_then(|direct| direct.status(&route));
@@ -348,7 +218,6 @@ impl WorkspaceManager {
                     });
                     MachineSection {
                         label: name.into(),
-                        route: Some(DIRECT_ROUTE),
                         target: MachineTarget::Direct(route),
                         status: presentation
                             .as_ref()
@@ -359,8 +228,6 @@ impl WorkspaceManager {
                         has_settings: saved,
                         awaiting_connection: !presented,
                         creates_workspaces: presented,
-                        // A direct network server's maintenance lives in its Settings detail.
-                        maintenance: Vec::new(),
                         workspaces,
                     }
                 }
@@ -368,8 +235,8 @@ impl WorkspaceManager {
             .collect()
     }
 
-    /// Performs a machine heading's command. Connecting is the person asking here, so any
-    /// sign-in or host approval it needs appears in this window.
+    /// Performs a machine heading's command. Connect lets the system ask for this device's key
+    /// because the person asked.
     pub(super) fn perform_machine_command(
         &mut self,
         target: MachineTarget,
@@ -377,102 +244,46 @@ impl WorkspaceManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if command == MachineMenuCommand::NewWorkspace {
-            self.create_workspace_on(&target, window, cx);
-            return;
-        }
-        let destination = match target {
-            MachineTarget::Ssh(destination) => Some(destination),
-            MachineTarget::Direct(route) => {
-                self.perform_direct_command(route, command, cx);
-                return;
+        match (command, target) {
+            (MachineMenuCommand::NewWorkspace, target) => {
+                self.create_workspace_on(&target, String::new(), window, cx);
             }
-            MachineTarget::Local => None,
-        };
-        match (command, destination) {
-            (MachineMenuCommand::ServerSettings, destination) => {
-                crate::ui::settings_window::open_server_settings(
-                    destination.map_or(MachineTarget::Local, MachineTarget::Ssh),
-                    cx,
-                )
+            (MachineMenuCommand::ServerSettings, target) => {
+                crate::ui::settings_window::open_server_settings(target, cx)
             }
-            (MachineMenuCommand::Connect, Some(destination)) => {
-                if let Some(connections) = crate::ui::ssh_servers::installed(cx) {
-                    crate::ui::ssh_servers::present_prompts_in(window, cx);
-                    connections.connect(destination);
-                }
-            }
-            (MachineMenuCommand::Disconnect, Some(destination)) => {
-                if let Some(connections) = crate::ui::ssh_servers::installed(cx) {
-                    connections.disconnect(&destination);
-                }
-            }
-            (MachineMenuCommand::Maintenance(action), Some(destination)) => {
-                // Settings owns these steps, so one surface describes a change, asks about it and
-                // keeps its result afterwards. The heading opens that surface on this machine.
-                crate::ui::settings_window::open_remote_maintenance(destination, action, cx);
-            }
-            (
-                MachineMenuCommand::Connect
-                | MachineMenuCommand::Disconnect
-                | MachineMenuCommand::Maintenance(_),
-                None,
-            )
-            | (MachineMenuCommand::NewWorkspace, _) => {}
-        }
-    }
-
-    /// Performs a direct network server heading's command. Connect lets the system ask for this
-    /// device's key because the person asked; nothing here reaches the server over SSH.
-    fn perform_direct_command(
-        &mut self,
-        route: DirectRouteId,
-        command: MachineMenuCommand,
-        cx: &mut Context<Self>,
-    ) {
-        match command {
-            MachineMenuCommand::ServerSettings => {
-                crate::ui::settings_window::open_server_settings(MachineTarget::Direct(route), cx)
-            }
-            MachineMenuCommand::Connect => {
+            (MachineMenuCommand::Connect, MachineTarget::Direct(route)) => {
                 if let Some(direct) = crate::ui::direct_servers::installed(cx) {
                     direct.resume(&route);
                 }
             }
-            MachineMenuCommand::Disconnect => {
+            (MachineMenuCommand::Disconnect, MachineTarget::Direct(route)) => {
                 if let Some(direct) = crate::ui::direct_servers::installed(cx) {
                     direct.disconnect(&route);
                 }
             }
-            MachineMenuCommand::Maintenance(_) | MachineMenuCommand::NewWorkspace => {}
+            (
+                MachineMenuCommand::Connect | MachineMenuCommand::Disconnect,
+                MachineTarget::Local,
+            ) => {}
         }
     }
 
-    /// Asks the server a machine heading names for a new Workspace, which it presents to every
-    /// connected client and this window activates once the server publishes it.
-    fn create_workspace_on(
+    /// Asks the server `target` names for a new Workspace named `name` unless blank, which it
+    /// presents to every connected client and this window activates once the server publishes
+    /// it.
+    pub(super) fn create_workspace_on(
         &mut self,
         target: &MachineTarget,
+        name: String,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         use crate::ui::shared_workspaces::{SharedRefusalReason, SharedSubmission};
 
-        let key =
-            self.shared
-                .keys()
-                .into_iter()
-                .find(|key| match (self.shared.origin(*key), target) {
-                    (Some(ServerOrigin::Local), MachineTarget::Local) => true,
-                    (Some(ServerOrigin::Ssh(bound)), MachineTarget::Ssh(destination)) => {
-                        bound == destination
-                    }
-                    (Some(ServerOrigin::Direct(bound)), MachineTarget::Direct(route)) => {
-                        bound.route == *route
-                    }
-                    _ => false,
-                });
-        let Some(shared) = key.and_then(|key| self.shared.get_mut(key)) else {
+        let Some(shared) = self
+            .server_key(target)
+            .and_then(|key| self.shared.get_mut(key))
+        else {
             super::WorkspaceManager::show_shared_refusal(
                 "create a Workspace",
                 SharedRefusalReason::Offline,
@@ -481,9 +292,47 @@ impl WorkspaceManager {
             );
             return;
         };
-        if let SharedSubmission::Refused(reason) = shared.create_workspace(String::new(), None) {
+        if let SharedSubmission::Refused(reason) = shared.create_workspace(name, None) {
             super::WorkspaceManager::show_shared_refusal("create a Workspace", reason, window, cx);
         }
         cx.notify();
+    }
+
+    /// Every saved paired server the creation menus offer, by name. Only one this window
+    /// presents can take a new Workspace now.
+    pub(super) fn remote_creation_servers(
+        &self,
+        cx: &App,
+    ) -> Vec<crate::ui::workspace_creation::RemoteCreationServer> {
+        let Some(direct) = crate::ui::direct_servers::installed(cx) else {
+            return Vec::new();
+        };
+        let mut servers: Vec<_> = direct
+            .routes()
+            .into_iter()
+            .filter_map(|(route, _)| {
+                Some(crate::ui::workspace_creation::RemoteCreationServer {
+                    route,
+                    name: direct.route(&route)?.label.into(),
+                    available: self.direct_route_presented(&route),
+                })
+            })
+            .collect();
+        servers.sort_by(|a, b| by_name(&a.name, &b.name).then_with(|| a.route.cmp(&b.route)));
+        servers
+    }
+
+    /// The binding presenting `target`'s server, if this window presents it.
+    pub(super) fn server_key(&self, target: &MachineTarget) -> Option<super::ServerKey> {
+        self.shared
+            .keys()
+            .into_iter()
+            .find(|key| match (self.shared.origin(*key), target) {
+                (Some(ServerOrigin::Local), MachineTarget::Local) => true,
+                (Some(ServerOrigin::Direct(bound)), MachineTarget::Direct(route)) => {
+                    bound.route == *route
+                }
+                _ => false,
+            })
     }
 }

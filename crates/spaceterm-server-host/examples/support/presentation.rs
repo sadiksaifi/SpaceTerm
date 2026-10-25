@@ -1,4 +1,4 @@
-//! One bounded presentation exercise for the existing IPC, SSH and WSS fixtures.
+//! One bounded presentation exercise for the existing IPC and WSS fixtures.
 //! The producer writes metadata without cell output while hidden and exits on request.
 use super::terminal_semantics::{Failure, stage};
 use spaceterm::runtime::PhysicalKey;

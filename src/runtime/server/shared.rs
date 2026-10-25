@@ -67,7 +67,7 @@ impl SharedWorkspaceHost {
             let organization = Organization::first(self.prototype.directory.clone())
                 .map_err(|_| Refusal::Failed)?;
             let settings = next.worktree_settings.take();
-            next = State::from_legacy(&organization);
+            next = State::from_organization(&organization);
             next.worktree_settings = settings;
             next.begin_boot(self.prototype.boot);
         }
@@ -116,7 +116,7 @@ impl SharedWorkspaceHost {
         Ok(())
     }
     fn restore_organization(&mut self, record: Option<&Organization>) {
-        self.state = record.map_or_else(State::empty, State::from_legacy);
+        self.state = record.map_or_else(State::empty, State::from_organization);
         // Recovery in the same boot preserves creator reservations; a restart clears them.
         self.state.begin_boot(self.prototype.boot);
         self.fresh_panes.retain(|id| self.state.pane(*id).is_some());

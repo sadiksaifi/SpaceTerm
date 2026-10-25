@@ -1,7 +1,7 @@
 //! Existing Worktree mutation, original-outcome and removal-review helpers for native checks.
 use super::repository::inventory;
 use spaceterm_server::{
-    LocalServer,
+    ServerConnection,
     hierarchy::{Mutation, RetainedOutcome},
     pane::{PaneConnection, Reply, Request},
     worktree::{Operation, Read, ReadReply},
@@ -68,7 +68,7 @@ pub fn review(
 
 /// Keeps an uncertain original in this client's existing journal until its exact outcome settles.
 pub fn journaled_mutation(
-    server: &LocalServer,
+    server: &ServerConnection,
     connection: &mut PaneConnection,
     mutation: Mutation,
 ) -> Result<RetainedOutcome, Box<dyn Error>> {

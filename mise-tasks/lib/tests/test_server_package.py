@@ -120,7 +120,7 @@ class ServerArchiveTests(unittest.TestCase):
             os.umask(previous)
         self.assertEqual(stat.S_IMODE((self.root / "unpacked/server").stat().st_mode), 0o755)
 
-    def test_previous_production_trust_cannot_authenticate_a_new_nonproduction_candidate(self):
+    def test_production_trust_cannot_authenticate_a_nonproduction_candidate(self):
         self.archive_with([("server/build.json", json.dumps(self.info).encode(), tarfile.REGTYPE)])
         production_fixture_seed = bytes(range(32))
         release.sign_ed25519(production_fixture_seed, self.archive, self.signature)

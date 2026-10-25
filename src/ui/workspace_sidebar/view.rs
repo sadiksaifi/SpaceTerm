@@ -966,14 +966,10 @@ impl WorkspaceSidebar {
         let scrollbar = self.scrollbar.clone();
         let menu_sidebar = sidebar.clone();
         let lifecycle_sidebar = sidebar.clone();
-        let remote_disabled = self.remote_unavailable.is_some();
-        let new_workspace_tooltip = crate::ui::workspace_creation::new_workspace_trigger_tooltip(
-            self.remote_unavailable.as_deref(),
-        );
         let new_workspace_menu = Menu::new(
             "new-workspace-menu",
             "New Workspace",
-            new_workspace_menu_entries(presentation, remote_disabled),
+            new_workspace_menu_entries(presentation, &self.remote_servers),
         )
         .size(MenuSize::Wide)
         .placement(AnchoredPlacementConfig::new(
@@ -1000,12 +996,16 @@ impl WorkspaceSidebar {
             });
         })
         .on_activate(move |activation, window, cx| match *activation.action() {
-            WorkspaceCreation::Local => {
+            NewWorkspaceItem::Create(WorkspaceCreation::Local) => {
                 let _ = menu_sidebar.update(cx, |_, cx| {
                     cx.emit(SidebarEvent::Create(WorkspaceCreation::Local));
                 });
             }
-            creation => {
+            // Settings owns adding a server; the menu only opens that journey.
+            NewWorkspaceItem::AddServer => {
+                window.dispatch_action(Box::new(crate::ui::settings_window::AddServer), cx);
+            }
+            NewWorkspaceItem::Create(creation) => {
                 let sidebar = menu_sidebar.clone();
                 let _ = menu_sidebar.update(cx, |sidebar, cx| {
                     sidebar.dismiss_editing(window, cx);
@@ -1019,7 +1019,7 @@ impl WorkspaceSidebar {
                 });
             }
         });
-        let new_workspace_menu = Tooltip::new("new-workspace-tooltip", new_workspace_tooltip)
+        let new_workspace_menu = Tooltip::new("new-workspace-tooltip", "New Workspace")
             .debug_selector("new-workspace-tooltip")
             .attach(new_workspace_menu, TooltipTargetVisibility::Visible);
         let application_menu = (!presentation
@@ -1155,9 +1155,6 @@ impl WorkspaceSidebar {
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .child(label.clone()),
             )
-            .when_some(section.route, |heading, route| {
-                heading.child(div().flex_shrink_0().child(route))
-            })
             .when_some(section.status, |heading, status| {
                 heading.child(
                     div()
@@ -1169,13 +1166,9 @@ impl WorkspaceSidebar {
                         .child(status),
                 )
             });
-        let named = match section.route {
-            Some(route) => format!("{label}, {route}"),
-            None => label.to_string(),
-        };
         let accessible = match section.status {
-            Some(status) => format!("{named}, {status}"),
-            None => named,
+            Some(status) => format!("{label}, {status}"),
+            None => label.to_string(),
         };
         let target = section.target.clone();
         let grow_sidebar = sidebar.clone();
@@ -1894,22 +1887,8 @@ fn new_worktree_button(
         .into_any_element()
 }
 
-/// The icon one maintenance step carries in a machine heading's menu.
-fn maintenance_icon(action: crate::ui::remote_maintenance::RemoteAction) -> IconName {
-    use crate::ui::remote_maintenance::RemoteAction;
-    match action {
-        RemoteAction::Start => IconName::Play,
-        RemoteAction::Stop => IconName::Square,
-        RemoteAction::Restart => IconName::RefreshCw,
-        RemoteAction::Uninstall => IconName::Trash2,
-        RemoteAction::Update => IconName::ArrowDownToLine,
-        RemoteAction::Return => IconName::RotateCcw,
-        _ => IconName::Check,
-    }
-}
-
-/// A machine heading's commands: connecting and disconnecting its SSH server where its status
-/// allows, the maintenance steps its server state allows, and the Servers Settings Section.
+/// A machine heading's commands: New Workspace on a presented remote server, connecting and
+/// disconnecting a paired server where its status allows, and the Servers Settings Section.
 fn machine_menu_entries(section: &MachineSection) -> Vec<MenuEntry<MachineMenuCommand>> {
     let mut entries = Vec::new();
     if section.creates_workspaces {
@@ -1939,21 +1918,6 @@ fn machine_menu_entries(section: &MachineSection) -> Vec<MenuEntry<MachineMenuCo
                 })
                 .debug_selector("machine-menu-disconnect"),
         );
-    }
-    if !section.maintenance.is_empty() {
-        if !entries.is_empty() {
-            entries.push(MenuEntry::separator());
-        }
-        for action in &section.maintenance {
-            let action = *action;
-            entries.push(
-                MenuEntry::action(action.label(), MachineMenuCommand::Maintenance(action))
-                    .icon(move |foreground, size| {
-                        Icon::new(maintenance_icon(action), size, foreground).into_any_element()
-                    })
-                    .debug_selector(format!("machine-menu-{}", action.name())),
-            );
-        }
     }
     if !section.has_settings {
         return entries;
@@ -2059,30 +2023,104 @@ fn application_menu(
         .into_any_element()
 }
 
+/// What the sidebar's New Workspace menu offers.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NewWorkspaceItem {
+    Create(WorkspaceCreation),
+    /// Opens Settings > Servers > Add Server, the one journey that adds a server.
+    AddServer,
+}
+
+fn creation_entry(
+    creation: WorkspaceCreation,
+    label: SharedString,
+    selector: String,
+    presentation: &crate::desktop_profile::DesktopPresentation,
+) -> MenuEntry<NewWorkspaceItem> {
+    let entry = MenuEntry::action(label, NewWorkspaceItem::Create(creation));
+    let entry = match creation.shortcut(presentation) {
+        Some(shortcut) => entry.shortcut(shortcut),
+        None => entry,
+    };
+    entry
+        .icon(move |foreground, size| {
+            Icon::custom(creation.icon(), size, foreground).into_any_element()
+        })
+        .debug_selector(format!("new-workspace-menu-{selector}"))
+}
+
+/// One saved server per row, then Add Server, so a person without the server they want reaches
+/// the journey that adds it.
+fn remote_submenu(
+    servers: &[crate::ui::workspace_creation::RemoteCreationServer],
+    creation: fn(crate::direct_connections::DirectRouteId) -> WorkspaceCreation,
+    selector: &str,
+) -> Vec<MenuEntry<NewWorkspaceItem>> {
+    let mut entries: Vec<_> = servers
+        .iter()
+        .enumerate()
+        .map(|(position, server)| {
+            let creation = creation(server.route);
+            // A server this window doesn't present can't take a Workspace until it connects.
+            MenuEntry::action(server.name.clone(), NewWorkspaceItem::Create(creation))
+                .disabled(!server.available)
+                .debug_selector(format!(
+                    "new-workspace-menu-{}",
+                    creation.selector(position)
+                ))
+        })
+        .collect();
+    if !entries.is_empty() {
+        entries.push(MenuEntry::separator());
+    }
+    entries.push(
+        MenuEntry::action("Add Server\u{2026}", NewWorkspaceItem::AddServer)
+            .debug_selector(format!("new-workspace-menu-{selector}-add-server")),
+    );
+    entries
+}
+
 fn new_workspace_menu_entries(
     presentation: &crate::desktop_profile::DesktopPresentation,
-    remote_disabled: bool,
-) -> Vec<MenuEntry<WorkspaceCreation>> {
-    let mut entries = Vec::new();
-    for creation in WorkspaceCreation::ALL {
-        if creation.starts_group() {
-            entries.push(MenuEntry::separator());
-        }
-        let entry = MenuEntry::action(creation.label(), creation);
-        let entry = match creation.shortcut(presentation) {
-            Some(shortcut) => entry.shortcut(shortcut),
-            None => entry,
-        };
-        entries.push(
-            entry
-                .icon(move |foreground, size| {
-                    Icon::custom(creation.icon(), size, foreground).into_any_element()
-                })
-                .disabled(remote_disabled && creation.is_remote())
-                .debug_selector(format!("new-workspace-menu-{}", creation.selector())),
-        );
-    }
-    entries
+    servers: &[crate::ui::workspace_creation::RemoteCreationServer],
+) -> Vec<MenuEntry<NewWorkspaceItem>> {
+    let [local, open_local] = WorkspaceCreation::LOCAL;
+    vec![
+        creation_entry(local, local.label(None), local.selector(0), presentation),
+        MenuEntry::submenu(
+            "Remote Workspace",
+            remote_submenu(servers, WorkspaceCreation::Remote, "create-remote"),
+        )
+        .icon(|foreground, size| {
+            Icon::custom(spaceterm_ui::CustomIconName::GlobePlus, size, foreground)
+                .into_any_element()
+        })
+        .debug_selector("new-workspace-menu-create-remote"),
+        MenuEntry::separator(),
+        creation_entry(
+            open_local,
+            open_local.label(None),
+            open_local.selector(0),
+            presentation,
+        ),
+        MenuEntry::submenu(
+            "Open Remote Directory",
+            remote_submenu(
+                servers,
+                WorkspaceCreation::OpenRemoteDirectory,
+                "open-remote-directory",
+            ),
+        )
+        .icon(|foreground, size| {
+            Icon::custom(
+                spaceterm_ui::CustomIconName::FolderBadgeGlobe,
+                size,
+                foreground,
+            )
+            .into_any_element()
+        })
+        .debug_selector("new-workspace-menu-open-remote-directory"),
+    ]
 }
 
 /// Every Workspace command carries a symbol, so all labels share the icon column.

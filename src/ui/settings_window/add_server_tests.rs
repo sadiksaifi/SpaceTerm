@@ -1,9 +1,10 @@
-//! The Add Server sheet, driven through a registry of SSH connections whose backend counts every
-//! remote call and a real direct connections registry whose network is unavailable.
+//! The Add Server sheet, driven through a scripted SSH setup backend that records every setup it
+//! is asked for, and a real direct connections registry whose network is unavailable.
 
+use std::collections::VecDeque;
+use std::net::SocketAddr;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use gpui::{Entity, TestAppContext, VisualTestContext};
@@ -14,176 +15,144 @@ use super::super::servers::testing::{ScriptedServer, connected};
 use super::super::servers::{LocalServerControl, OfferedServer};
 use super::*;
 use crate::appearance::Appearance;
+use crate::platform::app_paths::AppPaths;
 use crate::platform::appearance::testing::RecordingAppearancePlatform;
 use crate::platform::window_movement::RecordingOperatingSystemWindowDragPlatform;
 use crate::settings::SettingsDocument;
 use crate::settings::storage::testing::MemoryStorage;
-use crate::ssh::cancellation::SshCancellationToken;
-use crate::ssh::server_connection::{
-    ConnectMode, ConnectProgress, ConnectedSshServer, RetainedSshConnection, ServerAvailability,
-    SshConnectBackend, SshConnectFailure, SshConnectionIntentStore, SshIntentStoreError,
-    SshServerContinuity, SshServerFacts, SshServerLease, SshServerObservation,
+use crate::ssh::askpass::{AskPassAttempt, AskPassAttemptFactory, AskPassUnavailable};
+use crate::ssh::provisioning::testing::{
+    installation_approval, network_approval, startup_approval,
 };
+use crate::ssh::provisioning::{SetupOperation, SshSetupBackend, UnavailableKind};
 use crate::ui::appearance_runtime;
 
-/// The SSH computers the test reaches, counting every connection that would leave this computer.
-/// A host named `offline` never answers.
+/// What the scripted computer does with one setup.
+enum Outcome {
+    Finish(Result<DirectRouteId, SetupFailure>),
+    /// Runs until the sheet cancels it, then reports the cancellation.
+    UntilCancelled,
+}
+
+/// One setup the sheet asked for.
+#[derive(Clone, Debug)]
+struct Asked {
+    destination: String,
+    endpoint: SocketAddr,
+    approvals: SetupApprovals,
+}
+
+/// The SSH computers the test reaches. Each setup takes the next scripted outcome.
 #[derive(Default)]
 struct Computers {
-    connects: AtomicUsize,
+    outcomes: Mutex<VecDeque<Outcome>>,
+    asked: Mutex<Vec<Asked>>,
 }
 
-const OFFLINE: &str = "offline";
-
-struct Lease;
-impl SshServerLease for Lease {
-    fn is_alive(&self) -> bool {
-        true
-    }
-}
-
-fn facts() -> SshServerFacts {
-    SshServerFacts {
-        platform: ("Example OS".into(), "x86_64".into()),
-        version: Some("1.4.0".into()),
-        starts_automatically: true,
-    }
-}
-
-impl SshConnectBackend for Computers {
-    fn connect(
-        &self,
-        destination: &SshDestination,
-        _: ConnectMode,
-        _: Option<&SshServerContinuity>,
-        _: &SshCancellationToken,
-        _: &ConnectProgress<'_>,
-    ) -> Result<ConnectedSshServer, SshConnectFailure> {
-        self.connects.fetch_add(1, Ordering::SeqCst);
-        if destination.as_str() == OFFLINE {
-            return Err(SshConnectFailure::Unavailable(
-                crate::ssh::server_connection::UnavailableKind::HostUnreachable,
-            ));
-        }
-        Ok(ConnectedSshServer {
-            server: crate::local_server::LocalServer::for_identity("spaceterm-development")
-                .expect("the development identity resolves"),
-            continuity: SshServerContinuity {
-                route: [1; 32],
-                account: 501,
-                build: "spaceterm-development".into(),
-                server: [2; 32],
-            },
-            lease: Arc::new(Lease),
-            facts: facts(),
-        })
-    }
-
-    fn observe(
-        &self,
-        _: &SshDestination,
-        _: Option<&SshServerContinuity>,
-        _: &SshCancellationToken,
-        _: &ConnectProgress<'_>,
-    ) -> Result<SshServerObservation, SshConnectFailure> {
-        Ok(SshServerObservation {
-            continuity: None,
-            availability: ServerAvailability::Running,
-            facts: facts(),
-        })
-    }
-}
-
-/// Saved connections kept in memory. While `held`, loading waits, as a slow disk does.
-#[derive(Default)]
-struct SavedConnections {
-    records: Mutex<Vec<RetainedSshConnection>>,
-    held: Mutex<bool>,
-    released: Condvar,
-}
-
-impl SavedConnections {
-    /// A record of `destination`, saved before this launch, that loads only once released.
-    fn holding(destination: &str) -> Arc<Self> {
+impl Computers {
+    fn scripted(outcomes: impl IntoIterator<Item = Outcome>) -> Arc<Self> {
         Arc::new(Self {
-            records: Mutex::new(vec![RetainedSshConnection {
-                destination: SshDestination::new(destination.to_owned()).unwrap(),
-                continuity: None,
-                active: false,
-            }]),
-            held: Mutex::new(true),
-            released: Condvar::new(),
+            outcomes: Mutex::new(outcomes.into_iter().collect()),
+            asked: Mutex::default(),
         })
     }
 
-    fn release(&self) {
-        *self.held.lock().unwrap() = false;
-        self.released.notify_all();
+    fn asked(&self) -> Vec<Asked> {
+        self.asked.lock().unwrap().clone()
     }
 }
 
-impl SshConnectionIntentStore for SavedConnections {
-    fn load(&self) -> Result<Vec<RetainedSshConnection>, SshIntentStoreError> {
-        let held = self.held.lock().unwrap();
-        drop(self.released.wait_while(held, |held| *held).unwrap());
-        Ok(self.records.lock().unwrap().clone())
+impl SshSetupBackend for Computers {
+    fn setup(
+        &self,
+        request: SetupRequest,
+        cancellation: &CancellationToken,
+        _: &SetupProgress,
+    ) -> Result<DirectRouteId, SetupFailure> {
+        self.asked.lock().unwrap().push(Asked {
+            destination: request.destination.as_str().to_owned(),
+            endpoint: request.endpoint,
+            approvals: request.approvals.clone(),
+        });
+        let outcome = self.outcomes.lock().unwrap().pop_front();
+        match outcome {
+            Some(Outcome::Finish(result)) => result,
+            Some(Outcome::UntilCancelled) | None => {
+                let deadline = Instant::now() + Duration::from_secs(5);
+                while !cancellation.is_cancelled() {
+                    assert!(Instant::now() < deadline, "the sheet cancels the setup");
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+                Err(SetupFailure::Cancelled)
+            }
+        }
     }
-    fn retain(&self, record: RetainedSshConnection) -> Result<(), SshIntentStoreError> {
-        let mut records = self.records.lock().unwrap();
-        records.retain(|other| other.destination != record.destination);
-        records.push(record);
-        Ok(())
+}
+
+/// OpenSSH's prompts, which no scripted setup asks for.
+struct NoPrompts;
+impl AskPassAttemptFactory for NoPrompts {
+    fn start_attempt(&self, _: &AppPaths) -> Result<AskPassAttempt, AskPassUnavailable> {
+        Err(AskPassUnavailable)
     }
-    fn remove(&self, destination: &SshDestination) -> Result<(), SshIntentStoreError> {
-        self.records
-            .lock()
-            .unwrap()
-            .retain(|record| record.destination != *destination);
-        Ok(())
+}
+
+struct Setup(Arc<Computers>);
+impl SshSetupFactory for Setup {
+    fn backend(&self) -> Option<Arc<dyn SshSetupBackend>> {
+        Some(Arc::clone(&self.0) as Arc<dyn SshSetupBackend>)
+    }
+    fn prompts(&self, _: &Window, _: &mut App) -> Option<Arc<dyn AskPassAttemptFactory>> {
+        Some(Arc::new(NoPrompts))
+    }
+    fn hosts(&self) -> Vec<SshDestination> {
+        Vec::new()
     }
 }
 
 struct Sheet<'a> {
     window: Entity<SettingsWindow>,
     computers: Arc<Computers>,
-    connections: SshServerConnections,
+    direct: DirectConnections,
     cx: &'a mut VisualTestContext,
 }
 
-/// Opens Settings on Servers with the local server, an SSH registry and a direct registry.
-fn open_settings(cx: &mut TestAppContext) -> Sheet<'_> {
-    let (direct, _) = crate::direct_connections::tests::offline("studio");
-    let sheet = open_settings_with(Arc::new(SavedConnections::default()), direct, cx);
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while !sheet.connections.retained_inventory_loaded() {
-        assert!(Instant::now() < deadline, "the saved connections load");
-        std::thread::sleep(Duration::from_millis(2));
-    }
-    sheet
+/// Opens Settings on Servers with the local server, the scripted setup and a direct registry
+/// holding one saved route, `studio`, which a scripted setup can return.
+fn open_settings(
+    outcomes: impl FnOnce(DirectRouteId) -> Vec<Outcome>,
+    cx: &mut TestAppContext,
+) -> (Sheet<'_>, DirectRouteId) {
+    let (direct, route) = crate::direct_connections::tests::offline("studio");
+    let computers = Computers::scripted(outcomes(route));
+    (open_settings_using(computers, direct, cx), route)
 }
 
-/// Opens Settings as [`open_settings`] does, with SSH connections saved in `saved` and the direct
-/// registry `direct`, without waiting for the SSH connections to load.
-fn open_settings_with(
-    saved: Arc<SavedConnections>,
+/// Opens Settings as [`open_settings`] does, with the direct registry `direct` and no scripted
+/// setups.
+fn open_settings_with(direct: DirectConnections, cx: &mut TestAppContext) -> Sheet<'_> {
+    open_settings_using(Arc::default(), direct, cx)
+}
+
+fn open_settings_using(
+    computers: Arc<Computers>,
     direct: DirectConnections,
     cx: &mut TestAppContext,
 ) -> Sheet<'_> {
-    // The registries' workers run on their own threads.
+    // Setup and the registry's workers run on their own threads.
     cx.executor().allow_parking();
-    let computers = Arc::new(Computers::default());
-    let connections = SshServerConnections::new(computers.clone(), saved);
-    connections.resume_retained();
     let settings =
         crate::settings::Settings::load(MemoryStorage::with_document(&SettingsDocument::default()));
     let platform = RecordingAppearancePlatform::default();
     platform.set_system_appearance(Some(Appearance::Dark));
+    let installed = direct.clone();
+    let factory = Rc::new(Setup(Arc::clone(&computers)));
     cx.update(|cx| {
         appearance_runtime::install(settings, Rc::new(platform), cx)
             .expect("appearance runtime should install");
         crate::ui::init(cx).expect("UI initialization should succeed");
-        crate::ui::ssh_servers::install(connections.clone(), None, cx);
-        crate::ui::direct_servers::install(direct, cx);
+        crate::ui::ssh_setup::install(factory, cx);
+        crate::ui::direct_servers::install(installed, cx);
     });
     let local = Some(OfferedServer {
         connection: Ok(ScriptedServer::new(Ok(connected(1))) as Arc<dyn LocalServerControl>),
@@ -205,7 +174,7 @@ fn open_settings_with(
     Sheet {
         window,
         computers,
-        connections,
+        direct,
         cx,
     }
 }
@@ -219,6 +188,25 @@ impl Sheet<'_> {
             });
         });
         self.cx.run_until_parked();
+    }
+
+    /// Clicks the sheet's field whose selector is `selector` and types `text` into it, as the
+    /// person does.
+    fn type_into(&mut self, selector: &'static str, text: &str) {
+        let position = self
+            .cx
+            .debug_bounds(selector)
+            .unwrap_or_else(|| panic!("{selector} was not rendered"))
+            .center();
+        self.cx.simulate_click(position, gpui::Modifiers::none());
+        self.cx.simulate_input(text);
+        self.cx.run_until_parked();
+    }
+
+    /// Types `host` and `address` into the SSH method's empty fields.
+    fn fill(&mut self, host: &str, address: &str) {
+        self.type_into(HOST_SELECTOR, host);
+        self.type_into(ADDRESS_SELECTOR, address);
     }
 
     /// Shows `join` in the sheet as if the sheet had started it with an invitation from
@@ -293,8 +281,8 @@ impl Sheet<'_> {
             .to_owned()
     }
 
-    /// The sheet's node named `label`, as assistive technology reads it.
-    fn node(&mut self, label: &str) -> serde_json::Value {
+    /// The sheet's node named `label`, if it offers one.
+    fn find(&mut self, label: &str) -> Option<serde_json::Value> {
         let tree = A11yTree::read(self.cx);
         let dialog = *tree
             .with_role("Dialog")
@@ -303,8 +291,13 @@ impl Sheet<'_> {
         tree.descendants(dialog)
             .into_iter()
             .find(|node| node["aria"]["label"] == label)
+            .cloned()
+    }
+
+    /// The sheet's node named `label`, as assistive technology reads it.
+    fn node(&mut self, label: &str) -> serde_json::Value {
+        self.find(label)
             .unwrap_or_else(|| panic!("the sheet offers {label}"))
-            .clone()
     }
 
     /// Whether the sheet's button named `label` is unavailable.
@@ -324,7 +317,8 @@ impl Sheet<'_> {
             })
     }
 
-    /// Repaints until `done` holds, while the registries' workers run on their own threads.
+    /// Repaints until `done` holds, while setup and the registry's workers run on their own
+    /// threads.
     fn settle(&mut self, mut done: impl FnMut(&mut Self) -> bool) {
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
@@ -332,9 +326,339 @@ impl Sheet<'_> {
             if done(self) {
                 return;
             }
-            assert!(Instant::now() < deadline, "the registry settles");
+            assert!(Instant::now() < deadline, "the sheet settles");
             std::thread::sleep(Duration::from_millis(2));
         }
+    }
+}
+
+fn endpoint(text: &str) -> SocketAddr {
+    text.parse().unwrap()
+}
+
+#[gpui::test]
+fn set_up_stays_unavailable_until_a_host_and_an_address_are_typed(cx: &mut TestAppContext) {
+    let (mut sheet, _) = open_settings(|_| Vec::new(), cx);
+    sheet.begin(AddServerRequest::Ssh(None));
+
+    assert!(sheet.disabled("Set Up"), "an empty sheet sets up nothing");
+    sheet.type_into(HOST_SELECTOR, "penguin");
+    assert!(
+        sheet.disabled("Set Up"),
+        "a host alone has no network address"
+    );
+    sheet.type_into(ADDRESS_SELECTOR, "192.168.1.20");
+    assert!(!sheet.disabled("Set Up"));
+}
+
+/// An SSH alias names how SSH reaches the computer, not an address other devices reach over the
+/// network, so it is refused before SSH runs.
+#[gpui::test]
+fn an_address_that_isnt_an_ip_address_is_refused_before_setup_runs(cx: &mut TestAppContext) {
+    let (mut sheet, _) = open_settings(|_| Vec::new(), cx);
+    sheet.begin(AddServerRequest::Ssh(None));
+    sheet.fill("penguin", "penguin.local");
+
+    sheet.choose(SheetAction::SetUp.selector());
+
+    assert!(sheet.says("Enter an IP address of that computer"));
+    assert_eq!(sheet.title(), "Add Server");
+    assert!(
+        sheet.computers.asked().is_empty(),
+        "SSH runs only for a usable address"
+    );
+}
+
+#[gpui::test]
+fn setup_selects_the_paired_server_it_added_and_closes_the_sheet(cx: &mut TestAppContext) {
+    let (mut sheet, route) = open_settings(|route| vec![Outcome::Finish(Ok(route))], cx);
+    sheet.begin(AddServerRequest::Ssh(None));
+    sheet.fill("me@build.local", "192.168.1.20");
+
+    sheet.cx.simulate_keystrokes("enter");
+    sheet.settle(|sheet| !sheet.open() && sheet.selected() == Some(ServerChoice::Direct(route)));
+
+    let asked = sheet.computers.asked();
+    assert_eq!(asked.len(), 1);
+    assert_eq!(asked[0].destination, "me@build.local");
+    assert_eq!(
+        asked[0].endpoint,
+        endpoint("192.168.1.20:9231"),
+        "an address without a port uses SpaceTerm's"
+    );
+    assert!(asked[0].approvals.install.is_none());
+    assert!(asked[0].approvals.start.is_none());
+    assert!(asked[0].approvals.expose_network.is_none());
+}
+
+/// Installing waits for the person, and the setup that installs carries the approval of the exact
+/// offer the person reviewed.
+#[gpui::test]
+fn an_installation_offer_runs_again_only_with_its_own_approval(cx: &mut TestAppContext) {
+    let (mut sheet, route) = open_settings(
+        |route| {
+            vec![
+                Outcome::Finish(Err(SetupFailure::InstallationOffered {
+                    version: "1.4.0".into(),
+                    platform: ("Linux".into(), "x86_64".into()),
+                    approval: installation_approval("penguin"),
+                })),
+                Outcome::Finish(Ok(route)),
+            ]
+        },
+        cx,
+    );
+    sheet.begin(AddServerRequest::Ssh(None));
+    sheet.fill("penguin", "192.168.1.20:9300");
+    sheet.choose(SheetAction::SetUp.selector());
+    sheet.settle(|sheet| sheet.title() == "Install SpaceTerm Server on \u{201C}penguin\u{201D}?");
+
+    assert!(sheet.says("SpaceTerm may ask for your sudo password on that computer."));
+    assert_eq!(
+        sheet.computers.asked().len(),
+        1,
+        "nothing installs before Install"
+    );
+
+    sheet.choose(SheetAction::Install.selector());
+    sheet.settle(|sheet| !sheet.open() && sheet.selected() == Some(ServerChoice::Direct(route)));
+
+    let asked = sheet.computers.asked();
+    assert_eq!(asked.len(), 2);
+    assert_eq!(asked[1].endpoint, endpoint("192.168.1.20:9300"));
+    assert_eq!(
+        asked[1].approvals.install,
+        Some(installation_approval("penguin"))
+    );
+    assert!(
+        asked[1].approvals.start.is_none(),
+        "installing approves no other step"
+    );
+}
+
+#[gpui::test]
+fn a_stopped_server_starts_only_after_the_person_chooses_start_server(cx: &mut TestAppContext) {
+    let (mut sheet, route) = open_settings(
+        |route| {
+            vec![
+                Outcome::Finish(Err(SetupFailure::StartupRequired {
+                    approval: startup_approval("penguin"),
+                })),
+                Outcome::Finish(Ok(route)),
+            ]
+        },
+        cx,
+    );
+    sheet.begin(AddServerRequest::Ssh(None));
+    sheet.fill("penguin", "192.168.1.20");
+    sheet.choose(SheetAction::SetUp.selector());
+    sheet.settle(|sheet| sheet.title() == "Start SpaceTerm Server on \u{201C}penguin\u{201D}?");
+
+    sheet.choose(SheetAction::Start.selector());
+    sheet.settle(|sheet| !sheet.open() && sheet.selected() == Some(ServerChoice::Direct(route)));
+
+    let asked = sheet.computers.asked();
+    assert_eq!(asked[1].approvals.start, Some(startup_approval("penguin")));
+    assert!(asked[1].approvals.install.is_none());
+}
+
+/// Network access moves from the address the server listens at only after the person allows it,
+/// and the sheet says which address it leaves.
+#[gpui::test]
+fn network_access_changes_only_after_the_person_allows_it(cx: &mut TestAppContext) {
+    let (mut sheet, route) = open_settings(
+        |route| {
+            vec![
+                Outcome::Finish(Err(SetupFailure::NetworkAuthorizationRequired {
+                    current: Some(endpoint("10.0.0.4:9231")),
+                    approval: network_approval("penguin"),
+                })),
+                Outcome::Finish(Ok(route)),
+            ]
+        },
+        cx,
+    );
+    sheet.begin(AddServerRequest::Ssh(None));
+    sheet.fill("penguin", "192.168.1.20");
+    sheet.choose(SheetAction::SetUp.selector());
+    sheet.settle(|sheet| sheet.title() == "Allow Network Access on \u{201C}penguin\u{201D}?");
+
+    assert!(sheet.says("at 192.168.1.20:9231"));
+    assert!(sheet.says("It stops listening at 10.0.0.4:9231."));
+    assert!(
+        sheet.computers.asked()[0]
+            .approvals
+            .expose_network
+            .is_none()
+    );
+
+    sheet.choose(SheetAction::AllowNetwork.selector());
+    sheet.settle(|sheet| !sheet.open() && sheet.selected() == Some(ServerChoice::Direct(route)));
+
+    assert_eq!(
+        sheet.computers.asked()[1].approvals.expose_network,
+        Some(network_approval("penguin")),
+        "the setup that changes network access carries the approval of the offer the person saw"
+    );
+}
+
+/// Cancel waits until setup has closed what it opened: the sheet says it is cancelling until
+/// then, and adds no server.
+#[gpui::test]
+fn cancelling_setup_keeps_the_sheet_until_setup_stops(cx: &mut TestAppContext) {
+    let (mut sheet, _) = open_settings(|_| vec![Outcome::UntilCancelled], cx);
+    let saved = |sheet: &Sheet<'_>| {
+        sheet
+            .direct
+            .routes()
+            .into_iter()
+            .map(|(route, _)| route)
+            .collect::<Vec<_>>()
+    };
+    let routes = saved(&sheet);
+    sheet.begin(AddServerRequest::Ssh(None));
+    sheet.fill("penguin", "192.168.1.20");
+    sheet.choose(SheetAction::SetUp.selector());
+    sheet.settle(|sheet| sheet.says("Setting up \u{201C}penguin\u{201D}"));
+
+    sheet.choose(SheetAction::Cancel.selector());
+    sheet.settle(|sheet| !sheet.open());
+
+    assert_eq!(sheet.computers.asked().len(), 1);
+    assert_eq!(saved(&sheet), routes, "a cancelled setup adds no server");
+    assert_eq!(sheet.selected(), Some(ServerChoice::Local));
+}
+
+/// A server this computer can't reach over the network says so, and Try Again repeats the same
+/// setup without approvals it never asked for.
+#[gpui::test]
+fn an_unreachable_address_says_so_and_try_again_repeats_the_setup(cx: &mut TestAppContext) {
+    let (mut sheet, route) = open_settings(
+        |route| {
+            vec![
+                Outcome::Finish(Err(SetupFailure::Unavailable(
+                    UnavailableKind::EndpointUnreachable,
+                ))),
+                Outcome::Finish(Ok(route)),
+            ]
+        },
+        cx,
+    );
+    sheet.begin(AddServerRequest::Ssh(None));
+    sheet.fill("penguin", "192.168.1.20");
+    sheet.choose(SheetAction::SetUp.selector());
+    sheet.settle(|sheet| sheet.title() == "Couldn\u{2019}t Add \u{201C}penguin\u{201D}");
+
+    assert!(sheet.says("couldn\u{2019}t reach it at 192.168.1.20:9231"));
+    assert_ne!(
+        sheet.selected(),
+        Some(ServerChoice::Direct(route)),
+        "a server SpaceTerm can't reach isn't added"
+    );
+
+    sheet.choose(SheetAction::TryAgain.selector());
+    sheet.settle(|sheet| !sheet.open() && sheet.selected() == Some(ServerChoice::Direct(route)));
+    let asked = sheet.computers.asked();
+    assert_eq!(asked[1].endpoint, asked[0].endpoint);
+}
+
+/// A save SpaceTerm couldn't confirm may already be listed, so the sheet offers no Try Again that
+/// could pair this computer twice.
+#[gpui::test]
+fn an_unconfirmed_save_offers_no_try_again(cx: &mut TestAppContext) {
+    let (mut sheet, _) = open_settings(
+        |_| {
+            vec![Outcome::Finish(Err(SetupFailure::Unconfirmed(
+                SetupOperation::Save,
+            )))]
+        },
+        cx,
+    );
+    sheet.begin(AddServerRequest::Ssh(None));
+    sheet.fill("penguin", "192.168.1.20");
+    sheet.choose(SheetAction::SetUp.selector());
+    sheet.settle(|sheet| sheet.title() == "Couldn\u{2019}t Add \u{201C}penguin\u{201D}");
+
+    assert!(sheet.says("couldn\u{2019}t confirm it saved the connection"));
+    assert!(sheet.find("Try Again").is_none());
+}
+
+#[gpui::test]
+fn escape_closes_a_filled_in_sheet_without_setting_up(cx: &mut TestAppContext) {
+    let (mut sheet, _) = open_settings(|_| Vec::new(), cx);
+    sheet.begin(AddServerRequest::Ssh(Some("penguin".into())));
+    assert!(sheet.open());
+
+    sheet.cx.simulate_keystrokes("escape");
+    sheet.cx.run_until_parked();
+
+    assert!(!sheet.open(), "Escape cancels the sheet");
+    assert!(
+        sheet.computers.asked().is_empty(),
+        "a filled-in host sets up only after Set Up"
+    );
+}
+
+/// Typing a host's first character makes Set Up available on the same sheet: the presentation,
+/// the field's focus and Set Up's accessibility node all stay.
+#[gpui::test]
+fn typing_the_first_host_character_makes_set_up_available_in_place(cx: &mut TestAppContext) {
+    let (mut sheet, _) = open_settings(|_| Vec::new(), cx);
+    sheet.begin(AddServerRequest::Ssh(None));
+    sheet.type_into(ADDRESS_SELECTOR, "192.168.1.20");
+    let (before, _) = sheet.presented();
+    let set_up = sheet.node("Set Up");
+
+    sheet.type_into(HOST_SELECTOR, "p");
+
+    let (after, focused) = sheet.presented();
+    let available = sheet.node("Set Up");
+    assert!(before.is_some());
+    assert_eq!(after, before, "the sheet stays the same presentation");
+    assert!(focused, "the host field keeps keyboard focus");
+    assert_eq!(set_up["aria"]["disabled"], true);
+    assert_ne!(available["aria"]["disabled"], true);
+    assert_eq!(node_id(&set_up), node_id(&available));
+}
+
+/// Set Up can't be chosen while its values are missing, by pointer or by Return.
+#[gpui::test]
+fn an_unavailable_set_up_sets_up_nothing(cx: &mut TestAppContext) {
+    let (mut sheet, _) = open_settings(|_| Vec::new(), cx);
+    sheet.begin(AddServerRequest::Ssh(None));
+
+    sheet.choose(SheetAction::SetUp.selector());
+    sheet.cx.simulate_keystrokes("enter");
+    sheet.cx.run_until_parked();
+
+    assert!(sheet.open());
+    assert_eq!(sheet.title(), "Add Server");
+    assert!(sheet.computers.asked().is_empty());
+}
+
+#[test]
+fn parse_endpoint_accepts_only_usable_ip_addresses() {
+    assert_eq!(
+        parse_endpoint("192.168.1.20"),
+        Some(endpoint("192.168.1.20:9231"))
+    );
+    assert_eq!(
+        parse_endpoint(" 192.168.1.20:9300 "),
+        Some(endpoint("192.168.1.20:9300"))
+    );
+    assert_eq!(
+        parse_endpoint("[fd00::4]"),
+        Some(endpoint("[fd00::4]:9231"))
+    );
+    for refused in [
+        "penguin.local",
+        "127.0.0.1",
+        "0.0.0.0",
+        "192.168.1.20:0",
+        "224.0.0.1",
+        "",
+    ] {
+        assert_eq!(parse_endpoint(refused), None, "{refused}");
     }
 }
 
@@ -346,7 +670,7 @@ fn invitation(server: &str) -> Zeroizing<String> {
         .unwrap()
         .as_secs()
         + 60;
-    let pin = crate::local_server::direct::ServerPin {
+    let pin = crate::server_connection::direct::ServerPin {
         build: "spaceterm-development".into(),
         server: [1; 32],
         public_key: [3; 32],
@@ -366,56 +690,8 @@ fn invitation(server: &str) -> Zeroizing<String> {
 }
 
 #[gpui::test]
-fn connect_stays_unavailable_until_a_host_is_typed(cx: &mut TestAppContext) {
-    let mut sheet = open_settings(cx);
-    sheet.begin(AddServerRequest::Ssh(None));
-
-    assert!(sheet.disabled("Connect"), "an empty host connects nowhere");
-    sheet.cx.simulate_input("penguin");
-    sheet.cx.run_until_parked();
-    assert!(!sheet.disabled("Connect"), "a typed host can connect");
-}
-
-#[gpui::test]
-fn return_connects_to_the_typed_host_then_selects_it_and_closes_the_sheet(cx: &mut TestAppContext) {
-    let mut sheet = open_settings(cx);
-    sheet.begin(AddServerRequest::Ssh(None));
-
-    sheet.cx.simulate_input("me@build.local");
-    sheet.cx.run_until_parked();
-    sheet.cx.simulate_keystrokes("enter");
-    let window = sheet.window.clone();
-    sheet.settle(|sheet| {
-        !sheet.open()
-            && window.read_with(sheet.cx, |settings, _| settings.selected_server())
-                == Some(ServerChoice::Ssh(
-                    SshDestination::new("me@build.local".to_owned()).unwrap(),
-                ))
-    });
-
-    assert_eq!(sheet.computers.connects.load(Ordering::SeqCst), 1);
-}
-
-#[gpui::test]
-fn escape_closes_a_filled_in_sheet_without_connecting(cx: &mut TestAppContext) {
-    let mut sheet = open_settings(cx);
-    sheet.begin(AddServerRequest::Ssh(Some("penguin".into())));
-    assert!(sheet.open());
-
-    sheet.cx.simulate_keystrokes("escape");
-    sheet.cx.run_until_parked();
-
-    assert!(!sheet.open(), "Escape cancels the sheet");
-    assert_eq!(
-        sheet.computers.connects.load(Ordering::SeqCst),
-        0,
-        "a filled-in host connects only after Connect"
-    );
-}
-
-#[gpui::test]
 fn a_delivered_invitation_names_its_server_and_address_and_waits_for_join(cx: &mut TestAppContext) {
-    let mut sheet = open_settings(cx);
+    let (mut sheet, _) = open_settings(|_| Vec::new(), cx);
     sheet.begin(AddServerRequest::Invitation(Some(invitation("studio"))));
 
     assert!(
@@ -433,7 +709,7 @@ fn a_delivered_invitation_names_its_server_and_address_and_waits_for_join(cx: &m
 
 #[gpui::test]
 fn a_link_that_isnt_an_invitation_says_so_and_cant_join(cx: &mut TestAppContext) {
-    let mut sheet = open_settings(cx);
+    let (mut sheet, _) = open_settings(|_| Vec::new(), cx);
     sheet.begin(AddServerRequest::Invitation(Some(Zeroizing::new(
         "spaceterm://pair/not-an-invitation".to_owned(),
     ))));
@@ -443,61 +719,11 @@ fn a_link_that_isnt_an_invitation_says_so_and_cant_join(cx: &mut TestAppContext)
 }
 
 #[gpui::test]
-fn cancelling_after_a_new_host_fails_to_connect_adds_no_server(cx: &mut TestAppContext) {
-    let mut sheet = open_settings(cx);
-    sheet.begin(AddServerRequest::Ssh(None));
-
-    sheet.cx.simulate_input(OFFLINE);
-    sheet.cx.run_until_parked();
-    sheet.cx.simulate_keystrokes("enter");
-    sheet.settle(|sheet| sheet.title().starts_with("Couldn\u{2019}t Connect"));
-    sheet.cx.simulate_keystrokes("escape");
-    sheet.cx.run_until_parked();
-
-    assert!(!sheet.open(), "Escape cancels the sheet");
-    assert!(
-        sheet.connections.connections().is_empty(),
-        "a host the person never added stays out of the server list"
-    );
-}
-
-#[gpui::test]
-fn cancelling_keeps_a_saved_host_whose_record_has_not_loaded_yet(cx: &mut TestAppContext) {
-    let saved = SavedConnections::holding(OFFLINE);
-    let (direct, _) = crate::direct_connections::tests::offline("studio");
-    let mut sheet = open_settings_with(saved.clone(), direct, cx);
-    assert!(
-        !sheet.connections.retained_inventory_loaded(),
-        "the saved connections are still loading"
-    );
-    sheet.begin(AddServerRequest::Ssh(None));
-
-    sheet.cx.simulate_input(OFFLINE);
-    sheet.cx.run_until_parked();
-    sheet.cx.simulate_keystrokes("enter");
-    sheet.settle(|sheet| sheet.title().starts_with("Couldn\u{2019}t Connect"));
-    sheet.cx.simulate_keystrokes("escape");
-    sheet.cx.run_until_parked();
-    let kept = sheet
-        .connections
-        .connections()
-        .iter()
-        .any(|(destination, _)| destination.as_str() == OFFLINE);
-    saved.release();
-
-    assert!(!sheet.open(), "Escape cancels the sheet");
-    assert!(
-        kept,
-        "a host the person saved before stays, although its record hadn't loaded when they typed it"
-    );
-}
-
-#[gpui::test]
 fn a_join_whose_save_is_unconfirmed_still_selects_its_server_and_closes_the_sheet(
     cx: &mut TestAppContext,
 ) {
     let (direct, join, route) = crate::direct_connections::tests::uncertain_join("studio");
-    let mut sheet = open_settings_with(Arc::new(SavedConnections::default()), direct, cx);
+    let mut sheet = open_settings_with(direct, cx);
     sheet.begin(AddServerRequest::Invitation(None));
 
     sheet.adopt(join, "studio");
@@ -513,7 +739,7 @@ fn an_interrupted_join_waits_for_try_again_with_the_same_request(cx: &mut TestAp
         "studio",
         crate::direct_connections::EnrollmentStage::Claim,
     );
-    let mut sheet = open_settings_with(Arc::new(SavedConnections::default()), direct.clone(), cx);
+    let mut sheet = open_settings_with(direct.clone(), cx);
     sheet.begin(AddServerRequest::Invitation(None));
 
     sheet.adopt(join, "studio");
@@ -544,7 +770,7 @@ fn withdrawing_a_join_whose_save_is_unknown_says_the_withdrawal_isnt_saved(
     cx: &mut TestAppContext,
 ) {
     let (direct, join) = crate::direct_connections::tests::unconfirmed_join("studio");
-    let mut sheet = open_settings_with(Arc::new(SavedConnections::default()), direct.clone(), cx);
+    let mut sheet = open_settings_with(direct.clone(), cx);
     sheet.begin(AddServerRequest::Invitation(None));
 
     sheet.adopt(join, "studio");
@@ -579,7 +805,7 @@ fn withdrawing_a_join_whose_save_is_unknown_says_the_withdrawal_isnt_saved(
 #[gpui::test]
 fn an_unsaved_stop_says_so_until_the_registry_saves_again(cx: &mut TestAppContext) {
     let (direct, route, storage) = crate::direct_connections::tests::offline_with_storage("studio");
-    let mut sheet = open_settings_with(Arc::new(SavedConnections::default()), direct.clone(), cx);
+    let mut sheet = open_settings_with(direct.clone(), cx);
     sheet.begin(AddServerRequest::Invitation(None));
     // This computer can't save the registry, as when the stop itself failed to save.
     storage.set_failing(true);
@@ -615,43 +841,6 @@ fn an_unsaved_stop_says_so_until_the_registry_saves_again(cx: &mut TestAppContex
     sheet.settle(|sheet| sheet.says("SpaceTerm is cancelling the pairing with studio."));
 }
 
-/// Typing a host's first character makes Connect available on the same sheet: the presentation,
-/// the field's focus and Connect's accessibility node all stay.
-#[gpui::test]
-fn typing_the_first_host_character_makes_connect_available_in_place(cx: &mut TestAppContext) {
-    let mut sheet = open_settings(cx);
-    sheet.begin(AddServerRequest::Ssh(None));
-    let (before, _) = sheet.presented();
-    let connect = sheet.node("Connect");
-
-    sheet.cx.simulate_input("p");
-    sheet.cx.run_until_parked();
-
-    let (after, focused) = sheet.presented();
-    let available = sheet.node("Connect");
-    assert!(before.is_some());
-    assert_eq!(after, before, "the sheet stays the same presentation");
-    assert!(focused, "the host field keeps keyboard focus");
-    assert_eq!(connect["aria"]["disabled"], true);
-    assert_ne!(available["aria"]["disabled"], true);
-    assert_eq!(node_id(&connect), node_id(&available));
-}
-
-/// Connect can't be chosen while the host is empty, by pointer or by Return.
-#[gpui::test]
-fn an_unavailable_connect_connects_nothing(cx: &mut TestAppContext) {
-    let mut sheet = open_settings(cx);
-    sheet.begin(AddServerRequest::Ssh(None));
-
-    sheet.choose(SheetAction::Connect.selector());
-    sheet.cx.simulate_keystrokes("enter");
-    sheet.cx.run_until_parked();
-
-    assert!(sheet.open());
-    assert_eq!(sheet.title(), "Add Server");
-    assert_eq!(sheet.computers.connects.load(Ordering::SeqCst), 0);
-}
-
 /// Joining shows the code the authenticated exchange produced, which assistive technology reads
 /// digit by digit, while the server's owner decides. Escape stops that exact enrollment.
 #[gpui::test]
@@ -662,7 +851,7 @@ fn joining_shows_the_comparison_code_until_escape_stops_it(cx: &mut TestAppConte
         "000007",
         "the fixture's exchange produces this code"
     );
-    let mut sheet = open_settings_with(Arc::new(SavedConnections::default()), direct.clone(), cx);
+    let mut sheet = open_settings_with(direct.clone(), cx);
     sheet.begin(AddServerRequest::Invitation(Some(link)));
 
     sheet.cx.simulate_keystrokes("enter");
@@ -687,7 +876,7 @@ fn joining_shows_the_comparison_code_until_escape_stops_it(cx: &mut TestAppConte
 fn a_link_delivered_during_a_join_waits_for_it_to_end(cx: &mut TestAppContext) {
     let (direct, link, _) = crate::direct_connections::tests::waiting_invitation("studio");
     let (_, next, _) = crate::direct_connections::tests::waiting_invitation("annex");
-    let mut sheet = open_settings_with(Arc::new(SavedConnections::default()), direct, cx);
+    let mut sheet = open_settings_with(direct, cx);
     sheet.begin(AddServerRequest::Invitation(Some(link)));
     sheet.cx.simulate_keystrokes("enter");
     sheet.settle(|sheet| A11yTree::read(sheet.cx).find("Code").is_some());

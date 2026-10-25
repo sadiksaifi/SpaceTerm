@@ -246,8 +246,7 @@ impl TestTerminalSessionRecords {
             Some(crate::domain::CurrentDirectory::Remote(directory)) => {
                 metadata.context =
                     TerminalMetadataContext::Remote(RemoteTerminalMetadataContext::new(
-                        crate::domain::SshDestination::new("tester@remote".to_owned())
-                            .expect("the test destination is valid"),
+                        "tester@remote".to_owned(),
                         directory.clone(),
                     ));
                 metadata.directory.path = Arc::from(directory.as_str());

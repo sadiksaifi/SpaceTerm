@@ -24,15 +24,10 @@ pub(super) struct SavedRoute {
     pub(super) active: bool,
 }
 
-/// Account authority is distinct from device authority. SSH recovery retains the
-/// admitted continuity, rather than resolving a current alias to a new account.
+/// Account-local authority for resolving an exact retained revocation.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub(crate) enum AccountRoute {
     Local,
-    Ssh {
-        destination: String,
-        continuity: crate::ssh::server_connection::SshServerContinuity,
-    },
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -201,17 +196,7 @@ impl Document {
                         return Err(());
                     }
                 }
-                Authority::Account { pin, route } => {
-                    validate_pin(pin)?;
-                    if let AccountRoute::Ssh { continuity, .. } = route
-                        && (continuity.server != pin.server
-                            || continuity.build != pin.build
-                            || continuity.route == [0; 32]
-                            || continuity.account == 0)
-                    {
-                        return Err(());
-                    }
-                }
+                Authority::Account { pin, .. } => validate_pin(pin)?,
             }
         }
         Ok(())

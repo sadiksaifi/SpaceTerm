@@ -1,6 +1,6 @@
 //! Real-host two-client check. Admission uses owning-account authority without client credentials.
 mod support;
-use spaceterm_server::{LocalServer, ServerError, pane::control::Controller, pane::*};
+use spaceterm_server::{ServerConnection, ServerError, pane::control::Controller, pane::*};
 use std::error::Error;
 use support::{attach, await_output, command};
 
@@ -52,8 +52,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         .nth(1)
         .unwrap_or_else(|| "1".into())
         .parse()?;
-    let first = LocalServer::for_development_client("takeover-first", major)?;
-    let second = LocalServer::for_development_client("takeover-second", major)?;
+    let first = ServerConnection::for_development_client("takeover-first", major)?;
+    let second = ServerConnection::for_development_client("takeover-second", major)?;
     for client in [&first, &second] {
         assert_eq!(client.refresh()?.protocol_major, major);
     }

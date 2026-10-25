@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use super::title::{TitleActivity, TitleGlyph};
-use crate::domain::{RemoteDirectory, SshDestination};
+use crate::domain::RemoteDirectory;
 use crate::local_path::LocalPathSemantics;
 
 const MAX_TITLE_CHARS: usize = 256;
@@ -164,20 +164,20 @@ pub enum TerminalOrigin<'a> {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-/// Immutable remote identity and startup-directory context for one Terminal Session.
+/// Remote display facts and starting directory for one Terminal Session.
 ///
 /// The directory retains its exact remote spelling for presentation and startup. It is not local
 /// filesystem authority and must never be converted to `PathBuf` or locally validated.
 pub struct RemoteTerminalMetadataContext {
-    destination: SshDestination,
+    server_display: String,
     initial_directory: RemoteDirectory,
     machine: RemoteMachine,
 }
 
 impl RemoteTerminalMetadataContext {
-    pub const fn new(destination: SshDestination, initial_directory: RemoteDirectory) -> Self {
+    pub const fn new(server_display: String, initial_directory: RemoteDirectory) -> Self {
         Self {
-            destination,
+            server_display,
             initial_directory,
             machine: RemoteMachine {
                 user: None,
@@ -192,8 +192,8 @@ impl RemoteTerminalMetadataContext {
         self
     }
 
-    pub const fn destination(&self) -> &SshDestination {
-        &self.destination
+    pub fn server_display(&self) -> &str {
+        &self.server_display
     }
 
     pub const fn initial_directory(&self) -> &RemoteDirectory {
@@ -202,17 +202,6 @@ impl RemoteTerminalMetadataContext {
 
     pub fn set_initial_directory(&mut self, directory: RemoteDirectory) {
         self.initial_directory = directory;
-    }
-
-    /// Splits the destination into the account it names, if any, and the machine.
-    ///
-    /// A destination may be a host alias that names no account, in which case the discovered
-    /// account supplies the user instead.
-    fn destination_parts(&self) -> (Option<&str>, &str) {
-        match self.destination.as_str().rsplit_once('@') {
-            Some((user, host)) => (Some(user), host),
-            None => (None, self.destination.as_str()),
-        }
     }
 }
 
@@ -404,15 +393,10 @@ impl TerminalMetadataContext {
                 user: machine.user(),
                 host: machine.hostname(),
             },
-            Self::Remote(context) => {
-                let (spelled_user, host) = context.destination_parts();
-                TerminalOrigin::Remote {
-                    // A destination that spells an account agrees with discovery; an alias does
-                    // not spell one, so discovery is what names the user at all.
-                    user: context.machine.user().or(spelled_user),
-                    host,
-                }
-            }
+            Self::Remote(context) => TerminalOrigin::Remote {
+                user: context.machine.user(),
+                host: context.server_display(),
+            },
         }
     }
 }
@@ -898,13 +882,13 @@ const fn hex_digit(byte: u8) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{RemoteDirectory, SshDestination};
+    use crate::domain::RemoteDirectory;
     use crate::local_path::LocalPathSemantics;
 
     #[test]
-    fn remote_metadata_context_should_preserve_typed_destination_and_directory() {
+    fn remote_metadata_context_should_preserve_server_display_and_directory() {
         let remote = RemoteTerminalMetadataContext::new(
-            SshDestination::new("user@remote".to_owned()).unwrap(),
+            "user@remote".to_owned(),
             RemoteDirectory::new("~/project".to_owned()).unwrap(),
         );
         let context = TerminalMetadataContext::Remote(remote.clone());
@@ -931,7 +915,7 @@ mod tests {
             LocalMachine::new(Some("test"), Some("mac.local"), Some("/Users/test")),
         );
         let remote = TerminalMetadataContext::Remote(RemoteTerminalMetadataContext::new(
-            SshDestination::new("user@remote".to_owned()).unwrap(),
+            "user@remote".to_owned(),
             RemoteDirectory::new("~/project".to_owned()).unwrap(),
         ));
 
@@ -953,7 +937,7 @@ mod tests {
             LocalMachine::default(),
         );
         let remote = TerminalMetadataContext::Remote(RemoteTerminalMetadataContext::new(
-            SshDestination::new("user@remote".to_owned()).unwrap(),
+            "user@remote".to_owned(),
             RemoteDirectory::new("~/project".to_owned()).unwrap(),
         ));
         for context in [&local, &remote] {
@@ -1481,7 +1465,7 @@ mod tests {
     #[test]
     fn remote_osc7_accepts_machine_hostname_without_local_filesystem_authority() {
         let context = TerminalMetadataContext::Remote(RemoteTerminalMetadataContext::new(
-            SshDestination::new("dev-alias".into()).unwrap(),
+            "dev-alias".into(),
             RemoteDirectory::new("~".into()).unwrap(),
         ));
         let report = parse_osc7_directory("file://actual-hostname/srv/my%20app", &context).unwrap();

@@ -14,13 +14,15 @@ use spaceterm_ui::{
 use super::SettingsWindow;
 use super::local_operations::UpdateCompletion;
 use crate::application_identity::ApplicationIdentity;
-use crate::local_server::ServerError;
-use crate::local_server::service::activation::{
+use crate::local_startup::CandidateError;
+use crate::server_connection::ServerError;
+use crate::server_connection::service::activation::{
     ActivationPhase, ActivationStatus, is_released_downgrade,
 };
-use crate::local_server::service::control::{BuildName, UpdateChange, UpdateWording, build_labels};
-use crate::local_server::service::{RetainedInstallation, Service, ServiceStatus};
-use crate::local_startup::CandidateError;
+use crate::server_connection::service::control::{
+    BuildName, UpdateChange, UpdateWording, build_labels,
+};
+use crate::server_connection::service::{RetainedInstallation, Service, ServiceStatus};
 use crate::ui::sidebar_window::form::CaptionTone;
 
 pub(super) const UPDATE_SELECTOR: &str = "settings-server-update";
@@ -923,10 +925,10 @@ pub(super) mod testing {
     use std::sync::{Arc, Mutex};
 
     use super::{IncludedServer, PreparedChange, ServerUpdateControl, UpdateFacts};
-    use crate::local_server::ServerError;
-    use crate::local_server::service::RetainedInstallation;
-    use crate::local_server::service::activation::{ActivationPhase, ActivationStatus};
-    use crate::local_server::service::control::UpdateChange;
+    use crate::server_connection::ServerError;
+    use crate::server_connection::service::RetainedInstallation;
+    use crate::server_connection::service::activation::{ActivationPhase, ActivationStatus};
+    use crate::server_connection::service::control::UpdateChange;
     use crate::ui::settings_window::servers::testing::{retained, running, stopped};
 
     /// One operation a [`ScriptedUpdate`] received.

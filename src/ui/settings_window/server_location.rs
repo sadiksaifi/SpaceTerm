@@ -373,10 +373,6 @@ impl SettingsWindow {
                 .as_ref()
                 .and_then(|row| row.worktree_server())
                 .is_some(),
-            ServerChoice::Ssh(destination) => self
-                .ssh_servers
-                .as_ref()
-                .is_some_and(|rows| rows.connections.server(destination).is_some()),
             ServerChoice::Direct(route) => self
                 .direct_routes
                 .as_ref()
@@ -422,7 +418,6 @@ impl SettingsWindow {
                 // this window hears of it, so each reading looks the writer up again.
                 let client = cx.update(|cx| match &target {
                     ServerChoice::Local => Client::get(cx),
-                    ServerChoice::Ssh(destination) => Client::presented_ssh(destination, cx),
                     ServerChoice::Direct(route) => Client::presented_direct(route, cx),
                 });
                 let read = match &client {

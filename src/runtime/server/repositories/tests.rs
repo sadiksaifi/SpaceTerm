@@ -17,7 +17,7 @@ impl RepositoryProgramRunner for DelayedCount {
         &self,
         request: &ProgramRequest,
         stdout: &mut dyn FnMut(&[u8]),
-        cancellation: &SshCancellationToken,
+        cancellation: &CancellationToken,
     ) -> Result<ProgramExit, ProgramError> {
         let arguments = &request.arguments;
         let count_arguments: Vec<std::ffi::OsString> = policy::local_read::COUNT_ARGUMENTS
@@ -89,7 +89,7 @@ impl Reading {
         }
         let mut repositories = ServerRepositories::new([1; 32]);
         repositories.sources = sources.clone();
-        let cancellation = SshCancellationToken::default();
+        let cancellation = CancellationToken::default();
         let token = cancellation.clone();
         let sent_sources = sources.clone();
         let (interests, updates) = mpsc::sync_channel(1);
@@ -155,7 +155,7 @@ fn a_directory_deleted_during_discovery_keeps_saved_worktree_membership() {
             &self,
             request: &ProgramRequest,
             stdout: &mut dyn FnMut(&[u8]),
-            cancellation: &SshCancellationToken,
+            cancellation: &CancellationToken,
         ) -> Result<ProgramExit, ProgramError> {
             let discovery: Vec<std::ffi::OsString> = policy::local_read::DISCOVERY_ARGUMENTS
                 .iter()
@@ -223,7 +223,7 @@ fn a_directory_deleted_during_discovery_keeps_saved_worktree_membership() {
         "failed discovery cannot erase saved membership"
     );
     assert_eq!(facts.failure, Some(RepositoryReadError::Unavailable));
-    let restored = State::from_legacy(&reading.state.envelope(&git.0).unwrap());
+    let restored = State::from_organization(&reading.state.envelope(&git.0).unwrap());
     assert_eq!(
         restored.inventory.workspaces[0].tabs[0].worktree.as_ref(),
         Some(&tree)
@@ -679,7 +679,7 @@ impl RepositoryProgramRunner for SaturatedReads {
         &self,
         request: &ProgramRequest,
         stdout: &mut dyn FnMut(&[u8]),
-        cancellation: &SshCancellationToken,
+        cancellation: &CancellationToken,
     ) -> Result<ProgramExit, ProgramError> {
         if self.stage.matches(request) && self.slow.contains(&request.directory) {
             *self

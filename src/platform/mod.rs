@@ -27,15 +27,6 @@ pub(crate) mod application_menu;
 pub(crate) mod application_menu_model;
 #[cfg(feature = "desktop")]
 pub(crate) mod application_quit;
-#[cfg_attr(
-    not(feature = "desktop"),
-    allow(
-        dead_code,
-        unused_imports,
-        reason = "desktop composition owns this host capability"
-    )
-)]
-pub(crate) mod control_socket;
 #[cfg(feature = "desktop")]
 pub(crate) mod desktop_events;
 #[cfg(feature = "desktop")]

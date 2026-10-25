@@ -1,6 +1,6 @@
 //! Background persistence for this client's arrangements of shared Workspaces, outside Settings.
 use spaceterm_server::client_view::ClientView;
-use spaceterm_server::{LocalServer, ServerError};
+use spaceterm_server::{ServerConnection, ServerError};
 use std::sync::{Arc, Mutex};
 
 #[derive(Default)]
@@ -21,7 +21,7 @@ pub(super) struct RetainedClientViews {
     read: async_channel::Receiver<()>,
 }
 impl RetainedClientViews {
-    pub(super) fn new(server: LocalServer) -> Self {
+    pub(super) fn new(server: ServerConnection) -> Self {
         let state = Arc::new(Mutex::new(State::default()));
         let shared = Arc::clone(&state);
         let (wake, receiver) = std::sync::mpsc::sync_channel(1);

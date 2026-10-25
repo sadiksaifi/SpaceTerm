@@ -1164,17 +1164,13 @@ mod tests {
         }
     }
 
-    fn ssh(name: &str) -> crate::domain::SshDestination {
-        crate::domain::SshDestination::new(name.to_owned()).unwrap()
-    }
-
     /// Offline, unknown, unauthorized, and up-to-date servers keep their rows in the menu only.
     fn quiet_servers() -> Vec<ServerUpdateRow> {
         vec![
             server("local", ServerUpdateAction::Settings(MachineTarget::Local)),
             server(
                 "offline",
-                ServerUpdateAction::Settings(MachineTarget::Ssh(ssh("offline"))),
+                ServerUpdateAction::Settings(MachineTarget::Direct([6; 32])),
             ),
             server(
                 "paired",
@@ -1301,10 +1297,10 @@ mod tests {
 
     #[test]
     fn pill_should_lead_with_one_server_and_open_the_menu_for_several() {
-        let update = server("macbookpro", ServerUpdateAction::Ssh(ssh("macbookpro")));
+        let update = server("local", ServerUpdateAction::Local);
         let attention = server(
             "penguin",
-            ServerUpdateAction::Review(MachineTarget::Ssh(ssh("penguin"))),
+            ServerUpdateAction::Review(MachineTarget::Direct([3; 32])),
         );
         let with = |row: &ServerUpdateRow| {
             let mut servers = quiet_servers();
@@ -1318,7 +1314,7 @@ mod tests {
                 "Update Server".to_owned(),
                 PillTone::Primary,
                 None,
-                PillCommand::Server(ServerUpdateAction::Ssh(ssh("macbookpro")))
+                PillCommand::Server(ServerUpdateAction::Local)
             ))
         );
         assert_eq!(
@@ -1327,9 +1323,7 @@ mod tests {
                 "Server Needs Attention".to_owned(),
                 PillTone::Warning,
                 Some(ControlGlyph::Warning),
-                PillCommand::Server(ServerUpdateAction::Review(MachineTarget::Ssh(ssh(
-                    "penguin"
-                ))))
+                PillCommand::Server(ServerUpdateAction::Review(MachineTarget::Direct([3; 32])))
             ))
         );
         let mut both = with(&update);

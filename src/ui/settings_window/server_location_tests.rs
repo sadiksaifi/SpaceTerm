@@ -173,7 +173,7 @@ fn a_newer_value_reaches_an_unedited_field_and_an_older_one_never_does() {
     assert_eq!(model.draft, "~/newer/{branch}");
 }
 
-/// "Git on <server>" against a connected SSH server whose reads and writes a test scripts.
+/// "Git on <server>" against a paired server whose reads and writes a test scripts.
 mod presented {
     use std::rc::Rc;
     use std::sync::Arc;
@@ -183,26 +183,28 @@ mod presented {
     use spaceterm_server::hierarchy::{Mutation, Outcome};
     use spaceterm_ui::a11y_testing::A11yTree;
 
+    use super::super::super::server_list::ServerChoice;
     use super::super::super::server_list::tests::{
-        Servers, click, destination, open_servers, settle,
+        Paired, Servers, click, connected_paired, disconnected, open_with, settle,
     };
     use super::*;
     use crate::repository_status::ToolVersion;
     use crate::server_context::ServerKey;
-    use crate::ui::server_worktrees::testing::{ScriptedReads, present_ssh};
+    use crate::ui::server_worktrees::testing::{ScriptedReads, present_direct};
     use crate::ui::shared_workspaces::testing::ScriptedEdits;
 
     const GIT_SECTION: &str = "settings-navigation-settings-section-git";
     const SAVED: &str = "~/penguin/{repository}/{branch}";
 
-    fn penguin() -> ServerKey {
-        ServerKey::Ssh("penguin".to_owned())
+    fn penguin(paired: &Paired) -> ServerKey {
+        ServerChoice::Direct(paired.1[0]).key()
     }
 
     /// Opens Settings with penguin saved and chosen, whatever the selection would fall back to.
-    fn open_penguin(cx: &mut TestAppContext) -> Servers<'_> {
-        cx.update(|cx| server_selection::select(penguin(), cx));
-        open_servers(false, &["penguin"], cx)
+    fn open_penguin(paired: Paired, cx: &mut TestAppContext) -> Servers<'_> {
+        let key = penguin(&paired);
+        cx.update(|cx| server_selection::select(key, cx));
+        open_with(false, paired, cx)
     }
 
     /// Opens Git with penguin connected and its writer answering from `reads`.
@@ -210,17 +212,14 @@ mod presented {
         reads: Arc<ScriptedReads>,
         cx: &mut TestAppContext,
     ) -> (Servers<'_>, Rc<ScriptedEdits>) {
-        let servers = open_penguin(cx);
-        servers.connections.connect(destination("penguin"));
-        let connections = servers.connections.clone();
-        settle(servers.cx, |_| {
-            connections.server(&destination("penguin")).is_some()
-        });
+        let paired = connected_paired(&["penguin"], cx);
+        let servers = open_penguin(paired, cx);
         let edits = Rc::new(ScriptedEdits::new(None));
         edits.set_worktree_writes(true);
         let writer = edits.clone();
+        let route = servers.routes[0];
         servers.cx.update(|_, cx| {
-            present_ssh(&destination("penguin"), writer, reads, cx);
+            present_direct(route, writer, reads, cx);
         });
         click(GIT_SECTION, servers.cx);
         (servers, edits)
@@ -250,9 +249,8 @@ mod presented {
         cx.run_until_parked();
     }
 
-    fn penguin_location(cx: &mut VisualTestContext) -> Option<String> {
-        let key = penguin();
-        cx.update(|_, cx| server_selection::facts(&key, cx))
+    fn penguin_location(key: &ServerKey, cx: &mut VisualTestContext) -> Option<String> {
+        cx.update(|_, cx| server_selection::facts(key, cx))
             .and_then(|facts| facts.worktree_location)
     }
 
@@ -330,9 +328,11 @@ mod presented {
     fn a_server_that_is_not_connected_shows_its_last_known_git_settings(cx: &mut TestAppContext) {
         // As after a relaunch: the record keeps what penguin last answered, and nothing
         // presents penguin.
+        let paired = disconnected(&["penguin"]);
+        let key = penguin(&paired);
         cx.update(|cx| {
             server_selection::remember(
-                penguin(),
+                key,
                 LastKnownFacts {
                     observed_at: 10,
                     git: GitToolStatus::Ready(ToolVersion {
@@ -346,7 +346,7 @@ mod presented {
                 cx,
             );
         });
-        let servers = open_penguin(cx);
+        let servers = open_penguin(paired, cx);
         click(GIT_SECTION, servers.cx);
 
         assert_eq!(location_field(servers.cx), "~/kept/{branch}");
@@ -361,14 +361,16 @@ mod presented {
 
     #[gpui::test]
     fn last_known_facts_that_load_after_the_server_is_chosen_show_at_once(cx: &mut TestAppContext) {
-        let servers = open_penguin(cx);
+        let paired = disconnected(&["penguin"]);
+        let key = penguin(&paired);
+        let servers = open_penguin(paired, cx);
         click(GIT_SECTION, servers.cx);
         assert_eq!(location_field(servers.cx), "");
 
         // The retained record finishes loading while Git already shows penguin.
         servers.cx.update(|_, cx| {
             server_selection::remember(
-                penguin(),
+                key,
                 LastKnownFacts {
                     observed_at: 10,
                     git: GitToolStatus::Ready(ToolVersion {
@@ -392,11 +394,12 @@ mod presented {
     fn the_location_read_is_retained_with_the_servers_other_last_known_facts(
         cx: &mut TestAppContext,
     ) {
-        let key = penguin();
         // The connection's own observation stamps the time it looks. One newer than any this run
         // makes keeps the record as its owner wrote it, so only retaining the Git settings can
         // change it.
         let observed_at = 4_102_444_800;
+        let paired = connected_paired(&["penguin"], cx);
+        let key = penguin(&paired);
         cx.update(|cx| {
             server_selection::remember(
                 key.clone(),
@@ -408,9 +411,19 @@ mod presented {
                 cx,
             );
         });
-        let (servers, _) = present_penguin(ScriptedReads::new(SAVED), cx);
+        let servers = open_penguin(paired, cx);
+        let route = servers.routes[0];
+        servers.cx.update(|_, cx| {
+            present_direct(
+                route,
+                Rc::new(ScriptedEdits::new(None)),
+                ScriptedReads::new(SAVED),
+                cx,
+            );
+        });
+        click(GIT_SECTION, servers.cx);
         settle(servers.cx, |cx| {
-            penguin_location(cx).as_deref() == Some(SAVED)
+            penguin_location(&key, cx).as_deref() == Some(SAVED)
         });
 
         let facts = servers

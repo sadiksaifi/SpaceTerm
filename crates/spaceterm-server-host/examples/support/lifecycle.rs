@@ -1,12 +1,12 @@
 //! Shared real-host fixture. The child guard only terminates the server it started.
-use spaceterm_server::{LocalServer, ServerError, pane::*};
+use spaceterm_server::{ServerConnection, ServerError, pane::*};
 use std::{
     error::Error,
     process::{Child, Command, Stdio},
     time::{Duration, Instant},
 };
 
-pub fn require_idle(client: &LocalServer) -> Result<(), Box<dyn Error>> {
+pub fn require_idle(client: &ServerConnection) -> Result<(), Box<dyn Error>> {
     // Checking the listener first also protects running work before client setup.
     // SAFETY: geteuid has no preconditions.
     let directories = spaceterm_directories::ServerDirectories::for_account(
@@ -54,7 +54,7 @@ impl Drop for Server {
         let _ = self.0.wait();
     }
 }
-pub fn connect(server: &LocalServer) -> Result<PaneConnection, Box<dyn Error>> {
+pub fn connect(server: &ServerConnection) -> Result<PaneConnection, Box<dyn Error>> {
     let until = Instant::now() + Duration::from_secs(8);
     loop {
         match server.connect_pane() {

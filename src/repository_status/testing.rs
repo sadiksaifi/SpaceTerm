@@ -4,7 +4,7 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 use super::{ProgramError, ProgramExit, ProgramRequest, RepositoryProgramRunner};
-use crate::ssh::cancellation::SshCancellationToken;
+use crate::cancellation::CancellationToken;
 
 /// An exit status and the stdout chunks delivered before it, or a runner failure.
 pub(crate) type FakeResponse = Result<(Option<i32>, Vec<Vec<u8>>), ProgramError>;
@@ -34,7 +34,7 @@ impl RepositoryProgramRunner for FakeRunner {
         &self,
         request: &ProgramRequest,
         stdout: &mut dyn FnMut(&[u8]),
-        _cancellation: &SshCancellationToken,
+        _cancellation: &CancellationToken,
     ) -> Result<ProgramExit, ProgramError> {
         self.requests.lock().unwrap().push(request.clone());
         let (code, chunks) = self

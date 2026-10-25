@@ -4691,7 +4691,7 @@ fn osc8_wrapped_cells_share_identity() {
 fn remote_metadata_context_should_never_resolve_file_links_as_local_paths() {
     let metadata_context = TerminalMetadataContext::Remote(
         crate::terminal::metadata::RemoteTerminalMetadataContext::new(
-            crate::domain::SshDestination::new("user@remote".to_owned()).unwrap(),
+            "user@remote".to_owned(),
             crate::domain::RemoteDirectory::new("~/project".to_owned()).unwrap(),
         ),
     );
@@ -5562,7 +5562,7 @@ fn kitty_remote_graphics_cannot_enable_local_file_or_shared_memory_transports() 
     let _guard = crate::terminal::graphics::test_lock();
     let metadata_context = TerminalMetadataContext::Remote(
         crate::terminal::metadata::RemoteTerminalMetadataContext::new(
-            crate::domain::SshDestination::new("user@remote".to_owned()).unwrap(),
+            "user@remote".to_owned(),
             crate::domain::RemoteDirectory::new("~/project".to_owned()).unwrap(),
         ),
     );

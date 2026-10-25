@@ -116,6 +116,27 @@ pub(super) fn now() -> Result<u64, DirectError> {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Management {
     Status,
+    /// Temporary provisioning, admitted only over owning-account IPC.
+    PrepareSetup {
+        pin: ServerPin,
+        expected_policy: Option<NetworkPolicy>,
+        policy: NetworkPolicy,
+        operation: OperationId,
+        public_key: [u8; 32],
+        name: ClientName,
+    },
+    Setup {
+        pin: ServerPin,
+        expected_policy: Option<NetworkPolicy>,
+        policy: NetworkPolicy,
+        operation: OperationId,
+        public_key: [u8; 32],
+        name: ClientName,
+    },
+    CancelSetup {
+        pin: ServerPin,
+        operation: OperationId,
+    },
     SetPolicy(Option<NetworkPolicy>),
     Invite,
     Withdraw(ClaimId),
@@ -131,6 +152,12 @@ pub enum Management {
 #[derive(Clone, Serialize, Deserialize)]
 pub enum ManagementReply {
     Status(DirectStatus),
+    SetupPrepared,
+    Setup(PairedDevice),
+    SetupCancelled {
+        pin: ServerPin,
+        operation: OperationId,
+    },
     Invitation(String),
     Claims(Vec<PairingClaim>),
     Approved(DeviceInfo),

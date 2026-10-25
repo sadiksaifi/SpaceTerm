@@ -16,7 +16,7 @@ use std::{
     },
 };
 
-use crate::local_server::ServerError;
+use crate::server_connection::ServerError;
 
 /// The client-lifetime control records of one server's Panes.
 #[derive(Default)]
@@ -27,7 +27,6 @@ pub(crate) struct PaneControls {
 
 #[derive(Clone, Eq, PartialEq, Hash)]
 pub(crate) enum ControlRoute {
-    Ssh(String),
     Direct(Id),
 }
 

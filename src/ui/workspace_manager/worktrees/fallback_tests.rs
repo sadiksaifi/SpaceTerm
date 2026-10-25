@@ -84,7 +84,7 @@ fn worktree_fallback_acceptance_reviews_current_exact_targets_without_opening_th
     cx: &mut TestAppContext,
 ) {
     let initial = only_feature();
-    let (harness, _, _, cx) = ssh_harness(cx, initial.clone());
+    let (harness, _, _, cx) = paired_harness(cx, initial.clone());
     let feature = worktree_ids(&harness, cx).1;
     assert!(
         harness
@@ -164,7 +164,7 @@ fn worktree_fallback_acceptance_reviews_current_exact_targets_without_opening_th
 #[gpui::test]
 fn worktree_fallback_failure_keeps_every_existing_tab(cx: &mut TestAppContext) {
     let initial = only_feature();
-    let (harness, _, _, cx) = ssh_harness(cx, initial.clone());
+    let (harness, _, _, cx) = paired_harness(cx, initial.clone());
     request(&harness, cx);
     harness
         .edits
@@ -195,7 +195,7 @@ fn worktree_fallback_requires_accepted_membership_even_when_a_tab_is_published(
     cx: &mut TestAppContext,
 ) {
     let initial = only_feature();
-    let (harness, _, _, cx) = ssh_harness(cx, initial.clone());
+    let (harness, _, _, cx) = paired_harness(cx, initial.clone());
     request(&harness, cx);
     let published = accepted_inventory(initial);
     sync(&harness, published.clone(), cx);
@@ -223,7 +223,7 @@ fn worktree_fallback_with_no_usable_destination_closes_nothing(cx: &mut TestAppC
             }
         }
     }
-    let (harness, _, _, cx) = ssh_harness(cx, initial);
+    let (harness, _, _, cx) = paired_harness(cx, initial);
     let feature = worktree_ids(&harness, cx).1;
     assert!(
         !harness
@@ -251,7 +251,7 @@ fn worktree_fallback_with_no_usable_destination_closes_nothing(cx: &mut TestAppC
 #[gpui::test]
 fn worktree_fallback_never_closes_a_reassigned_original_anchor(cx: &mut TestAppContext) {
     let initial = only_feature();
-    let (harness, _, _, cx) = ssh_harness(cx, initial.clone());
+    let (harness, _, _, cx) = paired_harness(cx, initial.clone());
     request(&harness, cx);
     let mut accepted = accepted_inventory(initial);
     accepted.workspaces[0].tabs[0].worktree = Some(EXTRA_ROOT.into());

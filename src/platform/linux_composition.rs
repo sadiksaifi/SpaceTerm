@@ -129,7 +129,6 @@ fn capture_startup_dependencies(
         paths,
         executable,
         super::unix_ssh_process::UnixSshProcessAdapter,
-        Arc::new(super::unix_local_socket::UnixControlSocketProbe),
         Arc::new(super::unix_host_config_filesystem::UnixHostConfigFilesystem),
     )
 }
@@ -234,13 +233,14 @@ fn compose(
         paths,
         Arc::new(super::unix_local_identity::UnixLocalIdentity),
     );
-    let ssh_servers = startup.ssh_servers_factory(
+    let direct_servers = startup.direct_servers();
+    let ssh_setup = startup.ssh_setup_factory(
         Arc::new(super::unix_askpass_transport::AskPassWindowFactory::new(
             super::launch_host::running_executable(),
         )),
-        super::launch_host::ssh_server_artifacts(),
+        super::launch_host::server_artifact_catalog(),
+        direct_servers.clone(),
     );
-    let direct_servers = startup.direct_servers();
     let server_context_paths = startup.server_context_paths();
     // Repository Status reads run on threads that the deterministic test executor rejects.
     let repository_status = (!cfg!(test)).then(|| {
@@ -298,7 +298,7 @@ fn compose(
             repository_status,
             background_images: None,
             local_server: crate::ui::LocalServerAdapters::account(),
-            ssh_servers: Some(ssh_servers),
+            ssh_setup: Some(ssh_setup),
             direct_servers: Some(direct_servers),
             server_context_paths: Some(server_context_paths),
         },
@@ -355,7 +355,6 @@ mod tests {
             .unwrap(),
             crate::ssh::command::OpenSshExecutable::new(temporary.join("missing-ssh")).unwrap(),
             super::super::unix_ssh_process::UnixSshProcessAdapter,
-            Arc::new(super::super::unix_local_socket::UnixControlSocketProbe),
             Arc::new(super::super::unix_host_config_filesystem::UnixHostConfigFilesystem),
         )
         .unwrap();

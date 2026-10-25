@@ -1,239 +1,110 @@
 //! The server picker, All Servers and the selected server's card, driven through a scripted local
-//! server and a registry of saved SSH connections whose backend counts every remote call.
+//! server and a registry of saved paired servers that reaches no network.
 
 use std::rc::Rc;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext};
 use spaceterm_ui::a11y_testing::{A11yTree, perform};
 
+use super::super::direct_routes::UNPAIR_SELF_CONFIRM_SELECTOR;
 use super::super::servers::testing::{ScriptedServer, connected};
 use super::super::servers::{LocalServerControl, OfferedLocalServer, OfferedServer};
 use super::ServerChoice;
 use crate::appearance::Appearance;
-use crate::domain::SshDestination;
-use crate::local_server::service::maintenance::{MaintenanceFacts, RemoteBuild};
-use crate::local_server::service::{ServiceStartup, ServiceStatus};
+use crate::direct_connections::{DirectConnections, DirectRouteId, DirectRouteStatus};
 use crate::platform::appearance::testing::RecordingAppearancePlatform;
 use crate::platform::window_movement::RecordingOperatingSystemWindowDragPlatform;
+use crate::server_context::{LastKnownFacts, ObservedServerStatus, ServerKey};
 use crate::settings::SettingsDocument;
 use crate::settings::storage::testing::MemoryStorage;
-use crate::ssh::cancellation::SshCancellationToken;
-use crate::ssh::server_connection::{
-    ConnectMode, ConnectProgress, ConnectedSshServer, RemoteConnectionStatus,
-    RetainedSshConnection, ServerAvailability, ServerCandidate, SshConnectBackend,
-    SshConnectFailure, SshConnectionIntentStore, SshIntentStoreError, SshServerConnections,
-    SshServerContinuity, SshServerFacts, SshServerLease, SshServerObservation,
-};
-use crate::ssh::server_operations::{
-    RemoteMaintenanceRequest, RemoteOperationEntry, RemoteOperationHandle, RemoteOperationState,
-    RemoteServerOperations, RemoteUpdateOffer,
-};
 use crate::ui::appearance_runtime;
+use crate::ui::direct_servers::DirectServerAction;
 use crate::ui::settings_window::{SettingsSectionId, SettingsWindow};
 
 const NAVIGATION_SELECTOR: &str = "settings-navigation-settings-section-servers";
 
-/// The SSH computers the test reaches, counting every request that would leave this computer.
-#[derive(Default)]
-pub(in crate::ui::settings_window) struct Computers {
-    connects: AtomicUsize,
-    observations: AtomicUsize,
-    /// Destinations whose host never answers.
-    unreachable: Mutex<Vec<String>>,
+/// Saved paired servers and their routes, in the order the registry lists them.
+pub(in crate::ui::settings_window) type Paired = (DirectConnections, Vec<DirectRouteId>);
+
+/// Paired servers named `names`, saved and disconnected as after a relaunch, each at its own
+/// address. Nothing starts a connection.
+pub(in crate::ui::settings_window) fn disconnected(names: &[&str]) -> Paired {
+    let endpoints: Vec<String> = (10..)
+        .take(names.len())
+        .map(|host| format!("wss://192.168.1.{host}:9231"))
+        .collect();
+    let routes: Vec<(&str, &str)> = names
+        .iter()
+        .copied()
+        .zip(endpoints.iter().map(String::as_str))
+        .collect();
+    crate::direct_connections::tests::disconnected_routes_at(&routes)
 }
 
-impl Computers {
-    fn remote_calls(&self) -> usize {
-        self.connects.load(Ordering::SeqCst) + self.observations.load(Ordering::SeqCst)
+/// Paired servers named `names`, each connected over a handle that reaches no network. A test
+/// presents each server's writer itself.
+pub(in crate::ui::settings_window) fn connected_paired(
+    names: &[&str],
+    cx: &mut TestAppContext,
+) -> Paired {
+    // The registry connects each route on its own thread.
+    cx.executor().allow_parking();
+    let (direct, routes) = crate::direct_connections::tests::connected_routes(names);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !routes.iter().all(|route| direct.server(route).is_some()) {
+        assert!(Instant::now() < deadline, "the paired servers connect");
+        std::thread::sleep(Duration::from_millis(2));
     }
-}
-
-struct Lease;
-impl SshServerLease for Lease {
-    fn is_alive(&self) -> bool {
-        true
-    }
-}
-
-fn facts() -> SshServerFacts {
-    SshServerFacts {
-        platform: ("Example OS".into(), "x86_64".into()),
-        version: Some("1.4.0".into()),
-        starts_automatically: true,
-    }
-}
-
-impl SshConnectBackend for Computers {
-    fn connect(
-        &self,
-        destination: &SshDestination,
-        mode: ConnectMode,
-        _: Option<&SshServerContinuity>,
-        _: &SshCancellationToken,
-        _: &ConnectProgress<'_>,
-    ) -> Result<ConnectedSshServer, SshConnectFailure> {
-        self.connects.fetch_add(1, Ordering::SeqCst);
-        // As after a relaunch, nothing proves a route signs in without a prompt.
-        if mode == ConnectMode::QuietContinuation {
-            return Err(SshConnectFailure::NeedsPerson(
-                crate::ssh::server_connection::InteractionReason::FirstSignIn,
-            ));
-        }
-        if self
-            .unreachable
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|host| host == destination.as_str())
-        {
-            return Err(SshConnectFailure::Unavailable(
-                crate::ssh::server_connection::UnavailableKind::HostUnreachable,
-            ));
-        }
-        Ok(ConnectedSshServer {
-            server: crate::local_server::LocalServer::for_identity("spaceterm-development")
-                .expect("the development identity resolves"),
-            continuity: SshServerContinuity {
-                route: [1; 32],
-                account: 501,
-                build: "spaceterm-development".into(),
-                server: [2; 32],
-            },
-            lease: Arc::new(Lease),
-            facts: facts(),
-        })
-    }
-
-    fn observe(
-        &self,
-        _: &SshDestination,
-        _: Option<&SshServerContinuity>,
-        _: &SshCancellationToken,
-        _: &ConnectProgress<'_>,
-    ) -> Result<SshServerObservation, SshConnectFailure> {
-        self.observations.fetch_add(1, Ordering::SeqCst);
-        Ok(SshServerObservation {
-            continuity: None,
-            availability: ServerAvailability::Running,
-            facts: facts(),
-        })
-    }
-}
-
-/// The private record of saved connections, kept apart from the Settings Document.
-#[derive(Default)]
-pub(in crate::ui::settings_window) struct SavedConnections {
-    records: Mutex<Vec<RetainedSshConnection>>,
-    /// Whether removing a record fails, as unavailable storage does.
-    removal_fails: std::sync::atomic::AtomicBool,
-}
-
-impl SavedConnections {
-    fn destinations(&self) -> Vec<String> {
-        let mut saved: Vec<_> = self
-            .records
-            .lock()
-            .unwrap()
-            .iter()
-            .map(|record| record.destination.as_str().to_owned())
-            .collect();
-        saved.sort();
-        saved
-    }
-}
-
-impl SshConnectionIntentStore for SavedConnections {
-    fn load(&self) -> Result<Vec<RetainedSshConnection>, SshIntentStoreError> {
-        Ok(self.records.lock().unwrap().clone())
-    }
-    fn retain(&self, record: RetainedSshConnection) -> Result<(), SshIntentStoreError> {
-        let mut records = self.records.lock().unwrap();
-        records.retain(|other| other.destination != record.destination);
-        records.push(record);
-        Ok(())
-    }
-    fn remove(&self, destination: &SshDestination) -> Result<(), SshIntentStoreError> {
-        if self.removal_fails.load(Ordering::SeqCst) {
-            return Err(SshIntentStoreError::Unavailable);
-        }
-        self.records
-            .lock()
-            .unwrap()
-            .retain(|record| record.destination != *destination);
-        Ok(())
-    }
-}
-
-pub(in crate::ui::settings_window) fn destination(name: &str) -> SshDestination {
-    SshDestination::new(name.to_owned()).expect("a valid SSH destination")
+    (direct, routes)
 }
 
 pub(in crate::ui::settings_window) struct Servers<'a> {
     pub(in crate::ui::settings_window) window: Entity<SettingsWindow>,
-    pub(in crate::ui::settings_window) computers: Arc<Computers>,
-    pub(in crate::ui::settings_window) saved: Arc<SavedConnections>,
-    pub(in crate::ui::settings_window) connections: SshServerConnections,
+    pub(in crate::ui::settings_window) direct: DirectConnections,
+    pub(in crate::ui::settings_window) routes: Vec<DirectRouteId>,
     pub(in crate::ui::settings_window) storage: Arc<MemoryStorage>,
     pub(in crate::ui::settings_window) cx: &'a mut VisualTestContext,
 }
 
-/// Opens Settings on Servers with the local server when `local` is set and each `saved` SSH
-/// connection listed as it is after a relaunch: saved, inactive, and never reached.
-pub(in crate::ui::settings_window) fn open_servers<'a>(
-    local: bool,
-    saved: &[&str],
-    cx: &'a mut TestAppContext,
-) -> Servers<'a> {
-    open_servers_saved(local, saved, false, None, None, cx)
+impl Servers<'_> {
+    /// Whether every saved route is still disconnected, so nothing reached any server.
+    fn all_disconnected(&self) -> bool {
+        self.routes
+            .iter()
+            .all(|route| self.direct.status(route) == Some(DirectRouteStatus::Disconnected))
+    }
 }
 
-/// Opens Settings on Servers as [`open_servers`] does, with each `saved` connection set to
-/// reconnect when `active`, SSH maintenance through `operations` and paired servers through
-/// `direct` when given.
-fn open_servers_saved<'a>(
+/// Opens Settings on Servers with the local server when `local` is set and each of `names` saved
+/// as a disconnected paired server.
+pub(in crate::ui::settings_window) fn open_servers<'a>(
     local: bool,
-    saved: &[&str],
-    active: bool,
-    operations: Option<Arc<dyn RemoteServerOperations>>,
-    direct: Option<crate::direct_connections::DirectConnections>,
+    names: &[&str],
     cx: &'a mut TestAppContext,
 ) -> Servers<'a> {
-    let computers = Arc::new(Computers::default());
-    let records = Arc::new(SavedConnections::default());
-    *records.records.lock().unwrap() = saved
-        .iter()
-        .map(|name| RetainedSshConnection {
-            destination: destination(name),
-            continuity: None,
-            active,
-        })
-        .collect();
-    let connections = SshServerConnections::new(computers.clone(), records.clone());
-    connections.resume_retained();
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while connections.connections().len() < saved.len() {
-        assert!(Instant::now() < deadline, "the saved connections load");
-        std::thread::sleep(Duration::from_millis(2));
-    }
+    open_with(local, disconnected(names), cx)
+}
+
+/// Opens Settings on Servers with the local server when `local` is set and `paired` as the
+/// desktop's direct registry.
+pub(in crate::ui::settings_window) fn open_with<'a>(
+    local: bool,
+    paired: Paired,
+    cx: &'a mut TestAppContext,
+) -> Servers<'a> {
+    let (direct, routes) = paired;
     let storage = MemoryStorage::with_document(&SettingsDocument::default());
     let settings = crate::settings::Settings::load(storage.clone());
     let platform = RecordingAppearancePlatform::default();
     platform.set_system_appearance(Some(Appearance::Dark));
-    let registry = connections.clone();
+    let registry = direct.clone();
     cx.update(|cx| {
         appearance_runtime::install(settings, Rc::new(platform), cx)
             .expect("appearance runtime should install");
         crate::ui::init(cx).expect("UI initialization should succeed");
-        crate::ui::ssh_servers::install(registry, None, cx);
-        if let Some(operations) = operations {
-            crate::ssh::server_operations::install(operations, cx);
-        }
-        if let Some(direct) = direct {
-            crate::ui::direct_servers::install(direct, cx);
-        }
+        crate::ui::direct_servers::install(registry, cx);
     });
     let offered: OfferedLocalServer = local.then(|| OfferedServer {
         connection: Ok(ScriptedServer::new(Ok(connected(1))) as Arc<dyn LocalServerControl>),
@@ -255,9 +126,8 @@ fn open_servers_saved<'a>(
     click(NAVIGATION_SELECTOR, cx);
     Servers {
         window,
-        computers,
-        saved: records,
-        connections,
+        direct,
+        routes,
         storage,
         cx,
     }
@@ -369,26 +239,31 @@ fn status(servers: &Servers<'_>) -> String {
 }
 
 /// The footnote under the server card, which says how to change rows that can't change now.
-fn footnote(servers: &Servers<'_>) -> Option<String> {
+fn footnote(servers: &Servers<'_>) -> String {
     servers.window.read_with(servers.cx, |settings, cx| {
         settings
             .server_card_footnote(cx)
             .map(|footnote| footnote.to_string())
+            .unwrap_or_default()
     })
 }
 
+fn selected(cx: &mut VisualTestContext) -> ServerKey {
+    cx.update(|_, cx| super::super::server_selection::selected(cx))
+}
+
 #[gpui::test]
-fn all_servers_names_this_computer_first_then_each_saved_ssh_server(cx: &mut TestAppContext) {
-    let servers = open_servers(true, &["penguin", "build.local"], cx);
+fn all_servers_names_this_computer_first_then_each_paired_server(cx: &mut TestAppContext) {
+    let servers = open_servers(true, &["penguin", "build"], cx);
 
     assert_eq!(
         listed(servers.cx),
         vec![
             (local_name().to_owned(), true),
-            ("build.local".to_owned(), false),
             ("penguin".to_owned(), false),
+            ("build".to_owned(), false),
         ],
-        "the local server leads and is selected; saved SSH servers follow by destination"
+        "the local server leads and is selected; paired servers follow"
     );
     let tree = A11yTree::read(servers.cx);
     assert!(
@@ -399,8 +274,8 @@ fn all_servers_names_this_computer_first_then_each_saved_ssh_server(cx: &mut Tes
     );
     assert_eq!(
         tree.node("penguin")["aria"]["description"],
-        "penguin, Not connected",
-        "an SSH server names its machine and its short status"
+        "wss://192.168.1.10:9231, Not connected",
+        "a paired server names its address and its short status"
     );
 }
 
@@ -420,17 +295,14 @@ fn the_picker_and_all_servers_share_one_selection_that_connects_nothing(cx: &mut
     assert_eq!(picker["aria"]["value"], "penguin");
     assert_eq!(picker["aria"]["description"], "Choose or add a server");
     assert_eq!(
-        servers
-            .cx
-            .update(|_, cx| super::super::server_selection::selected(cx)),
-        crate::server_context::ServerKey::Ssh("penguin".to_owned()),
+        selected(servers.cx),
+        ServerChoice::Direct(servers.routes[0]).key(),
         "the choice is retained for Git and the next launch"
     );
     assert_eq!(status(&servers), "Not connected");
-    assert_eq!(
-        servers.computers.remote_calls(),
-        0,
-        "choosing a server connects to, starts and installs nothing"
+    assert!(
+        servers.all_disconnected(),
+        "choosing a server connects to nothing"
     );
 
     click("settings-navigation-settings-section-git", servers.cx);
@@ -441,26 +313,24 @@ fn the_picker_and_all_servers_share_one_selection_that_connects_nothing(cx: &mut
     );
 }
 
+/// A paired server SpaceTerm isn't connected to shows its rows and says how to change them.
 #[gpui::test]
-fn an_inactive_ssh_server_offers_check_status_and_connect_and_dims_its_settings(
-    cx: &mut TestAppContext,
-) {
+fn a_disconnected_paired_server_offers_connect_and_dims_its_settings(cx: &mut TestAppContext) {
     let servers = open_servers(true, &["penguin"], cx);
     select("penguin", servers.cx);
 
     for row in [
         "settings-row-server-status",
-        "settings-row-server-auto-start",
         "settings-row-end-all-sessions",
         "settings-row-network-access",
-        "settings-ssh-server-check",
-        "settings-ssh-server-connect",
+        DirectServerAction::Connect.selector(),
     ] {
         assert!(rendered(row, servers.cx), "{row} presents penguin");
     }
-    assert_eq!(
-        footnote(&servers).as_deref(),
-        Some("Connect to penguin to change these settings.")
+    assert!(
+        footnote(&servers).contains("Connect to penguin to change these settings."),
+        "got {:?}",
+        footnote(&servers)
     );
     let network = servers.window.read_with(servers.cx, |settings, cx| {
         settings.network_access_footnote(cx)
@@ -469,27 +339,28 @@ fn an_inactive_ssh_server_offers_check_status_and_connect_and_dims_its_settings(
         network.as_deref(),
         Some("Connect to penguin to change its network access.")
     );
-    assert_eq!(servers.computers.remote_calls(), 0);
+    assert!(servers.all_disconnected());
 }
 
-/// A build with no remote operations owner offers no remote maintenance, so the SSH server's
-/// menu offers only forgetting it.
-#[gpui::test]
-fn without_an_operations_owner_an_ssh_server_offers_no_maintenance(cx: &mut TestAppContext) {
-    let servers = open_servers(true, &["penguin"], cx);
-    select("penguin", servers.cx);
+/// A server's native service is administered on its own computer, so only this computer's
+/// server offers Start Automatically. Network access and devices are managed over any server's
+/// connection.
+#[test]
+fn only_this_computers_server_presents_automatic_start() {
+    use super::super::catalog::SettingsRowId;
 
-    click(super::super::server_card::MENU_SELECTOR, servers.cx);
-
-    let tree = A11yTree::read(servers.cx);
-    for maintenance in ["Restart Server", "Stop Server", "Uninstall Server\u{2026}"] {
-        assert_eq!(
-            tree.node(maintenance)["aria"]["disabled"],
-            true,
-            "{maintenance} needs an operations owner this build has none of"
-        );
+    let paired = ServerChoice::Direct([1; 32]);
+    assert!(super::row_presents(
+        SettingsRowId::ServerAutoStart,
+        Some(&ServerChoice::Local)
+    ));
+    assert!(!super::row_presents(
+        SettingsRowId::ServerAutoStart,
+        Some(&paired)
+    ));
+    for row in [SettingsRowId::NetworkAccess, SettingsRowId::PairedDevices] {
+        assert!(super::row_presents(row, Some(&paired)), "{row:?}");
     }
-    assert_ne!(tree.node("Remove Server\u{2026}")["aria"]["disabled"], true);
 }
 
 #[gpui::test]
@@ -505,12 +376,12 @@ fn the_local_server_offers_no_removal_or_pairing_ceremony(cx: &mut TestAppContex
                 .is_some_and(|label| label.contains("Remove") || label.contains("Unpair"))),
         "the account-local server has nothing to remove or unpair"
     );
-    assert!(!rendered("settings-server-remove", servers.cx));
+    assert!(!rendered("settings-server-unpair", servers.cx));
 }
 
 #[gpui::test]
 fn the_arrow_keys_move_the_selection_while_the_list_has_focus(cx: &mut TestAppContext) {
-    let servers = open_servers(true, &["build.local", "penguin"], cx);
+    let servers = open_servers(true, &["build", "penguin"], cx);
     servers.cx.update(|window, cx| {
         let focus = servers.window.read(cx).server_list_focus.clone();
         focus.focus(window, cx);
@@ -519,7 +390,7 @@ fn the_arrow_keys_move_the_selection_while_the_list_has_focus(cx: &mut TestAppCo
 
     servers.cx.simulate_keystrokes("down");
     servers.cx.run_until_parked();
-    assert_eq!(listed(servers.cx)[1], ("build.local".to_owned(), true));
+    assert_eq!(listed(servers.cx)[1], ("build".to_owned(), true));
     servers.cx.simulate_keystrokes("end");
     servers.cx.run_until_parked();
     assert_eq!(listed(servers.cx)[2], ("penguin".to_owned(), true));
@@ -528,232 +399,36 @@ fn the_arrow_keys_move_the_selection_while_the_list_has_focus(cx: &mut TestAppCo
     assert_eq!(listed(servers.cx)[0], (local_name().to_owned(), true));
 }
 
+/// A paired server SpaceTerm isn't connected to shows what it last reported, here the version it
+/// ran and that it needed an update, without reaching it.
 #[gpui::test]
-fn check_status_observes_an_inactive_server_once_and_leaves_a_presented_one_alone(
-    cx: &mut TestAppContext,
-) {
-    let servers = open_servers(true, &["penguin"], cx);
+fn a_disconnected_paired_server_shows_its_last_known_facts(cx: &mut TestAppContext) {
+    let (direct, routes) = disconnected(&["penguin"]);
+    let key = ServerChoice::Direct(routes[0]).key();
+    cx.update(|cx| {
+        super::super::server_selection::remember(
+            key,
+            LastKnownFacts {
+                observed_at: 10,
+                status: ObservedServerStatus::NeedsUpdate,
+                version: Some("1.4.0".to_owned()),
+                ..LastKnownFacts::default()
+            },
+            cx,
+        );
+    });
+    let servers = open_with(true, (direct, routes), cx);
     select("penguin", servers.cx);
 
-    click("settings-ssh-server-check", servers.cx);
-    let computers = servers.computers.clone();
-    settle(servers.cx, |_| {
-        computers.observations.load(Ordering::SeqCst) == 1
-    });
-    let connections = servers.connections.clone();
-    settle(servers.cx, |_| {
-        matches!(
-            connections.status(&destination("penguin")),
-            RemoteConnectionStatus::Checked { .. }
-        )
-    });
+    assert_eq!(status(&servers), "Needs update");
+    let version = version_announcement(servers.cx);
     assert!(
-        A11yTree::read(servers.cx)
-            .find_text("Version 1.4.0")
-            .is_some(),
-        "the observed version replaces Unknown"
+        version
+            .as_deref()
+            .is_some_and(|subtitle| subtitle.starts_with("Version 1.4.0")),
+        "got {version:?}"
     );
-    assert_eq!(
-        status(&servers),
-        "Running \u{b7} not connected",
-        "the check reports the server it read and connects nothing"
-    );
-
-    click("settings-ssh-server-connect", servers.cx);
-    settle(servers.cx, |_| {
-        connections.server(&destination("penguin")).is_some()
-    });
-    servers.cx.run_until_parked();
-
-    assert!(
-        !rendered("settings-ssh-server-check", servers.cx),
-        "a presented server already reports its state, so Check Status is not offered"
-    );
-    assert!(rendered("settings-ssh-server-disconnect", servers.cx));
-    assert_eq!(status(&servers), "Connected over SSH");
-    assert_eq!(
-        footnote(&servers),
-        None,
-        "a connected server's settings can change"
-    );
-    assert_eq!(computers.observations.load(Ordering::SeqCst), 1);
-}
-
-#[gpui::test]
-fn after_disconnect_the_card_presents_the_facts_last_observed(cx: &mut TestAppContext) {
-    let servers = open_servers(true, &["penguin"], cx);
-    select("penguin", servers.cx);
-    click("settings-ssh-server-connect", servers.cx);
-    let connections = servers.connections.clone();
-    settle(servers.cx, |_| {
-        connections.server(&destination("penguin")).is_some()
-    });
-    servers.cx.run_until_parked();
-
-    click("settings-ssh-server-disconnect", servers.cx);
-
-    assert!(
-        A11yTree::read(servers.cx)
-            .find_text("Version 1.4.0")
-            .is_some(),
-        "the version stays presented"
-    );
-    let footnote = footnote(&servers).unwrap_or_default();
-    assert_eq!(footnote, "Connect to penguin to change these settings.");
-    assert_eq!(servers.computers.observations.load(Ordering::SeqCst), 0);
-}
-
-/// An operations owner holding at most one service read of penguin, as Check Now leaves it, and
-/// when that read was observed. Every step it is asked for does nothing.
-struct HeldRead {
-    /// The read, when it was observed, and what it found about updating.
-    held: Mutex<Option<(MaintenanceFacts, std::time::Instant, RemoteUpdateOffer)>>,
-    changes: (async_channel::Sender<()>, async_channel::Receiver<()>),
-}
-
-/// What a read of penguin reports: the service in `status`, with `version` approved.
-fn read_facts(version: &str, status: ServiceStatus) -> MaintenanceFacts {
-    MaintenanceFacts {
-        server: [2; 32],
-        account: 501,
-        build: "spaceterm-development".to_owned(),
-        status,
-        startup: ServiceStartup::AtLogin,
-        approved: Some(RemoteBuild {
-            version: version.to_owned(),
-            commit: "a".repeat(40),
-            digest: "a".repeat(64),
-        }),
-        activation: None,
-    }
-}
-
-const RUNNING_SERVICE: ServiceStatus = ServiceStatus {
-    installed: true,
-    enabled: true,
-    running: true,
-    stopped: false,
-};
-
-const STOPPED_SERVICE: ServiceStatus = ServiceStatus {
-    installed: true,
-    enabled: true,
-    running: false,
-    stopped: true,
-};
-
-impl HeldRead {
-    /// An owner that has read nothing yet.
-    fn unread() -> Self {
-        Self {
-            held: Mutex::new(None),
-            changes: async_channel::unbounded(),
-        }
-    }
-
-    fn approving(version: &str) -> Self {
-        Self::reporting(version, RUNNING_SERVICE)
-    }
-
-    /// An owner whose read, observed now, found the service in `status`.
-    fn reporting(version: &str, status: ServiceStatus) -> Self {
-        let owner = Self::unread();
-        owner.report(version, status);
-        owner
-    }
-
-    /// A read observed now that verified no candidate, which replaces the one held.
-    fn report(&self, version: &str, status: ServiceStatus) {
-        self.report_offer(version, status, RemoteUpdateOffer::Unchecked);
-    }
-
-    /// A read observed now that found `offer`, which replaces the one held and tells the
-    /// surface.
-    fn report_offer(&self, version: &str, status: ServiceStatus, offer: RemoteUpdateOffer) {
-        *self.held.lock().unwrap() = Some((
-            read_facts(version, status),
-            std::time::Instant::now(),
-            offer,
-        ));
-        let _ = self.changes.0.try_send(());
-    }
-}
-
-impl RemoteServerOperations for HeldRead {
-    fn subscribe(&self) -> async_channel::Receiver<()> {
-        self.changes.1.clone()
-    }
-
-    fn entries(&self) -> Vec<RemoteOperationEntry> {
-        self.held
-            .lock()
-            .unwrap()
-            .iter()
-            .map(|(facts, observed_at, offer)| RemoteOperationEntry {
-                destination: destination("penguin"),
-                removed: false,
-                operation: None,
-                state: RemoteOperationState::Read(Box::new(facts.clone())),
-                observed_at: Some(*observed_at),
-                update_offer: offer.clone(),
-            })
-            .collect()
-    }
-
-    fn state(&self, server: &SshDestination) -> RemoteOperationState {
-        match &*self.held.lock().unwrap() {
-            Some((facts, _, _)) if *server == destination("penguin") => {
-                RemoteOperationState::Read(Box::new(facts.clone()))
-            }
-            _ => RemoteOperationState::Unread,
-        }
-    }
-
-    fn refresh(&self, _: &SshDestination) {}
-    fn set_automatic_start(&self, _: &SshDestination, _: bool) {}
-    fn describe(&self, _: &SshDestination, _: RemoteMaintenanceRequest) {}
-    fn confirm(&self, _: RemoteOperationHandle) {}
-    fn start(&self, _: &SshDestination) {}
-    fn cancel(&self, _: &SshDestination) {}
-    fn resume(&self, _: &SshDestination) {}
-    fn acknowledge(&self, _: RemoteOperationHandle) {}
-    fn discard(&self, _: [u8; 32]) {}
-    fn dismiss(&self, _: [u8; 32]) {}
-    fn resume_retained(&self) {}
-}
-
-/// Whether the Server row's subtitle names `version`.
-fn version_reads(version: &str, cx: &mut VisualTestContext) -> bool {
-    let exact = format!("Version {version}");
-    let with_update = format!("Version {version} \u{b7}");
-    version_announcement(cx)
-        .is_some_and(|subtitle| subtitle == exact || subtitle.starts_with(&with_update))
-}
-
-/// A service read, such as Check Now leaves, names the build approved when it ran. Once
-/// SpaceTerm connects, the server reports the version it runs now, which the card shows instead.
-#[gpui::test]
-fn a_connected_server_shows_the_version_it_reports_over_an_earlier_read(cx: &mut TestAppContext) {
-    let operations: Arc<dyn RemoteServerOperations> = Arc::new(HeldRead::approving("1.3.0"));
-    let servers = open_servers_saved(true, &["penguin"], false, Some(operations), None, cx);
-    select("penguin", servers.cx);
-    assert!(
-        version_reads("1.3.0", servers.cx),
-        "before connecting, the read's approved build is what SpaceTerm knows"
-    );
-
-    click("settings-ssh-server-connect", servers.cx);
-    let connections = servers.connections.clone();
-    settle(servers.cx, |_| {
-        connections.server(&destination("penguin")).is_some()
-    });
-    servers.cx.run_until_parked();
-
-    assert!(
-        version_reads("1.4.0", servers.cx),
-        "the connected server's own version replaces the earlier read"
-    );
-    assert!(!version_reads("1.3.0", servers.cx));
+    assert!(servers.all_disconnected());
 }
 
 /// The open picker's rows for servers named `name`, as assistive technology hears them: each
@@ -777,11 +452,7 @@ fn picker_rows(name: &str, cx: &mut VisualTestContext) -> Vec<String> {
 /// where each one is, so choosing one never means guessing.
 #[gpui::test]
 fn the_picker_tells_apart_servers_that_share_a_name(cx: &mut TestAppContext) {
-    let (direct, routes) = crate::direct_connections::tests::disconnected_routes_at(&[
-        ("studio", "wss://192.168.1.10:9231"),
-        ("studio", "wss://192.168.1.11:9231"),
-    ]);
-    let servers = open_servers_saved(true, &[], false, None, Some(direct), cx);
+    let servers = open_servers(true, &["studio", "studio"], cx);
 
     for section in ["servers", "git"] {
         click(
@@ -804,10 +475,8 @@ fn the_picker_tells_apart_servers_that_share_a_name(cx: &mut TestAppContext) {
     click(super::PICKER_SELECTOR, servers.cx);
     click(&format!("{}-2", super::PICKER_SELECTOR), servers.cx);
     assert_eq!(
-        servers
-            .cx
-            .update(|_, cx| super::super::server_selection::selected(cx)),
-        ServerChoice::Direct(routes[1]).key(),
+        selected(servers.cx),
+        ServerChoice::Direct(servers.routes[1]).key(),
         "choosing the second row selects the server at its address"
     );
     let tree = A11yTree::read(servers.cx);
@@ -822,99 +491,7 @@ fn the_picker_tells_apart_servers_that_share_a_name(cx: &mut TestAppContext) {
     );
 }
 
-/// A read found the server stopped. Someone started it elsewhere, and Check Status, asked for
-/// later, finds it running. The later report is what the card says and what SpaceTerm keeps.
-#[gpui::test]
-fn a_later_check_status_replaces_an_earlier_read(cx: &mut TestAppContext) {
-    let operations: Arc<dyn RemoteServerOperations> =
-        Arc::new(HeldRead::reporting("1.3.0", STOPPED_SERVICE));
-    let servers = open_servers_saved(true, &["penguin"], false, Some(operations), None, cx);
-    select("penguin", servers.cx);
-    assert!(
-        A11yTree::read(servers.cx)
-            .find("penguin: Stopped")
-            .is_some(),
-        "the read is all SpaceTerm knows at first"
-    );
-
-    click("settings-ssh-server-check", servers.cx);
-    let connections = servers.connections.clone();
-    settle(servers.cx, |_| {
-        matches!(
-            connections.status(&destination("penguin")),
-            RemoteConnectionStatus::Checked { .. }
-        )
-    });
-    servers.cx.run_until_parked();
-
-    assert!(
-        A11yTree::read(servers.cx)
-            .find("penguin: Running \u{b7} not connected")
-            .is_some(),
-        "the later check says the server runs"
-    );
-    assert!(version_reads("1.4.0", servers.cx));
-    let retained = servers.cx.update(|_, cx| {
-        super::super::server_selection::facts(&ServerChoice::Ssh(destination("penguin")).key(), cx)
-    });
-    assert_eq!(
-        retained.map(|facts| (facts.status, facts.version)),
-        Some((
-            crate::server_context::ObservedServerStatus::Running,
-            Some("1.4.0".to_owned())
-        )),
-        "SpaceTerm keeps the later report"
-    );
-}
-
-/// Check Status found the server running. A service read asked for later finds it stopped, as
-/// after Stop Server from another device. The later read is what the card says and keeps.
-#[gpui::test]
-fn a_later_read_replaces_an_earlier_check_status(cx: &mut TestAppContext) {
-    let owner = Arc::new(HeldRead::unread());
-    let operations: Arc<dyn RemoteServerOperations> = owner.clone();
-    let servers = open_servers_saved(true, &["penguin"], false, Some(operations), None, cx);
-    select("penguin", servers.cx);
-    click("settings-ssh-server-check", servers.cx);
-    let connections = servers.connections.clone();
-    settle(servers.cx, |_| {
-        matches!(
-            connections.status(&destination("penguin")),
-            RemoteConnectionStatus::Checked { .. }
-        )
-    });
-    servers.cx.run_until_parked();
-    assert!(
-        A11yTree::read(servers.cx)
-            .find("penguin: Running \u{b7} not connected")
-            .is_some(),
-        "Check Status says the server runs"
-    );
-
-    owner.report("1.3.0", STOPPED_SERVICE);
-    servers.cx.run_until_parked();
-
-    assert!(
-        A11yTree::read(servers.cx)
-            .find("penguin: Stopped")
-            .is_some(),
-        "the later read says the server is stopped"
-    );
-    assert!(version_reads("1.3.0", servers.cx));
-    let retained = servers.cx.update(|_, cx| {
-        super::super::server_selection::facts(&ServerChoice::Ssh(destination("penguin")).key(), cx)
-    });
-    assert_eq!(
-        retained.map(|facts| (facts.status, facts.version)),
-        Some((
-            crate::server_context::ObservedServerStatus::Stopped,
-            Some("1.3.0".to_owned())
-        )),
-        "SpaceTerm keeps the later read"
-    );
-}
-
-/// The Server row's subtitle, such as "Version 1.4.0 · 1.5.0 is available".
+/// The Server row's subtitle, such as "Version 1.4.0 · Update it from its own computer".
 fn version_announcement(cx: &mut VisualTestContext) -> Option<String> {
     A11yTree::read(cx).in_order().iter().find_map(|node| {
         ["label", "value"].into_iter().find_map(|field| {
@@ -924,68 +501,6 @@ fn version_announcement(cx: &mut VisualTestContext) -> Option<String> {
                 .map(str::to_owned)
         })
     })
-}
-
-/// A read names the build approved on penguin but no verified candidate, so SpaceTerm knows of
-/// no update. The Version row neither says one is available nor offers Update Server.
-#[gpui::test]
-fn an_ssh_server_without_a_verified_candidate_claims_no_update(cx: &mut TestAppContext) {
-    let operations: Arc<dyn RemoteServerOperations> = Arc::new(HeldRead::approving("1.3.0"));
-    let servers = open_servers_saved(true, &["penguin"], false, Some(operations), None, cx);
-    select("penguin", servers.cx);
-
-    let announcement = version_announcement(servers.cx);
-    assert!(
-        announcement
-            .as_deref()
-            .is_some_and(|label| label.starts_with("Version 1.3.0")
-                && !label.contains("available")),
-        "the approved build shows with no update claimed, got {announcement:?}"
-    );
-    assert!(!rendered("settings-server-version-update", servers.cx));
-}
-
-/// The read verified the candidate SpaceTerm includes, and its digest equals the approved
-/// build's, so penguin is up to date: the Version row says so and offers no update. A later read
-/// that verified a different candidate names that candidate's own version and offers Update
-/// Server. A read after the update finds the candidate approved, and the offer is gone again.
-#[gpui::test]
-fn the_ssh_version_row_follows_the_verified_candidate(cx: &mut TestAppContext) {
-    let owner = Arc::new(HeldRead::unread());
-    owner.report_offer("1.3.0", RUNNING_SERVICE, RemoteUpdateOffer::UpToDate);
-    let operations: Arc<dyn RemoteServerOperations> = owner.clone();
-    let servers = open_servers_saved(true, &["penguin"], false, Some(operations), None, cx);
-    select("penguin", servers.cx);
-
-    assert_eq!(
-        version_announcement(servers.cx).as_deref(),
-        Some("Version 1.3.0")
-    );
-    assert!(!rendered("settings-server-version-update", servers.cx));
-
-    owner.report_offer(
-        "1.3.0",
-        RUNNING_SERVICE,
-        RemoteUpdateOffer::Available(ServerCandidate {
-            version: "1.3.2".to_owned(),
-            digest: "b".repeat(64),
-        }),
-    );
-    servers.cx.run_until_parked();
-    assert_eq!(
-        version_announcement(servers.cx).as_deref(),
-        Some("Version 1.3.0 \u{b7} 1.3.2 is available"),
-        "the subtitle names the verified candidate, not this SpaceTerm's version"
-    );
-    assert!(rendered("settings-server-version-update", servers.cx));
-
-    owner.report_offer("1.3.2", RUNNING_SERVICE, RemoteUpdateOffer::UpToDate);
-    servers.cx.run_until_parked();
-    assert_eq!(
-        version_announcement(servers.cx).as_deref(),
-        Some("Version 1.3.2")
-    );
-    assert!(!rendered("settings-server-version-update", servers.cx));
 }
 
 struct RecordingMovement;
@@ -1002,25 +517,10 @@ impl crate::platform::window_movement::WindowMovementFactory for RecordingMoveme
 /// whether Settings is closed or already open on another server.
 #[gpui::test]
 fn opening_server_settings_selects_the_named_server(cx: &mut TestAppContext) {
-    let records = Arc::new(SavedConnections::default());
-    *records.records.lock().unwrap() = ["alpha", "bravo"]
-        .into_iter()
-        .map(|name| RetainedSshConnection {
-            destination: destination(name),
-            continuity: None,
-            active: false,
-        })
-        .collect();
-    let computers = Arc::new(Computers::default());
-    let connections = SshServerConnections::new(computers.clone(), records);
-    connections.resume_retained();
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while connections.connections().len() < 2 {
-        assert!(Instant::now() < deadline, "the saved connections load");
-        std::thread::sleep(Duration::from_millis(2));
-    }
+    let (direct, routes) = disconnected(&["alpha", "bravo"]);
     let settings =
         crate::settings::Settings::load(MemoryStorage::with_document(&SettingsDocument::default()));
+    let registry = direct.clone();
     cx.update(|cx| {
         appearance_runtime::install(
             settings,
@@ -1029,7 +529,7 @@ fn opening_server_settings_selects_the_named_server(cx: &mut TestAppContext) {
         )
         .expect("appearance runtime should install");
         crate::ui::init(cx).expect("UI initialization should succeed");
-        crate::ui::ssh_servers::install(connections, None, cx);
+        crate::ui::direct_servers::install(registry, cx);
         super::super::configure_window_chrome(
             Rc::new(RecordingMovement),
             Default::default(),
@@ -1037,16 +537,8 @@ fn opening_server_settings_selects_the_named_server(cx: &mut TestAppContext) {
             cx,
         );
     });
-    let opened = |destination: Option<SshDestination>, cx: &mut TestAppContext| {
-        cx.update(|cx| {
-            super::super::open_server_settings(
-                destination.map_or(
-                    crate::ui::MachineTarget::Local,
-                    crate::ui::MachineTarget::Ssh,
-                ),
-                cx,
-            )
-        });
+    let opened = |target: crate::ui::MachineTarget, cx: &mut TestAppContext| {
+        cx.update(|cx| super::super::open_server_settings(target, cx));
         cx.run_until_parked();
         let windows: Vec<_> = cx
             .windows()
@@ -1063,103 +555,87 @@ fn opening_server_settings_selects_the_named_server(cx: &mut TestAppContext) {
             .expect("Settings should stay open")
     };
 
-    let new_window = opened(Some(destination("bravo")), cx);
-    let open_window = opened(None, cx);
+    let new_window = opened(crate::ui::MachineTarget::Direct(routes[1]), cx);
+    let open_window = opened(crate::ui::MachineTarget::Local, cx);
 
     assert_eq!(
         new_window,
         (
             SettingsSectionId::Servers,
-            Some(ServerChoice::Ssh(destination("bravo")))
+            Some(ServerChoice::Direct(routes[1]))
         )
     );
     assert_eq!(
         open_window,
         (SettingsSectionId::Servers, Some(ServerChoice::Local))
     );
-    assert_eq!(computers.remote_calls(), 0);
+    assert!(
+        routes
+            .iter()
+            .all(|route| direct.status(route) == Some(DirectRouteStatus::Disconnected)),
+        "opening Settings on a server connects to nothing"
+    );
+}
+
+/// Unpairs the selected paired server from its ⋯ menu, confirming the alert.
+fn unpair_selected(cx: &mut VisualTestContext) {
+    click(super::super::server_card::MENU_SELECTOR, cx);
+    click("settings-server-unpair", cx);
+    answer_alert(UNPAIR_SELF_CONFIRM_SELECTOR, cx);
 }
 
 #[gpui::test]
-fn removing_the_selected_server_forgets_it_and_presents_this_computer(cx: &mut TestAppContext) {
-    let servers = open_servers(true, &["build.local", "penguin"], cx);
+fn unpairing_the_selected_server_presents_this_computer(cx: &mut TestAppContext) {
+    // Unpair starts the registry's worker, which tries the server on its own thread.
+    cx.executor().allow_parking();
+    let servers = open_servers(true, &["build", "penguin"], cx);
     select("penguin", servers.cx);
 
-    click(super::super::server_card::MENU_SELECTOR, servers.cx);
-    click("settings-server-remove", servers.cx);
-    assert_eq!(
-        servers.saved.destinations(),
-        ["build.local", "penguin"],
-        "Remove Server asks first"
-    );
-    answer_alert("settings-server-remove-confirm", servers.cx);
+    unpair_selected(servers.cx);
 
-    assert_eq!(
-        listed(servers.cx),
-        vec![
-            (local_name().to_owned(), true),
-            ("build.local".to_owned(), false)
-        ],
-        "the picker moves to this computer's server"
+    let remaining = vec![(local_name().to_owned(), true), ("build".to_owned(), false)];
+    settle(servers.cx, |cx| listed(cx) == remaining);
+    assert!(
+        servers.direct.route(&servers.routes[1]).is_none(),
+        "the saved route is gone"
     );
-    let saved = servers.saved.clone();
-    settle(servers.cx, |_| saved.destinations() == ["build.local"]);
-    assert_eq!(
-        servers
-            .cx
-            .update(|_, cx| super::super::server_selection::selected(cx)),
-        crate::server_context::ServerKey::Local
-    );
-    assert_eq!(
-        servers.computers.remote_calls(),
-        0,
-        "removing reaches no computer, so SSH access and the server stay as they were"
-    );
+    settle(servers.cx, |cx| selected(cx) == ServerKey::Local);
 }
 
 #[gpui::test]
-fn without_a_local_server_removing_presents_the_first_saved_server(cx: &mut TestAppContext) {
+fn without_a_local_server_unpairing_presents_the_first_paired_server(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
     let servers = open_servers(false, &["alpha", "bravo", "charlie"], cx);
     select("bravo", servers.cx);
 
-    click(super::super::server_card::MENU_SELECTOR, servers.cx);
-    click("settings-server-remove", servers.cx);
-    answer_alert("settings-server-remove-confirm", servers.cx);
+    unpair_selected(servers.cx);
 
-    assert_eq!(
-        listed(servers.cx),
-        vec![("alpha".to_owned(), true), ("charlie".to_owned(), false)]
-    );
+    let remaining = vec![("alpha".to_owned(), true), ("charlie".to_owned(), false)];
+    settle(servers.cx, |cx| listed(cx) == remaining);
 }
 
-/// A choice retained from an earlier launch waits for the saved connections to load rather than
-/// giving way to this computer's server while they do.
+/// A choice retained from an earlier launch returns once its saved route is listed.
 #[gpui::test]
-fn a_retained_choice_returns_once_its_saved_connection_loads(cx: &mut TestAppContext) {
-    cx.update(|cx| {
-        super::super::server_selection::select(
-            crate::server_context::ServerKey::Ssh("penguin".to_owned()),
-            cx,
-        )
-    });
+fn a_retained_choice_returns_once_its_saved_route_loads(cx: &mut TestAppContext) {
+    let (direct, routes) = disconnected(&["penguin"]);
+    let key = ServerChoice::Direct(routes[0]).key();
+    cx.update(|cx| super::super::server_selection::select(key, cx));
 
-    let servers = open_servers(true, &["penguin"], cx);
+    let servers = open_with(true, (direct, routes), cx);
 
     assert_eq!(listed(servers.cx)[1], ("penguin".to_owned(), true));
 }
 
-/// Loaded saved connections that no longer include the retained server are a real answer: the
-/// choice and its facts go, and this computer's server is presented.
+/// A loaded registry that no longer includes the retained server is a real answer: the choice
+/// and its facts go, and this computer's server is presented.
 #[gpui::test]
-fn a_retained_choice_whose_connection_is_gone_gives_way_once_loading_finishes(
-    cx: &mut TestAppContext,
-) {
-    let gone = crate::server_context::ServerKey::Ssh("gone".to_owned());
+fn a_retained_choice_whose_route_is_gone_gives_way_once_loading_finishes(cx: &mut TestAppContext) {
+    let gone = ServerKey::Direct([99; 32]);
     cx.update(|cx| {
         super::super::server_selection::select(gone.clone(), cx);
         super::super::server_selection::remember(
             gone.clone(),
-            crate::server_context::LastKnownFacts {
+            LastKnownFacts {
                 observed_at: 1,
                 ..Default::default()
             },
@@ -1168,16 +644,11 @@ fn a_retained_choice_whose_connection_is_gone_gives_way_once_loading_finishes(
     });
 
     let servers = open_servers(true, &[], cx);
-    let connections = servers.connections.clone();
-    settle(servers.cx, |_| connections.retained_inventory_loaded());
+    let direct = servers.direct.clone();
+    settle(servers.cx, |_| direct.retained_inventory_loaded());
     servers.cx.run_until_parked();
 
-    assert_eq!(
-        servers
-            .cx
-            .update(|_, cx| super::super::server_selection::selected(cx)),
-        crate::server_context::ServerKey::Local
-    );
+    assert_eq!(selected(servers.cx), ServerKey::Local);
     assert!(
         servers
             .cx
@@ -1189,20 +660,20 @@ fn a_retained_choice_whose_connection_is_gone_gives_way_once_loading_finishes(
 
 #[gpui::test]
 fn rendering_the_servers_section_reaches_no_computer(cx: &mut TestAppContext) {
-    let servers = open_servers(true, &["build.local", "penguin"], cx);
+    let servers = open_servers(true, &["build", "penguin"], cx);
     select("penguin", servers.cx);
-    select("build.local", servers.cx);
+    select("build", servers.cx);
     for _ in 0..3 {
         servers.cx.update(|window, _| window.refresh());
         servers.cx.run_until_parked();
     }
 
-    assert_eq!(servers.computers.remote_calls(), 0);
+    assert!(servers.all_disconnected());
 }
 
 #[gpui::test]
 fn searching_for_a_server_by_name_reveals_and_selects_it(cx: &mut TestAppContext) {
-    let mut servers = open_servers(true, &["build.local", "penguin"], cx);
+    let mut servers = open_servers(true, &["build", "penguin"], cx);
     click("settings-navigation-settings-section-interface", servers.cx);
 
     search_for("PENG", &mut servers);
@@ -1215,13 +686,13 @@ fn searching_for_a_server_by_name_reveals_and_selects_it(cx: &mut TestAppContext
         );
     });
     assert_eq!(listed(servers.cx)[2], ("penguin".to_owned(), true));
-    assert_eq!(servers.computers.remote_calls(), 0);
+    assert!(servers.all_disconnected());
 }
 
-/// A word that only appears inside a host's name answers the Settings it names, not that host.
-/// "servers" names All Servers, so the list shows which server the search presents.
+/// A word that only appears inside a server's name answers the Settings it names, not that
+/// server. "servers" names All Servers, so the list shows which server the search presents.
 #[gpui::test]
-fn a_query_inside_a_host_name_keeps_the_local_server(cx: &mut TestAppContext) {
+fn a_query_inside_a_server_name_keeps_the_local_server(cx: &mut TestAppContext) {
     let mut servers = open_servers(true, &["build.servers"], cx);
     search_for("servers", &mut servers);
 
@@ -1229,9 +700,9 @@ fn a_query_inside_a_host_name_keeps_the_local_server(cx: &mut TestAppContext) {
     assert_eq!(listed(servers.cx)[1], ("build.servers".to_owned(), false));
 }
 
-/// A Setting the query names by its own words comes before a host that happens to share it.
+/// A Setting the query names by its own words comes before a server that happens to share it.
 #[gpui::test]
-fn a_setting_named_by_the_query_ranks_before_a_host_with_that_name(cx: &mut TestAppContext) {
+fn a_setting_named_by_the_query_ranks_before_a_server_with_that_name(cx: &mut TestAppContext) {
     let mut servers = open_servers(true, &["font-box"], cx);
     click("settings-navigation-settings-section-interface", servers.cx);
     search_for("font", &mut servers);
@@ -1243,104 +714,6 @@ fn a_setting_named_by_the_query_ranks_before_a_host_with_that_name(cx: &mut Test
             Some(SettingsSectionId::Font)
         );
     });
-}
-
-/// A host whose requested Connect failed stays saved to connect when SpaceTerm reopens, so its
-/// Status offers ending that without removing the saved connection.
-#[gpui::test]
-fn a_failed_connection_offers_to_stop_reconnecting_and_stays_saved(cx: &mut TestAppContext) {
-    let servers = open_servers(true, &[], cx);
-    servers
-        .computers
-        .unreachable
-        .lock()
-        .unwrap()
-        .push("nohost".to_owned());
-    servers.connections.connect(destination("nohost"));
-    let connections = servers.connections.clone();
-    settle(servers.cx, |_| {
-        matches!(
-            connections.status(&destination("nohost")),
-            RemoteConnectionStatus::Unavailable { .. }
-        )
-    });
-    select("nohost", servers.cx);
-    assert_eq!(status(&servers), "Not reachable");
-    let records = servers.saved.clone();
-    let saved = move || {
-        records
-            .records
-            .lock()
-            .unwrap()
-            .iter()
-            .find(|record| record.destination == destination("nohost"))
-            .map(|record| record.active)
-    };
-    assert_eq!(saved(), Some(true));
-
-    click("settings-ssh-server-stop-reconnecting", servers.cx);
-    settle(servers.cx, |_| saved() == Some(false));
-    assert!(!rendered(
-        "settings-ssh-server-stop-reconnecting",
-        servers.cx
-    ));
-    assert_eq!(listed(servers.cx)[1].0, "nohost");
-}
-
-/// A saved connection that reopens waiting for the person waits for Connect.
-#[gpui::test]
-fn a_reopened_connection_waits_for_connect(cx: &mut TestAppContext) {
-    let servers = open_servers_saved(true, &["penguin"], true, None, None, cx);
-    let connections = servers.connections.clone();
-    settle(servers.cx, |_| {
-        matches!(
-            connections.status(&destination("penguin")),
-            RemoteConnectionStatus::NeedsPerson { .. }
-        )
-    });
-    select("penguin", servers.cx);
-
-    assert_eq!(status(&servers), "Waiting for you");
-    assert!(rendered("settings-ssh-server-connect", servers.cx));
-}
-
-/// A removal SpaceTerm couldn't save would bring the connection back at relaunch, so a notice
-/// names it and offers to remove it again.
-#[gpui::test]
-fn a_removal_that_could_not_be_saved_names_the_host_and_can_be_retried(cx: &mut TestAppContext) {
-    let notice = "settings-server-notice-unsaved-removal";
-    let servers = open_servers(true, &["penguin"], cx);
-    servers.saved.removal_fails.store(true, Ordering::SeqCst);
-    select("penguin", servers.cx);
-    click(super::super::server_card::MENU_SELECTOR, servers.cx);
-    click("settings-server-remove", servers.cx);
-    answer_alert("settings-server-remove-confirm", servers.cx);
-    let connections = servers.connections.clone();
-    settle(servers.cx, |_| !connections.unsaved_removals().is_empty());
-    servers.cx.run_until_parked();
-
-    let text = A11yTree::read(servers.cx)
-        .with_role("Status")
-        .into_iter()
-        .find_map(|node| {
-            node["aria"]["label"]
-                .as_str()
-                .filter(|label| label.contains("couldn't save removing"))
-                .map(str::to_owned)
-        })
-        .unwrap_or_default();
-    assert_eq!(text, "SpaceTerm couldn't save removing penguin.");
-
-    servers.saved.removal_fails.store(false, Ordering::SeqCst);
-    click(&format!("{notice}-remove-again"), servers.cx);
-    settle(servers.cx, |_| connections.unsaved_removals().is_empty());
-    assert!(servers.saved.destinations().is_empty());
-    let connections = servers.connections.clone();
-    settle(servers.cx, |_| connections.persistence_error().is_none());
-    assert!(
-        !rendered(notice, servers.cx),
-        "once the removal saves, no notice remains"
-    );
 }
 
 /// Short queries are partial words a person is still typing, so they select no server.
@@ -1357,10 +730,10 @@ fn a_short_query_selects_no_server(cx: &mut TestAppContext) {
 /// person chose.
 #[gpui::test]
 fn clearing_a_search_returns_to_the_server_the_person_chose(cx: &mut TestAppContext) {
-    let mut servers = open_servers(true, &["build.local", "penguin"], cx);
+    let mut servers = open_servers(true, &["build", "penguin"], cx);
     select("penguin", servers.cx);
     search_for("build", &mut servers);
-    assert_eq!(listed(servers.cx)[1], ("build.local".to_owned(), true));
+    assert_eq!(listed(servers.cx)[1], ("build".to_owned(), true));
 
     search_for("", &mut servers);
     assert_eq!(listed(servers.cx)[2], ("penguin".to_owned(), true));
@@ -1453,8 +826,9 @@ fn choosing_another_server_carries_no_draft_to_it(cx: &mut TestAppContext) {
     servers.cx.simulate_keystrokes("cmd-a");
     servers.cx.simulate_input("~/draft/{repository}/{branch}");
 
+    let bravo_route = servers.routes[1];
     servers.window.update(servers.cx, |settings, cx| {
-        settings.select_server(super::ServerChoice::Ssh(destination("bravo")), cx);
+        settings.select_server(ServerChoice::Direct(bravo_route), cx);
     });
     settle(servers.cx, |cx| {
         location_field(cx) == "~/bravo/{repository}/{branch}"
@@ -1480,8 +854,8 @@ fn search_for(query: &str, servers: &mut Servers<'_>) {
     servers.cx.run_until_parked();
 }
 
-/// Two saved SSH servers, each connected and presented with its own scripted writer, as the
-/// Workspace Window presents them.
+/// Two connected paired servers, each presented with its own scripted writer, as the Workspace
+/// Window presents them.
 fn present_both<'a>(
     cx: &'a mut TestAppContext,
 ) -> (
@@ -1489,29 +863,23 @@ fn present_both<'a>(
     Rc<crate::ui::shared_workspaces::testing::ScriptedEdits>,
     Rc<crate::ui::shared_workspaces::testing::ScriptedEdits>,
 ) {
-    use crate::ui::server_worktrees::testing::{ScriptedReads, present_ssh};
+    use crate::ui::server_worktrees::testing::{ScriptedReads, present_direct};
     use crate::ui::shared_workspaces::testing::ScriptedEdits;
 
-    let servers = open_servers(false, &["alpha", "bravo"], cx);
-    for name in ["alpha", "bravo"] {
-        servers.connections.connect(destination(name));
-    }
-    let connections = servers.connections.clone();
-    settle(servers.cx, |_| {
-        connections.server(&destination("alpha")).is_some()
-            && connections.server(&destination("bravo")).is_some()
-    });
-    // Each writer wraps its connection's server, as the Workspace Window's does.
+    let paired = connected_paired(&["alpha", "bravo"], cx);
+    let servers = open_with(false, paired, cx);
+    // Each writer wraps its route's connection, as the Workspace Window's does.
     let writers: Vec<_> = ["alpha", "bravo"]
         .into_iter()
-        .map(|name| {
+        .zip(servers.routes.clone())
+        .map(|(name, route)| {
             let edits = Rc::new(ScriptedEdits::new(None));
             edits.set_worktree_writes(true);
             let reads = ScriptedReads::new(&format!("~/{name}/{{repository}}/{{branch}}"));
-            let edits_for_window = edits.clone();
-            servers.cx.update(|_, cx| {
-                present_ssh(&destination(name), edits_for_window, reads, cx);
-            });
+            let writer = edits.clone();
+            servers
+                .cx
+                .update(|_, cx| present_direct(route, writer, reads, cx));
             edits
         })
         .collect();
@@ -1531,8 +899,8 @@ fn answer_alert(selector: &str, cx: &mut VisualTestContext) {
     click(&format!("modal-action-{selector}"), cx);
 }
 
-/// Reset All and Import replace only the Settings Document. Saved connections and their intent
-/// live in their own record, and Server Settings belong to each server, so neither changes.
+/// Reset All and Import replace only the Settings Document. Saved paired servers live in their
+/// own record, and Server Settings belong to each server, so neither changes.
 #[gpui::test]
 fn reset_all_and_import_leave_server_connections_and_server_settings_alone(
     cx: &mut TestAppContext,
@@ -1543,7 +911,7 @@ fn reset_all_and_import_leave_server_connections_and_server_settings_alone(
     settle(servers.cx, |cx| {
         location_field(cx) == "~/bravo/{repository}/{branch}"
     });
-    let saved_before = servers.saved.destinations();
+    let saved_before = servers.direct.routes();
     click("settings-navigation-settings-section-advanced", servers.cx);
     let detail = servers
         .window
@@ -1579,22 +947,15 @@ fn reset_all_and_import_leave_server_connections_and_server_settings_alone(
         retained.schema_version, 7,
         "the Settings Document stays schema 7"
     );
-    assert_eq!(servers.saved.destinations(), saved_before);
-    let listed: Vec<_> = servers
-        .connections
-        .connections()
-        .into_iter()
-        .map(|(destination, status)| {
-            (
-                destination.as_str().to_owned(),
-                matches!(status, RemoteConnectionStatus::Connected { .. }),
-            )
-        })
-        .collect();
     assert_eq!(
-        listed,
-        vec![("alpha".to_owned(), true), ("bravo".to_owned(), true)],
+        servers.direct.routes(),
+        saved_before,
         "both servers stay saved and connected"
+    );
+    assert!(
+        saved_before
+            .iter()
+            .all(|(_, status)| *status == DirectRouteStatus::Connected)
     );
     assert!(alpha.submitted().is_empty() && bravo.submitted().is_empty());
     click("settings-navigation-settings-section-git", servers.cx);

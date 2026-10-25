@@ -12,7 +12,7 @@ use repository::*;
 )]
 mod worktree_fixture;
 use spaceterm_server::{
-    LocalServer,
+    ServerConnection,
     hierarchy::{CloseTarget, Mutation, Outcome},
     pane::{PaneConnection, Reply, Request},
     worktree::{Branch, BranchName, Error as WorktreeError, Operation},
@@ -48,8 +48,8 @@ fn reconcile_fixture_originals(c: &mut PaneConnection) -> Result<(), Box<dyn Err
 
 fn main() -> Result<(), Box<dyn Error>> {
     let major = std::env::args().nth(1).unwrap_or("1".into()).parse()?;
-    let a = LocalServer::for_development_client("worktree-writes-a", major)?;
-    let b = LocalServer::for_development_client("worktree-writes-b", major)?;
+    let a = ServerConnection::for_development_client("worktree-writes-a", major)?;
+    let b = ServerConnection::for_development_client("worktree-writes-b", major)?;
     eprintln!("Worktree smoke: idle guard");
     lifecycle::require_idle(&a)?;
     eprintln!("Worktree smoke: first client setup");

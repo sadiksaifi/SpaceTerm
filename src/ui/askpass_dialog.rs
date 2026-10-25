@@ -73,7 +73,7 @@ struct AskPassSettlement {
 
 impl AskPassSettlement {
     fn deliver(self, cx: &mut App) {
-        super::ssh_servers::prompt_settled(
+        super::ssh_setup::prompt_settled(
             self.window,
             matches!(self.result, AskPassResult::Cancelled),
             cx,
@@ -194,7 +194,7 @@ impl GpuiAskPassPresenter {
             result: None,
             completion: Some(completion),
         });
-        super::ssh_servers::prompt_requested(window, cx);
+        super::ssh_setup::prompt_requested(window, cx);
         Ok(())
     }
 
@@ -290,7 +290,7 @@ impl GpuiAskPassPresenter {
             result: None,
             completion: Some(completion),
         });
-        super::ssh_servers::prompt_requested(window, cx);
+        super::ssh_setup::prompt_requested(window, cx);
         Ok(())
     }
 

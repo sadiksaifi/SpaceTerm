@@ -13,7 +13,7 @@ use super::pull_request::{
 };
 use super::remote_url::{GitHubHost, github_host};
 use super::{ProgramExit, ProgramRequest, PullRequest, PullRequestError, RepositoryProgramRunner};
-use crate::ssh::cancellation::SshCancellationToken;
+use crate::cancellation::CancellationToken;
 
 pub(crate) const PULL_REQUEST_OUTPUT_LIMIT: usize = 256 * 1024;
 pub(crate) const PULL_REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
@@ -55,7 +55,7 @@ impl GitHubCliLookup {
         &self,
         query: &PullRequestQuery,
         now: Instant,
-        cancellation: &SshCancellationToken,
+        cancellation: &CancellationToken,
     ) -> Result<Option<PullRequest>, PullRequestError> {
         let mut output = Vec::new();
         let exit = self.run(
@@ -73,7 +73,7 @@ impl GitHubCliLookup {
         &self,
         host: &str,
         now: Instant,
-        cancellation: &SshCancellationToken,
+        cancellation: &CancellationToken,
     ) -> Result<bool, PullRequestError> {
         let exit = self.run(
             auth_status_arguments(host),
@@ -89,7 +89,7 @@ impl GitHubCliLookup {
         arguments: Vec<OsString>,
         now: Instant,
         output: &mut Vec<u8>,
-        cancellation: &SshCancellationToken,
+        cancellation: &CancellationToken,
     ) -> Result<ProgramExit, PullRequestError> {
         let request = ProgramRequest {
             executable: self.executable.clone(),
@@ -122,7 +122,7 @@ impl GitHubHosts {
         &self,
         lookup: &GitHubCliLookup,
         host: &Arc<str>,
-        cancellation: &SshCancellationToken,
+        cancellation: &CancellationToken,
     ) -> Result<bool, PullRequestError> {
         if github_host(host) == GitHubHost::Known || self.confirmed().contains(host) {
             return Ok(true);
@@ -174,7 +174,7 @@ mod tests {
         let lookup = lookup(&runner);
         let hosts = GitHubHosts::default();
         let host: Arc<str> = "git.example.com".into();
-        let cancellation = SshCancellationToken::default();
+        let cancellation = CancellationToken::default();
 
         // Logged out of the host, or its network is unreachable.
         assert!(!hosts.is_github_host(&lookup, &host, &cancellation).unwrap());
@@ -211,7 +211,7 @@ mod tests {
         let now = Instant::now();
 
         let pull_request = lookup(&runner)
-            .find_pull_request(&query(), now, &SshCancellationToken::default())
+            .find_pull_request(&query(), now, &CancellationToken::default())
             .unwrap()
             .unwrap();
 
@@ -266,7 +266,7 @@ mod tests {
             let result = lookup(&runner).find_pull_request(
                 &query(),
                 Instant::now(),
-                &SshCancellationToken::default(),
+                &CancellationToken::default(),
             );
 
             assert_eq!(result, expected);
@@ -294,7 +294,7 @@ mod tests {
             let result = lookup(&runner).is_github_host(
                 "ghe.example.com",
                 now,
-                &SshCancellationToken::default(),
+                &CancellationToken::default(),
             );
 
             assert_eq!(result, expected);

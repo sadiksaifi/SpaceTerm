@@ -7,12 +7,12 @@ use std::time::{Duration, Instant};
 
 use thiserror::Error;
 
-use super::cancellation::SshCancellationToken;
 use super::process::{
     CapturedProcessError, SshProbeEnvironment, SshProcessAdapter, SshProcessEnvironmentError,
     SshProcessMechanismError, run_probe_process,
 };
 use super::startup_environment::StartupSshEnvironment;
+use crate::cancellation::CancellationToken;
 use crate::domain::SshDestination;
 
 const MINIMUM_OPENSSH_VERSION: OpenSshVersion = OpenSshVersion::new(8, 2);
@@ -79,11 +79,6 @@ impl OpenSshExecutable {
     pub(super) fn as_path(&self) -> &Path {
         &self.0
     }
-
-    #[cfg(test)]
-    pub(crate) fn for_test() -> Self {
-        Self(PathBuf::from("/test/ssh"))
-    }
 }
 
 impl fmt::Debug for OpenSshExecutable {
@@ -132,14 +127,13 @@ impl<A: SshProcessAdapter> SshCapabilityProbe<A> {
         })
     }
 
-    pub(crate) fn probe_blocking(&self) -> SshCapability {
-        let cancellation = SshCancellationToken::default();
+    pub(crate) fn probe(&self, cancellation: &CancellationToken) -> SshCapability {
         classify_supervised_probe_result(run_probe_process(
             &self.adapter,
             &self.command(),
             &self.environment,
             MAX_PROBE_STREAM_BYTES + 1,
-            &cancellation,
+            cancellation,
             Instant::now()
                 .checked_add(self.timeout)
                 .unwrap_or_else(Instant::now),
@@ -221,42 +215,37 @@ fn parse_version_component(component: &str) -> Option<u16> {
         .then(|| component.parse().ok())?
 }
 
-#[derive(Clone, Debug, Eq, Error, PartialEq)]
-pub(crate) enum SshCommandContextError {
-    #[error("SSH command paths must be absolute and control-free")]
-    UnsafePath,
-}
-
-pub(crate) struct SshCommandContext {
-    executable: OpenSshExecutable,
-    managed_config: PathBuf,
-    destination: SshDestination,
-    control_path: PathBuf,
-    quiet: bool,
-}
+pub(crate) struct SshCommandContext;
 
 impl SshCommandContext {
-    pub(crate) fn new(
+    /// One setup command, using normal OpenSSH configuration without sharing a master.
+    pub(crate) fn setup(
         executable: OpenSshExecutable,
-        managed_config: PathBuf,
-        destination: SshDestination,
-        control_path: PathBuf,
-    ) -> Result<Self, SshCommandContextError> {
-        if !is_safe_absolute_path(&managed_config) || !is_safe_absolute_path(&control_path) {
-            return Err(SshCommandContextError::UnsafePath);
+        destination: &SshDestination,
+        command: ValidatedRemoteShellCommand,
+    ) -> SshCommandSpec {
+        let mut arguments = vec!["-T".into()];
+        for option in [
+            "ControlMaster=no",
+            "ControlPath=none",
+            "ControlPersist=no",
+            "IgnoreUnknown=ForkAfterAuthentication,SessionType",
+            "ForkAfterAuthentication=no",
+            "ClearAllForwardings=yes",
+            "RemoteCommand=none",
+            "RequestTTY=no",
+            "SessionType=default",
+            "PermitLocalCommand=no",
+            "StrictHostKeyChecking=ask",
+        ] {
+            push_option(&mut arguments, option.into());
         }
-        Ok(Self {
-            executable,
-            managed_config,
-            destination,
-            control_path,
-            quiet: false,
-        })
-    }
-
-    pub(crate) fn quiet(mut self) -> Self {
-        self.quiet = true;
-        self
+        arguments.extend([
+            "--".into(),
+            destination.as_str().into(),
+            command.argument.into(),
+        ]);
+        SshCommandSpec::new(executable, arguments)
     }
     pub(crate) fn authorization_prompt(
         helper: PathBuf,
@@ -267,118 +256,25 @@ impl SshCommandContext {
             vec![super::askpass::prompt::REMOTE_LINGER_PROMPT.into()],
         ))
     }
-    pub(crate) fn key_public(
-        executable: PathBuf,
-        identity: &Path,
-    ) -> Result<SshCommandSpec, OpenSshExecutableError> {
-        Ok(SshCommandSpec::new(
-            OpenSshExecutable::new(executable)?,
-            vec![
-                "-y".into(),
-                "-P".into(),
-                "".into(),
-                "-f".into(),
-                identity.as_os_str().to_owned(),
+
+    pub(crate) fn setup_cleanup(
+        executable: OpenSshExecutable,
+        destination: &SshDestination,
+        command: ValidatedRemoteShellCommand,
+    ) -> SshCommandSpec {
+        let mut spec = Self::setup(executable, destination, command);
+        spec.arguments.splice(
+            0..0,
+            [
+                "-o".into(),
+                "BatchMode=yes".into(),
+                "-o".into(),
+                "StrictHostKeyChecking=yes".into(),
+                "-o".into(),
+                "ConnectTimeout=5".into(),
             ],
-        ))
-    }
-    pub(crate) fn master(&self) -> SshCommandSpec {
-        let mut arguments = self.base_arguments();
-        if self.quiet {
-            push_option(&mut arguments, "BatchMode=yes".into());
-            push_option(&mut arguments, "StrictHostKeyChecking=yes".into());
-        }
-        push_option(&mut arguments, OsString::from("ControlMaster=yes"));
-        push_option(&mut arguments, self.control_path_option());
-        push_option(&mut arguments, OsString::from("ControlPersist=no"));
-        // Clients predating this key cannot enable it in their configuration.
-        push_option(
-            &mut arguments,
-            OsString::from("IgnoreUnknown=ForkAfterAuthentication"),
         );
-        push_option(&mut arguments, OsString::from("ForkAfterAuthentication=no"));
-        arguments.push(OsString::from("-N"));
-        self.finish(arguments)
-    }
-
-    pub(crate) fn readiness_check(&self) -> SshCommandSpec {
-        self.control_operation("check")
-    }
-
-    pub(crate) fn server_channel(&self, command: ValidatedRemoteShellCommand) -> SshCommandSpec {
-        let mut arguments = self.child_arguments();
-        for option in [
-            "ClearAllForwardings=yes",
-            "RemoteCommand=none",
-            "RequestTTY=no",
-            "SessionType=default",
-            "BatchMode=yes",
-        ] {
-            push_option(&mut arguments, option.into());
-        }
-        arguments.push("-T".into());
-        self.push_destination(&mut arguments);
-        arguments.push(command.argument.into());
-        self.spec(arguments)
-    }
-
-    pub(crate) fn configuration(&self) -> SshCommandSpec {
-        let arguments = vec![
-            "-F".into(),
-            self.managed_config.as_os_str().to_owned(),
-            "-G".into(),
-            "--".into(),
-            self.destination.as_str().into(),
-        ];
-        self.spec(arguments)
-    }
-
-    fn control_operation(&self, operation: &str) -> SshCommandSpec {
-        let mut arguments = self.child_arguments();
-        arguments.extend([OsString::from("-O"), OsString::from(operation)]);
-        self.finish(arguments)
-    }
-
-    fn base_arguments(&self) -> Vec<OsString> {
-        vec![
-            OsString::from("-F"),
-            self.managed_config.as_os_str().to_owned(),
-            OsString::from("-S"),
-            self.control_path.as_os_str().to_owned(),
-        ]
-    }
-
-    fn child_arguments(&self) -> Vec<OsString> {
-        let mut arguments = self.base_arguments();
-        push_option(&mut arguments, OsString::from("ControlMaster=no"));
-        push_option(&mut arguments, OsString::from("ControlPersist=no"));
-        // OpenSSH prefixes ProxyCommand with `exec `. Terminate that empty exec before
-        // using the shell builtin, so even a hostile PATH cannot supply an `exit` executable.
-        push_option(&mut arguments, OsString::from("ProxyCommand=; exit 1"));
-        arguments
-    }
-
-    fn finish(&self, mut arguments: Vec<OsString>) -> SshCommandSpec {
-        self.push_destination(&mut arguments);
-        self.spec(arguments)
-    }
-
-    fn push_destination(&self, arguments: &mut Vec<OsString>) {
-        arguments.push(OsString::from("--"));
-        arguments.push(OsString::from(self.destination.as_str()));
-    }
-
-    fn spec(&self, arguments: Vec<OsString>) -> SshCommandSpec {
-        SshCommandSpec {
-            executable: self.executable.clone(),
-            arguments,
-        }
-    }
-
-    fn control_path_option(&self) -> OsString {
-        let mut option = OsString::from("ControlPath=");
-        option.push(&self.control_path);
-        option
+        spec
     }
 }
 
@@ -445,7 +341,7 @@ fn quote_for_posix_shell(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::ffi::{OsStr, OsString};
+    use std::ffi::OsString;
     use std::io::Cursor;
     use std::path::PathBuf;
 
@@ -542,21 +438,11 @@ mod tests {
             adapter.clone(),
         )
         .unwrap()
-        .probe_blocking()
+        .probe(&CancellationToken::default())
     }
 
     fn executable() -> OpenSshExecutable {
         OpenSshExecutable::new(PathBuf::from("/selected/openssh")).unwrap()
-    }
-
-    fn context() -> SshCommandContext {
-        SshCommandContext::new(
-            executable(),
-            PathBuf::from("/private/config/spaceterm/ssh_config"),
-            SshDestination::new("root@fedora@orb".to_owned()).unwrap(),
-            PathBuf::from("/private/runtime/spaceterm/ssh/control.sock"),
-        )
-        .unwrap()
     }
 
     fn arguments(spec: &SshCommandSpec) -> Vec<String> {
@@ -694,126 +580,31 @@ mod tests {
     }
 
     #[test]
-    fn master_spec_should_pin_config_socket_and_enable_master_exactly_once() {
-        let spec = context().master();
-
-        assert_eq!(
-            arguments(&spec),
-            [
-                "-F",
-                "/private/config/spaceterm/ssh_config",
-                "-S",
-                "/private/runtime/spaceterm/ssh/control.sock",
-                "-o",
-                "ControlMaster=yes",
-                "-o",
-                "ControlPath=/private/runtime/spaceterm/ssh/control.sock",
-                "-o",
-                "ControlPersist=no",
-                "-o",
-                "IgnoreUnknown=ForkAfterAuthentication",
-                "-o",
-                "ForkAfterAuthentication=no",
-                "-N",
-                "--",
-                "root@fedora@orb",
-            ]
-        );
-    }
-
-    #[test]
-    fn readiness_spec_should_target_only_the_private_master() {
-        let spec = context().readiness_check();
-
-        assert_eq!(
-            arguments(&spec),
-            [
-                "-F",
-                "/private/config/spaceterm/ssh_config",
-                "-S",
-                "/private/runtime/spaceterm/ssh/control.sock",
-                "-o",
-                "ControlMaster=no",
-                "-o",
-                "ControlPersist=no",
-                "-o",
-                "ProxyCommand=; exit 1",
-                "-O",
-                "check",
-                "--",
-                "root@fedora@orb",
-            ]
-        );
-    }
-
-    #[test]
-    fn server_spec_should_disable_external_master_forwarding_and_tty_behavior() {
-        let spec = context()
-            .server_channel(ValidatedRemoteShellCommand::server_script("exec server").unwrap());
-
-        assert_eq!(
-            arguments(&spec),
-            [
-                "-F",
-                "/private/config/spaceterm/ssh_config",
-                "-S",
-                "/private/runtime/spaceterm/ssh/control.sock",
-                "-o",
-                "ControlMaster=no",
-                "-o",
-                "ControlPersist=no",
-                "-o",
-                "ProxyCommand=; exit 1",
-                "-o",
-                "ClearAllForwardings=yes",
-                "-o",
-                "RemoteCommand=none",
-                "-o",
-                "RequestTTY=no",
-                "-o",
-                "SessionType=default",
-                "-o",
-                "BatchMode=yes",
-                "-T",
-                "--",
-                "root@fedora@orb",
-                "/bin/sh -c 'exec server'",
-            ]
-        );
-    }
-
-    #[test]
-    fn all_specs_should_use_the_exact_selected_executable() {
-        let context = context();
+    fn setup_should_use_user_configuration_without_reusing_or_creating_a_master() {
+        let destination = SshDestination::new("jump-alias".into()).unwrap();
         let command = ValidatedRemoteShellCommand::server_script("exec server").unwrap();
-        let specs = [
-            context.master(),
-            context.readiness_check(),
-            context.server_channel(command),
-        ];
-
-        assert!(
-            specs
-                .iter()
-                .all(|spec| spec.executable() == OsStr::new("/selected/openssh"))
-        );
-    }
-
-    #[test]
-    fn command_context_should_reject_relative_config_or_control_paths() {
-        for (config, control) in [
-            ("relative/config", "/private/runtime/control"),
-            ("/private/config/ssh_config", "relative/control"),
+        let spec = SshCommandContext::setup(executable(), &destination, command);
+        let arguments = arguments(&spec);
+        for option in [
+            "ControlMaster=no",
+            "ControlPath=none",
+            "ControlPersist=no",
+            "ForkAfterAuthentication=no",
+            "ClearAllForwardings=yes",
+            "PermitLocalCommand=no",
+            "StrictHostKeyChecking=ask",
         ] {
-            let error = SshCommandContext::new(
-                executable(),
-                PathBuf::from(config),
-                SshDestination::new("host".to_owned()).unwrap(),
-                PathBuf::from(control),
-            )
-            .err();
-
-            assert_eq!(error, Some(SshCommandContextError::UnsafePath));
+            assert!(arguments.windows(2).any(|pair| pair == ["-o", option]));
         }
+        assert!(
+            !arguments
+                .iter()
+                .any(|arg| matches!(arg.as_str(), "-F" | "-S" | "-N"))
+        );
+        assert!(arguments.ends_with(&[
+            "--".into(),
+            "jump-alias".into(),
+            "/bin/sh -c 'exec server'".into()
+        ]));
     }
 }

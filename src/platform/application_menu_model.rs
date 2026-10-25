@@ -66,10 +66,8 @@ pub(crate) fn file_menu() -> Menu {
         name: "File".into(),
         items: vec![
             MenuItem::action("New Workspace", NewWorkspace),
-            MenuItem::action("New Remote Workspace", crate::ui::NewRemoteWorkspace),
             MenuItem::action("Add Server…", crate::ui::settings_window::AddServer),
             MenuItem::action("Open Local Directory…", crate::ui::OpenLocalDirectory),
-            MenuItem::action("Open Remote Directory…", crate::ui::OpenRemoteDirectory),
             MenuItem::action("Switch Workspace", SwitchWorkspace),
             MenuItem::separator(),
             MenuItem::action("New Tab", CreateTab),

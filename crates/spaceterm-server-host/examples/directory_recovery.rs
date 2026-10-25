@@ -8,7 +8,7 @@ mod lifecycle;
 mod support;
 use lifecycle::{Server, connect, require_idle, size};
 use spaceterm_server::{
-    LocalServer, ServerError,
+    ServerConnection, ServerError,
     hierarchy::{Mutation, Outcome},
     pane::*,
 };
@@ -113,7 +113,7 @@ fn cleanup_exercise(connection: &mut PaneConnection) -> Result<(), Box<dyn Error
 }
 fn main() -> Result<(), Box<dyn Error>> {
     let major = std::env::args().nth(1).unwrap_or("1".into()).parse()?;
-    let client = LocalServer::for_development_client("directory-recovery", major)?;
+    let client = ServerConnection::for_development_client("directory-recovery", major)?;
     require_idle(&client)?;
     client.setup()?;
     let mut host = Server::start()?;

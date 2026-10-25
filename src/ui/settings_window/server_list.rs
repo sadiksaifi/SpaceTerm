@@ -1,8 +1,8 @@
 //! The servers Settings presents, the one selection Servers and Git share, and the two ways to
 //! choose: the server picker in the page header and the All Servers list.
 //!
-//! The list names this computer's server first, then each saved SSH connection by destination,
-//! then each server this device is paired with by the name it gave. Choosing a server only changes
+//! The list names this computer's server first, then each server this device is paired with by
+//! the name it gave. Choosing a server only changes
 //! what Servers and Git present: it connects to, starts and installs nothing, and the choice is
 //! retained across launches. Everything here reads what SpaceTerm already knows, so rendering
 //! reaches no computer and asks for no credential.
@@ -19,9 +19,7 @@ use super::server_card::Tone;
 use super::server_selection;
 use super::{AddServerRequest, SettingsWindow};
 use crate::direct_connections::{DirectRouteId, DirectRouteStatus};
-use crate::domain::SshDestination;
 use crate::server_context::ServerKey;
-use crate::ssh::server_connection::RemoteConnectionStatus;
 use crate::ui::appearance::{ChromeAppearance, gpui_color};
 use crate::ui::chrome_icons::IconRole;
 use crate::ui::chrome_typography::{ChromeTextStyleExt as _, TextRole};
@@ -51,7 +49,6 @@ pub(super) const GIT_SERVER_GROUP: &str = "Git on server";
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(in crate::ui::settings_window) enum ServerChoice {
     Local,
-    Ssh(SshDestination),
     /// A server this device reaches over a paired direct network route.
     Direct(DirectRouteId),
 }
@@ -61,7 +58,6 @@ impl ServerChoice {
     pub(in crate::ui::settings_window) fn key(&self) -> ServerKey {
         match self {
             Self::Local => ServerKey::Local,
-            Self::Ssh(destination) => ServerKey::Ssh(destination.as_str().to_owned()),
             Self::Direct(route) => ServerKey::Direct(*route),
         }
     }
@@ -69,9 +65,6 @@ impl ServerChoice {
     fn from_key(key: &ServerKey) -> Option<Self> {
         Some(match key {
             ServerKey::Local => Self::Local,
-            ServerKey::Ssh(destination) => {
-                Self::Ssh(SshDestination::new(destination.clone()).ok()?)
-            }
             ServerKey::Direct(route) => Self::Direct(*route),
         })
     }
@@ -80,8 +73,7 @@ impl ServerChoice {
     const fn kind(&self) -> u8 {
         match self {
             Self::Local => 0,
-            Self::Ssh(_) => 1,
-            Self::Direct(_) => 2,
+            Self::Direct(_) => 1,
         }
     }
 }
@@ -92,7 +84,7 @@ pub(super) struct ListedServer {
     pub(super) name: SharedString,
     /// "machine · OS" or "address · OS", which tells apart servers that share a name.
     pub(super) detail: SharedString,
-    /// A short status, such as "Connected · SSH".
+    /// A short status, such as "Connected".
     pub(super) status: SharedString,
     pub(super) tone: Tone,
     pub(super) working: bool,
@@ -116,7 +108,7 @@ impl ListedServer {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PickerCommand {
     AddServer,
-    /// Opens Add Server with the typed host filled in.
+    /// Opens Add Server with the typed SSH host filled in.
     ConnectHost,
 }
 
@@ -132,32 +124,20 @@ pub(super) fn looks_like_host(query: &str) -> bool {
             .all(|character| character.is_ascii_alphanumeric() || ".-_@:[]".contains(character))
 }
 
-/// Rows that present a server reached over SSH or this account, and never a paired one, whose
-/// connection carries no authority over its computer's services or network.
-const ACCOUNT_ROWS: [SettingsRowId; 3] = [
-    SettingsRowId::ServerAutoStart,
-    SettingsRowId::NetworkAccess,
-    SettingsRowId::PairedDevices,
-];
+/// Rows that present this computer's server only. Its native service is administered on its own
+/// machine, so no other server offers them.
+const ACCOUNT_ROWS: [SettingsRowId; 1] = [SettingsRowId::ServerAutoStart];
 
 /// Whether `row` presents something about `server`. Rows outside Servers and Git always do.
 pub(super) fn row_presents(row: SettingsRowId, server: Option<&ServerChoice>) -> bool {
     if ACCOUNT_ROWS.contains(&row) {
-        !matches!(server, Some(ServerChoice::Direct(_)) | None)
+        matches!(server, Some(ServerChoice::Local))
     } else {
         true
     }
 }
 
 impl SettingsWindow {
-    /// The saved SSH connections and their statuses, from the registry's snapshot.
-    pub(super) fn saved_ssh_servers(&self) -> Vec<(SshDestination, RemoteConnectionStatus)> {
-        self.ssh_servers
-            .as_ref()
-            .map(|rows| rows.connections.connections())
-            .unwrap_or_default()
-    }
-
     /// The saved direct routes, their statuses and names, from the registry's snapshot.
     pub(super) fn saved_direct_servers(&self) -> Vec<(DirectRouteId, DirectRouteStatus, String)> {
         let Some(direct) = self.direct_routes.as_ref() else {
@@ -177,15 +157,11 @@ impl SettingsWindow {
     /// Every server SpaceTerm presents, in the order the picker and the list show them.
     fn listed_choices(&self) -> Vec<ServerChoice> {
         let local = self.local_server.is_some().then_some(ServerChoice::Local);
-        let ssh = self
-            .saved_ssh_servers()
-            .into_iter()
-            .map(|(destination, _)| ServerChoice::Ssh(destination));
         let direct = self
             .saved_direct_servers()
             .into_iter()
             .map(|(route, _, _)| ServerChoice::Direct(route));
-        local.into_iter().chain(ssh).chain(direct).collect()
+        local.into_iter().chain(direct).collect()
     }
 
     pub(super) fn listed_servers(&self, cx: &App) -> Vec<ListedServer> {
@@ -252,7 +228,6 @@ impl SettingsWindow {
     pub(super) fn server_name(&self, choice: &ServerChoice) -> SharedString {
         match choice {
             ServerChoice::Local => SharedString::new_static(self.this_computer),
-            ServerChoice::Ssh(destination) => SharedString::from(destination.as_str().to_owned()),
             ServerChoice::Direct(route) => self
                 .saved_direct_servers()
                 .into_iter()
@@ -319,18 +294,14 @@ impl SettingsWindow {
         if self.reconciled_servers.as_ref() == Some(&keys) {
             return;
         }
-        // Registries load after the window opens. Until each present one has read its retained
-        // servers, nothing it will list is known to be gone, so the retained choice and facts
-        // stay. An empty inventory is a real answer.
-        let ssh_loaded = self
-            .ssh_servers
-            .as_ref()
-            .is_none_or(|rows| rows.connections.retained_inventory_loaded());
+        // The registry loads after the window opens. Until it has read its retained servers,
+        // nothing it will list is known to be gone, so the retained choice and facts stay. An
+        // empty inventory is a real answer.
         let direct_loaded = self
             .direct_routes
             .as_ref()
             .is_none_or(|rows| rows.connections.retained_inventory_loaded());
-        if !(ssh_loaded && direct_loaded) {
+        if !direct_loaded {
             return;
         }
         self.reconciled_servers = Some(keys.clone());
@@ -398,7 +369,7 @@ impl SettingsWindow {
         self.search_selected_server = self
             .listed_choices()
             .into_iter()
-            .find(|choice| !matches!(choice, ServerChoice::Direct(_)));
+            .find(|choice| matches!(choice, ServerChoice::Local));
     }
 
     /// The rows of `reachable` that present the selected server, best first. A query naming a
@@ -515,7 +486,7 @@ impl SettingsWindow {
                     commands.push(
                         ComboBoxCommand::new(
                             PickerCommand::ConnectHost,
-                            format!("Connect to \u{201C}{query}\u{201D} over SSH\u{2026}"),
+                            format!("Add \u{201C}{query}\u{201D} over SSH\u{2026}"),
                         )
                         .debug_selector(format!("{PICKER_SELECTOR}-connect-host")),
                     );
@@ -823,7 +794,7 @@ fn leading_slot(appearance: &ChromeAppearance) -> gpui::Div {
 
 /// What Add Server does, under its label in the All Servers list.
 pub(super) const fn add_server_description() -> &'static str {
-    "Connect over SSH or with an invitation."
+    "Set up over SSH or join with an invitation."
 }
 
 /// The color of a status dot of `tone`.

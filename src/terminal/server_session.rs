@@ -11,7 +11,7 @@ use super::pointer_input::{PointerInput, WheelInput};
 use super::session::clipboard::ClipboardAuthority;
 use super::session::*;
 use super::{emulator::*, geometry::TerminalGeometry, key::*};
-use crate::local_server::{LocalServer, ServerError};
+use crate::server_connection::{ServerConnection, ServerError};
 pub(crate) use control::{ControlRoute, PaneControlRegistry, PaneControls};
 use effects::ClientEffects;
 use spaceterm_server::pane::{self, Lease, PaneSize, Reply, Request};
@@ -59,7 +59,7 @@ pub(crate) struct DevelopmentPaneState {
     connection_recovery: Arc<Mutex<recovery::Recovery>>,
     recovery: Mutex<Option<pane::directories::Target>>,
     repair: Mutex<Option<(pane::directories::Target, std::path::PathBuf)>>,
-    directory_server: Mutex<Option<LocalServer>>,
+    directory_server: Mutex<Option<ServerConnection>>,
     directory_busy: AtomicBool,
     directory_note: Mutex<Option<&'static str>>,
     epoch: AtomicU64,
@@ -74,9 +74,6 @@ pub(crate) struct DevelopmentPaneState {
     client_effects: Mutex<std::collections::VecDeque<ClientEffectRequest>>,
     presentable: AtomicBool,
     preparation: AtomicBool,
-    /// Whether the server's route reported a deliberate stop since this Pane last connected.
-    /// The Pane then waits for an explicit retry instead of reconnecting on its own.
-    server_stopped: AtomicBool,
     wake: schedule::Wake,
 }
 impl DevelopmentPaneState {
@@ -108,7 +105,6 @@ impl DevelopmentPaneState {
             client_effects: Mutex::new(std::collections::VecDeque::new()),
             presentable: AtomicBool::new(true),
             preparation: AtomicBool::new(false),
-            server_stopped: AtomicBool::new(false),
             wake: schedule::Wake::default(),
             effect_authority: {
                 let authority = ClipboardAuthority::default();
@@ -206,22 +202,6 @@ impl DevelopmentPaneState {
             .unwrap_or_else(|e| e.into_inner())
             .start_unconfirmed()
     }
-    /// Records that the person stopped this Pane's server, as its route reported. An
-    /// interrupted Pane says so now, and later failures wait for an explicit retry, because no
-    /// automatic attempt can reach a stopped server.
-    pub(crate) fn report_server_stopped(&self) {
-        self.server_stopped.store(true, Ordering::Release);
-        let mut status = self.status.lock().unwrap_or_else(|e| e.into_inner());
-        *status = match *status {
-            DevelopmentPaneStatus::Reconnecting => {
-                DevelopmentPaneStatus::Failed(ServerError::Stopped)
-            }
-            DevelopmentPaneStatus::TakeoverReconnecting => {
-                DevelopmentPaneStatus::TakeoverFailed(ServerError::Stopped)
-            }
-            current => current,
-        };
-    }
     pub(crate) fn start_restored(&self) {
         let status = self.status.lock().unwrap_or_else(|e| e.into_inner());
         if !self.start_unconfirmed()
@@ -256,7 +236,7 @@ impl DevelopmentPaneState {
             .unwrap_or_else(|e| e.into_inner())
             .clone()
     }
-    pub(crate) fn directory_server(&self) -> Option<LocalServer> {
+    pub(crate) fn directory_server(&self) -> Option<ServerConnection> {
         self.directory_server
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -344,15 +324,6 @@ impl DevelopmentPaneState {
             .unwrap_or(Err(ServerError::NotRunning))
     }
     fn connection_failed(&self, error: ServerError, has_takeover: bool) -> bool {
-        // A route that reported a deliberate stop can't reach the server, whatever this attempt
-        // failed with.
-        let error = if self.server_stopped.load(Ordering::Acquire)
-            && error != ServerError::DirectoryUnavailable
-        {
-            ServerError::Stopped
-        } else {
-            error
-        };
         // An admitted server update refuses connections only until it resolves, so the Pane
         // keeps reconnecting on its backoff in every client, whoever started the update.
         let mut retryable = matches!(
@@ -448,8 +419,6 @@ impl DevelopmentPaneState {
             interaction.screen = mapping;
         }
         self.connected_epoch.store(epoch, Ordering::Release);
-        // Reaching the server again ends any stop its route reported.
-        self.server_stopped.store(false, Ordering::Release);
         if paste_unconfirmed {
             self.paste_unconfirmed.store(true, Ordering::Release);
         }
@@ -464,7 +433,7 @@ impl DevelopmentPaneState {
 }
 #[derive(Clone)]
 pub(crate) struct DevelopmentServerSessionFactory {
-    server: LocalServer,
+    server: ServerConnection,
     local_files: Option<crate::platform::local_filesystem::LocalFilesystemAuthority>,
     remote_metadata: Option<super::metadata::RemoteTerminalMetadataContext>,
     pane_id: spaceterm_server::hierarchy::Id,
@@ -475,7 +444,7 @@ pub(crate) struct DevelopmentServerSessionFactory {
 impl DevelopmentServerSessionFactory {
     /// Presents one server Pane. Construction connects to nothing.
     pub(crate) fn for_pane(
-        server: LocalServer,
+        server: ServerConnection,
         controls: &PaneControls,
         local_files: crate::platform::local_filesystem::LocalFilesystemAuthority,
         pane_id: spaceterm_server::hierarchy::Id,
@@ -485,20 +454,20 @@ impl DevelopmentServerSessionFactory {
     }
 
     pub(crate) fn for_remote_pane(
-        server: LocalServer,
+        server: ServerConnection,
         controls: &PaneControls,
-        destination: crate::domain::SshDestination,
+        server_display: String,
         pane_id: spaceterm_server::hierarchy::Id,
     ) -> (Self, Arc<DevelopmentPaneState>) {
         let metadata = super::metadata::RemoteTerminalMetadataContext::new(
-            destination,
+            server_display,
             crate::domain::RemoteDirectory::home(),
         );
         Self::for_origin(server, controls, None, Some(metadata), pane_id)
     }
 
     fn for_origin(
-        server: LocalServer,
+        server: ServerConnection,
         controls: &PaneControls,
         local_files: Option<crate::platform::local_filesystem::LocalFilesystemAuthority>,
         remote_metadata: Option<super::metadata::RemoteTerminalMetadataContext>,
@@ -2670,22 +2639,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn ssh_panes_have_no_local_file_authority_even_with_local_composition() {
+    fn paired_panes_have_no_local_file_authority_even_with_local_composition() {
         struct Route;
-        impl spaceterm_server::account_bridge::AccountConnector for Route {
+        impl spaceterm_server::direct::DirectConnector for Route {
             fn connect(
                 &self,
-            ) -> Result<spaceterm_server::account_bridge::AccountBridge, ServerError> {
+            ) -> Result<
+                spaceterm_server::direct::DirectConnection,
+                spaceterm_server::direct::DirectError,
+            > {
                 panic!("factory construction must not connect");
             }
         }
-        let server = LocalServer::remote(
+        let server = ServerConnection::direct(
             "spaceterm-development",
             [4; 32],
-            spaceterm_server::account_bridge::AccountBridgeIdentity {
-                account: 1000,
-                build: "spaceterm-development".into(),
-                server: [9; 32],
+            spaceterm_server::direct::PairedDevice {
+                pin: spaceterm_server::direct::ServerPin {
+                    build: "spaceterm-development".into(),
+                    server: [9; 32],
+                    public_key: [2; 32],
+                    certificate: [3; 32],
+                },
+                pairing: [5; 32],
+                client: [6; 32],
             },
             Arc::new(Route),
         )
@@ -3205,7 +3182,7 @@ mod tests {
     fn a_dismissed_window_whose_worker_starts_late_cannot_revoke_its_reopened_successor() {
         let controls = PaneControls::default();
         let (old, _) = DevelopmentServerSessionFactory::for_pane(
-            LocalServer::for_identity("spaceterm-development").unwrap(),
+            ServerConnection::for_identity("spaceterm-development").unwrap(),
             &controls,
             crate::platform::runtime_local_filesystem(),
             [7; 32],
@@ -3641,42 +3618,6 @@ mod tests {
             Ok(Reply::Unchanged)
         });
         assert_eq!(batches, 1, "nothing is replayed");
-    }
-
-    /// A Pane whose route reported the person's stop says the server stopped instead of
-    /// reconnecting, waits for an explicit retry, and reconnects normally once it reaches the
-    /// server again.
-    #[test]
-    fn a_reported_server_stop_ends_automatic_reconnection_until_the_pane_connects() {
-        let adapter = Adapter::new();
-        let state = &adapter.handle.state;
-        state.set(DevelopmentPaneStatus::Reconnecting);
-
-        state.report_server_stopped();
-        assert_eq!(
-            state.status(),
-            DevelopmentPaneStatus::Failed(ServerError::Stopped)
-        );
-        assert!(
-            !state.connection_failed(ServerError::NotRunning, false),
-            "no automatic attempt can reach a stopped server"
-        );
-        assert_eq!(
-            state.status(),
-            DevelopmentPaneStatus::Failed(ServerError::Stopped)
-        );
-        assert!(!state.connection_failed(ServerError::NotRunning, true));
-        assert_eq!(
-            state.status(),
-            DevelopmentPaneStatus::TakeoverFailed(ServerError::Stopped)
-        );
-
-        adapter.tracking_screen(1, 1, false);
-        assert!(
-            state.connection_failed(ServerError::NotRunning, false),
-            "a later interruption reconnects on its own again"
-        );
-        assert_eq!(state.status(), DevelopmentPaneStatus::Reconnecting);
     }
 
     #[test]

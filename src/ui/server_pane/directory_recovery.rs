@@ -1,6 +1,6 @@
 //! One cancellable server-backed picker, shared by both desktop Pane presentations.
 use crate::{
-    local_server::LocalServer,
+    server_connection::ServerConnection,
     ui::directory_picker::{
         DirectoryPicker, DirectoryPickerEvent, DirectorySelection, ServerDirectorySource,
     },
@@ -23,7 +23,7 @@ pub(crate) struct DirectoryRecovery {
 }
 impl DirectoryRecovery {
     pub(crate) fn new(
-        server: LocalServer,
+        server: ServerConnection,
         target: Target,
         actions: RecoveryActions,
         window: &mut Window,
