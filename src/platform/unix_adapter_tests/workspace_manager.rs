@@ -12,6 +12,9 @@ fn workspace_manager_with_directory_selection(
 ) {
     cx.update(crate::ui::init)
         .expect("UI initialization should succeed");
+    cx.update(|cx| {
+        crate::ui::updates::server_rows::testing::install_up_to_date(cx);
+    });
     let records = TestTerminalSessionRecords::default();
     let session_factory: Rc<dyn TerminalSessionFactory> =
         Rc::new(TestTerminalSessionFactory::new(records.clone()).with_fallback_title("zsh"));

@@ -236,6 +236,7 @@ mod tests {
             .expect("application initialization should succeed");
         });
         let (manager, cx) = cx.add_window_view(|window, cx| {
+            crate::ui::updates::server_rows::testing::install_up_to_date(cx);
             let mut manager = WorkspaceManager::new_with_adapters(
                 std::env::temp_dir(),
                 WorkspaceManagerAdapters {

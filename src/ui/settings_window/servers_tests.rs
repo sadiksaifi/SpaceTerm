@@ -1732,6 +1732,11 @@ fn an_admitted_start_notifies_a_waiting_workspace_after_settings_closes(cx: &mut
     launch.answer(Err(ServerError::ServiceUnavailable));
     let mut local_server = launch_testing::unanswered();
     local_server.launch = launch.clone();
+    // The Workspace Window's Updates control reads this computer's server through the host's
+    // local update observation.
+    visual
+        .cx
+        .update(crate::ui::updates::server_rows::testing::install_up_to_date);
     let (_workspace, _) = visual.cx.add_window_view(|window, cx| {
         WorkspaceManager::new_with_adapters(
             std::env::temp_dir(),

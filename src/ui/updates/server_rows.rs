@@ -3,13 +3,13 @@
 //! update. A paired server is updated on its own computer, so its row only opens its Settings.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
-use gpui::{App, Context, SharedString, Subscription, Task};
+use gpui::{App, Context, Global, SharedString, Subscription, Task};
 
 use crate::application_identity::ApplicationIdentity;
 use crate::direct_connections::{DirectConnections, DirectRouteStatus};
 use crate::server_connection::ServerError;
-use crate::server_connection::service::Service;
 use crate::ui::MachineTarget;
 use crate::ui::direct_servers::DirectChanges;
 use crate::ui::settings_window;
@@ -17,6 +17,31 @@ use crate::ui::settings_window;
 /// Each status is a few words that fit the menu. The action's Settings journey explains it.
 const UPDATE_STATUS_UNKNOWN: &str = "Status Unknown";
 const UPDATE_NEEDS_ATTENTION: &str = "Update Needs Attention";
+
+/// What a passive read of this computer's server reported about updating it.
+#[derive(Clone, Debug)]
+pub(crate) struct LocalUpdateFacts {
+    /// The server's identity, when its service reports one. Rows for one server merge by it.
+    pub(crate) server: Option<[u8; 32]>,
+    /// The update status as the Updates menu says it, and whether Update Server is offered, or
+    /// why the read failed.
+    pub(crate) update: Result<(SharedString, bool), ServerError>,
+}
+
+/// Reads this computer's server through its operating-system service. A read is passive: it
+/// prepares, activates and recovers nothing. Reading blocks, so it runs on a background worker.
+pub(crate) trait LocalUpdateObservation: Send + Sync {
+    fn observe(&self) -> LocalUpdateFacts;
+}
+
+struct InstalledLocalUpdates(Arc<dyn LocalUpdateObservation>);
+impl Global for InstalledLocalUpdates {}
+
+/// Makes `observation` the one the Updates menu reads this computer's server through. The host
+/// composition installs it before any Workspace Window opens.
+pub(crate) fn install_local_updates(observation: Arc<dyn LocalUpdateObservation>, cx: &mut App) {
+    cx.set_global(InstalledLocalUpdates(observation));
+}
 
 #[derive(Clone)]
 pub(crate) struct ServerUpdateRow {
@@ -70,6 +95,7 @@ impl ServerUpdateAction {
 
 #[derive(Clone)]
 struct Sources {
+    local: Arc<dyn LocalUpdateObservation>,
     direct: Option<DirectConnections>,
 }
 
@@ -85,10 +111,13 @@ pub(crate) struct ServerUpdates {
 }
 
 impl ServerUpdates {
+    /// The inventory read through the installed local observation, which the host composition
+    /// provides.
     pub(crate) fn new(cx: &mut Context<Self>) -> Self {
         let local = settings_window::local_operations::LocalServerOperations::get(cx);
         let local = cx.subscribe(&local, |inventory, _, _, cx| inventory.refresh(cx));
         let sources = Sources {
+            local: Arc::clone(&cx.global::<InstalledLocalUpdates>().0),
             direct: crate::ui::direct_servers::installed(cx),
         };
         let direct = sources.direct.as_ref().map(|connections| {
@@ -166,28 +195,16 @@ struct Observation {
 
 fn read_inventory(sources: Sources) -> Vec<ServerUpdateRow> {
     let identity = ApplicationIdentity::current().directory_name();
-    let service = Service::for_identity(identity);
-    let key = service
-        .as_ref()
-        .ok()
-        .and_then(|service| service.passive_server_id().ok().flatten())
+    let facts = sources.local.observe();
+    let key = facts
+        .server
         .map_or(ServerKey::UnknownLocal, |server| ServerKey::Known {
             build: identity.to_owned(),
             server,
         });
-    let row = if crate::local_startup::owned_foreground() {
-        local_row(Ok(("Development Server".into(), false)))
-    } else {
-        local_row(
-            service
-                .as_ref()
-                .map_err(|error| *error)
-                .and_then(settings_window::server_update::passive_update),
-        )
-    };
     let local = Observation {
         key,
-        row,
+        row: local_row(facts.update),
         route_priority: 2,
     };
     let mut observations = vec![local];
@@ -269,6 +286,39 @@ fn merge_rows(observations: Vec<Observation>) -> Vec<ServerUpdateRow> {
         }
     }
     servers.into_iter().map(|server| server.row).collect()
+}
+
+/// Scripted local observations for tests that open Workspace Windows or the Updates menu.
+#[cfg(test)]
+pub(crate) mod testing {
+    use std::sync::Arc;
+
+    use gpui::{App, SharedString};
+
+    use super::{LocalUpdateFacts, LocalUpdateObservation, install_local_updates};
+
+    /// This computer's server as a test scripts it. Every read reports the same facts.
+    pub(crate) struct ScriptedLocalUpdates(LocalUpdateFacts);
+
+    impl LocalUpdateObservation for ScriptedLocalUpdates {
+        fn observe(&self) -> LocalUpdateFacts {
+            self.0.clone()
+        }
+    }
+
+    /// Installs a local server that reports `status`, offering Update Server when `offered`.
+    pub(crate) fn install(status: &'static str, offered: bool, cx: &mut App) {
+        let scripted = ScriptedLocalUpdates(LocalUpdateFacts {
+            server: None,
+            update: Ok((SharedString::new_static(status), offered)),
+        });
+        install_local_updates(Arc::new(scripted), cx);
+    }
+
+    /// Installs a local server that is up to date, for tests about anything but its update.
+    pub(crate) fn install_up_to_date(cx: &mut App) {
+        install("Up to Date", false, cx);
+    }
 }
 
 #[cfg(test)]

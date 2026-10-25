@@ -7,6 +7,7 @@ pub(crate) mod server_rows;
 
 pub(super) use dropdown::UpdateControl;
 pub(crate) use launch::{request_window_close as request_launch_window_close, show_launch};
+pub(crate) use server_rows::{LocalUpdateFacts, LocalUpdateObservation, install_local_updates};
 
 use gpui::{
     AnyWindowHandle, App, BorrowAppContext, Context, Entity, Global, SharedString, Subscription,
@@ -1565,6 +1566,7 @@ mod tests {
         cx.update(|cx| ApplicationUpdates::install(adapter.clone(), cx));
         cx.update(crate::ui::init)
             .expect("UI initialization should succeed");
+        cx.update(server_rows::testing::install_up_to_date);
         let updates = cx.update(|cx| service(cx).expect("the update service is installed"));
         updates.update(cx, |updates, cx| updates.check(false, cx));
         adapter.emit(UpdateEvent::Available(version()));
@@ -1614,6 +1616,7 @@ mod tests {
         cx.update(|cx| ApplicationUpdates::install(adapter.clone(), cx));
         cx.update(crate::ui::init)
             .expect("UI initialization should succeed");
+        cx.update(server_rows::testing::install_up_to_date);
         let updates = cx.update(|cx| service(cx).expect("the update service is installed"));
         let mut document = crate::settings::SettingsDocument::default();
         document.updates.automatic_downloads = false;
@@ -1754,6 +1757,7 @@ mod tests {
 
         cx.update(crate::ui::init)
             .expect("UI initialization should succeed");
+        cx.update(server_rows::testing::install_up_to_date);
         let (host, cx) = cx.add_window_view(|_, _| InstallAlertHost);
         let _handle = cx.update(|window, cx| {
             host.update(cx, |_, cx| {

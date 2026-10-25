@@ -24,6 +24,28 @@ use crate::ssh::startup_environment::StartupSshEnvironment;
 use crate::terminal::{NativeServiceOrigin, NativeServiceStatus, SelectionCopy};
 use crate::ui::{NewWorkspace, SwitchWorkspace, WorkspaceManager};
 
+struct NativeLocalUpdates;
+
+impl crate::ui::updates::LocalUpdateObservation for NativeLocalUpdates {
+    fn observe(&self) -> crate::ui::updates::LocalUpdateFacts {
+        let identity = crate::application_identity::ApplicationIdentity::current().directory_name();
+        let service = spaceterm_server::service::Service::for_identity(identity);
+        let server = service
+            .as_ref()
+            .ok()
+            .and_then(|service| service.passive_server_id().ok().flatten());
+        let update = if crate::local_startup::owned_foreground() {
+            Ok(("Development Server".into(), false))
+        } else {
+            service
+                .as_ref()
+                .map_err(|error| *error)
+                .and_then(crate::ui::settings_window::server_update::passive_update)
+        };
+        crate::ui::updates::LocalUpdateFacts { server, update }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum StartupDependenciesError {
     #[error("Home directory unavailable")]
@@ -950,6 +972,7 @@ pub(crate) fn open(
     let ssh_setup = host.adapters.ssh_setup.clone();
     let direct_servers = host.adapters.direct_servers.clone();
     let result = cx.open_window(workspace_window_options(host, cx), |window, cx| {
+        crate::ui::updates::install_local_updates(Arc::new(NativeLocalUpdates), cx);
         // Both enrollment methods publish into this paired connection registry.
         if let Some(direct) = direct_servers.clone() {
             crate::ui::direct_servers::install(direct, cx);

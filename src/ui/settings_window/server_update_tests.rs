@@ -171,6 +171,7 @@ fn a_confirmed_update_replaces_the_running_server_once(cx: &mut TestAppContext) 
     let mut harness = open(available(), cx);
     let inventory_refreshes = Rc::new(std::cell::Cell::new(0));
     let (inventory, _observation) = harness.cx.update(|_, cx| {
+        crate::ui::updates::server_rows::testing::install_up_to_date(cx);
         let inventory = cx.new(crate::ui::updates::server_rows::ServerUpdates::new);
         let refreshes = inventory_refreshes.clone();
         let observation = cx.observe(&inventory, move |_, _| {
