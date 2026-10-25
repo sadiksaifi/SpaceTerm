@@ -49,6 +49,8 @@
 	<string>SpaceTerm lets terminal applications you run use your microphone for voice input.</string>
 	<key>NSNetworkVolumesUsageDescription</key>
 	<string>SpaceTerm reads the branch and changes of the Git repository a terminal pane is in on a network volume.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>SpaceTerm uses your local network to connect to servers you add and devices you pair.</string>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
 	<key>NSRemovableVolumesUsageDescription</key>
