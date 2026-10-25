@@ -36,71 +36,65 @@ pub struct AuthenticatedStatus {
 pub enum ServerError {
     #[error("{0}")]
     Direct(crate::direct::DirectError),
-    #[error("The local server is not set up.")]
+    #[error("The server is not set up.")]
     NotSetUp,
-    #[error("The local server service is unavailable. Try again after signing in.")]
+    #[error("Server service unavailable. Sign in and try again.")]
     ServiceUnavailable,
-    #[error("Install the local server service first.")]
+    #[error("Install the server service first.")]
     NotInstalled,
     #[error("The local server was stopped. Use Start Server to start it again.")]
     Stopped,
-    #[error("The server changed since you were asked. Review and confirm again.")]
+    #[error("The server changed. Review and confirm again.")]
     Changed,
     #[error(
-        "The admitted server update could not be resolved. Finish Update to check its original outcome."
+        "SpaceTerm couldn't confirm whether the server update finished. Check the update in Server Settings."
     )]
     ActivationUnresolved,
-    #[error("Returning to the previous server runtime could not be proved safe.")]
+    #[error("SpaceTerm can't safely restore the previous server version.")]
     ReturnUnavailable,
-    #[error("This server package could not be verified for this application identity.")]
+    #[error("Couldn't verify this server package.")]
     RuntimeUnavailable,
     /// This build includes no server package to verify. Distinct from a package that failed
     /// verification.
-    #[error("This SpaceTerm build doesn\u{2019}t include a server package for your account.")]
+    #[error("This SpaceTerm build doesn't include a server package.")]
     CandidateMissing,
-    #[error("Administrator authorization is required to enable linger for this account.")]
+    #[error("Administrator authorization required.")]
     AuthorizationRequired,
-    #[error("The local server is not running.")]
+    #[error("The server is not running.")]
     NotRunning,
-    #[error("Local server storage is unavailable.")]
+    #[error("Server storage is unavailable.")]
     StorageUnavailable,
-    #[error(
-        "This server's saved state is from an incompatible SpaceTerm build. SpaceTerm left it unchanged."
-    )]
+    #[error("This server's saved state is from an incompatible SpaceTerm.")]
     IncompatibleState,
-    #[error("Local server storage has unsafe ownership or permissions.")]
+    #[error("Server storage has unsafe permissions.")]
     UnsafeStorage,
-    #[error(
-        "The connection did not pass the account and server identity checks, so SpaceTerm did not connect."
-    )]
+    #[error("SpaceTerm couldn't verify the server or account for this connection.")]
     AuthenticationRefused,
-    #[error("The client and server have no compatible protocol version.")]
+    #[error("SpaceTerm and this server are incompatible.")]
     IncompatibleProtocol,
-    #[error("This server lacks a required capability. Its Terminal Sessions are still running.")]
+    #[error("This server needs an update.")]
     MissingRequiredCapability,
     #[error(
-        "The server candidate changed after this client was built. Restart the client to use its installed candidate."
+        "SpaceTerm was updated or moved after it opened. Quit and reopen SpaceTerm to continue."
     )]
     CandidateChanged,
     #[error("The local server connection did not complete.")]
     Protocol,
-    #[error("The local server could not start. Reinstall SpaceTerm and try again.")]
+    #[error("Reinstall SpaceTerm and try again.")]
     StartupFailed,
     #[error("Another client controls this Pane.")]
     Controlled,
-    #[error("This Terminal Session is no longer available.")]
+    #[error("This Terminal Session is unavailable.")]
     SessionUnavailable,
     #[error("This connection no longer controls the Terminal Session.")]
     StaleControl,
-    #[error("This operation isn't supported here.")]
+    #[error("This operation isn't supported.")]
     Unsupported,
     #[error("Directory unavailable.")]
     DirectoryUnavailable,
-    #[error("Terminal cleanup could not be confirmed.")]
+    #[error("Couldn't confirm the Terminal Sessions ended.")]
     CleanupUnresolved,
-    #[error(
-        "The server is waiting for shared edit acknowledgements. Reconnect the other clients to continue."
-    )]
+    #[error("Waiting for other clients to reconnect.")]
     Capacity,
 }
 

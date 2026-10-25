@@ -275,7 +275,7 @@ impl InviteDevice {
             );
             focus = SheetAction::NewInvitation;
         }
-        let title = format!("Invite a Device to {}", self.server);
+        let title = format!("Invite Device to {}", self.server);
         let dialog = Dialog::new(
             ModalId::new(MODAL_ID),
             title.clone(),
@@ -283,7 +283,7 @@ impl InviteDevice {
             actions,
             DialogInitialFocus::Action(focus),
         )
-        .description("Scan the code with a phone, or send the link to another computer.")
+        .description("Scan the code or send the link.")
         .size(DialogSize::Regular)
         .body(cx.entity());
         let renewing = cx.entity();
@@ -353,11 +353,7 @@ impl InviteDevice {
             ],
             DialogInitialFocus::Action(Answer::Allow),
         )
-        .description(format!(
-            "It gets full access to \u{201C}{}\u{201D}, including its Workspaces and Terminal \
-             Sessions.",
-            self.server
-        ))
+        .description(format!("It gets full access to \"{}\".", self.server))
         .size(DialogSize::Compact)
         .body(cx.entity());
         let answering = cx.entity();
@@ -756,7 +752,7 @@ impl Render for InviteDevice {
                     .size(ButtonSize::Regular)
                     .tab_stop(true)
                     .debug_selector(COPY_SELECTOR)
-                    .accessibility_description("Copy the invitation link")
+                    .accessibility_description("Copy invitation link")
                     .on_activate(move |_, _, cx| {
                         let _ = owner.update(cx, |body, cx| body.copy(cx));
                     });
@@ -767,12 +763,12 @@ impl Render for InviteDevice {
                         // The code is named and never described, so assistive technology keeps no
                         // copy of the link it carries.
                         .role(accesskit::Role::Image)
-                        .aria_label("QR code of the invitation link")
+                        .aria_label("Invitation link QR code")
                         .child(qr_tile(qr_code(Rc::clone(code)).into_any_element()))
                         .into_any_element(),
                     None => secondary(
                         "invite-device-no-qr",
-                        "This link is too long for a QR code. Copy it instead.".into(),
+                        "Link too long for a QR code. Copy it.".into(),
                     )
                     .into_any_element(),
                 };
@@ -782,7 +778,7 @@ impl Render for InviteDevice {
                     // The link is shown to read and Copy, and never published as accessible text,
                     // so assistive technology and its recordings keep no copy of it.
                     .role(accesskit::Role::Group)
-                    .aria_label("Invitation link, available to Copy")
+                    .aria_label("Invitation link")
                     .flex_1()
                     .min_w_0()
                     .px(appearance.spacing(8.0))
@@ -834,7 +830,7 @@ impl Render for InviteDevice {
                             )
                             .child(secondary(
                                 "invite-device-countdown",
-                                format!("Waiting \u{00B7} expires in {}", countdown(left)).into(),
+                                format!("Expires in {}", countdown(left)).into(),
                             )),
                     )
                     .into_any_element()
@@ -882,11 +878,7 @@ impl Render for InviteDevice {
                     ))
                     .child(emphasized(
                         "invite-device-allowed",
-                        format!(
-                            "\u{201C}{}\u{201D} can now connect to \u{201C}{}\u{201D}.",
-                            device.name, self.server
-                        )
-                        .into(),
+                        format!("\"{}\" can connect to \"{}\".", device.name, self.server).into(),
                     ))
                     .into_any_element(),
             )
@@ -903,7 +895,7 @@ impl Render for InviteDevice {
                     ))
                     .child(secondary(
                         "invite-device-declined-detail",
-                        "Create a new invitation to invite a device.".into(),
+                        "Create a new invitation.".into(),
                     ))
                     .into_any_element(),
             )
@@ -917,7 +909,7 @@ impl Render for InviteDevice {
                     .child(emphasized("invite-device-expired", "Expired".into()))
                     .child(secondary(
                         "invite-device-expired-detail",
-                        "This invitation can\u{2019}t be used any more.".into(),
+                        "Invitation unavailable.".into(),
                     ))
                     .into_any_element(),
             )
@@ -1233,7 +1225,7 @@ mod tests {
 
         let tree = A11yTree::read(cx);
 
-        assert!(tree.find("QR code of the invitation link").is_some());
+        assert!(tree.find("Invitation link QR code").is_some());
         assert!(!says(LINK, cx), "no published text carries the link");
     }
 

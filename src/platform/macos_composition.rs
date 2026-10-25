@@ -80,7 +80,7 @@ fn desktop_profile(
                 system_directory_selection: "Choose in Finder…",
                 read_only_update: (
                     "Move SpaceTerm to Applications",
-                    "Install SpaceTerm in Applications before updating it.",
+                    "Install SpaceTerm in Applications to update.",
                 ),
             },
             Rc::new(super::macos_shortcut_glyphs::MacosShortcutFormatter),

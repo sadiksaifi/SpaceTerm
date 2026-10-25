@@ -894,10 +894,7 @@ fn stopping_asks_once_before_it_sends_anything(cx: &mut TestAppContext) {
         ))],
         "describing a change sends no operation"
     );
-    assert!(explains(
-        "Stop the penguin server and end all of its Terminal Sessions?",
-        servers.cx
-    ));
+    assert!(explains("Stop the penguin server?", servers.cx));
 
     click_modal("settings-ssh-server-stop-confirm", servers.cx);
 
@@ -1010,8 +1007,11 @@ fn updating_names_both_versions_and_asks_once(cx: &mut TestAppContext) {
 
     assert!(alert_open("settings-ssh-server-update-confirm", servers.cx));
     assert!(explains(
-        "Update the penguin server to version 1.5.0 (commit bbbbbbb) and end all of its Terminal \
-         Sessions?",
+        "Update the penguin server to 1.5.0 (commit bbbbbbb)?",
+        servers.cx
+    ));
+    assert!(explains(
+        "All Terminal Sessions on it end for every client.",
         servers.cx
     ));
 
@@ -1024,10 +1024,7 @@ fn updating_names_both_versions_and_asks_once(cx: &mut TestAppContext) {
             Call::Confirm(RemoteOperationHandle(1)),
         ]
     );
-    assert!(explains(
-        "now runs version 1.5.0 (commit bbbbbbb)",
-        servers.cx
-    ));
+    assert!(explains("now runs 1.5.0 (bbbbbbb)", servers.cx));
 }
 
 /// A validated result stays until the person acknowledges it, which is an ordinary dismissal.
@@ -1078,7 +1075,7 @@ fn an_unconfirmed_operation_is_resolved_and_never_repeated(cx: &mut TestAppConte
 
     assert!(status_reads("Unconfirmed", servers.cx));
     assert!(explains(
-        "didn\u{2019}t hear whether penguin stopped its server",
+        "SpaceTerm couldn't confirm whether penguin stopped its server. Choose Check Again to check.",
         servers.cx
     ));
 
@@ -1160,8 +1157,7 @@ fn assistive_technology_hears_the_machine_each_step_acts_on(cx: &mut TestAppCont
     );
     assert_eq!(
         tree.node("Update\u{2026}")["aria"]["description"],
-        "Transfers the verified server version SpaceTerm includes to penguin, then asks before it \
-         replaces the approved one."
+        "Prepares the server update on penguin, then asks you to confirm."
     );
 }
 
@@ -1225,7 +1221,7 @@ fn a_removed_connection_keeps_what_spaceterm_still_has_to_say(cx: &mut TestAppCo
 
     assert!(rendered(REMOVED_NOTICE, servers.cx));
     assert!(explains(
-        "didn\u{2019}t hear whether penguin stopped its server",
+        "SpaceTerm couldn't confirm whether penguin stopped its server. Choose Check Again to check.",
         servers.cx
     ));
     assert!(explains("Nothing here reconnects", servers.cx));
@@ -1340,7 +1336,10 @@ fn discarding_an_operation_asks_before_it_retires_the_record(cx: &mut TestAppCon
         "Discard the stop SpaceTerm sent to penguin?",
         servers.cx
     ));
-    assert!(explains("what the stop did on penguin", servers.cx));
+    assert!(explains(
+        "SpaceTerm will stop checking this stop. You will lose the only remaining way to confirm its result on penguin.",
+        servers.cx
+    ));
 
     click_modal("settings-ssh-server-discard-cancel", servers.cx);
 
@@ -1570,21 +1569,11 @@ fn a_result_this_client_cannot_save_says_what_ok_leaves_behind(cx: &mut TestAppC
         "the section says what it couldn\u{2019}t save before the person clicks anything"
     );
     assert!(
-        announces(
-            "couldn\u{2019}t save what it knows about the operations",
-            servers.cx
-        ),
+        announces("SpaceTerm couldn't save these results.", servers.cx),
         "the notice names what SpaceTerm couldn\u{2019}t save"
     );
     assert!(
-        announces(
-            "Choosing OK or Discard leaves the operation listed.",
-            servers.cx
-        ),
-        "the notice says the step the person is about to take doesn\u{2019}t clear it"
-    );
-    assert!(
-        announces("gone after SpaceTerm quits", servers.cx),
+        announces("They're lost when SpaceTerm quits.", servers.cx),
         "the notice says the result on screen doesn\u{2019}t survive quitting"
     );
     assert!(
@@ -1620,8 +1609,8 @@ fn a_discard_this_client_cannot_save_says_the_original_stays(cx: &mut TestAppCon
     servers.cx.run_until_parked();
 
     assert!(
-        announces("is damaged, so it left the record unchanged", servers.cx),
-        "a damaged record says that SpaceTerm left it as it was"
+        announces("SpaceTerm's saved results are damaged.", servers.cx),
+        "the notice identifies the damaged saved results"
     );
 
     click(STATUS_DISCARD, servers.cx);
@@ -1638,7 +1627,7 @@ fn a_discard_this_client_cannot_save_says_the_original_stays(cx: &mut TestAppCon
         "the original SpaceTerm couldn\u{2019}t stop following stays"
     );
     assert!(announces(
-        "Choosing OK or Discard leaves the operation listed.",
+        "SpaceTerm's saved results are damaged. They're lost when SpaceTerm quits.",
         servers.cx
     ));
 }
@@ -1672,14 +1661,9 @@ fn a_removed_connections_unknown_original_ends_with_a_word(cx: &mut TestAppConte
         "the entry says where it ends instead of disappearing without a word"
     );
     assert!(explains(
-        "penguin has no record of the operation SpaceTerm sent.",
+        "SpaceTerm couldn't confirm the last change to penguin.",
         servers.cx
     ));
-    assert!(explains(
-        "may never have arrived, or that server may have dropped it",
-        servers.cx
-    ));
-    assert!(explains("has stopped following it", servers.cx));
     for absent in [
         "settings-ssh-server-service-again-penguin",
         "settings-ssh-server-maintenance-discard-penguin",
@@ -1735,19 +1719,15 @@ fn a_second_original_on_one_machine_is_named_and_settled_in_turn(cx: &mut TestAp
         "the row reports the original the person's last step produced"
     );
     assert!(explains(
-        "didn\u{2019}t hear whether penguin stopped its server",
+        "SpaceTerm couldn't confirm whether penguin stopped its server. Choose Check Again to check.",
         servers.cx
     ));
     assert!(
         explains(
-            "You asked for one more operation on penguin: the restart.",
+            "Another requested action on penguin is waiting: the restart.",
             servers.cx
         ),
         "the row must name the original it has still to report"
-    );
-    assert!(
-        explains("reports that one here once this one is settled", servers.cx),
-        "the row must say the named original gets its turn"
     );
 
     // Discard settles the original the row reports, and asks about that one alone.
@@ -1769,13 +1749,16 @@ fn a_second_original_on_one_machine_is_named_and_settled_in_turn(cx: &mut TestAp
     );
     assert!(
         explains(
-            "can\u{2019}t ask it about the restart it already sent",
+            "SpaceTerm can't check the result of the earlier restart.",
             servers.cx
         ),
         "the original that was waiting takes the settled one's place in the row"
     );
     assert!(
-        !explains("one more operation on penguin", servers.cx),
+        !explains(
+            "Another requested action on penguin is waiting:",
+            servers.cx
+        ),
         "nothing is left waiting once the machine holds one original"
     );
 }
@@ -1803,12 +1786,12 @@ fn a_removed_connection_with_two_originals_is_listed_once(cx: &mut TestAppContex
 
     assert!(rendered(REMOVED_NOTICE, servers.cx));
     assert!(explains(
-        "can\u{2019}t ask it about the stop it already sent",
+        "SpaceTerm can't check the result of the earlier stop.",
         servers.cx
     ));
     assert!(
         explains(
-            "You asked for one more operation on penguin: the removal.",
+            "Another requested action on penguin is waiting: the removal.",
             servers.cx
         ),
         "the entry must name the original it has still to report"
@@ -1834,13 +1817,16 @@ fn a_removed_connection_with_two_originals_is_listed_once(cx: &mut TestAppContex
     );
     assert!(
         explains(
-            "didn\u{2019}t hear whether penguin removed its service",
+            "SpaceTerm couldn't confirm whether penguin removed its service. Choose Check Again to check.",
             servers.cx
         ),
         "the original that was waiting takes the settled one's place"
     );
     assert!(
-        !explains("one more operation on penguin", servers.cx),
+        !explains(
+            "Another requested action on penguin is waiting:",
+            servers.cx
+        ),
         "nothing is left waiting once the entry holds one original"
     );
 }
@@ -1877,7 +1863,7 @@ fn discarding_the_update_row_retires_only_its_original(cx: &mut TestAppContext) 
     );
     assert!(!rendered(VERSION_DISCARD, servers.cx));
     assert!(explains(
-        "can\u{2019}t ask it about the stop it already sent",
+        "SpaceTerm can't check the result of the earlier stop.",
         servers.cx
     ));
 }

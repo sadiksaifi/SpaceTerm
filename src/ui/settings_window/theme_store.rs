@@ -208,7 +208,7 @@ impl ThemeStore {
                         count => format!("Installed {count} themes from {}.", extension.name),
                     }),
                     Ok(Err(error)) => SharedString::from(import_failure_message(error)),
-                    Err(_) => SharedString::from("Those themes could not be installed."),
+                    Err(_) => SharedString::from("Couldn't install themes."),
                 }
             }
         };
@@ -243,7 +243,7 @@ impl ThemeStore {
         self.status = Some(match removed {
             Ok(Some(1)) => format!("Removed 1 theme from {}.", extension.name).into(),
             Ok(Some(count)) => format!("Removed {count} themes from {}.", extension.name).into(),
-            _ => SharedString::from("Those themes could not be removed."),
+            _ => SharedString::from("Couldn't remove themes."),
         });
         cx.notify();
     }
@@ -293,7 +293,7 @@ impl ThemeStore {
                 .update(cx, |settings, cx| {
                     import_family(&bytes, |source| settings.editor.import(source, cx))
                 })
-                .unwrap_or_else(|_| SharedString::from("Those themes could not be installed.")),
+                .unwrap_or_else(|_| SharedString::from("Couldn't install themes.")),
             Err(error) => SharedString::from(error.message()),
         };
         self.status = Some(message);
@@ -346,8 +346,7 @@ impl ThemeStore {
             _ if self.registry.is_none() => placeholder()
                 .child(secondary(
                     "settings-theme-store-unavailable",
-                    "The Zed extension registry is unavailable. You can still import a theme file."
-                        .into(),
+                    "Zed extension registry unavailable. Import a theme file.".into(),
                 ))
                 .into_any_element(),
             Listing::NotRequested | Listing::Loading => placeholder()
@@ -420,7 +419,7 @@ impl ThemeStore {
                             div().pt(appearance.spacing(10.0)).child(secondary(
                                 "settings-theme-store-truncated",
                                 format!(
-                                    "Showing {count} of {total} extensions. Search to find others."
+                                    "Showing {count} of {total} extensions. Search for others."
                                 )
                                 .into(),
                             )),
@@ -502,10 +501,7 @@ impl SettingsWindow {
             ],
             DialogInitialFocus::Body(focus),
         )
-        .description(
-            "Themes from the Zed extension registry. Installed themes appear in your list, ready \
-             to choose.",
-        )
+        .description("Install a Zed Theme, then select it in Themes.")
         .size(DialogSize::Wide)
         .body(store);
         let presented = dialog.present(window, cx, |_, _, _| DialogCloseDecision::Allow, |_, _| {});
@@ -691,15 +687,13 @@ fn download_count(downloads: u64) -> String {
 /// Content-free wording for one registry failure.
 fn registry_failure_message(error: RegistryError) -> &'static str {
     match error {
-        RegistryError::Unreachable => {
-            "SpaceTerm could not reach the Zed extension registry. Check your connection and try again."
-        }
-        RegistryError::Refused => "The Zed extension registry refused the request.",
-        RegistryError::TooLarge => "That download is larger than SpaceTerm accepts.",
+        RegistryError::Unreachable => "Check your connection and try again.",
+        RegistryError::Refused => "Zed extension registry refused the request.",
+        RegistryError::TooLarge => "Download too large.",
         RegistryError::InvalidResponse | RegistryError::InvalidArchive => {
-            "The Zed extension registry sent something SpaceTerm could not read."
+            "Unreadable Zed extension registry response."
         }
-        RegistryError::NoThemes => "That extension contains no themes SpaceTerm can use.",
+        RegistryError::NoThemes => "No usable themes in this extension.",
     }
 }
 
@@ -716,18 +710,18 @@ fn import_family<'a>(
 fn import_failure_message(error: SettingsError) -> &'static str {
     match error {
         SettingsError::Catalog(CatalogError::TooManyThemes) => {
-            "There is no room for those themes. Remove some installed themes and try again."
+            "Remove installed themes and try again."
         }
-        SettingsError::Busy => "Settings are busy. Try again when saving finishes.",
+        SettingsError::Busy => "Try again when saving finishes.",
         SettingsError::Stale | SettingsError::Catalog(CatalogError::RevisionConflict) => {
-            "Settings changed before the install finished. Try again."
+            "Settings changed. Try again."
         }
-        SettingsError::Import(ImportError::TooLarge) => "That theme file is too large.",
+        SettingsError::Import(ImportError::TooLarge) => "Theme file too large.",
         SettingsError::Import(ImportError::InvalidThemeCount) => {
-            "That source contains no themes SpaceTerm can use, or too many."
+            "That file has no usable themes, or too many."
         }
-        SettingsError::Import(_) => "That is not a Zed theme file SpaceTerm can read.",
-        _ => "Those themes could not be installed.",
+        SettingsError::Import(_) => "Unreadable Zed theme file.",
+        _ => "Couldn't install themes.",
     }
 }
 
@@ -823,10 +817,7 @@ mod tests {
             })
         };
 
-        assert_eq!(
-            install(invalid).as_ref(),
-            "That is not a Zed theme file SpaceTerm can read."
-        );
+        assert_eq!(install(invalid).as_ref(), "Unreadable Zed theme file.");
         assert!(settings.snapshot().candidate.terminal_themes.is_empty());
 
         assert_eq!(install(corrected), installed_message(2));
@@ -841,17 +832,14 @@ mod tests {
     #[test]
     fn install_failures_have_content_free_messages() {
         for (error, expected) in [
-            (
-                SettingsError::Busy,
-                "Settings are busy. Try again when saving finishes.",
-            ),
+            (SettingsError::Busy, "Try again when saving finishes."),
             (
                 SettingsError::Catalog(CatalogError::TooManyThemes),
-                "There is no room for those themes. Remove some installed themes and try again.",
+                "Remove installed themes and try again.",
             ),
             (
                 SettingsError::Import(ImportError::InvalidThemeCount),
-                "That source contains no themes SpaceTerm can use, or too many.",
+                "That file has no usable themes, or too many.",
             ),
         ] {
             let mut attempts = 0;

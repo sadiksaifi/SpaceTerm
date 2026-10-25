@@ -64,25 +64,21 @@ impl SettingsSectionId {
         desktop: &crate::desktop_profile::DesktopPresentation,
     ) -> &'static str {
         match self {
-            Self::Interface => "Density, opacity, blur, and the sidebar for SpaceTerm's windows.",
-            Self::Font => "The typeface and text rendering in terminal panes.",
-            Self::Themes => {
-                "Light, dark, or automatic appearance, and the colors terminal panes use in each. Themes published for Zed work too."
-            }
+            Self::Interface => "Density, opacity, blur, and sidebar.",
+            Self::Font => "Terminal typeface and text rendering.",
+            Self::Themes => "Choose an appearance and a Terminal Theme for each.",
             Self::Keybindings => {
-                "Shortcuts for SpaceTerm commands. Click a shortcut, then press the new keys. Press Delete to remove it."
+                "Click a Shortcut and press its new keys, or press Delete to remove it."
             }
             Self::Privacy
                 if desktop.has_feature(crate::desktop_profile::HostFeature::SystemPermissions) =>
             {
-                "Clipboard access and system permissions for programs running in SpaceTerm."
+                "Clipboard access and system permissions."
             }
-            Self::Privacy => "Clipboard access for programs running in SpaceTerm.",
+            Self::Privacy => "Clipboard access.",
             Self::Git => "Repository Status, Pull Requests, and Worktrees.",
-            Self::Servers => "Servers run your Workspaces and their Terminal Sessions.",
-            Self::Updates => {
-                "SpaceTerm keeps itself current in the background and asks before it restarts."
-            }
+            Self::Servers => "Servers run Workspaces and Terminal Sessions.",
+            Self::Updates => "SpaceTerm updates in the background.",
             Self::Advanced => {
                 "Every setting at once: edit them as JSON, export or import them, or start over."
             }
@@ -269,7 +265,7 @@ impl SettingsRowDescriptor {
     pub(super) fn label(&self, naming: AccessibilityNaming) -> &'static str {
         match (self.id, naming) {
             (SettingsRowId::AccessibilityAccess, AccessibilityNaming::Accessibility) => {
-                "Accessibility access"
+                "Accessibility"
             }
             _ => self.label,
         }
@@ -530,7 +526,7 @@ const PREFERENCE_ROWS: &[SettingsRowDescriptor] = &[
         id: SettingsRowId::ScreenRecordingAccess,
         section: SettingsSectionId::Privacy,
         group: "Permissions",
-        label: "Screen recording access",
+        label: "Screen recording",
         keywords: &[
             "computer use",
             "screenshot",
@@ -552,7 +548,7 @@ const PREFERENCE_ROWS: &[SettingsRowDescriptor] = &[
         id: SettingsRowId::AccessibilityAccess,
         section: SettingsSectionId::Privacy,
         group: "Permissions",
-        label: "Device control access",
+        label: "Device control",
         keywords: &[
             "accessibility",
             "computer use",
@@ -577,7 +573,7 @@ const PREFERENCE_ROWS: &[SettingsRowDescriptor] = &[
         id: SettingsRowId::ClipboardWrites,
         section: SettingsSectionId::Privacy,
         group: "Clipboard",
-        label: "Allow terminal programs to copy text",
+        label: "Let terminal programs copy text",
         keywords: &[
             "clipboard",
             "copy",
@@ -593,7 +589,7 @@ const PREFERENCE_ROWS: &[SettingsRowDescriptor] = &[
         id: SettingsRowId::ClipboardReads,
         section: SettingsSectionId::Privacy,
         group: "Clipboard",
-        label: "Allow terminal programs to read clipboard text",
+        label: "Let terminal programs read clipboard text",
         keywords: &[
             "clipboard",
             "copy",
@@ -721,7 +717,7 @@ const PREFERENCE_ROWS: &[SettingsRowDescriptor] = &[
         id: SettingsRowId::NetworkAccess,
         section: SettingsSectionId::Servers,
         group: super::server_list::NETWORK_GROUP,
-        label: "Allow other devices to connect",
+        label: "Network access",
         keywords: &[
             "network",
             "network access",
@@ -880,7 +876,7 @@ const PREFERENCE_ROWS: &[SettingsRowDescriptor] = &[
         id: SettingsRowId::UpdateReminderInterval,
         section: SettingsSectionId::Updates,
         group: "Automatic updates",
-        label: "Remind me about overdue updates",
+        label: "Overdue update reminders",
         keywords: &[
             "reminder",
             "remind",
@@ -1046,13 +1042,13 @@ mod tests {
         let desktop = crate::desktop_profile::testing_presentation();
         assert_eq!(
             SettingsSectionId::Privacy.description(&desktop),
-            "Clipboard access and system permissions for programs running in SpaceTerm."
+            "Clipboard access and system permissions."
         );
         let desktop =
             desktop.without_features(&[crate::desktop_profile::HostFeature::SystemPermissions]);
         assert_eq!(
             SettingsSectionId::Privacy.description(&desktop),
-            "Clipboard access for programs running in SpaceTerm."
+            "Clipboard access."
         );
     }
 
@@ -1071,11 +1067,11 @@ mod tests {
         let row = SettingsRowId::AccessibilityAccess.descriptor();
         assert_eq!(
             row.label(AccessibilityNaming::Accessibility),
-            "Accessibility access"
+            "Accessibility"
         );
         assert_eq!(
             row.label(AccessibilityNaming::DeviceControl),
-            "Device control access"
+            "Device control"
         );
 
         let matched =

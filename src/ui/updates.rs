@@ -344,7 +344,7 @@ fn up_to_date_alert() -> Alert<PromptAction> {
         ModalId::new("update-up-to-date"),
         "SpaceTerm is up to date",
         "SpaceTerm Is Up to Date",
-        format!("Version {CURRENT_VERSION} is the latest release."),
+        "",
         vec![action(
             PromptAction::Acknowledge,
             "OK",
@@ -362,11 +362,8 @@ fn available_alert(version: &str) -> Alert<PromptAction> {
     Alert::new(
         ModalId::new("update-available"),
         "Update available",
-        format!("SpaceTerm {version} Is Available"),
-        format!(
-            "You have version {CURRENT_VERSION}. Download the update now. SpaceTerm asks before it \
-             restarts to install it."
-        ),
+        format!("SpaceTerm {version} Available"),
+        format!("You have version {CURRENT_VERSION}."),
         vec![
             action(
                 PromptAction::Download,
@@ -430,9 +427,9 @@ fn failure_alert(error: UpdateError, wording: DesktopWording) -> Alert<PromptAct
     let (title, retry, intent) = match error {
         UpdateError::Unavailable => ("Updates Unavailable", false, AlertIntent::Informational),
         UpdateError::Check => ("Couldn’t Check for Updates", true, AlertIntent::Warning),
-        UpdateError::Download => ("Couldn’t Download the Update", true, AlertIntent::Warning),
-        UpdateError::Verification => ("Couldn’t Verify the Update", true, AlertIntent::Warning),
-        UpdateError::Installation => ("Couldn’t Install the Update", true, AlertIntent::Warning),
+        UpdateError::Download => ("Couldn't Download", true, AlertIntent::Warning),
+        UpdateError::Verification => ("Couldn't Verify", true, AlertIntent::Warning),
+        UpdateError::Installation => ("Couldn't Install", true, AlertIntent::Warning),
         UpdateError::ReadOnly => (wording.read_only_update.0, false, AlertIntent::Warning),
     };
     let mut actions = Vec::with_capacity(2);
@@ -474,7 +471,7 @@ fn stop_download_alert(version: &str) -> Alert<PromptAction> {
         ModalId::new("update-stop-download"),
         "Stop update download",
         format!("Stop Downloading SpaceTerm {version}?"),
-        "You can download it again later with Check for Updates in the SpaceTerm menu.",
+        "You can download it again later.",
         vec![
             action(
                 PromptAction::StopDownload,
@@ -508,8 +505,7 @@ fn install_alert(version: &str) -> Alert<PromptAction> {
         ModalId::new("update-install"),
         "Install update",
         format!("Restart to Install SpaceTerm {version}?"),
-        "SpaceTerm quits, installs the update, and opens again. If commands are still running, \
-         SpaceTerm asks before it quits.",
+        "",
         vec![
             action(
                 PromptAction::Restart,
@@ -571,8 +567,8 @@ fn finish_install_alert(version: &str) -> Alert<PromptAction> {
     Alert::new(
         ModalId::new("update-finish-install"),
         "Finish installing update",
-        format!("Restart to Finish Installing SpaceTerm {version}?"),
-        "SpaceTerm installs the update when it quits.",
+        format!("Restart to Install SpaceTerm {version}?"),
+        "The update installs when SpaceTerm quits.",
         vec![
             action(
                 PromptAction::Restart,
@@ -646,6 +642,7 @@ enum ControlCommand {
 struct ControlPresentation {
     /// Progress or a problem, shown as a status row above the command.
     status: Option<SharedString>,
+    overdue_failure: Option<SharedString>,
     /// The command row's title, or the state itself while no command applies.
     label: SharedString,
     /// The pill's compact step and version.
@@ -674,6 +671,31 @@ impl ControlPresentation {
                        command| {
             Self {
                 status: status.map(SharedString::from),
+                overdue_failure: match state {
+                    UpdateState::Failed { error } => Some(
+                        match error {
+                            UpdateError::ReadOnly if wording.operating_system_name == "macOS" => {
+                                "Update overdue. Install SpaceTerm in Applications to update."
+                            }
+                            UpdateError::ReadOnly => {
+                                "Update overdue. Reinstall with the install script."
+                            }
+                            UpdateError::Check => "Update overdue. Couldn't check for updates.",
+                            UpdateError::Download => "Update overdue. Download failed. Try again.",
+                            UpdateError::Installation => {
+                                "Update overdue. Install failed. Try again."
+                            }
+                            UpdateError::Verification => {
+                                "Update overdue. Couldn't verify the update."
+                            }
+                            UpdateError::Unavailable => {
+                                "Update overdue. Use the installed release to update."
+                            }
+                        }
+                        .into(),
+                    ),
+                    _ => None,
+                },
                 label: label.into(),
                 pill: format!("{step} {version}").into(),
                 glyph,
@@ -715,7 +737,7 @@ impl ControlPresentation {
                     "Retry",
                     version,
                     Some(failure_message(*error, wording)),
-                    format!("Try Downloading SpaceTerm {version} Again"),
+                    format!("Download SpaceTerm {version} Again"),
                     ControlGlyph::Warning,
                     false,
                     Some(ControlCommand::RetryDownload),
@@ -796,7 +818,7 @@ impl ControlPresentation {
                 "Installing",
                 version,
                 None,
-                format!("Restart to Finish Installing SpaceTerm {version}"),
+                format!("Restart to Install SpaceTerm {version}"),
                 ControlGlyph::Restart,
                 true,
                 Some(ControlCommand::RetryInstall),
@@ -821,9 +843,11 @@ impl ControlPresentation {
         self.prominent = !(failed && reminder == ControlReminder::Gentle);
         if reminder == ControlReminder::Overdue {
             self.glyph = ControlGlyph::Warning;
-            self.status = Some(match self.status {
-                Some(status) => format!("This update is overdue. {status}").into(),
-                None => "This update is overdue.".into(),
+            self.status = self.overdue_failure.clone().or_else(|| {
+                Some(match &self.status {
+                    Some(status) => format!("This update is overdue. {status}").into(),
+                    None => "This update is overdue.".into(),
+                })
             });
         }
         self.reminder = Some(reminder);
@@ -913,7 +937,7 @@ impl UpdatePill {
                 Some(ServerNeed::Attention) => "Server Needs Attention".into(),
                 _ => "Update Server".into(),
             },
-            Self::Servers { count, .. } => format!("Update {count} Servers").into(),
+            Self::Servers { count, .. } => format!("Review {count} Servers").into(),
         }
     }
 
@@ -924,11 +948,8 @@ impl UpdatePill {
                 let step = step.status.clone().unwrap_or_else(|| step.label.clone());
                 match servers {
                     0 => step,
-                    1 => format!("{step}. A server also needs action in the Updates menu.").into(),
-                    count => {
-                        format!("{step}. {count} servers also need action in the Updates menu.")
-                            .into()
-                    }
+                    1 => format!("{step}. A server needs action in Updates.").into(),
+                    count => format!("{step}. {count} servers need action in Updates.").into(),
                 }
             }
             Self::Server { name, detail, .. } => format!("{name}: {detail}").into(),
@@ -1092,7 +1113,7 @@ mod tests {
             ),
             (
                 UpdateState::Installing { version: version() },
-                "Restart to Finish Installing SpaceTerm 0.4.2",
+                "Restart to Install SpaceTerm 0.4.2",
                 ControlGlyph::Restart,
                 true,
                 Some(ControlCommand::RetryInstall),
@@ -1116,7 +1137,7 @@ mod tests {
                 UpdateState::Failed {
                     error: UpdateError::Check,
                 },
-                "Try Downloading SpaceTerm 0.4.2 Again",
+                "Download SpaceTerm 0.4.2 Again",
                 ControlGlyph::Warning,
                 false,
                 Some(ControlCommand::RetryDownload),
@@ -1125,7 +1146,7 @@ mod tests {
                 UpdateState::Failed {
                     error: UpdateError::Installation,
                 },
-                "Try Downloading SpaceTerm 0.4.2 Again",
+                "Download SpaceTerm 0.4.2 Again",
                 ControlGlyph::Warning,
                 false,
                 Some(ControlCommand::RetryDownload),
@@ -1321,7 +1342,7 @@ mod tests {
         assert_eq!(
             pill(None, None, &both),
             Some((
-                "Update 2 Servers".to_owned(),
+                "Review 2 Servers".to_owned(),
                 PillTone::Primary,
                 None,
                 PillCommand::Menu
@@ -1725,5 +1746,41 @@ mod tests {
         for alert in alerts {
             assert_eq!(alert.validate(&policy), Ok(()));
         }
+    }
+
+    #[gpui::test]
+    fn restarting_to_install_shows_no_claim_about_ending_terminal_sessions(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use gpui::prelude::*;
+        use spaceterm_ui::a11y_testing::A11yTree;
+
+        struct InstallAlertHost;
+
+        impl Render for InstallAlertHost {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                spaceterm_ui::ModalLayer::new(gpui::div().size_full())
+            }
+        }
+
+        cx.update(crate::ui::init)
+            .expect("UI initialization should succeed");
+        let (host, cx) = cx.add_window_view(|_, _| InstallAlertHost);
+        let _handle = cx.update(|window, cx| {
+            host.update(cx, |_, cx| {
+                install_alert("0.4.2")
+                    .present(window, cx, |_, _| {})
+                    .expect("the install confirmation presents")
+            })
+        });
+        cx.run_until_parked();
+
+        let tree = A11yTree::read(cx);
+        tree.text("Restart to Install SpaceTerm 0.4.2?");
+        for action in ["Restart and Install", "Release Notes", "Later"] {
+            tree.node(action);
+        }
+        assert!(cx.debug_bounds("modal-alert-message").is_none());
+        assert!(cx.debug_bounds("modal-alert-detail").is_none());
     }
 }

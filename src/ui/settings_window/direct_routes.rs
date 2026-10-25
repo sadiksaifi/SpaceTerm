@@ -25,9 +25,7 @@ pub(super) const UNPAIR_SELF_CANCEL_SELECTOR: &str = "settings-direct-server-unp
 /// What a direct route says while SpaceTerm can't confirm its latest changes to direct
 /// connections are saved. The record covers every connection, so this speaks of recent changes
 /// rather than of any one connection.
-pub(super) const UNSAVED_CHANGES: &str = "SpaceTerm couldn\u{2019}t confirm its latest changes to \
-     direct connections are saved on this computer, so recent changes, such as a new pairing, may \
-     be missing after SpaceTerm reopens.";
+pub(super) const UNSAVED_CHANGES: &str = "SpaceTerm couldn't confirm it saved recent connection changes. They could be missing after you reopen SpaceTerm.";
 
 /// The direct network rows: the registry they present. Add Server owns joining a new server.
 pub(super) struct DirectRouteRows {
@@ -119,20 +117,17 @@ impl SettingsWindow {
         // only removes what remains here.
         let revoked = status == DirectRouteStatus::Refused(RefusalReason::Revoked);
         let title = if revoked {
-            format!("Remove the connection to \u{201C}{name}\u{201D}?")
+            format!("Remove Connection to \"{name}\"?")
         } else {
-            format!("Unpair this device from \u{201C}{name}\u{201D}?")
+            format!("Unpair This Device From \"{name}\"?")
         };
         let message = if revoked {
             format!(
-                "\u{201C}{name}\u{201D} already unpaired this device. SpaceTerm removes the \
-                 connection and this device\u{2019}s key for it from this computer."
+                "Remove the saved connection from this computer. To reconnect to {name}, request a new invitation."
             )
         } else {
             format!(
-                "SpaceTerm removes the connection to \u{201C}{name}\u{201D} from this computer \
-                 now and asks the server to revoke this device. Its Workspaces leave this window, \
-                 and their Terminal Sessions keep running on that computer."
+                "SpaceTerm removes this connection and its Workspaces from this window, then requests that {name} revoke access. Terminal Sessions keep running; reconnecting requires a new invitation."
             )
         };
         let confirm = if revoked { "Remove" } else { "Unpair" };
@@ -159,10 +154,6 @@ impl SettingsWindow {
             ],
         )
         .intent(AlertIntent::Critical)
-        .detail(
-            "To connect again, this device needs a new invitation from that server. SSH access \
-             and other servers aren\u{2019}t affected.",
-        )
         .present(window, cx, move |outcome, cx| {
             if !matches!(
                 outcome,

@@ -27,19 +27,17 @@ impl ChooseError {
         match self {
             Self::Read(ImportError::Unreadable) => "That file could not be read.",
             Self::Read(ImportError::TooLarge) | Self::Keep(BackgroundImageError::TooLarge) => {
-                "That image is larger than 32 MB."
+                "Image exceeds 32 MB."
             }
             Self::Keep(BackgroundImageError::UnsupportedFormat) => {
-                "That file is not a PNG, JPEG, HEIC, or WebP image that opens."
+                "Choose a readable PNG, JPEG, HEIC, or WebP image."
             }
-            Self::Keep(BackgroundImageError::TooManyPixels) => {
-                "That image has more than 64 megapixels."
-            }
+            Self::Keep(BackgroundImageError::TooManyPixels) => "Image exceeds 64 megapixels.",
             Self::Keep(
                 BackgroundImageError::Missing
                 | BackgroundImageError::Unsafe
                 | BackgroundImageError::Unavailable,
-            ) => "SpaceTerm could not keep a copy of that image.",
+            ) => "Couldn't copy image.",
         }
     }
 }
@@ -159,7 +157,7 @@ fn present_failure(error: ChooseError, window: &mut Window, cx: &mut Context<Set
     let _ = Alert::new(
         ModalId::new("settings-background-image-failed"),
         "Background image unavailable",
-        "Background Image Unavailable",
+        "Image Unavailable",
         error.message(),
         vec![ModalAction::new(
             (),

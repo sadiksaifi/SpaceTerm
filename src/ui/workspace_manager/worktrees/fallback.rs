@@ -104,7 +104,7 @@ impl WorkspaceManager {
             candidate.filter(|_| self.owner_writes_worktrees(workspace_id, cx))
         else {
             Self::worktree_fallback_failed(
-                "SpaceTerm cannot establish a usable Tab outside this Worktree. The server must list another available Worktree. Nothing was closed.",
+                "Open a Tab in another available Worktree before closing these Tabs.",
                 window,
                 cx,
             );
@@ -141,10 +141,13 @@ impl WorkspaceManager {
                 if let Some(owner) = manager.shared.owner(workspace_id) {
                     manager.sync_shared_workspaces(owner, window, cx);
                 }
-                manager.sidebar_worktrees.close_fallbacks.remove(&workspace_id);
+                manager
+                    .sidebar_worktrees
+                    .close_fallbacks
+                    .remove(&workspace_id);
                 let Ok(Ok(outcome)) = result else {
                     Self::worktree_fallback_failed(
-                        "The server could not establish a Tab outside this Worktree. Nothing was closed.",
+                        "SpaceTerm couldn't open a Tab outside this Worktree.",
                         window,
                         cx,
                     );
@@ -152,15 +155,22 @@ impl WorkspaceManager {
                 };
                 let Outcome::Accepted { target: accepted } = outcome.outcome else {
                     Self::worktree_fallback_failed(
-                        "The server could not establish a Tab outside this Worktree. Nothing was closed.",
+                        "SpaceTerm couldn't open a Tab outside this Worktree.",
                         window,
                         cx,
                     );
                     return;
                 };
-                let current = manager.shared.owning(workspace_id)
+                let current = manager
+                    .shared
+                    .owning(workspace_id)
                     .and_then(|shared| shared.latest_inventory())
-                    .and_then(|inventory| inventory.workspaces.iter().find(|entry| entry.id == workspace));
+                    .and_then(|inventory| {
+                        inventory
+                            .workspaces
+                            .iter()
+                            .find(|entry| entry.id == workspace)
+                    });
                 let usable = current.is_some_and(|current| {
                     current.tabs.iter().any(|entry| {
                         entry.id == accepted
@@ -171,23 +181,26 @@ impl WorkspaceManager {
                 });
                 if !usable {
                     Self::worktree_fallback_failed(
-                        "The server has not confirmed a usable Tab outside this Worktree. Nothing was closed.",
+                        "Wait for a Tab outside this Worktree to open, then try again.",
                         window,
                         cx,
                     );
                     return;
                 }
                 // A removed or reassigned anchor cannot turn this old request into a new close.
-                if current.is_some_and(|current| current.tabs.iter().any(|entry| {
-                    entry.id == tab
-                        && entry.worktree.as_ref() == Some(&path)
-                        && entry.worktree_repository == repository
-                })) {
+                if current.is_some_and(|current| {
+                    current.tabs.iter().any(|entry| {
+                        entry.id == tab
+                            && entry.worktree.as_ref() == Some(&path)
+                            && entry.worktree_repository == repository
+                    })
+                }) {
                     // Capture current exact targets and fresh consent through the original path.
                     manager.request_shared_close(target, window, cx);
                 }
             });
-        }).detach();
+        })
+        .detach();
         true
     }
 

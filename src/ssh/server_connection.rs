@@ -123,7 +123,6 @@ pub(crate) enum RemoteConnectionStatus {
         platform: (String, String),
     },
     Connected {
-        protocol_major: u16,
         facts: SshServerFacts,
     },
     /// An inactive connection's latest Check Status found the server reachable. Nothing
@@ -217,7 +216,6 @@ pub(crate) struct ConnectedSshServer {
     pub server: LocalServer,
     pub continuity: SshServerContinuity,
     pub lease: Arc<dyn SshServerLease>,
-    pub protocol_major: u16,
     pub facts: SshServerFacts,
 }
 pub(crate) trait SshInstallation: Send + Sync {
@@ -1019,7 +1017,6 @@ fn run_worker(
                 entry.presented = Some(connected.server.clone());
                 entry.last_facts = Some(connected.facts.clone());
                 entry.status = RemoteConnectionStatus::Connected {
-                    protocol_major: connected.protocol_major,
                     facts: connected.facts.clone(),
                 };
                 let _ = owner
@@ -1380,7 +1377,6 @@ mod tests {
             server: LocalServer::for_identity("spaceterm-development").unwrap(),
             continuity: pin(),
             lease: Arc::new(Lease),
-            protocol_major: 1,
             facts: facts(),
         }
     }

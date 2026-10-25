@@ -235,11 +235,11 @@ fn assignable(keystroke: &Keystroke, cx: &App) -> Result<Shortcut, SharedString>
 
 fn rejection_message(rejection: ShortcutRejection) -> SharedString {
     match rejection {
-        ShortcutRejection::FunctionModifier => "Shortcuts can't use the Fn key.".into(),
+        ShortcutRejection::FunctionModifier => "Fn shortcuts unavailable.".into(),
         ShortcutRejection::Malformed
         | ShortcutRejection::Chord
         | ShortcutRejection::ModifierOnly
-        | ShortcutRejection::UnsupportedKey => "SpaceTerm can't use this key in a shortcut.".into(),
+        | ShortcutRejection::UnsupportedKey => "Can't use this key in a shortcut.".into(),
     }
 }
 
@@ -252,13 +252,17 @@ fn reservation_message(
     match reservation {
         Reservation::Terminal(TerminalConvention::TextInput) => {
             let primary = presentation.format_modifiers(shortcut_modifiers);
-            format!("{chord} is sent to the terminal. Add {primary} to use it as a shortcut.")
+            if chord == "This shortcut" {
+                format!("Add {primary} to use this shortcut.")
+            } else {
+                format!("Add {primary} to use {chord} as a shortcut.")
+            }
         }
         Reservation::Terminal(
             TerminalConvention::ControlCharacter
             | TerminalConvention::Meta
             | TerminalConvention::ControlNavigation,
-        ) => format!("{chord} is reserved for programs running in the terminal."),
+        ) => format!("{chord} is reserved for terminal programs."),
         Reservation::System(reason) => format!(
             "{chord} is {}.",
             system_reservation_text(reason, presentation)
@@ -267,26 +271,12 @@ fn reservation_message(
     .into()
 }
 
-/// Who reserves a System Reserved Shortcut, and for what: "reserved by <owner> for <feature>".
+/// What a System Reserved Shortcut is reserved for.
 fn system_reservation_text(
     reason: SystemReservation,
-    presentation: &DesktopPresentation,
+    _presentation: &DesktopPresentation,
 ) -> String {
-    let owner = match reason {
-        // SpaceTerm's own Command Palette keeps its standard Shortcut on every desktop.
-        SystemReservation::CommandPalette => {
-            crate::application_identity::ApplicationIdentity::current().display_name()
-        }
-        #[cfg(feature = "developer-tools")]
-        SystemReservation::DeveloperWorkbench | SystemReservation::AppearancePreview => {
-            crate::application_identity::ApplicationIdentity::current().display_name()
-        }
-        _ => presentation.wording().operating_system_name,
-    };
-    format!(
-        "reserved by {owner} for {}",
-        system_reservation_label(reason)
-    )
+    format!("reserved for {}", system_reservation_label(reason))
 }
 
 /// The standard command or system feature a System Reserved Shortcut belongs to.
@@ -549,7 +539,7 @@ impl SettingsWindow {
                 CaptionTone::Warning,
             ),
             Some((owner, ShortcutNotice::Reassigned { from })) if *from == command => (
-                format!("Its shortcut is now assigned to {}.", owner.label()).into(),
+                format!("Shortcut assigned to {}.", owner.label()).into(),
                 CaptionTone::Warning,
             ),
             _ => match (resolved.state(command), resolved.inactive_override(command)) {
@@ -574,30 +564,29 @@ impl SettingsWindow {
                     };
                     // Keep the inactive override's reason when another Command owns the default.
                     let (outcome, tone) = match state {
-                        KeybindingState::Default => (
-                            ", so the default shortcut is active".to_owned(),
-                            CaptionTone::Warning,
-                        ),
+                        KeybindingState::Default => {
+                            (". Default shortcut active".to_owned(), CaptionTone::Warning)
+                        }
                         KeybindingState::Displaced { by } => (
-                            format!(". Its default shortcut is assigned to {}", by.label()),
+                            format!(". Default shortcut assigned to {}", by.label()),
                             CaptionTone::Warning,
                         ),
-                        _ => (" and isn't active".to_owned(), CaptionTone::Error),
+                        _ => ("".to_owned(), CaptionTone::Error),
                     };
-                    (format!("{chord} is {reason} here{outcome}.").into(), tone)
+                    (format!("{chord} is {reason}{outcome}.").into(), tone)
                 }
                 (KeybindingState::Displaced { by }, _) => (
-                    format!("Its default shortcut is assigned to {}.", by.label()).into(),
+                    format!("Default shortcut assigned to {}.", by.label()).into(),
                     CaptionTone::Warning,
                 ),
                 // Only a default can be blocked: a Reserved override is inactive instead.
                 (KeybindingState::TerminalBlocked(_), _) => (
-                    "Its default shortcut is reserved for terminal input and isn't active.".into(),
+                    "Default shortcut reserved for terminal input.".into(),
                     CaptionTone::Error,
                 ),
                 (KeybindingState::Blocked(reason), _) => (
                     format!(
-                        "Its default shortcut is {} and isn't active.",
+                        "Default shortcut {}.",
                         system_reservation_text(reason, presentation)
                     )
                     .into(),

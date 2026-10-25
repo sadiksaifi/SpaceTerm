@@ -167,41 +167,41 @@ pub struct RevocationReceipt {
 /// Bounded classifications only. No endpoints, invitations, credentials or native errors.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize, thiserror::Error)]
 pub enum DirectError {
-    #[error("The direct connection did not complete.")]
+    #[error("The connection did not complete.")]
     Transport,
-    #[error("Direct connection storage is unavailable.")]
+    #[error("Connection storage is unavailable.")]
     StorageUnavailable,
-    #[error("This connection's native device credential is unavailable.")]
+    #[error("This connection's device credential is unavailable.")]
     CredentialUnavailable,
-    #[error("Resume this connection to authorize native credential access.")]
+    #[error("Resume this connection to authorize credential access.")]
     InteractionRequired,
-    #[error("This invitation is invalid or has already been used.")]
+    #[error("This invitation is invalid or used.")]
     InvalidInvitation,
-    #[error("This invitation or device claim has expired.")]
+    #[error("This invitation or claim has expired.")]
     Expired,
-    #[error("The server owner rejected this device claim.")]
+    #[error("The server owner rejected this claim.")]
     Rejected,
-    #[error("The device claim changed. Review the current claim before approving it.")]
+    #[error("The claim changed. Review it before approving.")]
     ChangedClaim,
-    #[error("The server or device proof did not match this connection.")]
+    #[error("The server or device did not match this connection.")]
     AuthenticationRefused,
-    #[error("The server no longer matches this connection's retained trust pin.")]
+    #[error("The server no longer matches this connection.")]
     PinMismatch,
     #[error("This device has been unpaired.")]
     Revoked,
     #[error("The client and server have no compatible protocol version.")]
     IncompatibleProtocol,
-    #[error("Direct connections have reached their bounded capacity.")]
+    #[error("Direct connections have reached capacity.")]
     Capacity,
-    #[error("Enable direct network access explicitly before inviting a device.")]
+    #[error("Enable direct network access before inviting a device.")]
     Disabled,
-    #[error("This direct connection request is invalid.")]
+    #[error("This connection request is invalid.")]
     InvalidRequest,
-    #[error("Enter a concrete IP address and a nonzero TCP port.")]
+    #[error("Enter an IP address and a nonzero TCP port.")]
     InvalidAddress,
-    #[error("This device claim has already been decided.")]
+    #[error("This claim has already been decided.")]
     AlreadyDecided,
-    #[error("This proof belongs to a different device claim.")]
+    #[error("This proof belongs to a different claim.")]
     Substituted,
     #[error("This claim or connection names another server.")]
     WrongServer,

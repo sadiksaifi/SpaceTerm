@@ -235,10 +235,9 @@ impl UpdateAction {
     pub(super) const fn consequence(self) -> Option<&'static str> {
         match self {
             Self::Update => Some(
-                "Verifies the server version included with SpaceTerm, then asks before ending the \
-                 server's Terminal Sessions.",
+                "Update the server after confirmation. This ends its Terminal Sessions for every client.",
             ),
-            Self::Finish => Some("Completes the update you already confirmed."),
+            Self::Finish => Some("Completes the confirmed update."),
             Self::Return => Some("SpaceTerm asks first."),
             Self::Check => None,
         }
@@ -373,15 +372,12 @@ pub(super) fn present_update(state: &UpdateState) -> UpdatePresentation {
 fn failure_caption(error: ServerError) -> String {
     match error {
         ServerError::CandidateChanged => RESTART_CLIENT.to_owned(),
-        ServerError::Changed => "The server changed after SpaceTerm prepared the update, so \
-                                 nothing was updated. Review the update and confirm again."
-            .to_owned(),
-        error => format!("{error} The server version is unchanged."),
+        ServerError::Changed => "The server changed. Review the update again.".to_owned(),
+        error => error.to_string(),
     }
 }
 
-const RESTART_CLIENT: &str = "SpaceTerm was updated or moved after it opened. Quit and reopen \
-                              SpaceTerm to use the server version it now includes.";
+const RESTART_CLIENT: &str = "Quit and reopen SpaceTerm to update the server.";
 
 type Facts = (
     &'static str,
@@ -425,7 +421,7 @@ fn present_facts(facts: &UpdateFacts) -> Facts {
         return (
             "Unknown",
             "settings-server-update-state-unknown",
-            "SpaceTerm couldn\u{2019}t read the installed server version.".into(),
+            "Couldn't read installed server version.".into(),
             CaptionTone::Error,
             vec![UpdateAction::Check],
         );
@@ -504,17 +500,14 @@ fn present_facts(facts: &UpdateFacts) -> Facts {
         Err(CandidateError::ClientRestartRequired) => (
             "Restart SpaceTerm",
             "settings-server-update-state-restart",
-            format!("{now}{returned} {RESTART_CLIENT}"),
+            RESTART_CLIENT.to_owned(),
             CaptionTone::Warning,
             Vec::new(),
         ),
         Err(CandidateError::Verification(error)) => (
             "Not Verified",
             "settings-server-update-state-not-verified",
-            format!(
-                "{now}{returned} SpaceTerm couldn\u{2019}t verify the server package it \
-                 includes, so it doesn\u{2019}t offer it. {error}"
-            ),
+            format!("Couldn't verify the server package. {error}"),
             CaptionTone::Error,
             vec![UpdateAction::Check],
         ),
@@ -529,34 +522,21 @@ fn present_activation(activation: &ActivationStatus) -> Option<Facts> {
         ActivationPhase::Activating => (
             "Update Unfinished",
             "settings-server-update-state-unfinished",
-            format!(
-                "The update from version {previous} to version {candidate} hasn\u{2019}t \
-                 finished. Choose Finish Update to complete the update you confirmed. SpaceTerm \
-                 doesn\u{2019}t ask again."
-            ),
+            "Choose Finish Update to complete the update.".to_owned(),
             CaptionTone::Warning,
             vec![UpdateAction::Finish],
         ),
         ActivationPhase::Uncertain => (
             "Update Uncertain",
             "settings-server-update-state-uncertain",
-            format!(
-                "SpaceTerm couldn\u{2019}t confirm whether the server changed from version \
-                 {previous} to version {candidate}, so it doesn\u{2019}t connect to the server. \
-                 Choose Finish Update to check the same update again."
-            ),
+            format!("Couldn't confirm the update to {candidate}. Choose Finish Update."),
             CaptionTone::Error,
             vec![UpdateAction::Finish],
         ),
         ActivationPhase::Failed { can_return: true } => (
             "Update Failed",
             "settings-server-update-state-failed",
-            format!(
-                "Version {candidate} never became ready, and the server\u{2019}s Terminal \
-                 Sessions ended. Version {previous} and the server\u{2019}s saved Workspaces are \
-                 unchanged, so you can return to version {previous}. Terminal Sessions that \
-                 ended don\u{2019}t return."
-            ),
+            format!("Version {candidate} didn't start, and Terminal Sessions ended."),
             CaptionTone::Error,
             vec![UpdateAction::Return, UpdateAction::Check],
         ),
@@ -564,10 +544,7 @@ fn present_activation(activation: &ActivationStatus) -> Option<Facts> {
             "Update Failed",
             "settings-server-update-state-failed",
             format!(
-                "Version {candidate} never became ready, and the server\u{2019}s Terminal \
-                 Sessions ended. SpaceTerm couldn\u{2019}t confirm that the server\u{2019}s saved \
-                 Workspaces are unchanged, so it can\u{2019}t return to version {previous}. \
-                 Terminal Sessions that ended don\u{2019}t return."
+                "Version {candidate} didn't start, and Terminal Sessions ended. SpaceTerm can't safely restore {previous}."
             ),
             CaptionTone::Error,
             vec![UpdateAction::Check],
@@ -581,11 +558,11 @@ pub(super) struct UpdateConfirmation {
     pub(super) title: &'static str,
     pub(super) message: SharedString,
     pub(super) detail: SharedString,
-    pub(super) confirm: &'static str,
+    pub(super) confirm: String,
 }
 
 impl UpdateConfirmation {
-    /// The local server has no machine name to show, so the detail first says whose server it is.
+    /// Uses the shared confirmation for this application's server.
     pub(super) fn of(prepared: &PreparedChange) -> Self {
         let identity = ApplicationIdentity::current();
         let wording = UpdateWording::new(
@@ -599,12 +576,7 @@ impl UpdateConfirmation {
         Self {
             title: wording.title(),
             message: wording.message().into(),
-            detail: format!(
-                "This is the {} server for this account on this computer. {}",
-                identity.display_name(),
-                wording.detail()
-            )
-            .into(),
+            detail: wording.detail().into(),
             confirm: wording.confirm_label(),
         }
     }
@@ -838,12 +810,12 @@ impl SettingsWindow {
                     let alert = Alert::new(
                         ModalId::new(id),
                         confirmation.title,
-                        confirmation.title,
                         confirmation.message.clone(),
+                        confirmation.detail.clone(),
                         vec![
                             ModalAction::new(
                                 true,
-                                confirmation.confirm,
+                                confirmation.confirm.clone(),
                                 ModalActionRole::Affirmative,
                                 confirm_selector,
                             )
@@ -857,8 +829,7 @@ impl SettingsWindow {
                             ),
                         ],
                     )
-                    .intent(AlertIntent::Critical)
-                    .detail(confirmation.detail.clone());
+                    .intent(AlertIntent::Critical);
                     let result = alert.present(window, cx, move |outcome, cx| {
                         let confirmed = matches!(
                             outcome,

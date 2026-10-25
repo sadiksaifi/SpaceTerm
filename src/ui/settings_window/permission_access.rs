@@ -266,8 +266,7 @@ impl PermissionAccessRow {
             RecoveryNotice::OpenFailed => open_failed(application, pane),
             RecoveryNotice::Resetting => format!("Resetting {name}…"),
             RecoveryNotice::ResetFailed => format!(
-                "{name} could not be reset. Remove {application} from Privacy & Security > {pane}, \
-                 then add it again."
+                "Couldn't reset {name}. Remove {application} in Privacy & Security > {pane}, then add it again."
             ),
         });
 
@@ -298,7 +297,7 @@ impl PermissionAccessRow {
                             PermissionSetupStatus::Failed(
                                 PermissionSetupFailure::SettingsNotShown,
                             ) => Some(
-                                "System Settings did not open. Choose Set Up to try again."
+                                "Couldn't open System Settings. Choose Set Up to try again."
                                     .to_owned(),
                             ),
                             PermissionSetupStatus::Idle | PermissionSetupStatus::Running => None,
@@ -319,13 +318,13 @@ impl PermissionAccessRow {
                 text.state_unavailable,
                 match error {
                     PermissionAccessError::OffMainThread => {
-                        format!("{application} could not check {name} access.")
+                        format!("Couldn't check {name} access.")
                     }
                     PermissionAccessError::PlatformUnavailable => {
-                        format!("The system did not report {name} access.")
+                        format!("{name} access unknown.")
                     }
                     PermissionAccessError::PlatformRejected => {
-                        format!("The system rejected the {name} access check.")
+                        format!("{name} access check failed.")
                     }
                 },
                 Some(Action::CheckAgain),
@@ -342,10 +341,7 @@ impl PermissionAccessRow {
 }
 
 fn open_failed(application: &str, pane: &str) -> String {
-    format!(
-        "System Settings could not be opened. Turn on {application} in Privacy & Security > \
-         {pane}."
-    )
+    format!("Open System Settings and allow {application} in Privacy & Security > {pane}.")
 }
 
 /// Keeps the rows current with authorization changes the system reports while the window is open. A
@@ -525,12 +521,10 @@ impl SettingsWindow {
         let pane = copy.pane;
         let application = row.application_name;
         let title = format!("{name} Not Working?");
-        let reopen = "Quit and reopen the program that reports missing access.";
+        let reopen = "Quit and reopen the program that needs access.";
         let (message, primary) = if row.can_reset() {
             (
-                format!(
-                    "{reopen} If that does not help, reset {name} and allow {application} again."
-                ),
+                format!("{reopen} If that doesn't help, reset {name}."),
                 ModalAction::new(
                     TroubleshootDecision::Reset,
                     "Reset",
@@ -543,8 +537,7 @@ impl SettingsWindow {
         } else {
             (
                 format!(
-                    "{reopen} If that does not help, remove {application} from Privacy & Security \
-                     > {pane} and add it again."
+                    "{reopen} If that doesn't help, remove {application} from Privacy & Security > {pane} and add it again."
                 ),
                 ModalAction::new(
                     TroubleshootDecision::OpenSettings,
@@ -571,7 +564,6 @@ impl SettingsWindow {
                 ),
             ],
         )
-        .detail("Some programs use a helper app that needs its own permission.")
         .present(window, cx, move |outcome, cx| {
             let AlertOutcome::Activated { action_id, .. } = outcome else {
                 return;

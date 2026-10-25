@@ -99,6 +99,6 @@ pub fn run() -> Result<(), ServerError> {
     if !success {
         return Err(ServerError::StartupFailed);
     }
-    println!("Installed server PTY and shell resources verified.");
+    println!("Server checks passed.");
     Ok(())
 }

@@ -413,7 +413,7 @@ fn startup_without_usable_server_state_presents_recovery_across_the_window(
 ) {
     let (harness, cx) = launch_harness(vec![Err(ServerError::RuntimeUnavailable), ready()], cx);
     cx.run_until_parked();
-    assert_eq!(harness.launch_title(cx), Some("Server Not Verified"));
+    assert_eq!(harness.launch_title(cx), Some("Couldn't Verify Server"));
     assert_eq!(workspace_controls_presented(cx), Vec::<&str>::new());
     assert!(!creation_available(cx), "New Workspace has nowhere to go");
     assert!(cx.debug_bounds(launch::LAUNCH_SETTINGS_SELECTOR).is_some());
@@ -461,17 +461,15 @@ fn a_missing_server_package_and_a_failed_verification_explain_themselves_differe
     let missing = presentation(cx);
     assert_eq!(missing.title, "Server Not Included");
     assert!(
-        missing
-            .detail
-            .contains("doesn\u{2019}t include a server package")
+        missing.detail.is_empty(),
+        "the missing package alert is title-only"
     );
-    assert!(!missing.detail.contains("verif"), "{}", missing.detail);
     assert!(cx.debug_bounds(launch::LAUNCH_SETTINGS_SELECTOR).is_some());
 
     harness.click(LAUNCH_RETRY_SELECTOR, cx);
     let unverified = presentation(cx);
-    assert_eq!(unverified.title, "Server Not Verified");
-    assert!(unverified.detail.contains("could not be verified"));
+    assert_eq!(unverified.title, "Couldn't Verify Server");
+    assert_eq!(unverified.detail, "Reinstall SpaceTerm, then try again.");
     assert!(
         !unverified.detail.contains("include"),
         "{}",
@@ -568,7 +566,7 @@ fn startup_authorization_runs_only_from_its_explicit_step(cx: &mut TestAppContex
         .read_with(cx, |manager, _| manager.launch_presentation())
         .expect("the authorization step stays")
         .detail;
-    assert!(detail.starts_with("Authorization did not complete, so nothing changed."));
+    assert!(detail.starts_with("Authorization didn't finish."));
 
     harness.click(LAUNCH_AUTHORIZE_SELECTOR, cx);
     assert_eq!(
@@ -689,7 +687,7 @@ fn a_refused_server_offers_an_update_only_from_a_verified_build(cx: &mut TestApp
     assert!(
         presentation
             .detail
-            .contains("SpaceTerm and the server need versions that work together")
+            .contains("SpaceTerm and this server are incompatible.")
     );
     assert!(cx.debug_bounds(launch::LAUNCH_UPDATE_SELECTOR).is_none());
 
@@ -700,12 +698,10 @@ fn a_refused_server_offers_an_update_only_from_a_verified_build(cx: &mut TestApp
         .read_with(cx, |manager, _| manager.launch_presentation())
         .expect("the refusal is presented");
     assert_eq!(presentation.title, "Incompatible Server");
-    assert!(
-        presentation
-            .detail
-            .contains("Terminal Sessions keep running")
+    assert_eq!(
+        presentation.detail,
+        "Updating the server ends its Terminal Sessions for every client."
     );
-    assert!(presentation.detail.contains("SpaceTerm asks first"));
     assert!(cx.debug_bounds(launch::LAUNCH_UPDATE_SELECTOR).is_some());
     assert!(cx.debug_bounds(LAUNCH_RETRY_SELECTOR).is_some());
     assert_eq!(

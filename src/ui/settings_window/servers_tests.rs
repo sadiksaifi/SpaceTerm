@@ -441,10 +441,7 @@ fn an_installed_server_keeps_running_after_spaceterm_quits(cx: &mut TestAppConte
     let description = window.read_with(cx, |settings, cx| {
         settings.section_description(SettingsSectionId::Servers, cx)
     });
-    assert_eq!(
-        description,
-        "Servers run your Workspaces and their Terminal Sessions."
-    );
+    assert_eq!(description, "Servers run Workspaces and Terminal Sessions.");
 }
 
 #[gpui::test]
@@ -826,12 +823,17 @@ fn only_actions_that_end_sessions_or_remove_the_service_ask_first() {
     for action in [ServiceAction::Stop, ServiceAction::Restart] {
         let confirmation =
             ServiceConfirmation::for_action(action, true, login).expect("confirmation");
-        assert!(
-            confirmation
-                .message
-                .contains("server and end all of its Terminal Sessions")
+        let server = crate::application_identity::ApplicationIdentity::current().display_name();
+        let question = match action {
+            ServiceAction::Stop => format!("Stop the {server} server?"),
+            ServiceAction::Restart => format!("Restart the {server} server?"),
+            _ => unreachable!(),
+        };
+        assert_eq!(confirmation.message.as_ref(), question);
+        assert_eq!(
+            confirmation.detail.as_ref(),
+            "All Terminal Sessions on it end for every client."
         );
-        assert!(confirmation.detail.contains("for every client"));
         assert_eq!(confirmation.confirm, action.label());
     }
     // Uninstalling a server that is not running ends no Terminal Session.
@@ -840,7 +842,11 @@ fn only_actions_that_end_sessions_or_remove_the_service_ask_first() {
     let live =
         ServiceConfirmation::for_action(ServiceAction::Uninstall, true, login).expect("live");
     assert!(!idle.message.contains("Terminal Sessions"));
-    assert!(live.message.contains("end all of its Terminal Sessions"));
+    assert!(idle.detail.is_empty());
+    assert_eq!(
+        live.detail.as_ref(),
+        "All Terminal Sessions on it end for every client."
+    );
 }
 
 #[gpui::test]
@@ -893,13 +899,7 @@ fn install_names_each_verified_build_by_version_and_commit() {
     let second = retained("1.5.0", 'b');
     let choices = InstallChoice::of(&[first.clone(), second]);
     let labels: Vec<_> = choices.iter().map(|choice| choice.label.as_ref()).collect();
-    assert_eq!(
-        labels,
-        [
-            "Version 1.4.0 (commit aaaaaaa)",
-            "Version 1.5.0 (commit bbbbbbb)"
-        ]
-    );
+    assert_eq!(labels, ["1.4.0 (aaaaaaa)", "1.5.0 (bbbbbbb)"]);
 
     // Two packages of one version and commit also name their package, so they read apart.
     let mut rebuilt = first.clone();
@@ -908,10 +908,7 @@ fn install_names_each_verified_build_by_version_and_commit() {
     let labels: Vec<_> = choices.iter().map(|choice| choice.label.as_ref()).collect();
     assert_eq!(
         labels,
-        [
-            "Version 1.4.0 (commit aaaaaaa, package aaaaaaaa)",
-            "Version 1.4.0 (commit aaaaaaa, package cccccccc)",
-        ]
+        ["1.4.0 (aaaaaaa, aaaaaaaa)", "1.4.0 (aaaaaaa, cccccccc)",]
     );
 }
 
@@ -1335,7 +1332,7 @@ fn assistive_technology_hears_which_build_install_installs(cx: &mut TestAppConte
 
     assert!(
         A11yTree::read(cx)
-            .find("Install Version 1.4.0 (commit aaaaaaa)\u{2026}")
+            .find("Install 1.4.0 (aaaaaaa)…")
             .is_some(),
         "the menu names the build Install installs"
     );
@@ -1404,40 +1401,34 @@ fn boot_wording_names_boot_and_logout_and_keeps_lingering_after_uninstall() {
 
     let boot = ServiceStartup::AtBoot;
     let stop = ServiceConfirmation::for_action(ServiceAction::Stop, true, boot).expect("stop");
-    assert!(stop.detail.contains("even after the computer restarts"));
+    assert_eq!(
+        stop.detail.as_ref(),
+        "All Terminal Sessions on it end for every client."
+    );
     let uninstall =
         ServiceConfirmation::for_action(ServiceAction::Uninstall, true, boot).expect("uninstall");
-    assert!(
-        uninstall
-            .detail
-            .contains("no longer starts when the computer starts")
+    assert_eq!(
+        uninstall.detail.as_ref(),
+        "All Terminal Sessions on it end for every client."
     );
-    assert!(
-        uninstall
-            .detail
-            .contains("Lingering stays on for your account")
-    );
-    assert!(uninstall.detail.contains("loginctl disable-linger"));
 }
 
 #[test]
-fn the_authorization_prompt_names_its_consequences_and_what_follows() {
+fn the_authorization_prompt_names_the_required_permission_and_matching_action() {
     let install = AuthorizationPrompt::for_request(
         &AuthorizedRequest::Install(retained("1.4.0", 'a').directory),
         Some("Version 1.4.0 (commit aaaaaaa)"),
     );
     assert_eq!(install.confirm, "Authorize and Install");
     assert_eq!(
-        install.detail.as_ref(),
-        "Your computer asks for an administrator password to turn on lingering for your account. \
-         Lingering applies to every service your account runs, and uninstalling the server \
-         leaves it on. SpaceTerm then installs Version 1.4.0 (commit aaaaaaa) and starts the \
-         server. If you cancel here or in the password prompt, nothing changes."
+        install.message,
+        "Enter an administrator password so your account's services keep running after you log out."
     );
+    assert!(install.detail.is_empty());
     let start = AuthorizationPrompt::for_request(&AuthorizedRequest::Start, None);
     assert_eq!(start.confirm, "Authorize and Start");
-    assert!(start.detail.contains("SpaceTerm then starts the server."));
-    assert!(!start.detail.contains("installs"));
+    assert_eq!(start.message, install.message);
+    assert!(start.detail.is_empty());
 }
 
 #[gpui::test]
@@ -1460,9 +1451,7 @@ fn a_boot_installation_waits_for_explained_authorization_then_installs_its_build
     assert_eq!(presented.tone, CaptionTone::Warning);
     assert_eq!(
         presented.explanation.as_ref(),
-        "Your computer needs an administrator password before the server can start at boot and keep \
-         running after you log out. The server is not installed. Choose Authorize and Install to \
-         continue."
+        "Choose Authorize and Install to run the server at startup."
     );
     assert_eq!(presented.actions, vec![ServiceAction::AuthorizeInstall]);
 
@@ -1521,8 +1510,7 @@ fn cancelling_the_operating_systems_prompt_changes_nothing_and_keeps_the_stop(
     assert_eq!(presented.state, "Authorization Required");
     assert_eq!(
         presented.explanation.as_ref(),
-        "Authorization did not complete, so nothing changed. The server is stopped. Choose \
-         Authorize and Start to try again."
+        "Authorization didn't finish. Choose Authorize and Start to try again."
     );
     assert_eq!(
         presented.actions,
@@ -1601,9 +1589,7 @@ fn a_boot_service_restart_refused_after_stopping_offers_to_authorize_and_start(
     let presented = service_presentation(&window, cx);
     assert_eq!(
         presented.explanation.as_ref(),
-        "Your computer needs an administrator password before the server can start at boot and keep \
-         running after you log out. The server is stopped. Choose Authorize and Start to \
-         continue."
+        "Choose Authorize and Start to run the server at startup."
     );
     assert_eq!(
         presented.actions,
@@ -1657,11 +1643,11 @@ fn assistive_technology_hears_the_authorization_step_and_escape_leaves_it_unaske
     cx.run_until_parked();
     assert!(alert_open(AUTHORIZE_CANCEL_SELECTOR, cx));
     let tree = A11yTree::read(cx);
-    let prompt = tree.node("Run the Server at Startup");
+    let prompt = tree.node("Run the Server at Startup?");
     assert_eq!(prompt["aria"]["role"], "AlertDialog");
     assert_eq!(
         prompt["aria"]["description"],
-        "Let your account\u{2019}s services start at boot and keep running after you log out?"
+        "Enter an administrator password so your account's services keep running after you log out."
     );
     assert_eq!(
         tree.focused().map(|node| node["aria"]["label"].clone()),

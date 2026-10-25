@@ -7838,9 +7838,9 @@ fn main_window_reading_order(cx: &mut VisualTestContext) -> Vec<String> {
         "New Workspace",
         "Resize Workspace sidebar",
         "Tabs",
-        "Create Tab",
+        "New Tab",
         "Pane Caption",
-        "Terminal context actions",
+        "Context actions",
     ];
     A11yTree::read(cx)
         .in_order()
@@ -7913,9 +7913,9 @@ fn main_window_reads_in_presented_layout_order(cx: &mut TestAppContext) {
             "New Workspace",
             "Resize Workspace sidebar",
             "Tabs",
-            "Create Tab",
+            "New Tab",
             "Pane Caption",
-            "Terminal context actions",
+            "Context actions",
         ]
     );
 
@@ -7927,9 +7927,9 @@ fn main_window_reads_in_presented_layout_order(cx: &mut TestAppContext) {
             "Switch Workspace",
             "Resize Workspace sidebar",
             "Tabs",
-            "Create Tab",
+            "New Tab",
             "Pane Caption",
-            "Terminal context actions",
+            "Context actions",
         ]
     );
 }
@@ -8281,7 +8281,7 @@ fn pane_split_accessibility_scopes_contents_to_its_two_sides(cx: &mut TestAppCon
                 );
             }
             for context in [children[1], children[5]] {
-                assert_eq!(context["aria"]["label"], "Terminal context actions");
+                assert_eq!(context["aria"]["label"], "Context actions");
             }
         }
         cx.simulate_keystrokes("cmd-b");
@@ -8321,7 +8321,7 @@ fn pane_split_accessibility_keeps_nested_splitters_between_their_own_sides(
         let contexts = tree
             .in_order()
             .into_iter()
-            .filter(|node| node["aria"]["label"] == "Terminal context actions")
+            .filter(|node| node["aria"]["label"] == "Context actions")
             .collect::<Vec<_>>();
         assert_eq!(captions.len(), 4);
         assert_eq!(terminals.len(), 4);
@@ -8552,7 +8552,7 @@ fn close_confirmation_publishes_text_before_actions_and_contains_accessibility(
         assert!(tree.exposed(button));
     }
     assert_eq!(tree.focused().unwrap()["aria"]["label"], "Cancel");
-    for name in ["Tabs", "Workspaces", "Terminal context actions"] {
+    for name in ["Tabs", "Workspaces", "Context actions"] {
         assert!(!tree.exposed(tree.node(name)), "{name}");
     }
 }
@@ -8583,7 +8583,7 @@ fn close_confirmation_restores_accessibility_focus_after_escape_and_cancel(
         assert!(tree.with_role("AlertDialog").is_empty());
         assert_eq!(tree.focused().unwrap()["aria"]["label"], "Close Tab");
         assert!(tree.exposed(tree.focused().unwrap()));
-        assert!(tree.exposed(tree.node("Terminal context actions")));
+        assert!(tree.exposed(tree.node("Context actions")));
         assert!(manager.read_with(cx, |manager, _| {
             manager.close_confirmation.pending().is_none()
         }));
@@ -13492,7 +13492,6 @@ impl crate::ssh::server_connection::SshConnectBackend for ConnectsOnceThen {
                 server: [2; 32],
             },
             lease: Arc::new(ScriptedRoute(self.route.clone())),
-            protocol_major: 1,
             facts: crate::ssh::server_connection::SshServerFacts {
                 platform: ("linux".into(), "x86_64".into()),
                 version: Some("1.0.0".into()),
@@ -13895,7 +13894,6 @@ impl crate::ssh::server_connection::SshConnectBackend for StoppableServer {
                 server: [2; 32],
             },
             lease: Arc::new(ScriptedRoute(self.route.clone())),
-            protocol_major: 1,
             facts: crate::ssh::server_connection::SshServerFacts {
                 platform: ("linux".into(), "x86_64".into()),
                 version: Some("1.0.0".into()),

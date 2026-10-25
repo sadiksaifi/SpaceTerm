@@ -224,7 +224,7 @@ fn recording_another_commands_shortcut_reassigns_it(cx: &mut TestAppContext) {
     assert_eq!(
         description(&window, Command::CloseTab, cx),
         Some(ShortcutDescription {
-            text: "Its shortcut is now assigned to New Workspace.".into(),
+            text: "Shortcut assigned to New Workspace.".into(),
             tone: CaptionTone::Warning,
         })
     );
@@ -239,7 +239,7 @@ fn a_terminal_reserved_chord_is_refused_and_recording_continues(cx: &mut TestApp
     assert_eq!(
         description(&window, Command::NewWorkspace, cx),
         Some(ShortcutDescription {
-            text: "Ctrl+C is reserved for programs running in the terminal.".into(),
+            text: "Ctrl+C is reserved for terminal programs.".into(),
             tone: CaptionTone::Error,
         })
     );
@@ -249,7 +249,7 @@ fn a_terminal_reserved_chord_is_refused_and_recording_continues(cx: &mut TestApp
     assert_eq!(
         description(&window, Command::NewWorkspace, cx),
         Some(ShortcutDescription {
-            text: "K is sent to the terminal. Add Primary to use it as a shortcut.".into(),
+            text: "Add Primary to use K as a shortcut.".into(),
             tone: CaptionTone::Error,
         })
     );
@@ -259,7 +259,7 @@ fn a_terminal_reserved_chord_is_refused_and_recording_continues(cx: &mut TestApp
     cx.run_until_parked();
     assert_eq!(
         description(&window, Command::NewWorkspace, cx).map(|description| description.text),
-        Some("F5 is sent to the terminal. Add Primary to use it as a shortcut.".into())
+        Some("Add Primary to use F5 as a shortcut.".into())
     );
 
     // Escape ends the recording, and the refusal goes with it.
@@ -330,54 +330,30 @@ fn control_shift_recording_accepts_and_refuses_chords_by_its_conventions(cx: &mu
 
     let accepted = retained(&window, Command::CloseWorkspace, cx);
     for (chord, refusal) in [
-        (
-            "ctrl-c",
-            "Ctrl+C is reserved for programs running in the terminal.",
-        ),
-        (
-            "ctrl-2",
-            "Ctrl+2 is reserved for programs running in the terminal.",
-        ),
-        (
-            "ctrl-[",
-            "Ctrl+[ is reserved for programs running in the terminal.",
-        ),
-        (
-            "alt-b",
-            "Alt+B is reserved for programs running in the terminal.",
-        ),
-        (
-            "alt-f4",
-            "Alt+F4 is reserved for programs running in the terminal.",
-        ),
+        ("ctrl-c", "Ctrl+C is reserved for terminal programs."),
+        ("ctrl-2", "Ctrl+2 is reserved for terminal programs."),
+        ("ctrl-[", "Ctrl+[ is reserved for terminal programs."),
+        ("alt-b", "Alt+B is reserved for terminal programs."),
+        ("alt-f4", "Alt+F4 is reserved for terminal programs."),
         (
             "ctrl-alt-left",
-            "Ctrl+Alt+LEFT is reserved for programs running in the terminal.",
+            "Ctrl+Alt+LEFT is reserved for terminal programs.",
         ),
         (
             "shift-left",
-            "Shift+LEFT is sent to the terminal. Add Ctrl+Shift to use it as a shortcut.",
+            "Add Ctrl+Shift to use Shift+LEFT as a shortcut.",
         ),
         (
             "ctrl-shift-u",
-            "Ctrl+Shift+U is reserved by Operating System for the input method.",
+            "Ctrl+Shift+U is reserved for the input method.",
         ),
-        (
-            "ctrl-insert",
-            "Ctrl+INSERT is reserved by Operating System for Copy.",
-        ),
+        ("ctrl-insert", "Ctrl+INSERT is reserved for Copy."),
         (
             "shift-insert",
-            "Shift+INSERT is reserved by Operating System for Paste Selection.",
+            "Shift+INSERT is reserved for Paste Selection.",
         ),
-        (
-            "ctrl-,",
-            "Ctrl+, is reserved by Operating System for Settings.",
-        ),
-        (
-            "cmd-t",
-            "Primary+T is reserved by Operating System for desktop shortcuts.",
-        ),
+        ("ctrl-,", "Ctrl+, is reserved for Settings."),
+        ("cmd-t", "Primary+T is reserved for desktop shortcuts."),
     ] {
         record(&window, Command::CloseWorkspace, chord, cx);
         assert_eq!(
@@ -407,7 +383,7 @@ fn a_system_reserved_chord_is_refused_without_being_performed(cx: &mut TestAppCo
     assert_eq!(
         description(&window, Command::NewWorkspace, cx),
         Some(ShortcutDescription {
-            text: "Primary+Q is reserved by Operating System for Quit.".into(),
+            text: "Primary+Q is reserved for Quit.".into(),
             tone: CaptionTone::Error,
         })
     );
@@ -416,16 +392,15 @@ fn a_system_reserved_chord_is_refused_without_being_performed(cx: &mut TestAppCo
 #[cfg(feature = "developer-tools")]
 #[gpui::test]
 fn develop_menu_chords_are_refused_so_they_never_shadow_a_command(cx: &mut TestAppContext) {
-    let owner = crate::application_identity::ApplicationIdentity::current().display_name();
     let (window, cx) = open_keybindings(SettingsDocument::default(), cx);
     for (chord, text) in [
         (
             "cmd-alt-a",
-            format!("Primary+Alt+A is reserved by {owner} for the Developer Workbench."),
+            "Primary+Alt+A is reserved for the Developer Workbench.".to_owned(),
         ),
         (
             "cmd-alt-c",
-            format!("Primary+Alt+C is reserved by {owner} for Toggle Appearance."),
+            "Primary+Alt+C is reserved for Toggle Appearance.".to_owned(),
         ),
     ] {
         record(&window, Command::NewWorkspace, chord, cx);
@@ -497,8 +472,7 @@ fn an_override_reserved_here_is_explained_and_its_default_stays_active(cx: &mut 
     assert_eq!(
         description(&window, Command::CreateTab, cx),
         Some(ShortcutDescription {
-            text: "Ctrl+C is reserved for terminal input here, so the default shortcut is active."
-                .into(),
+            text: "Ctrl+C is reserved for terminal input. Default shortcut active.".into(),
             tone: CaptionTone::Warning,
         })
     );
@@ -513,8 +487,7 @@ fn an_override_reserved_here_is_explained_and_its_default_stays_active(cx: &mut 
     assert_eq!(
         description(&window, Command::NewWorktree, cx),
         Some(ShortcutDescription {
-            text: "Primary+Q is reserved by Operating System for Quit here and isn't active."
-                .into(),
+            text: "Primary+Q is reserved for Quit.".into(),
             tone: CaptionTone::Error,
         })
     );
@@ -541,7 +514,7 @@ fn a_displaced_default_is_explained_and_its_reset_reclaims_it(cx: &mut TestAppCo
     assert_eq!(
         description(&window, Command::NewWorkspace, cx),
         Some(ShortcutDescription {
-            text: "Its default shortcut is assigned to New Worktree.".into(),
+            text: "Default shortcut assigned to New Worktree.".into(),
             tone: CaptionTone::Warning,
         })
     );
@@ -586,7 +559,7 @@ fn a_displaced_default_and_its_inactive_override_are_both_explained(cx: &mut Tes
     assert_eq!(
         description(&window, Command::CreateTab, cx),
         Some(ShortcutDescription {
-            text: "Primary+T is reserved by Operating System for desktop shortcuts here. Its default shortcut is assigned to Split Right.".into(),
+            text: "Primary+T is reserved for desktop shortcuts. Default shortcut assigned to Split Right.".into(),
             tone: CaptionTone::Warning,
         })
     );
@@ -725,7 +698,7 @@ fn a_chord_no_command_uses_finds_nothing(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("settings-keybindings-no-results").is_some());
     assert_eq!(
         no_results(&window, cx).as_deref(),
-        Some("Ctrl+C is reserved for programs running in the terminal.")
+        Some("Ctrl+C is reserved for terminal programs.")
     );
 }
 
@@ -755,7 +728,7 @@ fn searching_by_a_system_reserved_shortcut_names_its_owner(cx: &mut TestAppConte
     assert!(found(&window, cx).is_empty());
     assert_eq!(
         no_results(&window, cx).as_deref(),
-        Some("Primary+Q is reserved by Operating System for Quit.")
+        Some("Primary+Q is reserved for Quit.")
     );
 }
 

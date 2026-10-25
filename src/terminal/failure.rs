@@ -158,14 +158,10 @@ impl TerminalFailure {
 impl fmt::Display for TerminalFailure {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let action = match self.recoverability {
-            Recoverability::Recoverable => "The last valid frame is preserved; retry the action.",
-            Recoverability::Fatal => "Close this Pane and restart the terminal command.",
+            Recoverability::Recoverable => "SpaceTerm couldn't complete the action. Try again.",
+            Recoverability::Fatal => "This Terminal Session failed. Close this Pane.",
         };
-        write!(
-            formatter,
-            "{} failed during {}. {action}",
-            self.class, self.operation
-        )
+        formatter.write_str(action)
     }
 }
 
@@ -500,13 +496,7 @@ mod tests {
             state.failure().map(TerminalFailure::recoverability),
             Some(Recoverability::Recoverable)
         );
-        assert!(
-            state
-                .failure()
-                .unwrap()
-                .to_string()
-                .contains("retry the action")
-        );
+        assert!(state.failure().unwrap().to_string().contains("Try again."));
         assert!(
             TerminalFailure::pty("read")
                 .to_string()

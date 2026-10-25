@@ -95,10 +95,7 @@ use permission_access::{PermissionAccessChanges, PermissionAccessRows};
 pub(crate) use server_selection::configure_server_context;
 pub(crate) use server_update::update_offered;
 /// The server control window shares the service row's progress and authorization wording.
-pub(crate) use servers::{
-    AuthorizationPrompt, AuthorizedRequest, INCOMPATIBLE_PROTOCOL, MISSING_CAPABILITY,
-    ServiceAction,
-};
+pub(crate) use servers::{AuthorizationPrompt, AuthorizedRequest, ServiceAction};
 use theme_gallery::ThemeGallery;
 use theme_store::ThemeStore;
 
@@ -2187,42 +2184,7 @@ impl SettingsWindow {
     }
 
     fn reset_all_detail(&self) -> String {
-        let mut detail = String::from(
-            "This cannot be undone. Themes can be installed again from their Zed extension or file.",
-        );
-        let mut permissions = Vec::new();
-        if !self.omitted_rows.contains(&SettingsRowId::MicrophoneAccess) {
-            permissions.push("Microphone");
-        }
-        for (row, permission) in [
-            (
-                SettingsRowId::ScreenRecordingAccess,
-                SystemPermission::ScreenRecording,
-            ),
-            (
-                SettingsRowId::AccessibilityAccess,
-                SystemPermission::Accessibility,
-            ),
-        ] {
-            if !self.omitted_rows.contains(&row) {
-                permissions.push(self.permission_access.row(permission).copy().name);
-            }
-        }
-        match permissions.as_slice() {
-            [] => {}
-            [permission] => detail.push_str(&format!(" {permission} access is a system permission and is not affected.")),
-            [first, second] => detail.push_str(&format!(" {first} and {second} access are system permissions and are not affected.")),
-            [first, second, third] => detail.push_str(&format!(" {first}, {second}, and {third} access are system permissions and are not affected.")),
-            _ => unreachable!("Settings presents at most three system permission rows"),
-        }
-        // Saved connections and Server Settings live outside the Settings Document.
-        if self
-            .available_sections
-            .contains(&SettingsSectionId::Servers)
-        {
-            detail.push_str(" Server connections and Server Settings are not affected.");
-        }
-        detail
+        "This cannot be undone.".to_owned()
     }
 
     fn confirm_reset_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -2231,7 +2193,7 @@ impl SettingsWindow {
             ModalId::new("settings-reset-all"),
             "Reset all settings",
             "Reset All Settings",
-            "Every setting and keyboard shortcut returns to its default, and the terminal themes you installed are removed.",
+            "Reset settings and keyboard shortcuts, and remove installed terminal themes.",
             vec![
                 ModalAction::new(
                     true,
@@ -2471,7 +2433,7 @@ impl SettingsWindow {
                 error(self.auto_start_error()),
             ),
             SettingsRowId::EndAllSessions => (
-                SharedString::new_static("Ending them keeps the server and its Workspaces."),
+                SharedString::new_static("Ending them keeps Workspaces."),
                 self.end_all_sessions_error()
                     .map(|text| (text, self.end_all_sessions_caption().1)),
             ),
@@ -2493,7 +2455,7 @@ impl SettingsWindow {
     /// One line of guidance for the rows that warrant it.
     fn row_description(&self, row: SettingsRowId, cx: &App) -> Option<&'static str> {
         match row {
-            SettingsRowId::AppearanceMode => Some("Auto matches the system light or dark setting."),
+            SettingsRowId::AppearanceMode => Some("Auto matches the system appearance."),
             SettingsRowId::Opacity | SettingsRowId::Blur => {
                 let background = self.window_background(cx);
                 let fully_opaque = background.opacity == 1.0;
@@ -2504,47 +2466,37 @@ impl SettingsWindow {
                 Some(
                     match (background.unavailable, accessibility_forced_opaque) {
                         (Some(UnavailableWindowEffect::Opacity), false) if opacity => {
-                            "Window opacity adjustment is unavailable on this system, so the window stays opaque. Floating surfaces use the default opacity."
+                            "Window transparency is unavailable on this system."
                         }
                         (Some(UnavailableWindowEffect::Opacity), false) => {
-                            "Window opacity adjustment is unavailable on this system, so the window stays opaque. Floating surfaces use the default blur."
+                            "Window transparency is unavailable on this system."
                         }
                         (Some(UnavailableWindowEffect::Opacity), true) if opacity => {
-                            "Window opacity adjustment is unavailable on this system, so the window stays opaque. Accessibility settings currently keep floating surfaces opaque."
+                            "Window transparency is unavailable on this system."
                         }
                         (Some(UnavailableWindowEffect::Opacity), true) => {
-                            "Window opacity adjustment is unavailable on this system, so the window stays opaque. Accessibility settings currently disable floating-surface blur."
+                            "Window transparency is unavailable on this system."
                         }
                         (Some(UnavailableWindowEffect::Blur), false) if opacity => {
-                            "Desktop blur is unavailable on this system, so the window stays opaque. Floating surfaces use the default opacity."
+                            "Desktop blur is unavailable on this system."
                         }
                         (Some(UnavailableWindowEffect::Blur), false) => {
-                            "Desktop blur is unavailable on this system, so the window stays opaque. Floating surfaces use the default blur."
+                            "Desktop blur is unavailable on this system."
                         }
                         (Some(UnavailableWindowEffect::Blur), true) if opacity => {
-                            "Desktop blur is unavailable on this system, so the window stays opaque. Accessibility settings currently keep floating surfaces opaque."
+                            "Desktop blur is unavailable on this system."
                         }
                         (Some(UnavailableWindowEffect::Blur), true) => {
-                            "Desktop blur is unavailable on this system, so the window stays opaque. Accessibility settings currently disable floating-surface blur."
+                            "Desktop blur is unavailable on this system."
                         }
                         (None, _) if opacity && fully_opaque => {
-                            "The window and floating surfaces are opaque at 1. Decrease this value to reveal the content behind them."
+                            "Decrease below 1 to see through windows."
                         }
-                        (None, true) if opacity => {
-                            "Accessibility settings currently keep the window and floating surfaces opaque. Your opacity choice is kept."
-                        }
-                        (None, _) if opacity => {
-                            "Adjust opacity for windows and floating surfaces. 0 is transparent; 1 is opaque."
-                        }
-                        (None, _) if fully_opaque => {
-                            "Blur affects the desktop behind the window and content behind floating surfaces. Decrease Opacity below 1 to see it."
-                        }
-                        (None, true) => {
-                            "Accessibility settings currently disable window and floating-surface blur. Your blur choice is kept."
-                        }
-                        (None, false) => {
-                            "Soften the desktop behind the window and content behind floating surfaces."
-                        }
+                        (None, true) if opacity => "Accessibility settings keep windows opaque.",
+                        (None, _) if opacity => "0 is transparent; 1 is opaque.",
+                        (None, _) if fully_opaque => "Decrease Opacity below 1 to see blur.",
+                        (None, true) => "Accessibility settings turn off blur.",
+                        (None, false) => "Soften content behind windows.",
                     },
                 )
             }
@@ -2555,33 +2507,31 @@ impl SettingsWindow {
                     .effective
                     == crate::appearance::WindowBackgroundAppearance::Opaque
                 {
-                    "Shown behind terminal windows in place of the desktop. Decrease Opacity below 1 to see it."
+                    "Shown behind windows. Decrease Opacity below 1 to see it."
                 } else {
-                    "Shown behind terminal windows in place of the desktop, with the same opacity and blur."
+                    "Shown behind windows."
                 },
             ),
-            SettingsRowId::SidebarDefaultState => Some(
-                "How the sidebar starts in each new window. Toggle Sidebar still shows or hides it.",
-            ),
-            SettingsRowId::TerminalFontFamily => Some("Only monospaced families are listed."),
+            SettingsRowId::SidebarDefaultState => Some("The sidebar state in each new window."),
+            SettingsRowId::TerminalFontFamily => Some("Only monospace fonts."),
             SettingsRowId::AutomaticUpdateDownloads
             | SettingsRowId::UpdateCheckInterval
             | SettingsRowId::UpdateReminderInterval => updates::update_row_description(row),
             SettingsRowId::MicrophoneAccess => {
                 Some(self.microphone_access.presentation().explanation)
             }
-            SettingsRowId::ClipboardWrites => Some(
-                "Programs in the focused pane can replace your clipboard text, including over SSH.",
-            ),
+            SettingsRowId::ClipboardWrites => {
+                Some("Programs in the Focused Pane can replace clipboard text, including over SSH.")
+            }
             SettingsRowId::ClipboardReads => Some(
-                "Programs in the focused pane can retrieve your clipboard text, including programs on remote machines.",
+                "Programs in the Focused Pane can retrieve clipboard text, including remotely.",
             ),
-            SettingsRowId::ShowRepositoryStatus => Some(
-                "Show the branch and changes in each pane's caption, and the branch on each sidebar row.",
-            ),
-            SettingsRowId::ShowPullRequests => Some(
-                "Show a branch's open pull request in the sidebar and the Repository Status popover.",
-            ),
+            SettingsRowId::ShowRepositoryStatus => {
+                Some("Show branch and changes in Pane Captions, and branch in sidebar rows.")
+            }
+            SettingsRowId::ShowPullRequests => {
+                Some("Show open Pull Requests in the sidebar and Repository Status popover.")
+            }
             SettingsRowId::GitTool | SettingsRowId::GitHubCli => {
                 Some(self.git_tool_presentation(row, cx).explanation)
             }

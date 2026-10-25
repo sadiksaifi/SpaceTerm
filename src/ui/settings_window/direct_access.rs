@@ -278,20 +278,18 @@ pub(super) fn access_problem(state: &AccessState, server: &str) -> Option<String
     match (state.listener, &state.addresses) {
         (Listener::AddressGone, _) => Some(match address {
             Some(address) => {
-                format!("{address} is no longer on {server}. Choose another address.")
+                format!("{address} is no longer on {server}. Choose another.")
             }
-            None => format!("The chosen address is no longer on {server}. Choose another."),
+            None => format!("Address no longer on {server}. Choose another."),
         }),
         (Listener::Failed, _) => Some(match address {
-            Some(address) => format!("{server} couldn\u{2019}t listen at {address}."),
-            None => format!("{server} couldn\u{2019}t listen on the network."),
+            Some(address) => format!("Couldn't listen at {address}."),
+            None => "Couldn't listen on the network.".to_owned(),
         }),
-        (Listener::Off, Some(addresses)) if addresses.available.is_empty() => Some(format!(
-            "{server} has no network address other devices can reach."
-        )),
-        (_, None) => Some(format!(
-            "{server} couldn\u{2019}t read its network addresses."
-        )),
+        (Listener::Off, Some(addresses)) if addresses.available.is_empty() => {
+            Some(format!("No reachable network address on {server}."))
+        }
+        (_, None) => Some(format!("Couldn't read {server}'s network addresses.")),
         _ => None,
     }
 }
@@ -459,40 +457,30 @@ impl SettingsWindow {
                 Some(Err(AccessFailure::Unreachable))
             )
         {
+            let name = self.selected_server_name();
             let observed = self
                 .direct_access
                 .shown()
                 .and_then(|shown| shown.observed_at)
                 .map(|at| {
                     format!(
-                        " These are the last known settings, from {}.",
+                        "SpaceTerm can't reach {name}. Last known Network Access settings: {}.",
                         super::server_card::observed_time(at, cx)
                     )
-                })
-                .unwrap_or_default();
-            return Some(format!("SpaceTerm can't reach the server right now.{observed}").into());
+                });
+            return Some(
+                observed
+                    .unwrap_or_else(|| "Can't reach the server.".to_owned())
+                    .into(),
+            );
         }
         let name = self.selected_server_name();
-        let ask = match &self.direct_access.target {
+        Some(match &self.direct_access.target {
             Some(ServerChoice::Local) => {
-                format!("Start the server on {name} to change its network access.")
+                format!("Start the server on {name} to change its network access.").into()
             }
-            _ => format!("Connect to {name} to change its network access."),
-        };
-        let observed = self
-            .direct_access
-            .shown()
-            .and_then(|shown| shown.observed_at)
-            .map(|at| {
-                format!(
-                    " Shown values are from {}.",
-                    super::server_card::observed_time(at, cx)
-                )
-            });
-        Some(SharedString::from(format!(
-            "{ask}{}",
-            observed.unwrap_or_default()
-        )))
+            _ => format!("Connect to {name} to change its network access.").into(),
+        })
     }
 
     /// Follows the selected server's network access while Servers shows it. Selection, section
@@ -583,7 +571,7 @@ impl SettingsWindow {
                 observed_at: Some(_),
                 ..
             }) => SharedString::from(format!("Last known address: {address}.")),
-            _ => SharedString::new_static("Devices you invite can connect over the network."),
+            _ => SharedString::new_static("Invited devices can connect over the network."),
         }
     }
 
@@ -774,13 +762,12 @@ impl SettingsWindow {
         let Some(control) = self.direct_access_control(&target) else {
             return;
         };
-        let server = self.direct_access_server_name();
         let generation = self.direct_access.generation;
         let owner = cx.weak_entity();
-        let title = format!("Stop other devices from connecting to {server}?");
+        let title = "Turn Off Network Access?";
         let result = Alert::new(
             ModalId::new("settings-network-access-turn-off"),
-            title.clone(),
+            title,
             title,
             "Paired devices connected over the network disconnect.",
             vec![
@@ -800,10 +787,6 @@ impl SettingsWindow {
             ],
         )
         .intent(AlertIntent::Informational)
-        .detail(
-            "Devices stay paired and can connect again when you turn this back on. Terminal \
-             Sessions keep running.",
-        )
         .present(window, cx, move |outcome, cx| {
             if !matches!(
                 outcome,
@@ -920,7 +903,7 @@ impl SettingsWindow {
                     .tab_stop(true)
                     .debug_selector(INVITE_SELECTOR)
                     .accessibility_description(SharedString::from(format!(
-                        "Show an invitation a phone or computer uses to connect to {server}"
+                        "Invite another device to connect to {server}."
                     )))
                     .on_activate(move |_, window, cx| {
                         let _ = owner.update(cx, |settings, cx| settings.invite_device(window, cx));
@@ -975,9 +958,7 @@ impl SettingsWindow {
                     .tab_stop(true)
                     .disabled(dimmed)
                     .debug_selector(format!("{selector}-remove"))
-                    .accessibility_description(SharedString::from(format!(
-                        "Remove {name}. SpaceTerm asks first."
-                    )))
+                    .accessibility_description(SharedString::from(format!("Remove {name}.")))
                     .on_activate(move |_, window, cx| {
                         let device = removed.clone();
                         let _ = owner.update(cx, |settings, cx| {
@@ -1077,23 +1058,18 @@ impl SettingsWindow {
         let Some(target) = self.direct_access.target.clone() else {
             return;
         };
-        let server = self.direct_access_server_name();
         let generation = self.direct_access.generation;
         let owner = cx.weak_entity();
-        let title = format!("Remove \u{201C}{}\u{201D}?", device.name);
+        let title = format!("Unpair \"{}\"?", device.name);
         let result = Alert::new(
             ModalId::new("settings-paired-device-remove"),
             title.clone(),
             title,
-            format!(
-                "\u{201C}{}\u{201D} can no longer connect to {server}. If it\u{2019}s connected \
-                 now, it disconnects and gives up control of its Panes.",
-                device.name
-            ),
+            "It needs a new invitation to reconnect.",
             vec![
                 ModalAction::new(
                     true,
-                    "Remove",
+                    "Unpair",
                     ModalActionRole::Affirmative,
                     REMOVE_CONFIRM_SELECTOR,
                 )
@@ -1108,9 +1084,6 @@ impl SettingsWindow {
             ],
         )
         .intent(AlertIntent::Critical)
-        .detail(
-            "Terminal Sessions keep running. To connect again, the device needs a new invitation.",
-        )
         .present(window, cx, move |outcome, cx| {
             if !matches!(
                 outcome,

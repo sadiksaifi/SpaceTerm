@@ -1500,6 +1500,82 @@ fn alert_detail_is_published_as_text_after_the_message(cx: &mut TestAppContext) 
     );
 }
 
+/// A title-only Alert asks its question in the heading alone, so assistive technology hears the
+/// title and decisions without an empty message, and the default decision still answers Return.
+#[gpui::test]
+fn title_only_alert_presents_its_heading_and_decisions_without_a_message(cx: &mut TestAppContext) {
+    use crate::a11y_testing::A11yTree;
+
+    install_test_catalogs(cx);
+    let outcome = Rc::new(RefCell::new(None));
+    let root_outcome = outcome.clone();
+    let (root, cx) = cx.add_window_view(move |_, cx| AlertFixture {
+        invoker: cx.focus_handle().tab_stop(true),
+        underlay_activations: Rc::new(Cell::new(0)),
+        outcome: root_outcome,
+        presentation: None,
+    });
+    cx.update(|window, cx| {
+        window.activate_window();
+        root.update(cx, |root, cx| {
+            let outcome = root.outcome.clone();
+            root.presentation = Some(
+                Alert::new(
+                    ModalId::new("title-only-alert"),
+                    "Quit confirmation",
+                    "Quit SpaceTerm?",
+                    "",
+                    vec![
+                        ModalAction::new("quit", "Quit", ModalActionRole::Affirmative, "quit")
+                            .default_action(true),
+                        ModalAction::new("cancel", "Cancel", ModalActionRole::Cancel, "cancel"),
+                    ],
+                )
+                .present(window, cx, move |result, _| {
+                    *outcome.borrow_mut() = Some(result);
+                })
+                .expect("a title-only Alert should present"),
+            );
+        });
+    });
+    cx.run_until_parked();
+
+    let tree = A11yTree::read(cx);
+    let alert = tree.node("Quit confirmation");
+    let labels = tree
+        .descendants(alert)
+        .into_iter()
+        .filter(|node| node["aria"]["role"] == "Label")
+        .map(|node| node["aria"]["value"].as_str().unwrap_or_default())
+        .collect::<Vec<_>>();
+    assert!(tree.exposed(alert));
+    assert!(
+        alert["aria"]["description"].is_null(),
+        "description={}",
+        alert["aria"]["description"]
+    );
+    assert_eq!(labels, ["Quit SpaceTerm?"]);
+    assert!(cx.debug_bounds("modal-alert-message").is_none());
+    assert!(tree.exposed(tree.node("Quit")) && tree.exposed(tree.node("Cancel")));
+    assert!(
+        cx.debug_bounds("modal-action-quit-keyboard-focus")
+            .is_some()
+    );
+
+    press_return(cx);
+    assert!(
+        matches!(
+            *outcome.borrow(),
+            Some(AlertOutcome::Activated {
+                action_id: "quit",
+                source: ModalActivationSource::Return,
+                suppression_selected: None,
+            })
+        ),
+        "Return should activate the focused default decision"
+    );
+}
+
 #[gpui::test]
 fn critical_alert_renders_bounded_semantic_treatment_without_accessory(cx: &mut TestAppContext) {
     let window = open_alert_intent_window(cx, super::super::AlertIntent::Critical);

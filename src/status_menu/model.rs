@@ -153,12 +153,9 @@ impl Phase {
             Self::Running => ("Running", None),
             Self::Stopped => (
                 "Stopped",
-                Some("You stopped the server. It stays stopped until you start it.".to_owned()),
+                Some("The server stays stopped until you start it.".to_owned()),
             ),
-            Self::NotRunning => (
-                "Not Running",
-                Some("The server is installed but not running.".to_owned()),
-            ),
+            Self::NotRunning => ("Not Running", Some("Installed but not running.".to_owned())),
             Self::NotInstalled => (
                 "Not Installed",
                 Some(format!("Open {name} to set up the server.")),
@@ -171,6 +168,10 @@ impl Phase {
                         .to_owned(),
                 ),
             ),
+            Self::Unavailable(ServerError::Stopped) => (
+                badge(ServerError::Stopped),
+                Some("Choose Start Server.".to_owned()),
+            ),
             Self::Unavailable(error) => (badge(error), Some(error.to_string())),
         }
     }
@@ -180,9 +181,9 @@ impl Phase {
 fn badge(error: ServerError) -> &'static str {
     match error {
         ServerError::UnsafeStorage => "Unsafe Storage",
-        ServerError::CleanupUnresolved => "Cleanup Unresolved",
+        ServerError::CleanupUnresolved => "Stop Unconfirmed",
         ServerError::IncompatibleState => "Incompatible State",
-        ServerError::RuntimeUnavailable => "Runtime Unavailable",
+        ServerError::RuntimeUnavailable => "Server Unavailable",
         ServerError::Unsupported => "Unsupported",
         _ => "Unavailable",
     }

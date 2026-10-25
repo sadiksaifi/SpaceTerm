@@ -54,22 +54,36 @@ struct Notice {
 /// What one unconfirmed unpair says, in one or two short sentences naming the server.
 pub(super) fn unpair_message(pending: &PendingUnpair) -> String {
     let server = &pending.server_label;
-    let subject = if pending.enrollment_cleanup {
-        format!("SpaceTerm is withdrawing a pairing with {server} that didn\u{2019}t finish.")
-    } else if pending.server_confirmed {
-        format!(
-            "{server} confirmed the unpair. SpaceTerm still has to remove this device\u{2019}s \
-             key."
-        )
-    } else {
-        format!("Unpair from {server} isn\u{2019}t confirmed yet.")
-    };
-    let next = match pending.state {
-        UnpairState::Retrying => " SpaceTerm keeps trying.",
-        UnpairState::NeedsInteraction => " Choose Resume to let SpaceTerm continue.",
-        UnpairState::Unconfirmed => " Choose Retry to try again.",
-    };
-    format!("{subject}{next}")
+    match (
+        pending.enrollment_cleanup,
+        pending.server_confirmed,
+        pending.state,
+    ) {
+        (true, _, state) => {
+            let next = match state {
+                UnpairState::NeedsInteraction => "Choose Resume to continue cancelling.",
+                UnpairState::Retrying => "It will retry automatically.",
+                UnpairState::Unconfirmed => "Choose Retry to continue cancelling.",
+            };
+            format!("SpaceTerm is cancelling the unfinished pairing with {server}. {next}")
+        }
+        (false, true, UnpairState::NeedsInteraction) => {
+            format!("Choose Resume to finish unpairing from {server}.")
+        }
+        (false, true, UnpairState::Retrying) => format!("Finishing unpairing from {server}…"),
+        (false, true, UnpairState::Unconfirmed) => {
+            format!("Choose Retry to finish unpairing from {server}.")
+        }
+        (false, false, UnpairState::NeedsInteraction) => {
+            format!("Unpair from {server} isn't confirmed. Choose Resume.")
+        }
+        (false, false, UnpairState::Retrying) => {
+            format!("Unpair from {server} isn't confirmed yet.")
+        }
+        (false, false, UnpairState::Unconfirmed) => {
+            format!("Unpair from {server} isn't confirmed. Choose Retry.")
+        }
+    }
 }
 
 impl SettingsWindow {
@@ -123,11 +137,20 @@ impl SettingsWindow {
                 })
                 .collect();
             notices.push(Notice {
-                message: SharedString::from(format!(
-                    "You removed {}. {} Nothing here reconnects it.",
-                    destination.as_str(),
-                    presentation.explanation
-                )),
+                message: if presentation.state == Some("No Record") {
+                    format!(
+                        "SpaceTerm couldn't confirm the last change to {}.",
+                        destination.as_str()
+                    )
+                    .into()
+                } else {
+                    format!(
+                        "You removed {}. {} Nothing here reconnects it.",
+                        destination.as_str(),
+                        presentation.explanation
+                    )
+                    .into()
+                },
                 steps,
                 dismissal: Some(Dismissal::Window(id.clone())),
                 id,
@@ -144,8 +167,7 @@ impl SettingsWindow {
                 notices.push(Notice {
                     id: "unsaved-removal".to_owned(),
                     message: SharedString::from(format!(
-                        "SpaceTerm couldn\u{2019}t save that you removed {names}. It may return \
-                         when SpaceTerm reopens."
+                        "SpaceTerm couldn't save removing {names}."
                     )),
                     steps: vec![("Remove Again", NoticeStep::RemoveAgain)],
                     dismissal: Some(Dismissal::Window("unsaved-removal".to_owned())),
@@ -360,7 +382,7 @@ mod tests {
     fn an_unconfirmed_unpair_names_the_server_and_keeps_trying() {
         assert_eq!(
             unpair_message(&pending(UnpairState::Retrying)),
-            "Unpair from Studio isn\u{2019}t confirmed yet. SpaceTerm keeps trying."
+            "Unpair from Studio isn't confirmed yet."
         );
     }
 
@@ -371,10 +393,7 @@ mod tests {
 
         let message = unpair_message(&confirmed);
 
-        assert!(
-            message.starts_with("Studio confirmed the unpair."),
-            "{message}"
-        );
-        assert!(!message.contains("isn\u{2019}t confirmed"), "{message}");
+        assert_eq!(message, "Finishing unpairing from Studio…");
+        assert!(!message.contains("isn't confirmed"), "{message}");
     }
 }

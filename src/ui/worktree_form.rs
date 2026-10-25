@@ -26,8 +26,7 @@ use crate::worktrees::ref_format::{BranchNameError, validate_branch_name};
 const FORM_MODAL_ID: &str = "new-worktree-form";
 const CREATE_ACTION_SELECTOR: &str = "new-worktree-create";
 const CANCEL_ACTION_SELECTOR: &str = "new-worktree-cancel";
-pub(crate) const BRANCHES_FAILED: &str =
-    "SpaceTerm couldn\u{2019}t read this repository\u{2019}s branches.";
+pub(crate) const BRANCHES_FAILED: &str = "Couldn't read this repository's branches.";
 const CREATE_FAILED: &str = "Git couldn\u{2019}t create the Worktree.";
 
 /// Runs the dialog's git work for one repository.
@@ -251,18 +250,20 @@ impl WorktreeForm {
             ],
             DialogInitialFocus::Body(self.name.read(cx).focus_handle()),
         )
-        .description(
-            format!(
+        .description(match (self.backend.server(), self.backend.machine()) {
+            (true, Some(machine)) => format!(
+                "Create a Worktree for a branch of {} on \"{machine}\".",
+                self.context.repository_name
+            ),
+            (true, None) => format!(
+                "Create a Worktree for a branch of {}.",
+                self.context.repository_name
+            ),
+            (false, _) => format!(
                 "Check out a branch of {} in its own directory.",
                 self.context.repository_name
-            ) + &match (self.backend.server(), self.backend.machine()) {
-                (true, Some(machine)) => format!(
-                    " The SpaceTerm Server on \u{201C}{machine}\u{201D} runs Git and creates it there."
-                ),
-                (true, None) => " The local server runs Git and creates it.".to_owned(),
-                (false, _) => String::new(),
-            },
-        )
+            ),
+        })
         .size(DialogSize::Wide)
         .body(cx.entity());
         let completion = dialog.present(
@@ -421,7 +422,7 @@ impl WorktreeForm {
         let name_error = |name: &str| match validate_branch_name(name) {
             Err(error) => Some(name_message(error)),
             Ok(()) if local.iter().any(|branch| branch == name) => {
-                Some("A branch with this name already exists.".into())
+                Some("Branch name already exists.".into())
             }
             Ok(()) => None,
         };
@@ -463,7 +464,7 @@ impl WorktreeForm {
             if path.is_absolute() {
                 Some(path)
             } else {
-                errors.location = Some("Enter a full path that starts with / or ~/.".into());
+                errors.location = Some("Start the path with / or ~/.".into());
                 None
             }
         };
@@ -508,14 +509,11 @@ impl WorktreeForm {
                         .and_then(|(path, branch)| match (self.probe)(&path) {
                             Ok(NewDirectoryTarget::Free) => Ok((path, branch)),
                             Ok(NewDirectoryTarget::Occupied) => Err(FormErrors {
-                                location: Some(
-                                    "This folder isn\u{2019}t empty. Choose a new or empty folder."
-                                        .into(),
-                                ),
+                                location: Some("Choose a new or empty directory.".into()),
                                 ..FormErrors::default()
                             }),
                             Err(_) => Err(FormErrors {
-                                location: Some("SpaceTerm can\u{2019}t use this location.".into()),
+                                location: Some("Can't use this location.".into()),
                                 ..FormErrors::default()
                             }),
                         });
@@ -616,18 +614,18 @@ impl WorktreeForm {
         self.pending_path = None;
         self.set_editable(true, cx);
         let (field, message): (Option<FormField>, SharedString) = match result {
-            Err(WorktreeCreateError::NotSubmitted(reason)) => (None,format!("SpaceTerm did not create the Worktree on the server. {reason}").into()),
-            Err(WorktreeCreateError::Server(spaceterm_server::worktree::Error::Location)) => (Some(FormField::Location),"SpaceTerm can\u{2019}t use this location on the local server. Choose a new or empty folder.".into()),
-            Err(WorktreeCreateError::Server(spaceterm_server::worktree::Error::Missing)) => (None,"The repository is no longer at its location on the local server, so nothing was created.".into()),
-            Err(WorktreeCreateError::Server(spaceterm_server::worktree::Error::Branch)) => (None,"Git reported an error while creating the Worktree and may have left part of it on disk. The sidebar shows what Git lists now.".into()),
-            Err(WorktreeCreateError::Server(_)) => (None,"The server couldn\u{2019}t confirm whether Git created the Worktree. The sidebar shows what Git lists now.".into()),
+            Err(WorktreeCreateError::NotSubmitted(reason)) => (None,reason.into()),
+            Err(WorktreeCreateError::Server(spaceterm_server::worktree::Error::Location)) => (Some(FormField::Location),"Choose a new or empty directory.".into()),
+            Err(WorktreeCreateError::Server(spaceterm_server::worktree::Error::Missing)) => (None,"The repository is no longer available. Reopen it before creating a Worktree.".into()),
+            Err(WorktreeCreateError::Server(spaceterm_server::worktree::Error::Branch)) => (None,"Git couldn't finish creating the Worktree. Check for leftover files before trying again.".into()),
+            Err(WorktreeCreateError::Server(_)) => (None,"SpaceTerm could not confirm whether the Worktree was created. Review the sidebar before trying again.".into()),
             Err(WorktreeCreateError::InvalidName) => (
                 Some(FormField::Name),
                 "Git doesn\u{2019}t accept this name.".into(),
             ),
             Err(WorktreeCreateError::BranchExists) => (
                 Some(FormField::Name),
-                "A branch with this name already exists.".into(),
+                "Branch name already exists.".into(),
             ),
             Err(WorktreeCreateError::BranchCheckedOut) => (
                 Some(FormField::Branch),
@@ -795,14 +793,9 @@ impl Render for WorktreeForm {
                 cx,
             )
         };
-        let mut notes = vec![
-            "Git hooks don\u{2019}t run, so a post-checkout hook\u{2019}s setup won\u{2019}t happen.",
-        ];
+        let mut notes = vec!["Git hooks don't run."];
         if self.source == BranchSource::Remote {
-            notes.insert(
-                0,
-                "Uses branches already fetched. SpaceTerm doesn\u{2019}t fetch.",
-            );
+            notes.insert(0, "Shows only fetched branches.");
         }
         div()
             .chrome_text(appearance.typography.style(TextRole::Body))
@@ -844,13 +837,25 @@ impl Render for WorktreeForm {
                             .child(note)
                     })),
             )
-            .when(self.pending && self.backend.server(),|body| {
-                let status=if self.backend.connected() {"Creating the Worktree on the local server…"} else {"Lost the connection to the local server. Git may still create the Worktree. Closing this dialog doesn\u{2019}t cancel the request, and SpaceTerm checks its result when it reconnects."};
-                body.child(div().id("new-worktree-status").debug_selector(||"new-worktree-status".to_owned()).role(accesskit::Role::Label).aria_value(status).child(status))
+            .when(self.pending && self.backend.server(), |body| {
+                let status = if self.backend.connected() {
+                    "Creating Worktree…"
+                } else {
+                    "Connection lost. SpaceTerm checks the result when it reconnects."
+                };
+                body.child(
+                    div()
+                        .id("new-worktree-status")
+                        .debug_selector(|| "new-worktree-status".to_owned())
+                        .role(accesskit::Role::Label)
+                        .aria_value(status)
+                        .child(status),
+                )
             })
             .when_some(
-                self.backend_error.clone()
-                    .or_else(||self.branches_failed.then(||BRANCHES_FAILED.into())),
+                self.backend_error
+                    .clone()
+                    .or_else(|| self.branches_failed.then(|| BRANCHES_FAILED.into())),
                 |body, error| {
                     body.child(
                         div()
@@ -1002,20 +1007,12 @@ fn branch_listed(branches: &BranchList, branch: &BranchName) -> bool {
 fn name_message(error: BranchNameError) -> SharedString {
     match error {
         BranchNameError::Empty => "Enter a branch name.",
-        BranchNameError::LeadingDash => "Invalid name: it can\u{2019}t start with a dash.",
-        BranchNameError::InvalidCharacter => {
-            "Invalid name: spaces and ~ ^ : ? * [ \\ aren\u{2019}t allowed."
-        }
-        BranchNameError::InvalidSequence => {
-            "Invalid name: \u{201c}..\u{201d}, \u{201c}//\u{201d}, and \u{201c}@{\u{201d} aren\u{2019}t allowed."
-        }
-        BranchNameError::InvalidComponent => {
-            "Invalid name: a part can\u{2019}t start with a dot or end with \u{201c}.lock\u{201d}."
-        }
-        BranchNameError::InvalidEnd => {
-            "Invalid name: it can\u{2019}t start or end with a slash or end with a dot."
-        }
-        BranchNameError::Reserved => "Invalid name: Git reserves this name.",
+        BranchNameError::LeadingDash => "Can't start with a dash.",
+        BranchNameError::InvalidCharacter => "Spaces and ~ ^ : ? * [ \\ aren't allowed.",
+        BranchNameError::InvalidSequence => "\"..\", \"//\", and \"@{\" aren't allowed.",
+        BranchNameError::InvalidComponent => "A part can't start with a dot or end with \".lock\".",
+        BranchNameError::InvalidEnd => "Can't start or end with a slash or end with a dot.",
+        BranchNameError::Reserved => "Git reserves this name.",
     }
     .into()
 }
@@ -1354,8 +1351,8 @@ mod tests {
         assert_eq!(
             (invalid[0].as_deref(), taken[0].as_deref(), valid),
             (
-                Some("Invalid name: spaces and ~ ^ : ? * [ \\ aren\u{2019}t allowed."),
-                Some("A branch with this name already exists."),
+                Some("Spaces and ~ ^ : ? * [ \\ aren't allowed."),
+                Some("Branch name already exists."),
                 [None, None, None],
             )
         );
@@ -1465,7 +1462,7 @@ mod tests {
 
         assert_eq!(
             visible_errors(&form, cx)[2].as_deref(),
-            Some("This folder isn\u{2019}t empty. Choose a new or empty folder.")
+            Some("Choose a new or empty directory.")
         );
         assert!(backend.created.borrow().is_empty());
         assert!(events.borrow().is_empty());
@@ -1487,9 +1484,7 @@ mod tests {
         assert_eq!(
             form.read_with(cx, |form, _| form.backend_error.clone())
                 .as_deref(),
-            Some(
-                "SpaceTerm did not create the Worktree on the server. SpaceTerm is not connected."
-            )
+            Some("SpaceTerm is not connected.")
         );
         assert!(events.borrow().is_empty());
         assert!(form.read_with(cx, |form, _| form.is_open() && !form.pending));
@@ -1509,7 +1504,7 @@ mod tests {
 
         assert_eq!(
             visible_errors(&form, cx)[0].as_deref(),
-            Some("A branch with this name already exists.")
+            Some("Branch name already exists.")
         );
         assert!(events.borrow().is_empty());
         assert!(form.read_with(cx, |form, _| form.is_open() && !form.pending));

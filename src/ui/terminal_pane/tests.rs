@@ -2266,7 +2266,7 @@ fn server_pane_uncertain_paste_warns_without_sending_a_second_payload(cx: &mut T
     assert_eq!(tree.node("Terminal status")["aria"]["value"], "Warning");
     assert_eq!(
         tree.node("Terminal status")["aria"]["description"],
-        "Paste was not confirmed. Check the shell before pasting again."
+        "Paste not confirmed. Check the shell before pasting again."
     );
     assert_eq!(
         requested_pastes(&records),
@@ -5067,7 +5067,7 @@ fn unsafe_paste_confirmation_blocks_terminal_input_and_keeps_only_metadata_in_ui
             .debug_a11y_tree_json()
             .expect("rendered notice accessibility tree")
     });
-    assert!(tree.contains("Paste 12 bytes across 2 lines?"));
+    assert!(tree.contains("Paste 12 bytes, 2 lines?"));
     assert!(!tree.contains("q9!w2") && !tree.contains("z7@r4x"));
 
     let confirm = cx
@@ -6931,7 +6931,7 @@ fn terminal_context_menu_publishes_its_target_and_opens_from_accessibility(
         cx.notify();
     });
     let tree = A11yTree::read(cx);
-    let target = tree.node("Terminal context actions");
+    let target = tree.node("Context actions");
     assert_eq!(target["aria"]["role"], "Group");
     assert!(supports(target, Action::ShowContextMenu));
     perform(cx, target, Action::ShowContextMenu);
@@ -6942,10 +6942,7 @@ fn terminal_context_menu_publishes_its_target_and_opens_from_accessibility(
     perform(cx, tree.node("Find"), Action::Click);
     let tree = A11yTree::read(cx);
     assert!(tree.with_role("Menu").is_empty());
-    assert_eq!(
-        tree.focused().unwrap()["aria"]["label"],
-        "Terminal Find query"
-    );
+    assert_eq!(tree.focused().unwrap()["aria"]["label"], "Terminal Find");
     perform(cx, tree.node("Close Find"), Action::Click);
     A11yTree::read(cx);
     assert!(cx.update(|window, cx| pane.read(cx).terminal_input_focused(window, cx)));
@@ -7005,11 +7002,7 @@ fn terminal_context_menu_accessibility_request_ignores_program_mouse_tracking(
         cx.notify();
     });
     let tree = A11yTree::read(cx);
-    perform(
-        cx,
-        tree.node("Terminal context actions"),
-        Action::ShowContextMenu,
-    );
+    perform(cx, tree.node("Context actions"), Action::ShowContextMenu);
     let tree = A11yTree::read(cx);
     assert_eq!(tree.with_role("Menu").len(), 1);
     assert_eq!(tree.focused().unwrap()["aria"]["label"], "Copy");
@@ -7050,11 +7043,7 @@ fn terminal_context_menu_without_pointer_does_not_target_the_bottom_left_link(
         cx.notify();
     });
     let tree = A11yTree::read(cx);
-    perform(
-        cx,
-        tree.node("Terminal context actions"),
-        Action::ShowContextMenu,
-    );
+    perform(cx, tree.node("Context actions"), Action::ShowContextMenu);
     let tree = A11yTree::read(cx);
     assert_eq!(tree.with_role("Menu").len(), 1);
     assert_eq!(tree.node("Open Link")["aria"]["disabled"], true);
@@ -8007,10 +7996,7 @@ fn stale_recoverable_and_export_completions_cannot_mask_a_fatal_failure(cx: &mut
         (
             Some(crate::terminal::FailureClass::Pty),
             None,
-            Some(
-                "PTY failed during read-shell-output. Close this Pane and restart the terminal command."
-                    .to_owned(),
-            ),
+            Some("This Terminal Session failed. Close this Pane.".to_owned(),),
         )
     );
 }
@@ -8302,10 +8288,7 @@ fn terminal_failure_should_keep_the_pane_visible_with_a_failure_status(cx: &mut 
     assert_eq!(
         state,
         (
-            Some(
-                "PTY failed during read-shell-output. Close this Pane and restart the terminal command."
-                    .to_owned()
-            ),
+            Some("This Terminal Session failed. Close this Pane.".to_owned()),
             true,
             Some(crate::terminal::FailureClass::Pty),
             1,
@@ -9935,7 +9918,7 @@ fn deferred_paste_resolution_stale_reply_warns_after_local_or_server_approval(
         );
         assert_eq!(
             status["aria"]["description"],
-            "Paste confirmation expired without writing terminal input"
+            "Paste confirmation expired. Nothing was sent."
         );
     }
 }
@@ -9957,7 +9940,7 @@ fn deferred_paste_resolution_lost_reply_reports_error_after_local_or_server_appr
         );
         assert_eq!(
             status["aria"]["description"],
-            "Paste confirmation was lost without writing terminal input"
+            "Paste failed. Nothing was sent."
         );
     }
 }
@@ -10095,8 +10078,8 @@ fn paste_confirmation_publishes_dialog_text_and_contains_accessibility(cx: &mut 
     A11yTree::read(cx);
     cx.dispatch_action(PasteClipboard);
     let tree = A11yTree::read(cx);
-    let title = "Paste 18 bytes across 3 lines?";
-    let message = "Pasting multiple lines may execute commands in your shell.";
+    let title = "Paste 18 bytes, 3 lines?";
+    let message = "Pasting multiple lines may execute commands.";
     let dialog = tree.node(title);
     assert_eq!(dialog["aria"]["role"], "AlertDialog");
     assert_eq!(dialog["aria"]["modal"], true);
@@ -10114,7 +10097,7 @@ fn paste_confirmation_publishes_dialog_text_and_contains_accessibility(cx: &mut 
     }
     assert_eq!(tree.focused().unwrap()["aria"]["label"], "Paste");
     assert!(
-        tree.find("Terminal context actions")
+        tree.find("Context actions")
             .is_none_or(|node| !tree.exposed(node))
     );
     assert!(!tree.exposed(tree.node("Terminal Pane")));
@@ -10249,7 +10232,7 @@ fn paste_confirmation_retirement_removes_the_dialog_and_cancels_the_payload(
     let tree = A11yTree::read(cx);
     assert!(tree.with_role("AlertDialog").is_empty());
     assert!(tree.find("Paste").is_none());
-    assert!(tree.find("Terminal context actions").is_none());
+    assert!(tree.find("Context actions").is_none());
     assert!(
         tree.in_order()
             .iter()

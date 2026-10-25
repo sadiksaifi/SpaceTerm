@@ -83,9 +83,9 @@ fn reset(workspace: WindowHandle<WorkspaceManager>, cx: &mut App) {
 fn launch_alert() -> Alert<RecoveryAction> {
     Alert::new(
         ModalId::new("settings-recovery"),
-        "SpaceTerm couldn't read your settings",
-        "SpaceTerm Couldn't Read Your Settings",
-        "SpaceTerm is using default settings and has changed nothing. Reset Settings keeps the unreadable file as a backup.",
+        "Couldn't read settings",
+        "Couldn't Read Settings",
+        "SpaceTerm is using default settings.",
         vec![
             ModalAction::new(
                 RecoveryAction::Reset,
@@ -108,9 +108,9 @@ fn launch_alert() -> Alert<RecoveryAction> {
 fn failure_alert() -> Alert<RecoveryAction> {
     Alert::new(
         ModalId::new("settings-recovery-failed"),
-        "SpaceTerm couldn't reset your settings",
+        "Couldn't reset settings",
         "SpaceTerm Couldn't Reset Your Settings",
-        "Your settings file could not be replaced. Open Settings to see what stopped the reset and try again.",
+        "Open Settings to see what went wrong.",
         vec![
             ModalAction::new(
                 RecoveryAction::OpenSettings,
@@ -135,7 +135,7 @@ pub(super) fn confirmation_alert() -> Alert<bool> {
         ModalId::new("settings-recovery-confirm"),
         "Reset settings",
         "Reset Settings?",
-        "SpaceTerm renames the unreadable settings file to settings.json.bak and starts from default settings.",
+        "Replace your unreadable settings with defaults? SpaceTerm saves a backup first.",
         vec![
             ModalAction::new(
                 true,
@@ -199,18 +199,14 @@ mod tests {
         });
 
         let tree = A11yTree::read(cx);
-        let alert = tree.node("SpaceTerm couldn't read your settings");
+        let alert = tree.node("Couldn't read settings");
         assert_eq!(alert["aria"]["role"], "AlertDialog");
         assert_eq!(alert["aria"]["modal"], true);
         assert_eq!(tree.node("Reset Settings")["aria"]["role"], "Button");
         perform(cx, tree.node("Not Now"), Action::Click);
         cx.run_until_parked();
         assert_eq!(*outcome.borrow(), Some(RecoveryAction::NotNow));
-        assert!(
-            A11yTree::read(cx)
-                .find("SpaceTerm couldn't read your settings")
-                .is_none()
-        );
+        assert!(A11yTree::read(cx).find("Couldn't read settings").is_none());
     }
 
     #[test]

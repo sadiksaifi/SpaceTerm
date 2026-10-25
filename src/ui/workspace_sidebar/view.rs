@@ -442,15 +442,13 @@ impl WorkspaceSidebar {
             .unwrap_or_else(|| tooltip.to_string());
         let tooltip_text = format!("{name}\n{tooltip_text}");
         let tooltip_label = if shared.is_some() {
-            "Server Workspace"
+            "Workspace"
         } else if remote_status.is_some() {
-            "Remote Workspace connection"
+            "Workspace connection"
         } else if disclosing {
             "Workspace"
-        } else if pinned {
-            "Pinned Directory"
         } else {
-            "Workspace Directory"
+            "Directory"
         };
 
         let (row_padding_leading, row_padding_trailing) = row_padding(appearance, cx);
@@ -1190,9 +1188,7 @@ impl WorkspaceSidebar {
                 .size(spaceterm_ui::ButtonSize::Compact)
                 .tab_stop(true)
                 .debug_selector(format!("machine-connect-{label}"))
-                .accessibility_description(SharedString::from(format!(
-                    "Connect to {label} to show its Workspaces"
-                )))
+                .accessibility_description(SharedString::from(format!("Connect to {label}")))
                 .on_activate(move |_, _, cx| {
                     let target = target.clone();
                     let _ = sidebar.update(cx, |_, cx| {
@@ -1790,17 +1786,17 @@ fn remove_worktree_entry<A: Clone>(
 ) -> Option<MenuEntry<A>> {
     let reason = match removal {
         WorktreeRemoval::Allowed => None,
-        WorktreeRemoval::NeedsServer => Some("Remove Worktree Needs the Server"),
-        WorktreeRemoval::Main => Some("Main Worktree Can\u{2019}t Be Removed"),
-        WorktreeRemoval::Locked => Some("Locked Worktree Can\u{2019}t Be Removed"),
-        WorktreeRemoval::HoldsPinnedDirectory => Some("Unpin the Directory to Remove"),
+        WorktreeRemoval::NeedsServer => Some("Remove Worktree…"),
+        WorktreeRemoval::Main => Some("Can't Remove Main Worktree"),
+        WorktreeRemoval::Locked => Some("Can't Remove Locked Worktree"),
+        WorktreeRemoval::HoldsPinnedDirectory => Some("Unpin Directory to Remove"),
         WorktreeRemoval::CheckingPinnedDirectories => {
             Some("Checking for Pinned Directories\u{2026}")
         }
         WorktreeRemoval::PinnedDirectoriesUnavailable => {
             Some("Pinned Directories Couldn\u{2019}t Be Checked")
         }
-        WorktreeRemoval::Server => Some("Server Worktree Can\u{2019}t Be Removed Here"),
+        WorktreeRemoval::Server => Some("Remove Worktree…"),
         WorktreeRemoval::Unlisted => return None,
     };
     let label = match (reason, name) {
@@ -1830,7 +1826,7 @@ fn new_worktree_entry<A: Clone>(
         if enabled {
             NEW_WORKTREE_LABEL
         } else {
-            "New Worktree Needs the Server"
+            "New Worktree…"
         },
         command,
     );
@@ -1855,7 +1851,7 @@ fn new_worktree_button(
     let label = if enabled {
         NEW_WORKTREE_LABEL
     } else {
-        "New Worktree Needs the Server"
+        "New Worktree…"
     };
     let glyph_size = appearance.icons.metrics(IconRole::Caption).glyph_size;
     div()
@@ -2100,12 +2096,8 @@ fn workspace_menu_entries(
     presentation: &crate::desktop_profile::DesktopPresentation,
 ) -> Vec<MenuEntry<RowMenuCommand>> {
     // A shared Workspace's New Tab, Rename, and pin commands ask the server, so they wait while
-    // this client is offline or an earlier edit is unanswered. Each waiting command keeps its
-    // place and says why, so no menu offers a step that does nothing.
+    // this client is offline or an earlier edit is unanswered.
     let shared_edits = shared.is_none_or(|shared| shared.edits);
-    let waiting = shared
-        .filter(|shared| !shared.edits)
-        .map(|shared| shared.edits_reason);
     let new_tab = new_tab && shared_edits;
     let mut entries = Vec::new();
     if new_tab {
@@ -2127,16 +2119,12 @@ fn workspace_menu_entries(
         );
     }
     entries.push(
-        MenuEntry::action(
-            match waiting {
-                Some(_) => "Rename Workspace Needs the Server",
-                None => "Rename Workspace",
-            },
-            RowMenuCommand::Rename,
-        )
-        .disabled(!shared_edits)
-        .icon(|foreground, size| Icon::new(IconName::Pencil, size, foreground).into_any_element())
-        .debug_selector("workspace-menu-row-rename"),
+        MenuEntry::action("Rename Workspace", RowMenuCommand::Rename)
+            .disabled(!shared_edits)
+            .icon(|foreground, size| {
+                Icon::new(IconName::Pencil, size, foreground).into_any_element()
+            })
+            .debug_selector("workspace-menu-row-rename"),
     );
     entries.push(
         MenuEntry::action(
@@ -2186,11 +2174,7 @@ fn workspace_menu_entries(
     if let Some(shared) = shared {
         entries.push(
             MenuEntry::action(
-                if shared.detaches {
-                    "Detach Workspace"
-                } else {
-                    "Detach Workspace Unavailable"
-                },
+                "Detach Workspace",
                 RowMenuCommand::Workspace(WorkspaceMenuCommand::Detach),
             )
             .disabled(!shared.detaches)

@@ -109,8 +109,8 @@ fn missing_desktop_opacity_shows_disabled_window_effect_defaults(cx: &mut TestAp
         false,
         crate::appearance::UnavailableWindowEffect::Opacity,
         [
-            "Window opacity adjustment is unavailable on this system, so the window stays opaque. Floating surfaces use the default opacity.",
-            "Window opacity adjustment is unavailable on this system, so the window stays opaque. Floating surfaces use the default blur.",
+            "Window transparency is unavailable on this system.",
+            "Window transparency is unavailable on this system.",
         ],
         cx,
     );
@@ -122,8 +122,8 @@ fn missing_desktop_blur_shows_disabled_window_effect_defaults(cx: &mut TestAppCo
         true,
         crate::appearance::UnavailableWindowEffect::Blur,
         [
-            "Desktop blur is unavailable on this system, so the window stays opaque. Floating surfaces use the default opacity.",
-            "Desktop blur is unavailable on this system, so the window stays opaque. Floating surfaces use the default blur.",
+            "Desktop blur is unavailable on this system.",
+            "Desktop blur is unavailable on this system.",
         ],
         cx,
     );
@@ -292,29 +292,21 @@ fn unavailable_window_effect_guidance_names_accessibility_for_floating_surfaces(
     };
     assert_eq!(
         description(SettingsRowId::Opacity, cx),
-        Some(
-            "Desktop blur is unavailable on this system, so the window stays opaque. Accessibility settings currently keep floating surfaces opaque."
-        )
+        Some("Desktop blur is unavailable on this system.")
     );
     assert_eq!(
         description(SettingsRowId::Blur, cx),
-        Some(
-            "Desktop blur is unavailable on this system, so the window stays opaque. Accessibility settings currently disable floating-surface blur."
-        )
+        Some("Desktop blur is unavailable on this system.")
     );
     harness.platform.set_native_window_opacity_supported(false);
     cx.run_until_parked();
     assert_eq!(
         description(SettingsRowId::Opacity, cx),
-        Some(
-            "Window opacity adjustment is unavailable on this system, so the window stays opaque. Accessibility settings currently keep floating surfaces opaque."
-        )
+        Some("Window transparency is unavailable on this system.")
     );
     assert_eq!(
         description(SettingsRowId::Blur, cx),
-        Some(
-            "Window opacity adjustment is unavailable on this system, so the window stays opaque. Accessibility settings currently disable floating-surface blur."
-        )
+        Some("Window transparency is unavailable on this system.")
     );
     assert!(!window_background_rows(&window, cx).adjustable());
 }
@@ -2015,12 +2007,12 @@ fn backdrop_guidance_tracks_capability_recovery_without_losing_retained_choices(
     assert!(
         guidance(SettingsRowId::Opacity, cx)
             .unwrap()
-            .starts_with("Window opacity adjustment is unavailable on this system")
+            .starts_with("Window transparency is unavailable on this system.")
     );
     assert!(
         guidance(SettingsRowId::Blur, cx)
             .unwrap()
-            .starts_with("Window opacity adjustment is unavailable on this system")
+            .starts_with("Window transparency is unavailable on this system.")
     );
 
     // The fallback shows the defaults it renders and leaves the retained choices for a desktop
@@ -2036,7 +2028,7 @@ fn backdrop_guidance_tracks_capability_recovery_without_losing_retained_choices(
     assert_eq!(document_of(&window, cx).appearance.window, retained);
     assert_eq!(
         guidance(SettingsRowId::Blur, cx),
-        Some("Soften the desktop behind the window and content behind floating surfaces.")
+        Some("Soften content behind windows.")
     );
     assert!(
         guidance(SettingsRowId::Opacity, cx)
@@ -2053,7 +2045,7 @@ fn backdrop_guidance_tracks_capability_recovery_without_losing_retained_choices(
     assert!(
         guidance(SettingsRowId::Opacity, cx)
             .unwrap()
-            .starts_with("Window opacity adjustment is unavailable on this system")
+            .starts_with("Window transparency is unavailable on this system.")
     );
     assert_eq!(document_of(&window, cx).appearance.window, retained);
     assert_eq!(
@@ -2079,8 +2071,8 @@ fn backdrop_guidance_only_promises_opacity_for_the_resolved_material_policy(
             settings.row_description(SettingsRowId::Blur, cx).unwrap(),
         )
     });
-    assert!(opacity.contains("window and floating surfaces opaque"));
-    assert!(blur.contains("disable window and floating-surface blur"));
+    assert_eq!(opacity, "Accessibility settings keep windows opaque.");
+    assert_eq!(blur, "Accessibility settings turn off blur.");
 
     harness.platform.set_require_opaque_surfaces(false);
     harness.platform.set_increase_contrast(true);
@@ -2089,11 +2081,12 @@ fn backdrop_guidance_only_promises_opacity_for_the_resolved_material_policy(
         let guidance = window
             .read_with(cx, |settings, cx| settings.row_description(row, cx))
             .unwrap();
-        assert!(!guidance.contains("currently keep"), "{row:?}: {guidance}");
-        assert!(
-            !guidance.contains("currently disable"),
-            "{row:?}: {guidance}"
-        );
+        let expected = match row {
+            SettingsRowId::Opacity => "0 is transparent; 1 is opaque.",
+            SettingsRowId::Blur => "Soften content behind windows.",
+            _ => unreachable!(),
+        };
+        assert_eq!(guidance, expected, "{row:?}");
     }
 
     harness.platform.set_increase_contrast(false);
@@ -2103,11 +2096,12 @@ fn backdrop_guidance_only_promises_opacity_for_the_resolved_material_policy(
         let guidance = window
             .read_with(cx, |settings, cx| settings.row_description(row, cx))
             .unwrap();
-        assert!(!guidance.contains("currently keep"), "{row:?}: {guidance}");
-        assert!(
-            !guidance.contains("currently disable"),
-            "{row:?}: {guidance}"
-        );
+        let expected = match row {
+            SettingsRowId::Opacity => "0 is transparent; 1 is opaque.",
+            SettingsRowId::Blur => "Soften content behind windows.",
+            _ => unreachable!(),
+        };
+        assert_eq!(guidance, expected, "{row:?}");
     }
     assert_eq!(document_of(&window, cx).appearance.window, retained);
 }
@@ -2133,12 +2127,12 @@ fn backdrop_guidance_identifies_full_opacity_without_claiming_a_system_override(
             )
         });
         if supported {
-            assert!(opacity.contains("opaque at 1"));
+            assert!(opacity.contains("Decrease below 1 to see through windows."));
             assert!(blur.contains("Decrease Opacity below 1"));
         } else {
             // Without window opacity adjustment the rows show the default rather than the retained 1.
-            assert!(opacity.starts_with("Window opacity adjustment is unavailable"));
-            assert!(blur.starts_with("Window opacity adjustment is unavailable"));
+            assert!(opacity.starts_with("Window transparency is unavailable on this system."));
+            assert!(blur.starts_with("Window transparency is unavailable on this system."));
         }
         assert!(!opacity.contains("ccessibility"));
         assert!(!blur.contains("ccessibility"));
@@ -2195,7 +2189,7 @@ fn opacity_stepper_persists_bounds_blur_and_reset(cx: &mut TestAppContext) {
             .read_with(cx, |settings, cx| settings
                 .row_description(SettingsRowId::Opacity, cx))
             .unwrap()
-            .contains("opaque at 1")
+            .contains("Decrease below 1 to see through windows.")
     );
     click("settings-blur", cx);
     settle(cx);
@@ -4322,10 +4316,7 @@ fn a_desktop_without_host_features_omits_their_surfaces_but_keeps_clipboard_priv
     cx.run_until_parked();
 
     window.read_with(cx, |settings, _| {
-        assert_eq!(
-            settings.reset_all_detail(),
-            "This cannot be undone. Themes can be installed again from their Zed extension or file."
-        );
+        assert_eq!(settings.reset_all_detail(), "This cannot be undone.");
         assert!(
             settings
                 .navigable_sections()
@@ -4376,8 +4367,7 @@ fn a_desktop_with_every_feature_presents_unavailable_host_features(cx: &mut Test
     let (window, _harness, cx) = open_settings(cx);
 
     window.read_with(cx, |settings, _| {
-        let accessibility = settings.permission_access.row(crate::platform::permission_access::SystemPermission::Accessibility).copy().name;
-        assert_eq!(settings.reset_all_detail(), format!("This cannot be undone. Themes can be installed again from their Zed extension or file. Microphone, Screen Recording, and {accessibility} access are system permissions and are not affected. Server connections and Server Settings are not affected."));
+        assert_eq!(settings.reset_all_detail(), "This cannot be undone.");
     });
 
     assert!(
@@ -4752,7 +4742,7 @@ fn settings_publish_headings_row_titles_and_guidance_in_reading_order(cx: &mut T
     };
     assert!(position("Heading Themes") < position("Label Appearance"));
     // Guidance stacks under its row title, beside the control it explains.
-    let guidance = position("Label Auto matches the system light or dark setting.");
+    let guidance = position("Label Auto matches the system appearance.");
     assert!(position("Label Appearance") < guidance);
     assert!(guidance < position("RadioGroup Appearance"));
 }
@@ -4799,7 +4789,7 @@ fn save_status_and_the_failure_banner_publish_their_text(cx: &mut TestAppContext
             .filter_map(|label| label["aria"]["value"].as_str().map(str::to_owned))
             .collect::<Vec<_>>()
     };
-    assert!(labels(cx).contains(&"All changes saved".to_owned()));
+    assert!(labels(cx).contains(&"Changes saved".to_owned()));
 
     harness.storage.fail_writes(Some(StorageError::Unavailable));
     click("settings-density-comfortable", cx);
@@ -4807,7 +4797,7 @@ fn save_status_and_the_failure_banner_publish_their_text(cx: &mut TestAppContext
     let text = labels(cx);
     for expected in [
         "Could not save your changes",
-        "The change is still applied. Retry to write it to your settings file.",
+        "The change applies until you quit.",
     ] {
         assert!(
             text.contains(&expected.to_owned()),

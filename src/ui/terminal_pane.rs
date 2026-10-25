@@ -979,7 +979,7 @@ impl TerminalPane {
             input.update(cx, |input, cx| input.select_all(cx));
         } else {
             let input = cx.new(|cx| {
-                TextInput::new("terminal-find-input", "Terminal Find query", "", window, cx)
+                TextInput::new("terminal-find-input", "Terminal Find", "", window, cx)
                     .placeholder("Find")
                     .variant(TextInputVariant::Bare)
                     .tab_behavior(TextInputTabBehavior::Propagate)
@@ -3592,7 +3592,7 @@ impl TerminalPane {
             Ok(Some(insertion)) => insertion,
             Ok(None) => return,
             Err(message) => {
-                self.status = Some(format!("File drop rejected: {message}"));
+                self.status = Some(message.to_owned());
                 self.status_intent = StatusIntent::Warning;
                 cx.notify();
                 return;
@@ -3873,15 +3873,12 @@ impl TerminalPane {
                             this.present_paste_confirmation(confirmation, guard, window, cx);
                         }
                         Ok(Ok(PasteRequestOutcome::Rejected(rejection))) => {
-                            this.status = Some(format!("Paste rejected: {rejection}"));
+                            this.status = Some(rejection.to_string());
                             this.status_intent = StatusIntent::Warning;
                             cx.notify();
                         }
                         Ok(Err(_)) | Err(_) => {
-                            this.status = Some(
-                                "Paste request failed before any terminal input was written"
-                                    .to_owned(),
-                            );
+                            this.status = Some("Paste failed. Nothing was sent.".to_owned());
                             this.status_intent = StatusIntent::Error;
                             cx.notify();
                         }
@@ -3910,7 +3907,7 @@ impl TerminalPane {
                 .is_some_and(|session| session.take_paste_unconfirmed())
         {
             self.status =
-                Some("Paste was not confirmed. Check the shell before pasting again.".to_owned());
+                Some("Paste not confirmed. Check the shell before pasting again.".to_owned());
             self.status_intent = StatusIntent::Warning;
         }
     }
@@ -3992,7 +3989,7 @@ impl TerminalPane {
         &mut self,
         operation: OperationToken,
         result: std::io::Result<()>,
-        path: PathBuf,
+        _path: PathBuf,
         cx: &mut Context<Self>,
     ) {
         if !self.operation_is_current(operation, self.latest_export_operation) {
@@ -4003,7 +4000,7 @@ impl TerminalPane {
                 self.clear_recovery(recovery);
             }
             if matches!(self.pane_state, PaneTerminalState::Running) {
-                self.status = Some(format!("Diagnostics exported to {}", path.display()));
+                self.status = Some("Diagnostics exported".to_owned());
                 self.status_intent = StatusIntent::Success;
             }
         } else {
@@ -4224,13 +4221,13 @@ impl TerminalPane {
         cx: &mut Context<Self>,
     ) {
         let title = format!(
-            "Paste {} bytes across {} lines?",
+            "Paste {} bytes, {} lines?",
             confirmation.byte_len, confirmation.line_count
         );
         let message = if confirmation.risk.control_bytes || confirmation.risk.closing_fence {
-            "This text contains control sequences that may change terminal behavior or execute commands."
+            "Pasting this text can change terminal behavior or run commands."
         } else {
-            "Pasting multiple lines may execute commands in your shell."
+            "Pasting multiple lines may execute commands."
         };
         let alert = Alert::new(
             ModalId::new("unsafe-paste-confirmation"),
@@ -4285,8 +4282,7 @@ impl TerminalPane {
             if let Some(session) = &self.terminal_session.session {
                 let _ = session.resolve_paste(confirmation.id, PasteDecision::Cancel);
             }
-            self.status =
-                Some("Paste confirmation could not open; no terminal input was written".to_owned());
+            self.status = Some("Couldn't open paste confirmation. Nothing was sent.".to_owned());
             self.status_intent = StatusIntent::Error;
         }
         cx.notify();
@@ -4346,18 +4342,13 @@ impl TerminalPane {
                         Ok(Ok(PasteResolution::Written)) => this.clear_attention(cx),
                         Ok(Ok(PasteResolution::Cancelled | PasteResolution::Unconfirmed)) => {}
                         Ok(Ok(PasteResolution::Stale)) => {
-                            this.status = Some(
-                                "Paste confirmation expired without writing terminal input"
-                                    .to_owned(),
-                            );
+                            this.status =
+                                Some("Paste confirmation expired. Nothing was sent.".to_owned());
                             this.status_intent = StatusIntent::Warning;
                             cx.notify();
                         }
                         Ok(Err(_)) | Err(_) => {
-                            this.status = Some(
-                                "Paste confirmation was lost without writing terminal input"
-                                    .to_owned(),
-                            );
+                            this.status = Some("Paste failed. Nothing was sent.".to_owned());
                             this.status_intent = StatusIntent::Error;
                             cx.notify();
                         }
@@ -4750,7 +4741,7 @@ impl EntityInputHandler for TerminalPane {
                         if outcome.recv().await != Ok(crate::terminal::session::InputMethodOutcome::Written) {
                             let _ = this.update(cx, |this, cx| {
                                 if this.terminal_session.native_service_session_identity == identity {
-                                    this.status = Some("Input method text was not fully confirmed. Check the shell before entering it again.".to_owned());
+                                    this.status = Some("Input not confirmed. Check the shell before typing it again.".to_owned());
                                     this.status_intent = StatusIntent::Warning;
                                     cx.notify();
                                 }
@@ -5225,7 +5216,7 @@ impl Render for TerminalPane {
             .map_or(size(px(1.0), px(1.0)), |bounds| bounds.size);
         let context_menu = ContextMenu::new(
             "terminal-context-menu",
-            "Terminal context actions",
+            "Context actions",
             div()
                 .w(context_target_size.width)
                 .h(context_target_size.height),
@@ -5233,7 +5224,7 @@ impl Render for TerminalPane {
         )
         .target(ContextMenuTarget::new(
             gpui::accesskit::Role::Group,
-            "Terminal context actions",
+            "Context actions",
         ))
         .size(MenuSize::Wide)
         .preserve_trigger_cursor()
@@ -5302,16 +5293,16 @@ impl Render for TerminalPane {
                 });
         let status_visible = status.is_some() && paste_confirmation.is_none();
         let mut typing_notice = typing_unavailable.then(|| {
-                super::server_pane::render_notice(
-                    "terminal-input-unavailable".into(),
-                    "Typing Unavailable".into(),
-                    "This server doesn't accept terminal input from this version of SpaceTerm. The shell keeps running on the server.".into(),
-                    StatusIntent::Warning,
-                    None,
-                    false,
-                    cx,
-                )
-            });
+            super::server_pane::render_notice(
+                "terminal-input-unavailable".into(),
+                "Typing Unavailable".into(),
+                "This version of SpaceTerm can't send input to this SpaceTerm Server.".into(),
+                StatusIntent::Warning,
+                None,
+                false,
+                cx,
+            )
+        });
         // A server-backed Pane registers no handler for an operation its Terminal Session lacks, so
         // menus and shortcuts present that operation as unavailable.
         let local_operations = !self.server_backed();
@@ -5319,16 +5310,23 @@ impl Render for TerminalPane {
             .decorate(pane_root)
             .on_action(cx.listener(Self::set_up_permission_request))
             .on_action(cx.listener(Self::decline_permission_request_action))
-            .when(self.terminal_session.session_factory.file_insertion_capabilities() == TerminalLocalFileCapabilities::Enabled && self.interactive_input_available(), |root| root.on_drop(cx.listener(Self::insert_dropped_files)))
+            .when(
+                self.terminal_session
+                    .session_factory
+                    .file_insertion_capabilities()
+                    == TerminalLocalFileCapabilities::Enabled
+                    && self.interactive_input_available(),
+                |root| root.on_drop(cx.listener(Self::insert_dropped_files)),
+            )
             .on_action(cx.listener(Self::show_repository_status))
             // The owning server clears its Terminal Session for the client whose input it takes.
-            .when(local_operations || self.interactive_input_available(), |root| {
-                root.on_action(cx.listener(Self::clear_screen_and_scrollback))
-            })
+            .when(
+                local_operations || self.interactive_input_available(),
+                |root| root.on_action(cx.listener(Self::clear_screen_and_scrollback)),
+            )
             .when(self.reading_available(), |root| {
                 root.on_action(cx.listener(Self::copy_selection))
                     .on_action(cx.listener(Self::edit_copy))
-
                     .on_action(cx.listener(Self::scroll_page_up))
                     .on_action(cx.listener(Self::scroll_page_down))
                     .on_action(cx.listener(Self::scroll_to_top))
@@ -5372,9 +5370,19 @@ impl Render for TerminalPane {
                     .child(context_menu),
             )
             .child(self.accessibility_element.decorate_text(terminal_text))
-            .children((!status_visible).then(|| typing_notice.take()).flatten().map(|notice| {
-                div().absolute().right(appearance.spacing(12.0)).bottom(appearance.spacing(12.0)).max_w(relative(0.94)).child(notice)
-            }))
+            .children(
+                (!status_visible)
+                    .then(|| typing_notice.take())
+                    .flatten()
+                    .map(|notice| {
+                        div()
+                            .absolute()
+                            .right(appearance.spacing(12.0))
+                            .bottom(appearance.spacing(12.0))
+                            .max_w(relative(0.94))
+                            .child(notice)
+                    }),
+            )
             .child(scrollbar)
             .when_some(find_bar, |root, find_bar| root.child(find_bar))
             .when_some(repository_popover, |root, popover| root.child(popover))
@@ -5429,14 +5437,21 @@ impl Render for TerminalPane {
                     // intrinsic flex pass, which can retain a zero-width line layout.
                     let status_icon_size = appearance.icons.metrics(IconRole::Status).glyph_size;
                     let message_width = ChromeTypography::round_measurement_up(
-                        appearance.typography.measure(TextRole::Body, &status, window),
+                        appearance
+                            .typography
+                            .measure(TextRole::Body, &status, window),
                         window,
-                    ) + status_icon_size + appearance.spacing(8.0);
+                    ) + status_icon_size
+                        + appearance.spacing(8.0);
                     let action_width = if diagnostics_available {
                         appearance
                             .typography
                             .measure(TextRole::Body, "Export Diagnostics", window)
-                            .max(appearance.typography.measure(TextRole::Body, "Report on GitHub", window))
+                            .max(appearance.typography.measure(
+                                TextRole::Body,
+                                "Report on GitHub",
+                                window,
+                            ))
                     } else if recovery_available {
                         appearance
                             .typography
@@ -5449,94 +5464,106 @@ impl Render for TerminalPane {
                         + appearance.spacing(20.0)
                         + notice_shell.hairline() * 4.0;
                     let status_element = notice_shell.mount(
-                            div()
-                                .id("terminal-status")
-                                .role(gpui::accesskit::Role::Status)
-                                .aria_label("Terminal status")
-                                .aria_description(status.clone())
-                                .aria_value(status_intent.map_or("Terminal Session exited", StatusIntent::label))
-                                .debug_selector(|| "terminal-status".to_owned())
-                                .when(!typing_unavailable, |status| {
-                                    status.absolute().right(px(TERMINAL_SIDE_INSET)).bottom_0()
-                                })
-                                .w(width)
-                                .max_w(relative(0.94))
-                                .text_color(gpui_color(floating_colors.text))
-                                .chrome_text(appearance.typography.style(TextRole::Body))
-                                .flex()
-                                .flex_row()
-                                .child(
-                                    div()
-                                        .debug_selector(|| "terminal-status-intent".to_owned())
-                                        .w(notice_shell.hairline() * 2.0)
-                                        .flex_shrink_0()
-                                        .bg(gpui_color(status_color)),
-                                )
-                                .child(
-                                    div()
-                                        .min_w_0()
-                                        .flex_1()
-                                        .px(appearance.spacing(10.0))
-                                        .py(appearance.spacing(6.0))
-                                        .flex()
-                                        .flex_col()
-                                        .gap(appearance.spacing(6.0))
-                                        .child(
-                                            div()
-                                                .w_full()
-                                                .flex()
-                                                .items_start()
-                                                .gap(appearance.spacing(8.0))
-                                                .child(
-                                                    div()
-                                                        .debug_selector(move || {
-                                                            format!(
-                                                                "terminal-status-glyph-{status_icon:?}"
-                                                            )
-                                                        })
-                                                        .flex_none()
-                                                        .child(Icon::new(
-                                                            status_icon,
-                                                            status_icon_size,
-                                                            gpui_color(status_color),
-                                                        )),
-                                                )
-                                                .child(
-                                                    div()
-                                                        .debug_selector(|| {
-                                                            "terminal-status-message".to_owned()
-                                                        })
-                                                        .min_w_0()
-                                                        .flex_1()
-                                                        .whitespace_normal()
-                                                        .child(status),
-                                                ),
-                                        )
-                                        .when(recovery_available, |status| {
-                                            status.child(
-                                                Button::new("retry-terminal-recovery", "Retry")
-                                                    .variant(ButtonVariant::Link)
-                                                    .size(ButtonSize::Compact)
-                                                    .debug_selector("retry-terminal-recovery")
-                                                    .on_activate(move |_, window, cx| {
-                                                        let _ =
-                                                            retry_pane.update(cx, |pane, cx| {
-                                                                pane.retry_recovery(window, cx);
-                                                            });
-                                                    }),
+                        div()
+                            .id("terminal-status")
+                            .role(gpui::accesskit::Role::Status)
+                            .aria_label("Terminal status")
+                            .aria_description(status.clone())
+                            .aria_value(
+                                status_intent
+                                    .map_or("Terminal Session exited", StatusIntent::label),
+                            )
+                            .debug_selector(|| "terminal-status".to_owned())
+                            .when(!typing_unavailable, |status| {
+                                status.absolute().right(px(TERMINAL_SIDE_INSET)).bottom_0()
+                            })
+                            .w(width)
+                            .max_w(relative(0.94))
+                            .text_color(gpui_color(floating_colors.text))
+                            .chrome_text(appearance.typography.style(TextRole::Body))
+                            .flex()
+                            .flex_row()
+                            .child(
+                                div()
+                                    .debug_selector(|| "terminal-status-intent".to_owned())
+                                    .w(notice_shell.hairline() * 2.0)
+                                    .flex_shrink_0()
+                                    .bg(gpui_color(status_color)),
+                            )
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .flex_1()
+                                    .px(appearance.spacing(10.0))
+                                    .py(appearance.spacing(6.0))
+                                    .flex()
+                                    .flex_col()
+                                    .gap(appearance.spacing(6.0))
+                                    .child(
+                                        div()
+                                            .w_full()
+                                            .flex()
+                                            .items_start()
+                                            .gap(appearance.spacing(8.0))
+                                            .child(
+                                                div()
+                                                    .debug_selector(move || {
+                                                        format!(
+                                                            "terminal-status-glyph-{status_icon:?}"
+                                                        )
+                                                    })
+                                                    .flex_none()
+                                                    .child(Icon::new(
+                                                        status_icon,
+                                                        status_icon_size,
+                                                        gpui_color(status_color),
+                                                    )),
                                             )
-                                        })
-                                        .when(diagnostics_available, |status| {
-                                            status.child(
-                                                Button::new("report-terminal-failure", "Report on GitHub")
-                                                    .variant(ButtonVariant::Link)
-                                                    .size(ButtonSize::Compact)
-                                                    .debug_selector("report-terminal-failure")
-                                                    .tooltip(Tooltip::new("report-terminal-failure-tooltip", "Open a GitHub issue draft with privacy-safe diagnostics"))
-                                                    .on_activate(move |_, _, cx| {
-                                                        let _ = report_pane.update(cx, |pane, cx| pane.report_failure(cx));
-                                                    }),
-                                            ).child(
+                                            .child(
+                                                div()
+                                                    .debug_selector(|| {
+                                                        "terminal-status-message".to_owned()
+                                                    })
+                                                    .min_w_0()
+                                                    .flex_1()
+                                                    .whitespace_normal()
+                                                    .child(status),
+                                            ),
+                                    )
+                                    .when(recovery_available, |status| {
+                                        status.child(
+                                            Button::new("retry-terminal-recovery", "Retry")
+                                                .variant(ButtonVariant::Link)
+                                                .size(ButtonSize::Compact)
+                                                .debug_selector("retry-terminal-recovery")
+                                                .on_activate(move |_, window, cx| {
+                                                    let _ = retry_pane.update(cx, |pane, cx| {
+                                                        pane.retry_recovery(window, cx);
+                                                    });
+                                                }),
+                                        )
+                                    })
+                                    .when(diagnostics_available, |status| {
+                                        status
+                                            .child(
+                                                Button::new(
+                                                    "report-terminal-failure",
+                                                    "Report on GitHub",
+                                                )
+                                                .variant(ButtonVariant::Link)
+                                                .size(ButtonSize::Compact)
+                                                .debug_selector("report-terminal-failure")
+                                                .tooltip(Tooltip::new(
+                                                    "report-terminal-failure-tooltip",
+                                                    "Open a GitHub issue draft",
+                                                ))
+                                                .on_activate(move |_, _, cx| {
+                                                    let _ = report_pane.update(cx, |pane, cx| {
+                                                        pane.report_failure(cx)
+                                                    });
+                                                }),
+                                            )
+                                            .child(
                                                 Button::new(
                                                     "export-terminal-diagnostics",
                                                     "Export Diagnostics",
@@ -5554,12 +5581,22 @@ impl Render for TerminalPane {
                                                     });
                                                 }),
                                             )
-                                        }),
-                                ),
-                        );
+                                    }),
+                            ),
+                    );
                     match typing_notice.take() {
                         Some(notice) => root.child(
-                            div().absolute().right(appearance.spacing(12.0)).bottom(appearance.spacing(12.0)).max_w(relative(0.94)).flex().flex_col().items_end().gap(appearance.spacing(8.0)).child(status_element).child(notice)
+                            div()
+                                .absolute()
+                                .right(appearance.spacing(12.0))
+                                .bottom(appearance.spacing(12.0))
+                                .max_w(relative(0.94))
+                                .flex()
+                                .flex_col()
+                                .items_end()
+                                .gap(appearance.spacing(8.0))
+                                .child(status_element)
+                                .child(notice),
                         ),
                         None => root.child(status_element),
                     }
@@ -5610,7 +5647,7 @@ fn render_permission_request(
         .join(" and ");
     let application = crate::application_identity::ApplicationIdentity::current().display_name();
     let message = format!(
-        "A program asked for {names} access, which lets programs you run in \
+        "A program requested {names} access. Allowing it lets programs in \
          {application} {purposes}."
     );
 

@@ -29,10 +29,7 @@ fn server_reports_its_compiled_identity_and_refuses_other_namespaces() {
                 .unwrap();
             assert_eq!(refused.status.code(), Some(1));
             assert!(refused.stdout.is_empty());
-            assert_eq!(
-                refused.stderr,
-                b"The local server connection did not complete.\n"
-            );
+            assert_eq!(refused.stderr, b"Invalid arguments. See --help.\n");
         }
     }
 }

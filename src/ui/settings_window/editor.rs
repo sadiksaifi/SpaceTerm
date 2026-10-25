@@ -369,23 +369,19 @@ impl SaveStatus {
     /// Content-free wording for the footer. No path, no raw native error.
     pub(super) fn message(self) -> &'static str {
         match self {
-            Self::Saved => "All changes saved",
+            Self::Saved => "Changes saved",
             Self::Saving => "Saving…",
             Self::Failed(_) => "Could not save your changes",
-            Self::Unavailable(SettingsError::Storage(StorageError::Conflict)) => {
-                "Your settings changed outside SpaceTerm"
-            }
+            Self::Unavailable(SettingsError::Storage(StorageError::Conflict)) => "Settings changed",
             Self::Unavailable(SettingsError::Storage(StorageError::Unsafe)) => {
-                "Your settings file is not in a safe location"
+                "Unsafe settings file location"
             }
             Self::Unavailable(SettingsError::Storage(StorageError::TooLarge)) => {
-                "Your settings file is too large to read"
+                "Settings file too large"
             }
-            Self::Unavailable(SettingsError::Invalid) => "Your settings could not be read",
-            Self::Unavailable(SettingsError::Unsupported) => {
-                "Your settings come from a newer SpaceTerm"
-            }
-            Self::Unavailable(_) => "Your settings are unavailable",
+            Self::Unavailable(SettingsError::Invalid) => "Couldn't read settings",
+            Self::Unavailable(SettingsError::Unsupported) => "Newer settings",
+            Self::Unavailable(_) => "Settings unavailable",
         }
     }
 
@@ -397,21 +393,13 @@ impl SaveStatus {
     pub(super) fn explanation(self) -> Option<&'static str> {
         match self {
             Self::Saved | Self::Saving => None,
-            Self::Failed(_) => {
-                Some("The change is still applied. Retry to write it to your settings file.")
+            Self::Failed(_) => Some("The change applies until you quit."),
+            status if status.recoverable() => Some("SpaceTerm is using default settings."),
+            Self::Unavailable(SettingsError::Storage(StorageError::Conflict)) => {
+                Some("Reload to keep editing.")
             }
-            status if status.recoverable() => Some(
-                "SpaceTerm is showing defaults and has changed nothing. Reset Settings keeps the unreadable file as a backup and starts from defaults.",
-            ),
-            Self::Unavailable(SettingsError::Storage(StorageError::Conflict)) => Some(
-                "Reload to pick up the change. Editing is paused so SpaceTerm does not replace it.",
-            ),
-            Self::Unavailable(SettingsError::Unsupported) => Some(
-                "SpaceTerm is showing defaults and has changed nothing. Update SpaceTerm to use and edit these settings.",
-            ),
-            Self::Unavailable(_) => {
-                Some("Editing is paused until SpaceTerm can read and write your settings.")
-            }
+            Self::Unavailable(SettingsError::Unsupported) => Some("Update SpaceTerm to use them."),
+            Self::Unavailable(_) => Some("Editing paused until settings can be read and written."),
         }
     }
 }

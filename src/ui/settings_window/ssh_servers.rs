@@ -15,7 +15,7 @@ use super::SettingsWindow;
 use super::server_list::ServerChoice;
 use crate::domain::SshDestination;
 use crate::ssh::server_connection::{RemoteConnectionStatus, SshServerConnections};
-use crate::ui::ssh_servers::{SshServerAction, installation_consequence, present};
+use crate::ui::ssh_servers::{SshServerAction, present};
 
 pub(super) const INSTALL_CONFIRM_SELECTOR: &str = "settings-ssh-server-install-confirm";
 pub(super) const INSTALL_CANCEL_SELECTOR: &str = "settings-ssh-server-install-cancel";
@@ -100,22 +100,28 @@ impl SettingsWindow {
         };
         let connections = rows.connections.clone();
         let RemoteConnectionStatus::InstallationOffered {
-            offer_id,
-            version,
-            platform,
+            offer_id, platform, ..
         } = connections.status(&destination)
         else {
             return;
         };
-        let title = "Install SpaceTerm Server?";
-        let message = format!(
-            "\u{201C}{}\u{201D} has no SpaceTerm server for this account. SpaceTerm will install \
-             verified version {version} and connect to it.",
-            destination.as_str()
-        );
+        let (title, message) = if platform.0 == "linux" {
+            (
+                "Install SpaceTerm Server?".to_owned(),
+                format!(
+                    "SpaceTerm may ask for your sudo password on \"{}\".",
+                    destination.as_str()
+                ),
+            )
+        } else {
+            (
+                format!("Install SpaceTerm Server on \"{}\"?", destination.as_str()),
+                String::new(),
+            )
+        };
         let result = Alert::new(
             ModalId::new("settings-ssh-server-install"),
-            title,
+            title.clone(),
             title,
             message,
             vec![
@@ -135,7 +141,6 @@ impl SettingsWindow {
             ],
         )
         .intent(AlertIntent::Informational)
-        .detail(installation_consequence(&platform.0))
         .present(window, cx, move |outcome, _| {
             if matches!(
                 outcome,

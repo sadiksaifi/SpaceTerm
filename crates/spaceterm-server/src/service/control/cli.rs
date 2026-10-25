@@ -13,9 +13,11 @@ use std::{ffi::OsString, io::Write, path::PathBuf};
 /// Bounded service-command failures, including output that could not be written.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum Error {
+    #[error("Invalid arguments. See --help.")]
+    InvalidArguments,
     #[error(transparent)]
     Server(#[from] ServerError),
-    #[error("The service command output could not be written.")]
+    #[error("Could not write service command output.")]
     Output,
 }
 
@@ -106,7 +108,7 @@ fn parse_confirmation(options: &[OsString]) -> Result<Option<String>, ServerErro
 /// Validation precedes account-path resolution and service access. Successful operations return
 /// 0; an unconfirmed destructive action prints its effects and returns 2 without changing state.
 pub fn run(identity: &str, args: &[OsString], output: &mut impl Write) -> Result<u8, Error> {
-    let request = Request::parse(identity, args)?;
+    let request = Request::parse(identity, args).map_err(|_| Error::InvalidArguments)?;
     let service = Service::for_identity(identity)?;
     let controller = Controller::new(service.clone());
     let status = match request {
@@ -115,11 +117,7 @@ pub fn run(identity: &str, args: &[OsString], output: &mut impl Write) -> Result
         Request::AutomaticStart(enabled) => controller.set_automatic_start(enabled)?,
         Request::EnableLinger => {
             controller.enable_linger(LingerAuthorization::Terminal)?;
-            writeln!(
-                output,
-                "Boot startup authorized for this account. Install or Start the server explicitly."
-            )
-            .map_err(|_| Error::Output)?;
+            writeln!(output, "Boot startup authorized.").map_err(|_| Error::Output)?;
             return Ok(0);
         }
         Request::Update {
@@ -143,7 +141,7 @@ pub fn run(identity: &str, args: &[OsString], output: &mut impl Write) -> Result
             let Some(approval) = service.prepare_activation(&candidate)? else {
                 writeln!(
                     output,
-                    "This exact server artifact is already approved. No update is needed."
+                    "This server version is already installed. No update is needed."
                 )
                 .map_err(|_| Error::Output)?;
                 return Ok(0);
@@ -200,14 +198,13 @@ pub fn run(identity: &str, args: &[OsString], output: &mut impl Write) -> Result
         Request::Destructive { action, confirmed } => {
             let confirmation = controller.prepare(action)?;
             if !confirmed {
-                writeln!(
-                    output,
-                    "{}\n{}\n{}\nNo changes made. Run again with --confirm to proceed.",
-                    confirmation.title(),
-                    confirmation.message(),
-                    confirmation.detail()
-                )
-                .map_err(|_| Error::Output)?;
+                writeln!(output, "{}", confirmation.message()).map_err(|_| Error::Output)?;
+                let detail = confirmation.detail();
+                if !detail.is_empty() {
+                    writeln!(output, "{detail}").map_err(|_| Error::Output)?;
+                }
+                writeln!(output, "Run again with --confirm to proceed.")
+                    .map_err(|_| Error::Output)?;
                 return Ok(2);
             }
             controller.confirm(confirmation)?
@@ -223,32 +220,57 @@ fn write_update_preview(
     candidate: &RetainedInstallation,
     token: &str,
 ) -> Result<(), Error> {
-    let digest = candidate
+    candidate
         .directory
         .file_name()
         .and_then(|v| v.to_str())
         .filter(|v| crate::service::runtime::digest_valid(v))
         .ok_or(ServerError::RuntimeUnavailable)?;
-    writeln!(output, "{}\n{}\n{}\nArchive SHA-256: {digest}\nNo changes made. Repeat this exact command with --confirm {token} to proceed.", wording.title(), wording.message(), wording.detail()).map_err(|_| Error::Output)
+    // The stopped-server CLI preview has distinct approved wording (#645).
+    let question = if wording.change == UpdateChange::Update && wording.stopped && !wording.running
+    {
+        format!(
+            "Update stopped {} server to {}?",
+            wording.server, wording.candidate
+        )
+    } else {
+        wording.message()
+    };
+    writeln!(output, "{question}").map_err(|_| Error::Output)?;
+    let detail = wording.detail();
+    if !detail.is_empty() {
+        writeln!(output, "{detail}").map_err(|_| Error::Output)?;
+    }
+    writeln!(output, "Repeat this command with --confirm {token}.").map_err(|_| Error::Output)
 }
 
-fn write_activation(output: &mut impl Write, status: &ActivationStatus) -> Result<(), Error> {
+fn write_activation(
+    output: &mut impl Write,
+    identity: &str,
+    status: &ActivationStatus,
+) -> Result<(), Error> {
     let message = match status.phase {
-        ActivationPhase::Activating => {
-            "Update admitted. Finish Update resolves this same operation."
-        }
-        ActivationPhase::Completed { running: true } => "The approved server update is running.",
+        ActivationPhase::Activating => "Update in progress. Run service-recover-update to finish.",
+        ActivationPhase::Completed { running: true } => "Server updated and running.",
         ActivationPhase::Completed { running: false } => {
-            "The runtime change is complete. The server is not running."
+            "The server version changed. The server is not running."
         }
         ActivationPhase::Failed { can_return: true } => {
-            "The update failed before readiness. A separately confirmed return to the previous runtime is available."
+            return writeln!(
+                output,
+                "The update failed to start. Run service-return-update {identity} to review restoring the previous version."
+            )
+            .map_err(|_| Error::Output);
         }
         ActivationPhase::Failed { can_return: false } => {
-            "The update failed. Returning to the previous runtime could not be proved safe."
+            "The update failed. SpaceTerm can't safely restore the previous server version."
         }
         ActivationPhase::Uncertain => {
-            "The update outcome could not be confirmed. Finish Update checks the original operation without repeating destructive dispatch."
+            return writeln!(
+                output,
+                "SpaceTerm couldn't confirm whether the update finished. Run service-recover-update {identity} to check it."
+            )
+            .map_err(|_| Error::Output);
         }
     };
     writeln!(output, "{message}").map_err(|_| Error::Output)
@@ -260,12 +282,13 @@ fn write_activation_result(
     result: Result<Option<ActivationStatus>, ServerError>,
 ) -> Result<u8, Error> {
     match result {
-        Ok(Some(status)) => write_activation(output, &status)?,
-        Ok(None) => writeln!(output, "There is no admitted server update to finish.")
-            .map_err(|_| Error::Output)?,
+        Ok(Some(status)) => write_activation(output, &service.identity, &status)?,
+        Ok(None) => {
+            writeln!(output, "There is no unfinished server update.").map_err(|_| Error::Output)?
+        }
         Err(error) => {
             if let Some(status) = service.activation_status()? {
-                write_activation(output, &status)?;
+                write_activation(output, &service.identity, &status)?;
             }
             return Err(error.into());
         }
@@ -276,27 +299,18 @@ fn write_activation_result(
 /// Shared service-command usage and authorization guidance for a compiled application identity.
 pub fn help(identity: &str) -> String {
     format!(
-        "Service controls (no desktop or display required):\n\
-           service-status IDENTITY                     Read status without starting the server\n\
-           service-start IDENTITY                      Start explicitly and clear deliberate Stop\n\
-           service-automatic-start IDENTITY on|off      Change automatic startup without ending Sessions\n\
-           service-stop IDENTITY [--confirm]            Stop and suspend automatic startup\n\
-           service-restart IDENTITY [--confirm]         Restart the approved installation\n\
-           service-uninstall IDENTITY [--confirm]       Remove service registration\n\
-           service-enable-linger IDENTITY               Authorize Linux boot startup using scoped sudo\n\n\
-           service-update IDENTITY RETAINED_INSTALLATION [--confirm SNAPSHOT]\n\
-           service-recover-update IDENTITY              Finish the admitted exact-target update\n\
-           service-return-update IDENTITY [--confirm SNAPSHOT]\n\n\
-         IDENTITY must be {identity}, this executable's compiled application identity.\n\
-         Service controls use the owning account's authority without pairing or a credential store.\n\
-         Stop, Restart and Uninstall show their effects and exit 2 without --confirm.\n\
-         To authorize the action, put --confirm after IDENTITY. They end Terminal Sessions\n\
-         for every client and keep Workspaces and verified server installations.\n\
-         Linux service-enable-linger authorizes only account lingering; SpaceTerm never runs as root.\n\
-         Install or Start explicitly after authorization. Status and setup-state preserve Stop.\n\
-         Update and return previews print an exact SNAPSHOT token; changed observations require a new preview.\n\
-         Return requires proof that the candidate never reached ready and saved server state is unchanged.\n\
-         Return keeps the server stopped. Ended Terminal Sessions never return."
+        "Service controls:\n\
+         service-status IDENTITY                     Show status\n\
+         service-start IDENTITY                      Start the server\n\
+         service-automatic-start IDENTITY on|off      Turn automatic startup on or off\n\
+         service-stop IDENTITY [--confirm]            Stop the server\n\
+         service-restart IDENTITY [--confirm]         Restart the server\n\
+         service-uninstall IDENTITY [--confirm]       Uninstall the server\n\
+         service-enable-linger IDENTITY               Allow startup at boot (Linux)\n\
+         service-update IDENTITY RETAINED_INSTALLATION [--confirm SNAPSHOT]\n\
+         service-recover-update IDENTITY              Finish an interrupted update\n\
+         service-return-update IDENTITY [--confirm SNAPSHOT]\n\n\
+         IDENTITY is {identity}. Stop, Restart, Uninstall and Update end all Terminal Sessions. Without --confirm they print a preview and exit 2. Update and return previews print the SNAPSHOT to pass to --confirm."
     )
 }
 
@@ -311,17 +325,11 @@ pub fn write_status(
     } else if status.running {
         "Running."
     } else if status.stopped {
-        "Stopped. It stays stopped until you start it."
+        "Stopped."
     } else {
         "Not running."
     };
-    writeln!(output, "{name} server: {phase}").map_err(|_| Error::Output)?;
-    writeln!(
-        output,
-        "Installed: {}; enabled: {}; running: {}; stopped: {}.",
-        status.installed, status.enabled, status.running, status.stopped
-    )
-    .map_err(|_| Error::Output)
+    writeln!(output, "{name} server: {phase}").map_err(|_| Error::Output)
 }
 
 #[cfg(test)]
@@ -330,6 +338,20 @@ mod tests {
     use std::os::unix::ffi::OsStringExt;
 
     const IDENTITY: &str = "spaceterm-development";
+
+    #[test]
+    fn invalid_arguments_report_usage_without_echoing_private_input() {
+        for args in [
+            Vec::new(),
+            vec!["service-private-command".into(), IDENTITY.into()],
+            vec!["service-status".into(), "private-identity".into()],
+        ] {
+            let mut output = Vec::new();
+            let error = run(IDENTITY, &args, &mut output).unwrap_err();
+            assert_eq!(error.to_string(), "Invalid arguments. See --help.");
+            assert!(output.is_empty());
+        }
+    }
 
     #[test]
     fn automatic_start_accepts_only_an_explicit_policy_and_compiled_identity() {
@@ -349,7 +371,7 @@ mod tests {
             let args: Vec<_> = args.into_iter().map(OsString::from).collect();
             assert_eq!(
                 run(IDENTITY, &args, &mut Vec::new()),
-                Err(Error::Server(ServerError::Protocol))
+                Err(Error::InvalidArguments)
             );
         }
     }
@@ -393,7 +415,7 @@ mod tests {
             let args: Vec<_> = args.into_iter().map(OsString::from).collect();
             assert_eq!(
                 run(IDENTITY, &args, &mut Vec::new()),
-                Err(Error::Server(ServerError::Protocol))
+                Err(Error::InvalidArguments)
             );
         }
     }
@@ -431,7 +453,7 @@ mod tests {
                 let malformed: Vec<_> = malformed.into_iter().map(OsString::from).collect();
                 assert_eq!(
                     run(IDENTITY, &malformed, &mut Vec::new()),
-                    Err(Error::Server(ServerError::Protocol))
+                    Err(Error::InvalidArguments)
                 );
             }
         }
@@ -452,7 +474,7 @@ mod tests {
             let args = [command, IDENTITY, "--confirm"].map(OsString::from);
             assert_eq!(
                 run(IDENTITY, &args, &mut Vec::new()),
-                Err(Error::Server(ServerError::Protocol))
+                Err(Error::InvalidArguments)
             );
         }
     }
@@ -487,7 +509,7 @@ mod tests {
                 let mut output = Vec::new();
                 assert_eq!(
                     run(IDENTITY, &[command.into(), identity], &mut output),
-                    Err(Error::Server(ServerError::Protocol))
+                    Err(Error::InvalidArguments)
                 );
                 assert!(output.is_empty());
             }
@@ -505,13 +527,13 @@ mod tests {
         ] {
             assert_eq!(
                 run(IDENTITY, &args, &mut Vec::new()),
-                Err(Error::Server(ServerError::Protocol))
+                Err(Error::InvalidArguments)
             );
         }
     }
 
     #[test]
-    fn stopped_status_explains_how_to_resume() {
+    fn stopped_status_reports_the_server_phase() {
         let mut output = Vec::new();
         write_status(
             &mut output,
@@ -523,11 +545,7 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(
-            output,
-            b"SpaceTerm Development server: Stopped. It stays stopped until you start it.\n\
-              Installed: true; enabled: false; running: false; stopped: true.\n"
-        );
+        assert_eq!(output, b"SpaceTerm Development server: Stopped.\n");
     }
 
     #[test]
@@ -547,10 +565,7 @@ mod tests {
         let error =
             write_status(&mut RefusedOutput, "SpaceTerm", ServiceStatus::default()).unwrap_err();
         assert_eq!(error, Error::Output);
-        assert_eq!(
-            error.to_string(),
-            "The service command output could not be written."
-        );
+        assert_eq!(error.to_string(), "Could not write service command output.");
         assert!(std::error::Error::source(&error).is_none());
     }
 }

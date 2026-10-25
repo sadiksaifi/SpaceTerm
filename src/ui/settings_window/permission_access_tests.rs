@@ -518,7 +518,7 @@ fn a_failed_reset_reports_failure_and_explains_the_manual_recovery(cx: &mut Test
         Some(RecoveryNotice::ResetFailed)
     );
     let failure = explanation(&window, ScreenRecording, cx);
-    assert!(failure.contains("could not be reset"));
+    assert!(failure.contains("Couldn't reset"));
     assert!(failure.contains("Privacy & Security > Screen & System Audio Recording"));
     assert!(!failure.contains("PlatformRejected"));
     // A failed reset starts no setup.
@@ -599,7 +599,7 @@ fn a_setup_that_cannot_open_system_settings_explains_where_to_go(cx: &mut TestAp
     );
     let failure = explanation(&window, Accessibility, cx);
     assert_ne!(failure, guidance);
-    assert!(failure.contains("could not be opened"));
+    assert!(failure.contains("Open System Settings and allow"));
     assert!(failure.contains("Privacy & Security > Device Control and Data Access"));
     assert!(failure.contains(APPLICATION));
 
@@ -665,20 +665,16 @@ fn an_unreadable_authorization_reports_failure_and_checks_again(cx: &mut TestApp
 fn failure_explanations_are_distinct_fixed_copy(cx: &mut TestAppContext) {
     let access = ScriptedPermissionAccess::new(Ok(Granted), Ok(Granted));
     let (window, cx) = open_settings(Some(access.clone()), None, cx);
-    let check_failure = match (cfg!(spaceterm_packaged), cfg!(spaceterm_release)) {
-        (false, _) => "SpaceTerm Development could not check Screen Recording access.",
-        (true, false) => "SpaceTerm Preflight could not check Screen Recording access.",
-        (true, true) => "SpaceTerm could not check Screen Recording access.",
-    };
+    let check_failure = "Couldn't check Screen Recording access.";
     for (error, expected) in [
         (PermissionAccessError::OffMainThread, check_failure),
         (
             PermissionAccessError::PlatformUnavailable,
-            "The system did not report Screen Recording access.",
+            "Screen Recording access unknown.",
         ),
         (
             PermissionAccessError::PlatformRejected,
-            "The system rejected the Screen Recording access check.",
+            "Screen Recording access check failed.",
         ),
     ] {
         access.set(ScreenRecording, Err(error));

@@ -57,12 +57,9 @@ impl UpdateStatusPresentation {
                 "Checking for updates…".to_owned(),
                 Some(UpdateStatusAction::CheckNow { enabled: false }),
             ),
-            UpdateState::UpToDate => (
-                format!("Up to date. {}.", last_checked(last_check, now)),
-                check_now,
-            ),
+            UpdateState::UpToDate => ("Up to date.".to_owned(), check_now),
             UpdateState::Available { version } => (
-                format!("Version {version} is available."),
+                format!("Version {version} available."),
                 Some(UpdateStatusAction::Download),
             ),
             UpdateState::Downloading {
@@ -71,17 +68,12 @@ impl UpdateStatusPresentation {
                 total,
             } if *total > 0 => {
                 let percent = (*received as f64 / *total as f64).clamp(0.0, 1.0) * 100.0;
-                (
-                    format!("Downloading version {version}… {}%", percent.floor()),
-                    None,
-                )
+                (format!("Downloading {version}… {}%", percent.floor()), None)
             }
-            UpdateState::Downloading { version, .. } => {
-                (format!("Downloading version {version}…"), None)
-            }
-            UpdateState::Verifying { version } => (format!("Preparing version {version}…"), None),
+            UpdateState::Downloading { version, .. } => (format!("Downloading {version}…"), None),
+            UpdateState::Verifying { version } => (format!("Preparing {version}…"), None),
             UpdateState::Ready { version } => (
-                format!("Version {version} installs when you quit SpaceTerm."),
+                format!("Version {version} installs when you quit."),
                 Some(UpdateStatusAction::RequestInstall),
             ),
             UpdateState::Installing { version } => (
@@ -242,7 +234,7 @@ impl SettingsWindow {
         let owner = cx.weak_entity();
         SegmentedControl::new(
             "settings-update-reminder-interval",
-            "Remind me about overdue updates",
+            "Overdue update reminders",
             &current,
             [
                 (ReminderInterval::TwoHours, "2 hours", "two-hours"),
@@ -305,12 +297,10 @@ fn reset_update_preference(row: SettingsRowId, preferences: &mut UpdatePreferenc
 /// One line of guidance for the preference rows.
 pub(super) fn update_row_description(row: SettingsRowId) -> Option<&'static str> {
     Some(match row {
-        SettingsRowId::AutomaticUpdateDownloads => {
-            "Updates download in the background and install when you quit SpaceTerm."
-        }
-        SettingsRowId::UpdateCheckInterval => "SpaceTerm also checks each time it opens.",
+        SettingsRowId::AutomaticUpdateDownloads => "Updates install when you quit SpaceTerm.",
+        SettingsRowId::UpdateCheckInterval => "SpaceTerm checks when it opens.",
         SettingsRowId::UpdateReminderInterval => {
-            "An update becomes overdue two days after its release. A dismissed reminder returns after this interval."
+            "Overdue update reminders return after this interval."
         }
         _ => return None,
     })
@@ -403,10 +393,10 @@ mod tests {
     }
 
     #[test]
-    fn status_should_name_the_last_check_and_the_quit_install() {
+    fn status_should_report_the_update_and_the_quit_install() {
         assert_eq!(
             resolve(UpdateState::UpToDate).summary.as_ref(),
-            "Up to date. Last checked 5 minutes ago."
+            "Up to date."
         );
         assert_eq!(
             resolve(UpdateState::Ready {
@@ -414,7 +404,7 @@ mod tests {
             })
             .summary
             .as_ref(),
-            "Version 0.4.2 installs when you quit SpaceTerm."
+            "Version 0.4.2 installs when you quit."
         );
         assert_eq!(
             resolve(UpdateState::Downloading {
@@ -424,7 +414,7 @@ mod tests {
             })
             .summary
             .as_ref(),
-            "Downloading version 0.4.2… 66%"
+            "Downloading 0.4.2… 66%"
         );
     }
 

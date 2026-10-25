@@ -31,9 +31,7 @@ use super::ssh_host_form::{
 use super::ssh_host_picker::{
     HostDiscoveryProvider, SshHostPicker, SshHostPickerEvent, SshHostPickerLifecycleEvent,
 };
-use super::ssh_servers::{
-    SshHostSource, SshServerAction, installation_consequence, platform_name, present,
-};
+use super::ssh_servers::{SshHostSource, SshServerAction, platform_name, present};
 use crate::domain::SshDestination;
 use crate::ssh::host_config::HostDiscovery;
 use crate::ssh::managed_hosts::ManagedSshHost;
@@ -523,10 +521,8 @@ impl RemoteWorkspaceFlow {
                     let _ = progress.dismiss(window, cx);
                 }
                 let detail = format!(
-                    "This account has no SpaceTerm server. SpaceTerm can install verified version \
-                     {version} for {}. {}",
+                    "Install SpaceTerm Server {version} for {}.",
                     platform_name(&platform.0, &platform.1),
-                    installation_consequence(&platform.0),
                 );
                 self.review_installation(destination, *offer_id, detail, window, cx);
                 false
@@ -659,7 +655,7 @@ impl RemoteWorkspaceFlow {
         );
         let alert = Alert::new(
             ModalId::new(INSTALLATION_ID),
-            "Install the SpaceTerm server",
+            "Install SpaceTerm Server",
             title,
             detail,
             vec![
@@ -990,11 +986,8 @@ impl RemoteWorkspaceFlow {
         };
         let progress = self.present_progress(
             generation,
-            format!(
-                "Opening a Workspace on \u{201C}{}\u{201D}",
-                destination.as_str()
-            ),
-            "Waiting for the SpaceTerm server to accept the Workspace\u{2026}".into(),
+            "Opening Workspace".to_owned(),
+            "Opening the Workspace…".into(),
             window,
             cx,
         );
@@ -1048,14 +1041,9 @@ impl RemoteWorkspaceFlow {
         if matches!(status, RemoteConnectionStatus::Connected { .. }) {
             // A newer connection to the destination replaced the one the request was for.
             let problem = ConnectionProblem {
-                title: format!(
-                    "Couldn\u{2019}t Open a Workspace on \u{201C}{}\u{201D}",
-                    destination.as_str()
-                ),
+                title: "Couldn't Open Workspace".to_owned(),
                 state: "Connection replaced",
-                explanation: "The connection was replaced before the Workspace opened, so \
-                              nothing was asked of the server. Try again to open it on the \
-                              current connection."
+                explanation: "The connection changed before the Workspace opened. Try again."
                     .into(),
                 retry: true,
             };
@@ -1289,7 +1277,6 @@ mod tests {
                         server: [2; 32],
                     },
                     lease: Arc::new(Lease(self.alive.clone())),
-                    protocol_major: 1,
                     facts: SshServerFacts {
                         platform: ("linux".into(), "x86_64".into()),
                         version: None,

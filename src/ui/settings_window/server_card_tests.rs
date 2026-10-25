@@ -126,10 +126,7 @@ fn a_local_server_without_a_protocol_in_common_needs_an_update() {
 fn an_ssh_server_reads_by_its_connection() {
     for (status, state, short, live) in [
         (
-            RemoteConnectionStatus::Connected {
-                protocol_major: 1,
-                facts: facts(),
-            },
+            RemoteConnectionStatus::Connected { facts: facts() },
             "Connected over SSH",
             "Connected \u{b7} SSH",
             true,
@@ -180,10 +177,7 @@ fn an_ssh_connection_reads_as_its_verb_and_maintenance_names_itself_apart() {
     assert_eq!(installing.state.as_ref(), "Installing\u{2026}");
 
     let stopping = ssh_state(
-        &RemoteConnectionStatus::Connected {
-            protocol_major: 1,
-            facts: facts(),
-        },
+        &RemoteConnectionStatus::Connected { facts: facts() },
         Some(Some(&SubmittedKind::Service(ServiceControlAction::Stop))),
         None,
         None,
@@ -193,10 +187,7 @@ fn an_ssh_connection_reads_as_its_verb_and_maintenance_names_itself_apart() {
     assert!(stopping.live, "the server stays connected while it stops");
 
     let reading = ssh_state(
-        &RemoteConnectionStatus::Connected {
-            protocol_major: 1,
-            facts: facts(),
-        },
+        &RemoteConnectionStatus::Connected { facts: facts() },
         Some(None),
         None,
         None,

@@ -10,7 +10,7 @@ use gpui::{
 };
 use spaceterm_ui::{DeterminateProgress, ProgressBar, ProgressSize, ProgressState};
 
-use super::{CURRENT_VERSION, service};
+use super::service;
 use crate::ui::appearance::gpui_color;
 use crate::ui::chrome_typography::{ChromeTextStyleExt as _, TextRole};
 use crate::updates::{ApplicationUpdates, LaunchState, UpdateState};
@@ -123,26 +123,23 @@ impl LaunchPresentation {
             LaunchState::Open => return None,
             LaunchState::Checking => {
                 return Some(Self {
-                    title: "Checking for Updates",
+                    title: "Checking Updates",
                     message: None,
-                    status: "SpaceTerm opens in a moment.".into(),
+                    status: "Opening SpaceTerm soon.".into(),
                     detail: None,
                     progress: None,
                 });
             }
             LaunchState::Required => (
                 "Updating SpaceTerm",
-                format!(
-                    "SpaceTerm {CURRENT_VERSION} is out of date. The update installs before \
-                     SpaceTerm opens."
-                ),
+                "SpaceTerm updates before opening.".to_owned(),
             ),
             LaunchState::Installing => (
                 "Installing Update",
-                "SpaceTerm is finishing the update it downloaded earlier.".to_owned(),
+                "Finishing the downloaded update.".to_owned(),
             ),
         };
-        let reopens = || Some(SharedString::from("SpaceTerm reopens when it’s done."));
+        let reopens = || Some(SharedString::from("SpaceTerm reopens afterward."));
         let (status, detail, progress) = match state {
             UpdateState::Downloading {
                 version,
@@ -386,16 +383,17 @@ mod tests {
             let presentation =
                 resolve(LaunchState::Required, state.clone()).expect("a held launch is presented");
             assert_eq!(presentation.title, "Updating SpaceTerm");
-            assert_eq!(presentation.message.as_deref(), Some(format!(
-                "SpaceTerm {CURRENT_VERSION} is out of date. The update installs before SpaceTerm opens."
-            ).as_str()));
+            assert_eq!(
+                presentation.message.as_deref(),
+                Some("SpaceTerm updates before opening.")
+            );
             let (status, detail) = match state {
                 UpdateState::Available { .. }
                 | UpdateState::Verifying { .. }
                 | UpdateState::Ready { .. } => ("Preparing SpaceTerm 0.4.2…", None),
                 UpdateState::Installing { .. } => (
                     "Installing SpaceTerm 0.4.2…",
-                    Some("SpaceTerm reopens when it’s done."),
+                    Some("SpaceTerm reopens afterward."),
                 ),
                 _ => ("Preparing the update…", None),
             };
@@ -440,12 +438,12 @@ mod tests {
         });
         let (_, cx) = cx.add_window_view(|window, cx| LaunchView::new(updates, window, cx));
         let tree = A11yTree::read(cx);
-        let title = tree.node("Checking for Updates");
+        let title = tree.node("Checking Updates");
         assert_eq!(title["aria"]["role"], "Heading");
         assert!(
             tree.with_role("Label")
                 .iter()
-                .any(|label| label["aria"]["value"] == "SpaceTerm opens in a moment.")
+                .any(|label| label["aria"]["value"] == "Opening SpaceTerm soon.")
         );
     }
 

@@ -133,7 +133,7 @@ pub(crate) fn present(status: DirectRouteStatus, server: &str) -> DirectServerPr
         DirectRouteStatus::Connecting => (
             "Connecting\u{2026}",
             "settings-direct-server-state-connecting",
-            format!("SpaceTerm is connecting to \u{201C}{server}\u{201D} over the network."),
+            format!("Connecting to \"{server}\"."),
             CaptionTone::Guidance,
             true,
             &[Cancel],
@@ -141,10 +141,7 @@ pub(crate) fn present(status: DirectRouteStatus, server: &str) -> DirectServerPr
         DirectRouteStatus::Connected => (
             "Connected",
             "settings-direct-server-state-connected",
-            format!(
-                "This device is paired with \u{201C}{server}\u{201D} and connected over the \
-                 network."
-            ),
+            format!("Paired with \"{server}\" and connected."),
             CaptionTone::Guidance,
             false,
             &[Disconnect],
@@ -152,10 +149,7 @@ pub(crate) fn present(status: DirectRouteStatus, server: &str) -> DirectServerPr
         DirectRouteStatus::Reconnecting => (
             "Reconnecting\u{2026}",
             "settings-direct-server-state-reconnecting",
-            format!(
-                "The connection to \u{201C}{server}\u{201D} was interrupted. Terminal screens \
-                 stay as they were until SpaceTerm reconnects."
-            ),
+            format!("The connection to \"{server}\" was interrupted."),
             CaptionTone::Warning,
             true,
             &[Disconnect],
@@ -163,10 +157,7 @@ pub(crate) fn present(status: DirectRouteStatus, server: &str) -> DirectServerPr
         DirectRouteStatus::Disconnected => (
             "Disconnected",
             "settings-direct-server-state-disconnected",
-            format!(
-                "This device is still paired with \u{201C}{server}\u{201D}. Connect to present \
-                 its Workspaces."
-            ),
+            format!("Connect to show \"{server}\"'s Workspaces."),
             CaptionTone::Guidance,
             false,
             &[Connect],
@@ -174,11 +165,7 @@ pub(crate) fn present(status: DirectRouteStatus, server: &str) -> DirectServerPr
         DirectRouteStatus::NeedsInteraction => (
             "Waiting for you",
             "settings-direct-server-state-interaction",
-            format!(
-                "SpaceTerm needs your permission to use this device\u{2019}s key for \
-                 \u{201C}{server}\u{201D}. It doesn\u{2019}t ask while it works in the \
-                 background, so choose Resume to continue."
-            ),
+            format!("Choose Resume to allow SpaceTerm to use this device's key for \"{server}\"."),
             CaptionTone::Warning,
             false,
             &[Resume, Disconnect],
@@ -188,38 +175,27 @@ pub(crate) fn present(status: DirectRouteStatus, server: &str) -> DirectServerPr
                 RefusalReason::Revoked => (
                     "Unpaired",
                     "settings-direct-server-state-revoked",
-                    format!(
-                        "\u{201C}{server}\u{201D} unpaired this device, so it can\u{2019}t \
-                         connect. Join with a new invitation to pair it again."
-                    ),
+                    format!("Join with a new invitation to pair with \"{server}\" again."),
                     &[],
                 ),
                 RefusalReason::PinMismatch => (
                     "Different server",
                     "settings-direct-server-state-pin",
                     format!(
-                        "The computer answering for \u{201C}{server}\u{201D} isn\u{2019}t the \
-                         server this device paired with, so SpaceTerm didn\u{2019}t connect \
-                         and sent it nothing."
+                        "SpaceTerm refused to connect because \"{server}\" now reaches a different server."
                     ),
                     &[Connect],
                 ),
                 RefusalReason::InvalidProof => (
                     "Not verified",
                     "settings-direct-server-state-proof",
-                    format!(
-                        "\u{201C}{server}\u{201D} couldn\u{2019}t prove it\u{2019}s the server \
-                         this device paired with, so SpaceTerm didn\u{2019}t connect."
-                    ),
+                    format!("SpaceTerm couldn't verify \"{server}\"'s identity."),
                     &[Connect],
                 ),
                 RefusalReason::Incompatible => (
                     "Incompatible",
                     "settings-direct-server-state-incompatible",
-                    format!(
-                        "This SpaceTerm and the server on \u{201C}{server}\u{201D} have no \
-                         protocol version in common. Update the older one to connect."
-                    ),
+                    format!("SpaceTerm and \"{server}\" are incompatible."),
                     &[],
                 ),
             };
@@ -237,9 +213,7 @@ pub(crate) fn present(status: DirectRouteStatus, server: &str) -> DirectServerPr
                 "Key unavailable",
                 "settings-direct-server-state-credential",
                 format!(
-                    "SpaceTerm can\u{2019}t read this device\u{2019}s key for \
-                     \u{201C}{server}\u{201D} from the system\u{2019}s credential storage. \
-                     Other servers aren\u{2019}t affected."
+                    "SpaceTerm couldn't access this device's key for \"{server}\". Choose Resume to try again."
                 ),
                 CaptionTone::Error,
                 false,
@@ -248,10 +222,7 @@ pub(crate) fn present(status: DirectRouteStatus, server: &str) -> DirectServerPr
             UnavailableReason::Network => (
                 "Unreachable",
                 "settings-direct-server-state-unreachable",
-                format!(
-                    "SpaceTerm can\u{2019}t reach \u{201C}{server}\u{201D} over the network \
-                     and keeps trying quietly."
-                ),
+                format!("SpaceTerm can't reach \"{server}\"."),
                 CaptionTone::Warning,
                 false,
                 &[Connect, Disconnect],
@@ -259,9 +230,7 @@ pub(crate) fn present(status: DirectRouteStatus, server: &str) -> DirectServerPr
             UnavailableReason::Storage => (
                 "Unavailable",
                 "settings-direct-server-state-storage",
-                "SpaceTerm couldn\u{2019}t read or save its direct connections on this \
-                 computer."
-                    .to_owned(),
+                "Couldn't read or save direct connections.".to_owned(),
                 CaptionTone::Error,
                 false,
                 &[],
@@ -302,42 +271,36 @@ impl UnpairAction {
 pub(crate) fn present_unpair(pending: &PendingUnpair) -> (String, &'static [UnpairAction]) {
     let server = &pending.server_label;
     let subject = if pending.enrollment_cleanup {
-        format!(
-            "A pairing with \u{201C}{server}\u{201D} that didn\u{2019}t finish left a request \
-             on that server, which SpaceTerm is withdrawing."
-        )
+        format!("SpaceTerm is cancelling the unfinished pairing with \"{server}\".")
     } else if pending.server_confirmed {
-        format!(
-            "\u{201C}{server}\u{201D} confirmed the unpair. SpaceTerm still has to remove this \
-             device\u{2019}s key for it from the system\u{2019}s credential storage."
-        )
+        format!("\"{server}\" unpaired this device. SpaceTerm is removing its saved key.")
     } else if pending.self_unpair {
-        format!(
-            "This device\u{2019}s connection to \u{201C}{server}\u{201D} is removed here, but \
-             the server hasn\u{2019}t confirmed that it revoked this device yet."
-        )
+        format!("Removed. Waiting for \"{server}\" to confirm.")
     } else {
-        format!("\u{201C}{server}\u{201D} hasn\u{2019}t confirmed the unpair you asked for yet.")
+        format!("SpaceTerm is still confirming that \"{server}\" unpaired the device.")
     };
     let (next, actions): (&str, &'static [UnpairAction]) = match pending.state {
-        UnpairState::Retrying => ("SpaceTerm keeps trying quietly.", &[UnpairAction::Dismiss]),
+        UnpairState::Retrying => ("", &[UnpairAction::Dismiss]),
         // Only Resume continues it, so it can't be dismissed out of reach.
         UnpairState::NeedsInteraction => (
-            "To continue, SpaceTerm needs your permission to use the key the request was made \
-             with. Choose Resume.",
+            "Choose Resume to allow SpaceTerm to use the key needed to finish this request.",
             &[UnpairAction::Resume],
         ),
         UnpairState::Unconfirmed if pending.server_confirmed => (
-            "Choose Retry to try again.",
+            "Choose Resume to try again.",
             &[UnpairAction::Resume, UnpairAction::Dismiss],
         ),
         UnpairState::Unconfirmed => (
-            "If that computer is gone for good, this stays unconfirmed. Choose Retry to try \
-             again.",
+            "Choose Resume to check again.",
             &[UnpairAction::Resume, UnpairAction::Dismiss],
         ),
     };
-    (format!("{subject} {next}"), actions)
+    let explanation = match pending.state {
+        UnpairState::Retrying => subject,
+        UnpairState::NeedsInteraction => next.to_owned(),
+        UnpairState::Unconfirmed => format!("{subject} {next}"),
+    };
+    (explanation, actions)
 }
 
 #[cfg(test)]
@@ -412,38 +375,62 @@ mod tests {
     }
 
     #[test]
-    fn an_unconfirmed_unpair_still_retrying_quietly_offers_retry_and_dismiss() {
-        let (_, actions) = present_unpair(&pending(UnpairState::Unconfirmed));
+    fn an_unconfirmed_unpair_names_the_resume_action_it_offers() {
+        let (explanation, actions) = present_unpair(&pending(UnpairState::Unconfirmed));
 
         assert_eq!(actions, &[UnpairAction::Resume, UnpairAction::Dismiss]);
+        assert!(
+            explanation.ends_with("Choose Resume to check again."),
+            "{explanation}"
+        );
+        assert!(!explanation.contains("Retry"), "{explanation}");
     }
 
     #[test]
     fn an_offline_self_unpair_says_removal_here_is_done_and_revocation_is_not_confirmed() {
         let (explanation, _) = present_unpair(&pending(UnpairState::Unconfirmed));
 
-        assert!(explanation.contains("is removed here"), "{explanation}");
+        assert!(explanation.starts_with("Removed."), "{explanation}");
         assert!(
-            explanation.contains("hasn\u{2019}t confirmed"),
+            explanation.contains("Waiting for \"studio\" to confirm"),
             "{explanation}"
         );
     }
 
     #[test]
     fn a_confirmed_revocation_reports_only_the_key_cleanup_left() {
-        let mut confirmed = pending(UnpairState::NeedsInteraction);
+        let mut confirmed = pending(UnpairState::Retrying);
         confirmed.server_confirmed = true;
 
         let (explanation, _) = present_unpair(&confirmed);
 
         assert!(
-            explanation.contains("confirmed the unpair"),
+            explanation.contains("unpaired this device"),
+            "{explanation}"
+        );
+        assert!(
+            explanation.contains("removing its saved key"),
             "{explanation}"
         );
         assert!(
             !explanation.contains("hasn\u{2019}t confirmed"),
             "a validated revocation is never called unconfirmed: {explanation}"
         );
+    }
+
+    #[test]
+    fn an_unconfirmed_key_cleanup_names_the_resume_action_it_offers() {
+        let mut confirmed = pending(UnpairState::Unconfirmed);
+        confirmed.server_confirmed = true;
+
+        let (explanation, actions) = present_unpair(&confirmed);
+
+        assert_eq!(actions, &[UnpairAction::Resume, UnpairAction::Dismiss]);
+        assert!(
+            explanation.ends_with("Choose Resume to try again."),
+            "{explanation}"
+        );
+        assert!(!explanation.contains("Retry"), "{explanation}");
     }
 
     #[test]

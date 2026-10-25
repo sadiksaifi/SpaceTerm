@@ -33,8 +33,5 @@ fn service_commands_refuse_another_build_identity_before_any_account_access() {
         .unwrap();
     assert_eq!(output.status.code(), Some(1));
     assert!(output.stdout.is_empty());
-    assert_eq!(
-        output.stderr,
-        b"The local server connection did not complete.\n"
-    );
+    assert_eq!(output.stderr, b"Invalid arguments. See --help.\n");
 }

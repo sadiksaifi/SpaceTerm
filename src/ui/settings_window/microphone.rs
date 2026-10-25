@@ -124,7 +124,7 @@ impl MicrophoneAccessRow {
             MicrophoneAccessStatus::Unsupported => (
                 "Unavailable",
                 "settings-microphone-access-state-unavailable",
-                "Not available on this platform.",
+                "Unavailable on this platform.",
                 None,
             ),
             MicrophoneAccessStatus::Authorization(Authorization::Authorized) => (
@@ -136,13 +136,13 @@ impl MicrophoneAccessRow {
             MicrophoneAccessStatus::Authorization(Authorization::NotDetermined) => (
                 "Not Requested",
                 "settings-microphone-access-state-not-requested",
-                "Lets terminal programs use the microphone. The system asks once.",
+                "Lets terminal programs use the microphone.",
                 Some(Action::Request),
             ),
             MicrophoneAccessStatus::Requesting => (
                 "Requesting",
                 "settings-microphone-access-state-requesting",
-                "Allow or deny access in the system prompt.",
+                "Respond to the system prompt.",
                 Some(Action::Requesting),
             ),
             MicrophoneAccessStatus::Authorization(Authorization::Denied) => (
@@ -151,8 +151,7 @@ impl MicrophoneAccessRow {
                 match self.recovery_failure {
                     None => "Lets terminal programs use the microphone.",
                     Some(_) => {
-                        "System Settings could not be opened. Turn on SpaceTerm in Privacy & \
-                         Security > Microphone."
+                        "Open System Settings and allow SpaceTerm in Privacy & Security > Microphone."
                     }
                 },
                 Some(Action::OpenSettings),
@@ -160,23 +159,16 @@ impl MicrophoneAccessRow {
             MicrophoneAccessStatus::Authorization(Authorization::Restricted) => (
                 "Restricted",
                 "settings-microphone-access-state-restricted",
-                "A device management policy blocks microphone access. SpaceTerm cannot change \
-                 it.",
+                "Your device's administrator has blocked microphone access.",
                 None,
             ),
             MicrophoneAccessStatus::Failed(error) => (
                 "Unavailable",
                 "settings-microphone-access-state-unavailable",
                 match error {
-                    MicrophoneAccessError::OffMainThread => {
-                        "SpaceTerm could not check microphone access."
-                    }
-                    MicrophoneAccessError::PlatformUnavailable => {
-                        "The system did not report microphone access."
-                    }
-                    MicrophoneAccessError::PlatformRejected => {
-                        "The system rejected the microphone access request."
-                    }
+                    MicrophoneAccessError::OffMainThread => "Couldn't check microphone access.",
+                    MicrophoneAccessError::PlatformUnavailable => "Microphone access unknown.",
+                    MicrophoneAccessError::PlatformRejected => "Microphone access request failed.",
                 },
                 Some(Action::CheckAgain),
             ),

@@ -217,10 +217,7 @@ impl SettingsWindow {
                     .whitespace_normal()
                     .child(Text::new(
                         "settings-theme-slots-guidance".into(),
-                        SharedString::from(
-                            "Terminal panes follow the system appearance. Select Light or Dark, \
-                             then choose its theme below.",
-                        ),
+                        SharedString::from("Select Light or Dark, then choose its theme."),
                     )),
             )
             .into_any_element()
@@ -593,14 +590,14 @@ impl SettingsWindow {
             .then_some(theme.family.as_ref())
             .flatten();
         let (title, message) = match (one, family) {
-            (true, _) => ("Remove Theme", format!("Remove “{}”?", theme.name)),
+            (true, _) => ("Remove Theme", format!("Remove \"{}\"?", theme.name)),
             (false, Some(family)) => (
                 "Remove Themes",
-                format!("Remove all {} {family} themes?", ids.len()),
+                format!("Remove {} {family} themes?", ids.len()),
             ),
             (false, None) => (
                 "Remove Themes",
-                format!("Remove all {} themes from this extension?", ids.len()),
+                format!("Remove {} themes from this extension?", ids.len()),
             ),
         };
         // The list shows one appearance, so name the themes of the other that go with it.
@@ -615,20 +612,19 @@ impl SettingsWindow {
             (count, Appearance::Light) => Some(format!("This includes {count} dark themes.")),
             (count, Appearance::Dark) => Some(format!("This includes {count} light themes.")),
         };
-        let consequence = match (in_use.is_empty(), &theme.package) {
-            (false, _) if one => "Terminal panes using it will switch to the built-in theme.",
-            (false, _) => "Terminal panes using one of them will switch to the built-in theme.",
-            (true, Some(_)) if one => "You can get it again from Get More Themes.",
-            (true, Some(_)) => "You can get them again from Get More Themes.",
-            (true, None) if one => "You can import it again from its file.",
-            (true, None) => "You can import them again from their file.",
+        let consequence = match (one, in_use.is_empty(), &theme.package) {
+            (false, _, _) => "",
+            (true, false, _) => "Terminal panes using it will switch to the built-in theme.",
+            (true, true, Some(_)) => "You can get it again from Get More Themes.",
+            (true, true, None) => "You can import it again from its file.",
         };
         let detail = match hidden {
+            Some(hidden) if consequence.is_empty() => hidden,
             Some(hidden) => format!("{hidden} {consequence}"),
             None => consequence.to_owned(),
         };
         let owner = cx.weak_entity();
-        let result = Alert::new(
+        let alert = Alert::new(
             ModalId::new("settings-remove-theme"),
             title,
             title,
@@ -650,9 +646,13 @@ impl SettingsWindow {
                 ),
             ],
         )
-        .intent(AlertIntent::Critical)
-        .detail(detail)
-        .present(window, cx, move |outcome, cx| {
+        .intent(AlertIntent::Critical);
+        let alert = if detail.is_empty() {
+            alert
+        } else {
+            alert.detail(detail)
+        };
+        let result = alert.present(window, cx, move |outcome, cx| {
             let confirmed = matches!(
                 outcome,
                 AlertOutcome::Activated {

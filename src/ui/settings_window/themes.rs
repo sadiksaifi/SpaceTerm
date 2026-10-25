@@ -72,7 +72,7 @@ impl SettingsWindow {
     /// confirmation, so only a failure speaks.
     pub(super) fn begin_document_export(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Ok(contents) = self.editor.export_document() else {
-            present_export_failure("Your settings could not be exported.", window, cx);
+            present_export_failure("Couldn't export settings.", window, cx);
             return;
         };
         let directory = std::env::current_dir().unwrap_or_else(|_| std::env::temp_dir());
@@ -87,7 +87,7 @@ impl SettingsWindow {
                 .await;
             if written.is_err() {
                 let _ = owner.update_in(cx, |_, window, cx| {
-                    present_export_failure("That file could not be written.", window, cx);
+                    present_export_failure("Couldn't write file.", window, cx);
                 });
             }
         })
@@ -120,16 +120,16 @@ fn present_export_failure(
 fn diagnostic_message(diagnostic: AppearanceDiagnostic) -> &'static str {
     match diagnostic {
         AppearanceDiagnostic::SystemAppearanceUnavailable => {
-            "SpaceTerm cannot read the system light or dark setting, so Auto is using the dark slot."
+            "SpaceTerm can't read the system appearance. Auto is using the Dark Terminal Theme."
         }
         AppearanceDiagnostic::TerminalThemeUnavailable { .. } => {
-            "The terminal theme you selected is not installed. A built-in theme is in use."
+            "SpaceTerm is using a built-in Terminal Theme because your selected theme isn't installed."
         }
         AppearanceDiagnostic::TerminalFontUnavailable => {
-            "The terminal font you selected is not available. A monospace fallback is in use."
+            "SpaceTerm is using a substitute monospace font because your selected font isn't available."
         }
         AppearanceDiagnostic::TerminalFontNotMonospace => {
-            "The terminal font you selected is not monospaced. A monospace fallback is in use."
+            "Choose a monospace font. SpaceTerm is using a substitute until then."
         }
     }
 }

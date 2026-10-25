@@ -173,8 +173,8 @@ impl fmt::Display for TerminalSessionExit {
             Self::Success => formatter.write_str("Shell exited successfully"),
             Self::ExitCode(code) => write!(formatter, "Shell exited with code {code}"),
             Self::Signal(signal) => write!(formatter, "Shell exited after signal {signal}"),
-            Self::GracefulShutdown => formatter.write_str("Shell shut down gracefully"),
-            Self::ForcedShutdown => formatter.write_str("Shell shutdown was forced"),
+            Self::GracefulShutdown => formatter.write_str("Shell shut down"),
+            Self::ForcedShutdown => formatter.write_str("Shell shutdown forced"),
         }
     }
 }
@@ -498,9 +498,9 @@ pub const MAX_INPUT_METHOD_BYTES: usize = 64 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Error)]
 pub enum InputMethodRefusal {
-    #[error("Input method text exceeds 65,536 bytes. The text remains available for editing.")]
+    #[error("Input method text is over 65,536 bytes.")]
     TooLarge,
-    #[error("Input method text could not be queued. The text remains available for editing.")]
+    #[error("Couldn't send input method text. You can still edit it.")]
     Unavailable,
 }
 

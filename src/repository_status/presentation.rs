@@ -214,7 +214,7 @@ pub(crate) struct PopoverChanges {
     /// Such as "1 staged, 2 modified", or "No changes".
     pub(crate) summary: String,
     pub(crate) entries: Vec<PopoverChange>,
-    /// Such as "and 14 more".
+    /// Such as "14 more".
     pub(crate) more: Option<String>,
 }
 
@@ -358,13 +358,13 @@ impl SidebarBadge {
     }
 }
 
-/// The collapsed title-bar chip's tooltip line, in git's words, such as `On branch main`.
+/// The collapsed title-bar chip's tooltip line, such as `Branch main`.
 pub(crate) fn chip_tooltip_line(view: &RepositoryView) -> Option<String> {
     presented(view).map(|status| match &status.head {
         RepositoryHead::Branch(branch) | RepositoryHead::Unborn(branch) => {
-            format!("On branch {}", name_text(branch))
+            format!("Branch {}", name_text(branch))
         }
-        RepositoryHead::Detached(commit) => format!("HEAD detached at {}", name_text(commit)),
+        RepositoryHead::Detached(commit) => format!("Detached at {}", name_text(commit)),
     })
 }
 
@@ -480,9 +480,9 @@ fn divergence_text(upstream: &super::Upstream) -> Option<String> {
 fn accessible_label(status: &RepositoryStatus, now: Instant) -> String {
     let mut parts = vec![match &status.head {
         RepositoryHead::Branch(branch) | RepositoryHead::Unborn(branch) => {
-            format!("branch {}", name_text(branch))
+            format!("Branch {}", name_text(branch))
         }
-        RepositoryHead::Detached(commit) => format!("detached at {}", name_text(commit)),
+        RepositoryHead::Detached(commit) => format!("Detached at {}", name_text(commit)),
     }];
     if let Some(operation) = status.operation {
         let (name, step) = operation_name(operation);
@@ -520,12 +520,12 @@ fn accessible_label(status: &RepositoryStatus, now: Instant) -> String {
             parts.push(format!("{} behind", divergence.behind));
         }
     }
-    let mut label = format!("Repository status: {}.", parts.join(", "));
+    let mut label = format!("{}.", parts.join(", "));
     if let Freshness::LastKnown { as_of } = status.freshness {
         let last_known = format!("Last known {}.", age_text(as_of, now));
         label.push(' ');
         if status.read_failure.is_some() {
-            label.push_str(&format!("Couldn't read repository status. {last_known}"));
+            label.push_str(&format!("Couldn't refresh. {last_known}"));
         } else {
             label.push_str(&last_known);
         }
@@ -535,10 +535,9 @@ fn accessible_label(status: &RepositoryStatus, now: Instant) -> String {
 
 fn footer(status: &RepositoryStatus, now: Instant) -> String {
     match status.freshness {
-        Freshness::LastKnown { as_of } if status.read_failure.is_some() => format!(
-            "Couldn't read repository status. Last known {}.",
-            age_text(as_of, now)
-        ),
+        Freshness::LastKnown { as_of } if status.read_failure.is_some() => {
+            format!("Couldn't refresh. Last known {}.", age_text(as_of, now))
+        }
         Freshness::LastKnown { as_of } => format!("Last known {}", age_text(as_of, now)),
         Freshness::Current if status.changes == ChangeState::Counting => {
             "Counting changes…".to_owned()
@@ -576,10 +575,8 @@ fn popover_changes(changes: &ChangeSummary) -> PopoverChanges {
     };
     let listed = u32::try_from(changes.entries.len()).unwrap_or(u32::MAX);
     let more = match changes.total {
-        ChangeTotal::Exact(total) if total > listed => Some(format!("and {} more", total - listed)),
-        ChangeTotal::AtLeast(total) if total > listed => {
-            Some(format!("and {}+ more", total - listed))
-        }
+        ChangeTotal::Exact(total) if total > listed => Some(format!("{} more", total - listed)),
+        ChangeTotal::AtLeast(total) if total > listed => Some(format!("{}+ more", total - listed)),
         _ => None,
     };
     PopoverChanges {
@@ -892,7 +889,7 @@ mod tests {
         repository.freshness = Freshness::LastKnown { as_of: now };
         assert_eq!(
             caption(repository.clone(), now + Duration::from_secs(300)).accessible_label,
-            "Repository status: branch main, 4 changes, 1 ahead, 2 behind. \
+            "Branch main, 4 changes, 1 ahead, 2 behind. \
              Last known 5 minutes ago."
         );
 
@@ -900,7 +897,7 @@ mod tests {
         repository.upstream = upstream(0, 0);
         assert_eq!(
             caption(repository.clone(), now).accessible_label,
-            "Repository status: branch main, 4 changes."
+            "Branch main, 4 changes."
         );
 
         repository.operation = Some(RepositoryOperation::Rebasing {
@@ -913,8 +910,8 @@ mod tests {
         repository.freshness = Freshness::LastKnown { as_of: now };
         assert_eq!(
             caption(repository, now).accessible_label,
-            "Repository status: branch main, rebasing, step 3 of 7. \
-             Couldn't read repository status. Last known just now."
+            "Branch main, rebasing, step 3 of 7. \
+             Couldn't refresh. Last known just now."
         );
 
         let detached = status(
@@ -924,17 +921,17 @@ mod tests {
         );
         assert_eq!(
             caption(detached, now).accessible_label,
-            "Repository status: detached at a1b2c3d, counting changes."
+            "Detached at a1b2c3d, counting changes."
         );
         let unborn = status(RepositoryHead::Unborn("main".into()), modified(0), now);
         assert_eq!(
             caption(unborn, now).accessible_label,
-            "Repository status: branch main, no commits."
+            "Branch main, no commits."
         );
         let clean = status(main_branch(), modified(0), now);
         assert_eq!(
             caption(clean, now).accessible_label,
-            "Repository status: branch main, no changes."
+            "Branch main, no changes."
         );
     }
 
@@ -1020,7 +1017,7 @@ mod tests {
                 },
             ]
         );
-        assert_eq!(changes.more.as_deref(), Some("and 14 more"));
+        assert_eq!(changes.more.as_deref(), Some("14 more"));
         assert_eq!(popover.footer, "Updated just now");
         assert!(!popover.dimmed);
     }
@@ -1087,7 +1084,7 @@ mod tests {
             .changes
             .unwrap();
         assert_eq!(changes.summary, "5000+ changes");
-        assert_eq!(changes.more.as_deref(), Some("and 4999+ more"));
+        assert_eq!(changes.more.as_deref(), Some("4999+ more"));
     }
 
     #[test]
@@ -1112,7 +1109,7 @@ mod tests {
         failed.read_failure = Some(RepositoryReadError::TimedOut);
         assert_eq!(
             footer(failed.clone()),
-            "Couldn't read repository status. Last known 3 minutes ago."
+            "Couldn't refresh. Last known 3 minutes ago."
         );
         failed.read_failure = None;
         assert_eq!(footer(failed.clone()), "Last known 3 minutes ago");
@@ -1203,7 +1200,7 @@ mod tests {
         let now = Instant::now();
         assert_eq!(
             chip_tooltip_line(&view(status(main_branch(), modified(4), now))).as_deref(),
-            Some("On branch main")
+            Some("Branch main")
         );
         assert_eq!(
             chip_tooltip_line(&view(status(
@@ -1212,7 +1209,7 @@ mod tests {
                 now
             )))
             .as_deref(),
-            Some("HEAD detached at a1b2c3d")
+            Some("Detached at a1b2c3d")
         );
     }
 

@@ -29,9 +29,9 @@ use crate::ui::{NewWorkspace, SwitchWorkspace, WorkspaceManager};
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum StartupDependenciesError {
-    #[error("the user home directory is unavailable")]
+    #[error("Home directory unavailable")]
     MissingHome,
-    #[error("the user home directory is not absolute")]
+    #[error("Home directory is not absolute")]
     RelativeHome,
     #[error("application paths are unavailable")]
     Paths,
@@ -716,9 +716,13 @@ impl ApplicationQuitCoordinator {
         *self.state.borrow_mut() = ApplicationQuitCoordinatorState::Prompting;
         let answer = window.update(cx, |_, window, cx| {
             window.activate_window();
-            window.prompt(PromptLevel::Warning, "Couldn't check Terminal Sessions",
-                Some("SpaceTerm couldn't read this development run's server. Try quitting again when the server is reachable so you can review the Terminal Sessions that would end."),
-                &[PromptButton::cancel("Cancel")], cx)
+            window.prompt(
+                PromptLevel::Warning,
+                "Couldn't check Terminal Sessions",
+                Some("Reconnect to the development server, then try again."),
+                &[PromptButton::cancel("Cancel")],
+                cx,
+            )
         });
         let coordinator = Rc::clone(self);
         cx.spawn(async move |cx| {
@@ -966,7 +970,7 @@ fn quit_confirmation_window(
 }
 
 fn quit_prompt(
-    status_area: StatusAreaName,
+    _status_area: StatusAreaName,
     sessions: Option<&spaceterm_server::hierarchy::CloseInventory>,
 ) -> QuitPrompt {
     let name = crate::application_identity::ApplicationIdentity::current().display_name();
@@ -977,14 +981,9 @@ fn quit_prompt(
                 .iter()
                 .filter(|pane| pane.session.is_some())
                 .count();
-            format!(
-                "This development build runs its own server, so quitting stops it too. Its {count} Terminal Sessions end, and any commands running in them stop."
-            )
+            format!("This ends {count} Terminal Sessions.")
         }
-        None => format!(
-            "{name} closes and leaves the {}. Your Terminal Sessions keep running on the server, so everything is where you left it when you open {name} again.",
-            status_area.phrase()
-        ),
+        None => String::new(),
     };
     QuitPrompt {
         title: format!("Quit {name}?"),
@@ -1473,7 +1472,7 @@ impl HostComposition {
 pub(crate) enum RuntimeError {
     #[error("UI initialization failed")]
     Initialization,
-    #[error("Operating-System Window creation failed")]
+    #[error("Window creation failed")]
     WindowOpen,
 }
 
@@ -1706,20 +1705,12 @@ mod tests {
     }
 
     #[test]
-    fn quit_warning_uses_the_build_name_and_platform_status_area() {
+    fn installed_quit_warning_names_the_build_without_body_text() {
         let name = crate::application_identity::ApplicationIdentity::current().display_name();
-        for (status_area, place) in [
-            (StatusAreaName::MenuBar, "menu bar"),
-            (StatusAreaName::StatusArea, "status area"),
-        ] {
+        for status_area in [StatusAreaName::MenuBar, StatusAreaName::StatusArea] {
             let prompt = quit_prompt(status_area, None);
             assert_eq!(prompt.title, format!("Quit {name}?"));
-            assert_eq!(
-                prompt.detail,
-                format!(
-                    "{name} closes and leaves the {place}. Your Terminal Sessions keep running on the server, so everything is where you left it when you open {name} again."
-                )
-            );
+            assert!(prompt.detail.is_empty());
             assert!(!prompt.destructive);
         }
     }
@@ -1828,10 +1819,7 @@ mod tests {
         let (_, detail) = cx
             .pending_prompt()
             .expect("server-owned work confirms without windows");
-        assert_eq!(
-            detail,
-            "This development build runs its own server, so quitting stops it too. Its 3 Terminal Sessions end, and any commands running in them stop."
-        );
+        assert_eq!(detail, "This ends 3 Terminal Sessions.");
         cx.simulate_prompt_answer("Quit");
         cx.run_until_parked();
         assert_eq!(quit.confirmations(), 1);

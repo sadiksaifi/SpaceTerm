@@ -2689,7 +2689,7 @@ impl TabView {
         };
         let edits = shared.edits();
         if let SharedSubmission::Refused(reason) = shared.split(source, axis) {
-            self.report_shared_refusal("create a Pane", reason, window, cx);
+            self.report_shared_refusal(reason, window, cx);
         } else {
             let presentation = edits.take_presentation();
             let tab = self
@@ -2711,19 +2711,23 @@ impl TabView {
     /// Explains a shared edit the client could not submit. Nothing was sent, and nothing waits.
     fn report_shared_refusal(
         &self,
-        operation: &str,
         reason: super::shared_workspaces::SharedRefusalReason,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let detail = format!(
-            "SpaceTerm did not {operation} in this shared Workspace. {}",
-            reason.explanation()
-        );
+        let detail = match reason {
+            super::shared_workspaces::SharedRefusalReason::Offline => "Reconnect, then try again.",
+            super::shared_workspaces::SharedRefusalReason::Pending => {
+                "Wait for the current changes to finish, then try again."
+            }
+            super::shared_workspaces::SharedRefusalReason::Value => {
+                "A name or directory is too long."
+            }
+        };
         let _ = Alert::new(
             ModalId::new("shared-pane-edit-unavailable"),
             "Shared change unavailable",
-            "Shared Change Unavailable",
+            "Couldn't Create Pane",
             detail,
             vec![ModalAction::new(
                 (),
@@ -2920,9 +2924,7 @@ impl TabView {
                         .size(ButtonSize::Regular)
                         .disabled(!offered)
                         .tab_stop(true)
-                        .accessibility_description(
-                            "Moves typing and this Pane's size to this SpaceTerm.",
-                        )
+                        .accessibility_description("Type and resize this Pane here.")
                         .debug_selector(selector("take-over"))
                         .on_activate(move |_, window, cx| {
                             let _ = owner.update(cx, |view, cx| {
@@ -3093,9 +3095,7 @@ impl TabView {
         let notice = pane.notice().map(|(title, detail, intent)| {
             let detail = match &remote {
                 Some(name) if pane.server_stopped() => gpui::SharedString::from(format!(
-                    "The SpaceTerm server on \u{201C}{name}\u{201D} was stopped, so the programs \
-                     in this Pane ended. It stays stopped until it\u{2019}s started on that \
-                     computer."
+                    "Start the server on \"{name}\" to use this Pane again."
                 )),
                 _ => detail,
             };

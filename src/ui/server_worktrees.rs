@@ -309,7 +309,7 @@ impl crate::ui::worktree_form::WorktreeFormBackend for FormBackend {
             let checked = read.await;
             let Ok(ReadReply::Location(path)) = checked else {
                 return Err(create_error(match checked.err().unwrap_or(Error::Location) {
-                    Error::Unavailable => return Err(crate::worktrees::git::WorktreeCreateError::NotSubmitted(if client.availability().0 {"SpaceTerm couldn\u{2019}t validate the location on the server. Review the location before trying again."} else {SharedRefusalReason::Offline.explanation()})),
+                    Error::Unavailable => return Err(crate::worktrees::git::WorktreeCreateError::NotSubmitted(if client.availability().0 {"SpaceTerm could not check the Worktree location. Review it before trying again."} else {creation_refusal(SharedRefusalReason::Offline)})),
                     error => error.into(),
                 }));
             };
@@ -352,10 +352,20 @@ pub(crate) fn available(cx: &App) -> bool {
         .is_some_and(Client::supports_worktree_writes)
 }
 
+fn creation_refusal(reason: SharedRefusalReason) -> &'static str {
+    match reason {
+        SharedRefusalReason::Offline => "Reconnect, then create the Worktree again.",
+        SharedRefusalReason::Pending => {
+            "Wait for the current changes to finish, then create the Worktree again."
+        }
+        SharedRefusalReason::Value => "Enter a shorter branch name or directory, then try again.",
+    }
+}
+
 fn create_error(error: WriteError) -> crate::worktrees::git::WorktreeCreateError {
     use crate::worktrees::git::WorktreeCreateError;
     match error {
-        WriteError::Refused(reason) => WorktreeCreateError::NotSubmitted(reason.explanation()),
+        WriteError::Refused(reason) => WorktreeCreateError::NotSubmitted(creation_refusal(reason)),
         WriteError::Server(error) => WorktreeCreateError::Server(error),
     }
 }

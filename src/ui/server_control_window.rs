@@ -71,12 +71,7 @@ pub(crate) enum Step {
     /// Asks before Stop or Restart, with the shared confirmation every control surface shows.
     Ask(Confirmation),
     /// Explains startup authorization before the operating system asks for a password.
-    Authorize {
-        /// The operating system's prompt was cancelled or refused, so nothing changed.
-        declined: bool,
-        /// A Restart already stopped the server, and only starting it remains.
-        stopped: bool,
-    },
+    Authorize,
     Working(Operation),
     Failed(ServerError),
 }
@@ -195,7 +190,7 @@ impl Content {
             Step::Ask(confirmation) => Self {
                 title: confirmation.title().into(),
                 heading: confirmation.message().into(),
-                body: Some(confirmation.detail().into()),
+                body: (!confirmation.detail().is_empty()).then(|| confirmation.detail().into()),
                 buttons: vec![
                     cancel,
                     Choice {
@@ -206,22 +201,12 @@ impl Content {
                     },
                 ],
             },
-            Step::Authorize { declined, stopped } => {
+            Step::Authorize => {
                 let prompt = AuthorizationPrompt::for_request(&AuthorizedRequest::Start, None);
-                let body = if *declined {
-                    format!(
-                        "The password prompt was cancelled or refused, so nothing changed. {}",
-                        prompt.detail
-                    )
-                } else if *stopped {
-                    format!("The server is stopped. {}", prompt.detail)
-                } else {
-                    prompt.detail.to_string()
-                };
                 Self {
                     title: prompt.title.into(),
-                    heading: prompt.message.into(),
-                    body: Some(body.into()),
+                    heading: "Run Services After Logout?".into(),
+                    body: Some("Your computer asks for an administrator password.".into()),
                     buttons: vec![
                         cancel,
                         Choice {
@@ -235,7 +220,12 @@ impl Content {
             }
             Step::Working(operation) => Self {
                 title: format!("{name} Server").into(),
-                heading: operation.service_action().progress(false).1.into(),
+                heading: match operation {
+                    Operation::Stop => "Stopping the server…",
+                    Operation::Restart => "Restarting the server…",
+                    Operation::Start => operation.service_action().progress(false).1,
+                }
+                .into(),
                 body: None,
                 buttons: Vec::new(),
             },
@@ -280,13 +270,7 @@ fn reachable_size(name: &str, operation: Operation, content: &Content, cx: &App)
     if operation != Operation::Stop {
         let start = Operation::Start;
         later.push(Content::of(name, start, &Step::Working(start)));
-        for (declined, stopped) in [(true, false), (false, operation == Operation::Restart)] {
-            later.push(Content::of(
-                name,
-                start,
-                &Step::Authorize { declined, stopped },
-            ));
-        }
+        later.push(Content::of(name, start, &Step::Authorize));
     }
     std::iter::once(content)
         .chain(&later)
@@ -388,7 +372,7 @@ impl ServerControlWindow {
                     cx,
                 );
             }
-            (Some(Step::Authorize { .. }), Response::Authorize) => {
+            (Some(Step::Authorize), Response::Authorize) => {
                 let controller = self.controller.clone();
                 self.run(
                     cx.background_spawn(async move {
@@ -433,27 +417,13 @@ impl ServerControlWindow {
                 Ok(_) => window.remove_window(),
                 // The operating system's prompt was cancelled or refused. Nothing changed.
                 Err(ServerError::AuthorizationRequired) if this.operation == Operation::Start => {
-                    this.show(
-                        Step::Authorize {
-                            declined: true,
-                            stopped: false,
-                        },
-                        window,
-                        cx,
-                    );
+                    this.show(Step::Authorize, window, cx);
                 }
                 // The Restart stopped the server, then starting it needed authorization. Only
                 // the start remains, so the window continues as Start and never restarts again.
                 Err(ServerError::AuthorizationRequired) if this.operation == Operation::Restart => {
                     this.operation = Operation::Start;
-                    this.show(
-                        Step::Authorize {
-                            declined: false,
-                            stopped: true,
-                        },
-                        window,
-                        cx,
-                    );
+                    this.show(Step::Authorize, window, cx);
                 }
                 Err(error) => this.show(Step::Failed(error), window, cx),
             });

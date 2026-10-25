@@ -235,9 +235,9 @@ impl ClaimWorker<'_> {
                                 .directory_note
                                 .lock()
                                 .unwrap_or_else(|e| e.into_inner()) = Some(if replacing {
-                                "That directory is no longer available. Choose another."
+                                "That directory is unavailable. Choose another."
                             } else {
-                                "The directory is still unavailable."
+                                "The directory is unavailable."
                             });
                             state.invalidate();
                             reply

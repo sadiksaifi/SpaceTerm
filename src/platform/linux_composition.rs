@@ -173,7 +173,7 @@ fn desktop_profile(
                 system_directory_selection: "Choose Directory…",
                 read_only_update: (
                     "Reinstall SpaceTerm to Update",
-                    "SpaceTerm can’t replace its installation folder. Install SpaceTerm with its install script, then try again.",
+                    "Run the SpaceTerm install script to install the update.",
                 ),
             },
             Rc::new(super::linux_shortcut_text::LinuxShortcutFormatter),

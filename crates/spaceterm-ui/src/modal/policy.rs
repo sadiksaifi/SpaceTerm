@@ -113,7 +113,6 @@ impl ModalDesktopPolicy {
         alert: &Alert<A>,
     ) -> Result<(), ModalValidationError> {
         validate_modal_header(&alert.id, &alert.accessibility_title, &alert.title)?;
-        validate_required_text(&alert.message, ModalTextField::AlertMessage)?;
         validate_bounded_text(
             &alert.message,
             ModalTextField::AlertMessage,

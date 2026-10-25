@@ -2180,7 +2180,6 @@ mod tests {
                 server: LocalServer::for_identity("spaceterm-development").unwrap(),
                 continuity: pin(),
                 lease: Arc::new(Route),
-                protocol_major: 1,
                 facts: SshServerFacts {
                     platform: ("linux".into(), "x86_64".into()),
                     version: Some("1.2.3".into()),

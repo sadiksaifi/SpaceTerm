@@ -313,14 +313,10 @@ pub(crate) struct SshServerPresentation {
 pub(crate) const fn persistence_warning(error: SshIntentStoreError) -> &'static str {
     match error {
         SshIntentStoreError::Unavailable => {
-            "SpaceTerm couldn\u{2019}t read or save which SSH servers to reconnect to when it \
-             reopens. A server you connect to may not reconnect on its own, and one you \
-             disconnected from may reconnect. Your connections work now."
+            "SpaceTerm couldn't save which SSH servers to reconnect to."
         }
         SshIntentStoreError::Malformed => {
-            "SpaceTerm\u{2019}s record of which SSH servers to reconnect to is damaged, so it \
-             left the record unchanged. SSH servers won\u{2019}t reconnect on their own when \
-             SpaceTerm reopens. Your connections work now."
+            "SSH servers will not reconnect automatically when SpaceTerm reopens."
         }
     }
 }
@@ -342,8 +338,7 @@ pub(crate) fn present(status: &RemoteConnectionStatus) -> SshServerPresentation 
             "Not Connected",
             "settings-ssh-server-state-inactive",
             guidance(
-                "SpaceTerm signs in with your SSH configuration, then uses the SpaceTerm server \
-                 for that account, or offers to install one.",
+                "Connect to show this server's Workspaces.",
             ),
             false,
             &[Connect, CheckStatus],
@@ -366,18 +361,17 @@ pub(crate) fn present(status: &RemoteConnectionStatus) -> SshServerPresentation 
             "Reconnecting",
             "settings-ssh-server-state-reconnecting",
             (
-                SharedString::from(format!(
-                    "The connection was interrupted. {} Terminal screens stay frozen and typing \
-                     is paused until it reconnects.",
-                    match next_retry {
+                SharedString::from(match next_retry {
                         // Between attempts, the row says it waits rather than implying progress.
                         Some(_) if *attempt > 1 => {
-                            "SpaceTerm keeps trying and waits a little longer each time.".to_owned()
+                            "SpaceTerm is reconnecting. Terminal screens are frozen and typing is paused.".to_owned()
                         }
-                        Some(_) => "SpaceTerm tries again shortly.".to_owned(),
-                        None => phase_detail(*phase).to_owned(),
-                    }
-                )),
+                        Some(_) => "The connection was interrupted. SpaceTerm tries again shortly.".to_owned(),
+                        None => format!(
+                            "The connection was interrupted. {} Terminal screens stay frozen and typing is paused until it reconnects.",
+                            phase_detail(*phase)
+                        ),
+                }),
                 CaptionTone::Guidance,
             ),
             true,
@@ -387,8 +381,7 @@ pub(crate) fn present(status: &RemoteConnectionStatus) -> SshServerPresentation 
             "Cancelling",
             "settings-ssh-server-state-cancelling",
             guidance(
-                "SpaceTerm is stopping the work it started. A step the server already accepted \
-                 may still take effect.",
+                "Cancelling. The server can still finish a step it has already accepted.",
             ),
             true,
             &[],
@@ -407,8 +400,7 @@ pub(crate) fn present(status: &RemoteConnectionStatus) -> SshServerPresentation 
             "settings-ssh-server-state-installation-offered",
             (
                 SharedString::from(format!(
-                    "This account has no SpaceTerm server. SpaceTerm can install verified version \
-                     {version} for {}.",
+                    "Install SpaceTerm Server {version} for {} to connect.",
                     platform_name(&platform.0, &platform.1)
                 )),
                 CaptionTone::Guidance,
@@ -416,17 +408,14 @@ pub(crate) fn present(status: &RemoteConnectionStatus) -> SshServerPresentation 
             false,
             &[Install, Disconnect],
         ),
-        RemoteConnectionStatus::Connected {
-            protocol_major,
-            facts,
-        } => (
+        RemoteConnectionStatus::Connected { facts, .. } => (
             "Connected",
             "settings-ssh-server-state-connected",
             (
-                SharedString::from(format!(
-                    "Its Workspaces appear in the sidebar. {} Protocol version {protocol_major}.",
-                    describe_server(facts)
-                )),
+                SharedString::from(match facts.version {
+                    Some(_) => format!("Its Workspaces appear in the sidebar. {}", describe_server(facts)),
+                    None => "Its Workspaces appear in the sidebar.".to_owned(),
+                }),
                 CaptionTone::Guidance,
             ),
             false,
@@ -442,7 +431,12 @@ pub(crate) fn present(status: &RemoteConnectionStatus) -> SshServerPresentation 
                 state,
                 selector,
                 (
-                    SharedString::from(format!("{detail} {}", describe_server(facts))),
+                    SharedString::from(match (&facts.version, availability) {
+                        (Some(_), ServerAvailability::Running) => format!("Running when last checked. {}", describe_server(facts)),
+                        (Some(_), ServerAvailability::NotRunning) => format!("Not running when last checked. Connect to start it. {}", describe_server(facts)),
+                        (Some(_), ServerAvailability::NotInstalled) => "Not installed when last checked.".to_owned(),
+                        (None, _) => detail.to_owned(),
+                    }),
                     CaptionTone::Guidance,
                 ),
                 false,
@@ -460,8 +454,7 @@ pub(crate) fn present(status: &RemoteConnectionStatus) -> SshServerPresentation 
             "Stopped",
             "settings-ssh-server-state-stopped",
             guidance(
-                "The SpaceTerm server for this account was stopped. It stays stopped until it\u{2019}s \
-                 started on that computer; connecting doesn\u{2019}t start it.",
+                "Choose Start Server to start this server, then connect.",
             ),
             false,
             &[Connect, CheckStatus],
@@ -520,20 +513,17 @@ const fn checked(availability: ServerAvailability) -> (&'static str, &'static st
         ServerAvailability::Running => (
             "Available",
             "settings-ssh-server-state-available",
-            "When SpaceTerm checked, the SpaceTerm server for this account was running. Connect to show \
-             its Workspaces.",
+            "The server was running when last checked. Connect to show its Workspaces.",
         ),
         ServerAvailability::NotRunning => (
             "Not Running",
             "settings-ssh-server-state-not-running",
-            "When SpaceTerm checked, the SpaceTerm server for this account was installed but not \
-             running. Connect starts it.",
+            "The server was not running when last checked. Connect starts it.",
         ),
         ServerAvailability::NotInstalled => (
-            "No Server",
+            "Not Installed",
             "settings-ssh-server-state-not-installed",
-            "When SpaceTerm checked, this account had no SpaceTerm server. Connect offers to install a \
-             verified one when SpaceTerm has one for that computer.",
+            "No SpaceTerm Server was installed when last checked.",
         ),
     }
 }
@@ -550,74 +540,49 @@ const fn phase_label(phase: ConnectPhase) -> &'static str {
 
 const fn phase_detail(phase: ConnectPhase) -> &'static str {
     match phase {
-        ConnectPhase::Authenticating => {
-            "Signing in with your SSH configuration. Answer any request from SSH to continue."
-        }
-        ConnectPhase::Discovering => "Looking for the SpaceTerm server for this account\u{2026}",
-        ConnectPhase::Installing => "Installing the verified SpaceTerm server\u{2026}",
-        ConnectPhase::Starting => "Starting the SpaceTerm server for this account\u{2026}",
+        ConnectPhase::Authenticating => "Answer the SSH prompt to sign in.",
+        ConnectPhase::Discovering => "Looking for the SpaceTerm Server…",
+        ConnectPhase::Installing => "Installing the SpaceTerm Server…",
+        ConnectPhase::Starting => "Starting the SpaceTerm Server…",
         ConnectPhase::Connecting => "Connecting to the SpaceTerm server\u{2026}",
     }
 }
 
 const fn interaction_detail(reason: InteractionReason) -> &'static str {
     match reason {
-        InteractionReason::Authentication => {
-            "SSH needs you to sign in again. Choose Connect to answer it; SpaceTerm doesn\u{2019}t \
-             ask in the background."
-        }
-        InteractionReason::HostVerification => {
-            "SSH needs you to confirm this computer\u{2019}s identity. Choose Connect to review \
-             it; SpaceTerm doesn\u{2019}t ask in the background."
-        }
+        InteractionReason::Authentication => "Choose Connect to sign in again.",
+        InteractionReason::HostVerification => "Choose Connect to verify this computer's identity.",
         InteractionReason::CredentialProvider => {
-            "Your SSH key or credential provider needs your approval. Choose Connect to approve \
-             it; SpaceTerm doesn\u{2019}t ask in the background."
+            "Choose Connect to approve access to your SSH key."
         }
         // Nothing has asked yet, so this names no prompt; SSH may or may not show one.
-        InteractionReason::FirstSignIn => {
-            "SpaceTerm hasn\u{2019}t signed in to this computer since it opened. Choose Connect \
-             to sign in; SpaceTerm doesn\u{2019}t connect in the background."
-        }
+        InteractionReason::FirstSignIn => "Choose Connect to sign in to this computer.",
     }
 }
 
 const fn continuity_detail(change: ContinuityChange) -> &'static str {
     match change {
         ContinuityChange::HostChanged => {
-            "This SSH destination now reaches a different computer, so SpaceTerm stopped \
-             reconnecting. Nothing was sent to it."
+            "SpaceTerm stopped reconnecting because this SSH Destination now reaches a different computer."
         }
         ContinuityChange::AccountChanged => {
-            "This SSH destination now signs in to a different account, so SpaceTerm stopped \
-             reconnecting. Nothing was sent to it."
+            "SpaceTerm stopped reconnecting because this SSH Destination now signs in to a different account."
         }
         ContinuityChange::ServerChanged => {
-            "The SpaceTerm server for this account changed, so SpaceTerm stopped reconnecting. \
-             Its Workspaces may differ from the ones you used."
+            "SpaceTerm stopped reconnecting because this account now has a different SpaceTerm Server."
         }
         ContinuityChange::BuildChanged => {
-            "The SpaceTerm server for this account is now a different version, so SpaceTerm \
-             stopped reconnecting."
+            "The SpaceTerm Server changed version, so SpaceTerm stopped reconnecting."
         }
     }
 }
 
 const fn incompatibility_detail(kind: IncompatibilityKind) -> &'static str {
     match kind {
-        IncompatibilityKind::Protocol => {
-            "SpaceTerm and the server for this account have no protocol version in common, so \
-             SpaceTerm didn\u{2019}t connect. The server and its Terminal Sessions keep running, \
-             and nothing was updated."
-        }
-        IncompatibilityKind::Capability => {
-            "The server for this account doesn\u{2019}t support a feature this SpaceTerm \
-             requires, so SpaceTerm didn\u{2019}t connect. The server and its Terminal Sessions \
-             keep running, and nothing was updated."
-        }
+        IncompatibilityKind::Protocol => "SpaceTerm and this server are incompatible.",
+        IncompatibilityKind::Capability => "This server needs an update.",
         IncompatibilityKind::Platform => {
-            "SpaceTerm has no verified server for this computer\u{2019}s operating system or \
-             processor. Nothing was installed."
+            "SpaceTerm Server is unavailable for this computer's operating system or processor."
         }
     }
 }
@@ -625,39 +590,28 @@ const fn incompatibility_detail(kind: IncompatibilityKind) -> &'static str {
 const fn refusal_detail(kind: RefusalKind) -> &'static str {
     match kind {
         RefusalKind::AuthorizationRefused => {
-            "The remote computer didn\u{2019}t allow the SpaceTerm server to keep running after \
-             logout, so SpaceTerm didn\u{2019}t install it. Connect to try again."
+            "This computer didn't allow the server to run after logout. Connect to try again."
         }
-        RefusalKind::InstallRefused => {
-            "The remote computer refused the installation. Nothing was installed."
-        }
-        RefusalKind::InvalidArtifact => {
-            "The server package didn\u{2019}t pass verification, so SpaceTerm didn\u{2019}t \
-             install it."
-        }
+        RefusalKind::InstallRefused => "The remote computer refused the installation.",
+        RefusalKind::InvalidArtifact => "The server package failed verification.",
     }
 }
 
 const fn unavailable_detail(kind: UnavailableKind) -> &'static str {
     match kind {
         UnavailableKind::LocalIpcUnavailable => {
-            "SpaceTerm couldn\u{2019}t prepare its SSH connection on this computer, so it \
-             didn\u{2019}t reach the other computer. Nothing changed there."
+            "SpaceTerm couldn't prepare the SSH connection. Try connecting again."
         }
-        UnavailableKind::Network => "The network is unavailable. Connect again when it returns.",
+        UnavailableKind::Network => "Connect again when the network returns.",
         UnavailableKind::HostUnreachable => {
-            "SpaceTerm couldn\u{2019}t reach this computer. Check that it\u{2019}s on and \
-             reachable, then connect again."
+            "Check that this computer is reachable, then connect again."
         }
-        UnavailableKind::SshFailed => {
-            "SSH couldn\u{2019}t connect with this destination. Check your SSH configuration, \
-             then connect again."
-        }
+        UnavailableKind::SshFailed => "Check your SSH configuration, then connect again.",
         UnavailableKind::ServiceUnavailable => {
-            "The SpaceTerm server for this account didn\u{2019}t answer. Connect again to retry."
+            "The SpaceTerm Server did not answer. Connect again."
         }
         UnavailableKind::CandidateUnavailable => {
-            "This SpaceTerm has no verified server package to install. Nothing was installed."
+            "This SpaceTerm installation has no server package to install."
         }
     }
 }
@@ -665,12 +619,9 @@ const fn unavailable_detail(kind: UnavailableKind) -> &'static str {
 const fn unconfirmed_detail(operation: UnconfirmedOperation) -> &'static str {
     match operation {
         UnconfirmedOperation::Install => {
-            "The connection ended before SpaceTerm could confirm the installation. It may have \
-             finished. Connect to find out; nothing is installed twice."
+            "SpaceTerm couldn't confirm the installation. Choose Connect to check whether it finished."
         }
-        UnconfirmedOperation::Connect => {
-            "The connection ended before SpaceTerm could confirm it. Connect to try again."
-        }
+        UnconfirmedOperation::Connect => "Couldn't confirm the connection. Connect to try again.",
     }
 }
 
@@ -683,29 +634,6 @@ pub(crate) fn platform_name(os: &str, arch: &str) -> String {
         _ => arch,
     };
     format!("{os} on {arch}")
-}
-
-/// What installing the offered server will do on the other computer, which the person approves
-/// before anything is installed. `os` names that computer's system as the backend reports it; it
-/// never describes this computer.
-pub(crate) fn installation_consequence(os: &str) -> &'static str {
-    match os.to_ascii_lowercase().as_str() {
-        "linux" => {
-            "SpaceTerm installs the server in your account on that computer and runs it as a \
-             systemd user service. To keep it running after you log out, systemd needs lingering \
-             turned on for your account; if it isn\u{2019}t already, SpaceTerm asks for your sudo \
-             password on that computer. Your SSH settings and keys aren\u{2019}t changed."
-        }
-        "macos" | "darwin" => {
-            "SpaceTerm installs the server in your account on that computer and runs it as a \
-             login item (LaunchAgent), so it runs while you\u{2019}re logged in there. No \
-             administrator password is needed. Your SSH settings and keys aren\u{2019}t changed."
-        }
-        _ => {
-            "SpaceTerm installs the server in this account. Existing SSH settings and keys \
-             aren\u{2019}t changed."
-        }
-    }
 }
 
 #[cfg(test)]
