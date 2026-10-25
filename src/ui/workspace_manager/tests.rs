@@ -12593,6 +12593,9 @@ fn remote_creation_without_saved_servers_should_offer_only_add_server(cx: &mut T
 /// Open Remote Directory on a saved server opens the Directory Picker browsing that server.
 #[gpui::test]
 fn open_remote_directory_should_browse_the_chosen_server(cx: &mut TestAppContext) {
+    // The picker reads penguin's directories over a channel whose worker answers from its own
+    // thread.
+    cx.executor().allow_parking();
     let (harness, cx) = MachineGroupsHarness::new(cx);
     let route = named_route("penguin");
     harness.present_direct("penguin", route, &[], cx);
@@ -12624,6 +12627,9 @@ fn open_remote_directory_should_browse_the_chosen_server(cx: &mut TestAppContext
 fn cancelling_open_remote_directory_should_ask_nothing_and_restore_terminal_focus(
     cx: &mut TestAppContext,
 ) {
+    // The picker reads penguin's directories over a channel whose worker answers from its own
+    // thread.
+    cx.executor().allow_parking();
     let (harness, cx) = MachineGroupsHarness::new(cx);
     harness.publish(ServerKey::LOCAL, &harness.local, &[("Here", 1)], cx);
     let edits = saved_servers(&harness, cx);
@@ -12677,7 +12683,9 @@ fn open_remote_directory_should_pin_on_its_server_and_reuse_a_workspace_pinned_t
     use spaceterm_server::hierarchy::Mutation;
 
     // The harness's server compares no directories, so the exact pin decides here. The native
-    // adapter test covers a server matching one directory through a symbolic link.
+    // adapter test covers a server matching one directory through a symbolic link. Its directory
+    // channel answers from its own thread.
+    cx.executor().allow_parking();
     let (harness, cx) = MachineGroupsHarness::new(cx);
     let route = named_route("penguin");
     let (key, penguin_edits) = harness.present_direct("penguin", route, &[("Far", 7)], cx);
