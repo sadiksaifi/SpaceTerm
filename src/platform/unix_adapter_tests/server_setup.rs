@@ -499,7 +499,7 @@ fn native_server_owned_work(
     {
         let root = path.to_str().ok_or("WSS fixture root encoding changed")?;
         let cleanup = format!(
-            r#"python3 -c 'import os,shutil,stat,sys; p=sys.argv[1]; parent=os.open(os.path.dirname(p),os.O_RDONLY|os.O_DIRECTORY); name=os.path.basename(p); fd=os.open(name,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=parent); s=os.fstat(fd); assert (s.st_dev,s.st_ino)==({device},{inode}) and shutil.rmtree.avoids_symlink_attacks; [shutil.rmtree(n,dir_fd=fd) if stat.S_ISDIR(os.stat(n,dir_fd=fd,follow_symlinks=False).st_mode) else os.unlink(n,dir_fd=fd) for n in os.listdir(fd)]; s=os.stat(name,dir_fd=parent,follow_symlinks=False); assert (s.st_dev,s.st_ino)==({device},{inode}); os.rmdir(name,dir_fd=parent); os.close(fd); os.close(parent); print("ST-ROOT-REMOVED")' '{root}' 2>/dev/null"#
+            r#"python3 -c 'import os,shutil,stat,sys; p=sys.argv[1]; parent=os.open(os.path.dirname(p),os.O_RDONLY|os.O_DIRECTORY); name=os.path.basename(p); fd=os.open(name,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=parent); s=os.fstat(fd); assert (s.st_dev,s.st_ino)==({device},{inode}) and shutil.rmtree.avoids_symlink_attacks; os.fchdir(fd); [shutil.rmtree(n) if stat.S_ISDIR(os.stat(n,dir_fd=fd,follow_symlinks=False).st_mode) else os.unlink(n,dir_fd=fd) for n in os.listdir(fd)]; s=os.stat(name,dir_fd=parent,follow_symlinks=False); assert (s.st_dev,s.st_ino)==({device},{inode}); os.rmdir(name,dir_fd=parent); os.close(fd); os.close(parent); print("ST-ROOT-REMOVED")' '{root}' 2>/dev/null"#
         );
         terminal_fixture_command(
             &mut connection,
@@ -1186,13 +1186,13 @@ fn native_server_setup_save_failure_keeps_cleanup_without_publishing_a_connectio
     });
     let backend = fixture.backend();
     let result = setup_with_approved_offers(&backend, (false, false), &progress);
-    unavailable.restore().unwrap();
     assert_eq!(result, Err(SetupFailure::Unconfirmed(SetupOperation::Save)));
     fixture.assert_no_connection();
     let spawns = fixture.adapter.seal();
     let cleanup = fixture.direct.pending_unpairs();
     assert_eq!(cleanup.len(), 1);
     assert!(cleanup[0].enrollment_cleanup);
+    unavailable.restore().unwrap();
     fixture.direct.resume_unpair(cleanup[0].key);
     wait_for("failed-save WSS cleanup", || {
         fixture.direct.pending_unpairs().is_empty()
