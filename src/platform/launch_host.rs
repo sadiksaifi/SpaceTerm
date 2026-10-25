@@ -22,15 +22,16 @@ pub(crate) fn running_executable() -> Option<PathBuf> {
 }
 
 /// Where this installation keeps the verified server packages SSH Connect may install on another
-/// computer. A packaged build reads its own installation; any other build reads only an explicit
-/// `SPACETERM_SSH_SERVER_ARTIFACTS` root.
+/// computer. Development and packaged clients share the installation-relative resource layout.
+/// An explicit Development override can select a separate catalog for native checks.
 pub(crate) fn ssh_server_artifacts() -> Option<PathBuf> {
-    if cfg!(spaceterm_packaged) {
-        let executable = running_executable()?;
-        Some(executable.parent()?.parent()?.join(SSH_SERVER_ARTIFACTS))
-    } else {
-        std::env::var_os("SPACETERM_SSH_SERVER_ARTIFACTS").map(PathBuf::from)
+    if !cfg!(spaceterm_packaged)
+        && let Some(root) = std::env::var_os("SPACETERM_SSH_SERVER_ARTIFACTS")
+    {
+        return Some(PathBuf::from(root));
     }
+    let executable = running_executable()?;
+    Some(executable.parent()?.parent()?.join(SSH_SERVER_ARTIFACTS))
 }
 
 /// The server packages' place inside an installation, relative to its executable's parent.

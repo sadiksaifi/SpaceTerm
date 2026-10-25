@@ -354,7 +354,7 @@ fn failure(error: SshConnectFailure) -> SshMaintenanceFailure {
         SshConnectFailure::Refused(RefusalKind::InvalidArtifact) => {
             SshMaintenanceFailure::Refused(MaintenanceRefusal::CandidateChanged)
         }
-        SshConnectFailure::Unavailable(UnavailableKind::CandidateUnavailable) => {
+        SshConnectFailure::Refused(RefusalKind::MissingArtifact) => {
             SshMaintenanceFailure::Refused(MaintenanceRefusal::CandidateUnavailable)
         }
         SshConnectFailure::Unavailable(kind) => SshMaintenanceFailure::Unavailable(kind),
@@ -738,7 +738,7 @@ mod tests {
 
     use super::*;
     use crate::ssh::server_process::SshServerArtifacts;
-    use crate::ssh::server_process::testing::{FakeAccount, backend, discovery};
+    use crate::ssh::server_process::testing::{FakeAccount, backend, discovery, with_candidate};
 
     /// The effective OpenSSH configuration whose digest is the route the original bound.
     const CONFIGURATION: &str = "hostname example.test\nuser tester\nport 22\n";
@@ -887,86 +887,6 @@ mod tests {
         {
             Err(crate::ssh::host_config::HostConfigFilesystemError::Missing)
         }
-    }
-
-    /// Real archive verification with the repository's public nonproduction signing seed.
-    /// The executable is inert fixture data: candidate inspection neither extracts nor runs it.
-    fn with_candidate(version: &str, run: impl FnOnce(&std::path::Path, &str)) {
-        use base64::Engine;
-        const TARGET: &str = "x86_64-unknown-linux-gnu";
-        assert_ne!(
-            build(),
-            "spaceterm",
-            "the fixture has no Release signing authority"
-        );
-        let root = std::env::temp_dir().join(format!(
-            "st-ssh-offer-{:x}",
-            u128::from_be_bytes(rand_bytes())
-        ));
-        struct Cleanup(std::path::PathBuf);
-        impl Drop for Cleanup {
-            fn drop(&mut self) {
-                let _ = std::fs::remove_dir_all(&self.0);
-            }
-        }
-        let _cleanup = Cleanup(root.clone());
-        let directory = root.join(TARGET);
-        std::fs::create_dir_all(&directory).unwrap();
-        let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
-        let mut archive = tar::Builder::new(encoder);
-        let manifest = serde_json::json!({"schema":1,"identity":build(),"target":TARGET,"commit":"a".repeat(40),"version":version,"protocol_major":1,"capabilities":["workspace_policy"]}).to_string();
-        let mut entries = vec![
-            ("build.json".to_owned(), manifest.into_bytes(), 0o644),
-            (
-                "bin/spaceterm-server".to_owned(),
-                b"inert signed executable".to_vec(),
-                0o755,
-            ),
-            (
-                "share/spaceterm/terminfo/x/xterm-spaceterm".to_owned(),
-                b"terminfo".to_vec(),
-                0o644,
-            ),
-        ];
-        for resource in serde_json::from_str::<Vec<String>>(include_str!(
-            "../../packaging/server-resources.json"
-        ))
-        .unwrap()
-        {
-            entries.push((resource, b"signed resource".to_vec(), 0o644));
-        }
-        for (name, bytes, mode) in entries {
-            let mut header = tar::Header::new_gnu();
-            header.set_size(bytes.len() as u64);
-            header.set_mode(mode);
-            header.set_cksum();
-            archive
-                .append_data(&mut header, format!("server/{name}"), bytes.as_slice())
-                .unwrap();
-        }
-        let bytes = archive.into_inner().unwrap().finish().unwrap();
-        let trust: serde_json::Value = serde_json::from_str(include_str!(
-            "../../packaging/server-nonproduction-trust.json"
-        ))
-        .unwrap();
-        let seed = base64::engine::general_purpose::STANDARD
-            .decode(trust["seed"].as_str().unwrap())
-            .unwrap();
-        let key = ring::signature::Ed25519KeyPair::from_seed_unchecked(&seed).unwrap();
-        let digest = Sha256::digest(&bytes)
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>();
-        std::fs::write(directory.join("artifact.tar.gz"), &bytes).unwrap();
-        std::fs::write(directory.join("artifact.sig"), key.sign(&bytes).as_ref()).unwrap();
-        std::fs::write(directory.join("artifact.sha256"), &digest).unwrap();
-        run(&root, &digest);
-    }
-
-    fn rand_bytes() -> [u8; 16] {
-        let mut bytes = [0; 16];
-        getrandom::fill(&mut bytes).unwrap();
-        bytes
     }
 
     #[gpui::test]
@@ -1486,12 +1406,11 @@ mod tests {
             discovery(SERVER),
             SshMaintenanceFailure::Refused(MaintenanceRefusal::CandidateUnavailable),
         );
-        let unverified = (
-            // This client holds a directory for the account's target whose artifact cannot be
-            // read and verified.
+        let missing = (
+            // The catalog has no archive for the account's target.
             SshServerArtifacts::new(Some("/fixture/artifacts".into())),
             discovery(SERVER),
-            SshMaintenanceFailure::Refused(MaintenanceRefusal::CandidateChanged),
+            SshMaintenanceFailure::Refused(MaintenanceRefusal::CandidateUnavailable),
         );
         let foreign = (
             SshServerArtifacts::new(Some("/fixture/artifacts".into())),
@@ -1501,7 +1420,7 @@ mod tests {
             },
             SshMaintenanceFailure::Incompatible(IncompatibilityKind::Platform),
         );
-        for (artifacts, discovered, expected) in [unavailable, unverified, foreign] {
+        for (artifacts, discovered, expected) in [unavailable, missing, foreign] {
             let account = account(discovered, Reply::Prepared(change()));
             let (backend, _) = backend(cx.background_executor.clone(), account.clone(), artifacts);
 

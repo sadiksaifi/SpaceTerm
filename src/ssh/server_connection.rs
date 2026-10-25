@@ -52,6 +52,7 @@ pub(crate) enum IncompatibilityKind {
 pub(crate) enum RefusalKind {
     AuthorizationRefused,
     InstallRefused,
+    MissingArtifact,
     InvalidArtifact,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -61,7 +62,6 @@ pub(crate) enum UnavailableKind {
     HostUnreachable,
     SshFailed,
     ServiceUnavailable,
-    CandidateUnavailable,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum UnconfirmedOperation {

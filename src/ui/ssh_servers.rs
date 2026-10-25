@@ -466,6 +466,17 @@ pub(crate) fn present(status: &RemoteConnectionStatus) -> SshServerPresentation 
             false,
             &[Connect, CheckStatus],
         ),
+        // Nothing refused or failed verification: this SpaceTerm installation lacks the
+        // package, so the remedy is on the client rather than the remote computer.
+        RemoteConnectionStatus::Refused {
+            kind: RefusalKind::MissingArtifact,
+        } => (
+            "Not Included",
+            "settings-ssh-server-state-not-included",
+            error(refusal_detail(RefusalKind::MissingArtifact)),
+            false,
+            &[Connect, CheckStatus],
+        ),
         RemoteConnectionStatus::Refused { kind } => (
             "Refused",
             "settings-ssh-server-state-refused",
@@ -593,6 +604,9 @@ const fn refusal_detail(kind: RefusalKind) -> &'static str {
             "This computer didn't allow the server to run after logout. Connect to try again."
         }
         RefusalKind::InstallRefused => "The remote computer refused the installation.",
+        RefusalKind::MissingArtifact => {
+            "This SpaceTerm installation doesn't include a server package for this computer. Reinstall SpaceTerm, then connect again."
+        }
         RefusalKind::InvalidArtifact => "The server package failed verification.",
     }
 }
@@ -609,9 +623,6 @@ const fn unavailable_detail(kind: UnavailableKind) -> &'static str {
         UnavailableKind::SshFailed => "Check your SSH configuration, then connect again.",
         UnavailableKind::ServiceUnavailable => {
             "The SpaceTerm Server did not answer. Connect again."
-        }
-        UnavailableKind::CandidateUnavailable => {
-            "This SpaceTerm installation has no server package to install."
         }
     }
 }
@@ -859,6 +870,36 @@ mod tests {
             platform: ("Example OS".to_owned(), "x86_64".to_owned()),
         });
         assert_eq!(offered.actions.first(), Some(&SshServerAction::Install));
+    }
+
+    /// A package this SpaceTerm lacks and one that failed verification need different remedies,
+    /// so each reads as its own state and only the missing one asks for a reinstall.
+    #[test]
+    fn a_missing_server_package_reads_differently_from_a_failed_verification() {
+        let missing = present(&RemoteConnectionStatus::Refused {
+            kind: RefusalKind::MissingArtifact,
+        });
+        let unverified = present(&RemoteConnectionStatus::Refused {
+            kind: RefusalKind::InvalidArtifact,
+        });
+
+        assert_eq!(missing.state, "Not Included");
+        assert_eq!(unverified.state, "Refused");
+        assert_ne!(missing.state_selector, unverified.state_selector);
+        assert!(
+            missing.explanation.contains("Reinstall SpaceTerm"),
+            "{}",
+            missing.explanation
+        );
+        assert!(
+            !missing.explanation.contains("verification"),
+            "{}",
+            missing.explanation
+        );
+        for presentation in [&missing, &unverified] {
+            assert!(!presentation.working);
+            assert!(!presentation.actions.contains(&SshServerAction::Install));
+        }
     }
 
     /// Work in progress offers Cancel, never a second Connect that would start competing work.

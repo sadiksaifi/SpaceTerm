@@ -41,6 +41,22 @@ class ServerArchiveTests(unittest.TestCase):
             "version": "dev.aaaaaaaaaaaa",
         }
 
+    def test_dirty_source_manifest_is_bound_to_its_commit_and_nonproduction_identity(self):
+        for identity in ("spaceterm-development", "spaceterm-preflight", "spaceterm"):
+            for commit in (self.commit, "b" * 40):
+                info = {
+                    **self.info,
+                    "identity": identity,
+                    "commit": commit,
+                    "version": "dev.aaaaaaaaaaaa.dirty",
+                }
+                with self.subTest(identity=identity, commit=commit):
+                    if identity == "spaceterm" or commit != self.commit:
+                        with self.assertRaises(TaskError):
+                            server_package.document(json.dumps(info))
+                    else:
+                        self.assertEqual(server_package.document(json.dumps(info)), info)
+
     def archive_with(self, entries):
         with tarfile.open(self.archive, "w:gz") as archive:
             for name, payload, kind in entries:

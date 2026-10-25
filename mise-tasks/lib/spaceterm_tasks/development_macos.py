@@ -45,7 +45,7 @@ def cached_icon(parent, name):
     return cache
 
 
-def stage_bundle(executable, server):
+def stage_bundle(executable, server, *, catalog=None):
     template = identity(IDENTITY)
     name = template["CFBundleName"]
     if name != template["CFBundleExecutable"]:
@@ -77,6 +77,8 @@ def stage_bundle(executable, server):
             ["tic", "-x", "-o", str(resources / "terminfo"), str(TERMINFO)],
             "Development terminfo compilation failed",
         )
+        if catalog is not None:
+            shutil.copytree(catalog, resources / "server-artifacts")
         verify_resources(resources, "Development bundle")
         checked(
             [
@@ -103,9 +105,17 @@ def stage_bundle(executable, server):
     return bundle
 
 
-def launch():
-    with development_run():
+def launch(*, ssh_config=None):
+    from spaceterm_tasks.server_builds import prepare
+
+    with (
+        development_run(),
+        tempfile.TemporaryDirectory(prefix="spaceterm-development-catalog-") as temporary,
+    ):
         environment = source_environment(os.environ)
+        catalog = prepare(
+            Path(temporary) / "catalog", "spaceterm-development", ssh_config=ssh_config
+        )
         server = build_executable(
             "--package",
             "spaceterm-server-host",
@@ -114,7 +124,9 @@ def launch():
             binary="spaceterm-server",
             env=environment,
         )
-        bundle = stage_bundle(build_executable("--locked", env=environment), server)
+        bundle = stage_bundle(
+            build_executable("--locked", env=environment), server, catalog=catalog
+        )
         scenario = environment.get("SPACETERM_UPDATE_PREVIEW")
         if scenario:
             print(f"Update preview: {scenario}. Choose SpaceTerm Development > Check for Updates…")

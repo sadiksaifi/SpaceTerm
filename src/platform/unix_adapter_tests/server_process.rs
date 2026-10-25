@@ -195,6 +195,20 @@ struct NativeFixture {
     backend: NativeSshConnectBackend<ObservedAdapter>,
 }
 fn native_fixture(cx: &mut gpui::TestAppContext, name: &str) -> NativeFixture {
+    native_fixture_with_artifacts(
+        cx,
+        name,
+        SshServerArtifacts::new(
+            std::env::var_os("SPACETERM_SSH_SERVER_ARTIFACTS").map(PathBuf::from),
+        ),
+    )
+}
+
+fn native_fixture_with_artifacts(
+    cx: &mut gpui::TestAppContext,
+    name: &str,
+    artifacts: SshServerArtifacts,
+) -> NativeFixture {
     use crate::platform::{
         app_directories::{AppDirectories, AppDirectoryEnvironment},
         unix_local_socket::UnixControlSocketProbe,
@@ -230,7 +244,7 @@ fn native_fixture(cx: &mut gpui::TestAppContext, name: &str) -> NativeFixture {
         );
         AppDirectories::resolve(identity()).unwrap()
     } else {
-        AppDirectories::resolve_xdg("spaceterm-development", &env, Some(root.clone())).unwrap()
+        AppDirectories::resolve_xdg(identity(), &env, Some(root.clone())).unwrap()
     };
     let paths = Arc::new(
         AppPaths::from_directories(directories, 103, Arc::new(UnixSecureFilesystem)).unwrap(),
@@ -269,9 +283,7 @@ fn native_fixture(cx: &mut gpui::TestAppContext, name: &str) -> NativeFixture {
             Arc::new(NoPrompt)
         },
         executor: cx.background_executor.clone(),
-        artifacts: SshServerArtifacts::new(
-            std::env::var_os("SPACETERM_SSH_SERVER_ARTIFACTS").map(PathBuf::from),
-        ),
+        artifacts,
         filesystem: Arc::new(
             crate::platform::unix_host_config_filesystem::UnixHostConfigFilesystem,
         ),
@@ -698,6 +710,343 @@ fn native_server_owned_work(
         report.graphics_bytes
     );
     Ok(())
+}
+
+/// Uses the selected client's real installation layout, with this test build's normal trust.
+/// This exercises the native backend; desktop presentation still needs separate GUI evidence.
+fn native_acceptance_catalog() -> PathBuf {
+    let client = std::env::var_os("SPACETERM_SSH_NATIVE_CLIENT")
+        .map(PathBuf::from)
+        .expect("select the actual prepared client executable");
+    let client = client
+        .canonicalize()
+        .expect("the prepared client must exist");
+    let output = std::process::Command::new(&client)
+        .arg("--build-info")
+        .stderr(std::process::Stdio::null())
+        .output()
+        .expect("the prepared client must report its build identity");
+    assert!(output.status.success(), "client build identity unavailable");
+    let info: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("client build identity must be JSON");
+    assert_eq!(info["schema"], 1);
+    assert_eq!(
+        info["identity"],
+        identity(),
+        "compile the matching test identity"
+    );
+    assert_eq!(info["target"], env!("SPACETERM_TARGET"));
+    assert_eq!(info["version"], env!("SPACETERM_VERSION"));
+    assert_eq!(info["commit"], env!("SPACETERM_COMMIT"));
+    let prefix = client.parent().and_then(|path| path.parent()).unwrap();
+    #[cfg(target_os = "macos")]
+    let catalog = prefix.join("Resources/server-artifacts");
+    #[cfg(target_os = "linux")]
+    let catalog = prefix.join("share/spaceterm/server-artifacts");
+    // Installed clients pin their native candidate. Development's foreground local server
+    // needs no candidate, but its SSH catalog still undergoes normal signature verification.
+    if cfg!(spaceterm_packaged) {
+        let pinned = info["server_candidate_sha256"]
+            .as_str()
+            .filter(|digest| digest.len() == 64)
+            .expect("the packaged client must pin its native server candidate");
+        assert_eq!(pinned, env!("SPACETERM_SERVER_SHA256"));
+        let digest = std::fs::read_to_string(
+            catalog
+                .join(env!("SPACETERM_TARGET"))
+                .join("artifact.sha256"),
+        )
+        .expect("the selected client must include its native catalog entry");
+        assert_eq!(digest.trim(), pinned, "client and catalog must match");
+    }
+    catalog
+}
+
+fn native_acceptance_account(
+    backend: &NativeSshConnectBackend<ObservedAdapter>,
+    destination: &SshDestination,
+    cancellation: &SshCancellationToken,
+) -> u32 {
+    let route = backend
+        .route(destination, ConnectMode::Requested, cancellation, &|_| {})
+        .unwrap_or_else(|error| panic!("account preflight: {}", failure_name(&error)));
+    // Read-only proof on the same authenticated route that will receive the installation.
+    // Account creation, GUI login and Linux linger belong to the owner's access plan.
+    let output = route
+        .run(
+            r#"python3 - <<'PY'
+import os, pathlib, pwd, stat, subprocess, sys
+uid = os.geteuid()
+account = pwd.getpwuid(uid)
+assert uid != 0 and account.pw_name == 'st648server'
+home = pathlib.Path(account.pw_dir)
+assert os.environ.get('HOME') == str(home)
+expected = '/Users/st648server' if sys.platform == 'darwin' else '/home/st648server'
+assert str(home) == expected
+metadata = home.lstat()
+assert stat.S_ISDIR(metadata.st_mode) and metadata.st_uid == uid
+assert stat.S_IMODE(metadata.st_mode) == 0o700
+marker = home / '.spaceterm-ssh-acceptance'
+metadata = marker.lstat()
+assert stat.S_ISREG(metadata.st_mode) and metadata.st_uid == uid
+assert stat.S_IMODE(metadata.st_mode) == 0o600
+assert marker.read_text() == 'st648server\n'
+for identity in ('spaceterm-development', 'spaceterm-preflight', 'spaceterm'):
+    paths = (
+        home / '.local/share' / identity / 'server',
+        home / 'Library/LaunchAgents' / ('io.github.sadiksaifi.' + identity + '.server.plist'),
+        home / '.config/systemd/user' / ('io.github.sadiksaifi.' + identity + '.server.service'),
+    )
+    assert all(not path.exists() and not path.is_symlink() for path in paths)
+if sys.platform == 'darwin':
+    subprocess.run(['/bin/launchctl', 'print', 'gui/' + str(uid)], check=True,
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
+else:
+    assert sys.platform == 'linux'
+    linger = subprocess.run(['/usr/bin/loginctl', 'show-user', str(uid), '--property=Linger', '--value'],
+                            check=True, capture_output=True, timeout=5)
+    assert linger.stdout == b'yes\n'
+    assert pathlib.Path('/run/user/' + str(uid) + '/bus').is_socket()
+print(uid)
+PY"#,
+            Vec::new(),
+            OBSERVATION,
+            cancellation,
+        )
+        .unwrap_or_else(|error| panic!("account preflight: {}", failure_name(&error)));
+    assert!(
+        output.exit.is_success(),
+        "requires a fresh st648server account, private marker and native service manager"
+    );
+    std::str::from_utf8(&output.stdout)
+        .ok()
+        .and_then(|text| text.trim().parse().ok())
+        .expect("account preflight must identify the disposable UID")
+}
+
+#[gpui::test]
+#[ignore = "installs into an owner-provisioned fresh st648server account; requires matching signed packages"]
+fn native_account_server_install_acceptance(cx: &mut gpui::TestAppContext) {
+    use spaceterm_server::{
+        hierarchy::{CloseTarget, Mutation, Outcome},
+        pane::{PaneSize, Reply, Request},
+    };
+    assert_eq!(
+        std::env::var("SPACETERM_SSH_NATIVE_INSTALL").as_deref(),
+        Ok("1"),
+        "explicit installation authorization required"
+    );
+    assert_eq!(
+        std::env::var("SPACETERM_SSH_NATIVE_EXPECT").as_deref(),
+        Ok("missing")
+    );
+    for key in [
+        "SPACETERM_SSH_NATIVE_REAL_PATHS",
+        "SPACETERM_SSH_SERVER_ARTIFACTS",
+    ] {
+        assert!(
+            std::env::var_os(key).is_none(),
+            "acceptance requires isolated client state and the real catalog"
+        );
+    }
+    assert!(
+        std::env::var_os("SPACETERM_SSH_NATIVE_CONFIG").is_some(),
+        "task-only SSH configuration required"
+    );
+    assert_eq!(
+        std::env::var("SPACETERM_DEVELOPMENT_CLIENT").as_deref(),
+        Ok("ssh-native-install-acceptance"),
+        "use a dedicated fixture client identity"
+    );
+    let account = std::process::Command::new("/usr/bin/id")
+        .arg("-un")
+        .output()
+        .unwrap();
+    assert!(
+        account.status.success() && account.stdout == b"st648client\n",
+        "run as the disposable st648client account"
+    );
+    let NativeFixture {
+        destination,
+        root,
+        backend,
+        ..
+    } = native_fixture_with_artifacts(
+        cx,
+        "accept",
+        SshServerArtifacts::new(Some(native_acceptance_catalog())),
+    );
+    let cancellation = SshCancellationToken::default();
+    let account = native_acceptance_account(&backend, &destination, &cancellation);
+    let observed = backend
+        .observe(&destination, None, &cancellation, &|_| {})
+        .unwrap_or_else(|error| panic!("fresh observation: {}", failure_name(&error)));
+    assert_eq!(observed.availability, ServerAvailability::NotInstalled);
+    let offer = match backend.connect(
+        &destination,
+        ConnectMode::Requested,
+        None,
+        &cancellation,
+        &|_| {},
+    ) {
+        Err(SshConnectFailure::InstallationOffered(offer)) => offer,
+        Err(error) => panic!("verified installation offer: {}", failure_name(&error)),
+        Ok(_) => panic!("fresh account connected without offering installation"),
+    };
+    assert_eq!(offer.platform, observed.facts.platform);
+    let connected = offer
+        .installation
+        .install(&cancellation, &|_| {})
+        .unwrap_or_else(|error| panic!("accepted installation: {}", failure_name(&error)));
+    assert_eq!(connected.continuity.account, account);
+    assert_eq!(
+        connected.facts.version.as_deref(),
+        Some(offer.version.as_str())
+    );
+    let mut pane_connection = connected.server.connect_shared_pane().unwrap();
+    let created = worktree_fixture::journaled_mutation(
+        &connected.server,
+        &mut pane_connection,
+        Mutation::CreateWorkspace {
+            name: "SSH install acceptance".into(),
+            directory: None,
+        },
+    )
+    .unwrap();
+    let Outcome::Accepted { target: workspace } = created.outcome else {
+        panic!("installed server refused a Workspace")
+    };
+    let current = repository::inventory(&mut pane_connection).unwrap().0;
+    let pane = current
+        .workspaces
+        .iter()
+        .find(|entry| entry.id == workspace)
+        .unwrap()
+        .tabs[0]
+        .root_pane;
+    let Reply::Attached { lease } = pane_connection
+        .exchange(&Request::SelectPane {
+            pane,
+            explicit: true,
+            style: None,
+            size: PaneSize {
+                columns: 80,
+                rows: 24,
+                cell_width: 8,
+                cell_height: 18,
+            },
+        })
+        .unwrap()
+    else {
+        panic!("installed server did not start the Workspace's Pane")
+    };
+    terminal_fixture_command(
+        &mut pane_connection,
+        lease,
+        "st648_live=accepted; printf 'ST648-INSTALLED\\n'",
+        "install-acceptance",
+        "ST648-INSTALLED",
+    )
+    .unwrap();
+    let before = repository::inventory(&mut pane_connection).unwrap().0;
+    let live = before
+        .close
+        .as_ref()
+        .unwrap()
+        .sessions
+        .iter()
+        .find(|entry| entry.id == pane)
+        .unwrap();
+    assert!(
+        live.session.is_some(),
+        "the usable Pane must own a live Terminal Session"
+    );
+    drop(pane_connection);
+    backend.disconnect(&destination);
+    // A new native backend has no candidate, while retaining this fixture's client identity.
+    // It must discover the approved runtime and leave its existing shell alive.
+    let config = &backend.config;
+    let reused_backend = NativeSshConnectBackend::new(NativeSshServerConfig {
+        paths: Arc::clone(&config.paths),
+        home: config.home.clone(),
+        startup: config.startup.clone(),
+        executable: config.executable.clone(),
+        adapter: config.adapter.clone(),
+        socket_probe: Arc::clone(&config.socket_probe),
+        askpass: Arc::clone(&config.askpass),
+        executor: config.executor.clone(),
+        artifacts: SshServerArtifacts::new(None),
+        filesystem: Arc::clone(&config.filesystem),
+        bootstrap: Arc::clone(&config.bootstrap),
+    });
+    let reused = reused_backend
+        .connect(
+            &destination,
+            ConnectMode::Requested,
+            Some(&connected.continuity),
+            &cancellation,
+            &|_| {},
+        )
+        .unwrap_or_else(|error| panic!("reuse without a catalog: {}", failure_name(&error)));
+    assert_eq!(reused.continuity, connected.continuity);
+    let mut pane_connection = reused.server.connect_shared_pane().unwrap();
+    let after = repository::inventory(&mut pane_connection).unwrap().0;
+    assert!(after.workspaces.iter().any(|entry| entry.id == workspace));
+    let after_close = after.close.as_ref().unwrap();
+    assert_eq!(after_close.boot, before.close.as_ref().unwrap().boot);
+    assert!(
+        after_close.sessions.contains(live),
+        "reconnect replaced the live Terminal Session"
+    );
+    let Reply::Attached { lease } = pane_connection
+        .exchange(&Request::SelectPane {
+            pane,
+            explicit: true,
+            style: None,
+            size: PaneSize {
+                columns: 80,
+                rows: 24,
+                cell_width: 8,
+                cell_height: 18,
+            },
+        })
+        .unwrap()
+    else {
+        panic!("reused Workspace's Pane unavailable")
+    };
+    terminal_fixture_command(
+        &mut pane_connection,
+        lease,
+        "test \"$st648_live\" = accepted && printf 'ST648-REUSED\\n'",
+        "install-reuse",
+        "ST648-REUSED",
+    )
+    .unwrap();
+    let confirmation = after
+        .close_confirmation(CloseTarget::Workspace { workspace })
+        .unwrap();
+    let closed = worktree_fixture::journaled_mutation(
+        &reused.server,
+        &mut pane_connection,
+        Mutation::Close {
+            target: CloseTarget::Workspace { workspace },
+            confirmation,
+        },
+    )
+    .unwrap();
+    assert!(matches!(closed.outcome, Outcome::Accepted { .. }));
+    drop(pane_connection);
+    reused_backend.disconnect(&destination);
+    drop(reused_backend);
+    drop(backend);
+    std::fs::remove_dir_all(root).unwrap();
+    eprintln!(
+        "PASS native SSH backend: identity={}, source={}, remote={}/{}, accepted install, usable Workspace, same live shell reused without a catalog; server retained for owner cleanup",
+        identity(),
+        env!("SPACETERM_TARGET"),
+        connected.facts.platform.0,
+        connected.facts.platform.1,
+    );
 }
 
 /// Explicit env selects a disposable account. This test never invokes Stop or Start.
@@ -1414,6 +1763,8 @@ fn failure_name(error: &SshConnectFailure) -> &'static str {
         SshConnectFailure::Unavailable(_) => "unavailable",
         SshConnectFailure::NeedsPerson(_) => "needs person",
         SshConnectFailure::Changed(_) => "continuity changed",
+        SshConnectFailure::Refused(RefusalKind::MissingArtifact) => "missing artifact",
+        SshConnectFailure::Refused(RefusalKind::InvalidArtifact) => "invalid artifact",
         SshConnectFailure::Refused(_) => "refused",
         SshConnectFailure::Incompatible(_) => "incompatible",
         SshConnectFailure::Unconfirmed(_) => "unconfirmed",
