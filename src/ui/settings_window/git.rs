@@ -23,20 +23,18 @@ pub(super) const WORKTREE_LOCATION_DESCRIPTION: &str = "Use {repository} and {br
 pub(super) fn worktree_location_problem(problem: WorktreePathTemplateError) -> &'static str {
     match problem {
         WorktreePathTemplateError::Empty => "Enter a location.",
-        WorktreePathTemplateError::TooLong => "Use 1,024 characters or fewer.",
+        WorktreePathTemplateError::TooLong => "At most 1,024 characters.",
         WorktreePathTemplateError::NotAbsolute => "Start the location with ~/ or /.",
         WorktreePathTemplateError::ParentSegment => "Remove \"..\" from the location.",
         WorktreePathTemplateError::UnclosedBrace => "Close each placeholder with }.",
         WorktreePathTemplateError::UnknownPlaceholder => {
-            "Use only the {repository} and {branch} placeholders."
+            "Use only {repository} and {branch} placeholders."
         }
         WorktreePathTemplateError::MissingBranch => {
-            "Include {branch}, so each Worktree gets its own folder."
+            "Include {branch} for separate Worktree directories."
         }
-        WorktreePathTemplateError::InvalidCharacter => {
-            "Remove tabs, line breaks, and other control characters."
-        }
-        WorktreePathTemplateError::NotWritable => "The server can\u{2019}t write to this folder.",
+        WorktreePathTemplateError::InvalidCharacter => "Remove control characters.",
+        WorktreePathTemplateError::NotWritable => "The server can't write here.",
     }
 }
 
@@ -58,7 +56,7 @@ pub(super) fn git_presentation(status: GitToolStatus) -> ToolPresentation {
             None,
             "Not checked",
             "settings-git-tool-state-unknown",
-            "SpaceTerm checks Git while this server is connected.",
+            "Git is checked while connected.",
         ),
         GitToolStatus::Ready(version) => (
             Some(version),
@@ -70,13 +68,13 @@ pub(super) fn git_presentation(status: GitToolStatus) -> ToolPresentation {
             Some(version),
             "Too old",
             "settings-git-tool-state-too-old",
-            "Repository Status needs Git 2.15 or later.",
+            "Requires Git 2.15 or later.",
         ),
         GitToolStatus::NotFound => (
             None,
             "Not found",
             "settings-git-tool-state-not-found",
-            "Install Git on this server to use Repository Status.",
+            "Install Git to use Repository Status.",
         ),
     };
     ToolPresentation {
@@ -93,7 +91,7 @@ pub(super) fn github_cli_presentation(status: GitHubCliStatus) -> ToolPresentati
         GitHubCliStatus::Unknown => (
             "Not checked",
             "settings-github-cli-state-unknown",
-            "SpaceTerm checks the GitHub CLI while Pull Requests are shown.",
+            "GitHub CLI is checked while Pull Requests are shown.",
         ),
         GitHubCliStatus::SignedIn => (
             "Signed in",
@@ -103,17 +101,17 @@ pub(super) fn github_cli_presentation(status: GitHubCliStatus) -> ToolPresentati
         GitHubCliStatus::SignedOut => (
             "Not signed in",
             "settings-github-cli-state-signed-out",
-            "Run \"gh auth login\" in a terminal.",
+            "Run \"gh auth login\".",
         ),
         GitHubCliStatus::NotFound => (
             "Not found",
             "settings-github-cli-state-not-found",
-            "Install the GitHub CLI to show Pull Requests.",
+            "Install GitHub CLI to show Pull Requests.",
         ),
         GitHubCliStatus::Unavailable => (
             "Unavailable",
             "settings-github-cli-state-unavailable",
-            "SpaceTerm asks the GitHub CLI again when a window becomes active.",
+            "Checked again when you switch to SpaceTerm.",
         ),
     };
     ToolPresentation {
@@ -275,7 +273,7 @@ mod tests {
         }));
         assert_eq!(
             (old.version.as_deref(), old.explanation),
-            (Some("2.14.6"), "Repository Status needs Git 2.15 or later.")
+            (Some("2.14.6"), "Requires Git 2.15 or later.")
         );
         let missing = git_presentation(GitToolStatus::NotFound);
         assert_eq!((missing.version, missing.state), (None, "Not found"));
@@ -287,7 +285,7 @@ mod tests {
 
         assert_eq!(
             (presentation.state, presentation.explanation),
-            ("Not signed in", "Run \"gh auth login\" in a terminal.")
+            ("Not signed in", "Run \"gh auth login\".")
         );
     }
 

@@ -41,7 +41,7 @@ impl SettingsFileView {
                 .input_length_limit(None)
                 // Every Settings Document prints as text, so the view is empty only when that
                 // text exceeds what a text area holds.
-                .placeholder("The settings file is too large to show here. Edit JSON opens it.")
+                .placeholder("File too large to show. Choose Edit JSON.")
                 .debug_selector("settings-file-text")
         });
         Self { area, shown: None }
@@ -165,7 +165,7 @@ impl SettingsWindow {
             .try_global::<crate::app::SelectedFileAccess>()
             .map(|access| Arc::clone(&access.0))
         else {
-            present_import_failure("File import is unavailable.", window, cx);
+            present_import_failure("File import unavailable.", window, cx);
             return;
         };
         let selection = cx.prompt_for_paths(gpui::PathPromptOptions {
@@ -203,27 +203,19 @@ impl SettingsWindow {
             Ok(Ok(document)) => document,
             Ok(Err(SettingsDocumentError::UnsupportedVersion)) => {
                 return present_import_failure(
-                    "That file comes from a version of SpaceTerm this one cannot read.",
+                    "Update SpaceTerm before importing this settings file.",
                     window,
                     cx,
                 );
             }
             Ok(Err(_)) => {
-                return present_import_failure(
-                    "That file is not a valid SpaceTerm settings file.",
-                    window,
-                    cx,
-                );
+                return present_import_failure("Invalid SpaceTerm settings file.", window, cx);
             }
             Err(ImportError::TooLarge) => {
-                return present_import_failure(
-                    "That file is too large to be a settings file.",
-                    window,
-                    cx,
-                );
+                return present_import_failure("Settings file too large.", window, cx);
             }
             Err(ImportError::Unreadable) => {
-                return present_import_failure("That file could not be read.", window, cx);
+                return present_import_failure("Couldn't read file.", window, cx);
             }
         };
         self.confirm_settings_import(imported, window, cx);
@@ -239,8 +231,8 @@ impl SettingsWindow {
         let result = Alert::new(
             ModalId::new("settings-import"),
             "Import settings",
-            "Import Settings",
-            "Every setting, keyboard shortcut, and installed terminal theme is replaced by the ones in this file.",
+            "Replace All Settings?",
+            "This replaces your settings, shortcuts, and installed themes.",
             vec![
                 ModalAction::new(
                     true,
@@ -259,7 +251,6 @@ impl SettingsWindow {
             ],
         )
         .intent(AlertIntent::Critical)
-        .detail("This cannot be undone. Export your settings first to keep a copy.")
         .present(window, cx, move |outcome, cx| {
             if !matches!(
                 outcome,

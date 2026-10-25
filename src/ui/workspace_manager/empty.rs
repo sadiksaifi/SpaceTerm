@@ -17,14 +17,11 @@ use super::super::workspace_frame::WorkspaceFrame;
 use super::{SwitchWorkspace, WindowDragRegion, WorkspaceManager};
 use crate::ui::appearance::gpui_color;
 
-pub(super) const EMPTY_TITLE: &str = "No Workspaces";
+pub(super) const EMPTY_TITLE: &str = "No Workspaces Attached";
 /// The detail while the server is reachable, so its detached Workspaces are in the switcher.
-pub(super) const EMPTY_DETAIL: &str = "Detached Workspaces keep running on the server. Choose \
-                                       one to attach it here, or create a new Workspace.";
+pub(super) const EMPTY_DETAIL: &str = "Choose a Workspace to attach, or create one.";
 /// The detail while the server is unreachable, so the switcher lists no detached Workspace.
-pub(super) const EMPTY_OFFLINE_DETAIL: &str = "Detached Workspaces keep running on the server. \
-                                               SpaceTerm is not connected, so they appear in the \
-                                               Workspace Switcher once it reconnects.";
+pub(super) const EMPTY_OFFLINE_DETAIL: &str = "Reconnect to choose a Workspace.";
 pub(super) const EMPTY_ACTION: &str = "Choose Workspace…";
 
 /// Where the sidebar stands while the empty view lays out beside it.
@@ -79,7 +76,7 @@ impl WorkspaceManager {
             .edge_margin);
         let band = WindowDragRegion::new(
             "empty-workspace-drag-region",
-            "Move Operating-System Window from Workspace chrome",
+            "Move Window",
             div()
                 .size_full()
                 .pt(frame.window_edge())

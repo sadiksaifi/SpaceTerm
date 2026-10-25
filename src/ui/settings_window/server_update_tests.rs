@@ -238,7 +238,7 @@ fn cancelling_the_confirmation_changes_nothing(cx: &mut TestAppContext) {
 }
 
 #[test]
-fn the_confirmation_names_both_builds_and_every_clients_sessions() {
+fn the_confirmation_names_the_candidate_and_every_clients_sessions() {
     let prepared = |running, stopped| super::PreparedChange {
         change: crate::local_server::service::control::UpdateChange::Update,
         previous: approved(),
@@ -249,33 +249,23 @@ fn the_confirmation_names_both_builds_and_every_clients_sessions() {
     };
     let live = super::UpdateConfirmation::of(&prepared(true, false));
     assert_eq!(live.title, "Update Server");
-    assert!(live.message.contains("version 1.5.0 (commit bbbbbbb)"));
-    assert!(live.message.contains("end all of its Terminal Sessions"));
-    assert!(live.detail.contains("from version 1.4.0 (commit aaaaaaa)"));
-    assert!(
-        live.detail.starts_with(&format!(
-            "This is the {} server for this account on this computer. ",
-            crate::application_identity::ApplicationIdentity::current().display_name()
-        )),
-        "{}",
-        live.detail
+    let server = crate::application_identity::ApplicationIdentity::current().display_name();
+    assert_eq!(
+        live.message.as_ref(),
+        format!("Update the {server} server to 1.5.0 (commit bbbbbbb)?")
     );
-    assert!(live.detail.contains("including those other clients use"));
-    assert!(
-        live.detail
-            .ends_with("Other servers aren\u{2019}t affected.")
+    assert_eq!(
+        live.detail.as_ref(),
+        "All Terminal Sessions on it end for every client."
     );
+    assert_eq!(live.confirm, "Update Server");
 
     let parked = super::UpdateConfirmation::of(&prepared(false, true));
-    assert!(parked.message.contains("stopped"), "{}", parked.message);
-    assert!(!parked.message.contains("end all"), "{}", parked.message);
-    assert!(
-        parked
-            .detail
-            .contains("stays stopped until you choose Start Server"),
-        "{}",
-        parked.detail
+    assert_eq!(
+        parked.message.as_ref(),
+        format!("Update the stopped {server} server to 1.5.0 (commit bbbbbbb)?")
     );
+    assert!(parked.detail.is_empty());
 }
 
 #[test]
@@ -339,7 +329,9 @@ fn a_changed_server_needs_a_fresh_confirmation(cx: &mut TestAppContext) {
     let presentation = harness.presentation();
     assert_eq!(presentation.tone, CaptionTone::Error);
     assert!(
-        presentation.explanation.contains("confirm again"),
+        presentation
+            .explanation
+            .contains("The server changed. Review the update again."),
         "{}",
         presentation.explanation
     );
@@ -368,7 +360,7 @@ fn a_failed_update_offers_return_only_when_the_service_proves_it_safe(cx: &mut T
     let presentation = harness.presentation();
     assert_eq!(presentation.state, "Update Failed");
     assert!(
-        presentation.explanation.contains("never became ready"),
+        presentation.explanation.contains("didn't start"),
         "{}",
         presentation.explanation
     );
@@ -419,7 +411,11 @@ fn a_failed_update_offers_return_only_when_the_service_proves_it_safe(cx: &mut T
         ..available()
     });
     assert_eq!(unproven.actions, [UpdateAction::Check]);
-    assert!(unproven.explanation.contains("can\u{2019}t return"));
+    assert!(
+        unproven
+            .explanation
+            .contains("SpaceTerm can't safely restore 1.4.0 (commit aaaaaaa).")
+    );
 }
 
 #[gpui::test]
@@ -470,11 +466,18 @@ fn an_approved_or_unavailable_build_offers_no_update() {
         });
         assert_eq!(presentation.state, state);
         assert!(presentation.actions.is_empty(), "{error:?}");
-        assert!(
-            presentation.explanation.contains("1.4.0"),
-            "{}",
-            presentation.explanation
-        );
+        if error == CandidateError::ClientRestartRequired {
+            assert_eq!(
+                presentation.explanation.as_ref(),
+                "Quit and reopen SpaceTerm to update the server."
+            );
+        } else {
+            assert!(
+                presentation.explanation.contains("1.4.0"),
+                "{}",
+                presentation.explanation
+            );
+        }
     }
 
     // An earlier release is never offered, as activation refuses it.

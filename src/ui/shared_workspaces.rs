@@ -319,13 +319,8 @@ mod development {
         pub(crate) const fn explanation(self) -> &'static str {
             match self {
                 Self::Available => "",
-                Self::Offline => {
-                    "Shared Workspace changes need the server. SpaceTerm is not connected, and \
-                     nothing is saved for later."
-                }
-                Self::Pending => {
-                    "SpaceTerm is waiting for the server to finish the queued changes. Try again after they finish."
-                }
+                Self::Offline => "Reconnect to make changes to this Workspace.",
+                Self::Pending => "Wait for the current changes to finish, then try again.",
             }
         }
     }
@@ -369,7 +364,7 @@ mod development {
             match self {
                 Self::Offline => SharedEditability::Offline.explanation(),
                 Self::Pending => SharedEditability::Pending.explanation(),
-                Self::Value => "The value is longer than the server accepts, so nothing was sent.",
+                Self::Value => "Enter a shorter name or directory.",
             }
         }
     }
@@ -438,6 +433,13 @@ mod development {
             }
         }
 
+        pub(crate) const fn retry_label(self) -> &'static str {
+            match self {
+                Self::Name => "Use My Name",
+                Self::PinnedDirectory => "Use My Directory",
+            }
+        }
+
         pub(crate) const fn label(self) -> &'static str {
             match self {
                 Self::Name => "name",
@@ -461,27 +463,21 @@ mod development {
     impl SharedRefusal {
         pub(crate) const fn title(self) -> &'static str {
             match self {
-                Self::Missing => "No Longer on the Server",
+                Self::Missing => "Item Already Removed",
                 Self::Invalid => "Change Not Accepted",
-                Self::Limit => "Server Is Full",
+                Self::Limit => "Server Limit Reached",
                 Self::Disconnected => "Changes Not Sent",
             }
         }
 
         pub(crate) const fn detail(self) -> &'static str {
             match self {
-                Self::Missing => {
-                    "Another client removed what this change was for, so the server did not \
-                     apply it."
-                }
-                Self::Invalid => "The server did not accept this value, so nothing changed.",
+                Self::Missing => "Another client removed the item you were changing.",
+                Self::Invalid => "Check the value and try again.",
                 Self::Disconnected => {
-                    "The connection ended before the waiting changes were sent. They were not saved for later. Any operation already sent still keeps its original identity until the server confirms its outcome."
+                    "The connection ended before these changes were sent. Reconnect, then try them again."
                 }
-                Self::Limit => {
-                    "The server already holds as many Workspaces, Tabs, or Panes as it allows, \
-                     so nothing was created."
-                }
+                Self::Limit => "Close unused Workspaces, Tabs, or Panes before creating more.",
             }
         }
     }
@@ -513,8 +509,8 @@ mod development {
 
         pub(crate) const fn title(self) -> &'static str {
             match self {
-                Self::Read | Self::UnsafeStorage => "Workspaces Unavailable",
-                Self::Write => "Changes Could Not Be Saved",
+                Self::Read | Self::UnsafeStorage => "Couldn't Restore Workspaces",
+                Self::Write => "Couldn't Confirm Saved Changes",
             }
         }
 
@@ -528,20 +524,13 @@ mod development {
         pub(crate) const fn detail(self) -> &'static str {
             match self {
                 Self::Read => {
-                    "SpaceTerm could not read which Workspaces this device presents, or their Tab order \
-                     and Pane Layouts. Workspaces stay closed, so nothing saved is replaced. Quit and \
-                     reopen SpaceTerm to try again."
+                    "SpaceTerm couldn't read your saved Workspace arrangement. Quit and reopen SpaceTerm to try again."
                 }
                 Self::UnsafeStorage => {
-                    "SpaceTerm could not validate which Workspaces this device presents, their Tab order \
-                     and Pane Layouts, or the storage that holds them. Workspaces stay closed, and \
-                     SpaceTerm keeps the saved data."
+                    "SpaceTerm couldn't open your saved Workspace arrangement safely. Your saved arrangement is unchanged."
                 }
                 Self::Write => {
-                    "SpaceTerm could not confirm that it saved which Workspaces this device \
-                     presents, or their Tab order and Pane Layouts. Until you quit and reopen \
-                     SpaceTerm, some of these changes may not be saved. Workspaces keep \
-                     running on the server."
+                    "Quit and reopen SpaceTerm before you rearrange Workspaces again. Your Workspaces keep running."
                 }
             }
         }
@@ -1725,18 +1714,6 @@ mod development {
                 target,
                 scope,
                 workspace: workspace.name.clone(),
-                tabs: workspace
-                    .tabs
-                    .iter()
-                    .filter(|tab| {
-                        tab.panes.iter().any(|pane| {
-                            confirmation
-                                .panes
-                                .iter()
-                                .any(|confirmed| confirmed.id == pane.id)
-                        })
-                    })
-                    .count(),
                 confirmation,
                 controls: inventory
                     .close
@@ -2268,7 +2245,6 @@ mod development {
         confirmation: ServerCloseConfirmation,
         controls: Option<Vec<ConfirmedControl>>,
         scope: SharedCloseScope,
-        tabs: usize,
         /// The Workspace's name as the server published it.
         workspace: String,
     }
@@ -2328,7 +2304,7 @@ mod development {
                 SharedCloseScope::Tab => "Close Tab?".to_owned(),
                 SharedCloseScope::Worktree => "Close Tabs?".to_owned(),
                 SharedCloseScope::Workspace => {
-                    format!("Kill Workspace \u{201C}{}\u{201D}?", self.workspace)
+                    format!("Kill Workspace \"{}\"?", self.workspace)
                 }
             }
         }
@@ -2345,66 +2321,29 @@ mod development {
         /// What closes, what ends, and for whom. Every client loses these Panes and Sessions,
         /// including a client that controls one of the Panes.
         pub(crate) fn message(&self) -> String {
-            let panes = self.confirmation.panes.len();
-            let removal = match self.scope {
-                SharedCloseScope::Workspace => {
-                    "Its Tabs and Panes are permanently removed for every client.".to_owned()
-                }
-                SharedCloseScope::Worktree => match (self.tabs, panes) {
-                    (1, 1) => {
-                        "The Worktree\u{2019}s Tab and its Pane close for every client.".to_owned()
-                    }
-                    (1, panes) => format!(
-                        "The Worktree\u{2019}s Tab and its {panes} Panes close for every client."
-                    ),
-                    (tabs, panes) => format!(
-                        "The Worktree\u{2019}s {tabs} Tabs and their {panes} Panes close for every client."
-                    ),
-                },
-                _ if self.confirmation.removes_workspace => format!(
-                    "This is the only {} in \u{201C}{}\u{201D}, so the Workspace is permanently \
-                     removed for every client.",
-                    if self.scope == SharedCloseScope::Tab {
-                        "Tab"
-                    } else {
-                        "Pane"
-                    },
-                    self.workspace
-                ),
-                SharedCloseScope::Pane if self.confirmation.removes_tab => {
-                    "This is the only Pane in its Tab, so the Tab closes for every client."
-                        .to_owned()
-                }
-                SharedCloseScope::Pane => "The Pane closes for every client.".to_owned(),
-                SharedCloseScope::Tab => match panes {
-                    1 => "The Tab and its Pane close for every client.".to_owned(),
-                    count => format!("The Tab and its {count} Panes close for every client."),
-                },
-            };
             let sessions = match self.sessions() {
-                0 => "No shell is running there, so no Terminal Session ends.".to_owned(),
-                1 => "This ends 1 Terminal Session for every client, including on a client that \
-                      controls its Pane, and stops its running commands."
-                    .to_owned(),
-                count => format!(
-                    "This ends {count} Terminal Sessions for every client, including in Panes \
-                     another client controls, and stops their running commands."
-                ),
+                0 => String::new(),
+                1 => "This ends 1 Terminal Session for every client.".to_owned(),
+                count => format!("This ends {count} Terminal Sessions for every client."),
             };
-            format!("{removal} {sessions}")
+            if self.scope == SharedCloseScope::Workspace {
+                if sessions.is_empty() {
+                    "This can't be undone.".to_owned()
+                } else {
+                    format!("{sessions} This can't be undone.")
+                }
+            } else {
+                sessions
+            }
         }
 
         /// What a removed Workspace leaves behind, when the close removes one.
         pub(crate) fn detail(&self) -> Option<&'static str> {
             if self.scope == SharedCloseScope::Worktree {
-                return Some(
-                    "The Worktree, its files, and its branch are kept. Tabs outside this Worktree keep running.",
-                );
+                return Some("The Worktree, its files, and its branch are kept.");
             }
             self.confirmation.removes_workspace.then_some(
-                "Other Workspaces keep running. Repository files and Git Worktree directories \
-                 stay on disk. Neither a server restart nor another client can bring this \
-                 Workspace back.",
+                "Repository files and Worktree directories stay on disk. This Workspace cannot be restored.",
             )
         }
 
@@ -2429,10 +2368,10 @@ mod development {
     /// after the confirmation opened.
     pub(crate) const fn shared_close_changed_title(target: ServerCloseTarget) -> &'static str {
         match target {
-            ServerCloseTarget::Pane { .. } => "Pane Changed on Another Client",
-            ServerCloseTarget::Tab { .. } => "Tab Changed on Another Client",
-            ServerCloseTarget::Worktree { .. } => "Tabs Changed on Another Client",
-            ServerCloseTarget::Workspace { .. } => "Workspace Changed on Another Client",
+            ServerCloseTarget::Pane { .. } => "Pane Changed",
+            ServerCloseTarget::Tab { .. } => "Tab Changed",
+            ServerCloseTarget::Worktree { .. } => "Tabs Changed",
+            ServerCloseTarget::Workspace { .. } => "Workspace Changed",
         }
     }
 

@@ -164,47 +164,30 @@ pub(super) fn caption(
         }
         Some(Ended::Restarted) => {
             return (
-                format!(
-                    "{server} restarted after you confirmed, so nothing ended. Review its \
-                     Terminal Sessions and try again."
-                )
-                .into(),
+                format!("{server} restarted, so nothing ended. Try again.").into(),
                 CaptionTone::Warning,
             );
         }
         Some(Ended::Changed) => {
             return (
-                format!(
-                    "The Terminal Sessions on {server} changed after you confirmed, so nothing \
-                     ended. Review them and try again."
-                )
-                .into(),
+                format!("The Terminal Sessions on {server} changed, so nothing ended. Try again.")
+                    .into(),
                 CaptionTone::Warning,
             );
         }
         Some(Ended::Refused(reason)) => {
-            return (
-                format!(
-                    "SpaceTerm didn\u{2019}t end the Terminal Sessions on {server}. {}",
-                    reason.explanation()
-                )
-                .into(),
-                CaptionTone::Error,
-            );
+            return (reason.explanation().into(), CaptionTone::Error);
         }
         Some(Ended::Failed) => {
             return (
-                format!("{server} couldn\u{2019}t end its Terminal Sessions. Nothing changed.")
-                    .into(),
+                format!("{server} couldn't end its Terminal Sessions.").into(),
                 CaptionTone::Error,
             );
         }
         Some(Ended::Unconfirmed) => {
             return (
                 format!(
-                    "SpaceTerm didn\u{2019}t hear whether {server} ended its Terminal Sessions. \
-                     It asks the server for the answer when it reconnects, and doesn\u{2019}t \
-                     ask it to end them again."
+                    "SpaceTerm couldn't confirm whether {server}'s Terminal Sessions ended. It will check when the connection returns."
                 )
                 .into(),
                 CaptionTone::Warning,
@@ -242,18 +225,11 @@ fn sessions(count: usize) -> String {
 }
 
 /// The confirmation's title, message, and detail. Each names the selected server.
-pub(super) fn confirmation(server: &str, live: usize) -> (String, String, String) {
+pub(super) fn confirmation(server: &str, _live: usize) -> (String, String, String) {
     (
         format!("End All Sessions on {server}?"),
-        format!(
-            "This ends {} on {server} for every client. Their terminal output and Scrollback are \
-             cleared, and programs running in them stop.",
-            sessions(live)
-        ),
-        "The server keeps running, and its Workspaces, Tabs, and Panes remain. Repository files \
-         and Worktree directories stay on disk. A Pane starts a new shell only when someone \
-         selects it, opens its Tab, or chooses Start Session."
-            .to_owned(),
+        "Running programs stop and terminal output is cleared for every client.".to_owned(),
+        String::new(),
     )
 }
 
@@ -364,7 +340,7 @@ impl SettingsWindow {
         };
         let generation = state.generation;
         let server = self.selected_server_name();
-        let (title, message, detail) = confirmation(&server, live_sessions(&confirmed).len());
+        let (title, message, _) = confirmation(&server, live_sessions(&confirmed).len());
         let owner = cx.weak_entity();
         let result = Alert::new(
             ModalId::new("settings-server-end-all-sessions"),
@@ -389,7 +365,6 @@ impl SettingsWindow {
             ],
         )
         .intent(AlertIntent::Critical)
-        .detail(detail)
         .present(window, cx, move |outcome, cx| {
             if !matches!(
                 outcome,
@@ -531,7 +506,7 @@ impl SettingsWindow {
             .tab_stop(true)
             .debug_selector(END_SELECTOR)
             .accessibility_description(SharedString::from(format!(
-                "Ends every Terminal Session on {server} for every client. SpaceTerm asks first."
+                "Ends every Terminal Session on {server} for every client."
             )))
             .on_activate(move |_, window, cx| {
                 let _ = owner.update(cx, |settings, cx| {

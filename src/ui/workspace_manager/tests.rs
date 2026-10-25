@@ -2569,7 +2569,10 @@ fn command_q_without_a_status_area_confirms_actual_exit(cx: &mut TestAppContext)
     let name = crate::application_identity::ApplicationIdentity::current().display_name();
     let (title, detail) = cx.pending_prompt().expect("actual exit always asks");
     assert_eq!(title, format!("Quit {name}?"));
-    assert!(detail.contains("Your Terminal Sessions keep running on the server"));
+    assert!(
+        detail.is_empty(),
+        "the installed-build quit prompt is title-only"
+    );
     cx.simulate_prompt_answer("Cancel");
     cx.run_until_parked();
     assert_eq!(cx.update(|_, cx| cx.windows().len()), 1);
@@ -7838,9 +7841,9 @@ fn main_window_reading_order(cx: &mut VisualTestContext) -> Vec<String> {
         "New Workspace",
         "Resize Workspace sidebar",
         "Tabs",
-        "Create Tab",
+        "New Tab",
         "Pane Caption",
-        "Terminal context actions",
+        "Context actions",
     ];
     A11yTree::read(cx)
         .in_order()
@@ -7913,9 +7916,9 @@ fn main_window_reads_in_presented_layout_order(cx: &mut TestAppContext) {
             "New Workspace",
             "Resize Workspace sidebar",
             "Tabs",
-            "Create Tab",
+            "New Tab",
             "Pane Caption",
-            "Terminal context actions",
+            "Context actions",
         ]
     );
 
@@ -7927,9 +7930,9 @@ fn main_window_reads_in_presented_layout_order(cx: &mut TestAppContext) {
             "Switch Workspace",
             "Resize Workspace sidebar",
             "Tabs",
-            "Create Tab",
+            "New Tab",
             "Pane Caption",
-            "Terminal context actions",
+            "Context actions",
         ]
     );
 }
@@ -8281,7 +8284,7 @@ fn pane_split_accessibility_scopes_contents_to_its_two_sides(cx: &mut TestAppCon
                 );
             }
             for context in [children[1], children[5]] {
-                assert_eq!(context["aria"]["label"], "Terminal context actions");
+                assert_eq!(context["aria"]["label"], "Context actions");
             }
         }
         cx.simulate_keystrokes("cmd-b");
@@ -8321,7 +8324,7 @@ fn pane_split_accessibility_keeps_nested_splitters_between_their_own_sides(
         let contexts = tree
             .in_order()
             .into_iter()
-            .filter(|node| node["aria"]["label"] == "Terminal context actions")
+            .filter(|node| node["aria"]["label"] == "Context actions")
             .collect::<Vec<_>>();
         assert_eq!(captions.len(), 4);
         assert_eq!(terminals.len(), 4);
@@ -8534,7 +8537,7 @@ fn close_confirmation_publishes_text_before_actions_and_contains_accessibility(
     assert_eq!(dialog["aria"]["role"], "AlertDialog");
     assert_eq!(dialog["aria"]["modal"], true);
     let title = tree.text("Close Tab?");
-    let message = tree.text("Close 1 Pane? Running commands in these Panes will stop.");
+    let message = tree.text("Running commands in 1 Pane stop.");
     let content = tree.descendants(dialog);
     let position = |node: &serde_json::Value| {
         content
@@ -8552,7 +8555,7 @@ fn close_confirmation_publishes_text_before_actions_and_contains_accessibility(
         assert!(tree.exposed(button));
     }
     assert_eq!(tree.focused().unwrap()["aria"]["label"], "Cancel");
-    for name in ["Tabs", "Workspaces", "Terminal context actions"] {
+    for name in ["Tabs", "Workspaces", "Context actions"] {
         assert!(!tree.exposed(tree.node(name)), "{name}");
     }
 }
@@ -8583,7 +8586,7 @@ fn close_confirmation_restores_accessibility_focus_after_escape_and_cancel(
         assert!(tree.with_role("AlertDialog").is_empty());
         assert_eq!(tree.focused().unwrap()["aria"]["label"], "Close Tab");
         assert!(tree.exposed(tree.focused().unwrap()));
-        assert!(tree.exposed(tree.node("Terminal context actions")));
+        assert!(tree.exposed(tree.node("Context actions")));
         assert!(manager.read_with(cx, |manager, _| {
             manager.close_confirmation.pending().is_none()
         }));
@@ -11757,7 +11760,7 @@ fn killing_the_active_workspace_should_open_its_neighbor_without_selecting_its_p
 }
 
 /// A neighbor whose Pane waits for first use takes the keyboard on the screen in the Pane's
-/// place, so Tab reaches Start New Shell and nothing starts until the person presses it.
+/// place, so Tab reaches Start Session and nothing starts until the person presses it.
 #[gpui::test]
 fn a_dormant_neighbor_should_take_the_keyboard_on_its_screen(cx: &mut TestAppContext) {
     use spaceterm_ui::a11y_testing::A11yTree;
@@ -11784,7 +11787,7 @@ fn a_dormant_neighbor_should_take_the_keyboard_on_its_screen(cx: &mut TestAppCon
         .map(|node| node["aria"]["label"].clone());
 
     assert_eq!(harness.active(cx), Some(WorkspaceId::new(2)));
-    assert_eq!(focused, Some(serde_json::json!("Start New Shell")));
+    assert_eq!(focused, Some(serde_json::json!("Start Session")));
     assert_eq!(
         harness.panes.pane(ATTACHED_BUILD_PANE).selections(),
         selections
@@ -12577,7 +12580,7 @@ mod shared_repositories {
 
         let removal = feature_removal_reads(
             pinned_through_an_alias(PinCheckState::Ready),
-            "Unpin the Directory to Remove",
+            "Unpin Directory to Remove",
             cx,
         );
         assert_eq!(removal, WorktreeRemoval::HoldsPinnedDirectory);
@@ -13492,7 +13495,6 @@ impl crate::ssh::server_connection::SshConnectBackend for ConnectsOnceThen {
                 server: [2; 32],
             },
             lease: Arc::new(ScriptedRoute(self.route.clone())),
-            protocol_major: 1,
             facts: crate::ssh::server_connection::SshServerFacts {
                 platform: ("linux".into(), "x86_64".into()),
                 version: Some("1.0.0".into()),
@@ -13895,7 +13897,6 @@ impl crate::ssh::server_connection::SshConnectBackend for StoppableServer {
                 server: [2; 32],
             },
             lease: Arc::new(ScriptedRoute(self.route.clone())),
-            protocol_major: 1,
             facts: crate::ssh::server_connection::SshServerFacts {
                 platform: ("linux".into(), "x86_64".into()),
                 version: Some("1.0.0".into()),

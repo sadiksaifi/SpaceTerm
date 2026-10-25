@@ -52,12 +52,11 @@ const SYSTEM_SELECTION_ACTION: &str = "directory-picker-system-selection";
 /// Identifies the row that opens the enclosing directory.
 const ENCLOSING_ROW: &str = "directory-picker-enclosing";
 const NO_SUBDIRECTORIES: &str = "No subdirectories";
-const TRUNCATED_LISTING_NOTE: &str =
-    "Showing the first 1024 directories. Type a path to open others.";
+const TRUNCATED_LISTING_NOTE: &str = "Showing the first 1024. Type a path to open others.";
 pub(super) const MAXIMUM_DIRECTORY_ROWS: usize = 1024;
 const CONNECTION_LOST_NOTICE: EmptyNotice =
     EmptyNotice::new(IconName::TriangleAlert, "Server connection lost")
-        .description("Choose again once SpaceTerm reconnects to the server.");
+        .description("Choose again once SpaceTerm reconnects.");
 
 /// The content-unavailable view the list area presents in place of child directories.
 #[derive(Clone, Copy)]
@@ -1012,13 +1011,9 @@ impl DirectoryPicker {
             "Create Directory?",
             // Another computer's directory is created there, so the question names it.
             match self.source.machine_name() {
-                Some(machine) => format!(
-                    "Create {} on \u{201C}{machine}\u{201D}? Missing parent directories will \
-                     also be created.",
-                    parsed.display()
-                ),
+                Some(machine) => format!("Create {} on \"{machine}\"?", parsed.display()),
                 None => format!(
-                    "Create {}? Missing parent directories will also be created.",
+                    "Create {}? Missing parent directories will be created.",
                     parsed.display()
                 ),
             },
@@ -1237,30 +1232,30 @@ impl DirectoryPicker {
             match self.status {
                 DirectoryPickerStatus::Missing => {
                     return EmptyNotice::new(IconName::CircleAlert, "Directory doesn’t exist")
-                        .description("Choose an existing directory on the server.");
+                        .description("Choose an existing directory.");
                 }
                 DirectoryPickerStatus::NotDirectory => {
-                    return EmptyNotice::new(IconName::File, "Not a directory")
-                        .description("Only a directory can be this Pane’s directory.");
+                    return EmptyNotice::new(IconName::File, "Directory required")
+                        .description("Choose an existing directory.");
                 }
                 DirectoryPickerStatus::ConnectionLost => {
                     return EmptyNotice::new(
                         IconName::TriangleAlert,
                         "Not connected to the server",
                     )
-                    .description("Edit the path to try again once SpaceTerm reconnects.");
+                    .description("Edit the path once SpaceTerm reconnects.");
                 }
                 _ => {}
             }
         }
         match self.status {
             DirectoryPickerStatus::NotDirectory => {
-                return EmptyNotice::new(IconName::File, "Not a directory")
-                    .description("Only a directory can be a Pinned Directory.");
+                return EmptyNotice::new(IconName::File, "Directory required")
+                    .description("Choose a directory.");
             }
             DirectoryPickerStatus::PermissionDenied => {
                 return EmptyNotice::new(IconName::Lock, "Permission denied")
-                    .description("Your account can\u{2019}t open this directory.");
+                    .description("Can't open this directory.");
             }
             DirectoryPickerStatus::ConnectionLost => return CONNECTION_LOST_NOTICE,
             DirectoryPickerStatus::Other => {
@@ -1272,7 +1267,7 @@ impl DirectoryPicker {
             }
             DirectoryPickerStatus::Missing => {
                 return EmptyNotice::new(IconName::FolderPlus, "Directory doesn\u{2019}t exist")
-                    .description("Open creates it and pins this Workspace to it.");
+                    .description("Open creates and pins this directory.");
             }
             DirectoryPickerStatus::DiscoveringAccount
             | DirectoryPickerStatus::Loading
@@ -1283,7 +1278,7 @@ impl DirectoryPicker {
             Some(DirectorySourceError::ConnectionLost) => CONNECTION_LOST_NOTICE,
             Some(DirectorySourceError::PermissionDenied) => {
                 EmptyNotice::new(IconName::Lock, "Permission denied")
-                    .description("Your account can\u{2019}t list this directory.")
+                    .description("Can't list this directory.")
             }
             Some(DirectorySourceError::Missing) => EmptyNotice::new(
                 IconName::CircleAlert,
@@ -1364,11 +1359,11 @@ impl DirectoryPicker {
 impl PickerPathError {
     const fn message(self) -> &'static str {
         match self {
-            Self::Relative => "Enter an absolute path beginning with / or ~/.",
-            Self::BareTilde => "Use ~/ to open your home directory.",
-            Self::UnsupportedTilde => "Only ~/ is supported for home-relative paths.",
+            Self::Relative => "Start the path with / or ~/.",
+            Self::BareTilde => "Use ~/ for your home directory.",
+            Self::UnsupportedTilde => "Use ~/ for your home directory.",
             Self::InvalidControlCharacter => "Paths cannot contain control characters.",
-            Self::DotSegment => "Use Go Back to open an enclosing directory.",
+            Self::DotSegment => "Use Go Back for an enclosing directory.",
         }
     }
 }
@@ -2249,7 +2244,7 @@ mod tests {
                 true,
                 Some(DirectorySourceError::PermissionDenied),
                 "Permission denied".to_owned(),
-                Some("Your account can\u{2019}t list this directory.".to_owned()),
+                Some("Can't list this directory.".to_owned()),
                 Vec::<String>::new(),
             )
         );
@@ -2412,7 +2407,7 @@ mod tests {
                 .results_note()
                 .cloned()),
             Some(SharedString::from(
-                "Showing the first 1024 directories. Type a path to open others."
+                "Showing the first 1024. Type a path to open others."
             ))
         );
     }

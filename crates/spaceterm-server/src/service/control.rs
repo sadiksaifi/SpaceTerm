@@ -52,7 +52,6 @@ pub struct Wording {
     server: String,
     action: Action,
     running: bool,
-    startup: ServiceStartup,
 }
 
 impl Wording {
@@ -67,13 +66,12 @@ impl Wording {
         server: &str,
         action: Action,
         running: bool,
-        startup: ServiceStartup,
+        _startup: ServiceStartup,
     ) -> Self {
         Self {
             server: server.into(),
             action,
             running,
-            startup,
         }
     }
 
@@ -95,35 +93,17 @@ impl Wording {
     pub fn message(&self) -> String {
         let server = &self.server;
         match self.action {
-            Action::Stop => {
-                format!("Stop the {server} server and end all of its Terminal Sessions?")
-            }
-            Action::Restart => {
-                format!("Restart the {server} server and end all of its Terminal Sessions?")
-            }
-            Action::Uninstall if self.running => {
-                format!("Uninstall the {server} server and end all of its Terminal Sessions?")
-            }
+            Action::Stop => format!("Stop the {server} server?"),
+            Action::Restart => format!("Restart the {server} server?"),
             Action::Uninstall => format!("Uninstall the {server} server?"),
         }
     }
 
     pub fn detail(&self) -> String {
-        let startup = self.startup;
-        match self.action {
-            Action::Stop => match startup {
-                ServiceStartup::AtLogin => "Terminal Sessions end for every client using this server, and programs running in them stop. Workspaces are kept. The server stays stopped, even after you log in again, until you choose Start Server.",
-                ServiceStartup::AtBoot => "Terminal Sessions end for every client using this server, and programs running in them stop. Workspaces are kept. The server stays stopped, even after the computer restarts, until you choose Start Server.",
-            }.into(),
-            Action::Restart => "Terminal Sessions end for every client using this server, and programs running in them stop. Workspaces are kept, and each Pane starts a new shell when you next use it.".into(),
-            Action::Uninstall => {
-                let ending = if self.running { "Terminal Sessions end for every client using this server, and programs running in them stop. " } else { "" };
-                let startup = match startup {
-                    ServiceStartup::AtLogin => "It no longer starts when you log in. Workspaces and verified server installations are kept, so you can install it again.",
-                    ServiceStartup::AtBoot => "It no longer starts when the computer starts. Workspaces and verified server installations are kept, so you can install it again. Lingering stays on for your account, because other services may rely on it. To turn it off, run loginctl disable-linger.",
-                };
-                format!("{ending}{startup}")
-            }
+        if self.action == Action::Uninstall && !self.running {
+            String::new()
+        } else {
+            "All Terminal Sessions on it end for every client.".into()
         }
     }
 }
@@ -199,8 +179,11 @@ impl UpdateWording {
         }
     }
 
-    pub fn confirm_label(&self) -> &'static str {
-        self.title()
+    pub fn confirm_label(&self) -> String {
+        match self.change {
+            UpdateChange::Update => self.title().into(),
+            UpdateChange::Return => format!("Return to {}", self.previous),
+        }
     }
 
     pub fn message(&self) -> String {
@@ -211,52 +194,20 @@ impl UpdateWording {
             ..
         } = self;
         match self.change {
-            UpdateChange::Update if self.running => format!(
-                "Update the {server} server to version {candidate} and end all of its Terminal \
-                 Sessions?"
-            ),
-            UpdateChange::Update if self.stopped => {
-                format!("Update the stopped {server} server to version {candidate}?")
+            UpdateChange::Update if self.stopped && !self.running => {
+                format!("Update the stopped {server} server to {candidate}?")
             }
-            UpdateChange::Update => format!("Update the {server} server to version {candidate}?"),
-            UpdateChange::Return => {
-                format!("Return the {server} server to version {previous}?")
-            }
+            UpdateChange::Update => format!("Update the {server} server to {candidate}?"),
+            UpdateChange::Return => format!("Return the {server} server to {previous}?"),
         }
     }
 
     pub fn detail(&self) -> String {
-        let Self {
-            previous,
-            candidate,
-            ..
-        } = self;
-        let kept = "Workspaces and each client\u{2019}s attachments and views are kept, and each \
-                    Pane starts a new shell when you next use it.";
-        let others = "Other servers aren\u{2019}t affected.";
-        let detail = match self.change {
-            UpdateChange::Update if self.running => format!(
-                "The server changes from version {previous} to version {candidate}. All Terminal \
-                 Sessions on this server end, including those other clients use, and programs \
-                 running in them stop. {kept}"
-            ),
-            UpdateChange::Update if self.stopped => format!(
-                "The server changes from version {previous} to version {candidate}. No Terminal \
-                 Sessions are running, and the server stays stopped until you choose Start \
-                 Server. {kept}"
-            ),
-            UpdateChange::Update => format!(
-                "The server changes from version {previous} to version {candidate}. It \
-                 isn\u{2019}t running now, so no Terminal Sessions end. {kept}"
-            ),
-            UpdateChange::Return => format!(
-                "Version {candidate} never became ready, so no Terminal Sessions are running. \
-                 SpaceTerm confirmed that version {previous} and the server\u{2019}s saved \
-                 Workspaces are unchanged. The server stays stopped until you choose Start \
-                 Server. Terminal Sessions that ended don\u{2019}t return."
-            ),
-        };
-        format!("{detail} {others}")
+        if self.change == UpdateChange::Update && self.running {
+            "All Terminal Sessions on it end for every client.".into()
+        } else {
+            String::new()
+        }
     }
 }
 
@@ -411,20 +362,14 @@ mod tests {
             ServiceStartup::AtLogin,
         );
         let remote = Wording::for_server("penguin", Action::Stop, true, ServiceStartup::AtLogin);
-        assert_eq!(
-            local.message(),
-            "Stop the SpaceTerm Development server and end all of its Terminal Sessions?"
-        );
-        assert_eq!(
-            remote.message(),
-            "Stop the penguin server and end all of its Terminal Sessions?"
-        );
+        assert_eq!(local.message(), "Stop the SpaceTerm Development server?");
+        assert_eq!(remote.message(), "Stop the penguin server?");
         assert_eq!(local.title(), remote.title());
         assert_eq!(local.detail(), remote.detail());
     }
 
     #[test]
-    fn a_remote_update_confirmation_names_the_selected_server_and_both_builds() {
+    fn a_remote_update_confirmation_names_the_selected_server_and_candidate() {
         let build = |version: &'static str| BuildName {
             version,
             commit: "0123456789abcdef0123456789abcdef01234567",
@@ -440,13 +385,9 @@ mod tests {
         );
         assert_eq!(
             wording.message(),
-            "Update the penguin server to version 0.7.0 (commit 0123456) and end all of its \
-             Terminal Sessions?"
+            "Update the penguin server to 0.7.0 (commit 0123456)?"
         );
         let detail = wording.detail();
-        assert!(detail.contains("from version 0.6.8 (commit 0123456)"));
-        assert!(detail.contains("including those other clients use"));
-        assert!(detail.contains("Workspaces and each client\u{2019}s attachments"));
-        assert!(detail.ends_with("Other servers aren\u{2019}t affected."));
+        assert_eq!(detail, "All Terminal Sessions on it end for every client.");
     }
 }

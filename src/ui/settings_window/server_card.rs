@@ -606,9 +606,9 @@ impl SettingsWindow {
             (Some(place), None) => SharedString::from(place),
             (None, Some(system)) => system,
             (None, None) => match choice {
-                ServerChoice::Local => SharedString::new_static("This account on this computer"),
+                ServerChoice::Local => SharedString::new_static("This account"),
                 ServerChoice::Ssh(_) => SharedString::new_static("Over SSH"),
-                ServerChoice::Direct(_) => SharedString::new_static("Paired over the network"),
+                ServerChoice::Direct(_) => SharedString::new_static("Paired over network"),
             },
         }
     }
@@ -651,25 +651,26 @@ impl SettingsWindow {
         if self.server_state(choice).live {
             return None;
         }
-        let observed = server_selection::facts(&choice.key(), cx)
-            .map(|facts| facts.observed_at)
-            .filter(|at| *at > 0)
-            .map(|at| observed_time(at, cx));
-        if self.server_unreachable(choice) {
-            let observed = observed
-                .map(|at| format!(" These are the last known settings, from {at}."))
-                .unwrap_or_default();
-            return Some(format!("SpaceTerm can't reach the server right now.{observed}").into());
-        }
         let name = self.server_name(choice);
-        let ask = match choice {
-            ServerChoice::Local => format!("Start the server on {name} to change these settings."),
-            _ => format!("Connect to {name} to change these settings."),
-        };
-        let observed = observed
-            .map(|at| format!(" Shown values are from {at}."))
-            .unwrap_or_default();
-        Some(format!("{ask}{observed}").into())
+        if self.server_unreachable(choice) {
+            let observed = server_selection::facts(&choice.key(), cx)
+                .map(|facts| facts.observed_at)
+                .filter(|at| *at > 0)
+                .map(|at| observed_time(at, cx));
+            return Some(observed.map_or_else(
+                || "SpaceTerm can't reach the server right now.".into(),
+                |at| format!("SpaceTerm can't reach {name}. Last known settings: {at}.").into(),
+            ));
+        }
+        Some(
+            match choice {
+                ServerChoice::Local => {
+                    format!("Start the server on {name} to change these settings.")
+                }
+                _ => format!("Connect to {name} to change these settings."),
+            }
+            .into(),
+        )
     }
 
     /// Whether the last attempt to reach `choice` failed, rather than finding it stopped, not
@@ -1039,23 +1040,13 @@ impl SettingsWindow {
     /// Asks before installing `build`, saying what installing does on this computer.
     fn confirm_installing(
         &mut self,
-        build: SharedString,
+        _build: SharedString,
         directory: std::path::PathBuf,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let at_boot = self.this_computer != "This Mac";
         let owner = cx.weak_entity();
-        let message = format!(
-            "SpaceTerm installs {build} for your account and starts it. It keeps running after \
-             SpaceTerm quits."
-        );
-        let detail = if at_boot {
-            "If your computer needs an administrator password to start it at boot, SpaceTerm asks \
-             you first."
-        } else {
-            "No administrator password is needed."
-        };
+        let message = "It keeps running after you quit SpaceTerm.";
         let result = spaceterm_ui::Alert::new(
             spaceterm_ui::ModalId::new("settings-server-install"),
             "Install SpaceTerm Server?",
@@ -1078,7 +1069,6 @@ impl SettingsWindow {
             ],
         )
         .intent(spaceterm_ui::AlertIntent::Informational)
-        .detail(detail)
         .present(window, cx, move |outcome, cx| {
             if matches!(
                 outcome,
@@ -1107,15 +1097,12 @@ impl SettingsWindow {
     ) {
         let owner = cx.weak_entity();
         let name = destination.as_str().to_owned();
-        let title = format!("Remove \u{201C}{name}\u{201D}?");
+        let title = format!("Remove \"{name}\"?");
         let result = spaceterm_ui::Alert::new(
             spaceterm_ui::ModalId::new("settings-server-remove"),
             title.clone(),
             title,
-            format!(
-                "SpaceTerm forgets this connection and stops reconnecting to it. The server on \
-                 \u{201C}{name}\u{201D} and its Terminal Sessions keep running."
-            ),
+            "",
             vec![
                 spaceterm_ui::ModalAction::new(
                     true,
@@ -1134,7 +1121,6 @@ impl SettingsWindow {
             ],
         )
         .intent(spaceterm_ui::AlertIntent::Critical)
-        .detail("Your SSH access stays. To use the server again, add it again.")
         .present(window, cx, move |outcome, cx| {
             if !matches!(
                 outcome,
@@ -1424,7 +1410,7 @@ impl SettingsWindow {
             )
         } else if offered(UpdateAction::Update) && needs_update {
             (
-                format!("{version} \u{b7} Update to keep using it"),
+                format!("{version} · Update required"),
                 vec![UpdateAction::Update],
             )
         } else if offered(UpdateAction::Update) {
@@ -1433,10 +1419,7 @@ impl SettingsWindow {
                 vec![UpdateAction::Update],
             )
         } else if presentation.state_selector == "settings-server-update-state-not-installed" {
-            (
-                "Install the server to see its version.".to_owned(),
-                Vec::new(),
-            )
+            ("Install to see the server version.".to_owned(), Vec::new())
         } else {
             (version, vec![UpdateAction::Check])
         };
@@ -1501,7 +1484,7 @@ impl SettingsWindow {
         } else if offered(RemoteAction::Finish) {
             unfinished_subtitle(&version, candidate.as_deref())
         } else if offered(RemoteAction::Update) && needs_update {
-            format!("{version} \u{b7} Update to keep using it")
+            format!("{version} · Update required")
         } else if offered(RemoteAction::Update) && candidate.is_some() {
             available_subtitle(&version, candidate.as_deref())
         } else {
@@ -2043,14 +2026,11 @@ impl SettingsWindow {
     /// The Start automatically row's description, naming when the server starts.
     pub(super) fn auto_start_description(&self) -> SharedString {
         match self.selected_server() {
-            Some(ServerChoice::Ssh(destination)) => SharedString::from(format!(
-                "Start the server when {} starts.",
-                destination.as_str()
-            )),
-            _ if self.this_computer == "This Mac" => {
-                SharedString::new_static("Start the server when you log in.")
+            Some(ServerChoice::Ssh(destination)) => {
+                SharedString::from(format!("Start when {} starts.", destination.as_str()))
             }
-            _ => SharedString::new_static("Start the server when this computer starts, at boot."),
+            _ if self.this_computer == "This Mac" => SharedString::new_static("Start at login."),
+            _ => SharedString::new_static("Start the server when this computer starts."),
         }
     }
 
@@ -2183,7 +2163,7 @@ fn status_step_consequence(step: &StatusStep, machine: &str) -> Option<SharedStr
             | VersionStep::Remote(RemoteAction::Check)
             | VersionStep::Observe,
         ) => Some(SharedString::from(format!(
-            "Checks for a newer SpaceTerm, then reads {machine} again. It connects to nothing."
+            "Checks for a newer SpaceTerm and reads {machine} again."
         ))),
         StatusStep::Version(VersionStep::Local(action)) => {
             action.consequence().map(SharedString::new_static)
@@ -2226,14 +2206,14 @@ fn version_text(value: Option<&SharedString>) -> String {
 fn available_subtitle(version: &str, candidate: Option<&str>) -> String {
     match candidate {
         Some(candidate) => format!("{version} \u{b7} {candidate} is available"),
-        None => format!("{version} \u{b7} An update is available"),
+        None => format!("{version} · Update available"),
     }
 }
 
 fn unfinished_subtitle(version: &str, candidate: Option<&str>) -> String {
     match candidate {
-        Some(candidate) => format!("{version} \u{b7} The update to {candidate} didn't finish"),
-        None => format!("{version} \u{b7} An update didn't finish"),
+        Some(candidate) => format!("{version} · Update to {candidate} unfinished"),
+        None => format!("{version} · Update unfinished"),
     }
 }
 

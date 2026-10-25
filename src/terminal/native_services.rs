@@ -354,7 +354,7 @@ mod tests {
                 &[PathBuf::from("relative")],
                 LOCAL_FILES
             ),
-            Err("file paths must be absolute")
+            Err("Couldn't drop these files.")
         );
     }
 

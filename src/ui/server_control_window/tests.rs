@@ -82,13 +82,7 @@ fn press_space(window: &mut VisualTestContext) {
 
 #[gpui::test]
 fn tab_reaches_cancel_first_and_space_chooses_it(cx: &mut TestAppContext) {
-    let window = open_window(
-        Step::Authorize {
-            declined: false,
-            stopped: false,
-        },
-        cx,
-    );
+    let window = open_window(Step::Authorize, cx);
     let window = &mut VisualTestContext::from_window(window, cx);
 
     // Cancel comes before the step that asks the operating system for a password.
@@ -135,13 +129,7 @@ fn close_all_windows_keeps_a_window_whose_operation_is_running(cx: &mut TestAppC
 
 #[gpui::test]
 fn close_all_windows_cancels_a_window_that_is_only_asking(cx: &mut TestAppContext) {
-    open_window(
-        Step::Authorize {
-            declined: false,
-            stopped: false,
-        },
-        cx,
-    );
+    open_window(Step::Authorize, cx);
     cx.update(|cx| cx.dispatch_action(&crate::app::CloseAllWindows));
     cx.run_until_parked();
 
@@ -167,16 +155,7 @@ fn a_restart_that_needs_authorization_continues_as_start(cx: &mut TestAppContext
 
     let (operation, authorizing) = control
         .read_with(cx, |this, _| {
-            (
-                this.operation,
-                matches!(
-                    this.step,
-                    Some(Step::Authorize {
-                        declined: false,
-                        stopped: true,
-                    })
-                ),
-            )
+            (this.operation, matches!(this.step, Some(Step::Authorize)))
         })
         .unwrap();
     assert!(authorizing, "the window explains startup authorization");

@@ -926,7 +926,7 @@ impl<A: SshProcessAdapter> NativeRoute<A> {
             }
         };
         drop(cache);
-        let status = client.refresh().map_err(map_server_error)?;
+        client.refresh().map_err(map_server_error)?;
         let health = client.connect_pane().map_err(map_server_error)?;
         self.presented
             .store(true, std::sync::atomic::Ordering::Release);
@@ -937,7 +937,6 @@ impl<A: SshProcessAdapter> NativeRoute<A> {
                 route: self.clone(),
                 health: Mutex::new(health),
             }),
-            protocol_major: status.protocol_major,
             facts,
         })
     }

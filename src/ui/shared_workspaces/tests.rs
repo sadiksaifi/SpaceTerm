@@ -711,9 +711,8 @@ fn a_takeover_screen_should_name_the_controlling_client_as_control_moves(cx: &mu
     settle(&harness, cx);
     announced(
         cx,
-        "Not Controlled",
-        "No SpaceTerm controls this Pane. Take Over to type and resize here. The shell keeps \
-         running.",
+        "No Client Controls This Pane",
+        "Take Over to type and resize this Pane.",
     );
 
     // An interrupted connection cannot say who controls the Pane now, so it names nobody.
@@ -771,7 +770,7 @@ fn a_takeover_screen_should_keep_its_controller_and_stop_claiming_a_shell_after_
     settle(&harness, cx);
     assert_eq!(
         A11yTree::read(cx).node("Reconnecting…")["aria"]["description"],
-        "Reconnecting… Take Over is available once SpaceTerm reconnects."
+        "Take Over is available after reconnection."
     );
 }
 
@@ -923,10 +922,9 @@ fn a_stopped_remote_server_says_so_in_its_pane_and_reconnects_when_its_route_ret
         .as_str()
         .unwrap_or_default()
         .to_owned();
-    assert!(
-        description.contains("server on \u{201C}penguin\u{201D} was stopped")
-            && description.contains("stays stopped until it\u{2019}s started on that computer"),
-        "got {description:?}"
+    assert_eq!(
+        description,
+        "Start the server on \"penguin\" to use this Pane again."
     );
     assert!(!description.contains("keeps running"));
     assert!(cx.debug_bounds("shared-pane-retry-1").is_none());
@@ -2121,11 +2119,27 @@ mod close {
         let approval = shared
             .close_approval(ROOT_PANE_TARGET)
             .expect("the published Pane can be reviewed");
-        assert!(
-            approval
-                .message()
-                .starts_with("The Pane closes for every client.")
+        assert_eq!(approval.message(), "");
+        let local_pane = LocalCloseTarget::Pane {
+            workspace_id: first_workspace_id(),
+            tab_id: TabId::new(1),
+            pane_id: crate::domain::PaneId::new(1),
+        };
+        let (mut initial, initial_edits) = self::shared(split_beside_second_tab());
+        assert_eq!(
+            initial.close(approval.clone(), local_pane),
+            SharedSubmission::Submitted
         );
+        assert!(matches!(
+            initial_edits.submitted().as_slice(),
+            [Mutation::Close {
+                confirmation: CloseConfirmation {
+                    removes_tab: false,
+                    ..
+                },
+                ..
+            }]
+        ));
 
         edits.set_inventory(inventory(
             3,
@@ -2144,13 +2158,21 @@ mod close {
         let fresh = shared
             .close_approval(ROOT_PANE_TARGET)
             .expect("the Pane can be reviewed again");
-        assert!(
-            fresh.message().starts_with(
-                "This is the only Pane in its Tab, so the Tab closes for every client."
-            )
-        );
+        assert_eq!(fresh.message(), "");
         assert_eq!(fresh.detail(), None, "the Workspace keeps its second Tab");
         assert!(edits.submitted().is_empty());
+        assert_eq!(shared.close(fresh, local_pane), SharedSubmission::Submitted);
+        assert!(matches!(
+            edits.submitted().as_slice(),
+            [Mutation::Close {
+                confirmation: CloseConfirmation {
+                    removes_tab: true,
+                    removes_workspace: false,
+                    ..
+                },
+                ..
+            }]
+        ));
     }
 
     #[test]
@@ -2252,9 +2274,7 @@ mod close {
             .expect("the published Tab can be reviewed");
         assert_eq!(
             tab.message(),
-            "The Tab and its 2 Panes close for every client. This ends 2 Terminal Sessions for \
-             every client, including in Panes another client controls, and stops their running \
-             commands."
+            "This ends 2 Terminal Sessions for every client."
         );
         assert_eq!(tab.detail(), None, "the Workspace keeps its second Tab");
 
@@ -2267,8 +2287,7 @@ mod close {
             .expect("the published Pane can be reviewed");
         assert_eq!(
             unstarted.message(),
-            "This is the only Pane in its Tab, so the Tab closes for every client. No shell is \
-             running there, so no Terminal Session ends.",
+            "",
             "a retained Pane without a shell ends no Session"
         );
 
@@ -2277,18 +2296,16 @@ mod close {
                 workspace: WORKSPACE,
             })
             .expect("the published Workspace can be reviewed");
-        assert_eq!(kill.title(), "Kill Workspace \u{201C}Build\u{201D}?");
+        assert_eq!(kill.title(), "Kill Workspace \"Build\"?");
         assert_eq!(kill.confirm_label(), "Kill Workspace");
         assert_eq!(
             kill.message(),
-            "Its Tabs and Panes are permanently removed for every client. This ends 2 Terminal \
-             Sessions for every client, including in Panes another client controls, and stops \
-             their running commands.",
+            "This ends 2 Terminal Sessions for every client. This can't be undone.",
             "Kill counts live Sessions, not Panes"
         );
         assert!(
             kill.detail()
-                .is_some_and(|detail| detail.contains("Git Worktree directories stay on disk"))
+                .is_some_and(|detail| detail.contains("Worktree directories stay on disk"))
         );
     }
 
@@ -2305,14 +2322,13 @@ mod close {
 
         assert_eq!(
             only.title(),
-            "Kill Workspace \u{201C}Build\u{201D}?",
+            "Kill Workspace \"Build\"?",
             "the final Pane requires Workspace-level review"
         );
         assert_eq!(only.confirm_label(), "Kill Workspace");
         assert_eq!(
             only.message(),
-            "Its Tabs and Panes are permanently removed for every client. This ends 1 Terminal Session for every client, including \
-             on a client that controls its Pane, and stops its running commands."
+            "This ends 1 Terminal Session for every client. This can't be undone."
         );
         assert!(only.detail().is_some());
     }

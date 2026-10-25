@@ -24,9 +24,8 @@ use crate::ssh::managed_hosts::{
 const FORM_MODAL_ID: &str = "managed-ssh-host-form";
 const SAVE_ACTION_SELECTOR: &str = "managed-ssh-host-save";
 const CANCEL_ACTION_SELECTOR: &str = "managed-ssh-host-cancel";
-const SAVE_FAILURE_MESSAGE: &str =
-    "SpaceTerm couldn\u{2019}t save this SSH host. Check permissions and try again.";
-const COLLISION_MESSAGE: &str = "That SSH host alias is already configured.";
+const SAVE_FAILURE_MESSAGE: &str = "Check permissions and try saving the SSH host again.";
+const COLLISION_MESSAGE: &str = "SSH alias already configured.";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ManagedHostFormBackendError {
@@ -272,24 +271,29 @@ impl SshHostForm {
         cx.spawn_in(window, async move |form, cx| {
             let result = selection.await;
             let _ = form.update_in(cx, |form, window, cx| {
-                if !form.open || form.lifecycle_generation != generation { return; }
+                if !form.open || form.lifecycle_generation != generation {
+                    return;
+                }
                 form.file_selection_pending = false;
                 match result {
                     Ok(Some(path)) => {
                         if let Some(path) = path.to_str() {
-                            form.identity_file.update(cx, |input, cx| { input.set_value(path, cx); });
+                            form.identity_file.update(cx, |input, cx| {
+                                input.set_value(path, cx);
+                            });
                             form.revalidate(cx);
                         } else {
-                            form.backend_error = Some("Choose a file with a Unicode file name.");
+                            form.backend_error = Some("Choose a Unicode file name.");
                         }
                     }
                     Ok(None) => {}
-                    Err(_) => form.backend_error = Some("The file chooser could not open. Enter the identity file path instead."),
+                    Err(_) => form.backend_error = Some("Enter the identity file path."),
                 }
                 form.identity_file.read(cx).focus_handle().focus(window, cx);
                 cx.notify();
             });
-        }).detach();
+        })
+        .detach();
     }
 
     pub(super) fn present(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
@@ -331,7 +335,7 @@ impl SshHostForm {
             ],
             DialogInitialFocus::Body(initial_focus),
         )
-        .description("Save an SSH destination for Remote Workspaces.")
+        .description("Save an SSH Destination.")
         .size(DialogSize::Wide)
         .body(cx.entity());
         let completion = dialog.present(
@@ -837,10 +841,7 @@ fn validate_form_values(values: &SshHostFormValues) -> SshHostFormValidation {
             ),
             SshHostFormField::User,
         ),
-        port: port
-            .as_ref()
-            .err()
-            .map(|_| "Enter a decimal port from 1 to 65535."),
+        port: port.as_ref().err().map(|_| "Enter a port from 1 to 65535."),
         identity_file: validation_error(
             ManagedSshHost::new(
                 "valid-alias".to_owned(),
@@ -905,22 +906,14 @@ fn managed_validation_message(
     kind: ManagedSshHostValueError,
 ) -> &'static str {
     match (field, kind) {
-        (SshHostFormField::Alias, ManagedSshHostValueError::Required) => "Alias is required.",
-        (SshHostFormField::HostName, ManagedSshHostValueError::Required) => {
-            "Host name is required."
-        }
-        (_, ManagedSshHostValueError::TooLong { .. }) => "This value is too long.",
-        (SshHostFormField::IdentityFile, _) => {
-            "Enter an absolute path or a path beginning with ~/ without wildcards."
-        }
-        (SshHostFormField::Alias, _) => {
-            "Use one literal SSH alias without spaces, wildcards, or options."
-        }
-        (SshHostFormField::HostName, _) => {
-            "Enter one host name or address without spaces or options."
-        }
-        (SshHostFormField::User, _) => "Enter one SSH user without spaces or options.",
-        (SshHostFormField::Port, _) => "Enter a decimal port from 1 to 65535.",
+        (SshHostFormField::Alias, ManagedSshHostValueError::Required) => "Alias required.",
+        (SshHostFormField::HostName, ManagedSshHostValueError::Required) => "Host name required.",
+        (_, ManagedSshHostValueError::TooLong { .. }) => "Value too long.",
+        (SshHostFormField::IdentityFile, _) => "Use an absolute path or ~/ without wildcards.",
+        (SshHostFormField::Alias, _) => "Use an SSH alias without spaces, wildcards, or options.",
+        (SshHostFormField::HostName, _) => "Host name or address without spaces or options.",
+        (SshHostFormField::User, _) => "SSH user without spaces or options.",
+        (SshHostFormField::Port, _) => "Enter a port from 1 to 65535.",
     }
 }
 
@@ -1197,12 +1190,12 @@ mod tests {
         );
         assert_eq!(tree.focused(), tree.find("Alias"));
         assert_eq!(tree.node("Choose Identity File")["aria"]["role"], "Button");
-        assert!(tree.find_text("Alias is required.").is_none());
+        assert!(tree.find_text("Alias required.").is_none());
 
         perform(cx, tree.node("Save"), Action::Click);
         let tree = A11yTree::read(cx);
         assert!(backend.records().is_empty());
-        for message in ["Alias is required.", "Host name is required."] {
+        for message in ["Alias required.", "Host name required."] {
             assert!(tree.find(message).is_none());
             assert!(tree.exposed(tree.text(message)));
         }

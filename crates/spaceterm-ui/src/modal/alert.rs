@@ -148,7 +148,9 @@ pub struct Alert<A> {
 }
 
 impl<A> Alert<A> {
-    /// Creates an Alert with mandatory logical and visible content plus one to three decisions.
+    /// Creates an Alert with mandatory logical and visible titles plus one to three decisions.
+    ///
+    /// A blank message presents a title-only Alert.
     pub fn new(
         id: ModalId,
         accessibility_title: impl Into<SharedString>,

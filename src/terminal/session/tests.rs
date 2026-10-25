@@ -1047,7 +1047,7 @@ fn session_failure_display_should_explain_each_classification() {
         statuses,
         [
             "Terminal Session startup failed during PTY creation: open unavailable",
-            "Terminal Emulator failed during session-runtime. Close this Pane and restart the terminal command.",
+            "This Terminal Session failed. Close this Pane.",
             "Shell output failed: read unavailable; shell exited (exit code 7)",
             "Shell output failed: read unavailable; waiting for the shell also failed: wait unavailable",
             "Shell output ended, but waiting for the shell failed: wait unavailable",

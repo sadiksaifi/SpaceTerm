@@ -92,10 +92,9 @@ fn an_unread_server_offers_only_a_read_that_starts_nothing() {
     let service = service("penguin", &unread);
     assert_eq!(service.actions, vec![RemoteAction::Check]);
     assert!(service.explanation.contains("penguin"));
-    assert!(
-        service.explanation.contains("starts nothing"),
-        "the read must promise it starts nothing, got {:?}",
-        service.explanation
+    assert_eq!(
+        service.explanation.as_ref(),
+        "Choose Check Now to check the server on penguin."
     );
     assert!(!service.working);
     let update = update("penguin", &unread);
@@ -123,7 +122,7 @@ fn a_stopped_server_offers_start_and_no_other_step_that_starts_it() {
     let update = update_with("penguin", &stopped, &available("1.5.0", 'b'));
     assert_eq!(update.actions, vec![RemoteAction::Update]);
     assert!(
-        update.explanation.contains("keeps the server stopped"),
+        update.explanation.contains("The server stays stopped"),
         "updating a stopped server must say it stays stopped, got {:?}",
         update.explanation
     );
@@ -172,7 +171,6 @@ fn no_update_is_offered_without_a_verified_candidate() {
     use crate::ssh::server_connection::{RemoteConnectionStatus, SshServerFacts};
 
     let connected = RemoteConnectionStatus::Connected {
-        protocol_major: 1,
         facts: SshServerFacts {
             platform: ("Example OS".to_owned(), "x86_64".to_owned()),
             version: Some("1.4.0".to_owned()),
@@ -282,7 +280,7 @@ fn a_machine_without_a_server_offers_no_maintenance_step() {
     assert_eq!(service.state, Some("Not Installed"));
     let update = update("penguin", &bare);
     assert!(update.actions.is_empty());
-    assert!(update.explanation.contains("nothing to update"));
+    assert!(update.explanation.contains("before updating it"));
 }
 
 /// One operation is underway at a time, and one row reports it. The other row says an operation
@@ -298,7 +296,11 @@ fn only_the_row_that_owns_an_operation_reports_its_progress() {
     let service = service("penguin", &stopping);
     assert!(service.working);
     assert_eq!(service.state, Some("Stopping"));
-    assert!(service.explanation.contains("Terminal Sessions end"));
+    assert!(
+        service
+            .explanation
+            .contains("Stopping the server on penguin")
+    );
     let update = update("penguin", &stopping);
     assert!(!update.working && update.state.is_none() && update.actions.is_empty());
 
@@ -344,15 +346,9 @@ fn an_unconfirmed_operation_only_asks_the_machine_again() {
     assert!(
         service
             .explanation
-            .contains("didn\u{2019}t hear whether penguin stopped its server")
+            .contains("couldn't confirm whether penguin stopped its server")
     );
-    assert!(
-        service
-            .explanation
-            .contains("isn\u{2019}t asked to do it again"),
-        "the row must promise the operation is not repeated, got {:?}",
-        service.explanation
-    );
+    assert!(service.explanation.contains("Choose Check Again to check."));
 
     let lost_update = RemoteOperationState::Unconfirmed {
         kind: SubmittedKind::Update {
@@ -378,17 +374,16 @@ fn a_validated_result_is_acknowledged_and_nothing_else() {
     assert_eq!(service.actions, vec![RemoteAction::Acknowledge]);
     assert_eq!(service.state, Some("Stopped"));
     assert!(service.explanation.contains("penguin"));
-    assert!(
-        service
-            .explanation
-            .contains("Terminal Sessions ended for every client")
+    assert_eq!(
+        service.explanation.as_ref(),
+        "The server on penguin stopped."
     );
     assert_eq!(RemoteAction::Acknowledge.label(), "OK");
 }
 
-/// A refusal reaches the person as a refusal, with nothing changed, and never as a result.
+/// A refusal keeps the failed state and names the action that can resolve its cause.
 #[test]
-fn a_refusal_says_nothing_changed() {
+fn a_refusal_names_the_action_needed() {
     let refused = RemoteOperationState::Resolved {
         handle: RemoteOperationHandle(4),
         kind: SubmittedKind::Service(Action::Restart),
@@ -398,14 +393,17 @@ fn a_refusal_says_nothing_changed() {
     let service = service("penguin", &refused);
     assert_eq!(service.state, Some("Refused"));
     assert_eq!(service.tone, CaptionTone::Error);
-    assert!(service.explanation.contains("Nothing changed on penguin"));
+    assert_eq!(
+        service.explanation.as_ref(),
+        "Choose Start Server to start the server on penguin."
+    );
     assert!(service.explanation.contains("Start Server"));
     assert_eq!(service.actions, vec![RemoteAction::Acknowledge]);
 }
 
 /// A refusal or an incompatibility that ends an attempt to resolve an operation already
 /// dispatched says nothing about what that operation did, and keeps the one step that settles it.
-/// Only a state with nothing submitted promises that nothing changed.
+/// A state with nothing submitted describes the refusal itself.
 #[test]
 fn a_refused_resolution_keeps_the_original_it_was_resolving() {
     for failure in [
@@ -429,16 +427,14 @@ fn a_refused_resolution_keeps_the_original_it_was_resolving() {
         assert!(
             submitted
                 .explanation
-                .contains("can\u{2019}t tell whether penguin stopped its server"),
+                .contains("check whether penguin stopped its server"),
             "{failure:?} must say the result is still unknown, got {:?}",
             submitted.explanation
         );
         assert!(
             submitted
                 .explanation
-                .contains("isn\u{2019}t asked to do it again"),
-            "{failure:?} must promise the operation is not repeated, got {:?}",
-            submitted.explanation
+                .starts_with("Choose Check Again to check whether")
         );
         assert_eq!(
             update("penguin", &state(Some(SubmittedKind::Return))).actions,
@@ -468,7 +464,10 @@ fn a_refused_resolution_keeps_the_original_it_was_resolving() {
             kind: None,
         },
     );
-    assert!(bare.explanation.contains("Nothing changed on penguin"));
+    assert_eq!(
+        bare.explanation.as_ref(),
+        "Update the server on penguin to use this operation."
+    );
 }
 
 /// A failed update offers the return only when the service proved it is safe, and never rolls
@@ -491,7 +490,8 @@ fn a_failed_update_offers_a_return_only_when_it_is_proved_safe() {
     let safe = update("penguin", &failed(true));
     assert_eq!(safe.state, Some("Update Failed"));
     assert_eq!(safe.actions, vec![RemoteAction::Return]);
-    assert!(safe.explanation.contains("don\u{2019}t return"));
+    assert!(safe.explanation.contains("Terminal Sessions ended"));
+    assert!(safe.explanation.contains("You can return to 1.4.0"));
     let unproved = update("penguin", &failed(false));
     assert!(
         unproved.actions.is_empty(),
@@ -529,7 +529,11 @@ fn an_unfinished_update_is_finished_without_asking_again() {
     let update = update("penguin", &unfinished);
     assert_eq!(update.state, Some("Update Unfinished"));
     assert_eq!(update.actions, vec![RemoteAction::Finish]);
-    assert!(update.explanation.contains("doesn\u{2019}t ask again"));
+    assert!(
+        update
+            .explanation
+            .contains("Choose Finish Update to continue.")
+    );
     assert!(update.explanation.contains("1.4.0"));
     assert!(update.explanation.contains("1.5.0"));
 }
@@ -820,7 +824,9 @@ fn every_state_reads_distinctly() {
             "{state} reads the same as an earlier state"
         );
         assert!(
-            presentation.explanation.contains("penguin"),
+            presentation.explanation.contains("penguin")
+                || (matches!(&states[index], RemoteOperationState::Read(facts) if facts.status.stopped)
+                    && presentation.explanation.as_ref() == "Choose Start Server to start it."),
             "{state} must name the machine it reports, got {:?}",
             presentation.explanation
         );
@@ -854,7 +860,7 @@ fn each_confirmation_names_the_machine_and_the_sessions_that_end() {
             confirmation.message.contains("Terminal Sessions")
                 || confirmation
                     .detail
-                    .contains("Terminal Sessions end for every client"),
+                    .contains("All Terminal Sessions on it end for every client."),
             "{action:?} must say every client's Terminal Sessions end, got {:?} {:?}",
             confirmation.message,
             confirmation.detail
@@ -868,13 +874,10 @@ fn each_confirmation_names_the_machine_and_the_sessions_that_end() {
     .expect("an update describes itself");
     assert_eq!(update.title, "Update Server");
     assert!(update.message.contains("penguin") && update.message.contains("1.5.0"));
-    assert!(update.detail.contains("1.4.0") && update.detail.contains("1.5.0"));
-    assert!(
-        update.detail.contains(
-            "All Terminal Sessions on this server end, including those other clients use"
-        )
+    assert_eq!(
+        update.detail.as_ref(),
+        "All Terminal Sessions on it end for every client."
     );
-    assert!(update.detail.ends_with("Other servers aren’t affected."));
     let returning = MaintenanceConfirmation::of(
         "penguin",
         RemoteMaintenanceRequest::Return,
@@ -909,13 +912,17 @@ fn discarding_an_operation_names_the_machine_and_what_it_gives_up() {
         confirmation.message
     );
     assert!(
-        confirmation.detail.contains("what the stop did on penguin"),
+        confirmation
+            .detail
+            .contains("SpaceTerm will stop checking this stop."),
         "the detail must say what the person gives up, got {:?}",
         confirmation.detail
     );
     assert!(
-        confirmation.detail.contains("Nothing is sent to penguin"),
-        "the detail must say that nothing is sent, got {:?}",
+        confirmation
+            .detail
+            .contains("You will lose the only remaining way to confirm its result on penguin."),
+        "the detail must name the result that can no longer be confirmed, got {:?}",
         confirmation.detail
     );
     let update = MaintenanceConfirmation::for_discard(
@@ -925,7 +932,9 @@ fn discarding_an_operation_names_the_machine_and_what_it_gives_up() {
         },
     );
     assert!(
-        update.detail.contains("what the update did on penguin"),
+        update
+            .detail
+            .contains("SpaceTerm will stop checking this update."),
         "the detail must name the operation it discards, got {:?}",
         update.detail
     );
@@ -937,7 +946,7 @@ fn discarding_an_operation_names_the_machine_and_what_it_gives_up() {
     }
 }
 
-/// Updating a stopped server says so instead of promising Sessions end, and leaves it stopped.
+/// Updating a stopped server asks for the exact candidate and leaves startup explicit.
 #[test]
 fn updating_a_stopped_server_leaves_it_stopped() {
     let confirmation = MaintenanceConfirmation::of(
@@ -947,11 +956,22 @@ fn updating_a_stopped_server_leaves_it_stopped() {
     )
     .expect("an update of a stopped server describes itself");
 
-    assert!(confirmation.message.contains("stopped"));
+    assert!(confirmation.message.contains("penguin") && confirmation.message.contains("1.5.0"));
+    assert!(confirmation.detail.is_empty());
+    let stopped = RemoteOperationState::Read(Box::new(facts(status(true, false, true))));
+    let offered = update_with("penguin", &stopped, &available("1.5.0", 'b'));
     assert!(
-        confirmation.detail.contains("stays stopped"),
-        "the detail must say the server stays stopped, got {:?}",
-        confirmation.detail
+        offered
+            .explanation
+            .contains("The server stays stopped until you choose Start Server.")
+    );
+    assert_eq!(
+        service("penguin", &stopped).actions,
+        vec![
+            RemoteAction::Start,
+            RemoteAction::Uninstall,
+            RemoteAction::Check
+        ]
     );
 }
 
@@ -969,10 +989,7 @@ fn an_observation_decides_what_is_offered_before_any_read() {
         version: Some("1.4.0".to_owned()),
         starts_automatically: true,
     };
-    let connected = RemoteConnectionStatus::Connected {
-        protocol_major: 1,
-        facts: facts(),
-    };
+    let connected = RemoteConnectionStatus::Connected { facts: facts() };
     let checked = |availability| RemoteConnectionStatus::Checked {
         availability,
         facts: facts(),
@@ -993,9 +1010,7 @@ fn an_observation_decides_what_is_offered_before_any_read() {
         ]
     );
     assert!(
-        service
-            .explanation
-            .contains("when SpaceTerm last reached it"),
+        service.explanation.contains("when last connected"),
         "an earlier observation says when it was made, got {:?}",
         service.explanation
     );
@@ -1078,21 +1093,9 @@ fn a_removed_connection_whose_original_is_unknown_reaches_a_final_word() {
         presentation.actions
     );
     let said = presentation.explanation.to_string();
-    assert!(
-        said.contains("penguin has no record of the operation SpaceTerm sent."),
-        "the final word names the machine with no record, got {said:?}"
-    );
-    assert!(
-        said.contains("may never have arrived, or that server may have dropped it"),
-        "the final word names both ways this happens without choosing one, got {said:?}"
-    );
-    assert!(
-        said.contains("can\u{2019}t tell whether it took effect"),
-        "the final word claims nothing about what the operation did, got {said:?}"
-    );
-    assert!(
-        said.contains("has stopped following it"),
-        "the final word says this client is no longer following it, got {said:?}"
+    assert_eq!(
+        said,
+        "SpaceTerm couldn't confirm the result on penguin. Choose OK to dismiss this entry."
     );
     reads_as_one_sentence(&presentation.explanation);
     assert!(
@@ -1120,26 +1123,17 @@ fn an_unsaved_operation_record_says_what_it_leaves_the_person_with() {
         "storage SpaceTerm couldn\u{2019}t reach reads differently from a damaged record"
     );
     assert!(
-        unavailable.contains("couldn\u{2019}t save what it knows about the operations"),
+        unavailable.contains("couldn't save these results"),
         "got {unavailable:?}"
     );
     assert!(
-        malformed.contains("is damaged, so it left the record unchanged"),
+        malformed.contains("saved results are damaged"),
         "got {malformed:?}"
     );
     for notice in [unavailable, malformed] {
         assert!(
-            notice.contains("Choosing OK or Discard leaves the operation listed."),
-            "the notice says the step the person took doesn\u{2019}t clear it, got {notice:?}"
-        );
-        assert!(
-            notice.contains("gone after SpaceTerm quits"),
-            "the notice says a result on screen now doesn\u{2019}t survive quitting, got \
-             {notice:?}"
-        );
-        assert!(
-            notice.contains("What your servers already did is unchanged."),
-            "the notice says the other computers are unaffected, got {notice:?}"
+            notice.contains("They're lost when SpaceTerm quits."),
+            "{notice:?}"
         );
         for named in [".json", "/", "\\", "errno", "Error", "Os {"] {
             assert!(
@@ -1171,27 +1165,25 @@ fn a_refused_submission_reports_the_original_that_refused_it() {
         "a refused submission must keep the step that settles the original it refused for"
     );
     assert!(
-        held.explanation
-            .contains("didn\u{2019}t ask for the step you just chose"),
+        held.explanation.contains("before starting another action"),
         "the row must say the refused step reached nothing, got {:?}",
         held.explanation
     );
     assert!(
         held.explanation
-            .contains("still following the stop it already sent to penguin"),
+            .contains("Finish checking the earlier stop on penguin"),
         "the row must say which earlier original it is still following, got {:?}",
         held.explanation
     );
     assert!(
         held.explanation
-            .contains("can\u{2019}t tell whether penguin stopped its server"),
+            .contains("couldn't confirm whether penguin stopped its server"),
         "the row must say the earlier original is unsettled, got {:?}",
         held.explanation
     );
     assert!(
-        held.explanation
-            .contains("isn\u{2019}t asked to do it again"),
-        "the row must promise the earlier original is not repeated, got {:?}",
+        held.explanation.contains("Choose Check Again to check."),
+        "the row must name the action that checks the earlier result, got {:?}",
         held.explanation
     );
     assert!(
@@ -1217,7 +1209,10 @@ fn a_refused_submission_reports_the_original_that_refused_it() {
     // Nothing was submitted, so the refusal is the whole story and a read is the only step.
     let bare = service("penguin", &state(None));
     assert_eq!(bare.actions, vec![RemoteAction::Check]);
-    assert!(bare.explanation.contains("Nothing changed on penguin"));
+    assert_eq!(
+        bare.explanation.as_ref(),
+        "SpaceTerm couldn't save this request, so it did not start the action on penguin."
+    );
     assert_ne!(
         bare.state_selector, held.state_selector,
         "a refusal holding an original reads differently from one holding none"
@@ -1320,14 +1315,7 @@ fn a_row_names_every_original_it_has_still_to_report() {
     assert!(
         service
             .explanation
-            .contains("You asked for one more operation on penguin: the restart."),
-        "got {:?}",
-        service.explanation
-    );
-    assert!(
-        service
-            .explanation
-            .contains("reports that one here once this one is settled"),
+            .contains("Another requested action on penguin is waiting: the restart."),
         "got {:?}",
         service.explanation
     );
@@ -1355,14 +1343,7 @@ fn a_row_names_every_original_it_has_still_to_report() {
     assert!(
         service
             .explanation
-            .contains("You asked for 2 more operations on penguin: the restart and the removal."),
-        "got {:?}",
-        service.explanation
-    );
-    assert!(
-        service
-            .explanation
-            .contains("reports them here one at a time, as each one is settled"),
+            .contains("2 requested actions on penguin are waiting: the restart and the removal."),
         "got {:?}",
         service.explanation
     );
@@ -1463,7 +1444,7 @@ fn a_removed_connection_names_the_second_original_it_holds() {
     assert!(
         presentation
             .explanation
-            .contains("You asked for one more operation on penguin: the restart."),
+            .contains("Another requested action on penguin is waiting: the restart."),
         "the entry must name the original it has still to report, got {:?}",
         presentation.explanation
     );

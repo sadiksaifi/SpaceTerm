@@ -45,16 +45,6 @@ pub(crate) enum StatusAreaName {
     StatusArea,
 }
 
-impl StatusAreaName {
-    /// The name inside a sentence, such as "menu bar".
-    pub(crate) const fn phrase(self) -> &'static str {
-        match self {
-            Self::MenuBar => "menu bar",
-            Self::StatusArea => "status area",
-        }
-    }
-}
-
 /// The warning for an actual client exit. Installed builds make Quit the default answer;
 /// destructive Development exits focus Cancel.
 #[derive(Clone, Debug, Eq, PartialEq)]

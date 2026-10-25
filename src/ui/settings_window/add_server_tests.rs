@@ -75,7 +75,6 @@ impl SshConnectBackend for Computers {
                 server: [2; 32],
             },
             lease: Arc::new(Lease),
-            protocol_major: 1,
             facts: facts(),
         })
     }
@@ -439,7 +438,7 @@ fn a_link_that_isnt_an_invitation_says_so_and_cant_join(cx: &mut TestAppContext)
         "spaceterm://pair/not-an-invitation".to_owned(),
     ))));
 
-    assert!(sheet.says("This isn\u{2019}t a valid SpaceTerm invitation link."));
+    assert!(sheet.says("Invalid SpaceTerm invitation link."));
     assert!(sheet.disabled("Join"));
 }
 
@@ -519,12 +518,10 @@ fn an_interrupted_join_waits_for_try_again_with_the_same_request(cx: &mut TestAp
 
     sheet.adopt(join, "studio");
     sheet.settle(|sheet| {
-        sheet.says(
-            "SpaceTerm didn\u{2019}t get an answer from the server at the invitation\u{2019}s address.",
-        )
+        sheet.says("SpaceTerm couldn't reach the server. Check your network, then try again.")
     });
 
-    assert_eq!(sheet.title(), "Join studio");
+    assert_eq!(sheet.title(), "Pairing Paused");
     assert!(
         !sheet.says("denied") && !sheet.says("permission"),
         "a network failure names no cause SpaceTerm didn't observe"
@@ -551,7 +548,9 @@ fn withdrawing_a_join_whose_save_is_unknown_says_the_withdrawal_isnt_saved(
     sheet.begin(AddServerRequest::Invitation(None));
 
     sheet.adopt(join, "studio");
-    sheet.settle(|sheet| sheet.says("couldn\u{2019}t confirm it saved the connection"));
+    sheet.settle(|sheet| {
+        sheet.says("studio approved this device, but SpaceTerm couldn't save the connection.")
+    });
 
     assert!(
         direct.routes().is_empty(),
@@ -563,7 +562,7 @@ fn withdrawing_a_join_whose_save_is_unknown_says_the_withdrawal_isnt_saved(
     );
 
     sheet.choose(SheetAction::Withdraw.selector());
-    sheet.settle(|sheet| sheet.says("couldn\u{2019}t save this request on this computer yet"));
+    sheet.settle(|sheet| sheet.says("Keep SpaceTerm open until the cancellation is saved."));
 
     assert!(
         sheet.open(),
@@ -599,21 +598,21 @@ fn an_unsaved_stop_says_so_until_the_registry_saves_again(cx: &mut TestAppContex
         });
     });
     sheet.cx.run_until_parked();
-    assert!(sheet.says("couldn\u{2019}t save this request on this computer yet"));
+    assert!(sheet.says("Keep SpaceTerm open until the cancellation is saved."));
 
     // Changes the registry announces but can't save leave the stop unsaved.
     direct.connect(&route);
     direct.disconnect(&route);
     sheet.cx.run_until_parked();
     assert!(direct.persistence_error());
-    assert!(sheet.says("couldn\u{2019}t save this request on this computer yet"));
+    assert!(sheet.says("Keep SpaceTerm open until the cancellation is saved."));
 
     // A change the registry saves and announces, as a quiet retry's save would.
     storage.set_failing(false);
     direct.disconnect(&route);
     assert!(!direct.persistence_error(), "the registry saved its change");
 
-    sheet.settle(|sheet| sheet.says("SpaceTerm saved that you stopped this pairing."));
+    sheet.settle(|sheet| sheet.says("SpaceTerm is cancelling the pairing with studio."));
 }
 
 /// Typing a host's first character makes Connect available on the same sheet: the presentation,
@@ -674,8 +673,8 @@ fn joining_shows_the_comparison_code_until_escape_stops_it(cx: &mut TestAppConte
     });
 
     assert_eq!(sheet.title(), "Join studio");
-    assert!(sheet.says("Check that studio shows the same code"));
-    assert!(sheet.says("Waiting for studio to allow"));
+    assert!(sheet.says("Check that studio shows this code"));
+    assert!(sheet.says("Waiting for approval…"));
 
     sheet.cx.simulate_keystrokes("escape");
     sheet.settle(|sheet| !sheet.open());
@@ -700,7 +699,7 @@ fn a_link_delivered_during_a_join_waits_for_it_to_end(cx: &mut TestAppContext) {
         "Join studio",
         "the join underway keeps its place"
     );
-    assert!(sheet.says("Another invitation link arrived. Add Server shows it next."));
+    assert!(sheet.says("Another invitation is next."));
 
     sheet.cx.simulate_keystrokes("escape");
     sheet.settle(|sheet| sheet.open() && sheet.title() == "Add Server" && sheet.says("annex"));

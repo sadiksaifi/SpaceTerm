@@ -292,7 +292,7 @@ impl SetupGuide {
             // A click only nudges the arrow, so the row publishes a group rather than a control.
             .role(accesskit::Role::Group)
             .aria_label(name)
-            .aria_description("Drag to the list above")
+            .aria_description("Drag to the list")
             .h(px(ROW_HEIGHT))
             .flex_none()
             .flex()
@@ -423,7 +423,7 @@ impl SetupGuide {
                 vec![
                     (verb, false),
                     (application, true),
-                    (" to the list above to allow ", false),
+                    (" to allow ", false),
                     (name, true),
                     (".", false),
                 ],
@@ -479,23 +479,27 @@ impl SetupGuide {
                 .child(text)
         };
         let guiding = |row: AnyElement, alternative: &str| {
-            let entry = if presentation.cleared {
-                format!("{application} removed any earlier entry.")
+            let text = if presentation.cleared {
+                if alternative.is_empty() {
+                    String::new()
+                } else {
+                    "Use the + button below the list.".to_owned()
+                }
             } else {
-                format!("If {application} is listed, turn it on.")
+                format!("If {application} is listed, turn it on.{alternative}")
             };
             div()
                 .flex()
                 .flex_col()
                 .gap(px(CAPTION_GAP))
                 .child(row)
-                .child(caption(format!("{entry}{alternative}")))
+                .when(!text.is_empty(), |body| body.child(caption(text)))
                 .into_any_element()
         };
         let body = match (&self.bundle, presentation.granted) {
             (Some(bundle), false) => guiding(
                 self.render_application(bundle, appearance, cx),
-                " Or use the + button below the list.",
+                " Or use + below the list.",
             ),
             (None, false) => guiding(
                 div()
@@ -504,7 +508,7 @@ impl SetupGuide {
                     .items_center()
                     .pl(indent)
                     .child(detail(format!(
-                        "Use the + button below the list, then choose {application}."
+                        "Use + below the list, then choose {application}."
                     )))
                     .into_any_element(),
                 "",
@@ -512,10 +516,10 @@ impl SetupGuide {
             (_, true) => {
                 let advice = match presentation.permission {
                     SystemPermission::ScreenRecording => {
-                        format!("If System Settings offers to quit {application}, choose Later.")
+                        format!("If offered to quit {application}, choose Later.")
                     }
                     SystemPermission::Accessibility => {
-                        "Restart any tool that was already running.".to_owned()
+                        "Restart any tool already running.".to_owned()
                     }
                 };
                 div()

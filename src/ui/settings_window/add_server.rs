@@ -45,10 +45,7 @@ use crate::ui::chrome_geometry::RadiusRole;
 use crate::ui::chrome_typography::{ChromeTextStyleExt as _, TextRole};
 use crate::ui::direct_access::{code_speech, code_text};
 use crate::ui::direct_servers::DirectChanges;
-use crate::ui::ssh_servers::{
-    SshPromptActivity, SshPromptEvent, SshServerAction, installation_consequence, platform_name,
-    present,
-};
+use crate::ui::ssh_servers::{SshPromptActivity, SshPromptEvent, SshServerAction, present};
 
 pub(super) const MODAL_ID: &str = "add-server";
 pub(super) const METHOD_SELECTOR: &str = "add-server-method";
@@ -65,11 +62,10 @@ pub(super) const CODE_SELECTOR: &str = "add-server-code";
 pub(super) const DEFERRED_SELECTOR: &str = "add-server-deferred";
 
 /// What the host field's description says. It is also the field's accessibility hint.
-const HOST_DESCRIPTION: &str = "SpaceTerm signs in the way ssh does, then uses that \
-     account\u{2019}s server or offers to install one.";
-const HOST_INVALID: &str = "Enter one SSH host or alias, such as penguin or me@build.local, \
-     without spaces or options.";
-const LINK_DESCRIPTION: &str = "Paste the link from Invite Device on the other computer.";
+const HOST_DESCRIPTION: &str =
+    "Connect using your SSH account. SpaceTerm offers to install a SpaceTerm Server if needed.";
+const HOST_INVALID: &str = "Enter an SSH host or alias without spaces or command options.";
+const LINK_DESCRIPTION: &str = "Paste the invitation link from the other computer.";
 /// How long the host and link fields are, so a long value scrolls inside the field.
 const FIELD_WIDTH: f32 = 260.0;
 
@@ -103,7 +99,7 @@ impl SheetAction {
             Self::TryAgain => "Try Again",
             Self::Back => "Back",
             Self::StartAgain => "Start Again",
-            Self::Withdraw => "Withdraw Pairing",
+            Self::Withdraw => "Cancel Pairing",
             Self::Cancel => "Cancel",
             Self::Close => "Close",
         }
@@ -188,8 +184,8 @@ fn address(endpoint: &str) -> &str {
 /// Why a pasted link can't be used. It says only what the link itself shows.
 fn link_problem(error: DirectError) -> &'static str {
     match error {
-        DirectError::Expired => "This invitation expired. Ask for a new one.",
-        _ => "This isn\u{2019}t a valid SpaceTerm invitation link.",
+        DirectError::Expired => "Invitation expired. Ask for a new one.",
+        _ => "Invalid SpaceTerm invitation link.",
     }
 }
 
@@ -567,6 +563,26 @@ impl AddServerSheet {
     fn shape(&self, cx: &App) -> Option<Shape> {
         let add = || SharedString::new_static("Add Server");
         let join_title = |server: &str| SharedString::from(format!("Join {server}"));
+        let failure_title = |server: &str, error: DirectError| {
+            if matches!(
+                error,
+                DirectError::WrongServer
+                    | DirectError::IncompatibleProtocol
+                    | DirectError::AuthenticationRefused
+                    | DirectError::PinMismatch
+                    | DirectError::ChangedClaim
+                    | DirectError::Substituted
+                    | DirectError::CredentialUnavailable
+                    | DirectError::InteractionRequired
+                    | DirectError::StorageUnavailable
+                    | DirectError::Capacity
+                    | DirectError::Transport
+            ) {
+                format!("Couldn't Pair With {server}").into()
+            } else {
+                join_title(server)
+            }
+        };
         let shape = match &self.stage {
             Stage::Form => {
                 let (primary, focus) = match self.method {
@@ -590,11 +606,7 @@ impl AddServerSheet {
                 }
             }
             Stage::Install { destination, .. } => Shape {
-                title: format!(
-                    "Install SpaceTerm on \u{201C}{}\u{201D}?",
-                    destination.as_str()
-                )
-                .into(),
+                title: format!("Install SpaceTerm Server on \"{}\"?", destination.as_str()).into(),
                 actions: vec![SheetAction::Install, SheetAction::Cancel],
                 focus: FocusTarget::Action(SheetAction::Install),
             },
@@ -639,18 +651,27 @@ impl AddServerSheet {
                     _ => (vec![SheetAction::Cancel], SheetAction::Cancel),
                 };
                 Shape {
-                    title: join_title(server),
+                    title: match status {
+                        Some(JoinStatus::Retryable { .. }) => "Pairing Paused".into(),
+                        Some(JoinStatus::Failed(error)) => failure_title(server, error),
+                        _ => join_title(server),
+                    },
                     actions,
                     focus: FocusTarget::Action(focus),
                 }
             }
-            Stage::JoinRefused { server, .. } => Shape {
-                title: join_title(server),
+            Stage::JoinRefused { server, error } => Shape {
+                title: failure_title(server, *error),
                 actions: vec![SheetAction::StartAgain, SheetAction::Close],
                 focus: FocusTarget::Action(SheetAction::StartAgain),
             },
-            Stage::StopUnsaved { server } | Stage::Stopped { server } => Shape {
-                title: join_title(server),
+            Stage::StopUnsaved { .. } => Shape {
+                title: "Cancellation Pending".into(),
+                actions: vec![SheetAction::Close],
+                focus: FocusTarget::Action(SheetAction::Close),
+            },
+            Stage::Stopped { server } => Shape {
+                title: format!("Cancelling Pairing With {server}").into(),
                 actions: vec![SheetAction::Close],
                 focus: FocusTarget::Action(SheetAction::Close),
             },
@@ -1144,16 +1165,13 @@ impl AddServerSheet {
                     | RemoteConnectionStatus::Reconnecting { .. }
                     | RemoteConnectionStatus::Cancelling => {}
                     RemoteConnectionStatus::InstallationOffered {
-                        offer_id,
-                        version,
-                        platform,
+                        offer_id, platform, ..
                     } => {
-                        let detail = format!(
-                            "This account has no SpaceTerm server. SpaceTerm can install \
-                             verified version {version} for {}. {}",
-                            platform_name(&platform.0, &platform.1),
-                            installation_consequence(&platform.0),
-                        );
+                        let detail = if platform.0 == "linux" {
+                            "SpaceTerm may ask for your sudo password on that computer."
+                        } else {
+                            ""
+                        };
                         self.stage = Stage::Install {
                             destination,
                             offer_id,
@@ -1283,10 +1301,8 @@ impl Render for AddServerSheet {
         };
         let deferred = self.deferred.as_ref().map(|request| {
             let note: SharedString = match request {
-                AddServerRequest::Ssh(Some(host)) => {
-                    format!("Add Server shows \u{201C}{host}\u{201D} next.").into()
-                }
-                _ => "Another invitation link arrived. Add Server shows it next.".into(),
+                AddServerRequest::Ssh(Some(host)) => format!("\"{host}\" is next.").into(),
+                _ => "Another invitation is next.".into(),
             };
             let colors = appearance.host_colors(spaceterm_ui::ControlHost::Floating);
             div()
@@ -1638,10 +1654,11 @@ impl AddServerSheet {
                     .child(text.line("detail", explanation, colors.text_secondary))
                     .into_any_element()
             }
-            Stage::Install { detail, .. } => text
+            Stage::Install { detail, .. } if !detail.is_empty() => text
                 .container(accesskit::Role::Group)
                 .child(text.line("install", detail.clone(), colors.text))
                 .into_any_element(),
+            Stage::Install { .. } => div().into_any_element(),
             Stage::SshProblem {
                 state, explanation, ..
             } => text
@@ -1663,17 +1680,11 @@ impl AddServerSheet {
                 .into_any_element(),
             Stage::Stopped { server } => text
                 .container(accesskit::Role::Status)
-                .child(
-                    text.line(
-                        "stopped",
-                        format!(
-                            "SpaceTerm saved that you stopped this pairing. It withdraws anything \
-                         {server} already received."
-                        )
-                        .into(),
-                        colors.text,
-                    ),
-                )
+                .child(text.line(
+                    "stopped",
+                    format!("SpaceTerm is cancelling the pairing with {server}.").into(),
+                    colors.text,
+                ))
                 .into_any_element(),
             Stage::Form | Stage::Done => div().into_any_element(),
         }
@@ -1710,10 +1721,10 @@ impl AddServerSheet {
                 )
                 .child(text.line(
                     "compare",
-                    format!("Check that {server} shows the same code").into(),
+                    format!("Check that {server} shows this code").into(),
                     colors.text,
                 ))
-                .child(text.progress("waiting", format!("Waiting for {server} to allow").into()))
+                .child(text.progress("waiting", "Waiting for approval…".into()))
                 .into_any_element(),
             Some(JoinStatus::Retryable { stage }) => text
                 .container(accesskit::Role::Alert)
@@ -1732,9 +1743,7 @@ impl AddServerSheet {
                     text.line(
                         "unconfirmed",
                         format!(
-                            "{server} allowed this device, but SpaceTerm couldn\u{2019}t confirm \
-                         it saved the connection on this computer, so it isn\u{2019}t using it. \
-                         If it was saved, it appears when SpaceTerm reopens."
+                            "{server} approved this device, but SpaceTerm couldn't save the connection."
                         )
                         .into(),
                         colors.warning,
@@ -1745,7 +1754,7 @@ impl AddServerSheet {
                 .container(accesskit::Role::Alert)
                 .child(text.line(
                     "denied",
-                    format!("{server} didn\u{2019}t allow this device.").into(),
+                    format!("{server} denied this device.").into(),
                     colors.text,
                 ))
                 .into_any_element(),
@@ -1754,11 +1763,7 @@ impl AddServerSheet {
                 .child(
                     text.line(
                         "expired",
-                        format!(
-                            "The invitation expired before {server} allowed this device. Ask for a \
-                         new one."
-                        )
-                        .into(),
+                        "Invitation expired. Ask for a new one.".into(),
                         colors.text,
                     ),
                 )

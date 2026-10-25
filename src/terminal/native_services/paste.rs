@@ -66,16 +66,14 @@ pub enum PasteRejection {
 impl std::fmt::Display for PasteRejection {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Empty => formatter.write_str("the paste is empty"),
+            Self::Empty => formatter.write_str("The paste is empty"),
             Self::TooLarge { limit } => {
-                write!(formatter, "the paste exceeds the {limit}-byte safety limit")
+                write!(formatter, "Paste up to {limit} bytes at a time.")
             }
             Self::ConfirmationPending => {
-                formatter.write_str("another unsafe paste is awaiting confirmation")
+                formatter.write_str("Confirm or cancel the previous paste first.")
             }
-            Self::TerminalUnfocused => {
-                formatter.write_str("the terminal no longer owns input focus")
-            }
+            Self::TerminalUnfocused => formatter.write_str("Select this Pane, then paste again."),
         }
     }
 }

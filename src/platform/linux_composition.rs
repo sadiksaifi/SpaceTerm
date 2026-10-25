@@ -168,13 +168,13 @@ fn desktop_profile(
         DesktopPresentation::new(
             DesktopWording {
                 file_preview: "Preview",
-                operating_system_name: "Linux",
                 this_computer: "This Computer",
                 system_directory_selection: "Choose Directory…",
                 read_only_update: (
                     "Reinstall SpaceTerm to Update",
-                    "SpaceTerm can’t replace its installation folder. Install SpaceTerm with its install script, then try again.",
+                    "Run the SpaceTerm install script to install the update.",
                 ),
+                overdue_read_only_update: "Update overdue. Reinstall with the install script.",
             },
             Rc::new(super::linux_shortcut_text::LinuxShortcutFormatter),
             crate::desktop_profile::ShortcutSelection::TerminalSurface,
@@ -437,7 +437,6 @@ mod tests {
                 assert_eq!(shortcut.as_deref(), Some(label));
             }
             assert_eq!(presentation.wording().file_preview, "Preview");
-            assert_eq!(presentation.wording().operating_system_name, "Linux");
             assert_eq!(
                 presentation.wording().system_directory_selection,
                 "Choose Directory…"

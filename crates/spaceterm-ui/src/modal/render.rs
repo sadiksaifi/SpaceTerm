@@ -418,7 +418,7 @@ fn render_overlay(
     let press_scope = scope.clone();
 
     let description = match &snapshot.semantics {
-        PreparedModalSemantics::Alert { message, .. } => Some(message.clone()),
+        PreparedModalSemantics::Alert { message, .. } => alert_message(message),
         PreparedModalSemantics::Dialog { description, .. } => description.clone(),
         PreparedModalSemantics::Progress { status, .. } => Some(status.clone()),
     };
@@ -676,6 +676,11 @@ fn alert_intent_presentation(
     }
 }
 
+/// Returns the Alert message to present, or `None` for a title-only Alert.
+fn alert_message(message: &SharedString) -> Option<SharedString> {
+    (!message.trim().is_empty()).then(|| message.clone())
+}
+
 fn render_header(
     snapshot: &ModalRenderSnapshot,
     maximum_height: gpui::Pixels,
@@ -801,6 +806,12 @@ fn render_body(
                 format!("modal-alert-intent-mark-{}", intent_presentation.selector);
             let detail_selector = format!("modal-alert-detail-{}", snapshot.presentation.value());
             let marker_extent = metrics.accessory_extent() / 2.0;
+            let message = alert_message(message);
+            let detail_gap = if message.is_some() {
+                metrics.action_gap / 2.0
+            } else {
+                px(0.0)
+            };
             let message_panel = div()
                 .debug_selector(move || intent_selector.clone())
                 .flex()
@@ -825,16 +836,18 @@ fn render_body(
                     div()
                         .flex_1()
                         .min_w_0()
-                        .child(
-                            div()
-                                .id(("modal-alert-message", snapshot.presentation.value()))
-                                .role(accesskit::Role::Label)
-                                .aria_value(message.clone())
-                                .debug_selector(|| "modal-alert-message".to_owned())
-                                .text_size(metrics.body_size)
-                                .whitespace_normal()
-                                .child(message.clone()),
-                        )
+                        .when_some(message, |content, message| {
+                            content.child(
+                                div()
+                                    .id(("modal-alert-message", snapshot.presentation.value()))
+                                    .role(accesskit::Role::Label)
+                                    .aria_value(message.clone())
+                                    .debug_selector(|| "modal-alert-message".to_owned())
+                                    .text_size(metrics.body_size)
+                                    .whitespace_normal()
+                                    .child(message),
+                            )
+                        })
                         .when_some(detail.clone(), |content, detail| {
                             let detail_selector = detail_selector.clone();
                             content.child(
@@ -843,7 +856,7 @@ fn render_body(
                                     .role(accesskit::Role::Label)
                                     .aria_value(detail.clone())
                                     .debug_selector(move || detail_selector.clone())
-                                    .mt(metrics.action_gap / 2.0)
+                                    .mt(detail_gap)
                                     .text_size(metrics.detail_size)
                                     .text_color(paint.secondary_text)
                                     .whitespace_normal()

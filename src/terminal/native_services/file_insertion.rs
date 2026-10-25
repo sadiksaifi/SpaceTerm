@@ -35,19 +35,19 @@ pub(crate) fn prepare_file_insertion(
     paths: &[PathBuf],
 ) -> Result<FileInsertion, &'static str> {
     if paths.is_empty() {
-        return Err("no file paths were supplied");
+        return Err("No files were supplied");
     }
     if paths.len() > MAX_FILE_ITEMS {
-        return Err("too many file paths were supplied");
+        return Err("Drop up to 256 files at a time.");
     }
     let mut text = String::new();
     for path in paths {
         if !policy.paths.is_absolute(path) {
-            return Err("file paths must be absolute");
+            return Err("Couldn't drop these files.");
         }
-        let value = path.to_str().ok_or("file paths must be valid UTF-8")?;
+        let value = path.to_str().ok_or("Couldn't drop these files.")?;
         if value.as_bytes().contains(&0) {
-            return Err("file paths must not contain NUL");
+            return Err("Couldn't drop these files.");
         }
         let ShellInsertionDialect::Posix = policy.shell;
         let quotes = value.bytes().filter(|byte| *byte == b'\'').count();
@@ -55,9 +55,9 @@ pub(crate) fn prepare_file_insertion(
             .len()
             .checked_add(quotes.saturating_mul(4))
             .and_then(|length| length.checked_add(2 + usize::from(!text.is_empty())))
-            .ok_or("file insertion exceeds the size limit")?;
+            .ok_or("Too many files to drop.")?;
         if length > MAX_FILE_INSERTION_BYTES.saturating_sub(text.len()) {
-            return Err("file insertion exceeds the size limit");
+            return Err("Too many files to drop.");
         }
         if !text.is_empty() {
             text.push(' ');

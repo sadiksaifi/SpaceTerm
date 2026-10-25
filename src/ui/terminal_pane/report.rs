@@ -16,7 +16,7 @@ pub(super) fn issue_url(diagnostics: &DiagnosticBundle, failure: &TerminalFailur
         .reason()
         .map_or_else(|| "Unspecified".to_owned(), |reason| format!("{reason:?}"));
     let body = format!(
-        "## Terminal failure\n\n{failure}\n\nReason: {reason}\n\nAdd reproduction steps if you can.\n\n## Diagnostics\n\n```text\n{}```\n",
+        "## Terminal failure\n\n{failure}\n\nReason: {reason}\n\nAdd reproduction steps.\n\n## Diagnostics\n\n```text\n{}```\n",
         diagnostics.report_text(MAX_DIAGNOSTIC_BYTES),
     );
     Url::parse_with_params(

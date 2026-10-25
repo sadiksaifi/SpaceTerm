@@ -121,16 +121,16 @@ fn run() -> Result<ExitCode, cli::Error> {
              Other commands:\n\
                service-install IDENTITY RETAINED_INSTALLATION\n\
                serve IDENTITY                              Run in the foreground\n\
-               setup-state IDENTITY                        Set up nonsecret state (client feature)\n\
-               status IDENTITY                             Connect to an existing server (client feature)\n\
-               ssh-discover IDENTITY                       Discover existing account state\n\
-               ssh-connect IDENTITY                        Carry protocol over non-PTY stdio\n\
-               ssh-prepare IDENTITY                        Start approved service, preserving Stop\n\
+               setup-state IDENTITY                        Set up server state\n\
+               status IDENTITY                             Connect to the server\n\
+               ssh-discover IDENTITY                       Find the server\n\
+               ssh-connect IDENTITY                        Connect over SSH\n\
+               ssh-prepare IDENTITY                        Start the server\n\
                ssh-install IDENTITY ARCHIVE SIGNATURE SHA256\n\
-               ssh-stage IDENTITY ARCHIVE SIGNATURE SHA256 Retain a verified candidate only\n\
+               ssh-stage IDENTITY ARCHIVE SIGNATURE SHA256 Stage a verified update\n\
                ssh-maintain IDENTITY                       Answer one maintenance request over stdio\n\
-               ssh-enable-linger IDENTITY                  Try account boot authorization without prompting\n\
-               ssh-enable-linger-password IDENTITY         Authorize account boot using standard input\n\
+               ssh-enable-linger IDENTITY                  Allow boot startup\n\
+               ssh-enable-linger-password IDENTITY         Allow boot startup (password on stdin)\n\
                --version | --build-info | --check | --help",
             cli::help(IDENTITY)
         );
@@ -178,7 +178,7 @@ fn run() -> Result<ExitCode, cli::Error> {
     }) {
         return cli::run(IDENTITY, &args, &mut std::io::stdout().lock()).map(ExitCode::from);
     }
-    let request = Request::parse(&args)?;
+    let request = Request::parse(&args).map_err(|_| cli::Error::InvalidArguments)?;
     match request {
         Request::SshDiscover => {
             let discovery = spaceterm_server::account_bridge::discover(IDENTITY)?;
@@ -269,15 +269,10 @@ fn run() -> Result<ExitCode, cli::Error> {
                 let client = spaceterm_server::LocalServer::for_identity(IDENTITY)?;
                 if matches!(request, Request::SetupState) {
                     client.setup()?;
-                    println!(
-                        "Local server state is set up. Startup and Stop intent are unchanged."
-                    );
+                    println!("The local server is set up.");
                 } else {
-                    let status = client.refresh()?;
-                    println!(
-                        "Connected to the local server; protocol {}.",
-                        status.protocol_major
-                    );
+                    client.refresh()?;
+                    println!("Connected to the local server.");
                 }
             }
             #[cfg(not(feature = "client"))]

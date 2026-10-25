@@ -331,12 +331,36 @@ impl WorkspaceManager {
                         manager.sidebar_worktrees.removal = None;
                         let error = result.err().unwrap_or(Error::Unavailable);
                         if !client.availability().0 {
-                            Self::show_shared_refusal("remove the Worktree", crate::ui::shared_workspaces::SharedRefusalReason::Offline, window, cx);
+                            Self::show_shared_refusal(
+                                "remove the Worktree",
+                                crate::ui::shared_workspaces::SharedRefusalReason::Offline,
+                                window,
+                                cx,
+                            );
                         } else if error == Error::Unavailable {
-                            let title = format!("Couldn\u{2019}t Remove \u{201c}{name}\u{201d}");
-                            let _ = Alert::new(ModalId::new("server-worktree-removal-check"),title.clone(),title,"SpaceTerm couldn\u{2019}t check it for changes, so nothing was removed.",vec![ModalAction::new(false,"OK",ModalActionRole::Cancel,"server-worktree-removal-check-ok")]).intent(AlertIntent::Warning).present(window,cx,|_,_|{});
+                            let title = "Couldn't Check Worktree Changes".to_owned();
+                            let _ = Alert::new(
+                                ModalId::new("server-worktree-removal-check"),
+                                title.clone(),
+                                title,
+                                "Try again before removing the Worktree.",
+                                vec![ModalAction::new(
+                                    false,
+                                    "OK",
+                                    ModalActionRole::Cancel,
+                                    "server-worktree-removal-check-ok",
+                                )],
+                            )
+                            .intent(AlertIntent::Warning)
+                            .present(window, cx, |_, _| {});
                         } else {
-                            manager.server_worktree_failure(&format!("Couldn\u{2019}t Remove \u{201c}{name}\u{201d}"),error,None,window,cx);
+                            manager.server_worktree_failure(
+                                &format!("Couldn\u{2019}t Remove \u{201c}{name}\u{201d}"),
+                                error,
+                                None,
+                                window,
+                                cx,
+                            );
                         }
                     }
                 }
@@ -357,54 +381,8 @@ impl WorkspaceManager {
             return;
         };
         let name = sanitize_for_display(&directory_name(&review.path), MAXIMUM_NAME_CHARS);
-        let title = format!("Remove Worktree \u{201c}{name}\u{201d}?");
+        let title = format!("Remove Worktree \"{name}\"?");
         let machine = self.owning_machine(workspace);
-        let mut message = vec![match &machine {
-            Some(machine) => format!(
-                "The SpaceTerm Server on \u{201c}{}\u{201d} deletes its directory with Git.",
-                sanitize_for_display(machine, MAXIMUM_NAME_CHARS)
-            ),
-            None => "The local server deletes its directory with Git.".to_owned(),
-        }];
-        if review.changes {
-            message.push("Its uncommitted changes and untracked files will be deleted.".into());
-        }
-        if review.submodules {
-            message.push("Its submodules\u{2019} checkouts will be deleted.".into());
-        }
-        let other = review
-            .tabs
-            .iter()
-            .filter(|t| {
-                self.shared
-                    .owning(workspace)
-                    .and_then(|s| s.local(t.workspace))
-                    != Some(workspace)
-            })
-            .count();
-        if !review.tabs.is_empty() {
-            let elsewhere = match other {
-                0 => String::new(),
-                1 => ", including 1 in another Workspace".into(),
-                n => format!(", including {n} in other Workspaces"),
-            };
-            message.push(format!(
-                "Closes {} {} for every client{elsewhere}.",
-                review.tabs.len(),
-                if review.tabs.len() == 1 {
-                    "Tab"
-                } else {
-                    "Tabs"
-                }
-            ));
-            let sessions = review
-                .tabs
-                .iter()
-                .flat_map(|t| &t.panes)
-                .filter(|p| p.session.is_some())
-                .count();
-            message.push(match sessions {0=>"No shell is running in them, so no Terminal Session ends.".into(),1=>"This ends 1 Terminal Session, even if another client controls its Pane, and stops its running commands.".into(),n=>format!("This ends {n} Terminal Sessions, including in Panes another client controls, and stops their running commands.")});
-        }
         let branch = self
             .shared_inventory(workspace)
             .and_then(|i| i.worktrees.iter().find(|r| r.root == review.path))
@@ -414,10 +392,62 @@ impl WorkspaceManager {
                 }
                 _ => None,
             });
-        message.push(branch.map_or_else(
-            || "Its commits stay in the repository.".into(),
-            |branch| format!("The branch \u{201c}{branch}\u{201d} is kept."),
-        ));
+        let tabs = review.tabs.len();
+        let sessions = review
+            .tabs
+            .iter()
+            .flat_map(|tab| &tab.panes)
+            .filter(|pane| pane.session.is_some())
+            .count();
+        let other = review
+            .tabs
+            .iter()
+            .filter(|tab| {
+                self.shared
+                    .owning(workspace)
+                    .and_then(|server| server.local(tab.workspace))
+                    != Some(workspace)
+            })
+            .count();
+        let specific = review.changes && review.submodules && tabs > 1 && other > 1 && sessions > 1;
+        let message = if let Some(branch) = branch.as_ref().filter(|_| specific) {
+            match &machine {
+                Some(machine) => format!(
+                    "This deletes its uncommitted changes and untracked files on \"{}\", closes {tabs} Tabs, and ends {sessions} Terminal Sessions for every client. The branch \"{branch}\" is kept.",
+                    sanitize_for_display(machine, MAXIMUM_NAME_CHARS)
+                ),
+                None => format!(
+                    "This deletes its uncommitted changes and untracked files, closes {tabs} Tabs, and ends {sessions} Terminal Sessions for every client. The branch \"{branch}\" is kept."
+                ),
+            }
+        } else {
+            let directory = match &machine {
+                Some(machine) => format!(
+                    "Deletes its directory on \"{}\"",
+                    sanitize_for_display(machine, MAXIMUM_NAME_CHARS)
+                ),
+                None => "Deletes its directory with Git".to_owned(),
+            };
+            let deleted = match (review.changes, review.submodules) {
+                (true, true) => {
+                    ", including uncommitted changes, untracked files, and submodule directories."
+                }
+                (true, false) => ", including uncommitted changes and untracked files.",
+                (false, true) => ", including submodule directories.",
+                (false, false) => ".",
+            };
+            let mut message = format!("{directory}{deleted}");
+            if tabs > 0 {
+                let noun = if tabs == 1 { "Tab" } else { "Tabs" };
+                message.push_str(&format!(" Closes {tabs} {noun} for every client."));
+                match sessions {
+                    0 => {}
+                    1 => message.push_str(" Ends 1 Terminal Session."),
+                    count => message.push_str(&format!(" Ends {count} Terminal Sessions.")),
+                }
+            }
+            message
+        };
         let operation = Operation::Remove {
             root: review.root.clone(),
             path: review.path.clone(),
@@ -430,7 +460,7 @@ impl WorkspaceManager {
             ModalId::new("worktree-removal"),
             title.clone(),
             title,
-            message.join(" "),
+            message,
             vec![
                 ModalAction::new(
                     true,
@@ -535,7 +565,7 @@ impl WorkspaceManager {
             self.sidebar_worktrees.removal = None;
             let _ = review.presentation.dismiss(window, cx);
             self.server_worktree_failure(
-                "Worktree Changed on Another Client",
+                "Worktree Changed",
                 if missing {
                     Error::Missing
                 } else {
@@ -555,21 +585,13 @@ impl WorkspaceManager {
         cx: &mut Context<Self>,
     ) {
         let name = sanitize_for_display(&directory_name(path), MAXIMUM_NAME_CHARS);
-        let (title, verb, again) = if creating {
-            (
-                "Worktree Creation Interrupted",
-                "created",
-                "To create it, choose New Worktree again.",
-            )
+        let (title, action) = if creating {
+            ("Check Worktree Creation", "New Worktree")
         } else {
-            (
-                "Worktree Removal Interrupted",
-                "removed",
-                "To remove it, choose Remove Worktree again.",
-            )
+            ("Check Worktree Removal", "Remove Worktree")
         };
         let message = format!(
-            "The server stopped before it confirmed whether Git {verb} \u{201c}{name}\u{201d}. SpaceTerm didn\u{2019}t repeat the request and refreshed the Worktrees from Git, so the sidebar shows what Git lists now. {again}"
+            "The server stopped before SpaceTerm could confirm the result. Check \"{name}\" in the sidebar before choosing {action} again."
         );
         let _ = Alert::new(
             ModalId::new("server-worktree-interrupted"),
@@ -627,34 +649,34 @@ impl WorkspaceManager {
         }
         let (title, message) = if creating {
             let reason = match error {
-                Error::Location => {
-                    "SpaceTerm couldn\u{2019}t use its location on the local server. Git didn\u{2019}t run, so nothing was created."
-                }
+                Error::Location => "Choose a new or empty directory and try again.".to_owned(),
                 Error::Missing => {
-                    "The repository is no longer at its location on the local server. Git didn\u{2019}t run, so nothing was created."
+                    "The repository is no longer available. Reopen it before creating a Worktree."
+                        .to_owned()
                 }
-                Error::Branch => {
-                    "Git reported an error while creating it and may have left part of it on disk. SpaceTerm didn\u{2019}t repeat the request and refreshed the Worktrees from Git, so the sidebar shows what Git lists now. Review them before choosing New Worktree again."
-                }
-                _ => {
-                    "The server couldn\u{2019}t confirm whether Git created it. SpaceTerm didn\u{2019}t repeat the request and refreshed the Worktrees from Git, so the sidebar shows what Git lists now. Review them before choosing New Worktree again."
-                }
+                Error::Branch => format!(
+                    "Git could not finish creating the Worktree. Check \"{name}\" for incomplete files and review the sidebar before trying again."
+                ),
+                _ => format!(
+                    "SpaceTerm could not confirm whether the Worktree was created. Check \"{name}\" and the sidebar before trying again."
+                ),
             };
-            (
-                format!("Couldn\u{2019}t Create \u{201c}{name}\u{201d}"),
-                reason,
-            )
+            let title = match error {
+                Error::Location | Error::Missing | Error::Branch => {
+                    format!("Couldn't Create Worktree \"{name}\"")
+                }
+                _ => "Check Worktree Creation".to_owned(),
+            };
+            (title, reason)
         } else {
             let reason = match error {
-                Error::Missing => "Git no longer lists it, so no Tab opened.",
-                Error::Location => {
-                    "Its directory isn\u{2019}t available on the server, so no Tab opened."
-                }
-                _ => "The server couldn\u{2019}t open a Tab in it.",
+                Error::Missing => "Git no longer lists it.",
+                Error::Location => "Its directory isn't available.",
+                _ => "Couldn't open a Tab in it.",
             };
             (
                 format!("Couldn\u{2019}t Open \u{201c}{name}\u{201d}"),
-                reason,
+                reason.to_owned(),
             )
         };
         let _ = Alert::new(
@@ -680,34 +702,33 @@ impl WorkspaceManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let title = if error == Error::Interrupted {
+            "Check the Worktree"
+        } else {
+            title
+        };
         let message = match error {
             Error::Changed => {
-                "A Tab was added or removed, a Terminal Session started or ended, or Git changed the target after the confirmation opened. Nothing was removed."
+                "Nothing was removed. Review the updated Worktree and Terminal Sessions before removing it."
             }
             Error::Main => "The Main Worktree cannot be removed.",
-            Error::Locked => "The Worktree is locked. Unlock it with Git before removing it.",
-            Error::Pinned => "It holds a Pinned Directory. Unpin the directory before removing it.",
-            Error::Missing => "Another client or Git removed it first. Nothing else changed.",
+            Error::Locked => "Unlock the Worktree with Git before removing it.",
+            Error::Pinned => "Unpin the directory before removing it.",
+            Error::Missing => "Another client or Git removed it.",
             Error::Interrupted => {
-                "The server stopped before it confirmed the Git write. SpaceTerm didn\u{2019}t repeat the request and refreshed the Worktrees from Git, so the sidebar shows what Git lists now. Start a new operation only after reviewing it."
+                "The server stopped before SpaceTerm could confirm the result. Review the sidebar before trying again."
             }
-            Error::Location => {
-                "The server could not use this location. Choose a new or empty folder."
-            }
+            Error::Location => "Choose a new or empty directory.",
             Error::Template(
                 spaceterm_server::worktree::path_template::WorktreePathTemplateError::NotWritable,
             ) => {
-                "The server can\u{2019}t write to the New Worktree Location folder. Choose another folder in Settings, under Git."
+                "The New Worktree Location directory is not writable. Choose another directory in Settings > Git."
             }
-            Error::Template(_) => {
-                "The server can\u{2019}t use its New Worktree Location. Correct it in Settings, under Git."
-            }
+            Error::Template(_) => "Correct New Worktree Location in Settings > Git.",
             Error::Branch => {
-                "Git could not create the Worktree with this branch. Review the branch and the Worktrees from Git."
+                "Check the selected branch and existing Worktrees before trying again."
             }
-            Error::Unavailable => {
-                "The server could not complete the Worktree operation. Review the Worktrees from Git before trying again."
-            }
+            Error::Unavailable => "Review the Worktrees in the sidebar before trying again.",
         };
         let mut actions = Vec::new();
         if error == Error::Changed && review.is_some() {

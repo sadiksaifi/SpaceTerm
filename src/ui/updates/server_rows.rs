@@ -23,7 +23,7 @@ use crate::ui::remote_maintenance::RemoteAction;
 use crate::ui::settings_window;
 
 /// Each status is a few words that fit the menu. The action's Settings journey explains it.
-const UPDATE_STATUS_UNKNOWN: &str = "Update Status Unknown";
+const UPDATE_STATUS_UNKNOWN: &str = "Status Unknown";
 const UPDATE_NEEDS_ATTENTION: &str = "Update Needs Attention";
 
 #[derive(Clone)]
@@ -146,7 +146,7 @@ impl ServerUpdates {
         let mut inventory = Self {
             sources,
             rows: vec![ServerUpdateRow {
-                label: "This computer · this account".into(),
+                label: "This computer".into(),
                 detail: "Reading Update Status…".into(),
                 action: Some(ServerUpdateAction::Settings(MachineTarget::Local)),
             }],
@@ -287,7 +287,7 @@ fn read_inventory(sources: Sources) -> Vec<ServerUpdateRow> {
                     server: route.paired.pin.server,
                 },
                 row: ServerUpdateRow {
-                    label: format!("{} · account unknown", route.label).into(),
+                    label: route.label.into(),
                     // A paired network connection grants no server maintenance authority.
                     detail: format!("{state} · {UPDATE_STATUS_UNKNOWN}").into(),
                     action: Some(ServerUpdateAction::Settings(MachineTarget::Direct(id))),
@@ -315,7 +315,7 @@ fn local_row(passive: Result<(SharedString, bool), ServerError>) -> ServerUpdate
         ),
     };
     ServerUpdateRow {
-        label: "This computer · this account".into(),
+        label: "This computer".into(),
         detail,
         action: Some(action),
     }
@@ -360,7 +360,7 @@ fn ssh_row(
 ) -> ServerUpdateRow {
     let label = continuity.map_or_else(
         || format!("{} · account unknown", destination.as_str()),
-        |identity| format!("{} · account {}", destination.as_str(), identity.account),
+        |_| destination.as_str().to_owned(),
     );
     let known = matches!(
         status,
@@ -383,7 +383,7 @@ fn ssh_row(
         _ => None,
     };
     let (detail, need) = match (known, facts) {
-        (false, _) => ("Offline or Status Unknown", None),
+        (false, _) => ("Status Unknown", None),
         (true, Some(facts)) => remote_update(facts, candidate),
         (true, None) => (UPDATE_STATUS_UNKNOWN, None),
     };
@@ -415,7 +415,7 @@ fn remote_update(
         return (UPDATE_STATUS_UNKNOWN, None);
     };
     let Some(candidate) = candidate else {
-        return ("No Update", None);
+        return ("Update Unavailable", None);
     };
     if candidate.digest == approved.digest {
         return ("Up to Date", None);
@@ -469,7 +469,6 @@ mod tests {
 
     fn connected() -> RemoteConnectionStatus {
         RemoteConnectionStatus::Connected {
-            protocol_major: 1,
             facts: SshServerFacts {
                 platform: ("macOS".into(), "arm64".into()),
                 version: Some("1.4.0".into()),
@@ -551,7 +550,7 @@ mod tests {
             Some(&state),
             Some(&candidate),
         );
-        assert!(offline.detail.contains("Offline"));
+        assert_eq!(offline.detail.as_ref(), "Status Unknown");
         assert_eq!(offline.action.unwrap().need(), None);
         let mut changed = continuity();
         changed.account += 1;

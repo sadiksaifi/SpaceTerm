@@ -361,10 +361,9 @@ pub(super) fn present(status: LocalServerStatus) -> LocalServerPresentation {
                     "The server is set up but not running. Start it below, or open a SpaceTerm \
                      window, to connect.",
                 ),
-                ServerError::AuthenticationRefused => (
-                    SharedString::from(format!("{error} Nothing changed.")),
-                    CaptionTone::Error,
-                ),
+                ServerError::AuthenticationRefused => {
+                    (SharedString::from(error.to_string()), CaptionTone::Error)
+                }
                 ServerError::IncompatibleState => (
                     SharedString::from(format!(
                         "{error} To start over, review and confirm a development state reset, then choose Check Now."
@@ -381,10 +380,9 @@ pub(super) fn present(status: LocalServerStatus) -> LocalServerPresentation {
                     SharedString::new_static(MISSING_CAPABILITY),
                     CaptionTone::Error,
                 ),
-                ServerError::ActivationUnresolved => guidance(
-                    "An update you confirmed hasn\u{2019}t finished, so SpaceTerm doesn\u{2019}t \
-                     connect yet. Choose Finish Update for the server above.",
-                ),
+                ServerError::ActivationUnresolved => {
+                    guidance("Choose Finish Update to complete the server update and reconnect.")
+                }
                 // A deliberate Stop is a state the person chose, not a fault.
                 ServerError::Stopped => guidance(STOPPED_GUIDANCE),
                 ServerError::NotInstalled => {
@@ -392,9 +390,7 @@ pub(super) fn present(status: LocalServerStatus) -> LocalServerPresentation {
                 }
                 // Only the service's explicit Start can ask for this authorization.
                 ServerError::AuthorizationRequired => guidance(
-                    "Your computer needs an administrator password before the server can run at startup \
-                     and after you log out. Choose Start Server for the background service below \
-                     to continue.",
+                    "Choose Start Server. Your computer asks for an administrator password.",
                 ),
                 _ => (SharedString::from(error.to_string()), CaptionTone::Error),
             };
@@ -541,16 +537,10 @@ fn failure(error: ServerError) -> (&'static str, &'static str, bool) {
 
 /// Why this client refused a server with no protocol major in common. Neither side's release
 /// number says which one is older, so the wording names no side.
-pub(crate) const INCOMPATIBLE_PROTOCOL: &str = "SpaceTerm and the server for your account have no \
-                                                protocol version in common, so SpaceTerm didn\u{2019}t \
-                                                connect. The server and its Terminal Sessions keep \
-                                                running.";
+pub(crate) const INCOMPATIBLE_PROTOCOL: &str = "SpaceTerm and this server are incompatible.";
 
 /// Why this client refused a server that lacks a capability it requires.
-pub(crate) const MISSING_CAPABILITY: &str = "The server for your account doesn\u{2019}t support a \
-                                             feature this SpaceTerm requires, so SpaceTerm \
-                                             didn\u{2019}t connect. The server and its Terminal \
-                                             Sessions keep running.";
+pub(crate) const MISSING_CAPABILITY: &str = "This server needs an update.";
 
 /// The connection row's guidance once the person has stopped the server. A stopped server stays
 /// stopped through account login and computer startup alike.
@@ -643,17 +633,13 @@ impl ServiceAction {
     /// where the row renders it.
     pub(super) const fn consequence(self) -> Option<&'static str> {
         match self {
-            Self::Stop => Some("Ends the server's Terminal Sessions. SpaceTerm asks first."),
-            Self::Restart => Some("Ends the server's Terminal Sessions. SpaceTerm asks first."),
-            Self::Uninstall => Some("Removes the service. SpaceTerm asks first."),
-            Self::AuthorizeInstall => Some(
-                "SpaceTerm explains the change first. Your computer then asks for an administrator \
-                 password, and SpaceTerm installs and starts the server.",
-            ),
-            Self::AuthorizeStart => Some(
-                "SpaceTerm explains the change first. Your computer then asks for an administrator \
-                 password, and SpaceTerm starts the server.",
-            ),
+            Self::Stop => Some("Ends the server's Terminal Sessions."),
+            Self::Restart => Some("Ends the server's Terminal Sessions."),
+            Self::Uninstall => Some("Removes the service."),
+            Self::AuthorizeInstall => {
+                Some("Requires an administrator password to install and start the server.")
+            }
+            Self::AuthorizeStart => Some("Requires an administrator password to start the server."),
             Self::Check | Self::Install | Self::Start => None,
         }
     }
@@ -798,31 +784,15 @@ pub(crate) struct AuthorizationPrompt {
 
 impl AuthorizationPrompt {
     /// The prompt for one waiting request. `build` names the build Install installs.
-    pub(crate) fn for_request(request: &AuthorizedRequest, build: Option<&str>) -> Self {
-        let (then, confirm) = match (request, build) {
-            (AuthorizedRequest::Install(_), Some(build)) => (
-                format!("SpaceTerm then installs {build} and starts the server."),
-                "Authorize and Install",
-            ),
-            (AuthorizedRequest::Install(_), None) => (
-                "SpaceTerm then installs and starts the server.".to_owned(),
-                "Authorize and Install",
-            ),
-            (AuthorizedRequest::Start, _) => (
-                "SpaceTerm then starts the server.".to_owned(),
-                "Authorize and Start",
-            ),
+    pub(crate) fn for_request(request: &AuthorizedRequest, _build: Option<&str>) -> Self {
+        let confirm = match request {
+            AuthorizedRequest::Install(_) => "Authorize and Install",
+            AuthorizedRequest::Start => "Authorize and Start",
         };
         Self {
-            title: "Run the Server at Startup",
-            message: "Let your account\u{2019}s services start at boot and keep running after you \
-                      log out?",
-            detail: SharedString::from(format!(
-                "Your computer asks for an administrator password to turn on lingering for your \
-                 account. Lingering applies to every service your account runs, and \
-                 uninstalling the server leaves it on. {then} If you cancel here or in the \
-                 password prompt, nothing changes."
-            )),
+            title: "Run the Server at Startup?",
+            message: "Enter an administrator password so your account's services keep running after you log out.",
+            detail: SharedString::default(),
             confirm,
         }
     }
@@ -888,6 +858,7 @@ pub(super) struct ServicePresentation {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct InstallChoice {
     pub(super) label: SharedString,
+    description_label: SharedString,
     directory: PathBuf,
 }
 
@@ -902,7 +873,7 @@ impl InstallChoice {
     pub(super) fn of(installations: &[RetainedInstallation]) -> Vec<Self> {
         let named = |installation: &RetainedInstallation| {
             let commit = installation.commit.get(..7).unwrap_or(&installation.commit);
-            format!("Version {} (commit {commit}", installation.version)
+            format!("{} ({commit}", installation.version)
         };
         installations
             .iter()
@@ -919,11 +890,20 @@ impl InstallChoice {
                     .and_then(|digest| digest.to_str())
                     .and_then(|digest| digest.get(..8));
                 let label = match package {
-                    Some(package) if ambiguous => format!("{name}, package {package})"),
+                    Some(package) if ambiguous => format!("{name}, {package})"),
                     _ => format!("{name})"),
+                };
+                let commit = installation.commit.get(..7).unwrap_or(&installation.commit);
+                let description_label = match package {
+                    Some(package) if ambiguous => format!(
+                        "Version {} (commit {commit}, package {package})",
+                        installation.version
+                    ),
+                    _ => format!("Version {} (commit {commit})", installation.version),
                 };
                 Self {
                     label: label.into(),
+                    description_label: description_label.into(),
                     directory: installation.directory.clone(),
                 }
             })
@@ -988,8 +968,7 @@ pub(super) fn present_service(state: ServiceState) -> ServicePresentation {
             "settings-server-service-state-cleanup-unresolved",
             (
                 SharedString::new_static(
-                    "SpaceTerm couldn't confirm that the server's Terminal Sessions ended. \
-                     Choose Stop Server to try again.",
+                    "Terminal Session end unconfirmed. Choose Stop Server to try again.",
                 ),
                 CaptionTone::Warning,
             ),
@@ -1022,7 +1001,7 @@ pub(super) fn present_service(state: ServiceState) -> ServicePresentation {
                                 "{} is verified and ready to install. You stopped the server. \
                                  Installing keeps it stopped until you start it. No \
                                  administrator password is needed.",
-                                only.label
+                                only.description_label
                             )),
                             CaptionTone::Guidance,
                         ),
@@ -1032,7 +1011,7 @@ pub(super) fn present_service(state: ServiceState) -> ServicePresentation {
                                  your account when the computer starts and keeps running after \
                                  you log out or quit SpaceTerm. If your computer needs an administrator \
                                  password to allow that, SpaceTerm asks you first.",
-                                only.label
+                                only.description_label
                             )),
                             CaptionTone::Guidance,
                         ),
@@ -1041,7 +1020,7 @@ pub(super) fn present_service(state: ServiceState) -> ServicePresentation {
                                 "{} is verified and ready to install. The server then runs for \
                                  your account whenever you\u{2019}re logged in, even after \
                                  SpaceTerm quits. No administrator password is needed.",
-                                only.label
+                                only.description_label
                             )),
                             CaptionTone::Guidance,
                         ),
@@ -1159,28 +1138,23 @@ fn authorization_caption(
     pending: &PendingAuthorization,
     phase: ServicePhase,
 ) -> (SharedString, CaptionTone) {
-    let reason = if pending.declined {
-        "Authorization did not complete, so nothing changed."
-    } else {
-        "Your computer needs an administrator password before the server can start at boot and keep \
-         running after you log out."
-    };
-    let now = match phase {
-        ServicePhase::NotInstalled => "The server is not installed.",
-        ServicePhase::Stopped => "The server is stopped.",
-        ServicePhase::NotRunning | ServicePhase::Running => "The server is not running.",
-    };
     let (_, step) = pending.request.steps();
     let step = step.label().trim_end_matches('\u{2026}');
-    let next = if pending.declined {
-        "to try again"
-    } else {
-        "to continue"
+    let message = match (pending.declined, phase) {
+        (true, ServicePhase::NotInstalled | ServicePhase::Stopped) => {
+            format!("Authorization didn't finish. Choose {step} to try again.")
+        }
+        (true, ServicePhase::NotRunning | ServicePhase::Running) => {
+            format!("Choose {step} to try again.")
+        }
+        (false, ServicePhase::NotInstalled | ServicePhase::Stopped) => {
+            format!("Choose {step} to run the server at startup.")
+        }
+        (false, ServicePhase::NotRunning | ServicePhase::Running) => {
+            format!("Choose {step} to continue.")
+        }
     };
-    (
-        SharedString::from(format!("{reason} {now} Choose {step} {next}.")),
-        CaptionTone::Warning,
-    )
+    (message.into(), CaptionTone::Warning)
 }
 
 /// A change to automatic start and why the last one didn't take effect.
@@ -1698,47 +1672,41 @@ impl SettingsWindow {
                 // An alert belongs to the entity presenting it, so Settings presents it.
                 let _ = presenting.update(cx, |_, cx| {
                     let result = Alert::new(
-                    ModalId::new("settings-server-auto-start-authorize"),
-                    "Start the Server at Boot",
-                    "Start the Server at Boot",
-                    "Let your account\u{2019}s services start at boot and keep running after you \
-                     log out?",
-                    vec![
-                        ModalAction::new(
-                            true,
-                            "Authorize\u{2026}",
-                            ModalActionRole::Affirmative,
-                            AUTHORIZE_CONFIRM_SELECTOR,
-                        )
-                        .with_emphasis(ModalActionEmphasis::Prominent),
-                        ModalAction::new(
-                            false,
-                            "Cancel",
-                            ModalActionRole::Cancel,
-                            AUTHORIZE_CANCEL_SELECTOR,
-                        ),
-                    ],
-                )
-                .intent(AlertIntent::Warning)
-                .detail(
-                    "Your computer asks for an administrator password to turn on lingering for \
-                     your account. Lingering applies to every service your account runs. If you \
-                     cancel, nothing changes.",
-                )
-                .present(window, cx, move |outcome, cx| {
-                    if !matches!(
-                        outcome,
-                        AlertOutcome::Activated {
-                            action_id: true,
-                            ..
+                        ModalId::new("settings-server-auto-start-authorize"),
+                        "Start the Server at Boot?",
+                        "Start the Server at Boot?",
+                        "Enter an administrator password so your account's services start at boot.",
+                        vec![
+                            ModalAction::new(
+                                true,
+                                "Authorize\u{2026}",
+                                ModalActionRole::Affirmative,
+                                AUTHORIZE_CONFIRM_SELECTOR,
+                            )
+                            .with_emphasis(ModalActionEmphasis::Prominent),
+                            ModalAction::new(
+                                false,
+                                "Cancel",
+                                ModalActionRole::Cancel,
+                                AUTHORIZE_CANCEL_SELECTOR,
+                            ),
+                        ],
+                    )
+                    .intent(AlertIntent::Warning)
+                    .present(window, cx, move |outcome, cx| {
+                        if !matches!(
+                            outcome,
+                            AlertOutcome::Activated {
+                                action_id: true,
+                                ..
+                            }
+                        ) {
+                            return;
                         }
-                    ) {
-                        return;
-                    }
-                    let _ = owner.update(cx, |settings, cx| {
-                        settings.change_automatic_start(true, true, handle, cx);
+                        let _ = owner.update(cx, |settings, cx| {
+                            settings.change_automatic_start(true, true, handle, cx);
+                        });
                     });
-                });
                     if result.is_err() {
                         eprintln!("failed to present the automatic start authorization");
                     }
@@ -1870,7 +1838,6 @@ impl SettingsWindow {
             ],
         )
         .intent(AlertIntent::Warning)
-        .detail(prompt.detail)
         .present(window, cx, move |outcome, cx| {
             if !matches!(
                 outcome,
@@ -1912,8 +1879,8 @@ impl SettingsWindow {
         let result = Alert::new(
             ModalId::new(confirmation.id),
             confirmation.title,
-            confirmation.title,
             confirmation.message.clone(),
+            confirmation.detail.clone(),
             vec![
                 ModalAction::new(
                     true,
@@ -1932,7 +1899,6 @@ impl SettingsWindow {
             ],
         )
         .intent(AlertIntent::Critical)
-        .detail(confirmation.detail.clone())
         .present(window, cx, move |outcome, cx| {
             if !matches!(
                 outcome,

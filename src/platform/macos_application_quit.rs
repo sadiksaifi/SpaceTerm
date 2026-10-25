@@ -434,8 +434,11 @@ pub(in crate::platform) mod tests {
         let mtm = objc2::MainThreadMarker::new().expect("native test must run on the main thread");
         let prompt = |destructive| QuitPrompt {
             title: "Quit SpaceTerm?".to_owned(),
-            detail: "SpaceTerm stays in the menu bar, and your Terminal Sessions keep running."
-                .to_owned(),
+            detail: if destructive {
+                "This ends 3 Terminal Sessions.".to_owned()
+            } else {
+                String::new()
+            },
             destructive,
         };
         let settle =
@@ -506,6 +509,7 @@ pub(in crate::platform) mod tests {
                 };
                 unsafe { host.setReleasedWhenClosed(false) };
                 let alert = quit_alert(&prompt(destructive), mtm);
+                assert_eq!(alert.informativeText().to_string().is_empty(), !destructive);
                 let responses = begin_quit_sheet(&alert, &host, destructive);
                 settle();
                 let sheet = alert.window();

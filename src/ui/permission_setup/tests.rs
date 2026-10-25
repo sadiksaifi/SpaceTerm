@@ -698,15 +698,11 @@ fn the_guide_publishes_its_instruction_and_the_application_row(cx: &mut TestAppC
 
     let guide = guide_context(cx);
     let tree = A11yTree::read(guide);
-    tree.text(&format!(
-        "Drag {application} to the list above to allow Screen Recording."
-    ));
+    tree.text(&format!("Drag {application} to allow Screen Recording."));
     let row = tree.node(application);
     assert_eq!(row["aria"]["role"], "Group");
-    assert_eq!(row["aria"]["description"], "Drag to the list above");
-    tree.text(&format!(
-        "{application} removed any earlier entry. Or use the + button below the list."
-    ));
+    assert_eq!(row["aria"]["description"], "Drag to the list");
+    tree.text("Use the + button below the list.");
 
     perform(guide, tree.node("Close"), Action::Click);
     guide.run_until_parked();
@@ -728,7 +724,7 @@ fn a_granted_guide_publishes_its_result_and_advice(cx: &mut TestAppContext) {
         .read_with(cx, |setup, _| setup.copy(Accessibility).name);
     let tree = spaceterm_ui::a11y_testing::A11yTree::read(guide_context(cx));
     tree.text(&format!("{name} is allowed."));
-    tree.text("Restart any tool that was already running.");
+    tree.text("Restart any tool already running.");
     assert_eq!(
         tree.node("Allow Screen Recording")["aria"]["role"],
         "Button"

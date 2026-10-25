@@ -32,7 +32,7 @@ pub(super) const LIST_SELECTOR: &str = "settings-all-servers";
 pub(super) const ADD_SERVER_SELECTOR: &str = "settings-add-server";
 /// The picker's name for assistive technology.
 pub(super) const PICKER_NAME: &str = "Server";
-const PICKER_HINT: &str = "Choose a server, or add one";
+const PICKER_HINT: &str = "Choose or add a server";
 /// The list's name for assistive technology.
 pub(super) const SERVER_LIST_NAME: &str = "All Servers";
 /// The fewest characters of a server's name that search treats as naming it.
@@ -823,7 +823,7 @@ fn leading_slot(appearance: &ChromeAppearance) -> gpui::Div {
 
 /// What Add Server does, under its label in the All Servers list.
 pub(super) const fn add_server_description() -> &'static str {
-    "Connect over SSH or join with an invitation."
+    "Connect over SSH or with an invitation."
 }
 
 /// The color of a status dot of `tone`.

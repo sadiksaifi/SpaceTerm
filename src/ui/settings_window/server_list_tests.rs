@@ -103,7 +103,6 @@ impl SshConnectBackend for Computers {
                 server: [2; 32],
             },
             lease: Arc::new(Lease),
-            protocol_major: 1,
             facts: facts(),
         })
     }
@@ -419,7 +418,7 @@ fn the_picker_and_all_servers_share_one_selection_that_connects_nothing(cx: &mut
     let picker = tree.node(super::PICKER_NAME);
     assert_eq!(picker["aria"]["role"], "ComboBox");
     assert_eq!(picker["aria"]["value"], "penguin");
-    assert_eq!(picker["aria"]["description"], "Choose a server, or add one");
+    assert_eq!(picker["aria"]["description"], "Choose or add a server");
     assert_eq!(
         servers
             .cx
@@ -600,10 +599,7 @@ fn after_disconnect_the_card_presents_the_facts_last_observed(cx: &mut TestAppCo
         "the version stays presented"
     );
     let footnote = footnote(&servers).unwrap_or_default();
-    assert!(
-        footnote.starts_with("Connect to penguin to change these settings. Shown values are from "),
-        "the card says the values were observed earlier, got {footnote:?}"
-    );
+    assert_eq!(footnote, "Connect to penguin to change these settings.");
     assert_eq!(servers.computers.observations.load(Ordering::SeqCst), 0);
 }
 
@@ -1329,12 +1325,11 @@ fn a_removal_that_could_not_be_saved_names_the_host_and_can_be_retried(cx: &mut 
         .find_map(|node| {
             node["aria"]["label"]
                 .as_str()
-                .filter(|label| label.contains("couldn\u{2019}t save that you removed"))
+                .filter(|label| label.contains("couldn't save removing"))
                 .map(str::to_owned)
         })
         .unwrap_or_default();
-    assert!(text.contains("penguin"), "got {text:?}");
-    assert!(text.contains("reopens"), "got {text:?}");
+    assert_eq!(text, "SpaceTerm couldn't save removing penguin.");
 
     servers.saved.removal_fails.store(false, Ordering::SeqCst);
     click(&format!("{notice}-remove-again"), servers.cx);
@@ -1553,10 +1548,7 @@ fn reset_all_and_import_leave_server_connections_and_server_settings_alone(
     let detail = servers
         .window
         .read_with(servers.cx, |settings, _| settings.reset_all_detail());
-    assert!(
-        detail.contains("Server connections and Server Settings are not affected."),
-        "the confirmation says what Reset All leaves alone, got {detail:?}"
-    );
+    assert_eq!(detail, "This cannot be undone.");
 
     click("settings-reset-all", servers.cx);
     answer_alert("settings-reset-all-confirm", servers.cx);
@@ -1716,7 +1708,10 @@ fn end_all_sessions_refuses_a_confirmation_for_an_earlier_server_run(cx: &mut Te
         bravo.submitted().is_empty(),
         "a restarted server's Sessions were never confirmed"
     );
-    assert!(end_all_sessions_caption(&servers).starts_with("bravo restarted after you confirmed"));
+    assert_eq!(
+        end_all_sessions_caption(&servers),
+        "bravo restarted, so nothing ended. Try again."
+    );
 
     // The server itself answers a confirmation it outran with the same explanation.
     servers
@@ -1741,7 +1736,7 @@ fn end_all_sessions_refuses_a_confirmation_for_an_earlier_server_run(cx: &mut Te
     };
     settle(servers.cx, |cx| {
         cx.executor().advance_clock(Duration::from_millis(100));
-        caption(cx).starts_with("The Terminal Sessions on bravo changed after you confirmed")
+        caption(cx) == "The Terminal Sessions on bravo changed, so nothing ended. Try again."
     });
 }
 
@@ -1770,7 +1765,7 @@ fn end_all_sessions_refuses_a_confirmation_whose_sessions_changed(cx: &mut TestA
     );
     let caption = end_all_sessions_caption(&servers);
     assert!(
-        caption.starts_with("The Terminal Sessions on bravo changed after you confirmed"),
+        caption == "The Terminal Sessions on bravo changed, so nothing ended. Try again.",
         "got {caption:?}"
     );
     assert!(!caption.contains("restarted"), "got {caption:?}");

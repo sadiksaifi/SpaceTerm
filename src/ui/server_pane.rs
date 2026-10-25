@@ -28,30 +28,20 @@ use super::terminal_pane::StatusIntent;
 
 /// What the window knows while it cannot ask the server who controls the Pane: only that this
 /// window does not.
-pub(crate) const TAKEOVER_TITLE: &str = "Not Controlled by This Window";
-pub(crate) const TAKEOVER_DETAIL: &str =
-    "Take Over to type and resize here. The shell keeps running.";
-pub(crate) const UNCONTROLLED_TITLE: &str = "Not Controlled";
-pub(crate) const UNCONTROLLED_DETAIL: &str = "No SpaceTerm controls this Pane. Take Over to type \
-                                              and resize here. The shell keeps running.";
-pub(crate) const EARLIER_ATTACHMENT_DETAIL: &str = "This SpaceTerm controlled it before the \
-                                                    Workspace was attached again. Take Over to \
-                                                    type and resize here.";
-pub(crate) const TAKEOVER_FAILED_DETAIL: &str =
-    "Take Over is available once SpaceTerm connects again.";
+pub(crate) const TAKEOVER_TITLE: &str = "Take Over to Continue";
+pub(crate) const TAKEOVER_DETAIL: &str = "Take Over to type and resize here.";
+pub(crate) const UNCONTROLLED_TITLE: &str = "No Client Controls This Pane";
+pub(crate) const UNCONTROLLED_DETAIL: &str = "Take Over to type and resize this Pane.";
+pub(crate) const EARLIER_ATTACHMENT_DETAIL: &str = "Take Over to type and resize this Pane.";
+pub(crate) const TAKEOVER_FAILED_DETAIL: &str = "Take Over is available once SpaceTerm connects.";
 /// The Takeover Screen's detail once End All Sessions ended the Pane's shell. The control grant
 /// outlives the Session, so the title still names who controls the Pane.
-pub(crate) const TAKEOVER_ENDED_DETAIL: &str = "End All Sessions ended the shell in this Pane. \
-                                                Take Over, then Start Session to start a new \
-                                                shell here.";
-pub(crate) const UNCONTROLLED_ENDED_DETAIL: &str = "No SpaceTerm controls this Pane, and End All \
-                                                    Sessions ended its shell. Take Over, then \
-                                                    Start Session to start a new shell here.";
-pub(crate) const EARLIER_ATTACHMENT_ENDED_DETAIL: &str = "This SpaceTerm controlled it before the \
-                                                          Workspace was attached again, and End \
-                                                          All Sessions ended its shell. Take \
-                                                          Over, then Start Session to start a \
-                                                          new shell here.";
+pub(crate) const TAKEOVER_ENDED_DETAIL: &str =
+    "End All Sessions ended this Pane's shell. Take Over, then choose Start Session.";
+pub(crate) const UNCONTROLLED_ENDED_DETAIL: &str =
+    "End All Sessions ended this Pane's shell. Take Over, then choose Start Session.";
+pub(crate) const EARLIER_ATTACHMENT_ENDED_DETAIL: &str =
+    "End All Sessions ended this Pane's shell. Take Over, then choose Start Session.";
 /// The Takeover Screen's title and detail while it offers Take Over, naming the Controlling Client
 /// the server reported. `None` means the server has not said, so the screen claims only what this
 /// window knows. `dormant` means End All Sessions ended the Pane's shell, so the detail never
@@ -86,16 +76,13 @@ pub(crate) fn takeover_copy(
     }
 }
 pub(crate) const SESSION_ENDED_TITLE: &str = "Session Ended";
-pub(crate) const SESSION_ENDED_DETAIL: &str =
-    "This Terminal Session is no longer available on the server.";
+pub(crate) const SESSION_ENDED_DETAIL: &str = "This Terminal Session is no longer available.";
 pub(crate) const TAKING_OVER: &str = "Taking Over…";
 pub(crate) const TAKE_OVER_UNCONFIRMED: &str = "Take Over was not confirmed.";
 pub(crate) const RESTORED_TITLE: &str = "Server Restarted";
 /// End All Sessions ended this Pane's shell and cleared its output. The Pane, its Tab, and its
 /// control stay, so only an explicit start brings a shell back.
-pub(crate) const ENDED_DETAIL: &str = "End All Sessions ended the shell in this Pane and cleared \
-                                       its output. Start Session to start a new shell in its \
-                                       last directory.";
+pub(crate) const ENDED_DETAIL: &str = "End All Sessions cleared this Pane.";
 
 /// The copy and selectors of a Pane waiting for an explicit start. End All Sessions and a server
 /// restart both leave a Pane there, and each screen names its own cause and action.
@@ -132,7 +119,7 @@ impl DormantCopy {
                 title: RESTORED_TITLE,
                 detail: RESTORED_DETAIL,
                 action: "start-shell",
-                label: "Start New Shell",
+                label: "Start Session",
                 description: START_DESCRIPTION,
                 progress: STARTING_SHELL,
                 unconfirmed: START_SHELL_UNCONFIRMED,
@@ -140,51 +127,37 @@ impl DormantCopy {
         }
     }
 }
-const START_DESCRIPTION: &str = "Starts a new shell on the server in this Pane's last directory.";
-pub(crate) const RESTORED_DETAIL: &str = "Programs that were running in this Pane ended when the \
-                                          server stopped. Start a new shell to keep working here.";
+const START_DESCRIPTION: &str = "Start a new Terminal Session in this Pane's last directory.";
+pub(crate) const RESTORED_DETAIL: &str = "Programs in this Pane ended.";
 pub(crate) const DIRECTORY_UNAVAILABLE_TITLE: &str = "Directory Unavailable";
-pub(crate) const DIRECTORY_UNAVAILABLE_DETAIL: &str = "SpaceTerm couldn't start a shell because \
-                                                       this directory is missing or inaccessible \
-                                                       on the server. Retry once it's available, \
-                                                       or choose another directory for this Pane.";
-pub(crate) const STARTING_SHELL: &str = "Starting Shell…";
+pub(crate) const DIRECTORY_UNAVAILABLE_DETAIL: &str =
+    "Restore access and choose Retry, or choose another directory.";
+pub(crate) const STARTING_SHELL: &str = "Starting Session…";
 const RETRY_DIRECTORY: &str = "Retry";
 const CHOOSE_DIRECTORY: &str = "Choose Directory…";
-const RETRY_DIRECTORY_DESCRIPTION: &str = "Checks this directory on the server again and starts a \
-                                           shell if it's available.";
-const CHOOSE_DIRECTORY_DESCRIPTION: &str = "Chooses another directory on the server for this \
-                                            Pane. The Workspace's pinned directory and Worktree \
-                                            don't change.";
-const CHOOSE_DIRECTORY_UNSUPPORTED: &str = "This server can't change a Pane's directory. Update \
-                                            the server to choose another directory.";
+const RETRY_DIRECTORY_DESCRIPTION: &str = "Try starting the shell in this directory again.";
+const CHOOSE_DIRECTORY_DESCRIPTION: &str =
+    "Choose a directory for this Pane only; keep its Workspace's Pinned Directory and Worktree.";
+const CHOOSE_DIRECTORY_UNSUPPORTED: &str =
+    "Update this SpaceTerm Server to choose another directory.";
 pub(crate) const START_SHELL_UNCONFIRMED: &str = "Starting the shell was not confirmed.";
 /// A start the server may have run. Starting again could leave a second shell in the Pane, so the
 /// screen offers a check, which never starts a shell, and names the one restart that ends the wait
 /// along with what it ends.
 pub(crate) const START_UNKNOWN_TITLE: &str = "Shell Start Not Confirmed";
-pub(crate) const START_UNKNOWN_DETAIL: &str = "The connection was interrupted before the server \
-                                               confirmed this Pane\u{2019}s new shell, so one may \
-                                               already be running. SpaceTerm won\u{2019}t start \
-                                               another until Retry finds it or the server \
-                                               restarts.";
+pub(crate) const START_UNKNOWN_DETAIL: &str = "Check whether the shell started.";
 /// What restarting ends, where this client can restart the server from Server Settings.
-pub(crate) const START_UNKNOWN_RESTART_HERE: &str = "Restart Server in Server Settings ends every \
-                                                     Terminal Session on that server, for every \
-                                                     client, and asks first.";
+pub(crate) const START_UNKNOWN_RESTART_HERE: &str =
+    "Restarting the server ends every Terminal Session on it.";
 /// What restarting ends, where only the server's own computer can restart it.
-pub(crate) const START_UNKNOWN_RESTART_ELSEWHERE: &str = "Restarting the server on its computer \
-                                                          ends every Terminal Session on it, for \
-                                                          every client.";
-const CHECK_START_DESCRIPTION: &str =
-    "Checks whether the shell in this Pane started. It never starts a shell.";
+pub(crate) const START_UNKNOWN_RESTART_ELSEWHERE: &str =
+    "Restarting the server ends every Terminal Session on it.";
+const CHECK_START_DESCRIPTION: &str = "Check whether this Pane's shell started.";
 const SERVER_SETTINGS: &str = "Server Settings\u{2026}";
-const SERVER_SETTINGS_DESCRIPTION: &str = "Opens this Pane\u{2019}s server in Settings. Restart \
-                                           Server there ends every Terminal Session on that \
-                                           server, for every client, and asks first.";
+const SERVER_SETTINGS_DESCRIPTION: &str = "Open Server Settings.";
 pub(crate) const CHECKING_START: &str = "Checking\u{2026}";
 pub(crate) const START_STILL_UNKNOWN: &str =
-    "The server hasn\u{2019}t confirmed a shell in this Pane yet.";
+    "SpaceTerm still can't tell whether the shell started.";
 
 /// The notice title and cause of a connection SpaceTerm stopped retrying. Incompatibility names
 /// the refusal and never which side is older, because release numbers don't say.
@@ -192,25 +165,17 @@ fn failure_copy(error: ServerError) -> (&'static str, SharedString) {
     match error {
         ServerError::Protocol => (
             "Connection Failed",
-            SharedString::new_static("SpaceTerm stopped reconnecting after repeated failures."),
+            SharedString::new_static("SpaceTerm stopped reconnecting."),
         ),
         ServerError::IncompatibleProtocol => (
             "Incompatible Server",
-            SharedString::new_static(
-                "SpaceTerm and this Pane\u{2019}s server have no protocol version in common, so \
-                 SpaceTerm didn\u{2019}t connect. The server and its Terminal Sessions keep \
-                 running.",
-            ),
+            SharedString::new_static("SpaceTerm and this server are incompatible."),
         ),
         ServerError::MissingRequiredCapability => (
             "Incompatible Server",
-            SharedString::new_static(
-                "This Pane\u{2019}s server doesn\u{2019}t support a feature this SpaceTerm \
-                 requires, so SpaceTerm didn\u{2019}t connect. The server and its Terminal \
-                 Sessions keep running.",
-            ),
+            SharedString::new_static("This server needs an update."),
         ),
-        error => ("Not Connected", SharedString::from(error.to_string())),
+        error => ("Disconnected", SharedString::from(error.to_string())),
     }
 }
 
@@ -293,14 +258,18 @@ pub(crate) fn render_directory_screen(
     cx: &App,
 ) -> Stateful<gpui::Div> {
     let detail = if missing_worktree {
-        "This Tab's Worktree is missing, and SpaceTerm doesn't recreate Worktrees. Retry after restoring it with git, or choose another directory for this Pane."
+        "Restore it with Git and choose Retry, or choose another directory."
     } else {
         DIRECTORY_UNAVAILABLE_DETAIL
     };
     render_screen_content(
         selector,
         ScreenCopy {
-            title: DIRECTORY_UNAVAILABLE_TITLE.into(),
+            title: if missing_worktree {
+                "Worktree Missing".into()
+            } else {
+                DIRECTORY_UNAVAILABLE_TITLE.into()
+            },
             detail: detail.into(),
             path,
         },
@@ -346,7 +315,7 @@ fn render_screen_content(
     let detail_id = SharedString::from(format!("{selector}-detail"));
     let slot_id = SharedString::from(format!("{selector}-status-slot"));
     let message: SharedString = match &path {
-        Some(path) => format!("{title}. {path}. {detail}").into(),
+        Some(_) => detail.clone(),
         None => format!("{title}. {detail}").into(),
     };
     let entry = announcements.entry.clone();
@@ -688,7 +657,7 @@ where
             );
         }
         actions.push(
-            Button::new(retry.clone(), "Retry")
+            Button::new(retry.clone(), "Check Shell")
                 .variant(ButtonVariant::Primary)
                 .size(ButtonSize::Regular)
                 .disabled(checking)
@@ -728,7 +697,7 @@ pub(crate) fn render_notice(
     let intent_color = intent.color(&appearance.floating_control_colors);
     let icon = intent.glyph(appearance.capabilities.differentiate_without_color);
     let icon_size = appearance.icons.metrics(IconRole::Status).glyph_size;
-    let description = format!("{title} {detail}");
+    let description = detail.clone();
     let element_selector = selector.clone();
     shell
         .mount(
@@ -1355,20 +1324,15 @@ mod connection {
                     // The screen explains the unconfirmed start and offers its check, so the notice
                     // adds only what reconnecting does.
                     SharedString::new_static(if self.unknown_shown {
-                        "SpaceTerm checks whether the shell started once it reconnects."
-                    } else if self.takeover_shown && self.session_dormant {
-                        "Take Over is available once SpaceTerm reconnects."
+                        "SpaceTerm checks whether the shell started after reconnecting."
                     } else if self.takeover_shown {
-                        "Take Over is available once SpaceTerm reconnects. The shell keeps \
-                         running on the server."
-                    } else if self.dormant == Some(Dormant::Restored) {
-                        "Start New Shell is available once SpaceTerm reconnects."
-                    } else if self.dormant == Some(Dormant::Ended) {
-                        "Start Session is available once SpaceTerm reconnects."
+                        "Take Over is available after reconnection."
+                    } else if matches!(self.dormant, Some(Dormant::Restored | Dormant::Ended)) {
+                        "Start Session is available after reconnection."
                     } else if self.dormant.is_some() {
-                        "No shell is running in this Pane."
+                        "No shell is running."
                     } else {
-                        "Typing is paused and is not sent. The shell keeps running on the server."
+                        "Typing is paused."
                     }),
                     super::StatusIntent::Warning,
                 )),
@@ -1382,10 +1346,7 @@ mod connection {
                 DevelopmentPaneStatus::Failed(ServerError::Stopped)
                 | DevelopmentPaneStatus::TakeoverFailed(ServerError::Stopped) => Some((
                     SharedString::new_static("Server Stopped"),
-                    SharedString::new_static(
-                        "You stopped the server, so the programs in this Pane ended. Start it \
-                         to keep working here.",
-                    ),
+                    SharedString::new_static("The programs in this Pane ended."),
                     super::StatusIntent::Warning,
                 )),
                 DevelopmentPaneStatus::Failed(error)
@@ -1402,7 +1363,7 @@ mod connection {
                     Some((
                         SharedString::new_static(title),
                         match next {
-                            Some(next) => format!("{cause} {next}").into(),
+                            Some(next) => next.into(),
                             None => cause,
                         },
                         super::StatusIntent::Error,
@@ -1414,19 +1375,14 @@ mod connection {
 
         /// What becomes of the Pane once SpaceTerm connects, after it stopped reconnecting.
         fn after_reconnecting(&self) -> &'static str {
-            if self.takeover_shown && self.session_dormant {
-                "Take Over is available once SpaceTerm connects."
-            } else if self.takeover_shown {
-                "Take Over is available once SpaceTerm connects. The shell keeps running on the \
-                 server."
-            } else if self.dormant == Some(Dormant::Restored) {
-                "Start New Shell is available once SpaceTerm connects."
-            } else if self.dormant == Some(Dormant::Ended) {
-                "Start Session is available once SpaceTerm connects."
+            if self.takeover_shown {
+                "Choose Retry to reconnect, then Take Over to use this Pane."
+            } else if matches!(self.dormant, Some(Dormant::Restored | Dormant::Ended)) {
+                "Choose Retry to reconnect, then Start Session to open a shell."
             } else if self.dormant.is_some() {
-                "No shell is running in this Pane."
+                "No shell is running in this Pane. Choose Retry to reconnect."
             } else {
-                "The shell keeps running on the server."
+                "Choose Retry to reconnect."
             }
         }
 

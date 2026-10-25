@@ -395,7 +395,10 @@ fn restricted_access_explains_the_policy_without_prompting(cx: &mut TestAppConte
     );
     assert_eq!(action(&window, cx), None);
     assert_no_action_rendered(cx);
-    assert!(explanation(&window, cx).contains("cannot change"));
+    assert_eq!(
+        explanation(&window, cx),
+        "Your device's administrator has blocked microphone access."
+    );
 
     // Nothing outside the row can prompt from a restricted state either.
     cx.update(|_, cx| {
@@ -470,15 +473,15 @@ fn failure_explanations_are_distinct_fixed_copy(cx: &mut TestAppContext) {
     for (error, expected) in [
         (
             MicrophoneAccessError::OffMainThread,
-            "SpaceTerm could not check microphone access.",
+            "Couldn't check microphone access.",
         ),
         (
             MicrophoneAccessError::PlatformUnavailable,
-            "The system did not report microphone access.",
+            "Microphone access unknown.",
         ),
         (
             MicrophoneAccessError::PlatformRejected,
-            "The system rejected the microphone access request.",
+            "Microphone access request failed.",
         ),
     ] {
         access.authorization.set(Err(error));
@@ -568,16 +571,24 @@ fn microphone_access_row_keeps_its_natural_height_with_wrapped_guidance(cx: &mut
             );
         }
     }
-    // The narrowest window wraps the guidance.
+    // The recovery guidance still wraps at the narrowest window.
     cx.simulate_resize(gpui::size(
         gpui::px(super::super::WINDOW_WIDTH),
         gpui::px(super::super::WINDOW_HEIGHT),
     ));
     access
         .authorization
-        .set(Ok(MicrophoneAuthorization::NotDetermined));
+        .set(Ok(MicrophoneAuthorization::Denied));
+    access
+        .open_failure
+        .set(Some(MicrophoneAccessError::PlatformRejected));
     cx.update(|_, cx| window.update(cx, |settings, cx| settings.refresh_microphone_access(cx)));
     cx.run_until_parked();
+    click(OPEN_SETTINGS_SELECTOR, cx);
+    assert_eq!(
+        explanation(&window, cx),
+        "Open System Settings and allow SpaceTerm in Privacy & Security > Microphone."
+    );
     let label = cx.debug_bounds(LABEL_SELECTOR).expect("label bounds");
     let description = cx
         .debug_bounds(DESCRIPTION_SELECTOR)

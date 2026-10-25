@@ -187,14 +187,7 @@ impl LinuxStatusItem {
                 match result {
                     Ok(status) => status_menu::operation_succeeded(cx, status),
                     Err(ServerError::AuthorizationRequired) => {
-                        self.open_control(
-                            operation,
-                            Step::Authorize {
-                                declined: false,
-                                stopped: false,
-                            },
-                            cx,
-                        );
+                        self.open_control(operation, Step::Authorize, cx);
                     }
                     Err(error) => self.open_control(operation, Step::Failed(error), cx),
                 }

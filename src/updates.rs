@@ -49,15 +49,15 @@ pub(crate) enum UpdateState {
 )]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub(crate) enum UpdateError {
-    #[error("Updates are available in the installed release of SpaceTerm.")]
+    #[error("Updates require the installed release of SpaceTerm.")]
     Unavailable,
-    #[error("SpaceTerm could not check for updates. Try again when you are online.")]
+    #[error("Try again when you are online.")]
     Check,
-    #[error("The update could not be downloaded. Please try again.")]
+    #[error("Try the update again.")]
     Download,
-    #[error("The update could not be verified. Please try again later.")]
+    #[error("Try again later.")]
     Verification,
-    #[error("The update could not be installed. Please try again.")]
+    #[error("Try the update again.")]
     Installation,
     /// Desktop wording names the remedy, which differs by platform.
     #[error("SpaceTerm can’t replace its installation.")]

@@ -223,10 +223,7 @@ impl LocationModel {
                 CaptionTone::Warning,
             ),
             LocationNotice::Refused(reason) => (reason.explanation(), CaptionTone::Error),
-            LocationNotice::Failed => (
-                "The server couldn\u{2019}t save this location.",
-                CaptionTone::Error,
-            ),
+            LocationNotice::Failed => ("Couldn't save this location.", CaptionTone::Error),
         })
     }
 }

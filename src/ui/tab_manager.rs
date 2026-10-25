@@ -2018,7 +2018,7 @@ impl TabManager {
                     .items_center()
                     .justify_center()
                     .child(
-                        IconButton::new("create-tab-button", "Create Tab", move |foreground| {
+                        IconButton::new("create-tab-button", "New Tab", move |foreground| {
                             #[cfg(test)]
                             rendered_create_tab_icon.set(foreground);
                             Icon::custom(CustomIconName::Plus, create_icon_size, foreground)
@@ -2037,7 +2037,7 @@ impl TabManager {
                         })
                         .debug_selector("create-tab-button")
                         .tooltip(
-                            Tooltip::new("create-tab-tooltip", "Create Tab")
+                            Tooltip::new("create-tab-tooltip", "New Tab")
                                 .shortcut(
                                     create_tab_shortcut(
                                         crate::desktop_profile::DesktopPresentation::get(cx),
@@ -2088,29 +2088,25 @@ impl TabManager {
                 },
             );
 
-        let drag_region = WindowDragRegion::new(
-            "tab-bar-drag-region",
-            "Move Operating-System Window from Tab chrome",
-            content,
-        )
-        .middle_activation(matches!(
-            window.window_decorations(),
-            gpui::Decorations::Client { .. }
-        ))
-        .status(self.window_drag_status.clone())
-        .pointer_insets(Edges {
-            left: super::control_theme::resize_handle::spacious_target_half_thickness(cx),
-            ..Edges::default()
-        })
-        .debug_selector("tab-bar-drag-region")
-        .on_event(move |event, window, cx| {
-            let event = *event;
-            drag_manager
-                .update(cx, |manager, cx| {
-                    manager.handle_operating_system_window_drag_event(event, window, cx)
-                })
-                .unwrap_or_default()
-        });
+        let drag_region = WindowDragRegion::new("tab-bar-drag-region", "Move Window", content)
+            .middle_activation(matches!(
+                window.window_decorations(),
+                gpui::Decorations::Client { .. }
+            ))
+            .status(self.window_drag_status.clone())
+            .pointer_insets(Edges {
+                left: super::control_theme::resize_handle::spacious_target_half_thickness(cx),
+                ..Edges::default()
+            })
+            .debug_selector("tab-bar-drag-region")
+            .on_event(move |event, window, cx| {
+                let event = *event;
+                drag_manager
+                    .update(cx, |manager, cx| {
+                        manager.handle_operating_system_window_drag_event(event, window, cx)
+                    })
+                    .unwrap_or_default()
+            });
 
         div()
             .id("tab-bar")
@@ -3055,14 +3051,21 @@ impl TabManager {
         };
         let edits = shared.edits();
         if let SharedSubmission::Refused(reason) = shared.create_tab(source) {
-            let detail = format!(
-                "SpaceTerm did not create a Tab in this shared Workspace. {}",
-                reason.explanation()
-            );
+            let detail = match reason {
+                super::shared_workspaces::SharedRefusalReason::Offline => {
+                    "Reconnect, then try again."
+                }
+                super::shared_workspaces::SharedRefusalReason::Pending => {
+                    "Wait for the current changes to finish, then try again."
+                }
+                super::shared_workspaces::SharedRefusalReason::Value => {
+                    "A name or directory is too long."
+                }
+            };
             let _ = Alert::new(
                 ModalId::new("shared-tab-unavailable"),
                 "Shared change unavailable",
-                "Shared Change Unavailable",
+                "Couldn't Create Tab",
                 detail,
                 vec![ModalAction::new(
                     (),
@@ -3273,13 +3276,9 @@ fn tab_menu_entries(
     shared: Option<SharedStripControls>,
     presentation: &crate::desktop_profile::DesktopPresentation,
 ) -> Vec<MenuEntry<TabMenuCommand>> {
-    // A shared Workspace's creations and Tab close wait for the server. Each entry says so in
-    // place of its label, so no menu offers a step that does nothing.
+    // A shared Workspace's creations and Tab close wait for the server.
     let shared_edits = shared.is_none_or(|shared| shared.edits);
     let child_launch_available = shared_edits;
-    let waiting = shared
-        .filter(|shared| !shared.edits)
-        .map(|shared| shared.edits_reason);
     let with_shortcut =
         |entry: MenuEntry<TabMenuCommand>, action: &dyn gpui::Action| match presentation
             .shortcut(action)
@@ -3290,13 +3289,7 @@ fn tab_menu_entries(
         };
     vec![
         with_shortcut(
-            MenuEntry::action(
-                match waiting {
-                    Some(_) => "New Tab Needs the Server",
-                    None => "New Tab",
-                },
-                TabMenuCommand::NewTab,
-            ),
+            MenuEntry::action("New Tab", TabMenuCommand::NewTab),
             &CreateTab,
         )
         .icon(|foreground, size| {
@@ -3340,13 +3333,7 @@ fn tab_menu_entries(
         .debug_selector("tab-menu-row-move-right"),
         MenuEntry::separator(),
         with_shortcut(
-            MenuEntry::action(
-                match waiting {
-                    Some(_) => "Close Tab Needs the Server",
-                    None => "Close Tab",
-                },
-                TabMenuCommand::Close,
-            ),
+            MenuEntry::action("Close Tab", TabMenuCommand::Close),
             &CloseTab,
         )
         .destructive(shared_edits)

@@ -13,7 +13,7 @@ use gpui::SharedString;
 
 use crate::local_server::service::ServiceStatus;
 use crate::local_server::service::control::{
-    Action, BuildName, UpdateChange, UpdateWording, Wording, build_label, build_labels,
+    Action, BuildName, UpdateChange, UpdateWording, Wording,
 };
 use crate::local_server::service::maintenance::{
     MaintenanceFacts, MaintenanceRefusal, PreparedChange, RemoteActivation, RemoteActivationPhase,
@@ -152,33 +152,27 @@ impl RemoteAction {
     pub(crate) fn consequence(self, machine: &str) -> SharedString {
         let text = match self {
             Self::Check => {
-                format!("Signs in to {machine} and reads its service. It starts nothing.")
+                format!("Checks the server status on {machine}.")
             }
             Self::Start => format!("Starts the server on {machine}."),
-            Self::Stop | Self::Restart => format!(
-                "Ends the Terminal Sessions on {machine} for every client. SpaceTerm asks first."
-            ),
-            Self::Uninstall => {
-                format!("Removes the service on {machine}. SpaceTerm asks first.")
+            Self::Stop | Self::Restart => {
+                format!("Ends the Terminal Sessions on {machine} for every client.")
             }
-            Self::Update => format!(
-                "Transfers the verified server version SpaceTerm includes to {machine}, then asks \
-                 before it replaces the approved one."
-            ),
-            Self::Return => format!(
-                "Returns the server on {machine} to its previous version. SpaceTerm asks first."
-            ),
-            Self::Finish => format!("Completes the update you confirmed on {machine}."),
-            Self::CheckAgain => format!(
-                "Asks {machine} for the result of the operation it already received. It is not \
-                 asked to do it again."
-            ),
+            Self::Uninstall => {
+                format!("Removes the service on {machine}.")
+            }
+            Self::Update => {
+                format!("Prepares the server update on {machine}, then asks you to confirm.")
+            }
+            Self::Return => format!("Returns the server on {machine} to its previous version."),
+            Self::Finish => format!("Completes the update on {machine}."),
+            Self::CheckAgain => format!("Checks the result on {machine}."),
             Self::Cancel => format!("Stops waiting for {machine}."),
             Self::Acknowledge => format!("Dismisses this result for {machine}."),
-            Self::Discard => format!(
-                "Stops following the operation SpaceTerm sent to {machine}. SpaceTerm asks first."
-            ),
-            Self::Dismiss => format!("Clears this entry for {machine}. Nothing is sent to it."),
+            Self::Discard => {
+                format!("Stops checking the result on {machine}. SpaceTerm asks first.")
+            }
+            Self::Dismiss => format!("Dismisses this result for {machine}."),
         };
         SharedString::from(text)
     }
@@ -352,14 +346,10 @@ fn held(state: &RemoteOperationState) -> Option<&SubmittedKind> {
 fn awaiting(machine: &str, kinds: &[&SubmittedKind]) -> String {
     let named = listed(kinds);
     if kinds.len() == 1 {
-        format!(
-            "You asked for one more operation on {machine}: {named}. SpaceTerm reports that one \
-             here once this one is settled."
-        )
+        format!("Another requested action on {machine} is waiting: {named}.")
     } else {
         format!(
-            "You asked for {} more operations on {machine}: {named}. SpaceTerm reports them here \
-             one at a time, as each one is settled.",
+            "{} requested actions on {machine} are waiting: {named}.",
             kinds.len()
         )
     }
@@ -515,12 +505,11 @@ fn bystander(
         RemoteOperationState::Working { .. } | RemoteOperationState::Described { .. } => {
             guidance(format!("An operation on {machine} is underway."))
         }
-        RemoteOperationState::Resolved { .. } => guidance(format!(
-            "SpaceTerm has the result of an operation on {machine} under {reported}."
-        )),
+        RemoteOperationState::Resolved { .. } => {
+            guidance(format!("See {reported} for the result on {machine}."))
+        }
         _ => guidance(format!(
-            "An operation you asked for on {machine} hasn\u{2019}t finished. {reported} says \
-             what SpaceTerm knows about it."
+            "See {reported} for the unfinished action on {machine}."
         )),
     };
     MaintenancePresentation {
@@ -537,15 +526,12 @@ fn unread(machine: &str, row: MaintenanceRow) -> MaintenancePresentation {
     let (state, explanation, actions) = match row {
         MaintenanceRow::Service => (
             Some("Not Checked"),
-            format!(
-                "SpaceTerm hasn\u{2019}t read the service on {machine}. Choose Check Now to sign \
-                 in and read it. Reading starts nothing."
-            ),
+            format!("Choose Check Now to check the server on {machine}."),
             vec![RemoteAction::Check],
         ),
         MaintenanceRow::Update => (
             None,
-            format!("SpaceTerm reads the server version on {machine} when you choose Check Now."),
+            format!("Choose Check Now to read the server version on {machine}."),
             Vec::new(),
         ),
     };
@@ -580,31 +566,26 @@ fn read_service(machine: &str, facts: &MaintenanceFacts) -> MaintenancePresentat
             "Not Installed",
             selector(MaintenanceRow::Service, "not-installed"),
             guidance(format!(
-                "{machine} has no SpaceTerm server for this account. Connect offers to install a \
-                 verified one."
+                "Choose Connect to install SpaceTerm Server for this account on {machine}."
             )),
         ),
         ServicePhase::Running => (
             "Running",
             selector(MaintenanceRow::Service, "running"),
             guidance(format!(
-                "The server on {machine} is running, and it keeps running after SpaceTerm quits."
+                "The server on {machine} keeps running after SpaceTerm quits."
             )),
         ),
         ServicePhase::Stopped => (
             "Stopped",
             selector(MaintenanceRow::Service, "stopped"),
-            guidance(format!(
-                "The server on {machine} was stopped. It stays stopped, even after {machine} \
-                 restarts, until you choose Start Server."
-            )),
+            guidance("Choose Start Server to start it.".to_owned()),
         ),
         ServicePhase::NotRunning => (
             "Not Running",
             selector(MaintenanceRow::Service, "not-running"),
             warning(format!(
-                "The server on {machine} is installed but not running. Choose Start Server to \
-                 start it."
+                "Choose Start Server to start the server on {machine}."
             )),
         ),
     };
@@ -676,10 +657,7 @@ fn update_offer(
         return quiet(
             None,
             "available",
-            format!(
-                "{machine} has no SpaceTerm server for this account, so there is nothing to \
-                 update."
-            ),
+            format!("Install SpaceTerm Server on {machine} before updating it."),
         );
     }
     let candidate = match offer {
@@ -696,8 +674,7 @@ fn update_offer(
                 None,
                 "unavailable",
                 format!(
-                    "This SpaceTerm has no verified server version for {machine}, so it offers \
-                     no update."
+                    "No server update is available for {machine} from this SpaceTerm installation."
                 ),
             );
         }
@@ -705,30 +682,37 @@ fn update_offer(
             return quiet(
                 None,
                 "unchecked",
-                format!(
-                    "Choose Check Now to see whether SpaceTerm has a newer server for {machine}."
-                ),
+                format!("Choose Check Now to check for a server update on {machine}."),
             );
         }
     };
-    let approved = approved
-        .map(|approved| format!("Version {} is approved on {machine}. ", build(approved)))
-        .unwrap_or_default();
-    let effect = if status.running {
-        format!(
-            "Updating ends the Terminal Sessions on {machine} for every client, so SpaceTerm asks \
-             first."
-        )
-    } else if status.stopped {
-        "Updating keeps the server stopped until you choose Start Server.".to_owned()
-    } else {
-        "The server isn\u{2019}t running, so updating ends no Terminal Sessions.".to_owned()
+    let candidate_version = &candidate.version;
+    let explanation = match approved {
+        Some(approved) => {
+            let current_version = build(approved);
+            if status.running {
+                format!(
+                    "Update {current_version} to {candidate_version}. This ends its Terminal Sessions for every client."
+                )
+            } else if status.stopped {
+                format!(
+                    "Update {current_version} to {candidate_version} on {machine}. The server stays stopped until you choose Start Server."
+                )
+            } else {
+                format!(
+                    "Update {current_version} to {candidate_version} on {machine}. No Terminal Sessions are running."
+                )
+            }
+        }
+        None if status.running => {
+            format!("Updating ends the Terminal Sessions on {machine} for every client.")
+        }
+        None if status.stopped => {
+            "Updating keeps the server stopped until you choose Start Server.".to_owned()
+        }
+        None => format!("Update Server transfers version {candidate_version} to {machine}."),
     };
-    let (explanation, tone) = guidance(format!(
-        "{approved}Update Server transfers the verified server version {} that SpaceTerm \
-         includes, then asks before it replaces the approved one. {effect}",
-        candidate.version
-    ));
+    let (explanation, tone) = guidance(explanation);
     MaintenancePresentation {
         state: None,
         state_selector: selector(MaintenanceRow::Update, "available"),
@@ -756,22 +740,12 @@ pub(crate) fn observed(
     Some(match row {
         MaintenanceRow::Service => {
             let (explanation, tone) = match phase {
-                ServicePhase::NotInstalled => guidance(format!(
-                    "{machine} had no SpaceTerm server for this account when SpaceTerm last \
-                     reached it. Connect offers to install a verified one."
-                )),
-                ServicePhase::Running => guidance(format!(
-                    "The server on {machine} was running when SpaceTerm last reached it. Choose \
-                     Check Now to read its service."
-                )),
-                ServicePhase::Stopped => guidance(format!(
-                    "The server on {machine} was stopped when SpaceTerm last reached it. It stays \
-                     stopped until you choose Start Server."
-                )),
-                ServicePhase::NotRunning => warning(format!(
-                    "The server on {machine} was installed but not running when SpaceTerm last \
-                     reached it. Choose Check Now to read its service."
-                )),
+                ServicePhase::NotInstalled => {
+                    guidance("Not installed when last connected. Connect to install it.".to_owned())
+                }
+                ServicePhase::Running => guidance("Running when last connected.".to_owned()),
+                ServicePhase::Stopped => guidance("Stopped when last connected.".to_owned()),
+                ServicePhase::NotRunning => warning("Not running when last connected.".to_owned()),
             };
             MaintenancePresentation {
                 state: Some(phase_badge(phase)),
@@ -850,9 +824,7 @@ fn unresolved_activation(
             "Update Unfinished",
             selector(MaintenanceRow::Update, "unfinished"),
             warning(format!(
-                "The update of {machine} from version {previous} to version {candidate} \
-                 hasn\u{2019}t finished. Choose Finish Update to complete the update you \
-                 confirmed. SpaceTerm doesn\u{2019}t ask again."
+                "The update on {machine} from {previous} to {candidate} is unfinished. Choose Finish Update to continue."
             )),
             vec![RemoteAction::Finish],
         ),
@@ -860,9 +832,7 @@ fn unresolved_activation(
             "Update Uncertain",
             selector(MaintenanceRow::Update, "uncertain"),
             failure(format!(
-                "SpaceTerm couldn\u{2019}t confirm whether the server on {machine} changed from \
-                 version {previous} to version {candidate}. Choose Finish Update to check the \
-                 same update again."
+                "Couldn't confirm the update on {machine}. Choose Finish Update."
             )),
             vec![RemoteAction::Finish],
         ),
@@ -870,10 +840,7 @@ fn unresolved_activation(
             "Update Failed",
             selector(MaintenanceRow::Update, "failed"),
             failure(format!(
-                "Version {candidate} never became ready on {machine}, and the server\u{2019}s \
-                 Terminal Sessions ended. Version {previous} and its saved Workspaces are \
-                 unchanged, so you can return to version {previous}. Terminal Sessions that ended \
-                 don\u{2019}t return."
+                "Version {candidate} didn't start on {machine}, and Terminal Sessions ended. You can return to {previous}."
             )),
             vec![RemoteAction::Return],
         ),
@@ -881,10 +848,7 @@ fn unresolved_activation(
             "Update Failed",
             selector(MaintenanceRow::Update, "failed"),
             failure(format!(
-                "Version {candidate} never became ready on {machine}, and the server\u{2019}s \
-                 Terminal Sessions ended. SpaceTerm couldn\u{2019}t confirm that its saved \
-                 Workspaces are unchanged, so it can\u{2019}t return to version {previous}. \
-                 Terminal Sessions that ended don\u{2019}t return."
+                "Version {candidate} didn't start on {machine}, and Terminal Sessions ended. SpaceTerm can't safely return to {previous}."
             )),
             Vec::new(),
         ),
@@ -931,7 +895,7 @@ fn submitted(
                 Some("Waiting for You"),
                 selector(row, "confirm"),
                 guidance(format!(
-                    "Nothing has been sent to {machine}. Choose {} to review what it affects.",
+                    "Choose {} to review this change on {machine}.",
                     plain(step.label())
                 )),
                 vec![step, RemoteAction::Cancel],
@@ -945,8 +909,7 @@ fn submitted(
             Some("Unconfirmed"),
             selector(row, "unconfirmed"),
             warning(format!(
-                "SpaceTerm didn\u{2019}t hear whether {machine} {}. Choose {} to ask it for the \
-                 answer; it isn\u{2019}t asked to do it again.",
+                "SpaceTerm couldn't confirm whether {machine} {}. Choose {} to check.",
                 did(kind),
                 plain(resolve_action(kind).label())
             )),
@@ -959,11 +922,15 @@ fn submitted(
             (
                 Some("Waiting for You"),
                 selector(row, "waiting"),
-                guidance(format!(
-                    "{} Choose {} to continue; SpaceTerm doesn\u{2019}t ask in the background.",
-                    interaction(*reason, machine),
-                    plain(step.label())
-                )),
+                guidance(if *reason == InteractionReason::FirstSignIn {
+                    format!("Choose {} to sign in to {machine}.", plain(step.label()))
+                } else {
+                    format!(
+                        "{} Choose {} to continue.",
+                        interaction(*reason, machine),
+                        plain(step.label())
+                    )
+                }),
                 vec![step],
                 false,
             )
@@ -985,12 +952,11 @@ fn submitted(
                 // An original bound to an identity the destination no longer reaches can never be
                 // resolved, so the person can stop following it instead of carrying it forever.
                 Some(kind) => format!(
-                    "{} Nothing was sent to it. SpaceTerm can\u{2019}t ask it about the {} it \
-                     already sent.",
+                    "{} SpaceTerm can't check the result of the earlier {}.",
                     continuity(*reason, machine),
                     sent(kind)
                 ),
-                None => format!("{} Nothing was sent to it.", continuity(*reason, machine)),
+                None => continuity(*reason, machine),
             }),
             match kind {
                 Some(kind) => vec![resolve_action(kind), RemoteAction::Discard],
@@ -1027,10 +993,7 @@ fn resolved(
         RetainedOutcome::Refused(reason) => (
             Some("Refused"),
             selector(row, "refused"),
-            failure(format!(
-                "{} Nothing changed on {machine}.",
-                refusal(*reason, machine)
-            )),
+            failure(refusal(*reason, machine)),
             vec![RemoteAction::Acknowledge],
             false,
         ),
@@ -1043,16 +1006,11 @@ fn resolved(
             actions.push(RemoteAction::Acknowledge);
             let detail = if can_return {
                 format!(
-                    "The new version never became ready on {machine}, and the server\u{2019}s \
-                     Terminal Sessions ended. Its previous version and saved Workspaces are \
-                     unchanged, so you can return to it. Terminal Sessions that ended \
-                     don\u{2019}t return."
+                    "The update didn't start on {machine}, and Terminal Sessions ended. You can return to the previous version."
                 )
             } else {
                 format!(
-                    "The new version never became ready on {machine}, and the server\u{2019}s \
-                     Terminal Sessions ended. SpaceTerm couldn\u{2019}t confirm that its saved \
-                     Workspaces are unchanged, so it can\u{2019}t return to the previous version."
+                    "The update didn't start on {machine}, and Terminal Sessions ended. SpaceTerm can't safely return to the previous version."
                 )
             };
             (
@@ -1080,11 +1038,10 @@ fn failed(
             selector(row, "cancelled"),
             warning(match &resolve {
                 Some(step) => format!(
-                    "You stopped waiting for {machine}. A step it already accepted may still take \
-                     effect. Choose {} to ask for the result.",
+                    "Stopped waiting. The action may still finish; choose {} to check.",
                     plain(step.label())
                 ),
-                None => format!("You stopped waiting for {machine}. Nothing was sent to it."),
+                None => format!("SpaceTerm cancelled before sending the request to {machine}."),
             }),
             again(resolve),
             false,
@@ -1092,21 +1049,18 @@ fn failed(
         SshMaintenanceFailure::NeedsPerson(reason) => (
             Some("Waiting for You"),
             selector(row, "waiting"),
-            guidance(format!(
-                "{} Choose {} to continue; SpaceTerm doesn\u{2019}t ask in the background.",
-                interaction(reason, machine),
-                plain(resolve.unwrap_or(RemoteAction::Check).label())
-            )),
+            guidance(if reason == InteractionReason::FirstSignIn {
+                format!("Choose {} to sign in to {machine}.", plain(resolve.unwrap_or(RemoteAction::Check).label()))
+            } else {
+                format!("{} Choose {} to continue.", interaction(reason, machine), plain(resolve.unwrap_or(RemoteAction::Check).label()))
+            }),
             vec![resolve.unwrap_or(RemoteAction::Check)],
             false,
         ),
         SshMaintenanceFailure::Changed(change) => (
             Some("Paused"),
             selector(row, "paused"),
-            failure(format!(
-                "{} Nothing was sent to it.",
-                continuity(change, machine)
-            )),
+            failure(continuity(change, machine)),
             vec![resolve.unwrap_or(RemoteAction::Check)],
             false,
         ),
@@ -1117,21 +1071,14 @@ fn failed(
             Some(submitted) => (
                 Some("Refused"),
                 selector(row, "refused-unresolved"),
-                failure(format!(
-                    "{} {}",
-                    refusal(reason, machine),
-                    unsettled(machine, submitted)
-                )),
+                failure(unsettled_check(machine, submitted)),
                 vec![resolve_action(submitted)],
                 false,
             ),
             None => (
                 Some("Refused"),
                 selector(row, "refused"),
-                failure(format!(
-                    "{} Nothing changed on {machine}.",
-                    refusal(reason, machine)
-                )),
+                failure(refusal(reason, machine)),
                 vec![RemoteAction::Check],
                 false,
             ),
@@ -1140,11 +1087,7 @@ fn failed(
             Some(submitted) => (
                 Some("Incompatible"),
                 selector(row, "incompatible-unresolved"),
-                failure(format!(
-                    "{} {}",
-                    incompatible_cause(incompatible, machine),
-                    unsettled(machine, submitted)
-                )),
+                failure(unsettled_check(machine, submitted)),
                 vec![resolve_action(submitted)],
                 false,
             ),
@@ -1159,14 +1102,16 @@ fn failed(
         SshMaintenanceFailure::Unavailable(kind) => (
             Some("Unavailable"),
             selector(row, "unavailable"),
-            failure(format!(
-                "{} {}",
-                unavailable(kind, machine),
-                match &resolve {
-                    Some(step) => format!("Choose {} when it answers again.", plain(step.label())),
-                    None => "Choose Check Now when it answers again.".to_owned(),
+            failure(match (kind, resolve) {
+                (UnavailableKind::LocalIpcUnavailable, Some(step)) => format!(
+                    "Couldn't prepare the SSH connection. Choose {} when it answers again.",
+                    plain(step.label())
+                ),
+                (UnavailableKind::CandidateUnavailable, None) => {
+                    "This SpaceTerm installation has no server update for that computer. Choose Check Now to try again.".to_owned()
                 }
-            )),
+                _ => unavailable(kind, machine),
+            }),
             vec![resolve.unwrap_or(RemoteAction::Check)],
             false,
         ),
@@ -1175,12 +1120,11 @@ fn failed(
             selector(row, "unconfirmed"),
             warning(match (&resolve, kind) {
                 (Some(step), Some(kind)) => format!(
-                    "SpaceTerm didn\u{2019}t hear whether {machine} {}. Choose {} to ask it for \
-                     the answer; it isn\u{2019}t asked to do it again.",
+                    "SpaceTerm couldn't confirm whether {machine} {}. Choose {} to check.",
                     did(kind),
                     plain(step.label())
                 ),
-                _ => format!("SpaceTerm didn\u{2019}t hear from {machine}."),
+                _ => format!("Didn't hear from {machine}."),
             }),
             again(resolve),
             false,
@@ -1189,8 +1133,7 @@ fn failed(
             Some("No Record"),
             selector(row, "forgotten"),
             warning(format!(
-                "{machine} has no record of the operation SpaceTerm submitted, so SpaceTerm \
-                 can\u{2019}t tell whether it took effect. Nothing was asked again."
+                "SpaceTerm couldn't confirm the result because {machine} has no record of this action."
             )),
             vec![RemoteAction::Check],
             false,
@@ -1204,9 +1147,7 @@ fn failed(
                 Some("Not Started"),
                 selector(row, "not-retained-unresolved"),
                 failure(format!(
-                    "SpaceTerm is still following the {} it already sent to {machine}, so it \
-                     didn\u{2019}t ask for the step you just chose. Nothing was sent to {machine} \
-                     for that step. {}",
+                    "Finish checking the earlier {} on {machine} before starting another action. {}",
                     sent(submitted),
                     unsettled(machine, submitted)
                 )),
@@ -1217,8 +1158,7 @@ fn failed(
                 Some("Not Started"),
                 selector(row, "not-retained"),
                 failure(format!(
-                    "SpaceTerm couldn\u{2019}t save what it needs to follow this operation, so it \
-                     didn\u{2019}t ask {machine} to do it. Nothing changed on {machine}."
+                    "SpaceTerm couldn't save this request, so it did not start the action on {machine}."
                 )),
                 vec![RemoteAction::Check],
                 false,
@@ -1261,10 +1201,17 @@ const fn resolve_action(kind: &SubmittedKind) -> RemoteAction {
 /// machine answers for it.
 fn unsettled(machine: &str, kind: &SubmittedKind) -> String {
     format!(
-        "SpaceTerm can\u{2019}t tell whether {machine} {}. Choose {} to ask for the result; it \
-         isn\u{2019}t asked to do it again.",
+        "SpaceTerm couldn't confirm whether {machine} {}. Choose {} to check.",
         did(kind),
         plain(resolve_action(kind).label())
+    )
+}
+
+fn unsettled_check(machine: &str, kind: &SubmittedKind) -> String {
+    format!(
+        "Choose {} to check whether {machine} {}.",
+        plain(resolve_action(kind).label()),
+        did(kind)
     )
 }
 
@@ -1324,36 +1271,31 @@ const fn working_badge(phase: MaintenancePhase, kind: Option<&SubmittedKind>) ->
 
 fn working_detail(machine: &str, phase: MaintenancePhase, kind: Option<&SubmittedKind>) -> String {
     match (phase, kind) {
-        (MaintenancePhase::Authenticating, _) => format!(
-            "Signing in to {machine} on the route this operation uses. Answer any request from \
-             SSH to continue."
-        ),
-        (MaintenancePhase::Validating, _) => format!(
-            "Checking that {machine} is the same computer, account and server as before\u{2026}"
-        ),
-        (MaintenancePhase::Transferring, _) => format!(
-            "Transferring the verified server version SpaceTerm includes to {machine}\u{2026}"
-        ),
+        (MaintenancePhase::Authenticating, _) => {
+            format!("Answer the SSH prompt to sign in to {machine}.")
+        }
+        (MaintenancePhase::Validating, _) => format!("Verifying the connection to {machine}…"),
+        (MaintenancePhase::Transferring, _) => format!("Preparing the server update on {machine}…"),
         (MaintenancePhase::Resolving, _) => {
-            format!("Asking {machine} for the result of the operation it already received\u{2026}")
+            format!("Checking the result on {machine}…")
         }
         (MaintenancePhase::Dispatching, None) => {
-            format!("Asking {machine} what the change affects\u{2026}")
+            format!("Preparing the change on {machine}…")
         }
         (MaintenancePhase::Dispatching, Some(SubmittedKind::Start)) => {
             format!("Starting the server on {machine}\u{2026}")
         }
         (MaintenancePhase::Dispatching, Some(SubmittedKind::Service(Action::Stop))) => {
-            format!("Stopping the server on {machine}. Its Terminal Sessions end\u{2026}")
+            format!("Stopping the server on {machine}…")
         }
         (MaintenancePhase::Dispatching, Some(SubmittedKind::Service(Action::Restart))) => {
-            format!("Restarting the server on {machine}. Its Terminal Sessions end\u{2026}")
+            format!("Restarting the server on {machine}…")
         }
         (MaintenancePhase::Dispatching, Some(SubmittedKind::Service(Action::Uninstall))) => {
             format!("Removing the service on {machine}\u{2026}")
         }
         (MaintenancePhase::Dispatching, Some(SubmittedKind::Update { .. })) => {
-            format!("Updating the server on {machine}. Its Terminal Sessions end\u{2026}")
+            format!("Updating the server on {machine}…")
         }
         (MaintenancePhase::Dispatching, Some(SubmittedKind::Return)) => {
             format!("Returning the server on {machine} to its previous version\u{2026}")
@@ -1380,54 +1322,34 @@ fn completed_detail(
     active: Option<&RemoteBuild>,
     status: Option<ServiceStatus>,
 ) -> String {
-    let kept = "Its Workspaces and each client\u{2019}s attachments and views are kept, and each \
-                Pane starts a new shell when you next use it.";
     let stays_stopped = status.is_some_and(|status| status.stopped && !status.running);
     let detail = match kind {
         SubmittedKind::Start => format!("The server on {machine} started."),
-        SubmittedKind::Service(Action::Stop) => format!(
-            "The server on {machine} stopped, and its Terminal Sessions ended for every client. \
-             Its Workspaces are kept. It stays stopped until you choose Start Server."
-        ),
-        SubmittedKind::Service(Action::Restart) => format!(
-            "The server on {machine} restarted, and its Terminal Sessions ended for every client. \
-             {kept}"
-        ),
-        SubmittedKind::Service(Action::Uninstall) => format!(
-            "The service on {machine} was removed, and its Terminal Sessions ended for every \
-             client. The server\u{2019}s Workspaces and verified installations are kept, so it \
-             can be installed again."
-        ),
-        // The service named the build it validated as active, so the sentence reads the same
-        // after the desktop reopens. A reply that named none says only what changed.
+        SubmittedKind::Service(Action::Stop) => format!("The server on {machine} stopped."),
+        SubmittedKind::Service(Action::Restart) => format!("The server on {machine} restarted."),
+        SubmittedKind::Service(Action::Uninstall) => {
+            format!("The server on {machine} was uninstalled.")
+        }
         SubmittedKind::Update { .. } => match active {
-            Some(active) => format!(
-                "The server on {machine} now runs version {}, and its Terminal Sessions ended for \
-                 every client. {kept}",
-                build(active)
-            ),
-            None => format!(
-                "The server on {machine} was updated, and its Terminal Sessions ended for every \
-                 client. {kept}"
-            ),
+            Some(active) => format!("The server on {machine} now runs {}.", build(active)),
+            None => format!("The server on {machine} was updated."),
         },
         SubmittedKind::Return => match active {
+            Some(active) if stays_stopped => {
+                format!("The server on {machine} returned to {}.", build(active))
+            }
             Some(active) => format!(
-                "The server on {machine} returned to version {}. Terminal Sessions that ended \
-                 don\u{2019}t return.",
+                "The server on {machine} returned to version {}.",
                 build(active)
             ),
-            None => format!(
-                "The server on {machine} returned to its previous version. Terminal Sessions that \
-                 ended don\u{2019}t return."
-            ),
+            None => format!("The server on {machine} returned to its previous version."),
         },
     };
     let stopped = match kind {
         SubmittedKind::Update { .. } | SubmittedKind::Return if stays_stopped => {
-            format!(" The server on {machine} stays stopped until you choose Start Server.")
+            " It stays stopped until you choose Start Server."
         }
-        _ => String::new(),
+        _ => "",
     };
     format!("{detail}{stopped}")
 }
@@ -1451,64 +1373,52 @@ fn interaction(reason: InteractionReason, machine: &str) -> String {
 
 fn continuity(change: ContinuityChange, machine: &str) -> String {
     match change {
-        ContinuityChange::HostChanged => {
-            format!(
-                "\u{201C}{machine}\u{201D} now reaches a different computer, so SpaceTerm stopped."
-            )
+        ContinuityChange::HostChanged => format!("\"{machine}\" now reaches a different computer."),
+        ContinuityChange::AccountChanged => {
+            format!("\"{machine}\" now signs in to a different account.")
         }
-        ContinuityChange::AccountChanged => format!(
-            "\u{201C}{machine}\u{201D} now signs in to a different account, so SpaceTerm stopped."
-        ),
         ContinuityChange::ServerChanged => format!(
-            "The SpaceTerm server for this account on {machine} is a different server, so \
-             SpaceTerm stopped."
+            "SpaceTerm paused because this account on {machine} now has a different server."
         ),
-        ContinuityChange::BuildChanged => format!(
-            "The SpaceTerm server for this account on {machine} is a different version, so \
-             SpaceTerm stopped."
-        ),
+        ContinuityChange::BuildChanged => {
+            format!("SpaceTerm paused because the server version on {machine} changed.")
+        }
     }
 }
 
 fn refusal(reason: MaintenanceRefusal, machine: &str) -> String {
     match reason {
         MaintenanceRefusal::NotInstalled => {
-            format!("{machine} has no SpaceTerm server for this account.")
+            format!("{machine} has no SpaceTerm Server for this account.")
         }
-        MaintenanceRefusal::NotRunning => {
-            format!("The server on {machine} isn\u{2019}t running, and this needed it running.")
-        }
+        MaintenanceRefusal::NotRunning => format!("Start the server on {machine}, then try again."),
         MaintenanceRefusal::Stopped => {
-            format!("The server on {machine} was stopped. Only Start Server reverses that.")
+            format!("Choose Start Server to start the server on {machine}.")
         }
-        MaintenanceRefusal::Changed => format!(
-            "The server on {machine} changed after SpaceTerm described the change, so it refused \
-             it. Review it and confirm again."
-        ),
-        MaintenanceRefusal::AuthorizationRequired => format!(
-            "{machine} needs an authorization its service doesn\u{2019}t have. Grant it on that \
-             computer, then try again."
-        ),
+        MaintenanceRefusal::Changed => {
+            format!("The server on {machine} changed. Review the action and confirm again.")
+        }
+        MaintenanceRefusal::AuthorizationRequired => {
+            format!("Authorize this action on {machine}, then try again.")
+        }
         MaintenanceRefusal::CandidateUnavailable => {
             "SpaceTerm has no verified server version for that computer.".to_owned()
         }
-        MaintenanceRefusal::CandidateChanged => format!(
-            "The server version SpaceTerm offered doesn\u{2019}t verify for {machine}, so nothing \
-             was installed."
-        ),
+        MaintenanceRefusal::CandidateChanged => {
+            format!("SpaceTerm couldn't verify the server update for {machine}.")
+        }
         MaintenanceRefusal::ReturnUnavailable => format!(
-            "SpaceTerm couldn\u{2019}t prove that returning the server on {machine} to its \
-             previous version is safe."
+            "SpaceTerm can't safely return the server on {machine} to its previous version."
         ),
         MaintenanceRefusal::StorageUnavailable => {
-            format!("The service storage on {machine} is unavailable or unsafely owned.")
+            format!("SpaceTerm can't safely access the saved server data on {machine}.")
         }
         MaintenanceRefusal::Protocol => {
-            format!("The service on {machine} answered something SpaceTerm couldn\u{2019}t read.")
+            format!("SpaceTerm couldn't read the response from the server on {machine}.")
         }
-        MaintenanceRefusal::Unsupported => format!(
-            "The server on {machine} doesn\u{2019}t offer this operation. Update it to use this."
-        ),
+        MaintenanceRefusal::Unsupported => {
+            format!("Update the server on {machine} to use this operation.")
+        }
     }
 }
 
@@ -1516,60 +1426,54 @@ fn refusal(reason: MaintenanceRefusal, machine: &str) -> String {
 /// that server is doing, so a sentence about an operation already dispatched can use it.
 fn incompatible_cause(kind: IncompatibilityKind, machine: &str) -> String {
     match kind {
-        IncompatibilityKind::Protocol => format!(
-            "SpaceTerm and the server for this account on {machine} have no protocol version in \
-             common, so SpaceTerm sent nothing."
-        ),
-        IncompatibilityKind::Capability => format!(
-            "The server for this account on {machine} doesn\u{2019}t support a feature this \
-             SpaceTerm requires, so SpaceTerm sent nothing."
-        ),
+        IncompatibilityKind::Protocol => {
+            format!("SpaceTerm and the server on {machine} are incompatible.")
+        }
+        IncompatibilityKind::Capability => format!("The server on {machine} needs an update."),
         IncompatibilityKind::Platform => format!(
-            "SpaceTerm has no verified server for {machine}\u{2019}s operating system or processor."
+            "SpaceTerm has no verified server for {machine}'s operating system or processor."
         ),
     }
 }
 
-/// The incompatibility of a server nothing was submitted to, which leaves it as it was.
+/// The incompatibility of a server nothing was submitted to.
 fn incompatibility(kind: IncompatibilityKind, machine: &str) -> String {
-    let unchanged = match kind {
-        IncompatibilityKind::Protocol | IncompatibilityKind::Capability => {
-            "The server and its Terminal Sessions keep running."
-        }
-        IncompatibilityKind::Platform => "Nothing was installed.",
-    };
-    format!("{} {unchanged}", incompatible_cause(kind, machine))
+    incompatible_cause(kind, machine)
 }
 
 fn unavailable(kind: UnavailableKind, machine: &str) -> String {
     match kind {
         UnavailableKind::LocalIpcUnavailable => format!(
-            "SpaceTerm couldn\u{2019}t prepare its SSH connection on this computer, so it \
-             didn\u{2019}t reach {machine}. Nothing changed there."
+            "SpaceTerm couldn't prepare the SSH connection to {machine}. Choose Check Now to try again."
         ),
         UnavailableKind::Network => "The network is unavailable.".to_owned(),
-        UnavailableKind::HostUnreachable => format!("SpaceTerm couldn\u{2019}t reach {machine}."),
-        UnavailableKind::SshFailed => format!(
-            "SSH couldn\u{2019}t connect to \u{201C}{machine}\u{201D}. Check your SSH \
-             configuration."
-        ),
-        UnavailableKind::ServiceUnavailable => {
-            format!("The server for this account on {machine} didn\u{2019}t answer.")
-        }
+        UnavailableKind::HostUnreachable => format!("Couldn't reach {machine}."),
+        UnavailableKind::SshFailed => "Check your SSH configuration.".to_owned(),
+        UnavailableKind::ServiceUnavailable => format!("The server on {machine} did not answer."),
         UnavailableKind::CandidateUnavailable => {
             "This SpaceTerm has no verified server version for that computer.".to_owned()
         }
     }
 }
 
-/// Names one build by version and abbreviated commit, as every control surface does.
+/// Names one build by version and abbreviated commit.
 fn build(build: &RemoteBuild) -> String {
-    build_label(&build.version, &build.commit)
+    let commit = build.commit.get(..7).unwrap_or(&build.commit);
+    format!("{} ({commit})", build.version)
 }
 
-/// Names two builds so they read apart, as every control surface does.
+/// Adds the package prefix only when version and commit do not distinguish the builds.
 fn builds(previous: &RemoteBuild, candidate: &RemoteBuild) -> (String, String) {
-    build_labels(name(previous), name(candidate))
+    let ambiguous = build(previous) == build(candidate) && previous.digest != candidate.digest;
+    let label = |value: &RemoteBuild| {
+        if ambiguous && let Some(package) = value.digest.get(..8) {
+            let commit = value.commit.get(..7).unwrap_or(&value.commit);
+            format!("{} ({commit}, {package})", value.version)
+        } else {
+            build(value)
+        }
+    };
+    (label(previous), label(candidate))
 }
 
 fn name(build: &RemoteBuild) -> BuildName<'_> {
@@ -1586,7 +1490,7 @@ pub(crate) struct MaintenanceConfirmation {
     pub(crate) title: &'static str,
     pub(crate) message: SharedString,
     pub(crate) detail: SharedString,
-    pub(crate) confirm: &'static str,
+    pub(crate) confirm: SharedString,
 }
 
 impl MaintenanceConfirmation {
@@ -1608,7 +1512,7 @@ impl MaintenanceConfirmation {
                     title: wording.title(),
                     message: wording.message().into(),
                     detail: wording.detail().into(),
-                    confirm: wording.confirm_label(),
+                    confirm: wording.confirm_label().into(),
                 })
             }
             RemoteMaintenanceRequest::Update | RemoteMaintenanceRequest::Return => {
@@ -1630,7 +1534,7 @@ impl MaintenanceConfirmation {
                     title: wording.title(),
                     message: wording.message().into(),
                     detail: wording.detail().into(),
-                    confirm: wording.confirm_label(),
+                    confirm: wording.confirm_label().into(),
                 })
             }
         }
@@ -1644,14 +1548,12 @@ impl MaintenanceConfirmation {
     pub(crate) fn for_discard(machine: &str, kind: &SubmittedKind) -> Self {
         let sent = sent(kind);
         Self {
-            title: "Discard Operation",
+            title: "Discard",
             message: SharedString::from(format!("Discard the {sent} SpaceTerm sent to {machine}?")),
             detail: SharedString::from(format!(
-                "This record is the only thing that could still tell you what the {sent} did on \
-                 {machine}. SpaceTerm stops following it and keeps no record of it. Nothing is \
-                 sent to {machine}, and what its server already did stays as it is."
+                "SpaceTerm will stop checking this {sent}. You will lose the only remaining way to confirm its result on {machine}."
             )),
-            confirm: "Discard",
+            confirm: "Discard".into(),
         }
     }
 }
@@ -1686,10 +1588,7 @@ pub(crate) const fn discarded_operation(state: &RemoteOperationState) -> Option<
 /// and claims neither, and it claims nothing about what the operation did on that computer.
 fn forgotten_final_word(machine: &str) -> MaintenancePresentation {
     let (explanation, tone) = warning(format!(
-        "{machine} has no record of the operation SpaceTerm sent. The operation may never have \
-         arrived, or that server may have dropped it after admitting it. SpaceTerm can\u{2019}t \
-         tell whether it took effect. SpaceTerm has stopped following it. Choose OK to clear this \
-         entry."
+        "SpaceTerm couldn't confirm the result on {machine}. Choose OK to dismiss this entry."
     ));
     MaintenancePresentation {
         state: Some("No Record"),
@@ -1778,15 +1677,10 @@ fn removed_word(machine: &str, state: &RemoteOperationState) -> Option<Maintenan
 pub(crate) const fn operations_persistence_warning(error: SshIntentStoreError) -> &'static str {
     match error {
         SshIntentStoreError::Unavailable => {
-            "SpaceTerm couldn\u{2019}t save what it knows about the operations you asked for on \
-             your SSH servers. Choosing OK or Discard leaves the operation listed. A result shown \
-             now is gone after SpaceTerm quits. What your servers already did is unchanged."
+            "SpaceTerm couldn't save these results. They're lost when SpaceTerm quits."
         }
         SshIntentStoreError::Malformed => {
-            "SpaceTerm\u{2019}s record of the operations you asked for on your SSH servers is \
-             damaged, so it left the record unchanged. Choosing OK or Discard leaves the \
-             operation listed. A result shown now is gone after SpaceTerm quits. What your \
-             servers already did is unchanged."
+            "SpaceTerm's saved results are damaged. They're lost when SpaceTerm quits."
         }
     }
 }

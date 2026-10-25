@@ -108,7 +108,7 @@ fn a_lost_start_offers_only_a_check_while_reconnecting() {
         notice(&view),
         Some((
             "Reconnecting…".to_owned(),
-            "SpaceTerm checks whether the shell started once it reconnects.".to_owned()
+            "SpaceTerm checks whether the shell started after reconnecting.".to_owned()
         ))
     );
     assert!(
@@ -128,7 +128,7 @@ fn exhausted_recovery_after_a_lost_start_names_the_cause_and_never_starts_again(
         notice(&view),
         Some((
             "Connection Failed".to_owned(),
-            "SpaceTerm stopped reconnecting after repeated failures.".to_owned()
+            "SpaceTerm stopped reconnecting.".to_owned()
         ))
     );
     assert!(view.can_retry() && !view.notice_offers_retry());
@@ -221,9 +221,7 @@ fn a_restored_pane_that_stopped_reconnecting_names_the_failure() {
         notice(&view),
         Some((
             "Connection Failed".to_owned(),
-            "SpaceTerm stopped reconnecting after repeated failures. Start New Shell is \
-             available once SpaceTerm connects."
-                .to_owned()
+            "Choose Retry to reconnect, then Start Session to open a shell.".to_owned()
         ))
     );
     assert!(view.notice_offers_retry());
@@ -234,14 +232,11 @@ fn an_incompatible_server_is_named_without_claiming_which_side_is_older() {
     for (error, cause) in [
         (
             ServerError::IncompatibleProtocol,
-            "SpaceTerm and this Pane\u{2019}s server have no protocol version in common, so \
-             SpaceTerm didn\u{2019}t connect. The server and its Terminal Sessions keep running.",
+            "SpaceTerm and this server are incompatible.",
         ),
         (
             ServerError::MissingRequiredCapability,
-            "This Pane\u{2019}s server doesn\u{2019}t support a feature this SpaceTerm \
-             requires, so SpaceTerm didn\u{2019}t connect. The server and its Terminal Sessions \
-             keep running.",
+            "This server needs an update.",
         ),
     ] {
         let connection = Connection::new(DevelopmentPaneStatus::Connected);

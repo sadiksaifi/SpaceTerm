@@ -282,21 +282,23 @@ impl WindowMovement {
         window: &Window,
     ) -> WindowDragRegion {
         let movement = self.clone();
-        WindowDragRegion::new(
-            SharedString::from(id.clone()),
-            format!(
+        let label = match self.window_name {
+            "About" => "Move About window".to_owned(),
+            "Server Control" => "Move Server Control window".to_owned(),
+            "Developer Workbench" => format!(
                 "Move Operating-System Window from {} chrome",
                 self.window_name
             ),
-            content,
-        )
-        .middle_activation(matches!(
-            window.window_decorations(),
-            gpui::Decorations::Client { .. }
-        ))
-        .pointer_insets(pointer_insets)
-        .debug_selector(id)
-        .on_event(move |event, window, cx| movement.handle(*event, window, cx))
+            _ => "Move Window".to_owned(),
+        };
+        WindowDragRegion::new(SharedString::from(id.clone()), label, content)
+            .middle_activation(matches!(
+                window.window_decorations(),
+                gpui::Decorations::Client { .. }
+            ))
+            .pointer_insets(pointer_insets)
+            .debug_selector(id)
+            .on_event(move |event, window, cx| movement.handle(*event, window, cx))
     }
 
     fn handle(

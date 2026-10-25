@@ -106,12 +106,12 @@ impl DiscoveredSshHost {
 
     pub(crate) fn subtitle(&self) -> String {
         if self.ambiguous {
-            return "Multiple SSH config declarations".to_owned();
+            return "Multiple SSH declarations".to_owned();
         }
         self.direct_target.as_ref().map_or_else(
             || {
                 self.provenance.as_ref().map_or_else(
-                    || "Multiple SSH config sources".to_owned(),
+                    || "Multiple SSH sources".to_owned(),
                     |provenance| provenance.path.display().to_string(),
                 )
             },

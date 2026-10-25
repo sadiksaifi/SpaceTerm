@@ -238,21 +238,15 @@ pub(super) struct LaunchPresentation {
 
 pub(super) const OPENING_TITLE: &str = "Opening Workspaces\u{2026}";
 // Launch reuses a running server or starts it, so the detail claims neither.
-const OPENING_DETAIL: &str = "Your Workspaces open as soon as the server for your account is \
-                              ready.";
+const OPENING_DETAIL: &str = "Waiting for the server…";
 pub(super) const STOPPED_TITLE: &str = "Server Stopped";
-const STOPPED_DETAIL: &str = "You stopped the server, so no Terminal Sessions are running. It \
-                              stays stopped, even after you restart the computer, until you start \
-                              it. Starting it opens your Workspaces.";
+const STOPPED_DETAIL: &str = "Start the server to open your Workspaces.";
 pub(super) const AUTHORIZATION_TITLE: &str = "Run the Server at Startup";
-const AUTHORIZATION_DETAIL: &str = "The server keeps your Terminal Sessions running after you log \
-                                    out. Your computer asks for an administrator password once to \
-                                    let your account\u{2019}s services start at boot and keep \
-                                    running after you log out. This applies to every service your \
-                                    account runs.";
-const AUTHORIZATION_DECLINED: &str = "Authorization did not complete, so nothing changed.";
-const AUTHORIZING_DETAIL: &str = "Enter an administrator password in the system prompt to \
-                                  continue. If you cancel, nothing changes.";
+const AUTHORIZATION_DETAIL: &str =
+    "Enter an administrator password so your Terminal Sessions keep running after you log out.";
+const AUTHORIZATION_DECLINED: &str = "Authorization didn't finish.";
+const AUTHORIZING_DETAIL: &str =
+    "Enter an administrator password in the system prompt to continue.";
 
 /// The title for a launch that could not finish. The detail names the exact reason.
 const fn failure_title(error: ServerError) -> &'static str {
@@ -265,7 +259,7 @@ const fn failure_title(error: ServerError) -> &'static str {
         }
         ServerError::CandidateChanged => "Restart SpaceTerm",
         ServerError::CandidateMissing => "Server Not Included",
-        ServerError::RuntimeUnavailable => "Server Not Verified",
+        ServerError::RuntimeUnavailable => "Couldn't Verify Server",
         ServerError::UnsafeStorage => "Unsafe Server Storage",
         ServerError::StorageUnavailable => "Server Storage Unavailable",
         ServerError::NotInstalled => "Server Not Installed",
@@ -278,14 +272,8 @@ const fn failure_title(error: ServerError) -> &'static str {
 /// whether this build lacks one or holds one that failed verification.
 fn failure_detail(error: ServerError) -> SharedString {
     match error {
-        ServerError::CandidateMissing => format!(
-            "{error} SpaceTerm can\u{2019}t set up the server without one. Nothing changed."
-        )
-        .into(),
-        ServerError::RuntimeUnavailable => {
-            format!("{error} SpaceTerm runs only a server package it can verify. Nothing changed.")
-                .into()
-        }
+        ServerError::CandidateMissing => "".into(),
+        ServerError::RuntimeUnavailable => "Reinstall SpaceTerm, then try again.".into(),
         error => error.to_string().into(),
     }
 }
@@ -359,9 +347,13 @@ pub(super) fn present(state: LaunchState) -> LaunchPresentation {
             waiting: false,
         },
         LaunchState::AuthorizationRequired { declined } => LaunchPresentation {
-            title: AUTHORIZATION_TITLE,
+            title: if declined {
+                "Startup Authorization"
+            } else {
+                AUTHORIZATION_TITLE
+            },
             detail: if declined {
-                format!("{AUTHORIZATION_DECLINED} {AUTHORIZATION_DETAIL}").into()
+                fixed(AUTHORIZATION_DECLINED)
             } else {
                 fixed(AUTHORIZATION_DETAIL)
             },
@@ -370,28 +362,14 @@ pub(super) fn present(state: LaunchState) -> LaunchPresentation {
             waiting: false,
         },
         LaunchState::Incompatible { reason, update } => {
-            let refusal = if reason == ServerError::MissingRequiredCapability {
-                crate::ui::settings_window::MISSING_CAPABILITY
-            } else {
-                crate::ui::settings_window::INCOMPATIBLE_PROTOCOL
-            };
-            // Release numbers say nothing about which side is older, so only a verified
-            // included build the server can update to names a next step.
-            let next = match (update, reason) {
-                (true, _) => {
-                    "SpaceTerm includes a server version that works with it. Updating the server \
-                     ends its Terminal Sessions for every client, so SpaceTerm asks first."
-                }
-                (false, ServerError::MissingRequiredCapability) => {
-                    "To connect, the server needs a version that supports it."
-                }
-                (false, _) => {
-                    "To connect, SpaceTerm and the server need versions that work together."
-                }
+            let detail = match (update, reason) {
+                (true, _) => "Updating the server ends its Terminal Sessions for every client.",
+                (false, ServerError::MissingRequiredCapability) => "This server needs an update.",
+                (false, _) => "SpaceTerm and this server are incompatible.",
             };
             LaunchPresentation {
                 title: failure_title(reason),
-                detail: format!("{refusal} {next}").into(),
+                detail: fixed(detail),
                 progress: None,
                 actions: if update {
                     &[Update, Retry]
@@ -881,7 +859,8 @@ impl WorkspaceManager {
         } = presentation;
         self.launch.spoke.set(true);
         let message: SharedString = match progress {
-            Some(progress) => format!("{title} {progress}").into(),
+            Some(progress) => progress.into(),
+            None if detail.is_empty() => title.into(),
             None => format!("{title}. {detail}").into(),
         };
         let announcement = Some(self.launch.announcement(&message));
@@ -945,25 +924,28 @@ impl WorkspaceManager {
                             .text_color(gpui_color(appearance.colors.text))
                             .child(title),
                     )
-                    .child(
-                        div()
-                            .id("server-launch-detail")
-                            .debug_selector(|| format!("{LAUNCH_SELECTOR}-detail"))
-                            .role(gpui::accesskit::Role::Group)
-                            .when_some(announcement, |detail, node| {
-                                detail.a11y_synthetic_children(move |builder| {
-                                    let mut node = node.clone();
-                                    if let Some(bounds) = builder.parent_node().bounds() {
-                                        node.set_bounds(bounds);
-                                    }
-                                    builder.push_child(builder.synthetic_node_id("status"), node);
+                    .when(!detail.is_empty(), |column| {
+                        column.child(
+                            div()
+                                .id("server-launch-detail")
+                                .debug_selector(|| format!("{LAUNCH_SELECTOR}-detail"))
+                                .role(gpui::accesskit::Role::Group)
+                                .when_some(announcement, |detail, node| {
+                                    detail.a11y_synthetic_children(move |builder| {
+                                        let mut node = node.clone();
+                                        if let Some(bounds) = builder.parent_node().bounds() {
+                                            node.set_bounds(bounds);
+                                        }
+                                        builder
+                                            .push_child(builder.synthetic_node_id("status"), node);
+                                    })
                                 })
-                            })
-                            .whitespace_normal()
-                            .chrome_text(appearance.typography.style(TextRole::Secondary))
-                            .text_color(gpui_color(appearance.colors.text_secondary))
-                            .child(detail),
-                    ),
+                                .whitespace_normal()
+                                .chrome_text(appearance.typography.style(TextRole::Secondary))
+                                .text_color(gpui_color(appearance.colors.text_secondary))
+                                .child(detail),
+                        )
+                    }),
             )
             .when_some(progress, |stage, progress| {
                 stage.child(

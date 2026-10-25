@@ -22,7 +22,7 @@ impl ImportError {
     pub(super) const fn message(self) -> &'static str {
         match self {
             Self::Unreadable => "That file could not be read.",
-            Self::TooLarge => "That file is too large to be a theme file.",
+            Self::TooLarge => "Theme file too large.",
         }
     }
 }

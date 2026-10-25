@@ -20,7 +20,7 @@ const CONFIRMATION_MODAL_ID: &str = "ssh-askpass-confirmation";
 const SECRET_MODAL_ID: &str = "ssh-askpass-secret";
 const MAX_SECRET_BYTES: usize = 16 * 1024;
 const SECRET_INPUT_HEIGHT: f32 = 28.0;
-const REQUIRED_SECRET_MESSAGE: &str = "Enter a response to continue.";
+const REQUIRED_SECRET_MESSAGE: &str = "Enter a response.";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum AskPassAction {

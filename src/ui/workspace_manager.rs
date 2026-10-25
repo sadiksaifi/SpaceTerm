@@ -930,9 +930,14 @@ impl WorkspaceManager {
         let _ = Alert::new(
             ModalId::new("workspace-pin-directory-unavailable"),
             "Directory unavailable",
-            "Directory Unavailable",
-            "The directory could not be pinned. Check that it exists and is accessible, then try again.",
-            vec![ModalAction::new((), "OK", ModalActionRole::Cancel, "workspace-pin-error-ok")],
+            "Couldn't Pin Directory",
+            "Check that the directory exists.",
+            vec![ModalAction::new(
+                (),
+                "OK",
+                ModalActionRole::Cancel,
+                "workspace-pin-error-ok",
+            )],
         )
         .intent(AlertIntent::Warning)
         .present(window, cx, |_, _| {});
@@ -1085,7 +1090,7 @@ impl WorkspaceManager {
     fn remote_workspace_unavailable_reason(&self, cx: &App) -> Option<String> {
         crate::ui::ssh_servers::installed(cx)
             .is_none()
-            .then(|| "SSH isn\u{2019}t available on this computer".to_owned())
+            .then(|| "SSH isn't available.".to_owned())
     }
 
     /// Opens New Remote Workspace or Open Remote Directory: choose an SSH host, connect to the
@@ -1224,11 +1229,10 @@ impl WorkspaceManager {
                         self.remote_workspace_name = None;
                         self.remote_directory_match = None;
                         flow.update(cx, |flow, cx| flow.opened(window, cx));
-                        Self::show_shared_unavailable(
+                        Self::show_shared_unavailable_with_title(
+                            "Couldn't Open Workspace",
                             &format!(
-                                "SpaceTerm couldn\u{2019}t check whether a Workspace on \
-                                 \u{201C}{}\u{201D} already uses this directory, so it didn\u{2019}t \
-                                 open one. Try again.",
+                                "Couldn't check for an existing Workspace on \"{}\". Try again.",
                                 destination_name
                             ),
                             window,
@@ -1471,8 +1475,13 @@ impl WorkspaceManager {
             ModalId::new("workspace-home-directory-unavailable"),
             "Home directory unavailable",
             "Home Directory Unavailable",
-            "A workspace could not be created. Check that your home directory exists and is accessible, then try again.",
-            vec![ModalAction::new((), "OK", ModalActionRole::Cancel, "workspace-home-error-ok")],
+            "Check that your home directory exists.",
+            vec![ModalAction::new(
+                (),
+                "OK",
+                ModalActionRole::Cancel,
+                "workspace-home-error-ok",
+            )],
         )
         .intent(AlertIntent::Warning)
     }
@@ -1627,10 +1636,11 @@ impl WorkspaceManager {
         let count = self.close_hierarchy(cx).affected_pane_count(target);
         let noun = if count == 1 { "Pane" } else { "Panes" };
         let message = match scope {
-            CloseScope::Workspace => format!(
-                "Kill this Workspace and close its {count} {noun}? Running commands in these \
-                 Panes will stop."
-            ),
+            CloseScope::Workspace => format!("Running commands in its {count} {noun} stop."),
+            CloseScope::Pane | CloseScope::Window => {
+                format!("Running commands in {count} {noun} will stop.")
+            }
+            CloseScope::Tab => format!("Running commands in {count} {noun} stop."),
             _ => format!("Close {count} {noun}? Running commands in these Panes will stop."),
         };
         let result = Alert::new(
@@ -2682,29 +2692,26 @@ impl WorkspaceManager {
                 cx,
             ),
         );
-        let drag_region = WindowDragRegion::new(
-            "workspace-top-chrome-drag-region",
-            "Move Operating-System Window from Workspace chrome",
-            content,
-        )
-        .middle_activation(matches!(
-            window.window_decorations(),
-            gpui::Decorations::Client { .. }
-        ))
-        .status(self.window_drag_status.clone())
-        .pointer_insets(Edges {
-            right: super::control_theme::resize_handle::spacious_target_half_thickness(cx),
-            ..Edges::default()
-        })
-        .debug_selector("workspace-top-chrome-drag-region")
-        .on_event(move |event, window, cx| {
-            let event = *event;
-            drag_manager
-                .update(cx, |manager, cx| {
-                    manager.handle_operating_system_window_drag_event(event, window, cx)
+        let drag_region =
+            WindowDragRegion::new("workspace-top-chrome-drag-region", "Move Window", content)
+                .middle_activation(matches!(
+                    window.window_decorations(),
+                    gpui::Decorations::Client { .. }
+                ))
+                .status(self.window_drag_status.clone())
+                .pointer_insets(Edges {
+                    right: super::control_theme::resize_handle::spacious_target_half_thickness(cx),
+                    ..Edges::default()
                 })
-                .unwrap_or_default()
-        });
+                .debug_selector("workspace-top-chrome-drag-region")
+                .on_event(move |event, window, cx| {
+                    let event = *event;
+                    drag_manager
+                        .update(cx, |manager, cx| {
+                            manager.handle_operating_system_window_drag_event(event, window, cx)
+                        })
+                        .unwrap_or_default()
+                });
 
         spaceterm_ui::ControlHost::TitleBar
             .mount(
@@ -3674,9 +3681,9 @@ impl WorkspaceManager {
                 return true;
             }
             Err(SharedCloseUnavailable::Unreported) => {
-                Self::show_shared_unavailable(
-                    "The server has not reported which Terminal Sessions this would end yet, so \
-                     SpaceTerm cannot show what you would approve. Nothing was closed.",
+                Self::show_shared_unavailable_with_title(
+                    "Couldn't Close Yet",
+                    "Wait for SpaceTerm to check the affected Terminal Sessions, then try again.",
                     window,
                     cx,
                 );
@@ -4026,8 +4033,11 @@ impl WorkspaceManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let message = "A Pane was added or removed, or a Terminal Session started or ended, \
-                       after the confirmation opened. Nothing was closed.";
+        let message = if target.is_some() {
+            "Nothing was closed. Review the updated Terminal Sessions before closing."
+        } else {
+            "Nothing was closed. Check the Workspace before closing it again."
+        };
         let mut actions = Vec::new();
         if target.is_some() {
             actions.push(
@@ -4156,7 +4166,7 @@ impl WorkspaceManager {
             ModalId::new("shared-close-missing"),
             approval.missing_title(),
             approval.missing_title(),
-            "Another client removed it while the confirmation was open. Nothing else changed.",
+            "Another client already closed it.",
             vec![ModalAction::new(
                 (),
                 "OK",
@@ -4181,8 +4191,7 @@ impl WorkspaceManager {
             |entry| entry.name().to_owned(),
         );
         let detail = format!(
-            "Another client changed the {} of {name} first, so the server kept its value and your \
-             change was not applied.\n\nOn the server: {}\nYour change: {}",
+            "Another client changed the {} of {name}. Current value: {}\nYour change: {}",
             conflict.field.label(),
             conflict.authoritative,
             conflict.draft.display(),
@@ -4197,14 +4206,14 @@ impl WorkspaceManager {
             vec![
                 ModalAction::new(
                     true,
-                    "Try Again",
+                    conflict.field.retry_label(),
                     ModalActionRole::Affirmative,
                     SHARED_CONFLICT_RETRY_SELECTOR,
                 )
                 .with_emphasis(ModalActionEmphasis::Prominent),
                 ModalAction::new(
                     false,
-                    "Keep the Server\u{2019}s Value",
+                    "Keep Current Value",
                     ModalActionRole::Cancel,
                     SHARED_CONFLICT_KEEP_SELECTOR,
                 ),
@@ -4282,26 +4291,40 @@ impl WorkspaceManager {
 
     /// Explains a shared edit this client could not submit. Nothing was sent, and nothing waits.
     fn show_shared_refusal(
-        operation: &str,
+        _operation: &str,
         reason: super::shared_workspaces::SharedRefusalReason,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let detail = format!(
-            "SpaceTerm did not {operation} on the server. {}",
-            reason.explanation()
-        );
-        Self::show_shared_unavailable(&detail, window, cx);
+        let detail = match reason {
+            super::shared_workspaces::SharedRefusalReason::Offline => "Reconnect, then try again.",
+            super::shared_workspaces::SharedRefusalReason::Pending => {
+                "Wait for the current changes to finish, then try again."
+            }
+            super::shared_workspaces::SharedRefusalReason::Value => {
+                "Enter a shorter name or directory, then try again."
+            }
+        };
+        Self::show_shared_unavailable_with_title("Couldn't Make Change", detail, window, cx);
     }
 
     /// Returns whether the alert was presented over the active Settings Window.
     fn show_shared_unavailable(detail: &str, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        Self::show_shared_unavailable_with_title("Shared Change Unavailable", detail, window, cx)
+    }
+
+    fn show_shared_unavailable_with_title(
+        title: &'static str,
+        detail: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
         let detail = detail.to_owned();
         let alert = move || {
             Alert::new(
                 ModalId::new("shared-workspace-unavailable"),
                 "Shared change unavailable",
-                "Shared Change Unavailable",
+                title,
                 detail.clone(),
                 vec![ModalAction::new(
                     (),
@@ -4792,8 +4815,7 @@ impl WorkspaceManager {
 /// What a detached Workspace's Workspace Switcher result says beneath its name.
 const DETACHED_DESCRIPTION: &str = "Detached";
 /// The same result while this client cannot change its attachments.
-const DETACHED_UNAVAILABLE_DESCRIPTION: &str =
-    "Detached. Attaching is unavailable until SpaceTerm reopens.";
+const DETACHED_UNAVAILABLE_DESCRIPTION: &str = "Detached. Reopen SpaceTerm to attach.";
 
 /// A detached Workspace's Workspace Switcher result, named by its server identity's leading bytes.
 fn detached_switcher_selector(server: spaceterm_server::hierarchy::Id) -> String {
@@ -4822,30 +4844,23 @@ impl AttachmentChange {
         match (self, failure) {
             (Self::Attach, Unchanged) => (
                 "Workspace not attached",
-                "Workspace Not Attached",
-                "SpaceTerm could not save the attachment on this device, so nothing changed. \
-                 The Workspace keeps running on the server.",
+                "Couldn't Attach Workspace",
+                "The Workspace keeps running.",
             ),
             (Self::Attach, Uncertain) => (
                 "Attachment not confirmed",
-                "Attachment Not Confirmed",
-                "SpaceTerm cannot confirm whether this device saved the attachment. The \
-                 Workspace keeps running on the server. SpaceTerm makes no more attachment \
-                 changes until you quit and reopen it.",
+                "Couldn't Confirm Attachment",
+                "Quit and reopen SpaceTerm before you attach or detach more Workspaces. This Workspace keeps running.",
             ),
             (Self::Detach, Unchanged) => (
                 "Workspace not detached",
-                "Workspace Not Detached",
-                "SpaceTerm could not save the change on this device, so the Workspace stays \
-                 here. It keeps running on the server.",
+                "Couldn't Detach Workspace",
+                "The Workspace stays here.",
             ),
             (Self::Detach, Uncertain) => (
                 "Detach not confirmed",
-                "Detach Not Confirmed",
-                "SpaceTerm removed the Workspace from this window but cannot confirm that this \
-                 device saved the change, so it may return when SpaceTerm reopens. It keeps \
-                 running on the server. SpaceTerm makes no more attachment changes until you \
-                 quit and reopen it.",
+                "Couldn't Confirm Detach",
+                "This Workspace might return when SpaceTerm reopens. Quit and reopen SpaceTerm before you attach or detach more Workspaces.",
             ),
         }
     }
@@ -4859,9 +4874,8 @@ const SHARED_CONFLICT_RETRY_SELECTOR: &str = "shared-workspace-conflict-retry";
 const SHARED_CONFLICT_KEEP_SELECTOR: &str = "shared-workspace-conflict-keep";
 
 /// Why a directory on this computer never becomes another computer's server Workspace pin.
-const REMOTE_LOCAL_PIN_REFUSED: &str = "This Workspace runs on another computer, so a folder on \
-                                        this computer can\u{2019}t be its pinned directory. \
-                                        Nothing changed.";
+const REMOTE_LOCAL_PIN_REFUSED: &str =
+    "Choose a directory on the computer where this Workspace runs.";
 
 impl Render for WorkspaceManager {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {

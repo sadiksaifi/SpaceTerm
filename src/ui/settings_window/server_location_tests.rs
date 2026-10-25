@@ -22,11 +22,11 @@ fn each_typed_problem_appears_under_the_field_as_the_person_types() {
         ("", "Enter a location."),
         (
             "~/wt/{repo}/{branch}",
-            "Use only the {repository} and {branch} placeholders.",
+            "Use only {repository} and {branch} placeholders.",
         ),
         (
             "~/wt/{repository}",
-            "Include {branch}, so each Worktree gets its own folder.",
+            "Include {branch} for separate Worktree directories.",
         ),
         ("wt/{branch}", "Start the location with ~/ or /."),
     ] {
@@ -64,10 +64,7 @@ fn an_unwritable_folder_appears_only_for_the_text_the_server_checked() {
     );
     assert_eq!(
         model.message(),
-        Some((
-            "The server can\u{2019}t write to this folder.",
-            CaptionTone::Error
-        ))
+        Some(("The server can't write here.", CaptionTone::Error))
     );
     assert_eq!(model.commit(), None);
 }
@@ -290,10 +287,7 @@ mod presented {
         type_location("/Volumes/Locked/{branch}", servers.cx);
         wait(Duration::from_millis(400), servers.cx);
 
-        assert!(says(
-            "The server can\u{2019}t write to this folder.",
-            servers.cx
-        ));
+        assert!(says("The server can't write here.", servers.cx));
         servers.cx.simulate_keystrokes("enter");
         servers.cx.run_until_parked();
         assert!(edits.submitted().is_empty());

@@ -55,10 +55,10 @@ enum HostDiscoveryIssueClass {
 impl HostDiscoveryIssueClass {
     const fn action(self) -> &'static str {
         match self {
-            Self::Unreadable => "check SSH config file permissions",
-            Self::Malformed => "fix malformed SSH config directives",
-            Self::IncludeCycle => "remove recursive Include directives",
-            Self::SafetyLimit => "narrow Include patterns or reduce config size",
+            Self::Unreadable => "check SSH file permissions",
+            Self::Malformed => "fix malformed SSH directives",
+            Self::IncludeCycle => "remove recursive Includes",
+            Self::SafetyLimit => "narrow Includes or reduce config size",
         }
     }
 }
@@ -104,13 +104,16 @@ impl HostDiscoveryDiagnostic {
             .map(HostDiscoveryIssueClass::action)
             .collect::<Vec<_>>()
             .join("; ");
-        let description = format!("To load all hosts, {actions}, then refresh.");
+        let mut description = format!("{actions}, then refresh.");
+        if let Some(first) = description.get_mut(..1) {
+            first.make_ascii_uppercase();
+        }
         debug_assert!(description.len() <= MAXIMUM_DISCOVERY_WARNING_BYTES);
         Some(Self {
             title: if discovery.hosts.is_empty() {
-                "No safe SSH hosts were found"
+                "No SSH hosts found"
             } else {
-                "SSH host list is incomplete"
+                "SSH host list incomplete"
             },
             description,
         })
@@ -136,10 +139,10 @@ fn empty_state(discovery: &HostDiscovery, query: &str) -> CommandPaletteEmpty {
         CommandPaletteEmpty::new(diagnostic.title).description(diagnostic.description)
     } else if query.is_empty() && discovery.hosts.is_empty() {
         CommandPaletteEmpty::new("No SSH hosts configured")
-            .description("Add a host to connect to it from SpaceTerm.")
+            .description("Add an SSH host to connect.")
     } else {
         CommandPaletteEmpty::new("No matching SSH hosts")
-            .description("Check the host name, or add it as a new SSH host.")
+            .description("Check the host name or add an SSH host.")
     };
     empty.action(
         CommandPaletteEmptyAction::new(ADD_HOST_ACTION, ADD_HOST_LABEL)
@@ -945,7 +948,7 @@ mod tests {
 
         let diagnostic = HostDiscoveryDiagnostic::for_discovery(&discovery).unwrap();
 
-        assert!(diagnostic.description.contains("narrow Include patterns"));
+        assert!(diagnostic.description.contains("Narrow Includes"));
         assert!(diagnostic.description.len() <= MAXIMUM_DISCOVERY_WARNING_BYTES);
     }
 
@@ -1008,12 +1011,12 @@ mod tests {
         let diagnostic = picker.read_with(cx, |picker, _| {
             HostDiscoveryDiagnostic::for_discovery(&picker.discovery).unwrap()
         });
-        assert_eq!(diagnostic.title, "No safe SSH hosts were found");
+        assert_eq!(diagnostic.title, "No SSH hosts found");
         assert_eq!(
             picker.read_with(cx, |picker, _| empty_state(&picker.discovery, "")
                 .title()
                 .to_owned()),
-            "No safe SSH hosts were found"
+            "No SSH hosts found"
         );
         assert!(cx.debug_bounds(DISCOVERY_WARNING_SELECTOR).is_none());
         assert!(cx.debug_bounds(EMPTY_ADD_HOST_SELECTOR).is_some());
@@ -1163,7 +1166,7 @@ mod tests {
             picker.read_with(cx, |picker, _| empty_state(&picker.discovery, "new-host")
                 .title()
                 .to_owned()),
-            "SSH host list is incomplete"
+            "SSH host list incomplete"
         );
         cx.simulate_keystrokes("enter");
         cx.run_until_parked();

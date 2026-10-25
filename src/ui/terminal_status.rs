@@ -23,7 +23,7 @@ const BLINK_STEP: Duration = Duration::from_millis(500);
 /// How many times the glyph blinks before it rests with an additive unread badge.
 const BLINKS: u32 = 4;
 /// Names the Terminal Session's reported work for the frame spinner. It stays content-free.
-const PROGRESS_NAME: &str = "terminal progress";
+const PROGRESS_NAME: &str = "progress";
 
 /// Whether the active Chrome typography and its selected fallbacks can draw every base in a
 /// reported glyph. Shaping first makes the text system choose the fallback run painting will use.
