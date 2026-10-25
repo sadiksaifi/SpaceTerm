@@ -11,6 +11,7 @@ use spaceterm_server::{
 use std::{ffi::OsString, path::Path, process::ExitCode};
 
 const IDENTITY: &str = env!("SPACETERM_SERVER_IDENTITY");
+include!(concat!(env!("OUT_DIR"), "/build-info.rs"));
 
 fn main() -> ExitCode {
     match run() {
@@ -108,7 +109,7 @@ fn stage(
     signature: &Path,
     digest: &str,
 ) -> Result<RetainedInstallation, ServerError> {
-    service.provision_candidate(archive, signature, digest, 1, &["workspace_policy"])
+    service.provision_candidate(archive, signature, digest, PROTOCOL_MAJOR, CAPABILITIES)
 }
 
 fn run() -> Result<ExitCode, cli::Error> {
@@ -141,17 +142,9 @@ fn run() -> Result<ExitCode, cli::Error> {
         return Ok(ExitCode::SUCCESS);
     }
     if args == ["--build-info"] {
-        println!(
+        print!(
             "{}",
-            serde_json::json!({
-                "schema": 1,
-                "identity": IDENTITY,
-                "version": env!("SPACETERM_SERVER_VERSION"),
-                "commit": env!("SPACETERM_SERVER_COMMIT"),
-                "target": env!("SPACETERM_SERVER_TARGET"),
-                "protocol_major": 1,
-                "capabilities": ["workspace_policy"],
-            })
+            include_str!(concat!(env!("OUT_DIR"), "/build-info.json"))
         );
         return Ok(ExitCode::SUCCESS);
     }

@@ -4,13 +4,10 @@
 # USAGE flag "--identity <identity>" help="Nonproduction application identity" default="spaceterm-development" {
 # USAGE   choices "spaceterm-development" "spaceterm-preflight"
 # USAGE }
-# USAGE flag "--ssh-config <path>" help="OpenSSH config containing trusted native builder aliases"
 """Prepare both signed nonproduction server targets from the current source.
 
-Configure macos-builder and linux-builder as trusted native SSH builder aliases.
-Each peer needs ~/Projects/SpaceTerm, rsync, mise and the native build prerequisites.
-The current source, including uncommitted files, is built in target/server-builds;
-existing source, services and other build caches are preserved.
+Both target packages are cross-built locally, including current uncommitted source.
+No remote builder or production signing credentials are required.
 """
 
 import argparse
@@ -23,8 +20,5 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("destination", type=Path)
     parser.add_argument("--identity", choices=NONPRODUCTION, default="spaceterm-development")
-    parser.add_argument(
-        "--ssh-config", help="OpenSSH config containing trusted native builder aliases"
-    )
     args = parser.parse_args()
-    main(lambda: prepare(args.destination, args.identity, ssh_config=args.ssh_config) and 0)
+    main(lambda: prepare(args.destination, args.identity) and 0)

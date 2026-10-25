@@ -105,7 +105,7 @@ def stage_bundle(executable, server, *, catalog=None):
     return bundle
 
 
-def launch(*, ssh_config=None):
+def launch():
     from spaceterm_tasks.server_builds import prepare
 
     with (
@@ -113,9 +113,7 @@ def launch(*, ssh_config=None):
         tempfile.TemporaryDirectory(prefix="spaceterm-development-catalog-") as temporary,
     ):
         environment = source_environment(os.environ)
-        catalog = prepare(
-            Path(temporary) / "catalog", "spaceterm-development", ssh_config=ssh_config
-        )
+        catalog = prepare(Path(temporary) / "catalog", "spaceterm-development")
         server = build_executable(
             "--package",
             "spaceterm-server-host",

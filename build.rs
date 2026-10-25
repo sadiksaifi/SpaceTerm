@@ -46,6 +46,7 @@ fn candidate_provenance(packaged: bool) {
 
 fn main() {
     println!("cargo:rerun-if-env-changed=SPACETERM_PACKAGED");
+    println!("cargo:rerun-if-env-changed=SPACETERM_SERVER_SOURCE_STATE");
     println!("cargo:rerun-if-env-changed=SPACETERM_RELEASE_TAG");
     println!("cargo:rerun-if-env-changed=SPACETERM_SPARKLE_DIR");
     println!("cargo:rustc-check-cfg=cfg(spaceterm_sparkle)");

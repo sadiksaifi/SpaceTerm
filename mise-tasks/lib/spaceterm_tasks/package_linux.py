@@ -104,7 +104,7 @@ def write_archive(tree, archive):
         output.add(tree, arcname=tree.name, filter=normalized)
 
 
-def package(release_tag=None, *, ssh_config=None):
+def package(release_tag=None):
     """Build, stage, archive, and verify one identity, then move the archive into dist/."""
     require_x86_64_linux()
     if release_tag:
@@ -121,7 +121,6 @@ def package(release_tag=None, *, ssh_config=None):
             STAGE / DIRECTORIES[name] / "share/spaceterm/server-artifact",
             DIRECTORIES[name],
             release_tag,
-            ssh_config=ssh_config,
             catalog_destination=STAGE / DIRECTORIES[name] / "share/spaceterm/server-artifacts",
         )
     )

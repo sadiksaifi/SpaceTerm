@@ -318,7 +318,10 @@ fn verify_required_library_exports(
     link_mode: LinkMode,
     requested_libraries: &[PathBuf],
 ) {
-    if !target.contains("darwin") || !matches!(link_mode, LinkMode::Static) {
+    // The host's nm must understand Mach-O archives. GNU nm on a Linux cross-build
+    // host does not; the target binary is checked by the server packager instead.
+    let darwin_host = env::var("HOST").is_ok_and(|host| host.contains("darwin"));
+    if !darwin_host || !target.contains("darwin") || !matches!(link_mode, LinkMode::Static) {
         return;
     }
 
