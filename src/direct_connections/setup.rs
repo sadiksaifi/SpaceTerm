@@ -39,15 +39,26 @@ impl DirectConnections {
         // Resume validates the pinned endpoint without opening a connection.
         direct::Enrollment::resume(&endpoint, pin.clone(), operation, &credential)?;
         let public_key = credential.public_key()?;
-        let mut state = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
-        if !state.inventory_loaded {
-            return Err(DirectError::StorageUnavailable);
+        {
+            let state = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
+            if !state.inventory_loaded {
+                return Err(DirectError::StorageUnavailable);
+            }
+            state.document.ensure_capacity()?;
         }
-        state.document.ensure_capacity()?;
+        // Native credential access may wait for account authorization. Snapshots
+        // and unrelated cleanup must remain available throughout that wait.
         self.0
             .credentials
             .insert(&key, credential.expose_bytes())
             .map_err(worker::credential_error)?;
+        let mut state = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
+        if let Err(error) = state.document.ensure_capacity() {
+            drop(state);
+            // This key was never offered to a server or transferred to recovery.
+            let _ = self.0.credentials.remove(&key, Interaction::Quiet);
+            return Err(error);
+        }
         state.document.pending.push(PendingRecord::enrollment(
             operation,
             "Server setup".into(),
@@ -402,6 +413,85 @@ mod tests {
             );
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
+    }
+
+    #[test]
+    fn a_waiting_native_credential_insert_does_not_block_registry_snapshots() {
+        struct WaitingCredentials {
+            store: Credentials,
+            entered: std::sync::mpsc::Sender<()>,
+            release: Mutex<std::sync::mpsc::Receiver<()>>,
+        }
+        impl CredentialStore for WaitingCredentials {
+            fn read(
+                &self,
+                key: &[u8; 32],
+                interaction: Interaction,
+            ) -> Result<Option<Zeroizing<Vec<u8>>>, credentials::CredentialError> {
+                self.store.read(key, interaction)
+            }
+            fn insert(
+                &self,
+                key: &[u8; 32],
+                secret: &[u8],
+            ) -> Result<(), credentials::CredentialError> {
+                self.entered
+                    .send(())
+                    .map_err(|_| credentials::CredentialError::Unavailable)?;
+                self.release
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .map_err(|_| credentials::CredentialError::Unavailable)?;
+                self.store.insert(key, secret)
+            }
+            fn remove(
+                &self,
+                key: &[u8; 32],
+                interaction: Interaction,
+            ) -> Result<(), credentials::CredentialError> {
+                self.store.remove(key, interaction)
+            }
+        }
+        let (entered, inserting) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let owner = DirectConnections::new(
+            "spaceterm-development",
+            Arc::new(MemoryRecords::default()),
+            Arc::new(WaitingCredentials {
+                store: Credentials::default(),
+                entered,
+                release: Mutex::new(released),
+            }),
+            Arc::new(Network {
+                fail: true,
+                cancellation: CancellationToken::default(),
+                connections: AtomicUsize::new(0),
+                cancellations: Mutex::default(),
+            }),
+        );
+        owner.resume_retained();
+        let setup = owner.clone();
+        let preparation = std::thread::spawn(move || {
+            setup.prepare_setup(
+                "wss://127.0.0.1:9231/spaceterm".into(),
+                saved(1, 2).route.paired.pin,
+                0,
+            )
+        });
+        inserting
+            .recv_timeout(std::time::Duration::from_secs(3))
+            .unwrap();
+        let reader = owner.clone();
+        let (read, snapshot) = std::sync::mpsc::channel();
+        let observation = std::thread::spawn(move || read.send(reader.routes()).unwrap());
+        let observed_while_waiting = snapshot.recv_timeout(std::time::Duration::from_secs(3));
+        // Release the boundary before asserting, including when the regression is present.
+        release.send(()).unwrap();
+        let prepared = preparation.join().unwrap().unwrap();
+        observation.join().unwrap();
+        assert_eq!(observed_while_waiting.unwrap(), Vec::new());
+        drop(prepared);
     }
 
     #[test]
