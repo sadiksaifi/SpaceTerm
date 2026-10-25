@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 import re
+import select
 import shlex
 import shutil
 import signal
@@ -19,6 +20,7 @@ import sys
 import tempfile
 import threading
 import tomllib
+from contextlib import suppress
 from pathlib import Path
 
 from spaceterm_tasks import ROOT, TaskError, main
@@ -175,17 +177,56 @@ def _remote_run(command, failure):
     with terminating_signals_raise():
         process = subprocess.Popen(command, stdin=subprocess.PIPE, start_new_session=OWN_GROUP)
         try:
+            assert process.stdin is not None
+            while process.poll() is None:
+                try:
+                    process.stdin.write(b".")
+                    process.stdin.flush()
+                except BrokenPipeError:
+                    break
+                try:
+                    process.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    pass
             status = process.wait()
         except BaseException:
             if process.stdin:
-                process.stdin.close()
+                with suppress(BrokenPipeError):
+                    process.stdin.close()
             stop_group(process)
             raise
         finally:
             if process.stdin:
-                process.stdin.close()
+                with suppress(BrokenPipeError):
+                    process.stdin.close()
     if status:
         raise TaskError(failure)
+
+
+def _sync_source(source, destination, transport, failure):
+    """Transfer source and sanitized Git metadata, excluding later ignored tool output."""
+    files, repositories, _ = _source(source)
+    selected = set(files)
+    for relative in repositories:
+        metadata = source / relative / ".git"
+        selected.add(relative / ".git/refs")
+        selected.update(path.relative_to(source) for path in metadata.rglob("*") if path.is_file())
+    with tempfile.NamedTemporaryFile() as manifest:
+        manifest.write(b"\0".join(os.fsencode(path) for path in sorted(selected)) + b"\0")
+        manifest.flush()
+        checked(
+            [
+                "rsync",
+                "-a",
+                "--from0",
+                "--files-from",
+                manifest.name,
+                *transport,
+                str(source) + "/",
+                destination,
+            ],
+            failure,
+        )
 
 
 def _peer(source, digest, identity, target, output, ssh_config):
@@ -214,20 +255,11 @@ def _peer(source, digest, identity, target, output, ssh_config):
     remote_source = remote + "/sources/" + digest
     checked([*ssh, peer, "mkdir -p " + shlex.quote(remote_source)], failure)
     # A content-addressed tree is only source. Cargo and Zig caches remain separate.
-    checked(
-        [
-            "rsync",
-            "-a",
-            "--delete",
-            "-e",
-            shlex.join(ssh),
-            str(source) + "/",
-            peer + ":" + shlex.quote(remote_source) + "/",
-        ],
-        failure,
+    _sync_source(
+        source, peer + ":" + shlex.quote(remote_source) + "/", ("-e", shlex.join(ssh)), failure
     )
     runner = (
-        'set -eu; export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"; '
+        'set -eu; export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH" PYTHONDONTWRITEBYTECODE=1; '
         f"cd {shlex.quote(remote_source)}; "
         "mise trust --yes .mise.toml; "
         f"exec mise exec -- python -m spaceterm_tasks.server_builds --native {shlex.quote(identity)} "
@@ -272,19 +304,21 @@ def native(identity, digest, cache):
         # Build scripts may embed CARGO_MANIFEST_DIR. Keep that path stable across
         # snapshots while the host lock excludes another producer from replacing it.
         stable = cache / "build-source" / identity
-        stable.mkdir(parents=True, exist_ok=True)
-        checked(
-            [
-                "rsync",
-                "-a",
-                "--delete",
-                "--exclude=/target",
-                "--exclude=/dist",
-                str(ROOT) + "/",
-                str(stable) + "/",
-            ],
-            "the native builder could not prepare its stable source directory",
-        )
+        with tempfile.TemporaryDirectory(dir=cache, prefix=".build-source-") as temporary:
+            prepared = Path(temporary) / "source"
+            prepared.mkdir()
+            _sync_source(
+                ROOT,
+                str(prepared) + "/",
+                (),
+                "the native builder could not prepare its stable source directory",
+            )
+            stable.parent.mkdir(parents=True, exist_ok=True)
+            # Only this task's disposable source copy is replaced, under its host lock.
+            # Cargo, Zig, sysroots and authenticated catalog outputs are retained.
+            if stable.exists():
+                shutil.rmtree(stable)
+            prepared.rename(stable)
         _run_local(stable, identity, digest, cache, build=True)
         return catalog / target
 
@@ -330,14 +364,18 @@ def _run_local(source, identity, digest, cache, *, build=False):
         process = subprocess.Popen(
             command,
             cwd=source,
-            env={**os.environ, "PYTHONPATH": str(source / "mise-tasks/lib")},
+            env={
+                **os.environ,
+                "PYTHONPATH": str(source / "mise-tasks/lib"),
+                "PYTHONDONTWRITEBYTECODE": "1",
+            },
             start_new_session=OWN_GROUP,
         )
         try:
             if process.wait():
                 raise TaskError("the local native server builder failed")
         except BaseException:
-            stop_group(process)
+            stop_group(process, timeout=15)
             raise
 
 
@@ -373,6 +411,15 @@ def prepare(destination, identity, *, ssh_config=None):
     return destination
 
 
+def _watch_stdin():
+    """A broken SSH connection cannot leave the exact native build running indefinitely."""
+    while True:
+        ready, _, _ = select.select([sys.stdin], [], [], 15)
+        if not ready or os.read(sys.stdin.fileno(), 1) != b".":
+            os.kill(os.getpid(), signal.SIGTERM)
+            return
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     mode = parser.add_mutually_exclusive_group(required=True)
@@ -383,12 +430,7 @@ if __name__ == "__main__":
     parser.add_argument("--watch-stdin", action="store_true")
     args = parser.parse_args()
     if args.watch_stdin:
-
-        def disconnected():
-            sys.stdin.buffer.read()
-            os.kill(os.getpid(), signal.SIGTERM)
-
-        threading.Thread(target=disconnected, daemon=True).start()
+        threading.Thread(target=_watch_stdin, daemon=True).start()
 
     def run():
         if args.build:

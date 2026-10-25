@@ -1,12 +1,14 @@
 """Native builders receive the current source without changing an existing checkout."""
 
+import signal
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 
 from spaceterm_tasks import TaskError
-from spaceterm_tasks.server_builds import snapshot
+from spaceterm_tasks.server_builds import _sync_source, snapshot
 
 
 class ServerSourceTests(unittest.TestCase):
@@ -56,6 +58,16 @@ class ServerSourceTests(unittest.TestCase):
             self.assertEqual(git(first, "rev-parse", "HEAD"), commit)
             self.assertNotIn("private-builder", (first / ".git/config").read_text())
             self.assertFalse((first / ".git/hooks").exists())
+            # Imported Python and native tools may leave ignored output in a snapshot.
+            # The builder transport still sends only the listed source and Git identity.
+            (first / "private").write_text("ignored credential fixture")
+            transported = parent / "transported"
+            transported.mkdir()
+            _sync_source(first, str(transported) + "/", (), "source transfer failed")
+            self.assertFalse((transported / "private").exists())
+            self.assertEqual((transported / "new.rs").read_text(), "untracked")
+            self.assertEqual(git(transported, "rev-parse", "HEAD"), commit)
+
             self.assertEqual(git(root, "status", "--porcelain"), before)
             self.assertEqual(snapshot(root, parent / "snapshots"), (first, digest))
             (root / "source.rs").write_text("new dirty source on same commit")
@@ -72,6 +84,32 @@ class ServerSourceTests(unittest.TestCase):
                 )
                 with self.assertRaisesRegex(TaskError, "project-relative Cargo patches"):
                     snapshot(root, parent / "snapshots")
+
+
+class RemoteBuildLeaseTests(unittest.TestCase):
+    def test_transport_keeps_the_remote_native_build_lease_alive(self):
+        from spaceterm_tasks.server_builds import _remote_run
+
+        peer = (
+            "import select, sys; "
+            "ready = select.select([sys.stdin], [], [], 2)[0]; "
+            "raise SystemExit(0 if ready and sys.stdin.buffer.read(1) == b'.' else 23)"
+        )
+        _remote_run([sys.executable, "-c", peer], "the remote native build lost its lease")
+
+    def test_native_runner_ends_on_eof_or_expired_transport_lease(self):
+        for expired in (False, True):
+            program = "from spaceterm_tasks.server_builds import _watch_stdin; "
+            if expired:
+                # Time is a boundary: expire select immediately instead of waiting 15 seconds.
+                program += "import select; select.select = lambda *a: ([], [], []); "
+            result = subprocess.run(
+                [sys.executable, "-c", program + "_watch_stdin()"],
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                timeout=3,
+            )
+            self.assertEqual(result.returncode, -signal.SIGTERM)
 
 
 if __name__ == "__main__":
