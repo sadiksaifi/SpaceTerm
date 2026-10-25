@@ -1,7 +1,5 @@
 use std::fmt;
 
-use crate::domain::SshDestination;
-
 #[derive(Clone, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub(crate) struct SshHostAlias(String);
 
@@ -25,85 +23,9 @@ impl SshHostAlias {
     }
 }
 
-#[derive(Clone, Eq, PartialEq)]
-pub(crate) enum DestinationQueryResolution {
-    Configured {
-        destination: SshDestination,
-        alias: SshHostAlias,
-        explicit_user: Option<String>,
-    },
-    AddHost {
-        destination: SshDestination,
-    },
-}
-
-impl fmt::Debug for DestinationQueryResolution {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("DestinationQueryResolution(<redacted>)")
-    }
-}
-
-impl DestinationQueryResolution {
-    #[cfg(test)]
-    pub(crate) const fn destination(&self) -> &SshDestination {
-        match self {
-            Self::Configured { destination, .. } | Self::AddHost { destination } => destination,
-        }
-    }
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum SshHostAliasError {
     Invalid,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum DestinationQueryError {
-    Invalid,
-    TooLong { actual: usize, maximum: usize },
-}
-
-pub(crate) fn resolve_destination_query(
-    query: &str,
-    configured_aliases: &[SshHostAlias],
-    maximum_token_bytes: usize,
-) -> Result<DestinationQueryResolution, DestinationQueryError> {
-    if query.len() > maximum_token_bytes {
-        return Err(DestinationQueryError::TooLong {
-            actual: query.len(),
-            maximum: maximum_token_bytes,
-        });
-    }
-    if !is_positive_literal(query) || query.split('@').any(str::is_empty) {
-        return Err(DestinationQueryError::Invalid);
-    }
-    let destination =
-        SshDestination::new(query.to_owned()).map_err(|_| DestinationQueryError::Invalid)?;
-    if let Some(alias) = configured_aliases
-        .iter()
-        .find(|alias| alias.as_str() == query)
-    {
-        return Ok(DestinationQueryResolution::Configured {
-            destination,
-            alias: alias.clone(),
-            explicit_user: None,
-        });
-    }
-    let suffix = configured_aliases
-        .iter()
-        .filter_map(|alias| {
-            let prefix = query.strip_suffix(alias.as_str())?.strip_suffix('@')?;
-            is_positive_literal(prefix).then_some((alias, prefix))
-        })
-        .max_by_key(|(alias, _)| alias.as_str().len());
-    if let Some((alias, explicit_user)) = suffix {
-        return Ok(DestinationQueryResolution::Configured {
-            destination,
-            alias: alias.clone(),
-            explicit_user: Some(explicit_user.to_owned()),
-        });
-    }
-    Ok(DestinationQueryResolution::AddHost { destination })
 }
 
 fn is_positive_literal(value: &str) -> bool {
@@ -125,16 +47,10 @@ mod tests {
     }
 
     #[test]
-    fn debug_should_redact_aliases_and_destination_resolutions() {
-        let alias = alias("sensitive-host");
-        let resolution =
-            resolve_destination_query("user@sensitive-host", std::slice::from_ref(&alias), 255)
-                .unwrap();
-
-        assert_eq!(format!("{alias:?}"), "SshHostAlias(<redacted>)");
+    fn debug_should_redact_aliases() {
         assert_eq!(
-            format!("{resolution:?}"),
-            "DestinationQueryResolution(<redacted>)"
+            format!("{:?}", alias("sensitive-host")),
+            "SshHostAlias(<redacted>)"
         );
     }
 
@@ -170,100 +86,5 @@ mod tests {
                 "unexpectedly accepted {value:?}"
             );
         }
-    }
-
-    #[test]
-    fn destination_query_should_prefer_an_exact_alias() {
-        let aliases = [alias("orb"), alias("root@fedora@orb")];
-
-        let resolution = resolve_destination_query("root@fedora@orb", &aliases, 128).unwrap();
-
-        assert_eq!(
-            resolution,
-            DestinationQueryResolution::Configured {
-                destination: SshDestination::new("root@fedora@orb".to_owned()).unwrap(),
-                alias: alias("root@fedora@orb"),
-                explicit_user: None,
-            }
-        );
-    }
-
-    #[test]
-    fn destination_query_should_use_the_longest_configured_alias_suffix() {
-        let aliases = [alias("orb"), alias("fedora@orb")];
-
-        let resolution = resolve_destination_query("root@fedora@orb", &aliases, 128).unwrap();
-
-        assert_eq!(
-            resolution,
-            DestinationQueryResolution::Configured {
-                destination: SshDestination::new("root@fedora@orb".to_owned()).unwrap(),
-                alias: alias("fedora@orb"),
-                explicit_user: Some("root".to_owned()),
-            }
-        );
-    }
-
-    #[test]
-    fn destination_query_should_preserve_a_multi_part_explicit_user() {
-        let resolution =
-            resolve_destination_query("name@realm@work", &[alias("work")], 128).unwrap();
-
-        assert_eq!(
-            resolution,
-            DestinationQueryResolution::Configured {
-                destination: SshDestination::new("name@realm@work".to_owned()).unwrap(),
-                alias: alias("work"),
-                explicit_user: Some("name@realm".to_owned()),
-            }
-        );
-    }
-
-    #[test]
-    fn destination_query_should_return_add_host_for_an_unknown_safe_literal() {
-        let resolution = resolve_destination_query("new-host", &[alias("work")], 128).unwrap();
-
-        assert_eq!(
-            resolution,
-            DestinationQueryResolution::AddHost {
-                destination: SshDestination::new("new-host".to_owned()).unwrap(),
-            }
-        );
-    }
-
-    #[test]
-    fn destination_query_should_reject_unsafe_or_malformed_tokens() {
-        for query in [
-            "",
-            "-oProxyCommand=x",
-            "two words",
-            "host*",
-            "user@",
-            "@host",
-        ] {
-            assert_eq!(
-                resolve_destination_query(query, &[alias("host")], 128),
-                Err(DestinationQueryError::Invalid),
-                "unexpectedly accepted {query:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn destination_query_should_preserve_the_exact_query_token() {
-        let resolution = resolve_destination_query("User@Work", &[alias("Work")], 128).unwrap();
-
-        assert_eq!(resolution.destination().as_str(), "User@Work");
-    }
-
-    #[test]
-    fn destination_query_should_enforce_the_injected_token_bound() {
-        assert_eq!(
-            resolve_destination_query("work", &[alias("work")], 3),
-            Err(DestinationQueryError::TooLong {
-                actual: 4,
-                maximum: 3,
-            })
-        );
     }
 }

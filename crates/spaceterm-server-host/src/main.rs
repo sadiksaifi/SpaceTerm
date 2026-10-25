@@ -5,7 +5,6 @@ use spaceterm_server::{
     service::{
         LingerAuthorization, RetainedInstallation, Service,
         control::{cli, display_name},
-        maintenance::{self, RemoteBuild, Reply},
     },
 };
 use std::{ffi::OsString, path::Path, process::ExitCode};
@@ -31,14 +30,12 @@ enum Request<'a> {
     Status,
     Install(&'a Path),
     SshDiscover,
-    SshConnect,
-    SshPrepare,
+    SetupDirectStatus,
+    SetupDirectPrepare(&'a str),
+    SetupDirect(&'a str),
+    SetupDirectCancel,
+    SetupStart,
     SshInstall {
-        archive: &'a Path,
-        signature: &'a Path,
-        digest: &'a str,
-    },
-    SshStage {
         archive: &'a Path,
         signature: &'a Path,
         digest: &'a str,
@@ -63,33 +60,36 @@ impl<'a> Request<'a> {
             (Some("setup-state"), []) => Ok(Self::SetupState),
             (Some("status"), []) => Ok(Self::Status),
             (Some("ssh-discover"), []) => Ok(Self::SshDiscover),
-            (Some("ssh-connect"), []) => Ok(Self::SshConnect),
-            (Some("ssh-prepare"), []) => Ok(Self::SshPrepare),
+            (Some("setup-direct-status"), []) => Ok(Self::SetupDirectStatus),
+            (Some("setup-direct-cancel"), []) => Ok(Self::SetupDirectCancel),
+            (Some("setup-direct-prepare"), [address]) => {
+                let address = address.to_str().ok_or(ServerError::Protocol)?;
+                spaceterm_server::direct::NetworkPolicy::parse(address)?;
+                Ok(Self::SetupDirectPrepare(address))
+            }
+            (Some("setup-direct"), [address]) => {
+                let address = address.to_str().ok_or(ServerError::Protocol)?;
+                spaceterm_server::direct::NetworkPolicy::parse(address)?;
+                Ok(Self::SetupDirect(address))
+            }
+            (Some("setup-start"), []) => Ok(Self::SetupStart),
             (Some("ssh-enable-linger"), []) => Ok(Self::SshEnableLinger(
                 LingerAuthorization::RemoteNoninteractive,
             )),
             (Some("ssh-enable-linger-password"), []) => {
                 Ok(Self::SshEnableLinger(LingerAuthorization::RemoteStdin))
             }
-            (Some(command @ ("ssh-install" | "ssh-stage")), [archive, signature, digest])
+            (Some("ssh-install"), [archive, signature, digest])
                 if !archive.as_encoded_bytes().starts_with(b"-")
                     && !signature.as_encoded_bytes().starts_with(b"-") =>
             {
                 let archive = Path::new(archive);
                 let signature = Path::new(signature);
                 let digest = digest.to_str().ok_or(ServerError::Protocol)?;
-                Ok(if command == "ssh-stage" {
-                    Self::SshStage {
-                        archive,
-                        signature,
-                        digest,
-                    }
-                } else {
-                    Self::SshInstall {
-                        archive,
-                        signature,
-                        digest,
-                    }
+                Ok(Self::SshInstall {
+                    archive,
+                    signature,
+                    digest,
                 })
             }
             (Some("service-install"), [installation])
@@ -112,6 +112,35 @@ fn stage(
     service.provision_candidate(archive, signature, digest, PROTOCOL_MAJOR, CAPABILITIES)
 }
 
+fn setup_pipe() -> Result<(), ServerError> {
+    // SAFETY: isatty only observes the process's standard descriptors.
+    if unsafe { libc::isatty(libc::STDIN_FILENO) != 0 || libc::isatty(libc::STDOUT_FILENO) != 0 } {
+        return Err(ServerError::Protocol);
+    }
+    Ok(())
+}
+
+fn read_setup<T: serde::de::DeserializeOwned>() -> Result<T, ServerError> {
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    std::io::stdin()
+        .lock()
+        .take(4097)
+        .read_to_end(&mut bytes)
+        .map_err(|_| ServerError::Protocol)?;
+    if bytes.len() > 4096 {
+        return Err(ServerError::Protocol);
+    }
+    serde_json::from_slice(&bytes).map_err(|_| ServerError::Protocol)
+}
+
+fn write_setup(value: &impl serde::Serialize) -> Result<(), ServerError> {
+    use std::io::Write;
+    let mut output = std::io::stdout().lock();
+    serde_json::to_writer(&mut output, value).map_err(|_| ServerError::Protocol)?;
+    output.write_all(b"\n").map_err(|_| ServerError::Protocol)
+}
+
 fn run() -> Result<ExitCode, cli::Error> {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     if args == ["--help"] {
@@ -125,11 +154,12 @@ fn run() -> Result<ExitCode, cli::Error> {
                setup-state IDENTITY                        Set up server state\n\
                status IDENTITY                             Connect to the server\n\
                ssh-discover IDENTITY                       Find the server\n\
-               ssh-connect IDENTITY                        Connect over SSH\n\
-               ssh-prepare IDENTITY                        Start the server\n\
+               setup-start IDENTITY                        Start the approved server from stdin\n\
                ssh-install IDENTITY ARCHIVE SIGNATURE SHA256\n\
-               ssh-stage IDENTITY ARCHIVE SIGNATURE SHA256 Stage a verified update\n\
-               ssh-maintain IDENTITY                       Answer one maintenance request over stdio\n\
+               setup-direct-status IDENTITY                Observe enrollment trust\n\
+               setup-direct-prepare IDENTITY IP:PORT       Reserve setup enrollment from stdin\n\
+               setup-direct IDENTITY IP:PORT               Expose and enroll a client public key from stdin\n\
+               setup-direct-cancel IDENTITY                Cancel a setup operation from stdin\n\
                ssh-enable-linger IDENTITY                  Allow boot startup\n\
                ssh-enable-linger-password IDENTITY         Allow boot startup (password on stdin)\n\
                --version | --build-info | --check | --help",
@@ -152,18 +182,6 @@ fn run() -> Result<ExitCode, cli::Error> {
         check::run()?;
         return Ok(ExitCode::SUCCESS);
     }
-    if args
-        .first()
-        .is_some_and(|command| command == "ssh-maintain")
-    {
-        return maintenance::run(
-            IDENTITY,
-            &args,
-            &mut std::io::stdin().lock(),
-            &mut std::io::stdout().lock(),
-        )
-        .map(ExitCode::from);
-    }
     if args.first().is_some_and(|command| {
         command.as_encoded_bytes().starts_with(b"service-")
             && command != "service-install"
@@ -174,16 +192,45 @@ fn run() -> Result<ExitCode, cli::Error> {
     let request = Request::parse(&args).map_err(|_| cli::Error::InvalidArguments)?;
     match request {
         Request::SshDiscover => {
-            let discovery = spaceterm_server::account_bridge::discover(IDENTITY)?;
+            let discovery = spaceterm_server::provisioning::discover(IDENTITY)?;
             let mut value = serde_json::to_value(discovery).map_err(|_| ServerError::Protocol)?;
             value["target"] = env!("SPACETERM_SERVER_TARGET").into();
             value["version"] = env!("SPACETERM_SERVER_VERSION").into();
             value["commit"] = env!("SPACETERM_SERVER_COMMIT").into();
             println!("{value}");
         }
-        Request::SshConnect => spaceterm_server::account_bridge::run(IDENTITY)?,
-        Request::SshPrepare => {
-            Service::for_identity(IDENTITY)?.connect()?;
+        Request::SetupDirectStatus => {
+            setup_pipe()?;
+            write_setup(&spaceterm_server::provisioning::direct_status(IDENTITY)?)?;
+        }
+        Request::SetupDirect(address) => {
+            setup_pipe()?;
+            let request = read_setup::<spaceterm_server::provisioning::SetupRequest>()?;
+            let policy = spaceterm_server::direct::NetworkPolicy::parse(address)
+                .map_err(ServerError::from)?;
+            write_setup(&spaceterm_server::provisioning::setup_direct(
+                IDENTITY, policy, request,
+            )?)?;
+        }
+        Request::SetupDirectPrepare(address) => {
+            setup_pipe()?;
+            let request = read_setup::<spaceterm_server::provisioning::SetupRequest>()?;
+            let policy = spaceterm_server::direct::NetworkPolicy::parse(address)
+                .map_err(ServerError::from)?;
+            spaceterm_server::provisioning::prepare_direct(IDENTITY, policy, request)?;
+            println!("{{\"prepared\":true}}");
+        }
+        Request::SetupDirectCancel => {
+            setup_pipe()?;
+            let request = read_setup::<spaceterm_server::provisioning::SetupCancellation>()?;
+            write_setup(&spaceterm_server::provisioning::cancel_direct(
+                IDENTITY, request,
+            )?)?;
+        }
+        Request::SetupStart => {
+            setup_pipe()?;
+            let approved = read_setup::<spaceterm_server::service::SetupStartObservation>()?;
+            write_setup(&Service::for_identity(IDENTITY)?.start_for_setup(&approved)?)?;
         }
         Request::SshInstall {
             archive,
@@ -193,27 +240,6 @@ fn run() -> Result<ExitCode, cli::Error> {
             let service = Service::for_identity(IDENTITY)?;
             let candidate = stage(&service, archive, signature, digest)?;
             service.install(&candidate.directory)?;
-        }
-        Request::SshStage {
-            archive,
-            signature,
-            digest,
-        } => {
-            // Staging retains the verified candidate only. It installs, activates and starts
-            // nothing, so the approved runtime and its Terminal Sessions continue.
-            let candidate = stage(
-                &Service::for_identity(IDENTITY)?,
-                archive,
-                signature,
-                digest,
-            )?;
-            let reply = Reply::Staged {
-                candidate: RemoteBuild::describe(&candidate)?,
-            };
-            println!(
-                "{}",
-                serde_json::to_string(&reply).map_err(|_| ServerError::Protocol)?
-            );
         }
         Request::SshEnableLinger(authorization) => {
             Service::for_identity(IDENTITY)?.enable_linger(authorization)?
@@ -259,7 +285,7 @@ fn run() -> Result<ExitCode, cli::Error> {
         Request::SetupState | Request::Status => {
             #[cfg(feature = "client")]
             {
-                let client = spaceterm_server::LocalServer::for_identity(IDENTITY)?;
+                let client = spaceterm_server::ServerConnection::for_identity(IDENTITY)?;
                 if matches!(request, Request::SetupState) {
                     client.setup()?;
                     println!("The local server is set up.");
@@ -346,38 +372,30 @@ mod tests {
     }
 
     #[test]
-    fn staging_and_maintenance_require_the_compiled_identity_and_their_exact_arguments() {
-        let args = ["ssh-stage", IDENTITY, "/archive", "/signature", "sha256"].map(OsString::from);
-        assert!(matches!(
-            Request::parse(&args),
-            Ok(Request::SshStage { digest, .. }) if digest == "sha256"
-        ));
+    fn installation_requires_the_compiled_identity_and_exact_arguments() {
         let args =
             ["ssh-install", IDENTITY, "/archive", "/signature", "sha256"].map(OsString::from);
-        assert!(matches!(
-            Request::parse(&args),
-            Ok(Request::SshInstall { digest, .. }) if digest == "sha256"
-        ));
+        assert!(
+            matches!(Request::parse(&args), Ok(Request::SshInstall { digest, .. }) if digest == "sha256")
+        );
         for malformed in [
-            vec!["ssh-stage", IDENTITY],
+            vec!["ssh-install", IDENTITY],
             vec![
-                "ssh-stage",
+                "ssh-install",
                 "foreign-identity",
                 "/archive",
                 "/signature",
                 "sha256",
             ],
-            vec!["ssh-stage", IDENTITY, "--archive", "/signature", "sha256"],
+            vec!["ssh-install", IDENTITY, "--archive", "/signature", "sha256"],
             vec![
-                "ssh-stage",
+                "ssh-install",
                 IDENTITY,
                 "/archive",
                 "/signature",
                 "sha256",
                 "extra",
             ],
-            vec!["ssh-maintain", IDENTITY, "--confirm"],
-            vec!["ssh-maintain", "foreign-identity"],
         ] {
             let malformed: Vec<_> = malformed.into_iter().map(OsString::from).collect();
             assert!(matches!(
@@ -385,21 +403,5 @@ mod tests {
                 Err(ServerError::Protocol)
             ));
         }
-    }
-
-    #[test]
-    fn a_maintenance_request_for_another_identity_is_refused_as_one_reply() {
-        let args = ["ssh-maintain", "foreign-identity"].map(OsString::from);
-        let mut output = Vec::new();
-        assert_eq!(
-            maintenance::run(IDENTITY, &args, &mut &b"{}"[..], &mut output),
-            Ok(0)
-        );
-        assert_eq!(
-            serde_json::from_slice::<Reply>(&output).unwrap(),
-            Reply::Refused {
-                refusal: spaceterm_server::service::maintenance::MaintenanceRefusal::Protocol,
-            }
-        );
     }
 }

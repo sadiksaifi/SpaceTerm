@@ -81,7 +81,7 @@ fn installed_service_preserves_sessions_and_restores_dormant_organization() {
         paths.data,
         Path::new("/home/stvm/.local/share/spaceterm-preflight/server")
     );
-    let native = crate::LocalServer::for_identity("spaceterm-preflight").unwrap();
+    let native = crate::ServerConnection::for_identity("spaceterm-preflight").unwrap();
     if phase == "stopped" {
         assert!(service.status().unwrap().stopped);
         assert!(matches!(

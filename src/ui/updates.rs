@@ -7,6 +7,7 @@ pub(crate) mod server_rows;
 
 pub(super) use dropdown::UpdateControl;
 pub(crate) use launch::{request_window_close as request_launch_window_close, show_launch};
+pub(crate) use server_rows::{LocalUpdateFacts, LocalUpdateObservation, install_local_updates};
 
 use gpui::{
     AnyWindowHandle, App, BorrowAppContext, Context, Entity, Global, SharedString, Subscription,
@@ -1164,17 +1165,13 @@ mod tests {
         }
     }
 
-    fn ssh(name: &str) -> crate::domain::SshDestination {
-        crate::domain::SshDestination::new(name.to_owned()).unwrap()
-    }
-
     /// Offline, unknown, unauthorized, and up-to-date servers keep their rows in the menu only.
     fn quiet_servers() -> Vec<ServerUpdateRow> {
         vec![
             server("local", ServerUpdateAction::Settings(MachineTarget::Local)),
             server(
                 "offline",
-                ServerUpdateAction::Settings(MachineTarget::Ssh(ssh("offline"))),
+                ServerUpdateAction::Settings(MachineTarget::Direct([6; 32])),
             ),
             server(
                 "paired",
@@ -1301,10 +1298,10 @@ mod tests {
 
     #[test]
     fn pill_should_lead_with_one_server_and_open_the_menu_for_several() {
-        let update = server("macbookpro", ServerUpdateAction::Ssh(ssh("macbookpro")));
+        let update = server("local", ServerUpdateAction::Local);
         let attention = server(
             "penguin",
-            ServerUpdateAction::Review(MachineTarget::Ssh(ssh("penguin"))),
+            ServerUpdateAction::Review(MachineTarget::Direct([3; 32])),
         );
         let with = |row: &ServerUpdateRow| {
             let mut servers = quiet_servers();
@@ -1318,7 +1315,7 @@ mod tests {
                 "Update Server".to_owned(),
                 PillTone::Primary,
                 None,
-                PillCommand::Server(ServerUpdateAction::Ssh(ssh("macbookpro")))
+                PillCommand::Server(ServerUpdateAction::Local)
             ))
         );
         assert_eq!(
@@ -1327,9 +1324,7 @@ mod tests {
                 "Server Needs Attention".to_owned(),
                 PillTone::Warning,
                 Some(ControlGlyph::Warning),
-                PillCommand::Server(ServerUpdateAction::Review(MachineTarget::Ssh(ssh(
-                    "penguin"
-                ))))
+                PillCommand::Server(ServerUpdateAction::Review(MachineTarget::Direct([3; 32])))
             ))
         );
         let mut both = with(&update);
@@ -1571,6 +1566,7 @@ mod tests {
         cx.update(|cx| ApplicationUpdates::install(adapter.clone(), cx));
         cx.update(crate::ui::init)
             .expect("UI initialization should succeed");
+        cx.update(server_rows::testing::install_up_to_date);
         let updates = cx.update(|cx| service(cx).expect("the update service is installed"));
         updates.update(cx, |updates, cx| updates.check(false, cx));
         adapter.emit(UpdateEvent::Available(version()));
@@ -1620,6 +1616,7 @@ mod tests {
         cx.update(|cx| ApplicationUpdates::install(adapter.clone(), cx));
         cx.update(crate::ui::init)
             .expect("UI initialization should succeed");
+        cx.update(server_rows::testing::install_up_to_date);
         let updates = cx.update(|cx| service(cx).expect("the update service is installed"));
         let mut document = crate::settings::SettingsDocument::default();
         document.updates.automatic_downloads = false;
@@ -1760,6 +1757,7 @@ mod tests {
 
         cx.update(crate::ui::init)
             .expect("UI initialization should succeed");
+        cx.update(server_rows::testing::install_up_to_date);
         let (host, cx) = cx.add_window_view(|_, _| InstallAlertHost);
         let _handle = cx.update(|window, cx| {
             host.update(cx, |_, cx| {

@@ -29,6 +29,34 @@ pub struct CandidateMetadata {
     pub capabilities: Vec<String>,
 }
 
+/// Authenticate the exact captured archive and signature for one application and target.
+/// This verifies the digest, archive contents and required protocol capabilities without I/O.
+///
+/// # Errors
+/// Returns RuntimeUnavailable for invalid authentication, bounds, target or archive contents;
+/// CandidateChanged for a different digest; IncompatibleProtocol or MissingRequiredCapability
+/// when the signed declarations do not meet the connection requirements.
+pub fn verify_candidate_bytes(
+    identity: &str,
+    archive: &[u8],
+    signature: &[u8],
+    expected_sha256: &str,
+    target: &str,
+    required_major: u16,
+    required_capabilities: &[&str],
+) -> Result<CandidateMetadata, ServerError> {
+    verified_candidate_build(
+        identity,
+        archive,
+        signature,
+        expected_sha256,
+        target,
+        required_major,
+        required_capabilities,
+    )
+    .map(Into::into)
+}
+
 impl Service {
     /// Authenticate a signed remote-target candidate without executing or extracting it.
     pub fn inspect_candidate_for_target(
@@ -49,12 +77,7 @@ impl Service {
             required_major,
             required_capabilities,
         )?;
-        Ok(CandidateMetadata {
-            version: info.version,
-            commit: info.commit,
-            protocol_major: info.protocol_major,
-            capabilities: info.capabilities,
-        })
+        Ok(info.into())
     }
     /// Retain this exact signed independent artifact in the owning account's installation store.
     ///
@@ -111,12 +134,7 @@ impl Service {
             required_major,
             required_capabilities,
         )?;
-        Ok(CandidateMetadata {
-            version: info.version,
-            commit: info.commit,
-            protocol_major: info.protocol_major,
-            capabilities: info.capabilities,
-        })
+        Ok(info.into())
     }
 
     /// Verify and retain the archive pinned by the running client, independently of its release.
@@ -233,27 +251,16 @@ fn verify_installation(
     if path.file_name().and_then(|v| v.to_str()) != Some(&digest(&bytes)) {
         return Err(ServerError::RuntimeUnavailable);
     }
-    let legacy_production = authenticate(&bytes, &signature, identity).is_err();
-    if legacy_production {
-        // Previous builds signed nonproduction runtimes with production trust. Retained
-        // installations remain usable for Start, recovery and the previous side of Update.
-        // Newly offered candidates must use current identity trust at every admission check.
-        if candidate_requirements.is_some()
-            || !matches!(identity, "spaceterm-preflight" | "spaceterm-development")
-        {
-            return Err(ServerError::RuntimeUnavailable);
-        }
-        authenticate(&bytes, &signature, "spaceterm")?;
-    }
+    authenticate(&bytes, &signature, identity)?;
     let info = verify_contents(&directory, &bytes, identity)?;
     if let Some((major, capabilities)) = candidate_requirements {
         info.require_compatibility(major, capabilities)?;
     }
-    verify_native(path, identity, legacy_production)?;
+    verify_native(path, identity)?;
     verify_executable(path, &info)?;
     verify_directory_path(&directory, path)
 }
-fn verify_native(path: &Path, identity: &str, legacy_production: bool) -> Result<(), ServerError> {
+fn verify_native(path: &Path, identity: &str) -> Result<(), ServerError> {
     #[cfg(test)]
     if test_support::active() {
         return Ok(());
@@ -261,7 +268,7 @@ fn verify_native(path: &Path, identity: &str, legacy_production: bool) -> Result
     #[cfg(target_os = "macos")]
     {
         let mut requirement = format!("identifier \"io.github.sadiksaifi.{identity}.server\"");
-        if identity == "spaceterm" || legacy_production {
+        if identity == "spaceterm" {
             let template = include_str!("../../../../packaging/macos/spaceterm/Packager.toml");
             let signer = template
                 .lines()
@@ -283,7 +290,7 @@ fn verify_native(path: &Path, identity: &str, legacy_production: bool) -> Result
         .map_err(|_| ServerError::RuntimeUnavailable)?;
     }
     #[cfg(not(target_os = "macos"))]
-    let _ = (path, identity, legacy_production);
+    let _ = (path, identity);
     Ok(())
 }
 fn verify_executable(path: &Path, expected: &Build) -> Result<(), ServerError> {
@@ -335,6 +342,16 @@ struct Build {
     version: String,
     protocol_major: u16,
     capabilities: Vec<String>,
+}
+impl From<Build> for CandidateMetadata {
+    fn from(info: Build) -> Self {
+        Self {
+            version: info.version,
+            commit: info.commit,
+            protocol_major: info.protocol_major,
+            capabilities: info.capabilities,
+        }
+    }
 }
 impl Build {
     fn require_compatibility(
@@ -688,13 +705,37 @@ fn candidate_for_target(
 ) -> Result<(Vec<u8>, Vec<u8>, Build), ServerError> {
     let bytes = source(archive, MAX_ARCHIVE)?;
     let signature = source(signature, 64)?;
-    authenticate(&bytes, &signature, identity)?;
-    if !digest_valid(expected_sha256) || digest(&bytes) != expected_sha256 {
+    let info = verified_candidate_build(
+        identity,
+        &bytes,
+        &signature,
+        expected_sha256,
+        target,
+        required_major,
+        required_capabilities,
+    )?;
+    Ok((bytes, signature, info))
+}
+
+fn verified_candidate_build(
+    identity: &str,
+    archive: &[u8],
+    signature: &[u8],
+    expected_sha256: &str,
+    target: &str,
+    required_major: u16,
+    required_capabilities: &[&str],
+) -> Result<Build, ServerError> {
+    if archive.len() as u64 > MAX_ARCHIVE || signature.len() > 64 {
+        return Err(ServerError::RuntimeUnavailable);
+    }
+    authenticate(archive, signature, identity)?;
+    if !digest_valid(expected_sha256) || digest(archive) != expected_sha256 {
         return Err(ServerError::CandidateChanged);
     }
-    let info = contents_for_target(&bytes, identity, target, |_, _, _, _| Ok(()))?;
+    let info = contents_for_target(archive, identity, target, |_, _, _, _| Ok(()))?;
     info.require_compatibility(required_major, required_capabilities)?;
-    Ok((bytes, signature, info))
+    Ok(info)
 }
 
 fn retain(
@@ -743,7 +784,7 @@ fn retain(
         verify_contents(&prepared.directory, bytes, identity)?;
         let prepared_path = prepared.path(parent);
         verify_directory_path(&prepared.directory, &prepared_path)?;
-        verify_native(&prepared_path, identity, false)?;
+        verify_native(&prepared_path, identity)?;
         verify_executable(&prepared_path, info)?;
         verify_directory_path(&directory, parent)?;
         prepared

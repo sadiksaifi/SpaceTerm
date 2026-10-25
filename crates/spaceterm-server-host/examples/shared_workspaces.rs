@@ -12,7 +12,7 @@ mod lifecycle;
 mod support;
 use lifecycle::{Server, require_idle, size};
 use spaceterm_server::{
-    LocalServer, ServerError,
+    ServerConnection, ServerError,
     hierarchy::{Axis, CloseTarget, Id, Inventory, Mutation, Outcome},
     pane::*,
 };
@@ -21,7 +21,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-fn connect(server: &LocalServer) -> Result<PaneConnection, Box<dyn Error>> {
+fn connect(server: &ServerConnection) -> Result<PaneConnection, Box<dyn Error>> {
     let until = Instant::now() + Duration::from_secs(8);
     loop {
         match server.connect_shared_pane() {
@@ -64,7 +64,7 @@ fn select(connection: &mut PaneConnection, pane: Id, explicit: bool) -> Result<R
         style: None,
     })
 }
-fn attachment_workflow(a: &LocalServer, b: &LocalServer) -> Result<(), Box<dyn Error>> {
+fn attachment_workflow(a: &ServerConnection, b: &ServerConnection) -> Result<(), Box<dyn Error>> {
     let mut first = connect(a)?;
     let mut second = connect(b)?;
     let workspace = mutate(
@@ -158,8 +158,8 @@ fn attachment_workflow(a: &LocalServer, b: &LocalServer) -> Result<(), Box<dyn E
 
 fn main() -> Result<(), Box<dyn Error>> {
     let major = std::env::args().nth(1).unwrap_or("1".into()).parse()?;
-    let a = LocalServer::for_development_client("shared-smoke-a", major)?;
-    let b = LocalServer::for_development_client("shared-smoke-b", major)?;
+    let a = ServerConnection::for_development_client("shared-smoke-a", major)?;
+    let b = ServerConnection::for_development_client("shared-smoke-b", major)?;
     require_idle(&a)?;
     a.setup()?;
     b.setup()?;

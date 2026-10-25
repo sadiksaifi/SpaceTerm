@@ -1380,9 +1380,7 @@ impl Render for DirectoryPicker {
             .when(self.blocks_terminal_input(), |picker| {
                 picker
                     .capture_action(block_parent_action::<NewWorkspace>)
-                    .capture_action(block_parent_action::<super::NewRemoteWorkspace>)
                     .capture_action(block_parent_action::<super::OpenLocalDirectory>)
-                    .capture_action(block_parent_action::<super::OpenRemoteDirectory>)
                     .capture_action(block_parent_action::<super::NewWorktree>)
                     .capture_action(block_parent_action::<super::NextWorktree>)
                     .capture_action(block_parent_action::<super::PreviousWorktree>)
@@ -2706,8 +2704,8 @@ mod tests {
 
     use super::server_source::testing::InProcessServer;
 
-    /// The owning server reached over a route that, like an SSH server's session limit, refuses
-    /// a channel beyond the first two it opened.
+    /// The owning server reached over a route that refuses a channel beyond the first two it
+    /// opened.
     struct LimitedChannels {
         server: InProcessServer,
         opened: Arc<AtomicUsize>,

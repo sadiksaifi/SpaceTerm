@@ -67,7 +67,6 @@ pub(crate) struct TerminalFocusCoordinator {
 #[derive(Default)]
 pub(crate) struct WorkspaceFocusOwners {
     pub(crate) picker: bool,
-    pub(crate) remote_flow: bool,
     pub(crate) switcher: bool,
     pub(crate) window_drag: bool,
     pub(crate) sidebar_resize: bool,
@@ -88,10 +87,7 @@ impl TerminalFocusCoordinator {
     pub(crate) fn workspace_blocker(owners: WorkspaceFocusOwners) -> Option<TerminalFocusBlocker> {
         Self::first_owner(&[
             (owners.picker, TerminalFocusBlocker::Modal),
-            (
-                owners.remote_flow || owners.switcher,
-                TerminalFocusBlocker::CommandPalette,
-            ),
+            (owners.switcher, TerminalFocusBlocker::CommandPalette),
             (owners.window_drag, TerminalFocusBlocker::TopChrome),
             (owners.sidebar_resize, TerminalFocusBlocker::SidebarResize),
             (owners.rename, TerminalFocusBlocker::RenameField),

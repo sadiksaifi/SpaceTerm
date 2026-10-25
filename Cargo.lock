@@ -5957,6 +5957,7 @@ name = "spaceterm-server-host"
 version = "0.0.0"
 dependencies = [
  "libc",
+ "serde",
  "serde_json",
  "spaceterm",
  "spaceterm-directories",

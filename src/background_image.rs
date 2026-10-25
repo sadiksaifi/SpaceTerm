@@ -371,7 +371,6 @@ fn is_supported_format(bytes: &[u8]) -> bool {
 fn filesystem_error(error: SecureFilesystemError) -> BackgroundImageError {
     match error {
         SecureFilesystemError::Unsafe => BackgroundImageError::Unsafe,
-        SecureFilesystemError::TooLarge => BackgroundImageError::TooLarge,
         SecureFilesystemError::Missing => BackgroundImageError::Missing,
         SecureFilesystemError::AlreadyExists
         | SecureFilesystemError::Conflict

@@ -88,7 +88,7 @@ pub(crate) struct Interest {
     pub(crate) machine: RepositoryMachine,
     pub(crate) directory: SourceDirectory,
     pub(crate) visible: bool,
-    /// Whether the Control Connection can run reads. Local Interests pass `true`.
+    /// Whether the server connection can run reads. Local Interests pass `true`.
     pub(crate) available: bool,
     /// The Pane's finished command count at registration. Sidebar rows pass 0.
     pub(crate) finished_commands: u64,
@@ -409,7 +409,7 @@ impl RepositoryScheduler {
         self.finish()
     }
 
-    /// The Interest's Control Connection became able or unable to run reads. A restored
+    /// The Interest's server connection became able or unable to run reads. A restored
     /// connection reads at once when the Interest is visible.
     pub(crate) fn set_available(
         &mut self,

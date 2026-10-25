@@ -1,0 +1,207 @@
+//! Temporary account-authorized server provisioning.
+use crate::direct::{
+    DirectError, DirectStatus, Management, ManagementReply, NetworkPolicy, PairedDevice, ServerPin,
+};
+use crate::pane::control::ClientName;
+use crate::{ServerError, host, protocol, storage::Directory};
+use serde::{Deserialize, Serialize};
+
+/// One exact enrollment authorized by the owning account during Add Server.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SetupRequest {
+    /// Encoded big-endian in operation[..8]; the remaining 24 bytes are client randomness.
+    pub generation: u64,
+    pub pin: ServerPin,
+    pub expected_policy: Option<NetworkPolicy>,
+    pub operation: [u8; 32],
+    pub public_key: [u8; 32],
+    pub name: ClientName,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SetupCancellation {
+    pub pin: ServerPin,
+    pub operation: [u8; 32],
+}
+
+#[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SetupCancellationReply {
+    pub cancelled: bool,
+    pub pin: ServerPin,
+    pub operation: [u8; 32],
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SetupReply {
+    pub schema: u8,
+    pub endpoint: String,
+    pub paired: PairedDevice,
+    pub server_name: String,
+}
+
+/// Observe the running server's pin before retaining a pending enrollment on the client.
+pub fn direct_status(identity: &str) -> Result<DirectStatus, ServerError> {
+    match manage(identity, Management::Status)? {
+        ManagementReply::Status(status) => Ok(status),
+        _ => Err(ServerError::Protocol),
+    }
+}
+
+/// Reserve one exact operation before allowing enrollment. Cancellation permanently fences it.
+pub fn prepare_direct(
+    identity: &str,
+    policy: NetworkPolicy,
+    request: SetupRequest,
+) -> Result<(), ServerError> {
+    match manage(
+        identity,
+        Management::PrepareSetup {
+            generation: request.generation,
+            pin: request.pin,
+            expected_policy: request.expected_policy,
+            policy,
+            operation: request.operation,
+            public_key: request.public_key,
+            name: request.name,
+        },
+    )? {
+        ManagementReply::SetupPrepared => Ok(()),
+        _ => Err(ServerError::Protocol),
+    }
+}
+
+/// Authorize an exact network exposure and client public key through owning-account IPC.
+/// The server atomically binds the operation to the policy, key, name and assigned identities.
+pub fn setup_direct(
+    identity: &str,
+    policy: NetworkPolicy,
+    request: SetupRequest,
+) -> Result<SetupReply, ServerError> {
+    let endpoint = format!("wss://{}/spaceterm", policy.bind);
+    let paired = match manage(
+        identity,
+        Management::Setup {
+            generation: request.generation,
+            pin: request.pin,
+            expected_policy: request.expected_policy,
+            policy,
+            operation: request.operation,
+            public_key: request.public_key,
+            name: request.name,
+        },
+    )? {
+        ManagementReply::Setup(paired) => paired,
+        _ => return Err(ServerError::Protocol),
+    };
+    let status = direct_status(identity)?;
+    if status.pin != paired.pin {
+        return Err(DirectError::PinMismatch.into());
+    }
+    Ok(SetupReply {
+        schema: 1,
+        endpoint,
+        paired,
+        server_name: status.server_name,
+    })
+}
+
+/// Revoke only the pairing allocated by this setup operation, including after a lost reply.
+pub fn cancel_direct(
+    identity: &str,
+    request: SetupCancellation,
+) -> Result<SetupCancellationReply, ServerError> {
+    match manage(
+        identity,
+        Management::CancelSetup {
+            pin: request.pin.clone(),
+            operation: request.operation,
+        },
+    )? {
+        ManagementReply::SetupCancelled { pin, operation }
+            if pin == request.pin && operation == request.operation =>
+        {
+            Ok(SetupCancellationReply {
+                cancelled: true,
+                pin,
+                operation,
+            })
+        }
+        _ => Err(ServerError::Protocol),
+    }
+}
+
+fn manage(identity: &str, request: Management) -> Result<ManagementReply, ServerError> {
+    let paths = host::Paths::for_identity(identity)?;
+    crate::service::check_admission(&paths)?;
+    let server = Directory::open(&paths.data, false)?.read()?.server;
+    let client = protocol::random()?;
+    let mut stream = host::connect(&paths)?;
+    protocol::admit_client(
+        &mut stream,
+        (&client, &"Server setup".into()),
+        &server,
+        identity,
+        &[protocol::MAJOR],
+    )?;
+    let mut wire = protocol::Wire::terminal(&mut stream)?;
+    wire.write(&crate::pane::Request::Direct(request))?;
+    match wire.read()? {
+        crate::pane::Reply::Direct(reply) => reply.map_err(Into::into),
+        _ => Err(ServerError::Protocol),
+    }
+}
+
+/// Bounded account discovery. The helper declares its protocol; final admission negotiates
+/// capabilities with the running server before any operation.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AccountDiscovery {
+    pub schema: u32,
+    pub account: u32,
+    pub build: String,
+    pub server: Option<[u8; 32]>,
+    pub installed: bool,
+    pub enabled: bool,
+    pub running: bool,
+    pub stopped: bool,
+    pub start_observation: Option<crate::service::SetupStartObservation>,
+    pub protocol_majors: Vec<u16>,
+    pub capabilities: Vec<String>,
+    pub target: String,
+    pub version: String,
+    pub commit: String,
+}
+
+/// Discover the account's existing state without provisioning or starting a server.
+pub fn discover(identity: &str) -> Result<AccountDiscovery, ServerError> {
+    let paths = host::Paths::for_identity(identity)?;
+    let server = match Directory::open(&paths.data, false).and_then(|d| d.read()) {
+        Ok(record) => Some(record.server),
+        Err(ServerError::NotSetUp) => None,
+        Err(error) => return Err(error),
+    };
+    let service = crate::service::Service::for_identity(identity)?;
+    let status = service.passive_status()?;
+    let start_observation = service.setup_start_observation()?;
+    Ok(AccountDiscovery {
+        schema: 1,
+        // SAFETY: geteuid has no preconditions.
+        account: unsafe { libc::geteuid() },
+        build: identity.into(),
+        server,
+        installed: status.installed,
+        enabled: status.enabled,
+        running: status.running,
+        stopped: status.stopped,
+        start_observation,
+        protocol_majors: vec![protocol::MAJOR],
+        capabilities: vec!["workspace_policy".into()],
+        target: String::new(),
+        version: String::new(),
+        commit: String::new(),
+    })
+}

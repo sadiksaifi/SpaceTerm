@@ -12,7 +12,6 @@ use gpui::MouseButton;
 use gpui::px;
 use std::cell::RefCell;
 use std::fs;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -306,7 +305,6 @@ use crate::terminal::testing::{
     RecordedCommand, TestTerminalSessionFactory, TestTerminalSessionRecords,
 };
 use crate::terminal::{TerminalSessionEvent, TerminalSessionExit};
-use crate::ui::remote_workspace_flow::RemoteWorkspaceFlowStage;
 
 #[gpui::test]
 fn native_service_factory_reaches_initial_and_new_hierarchy(cx: &mut TestAppContext) {
@@ -475,6 +473,8 @@ fn new_desktop_manager(
     cx: &mut Context<WorkspaceManager>,
 ) -> WorkspaceManager {
     use_desktop_sessions(session_factory, cx);
+    // Every Workspace Window's update control reads this computer's server update state.
+    crate::ui::updates::server_rows::testing::install_up_to_date(cx);
     let mut manager =
         WorkspaceManager::new_with_adapters(home_directory, adapters, sidebar, window, cx);
     manager.present_desktop_workspace(window, cx);
@@ -544,24 +544,11 @@ fn workspace_manager(
     TestTerminalSessionRecords,
     &mut VisualTestContext,
 ) {
-    // A usable OpenSSH, whose hosts all wait for the person, so remote creation is offered.
-    cx.update(install_waiting_ssh_servers);
-    workspace_manager_without_ssh(cx)
+    workspace_manager_using(workspace_adapters(), cx)
 }
 
-/// A Workspace Window on a computer without a usable OpenSSH, so the desktop has no SSH registry.
-fn workspace_manager_without_ssh(
-    cx: &mut TestAppContext,
-) -> (
-    Entity<WorkspaceManager>,
-    TestTerminalSessionRecords,
-    &mut VisualTestContext,
-) {
-    workspace_manager_without_ssh_using(workspace_adapters(), cx)
-}
-
-/// A Workspace Window as [`workspace_manager_without_ssh`] opens it, over `adapters`.
-fn workspace_manager_without_ssh_using(
+/// A Workspace Window as [`workspace_manager`] opens it, over `adapters`.
+fn workspace_manager_using(
     adapters: WorkspaceManagerAdapters,
     cx: &mut TestAppContext,
 ) -> (
@@ -1303,265 +1290,6 @@ fn hiding_the_sidebar_should_keep_the_top_combo_box_and_its_focus_blocker(cx: &m
         cx.update(|window, cx| manager.read(cx).terminal_focus_blocker(window, cx)),
         None
     );
-}
-
-#[gpui::test]
-fn top_combo_box_available_remote_should_open_one_flow_and_keep_terminal_input_blocked(
-    cx: &mut TestAppContext,
-) {
-    let (manager, records, cx) = workspace_manager(cx);
-    open_workspace_switcher_for_creation(cx);
-
-    click("workspace-switcher-create-remote", cx);
-
-    assert_eq!(
-        cx.update(|window, cx| {
-            let manager = manager.read(cx);
-            let flow = manager
-                .remote_workspace_flow
-                .as_ref()
-                .expect("the available Remote Workspace source should open its flow")
-                .read(cx);
-            (
-                window_combo_box_is_open(window, cx),
-                flow.stage(),
-                flow.owns_first_responder(window, cx),
-                manager.terminal_focus_blocker(window, cx),
-                manager
-                    .workspaces
-                    .active()
-                    .payload()
-                    .read(cx)
-                    .focused_terminal_is_focused(window, cx),
-                manager.workspaces.len(),
-                records.starts().len(),
-            )
-        }),
-        (
-            false,
-            RemoteWorkspaceFlowStage::HostSelection,
-            true,
-            Some(TerminalFocusBlocker::CommandPalette),
-            false,
-            1,
-            1,
-        )
-    );
-
-    cx.simulate_keystrokes("escape");
-    cx.run_until_parked();
-
-    assert_eq!(
-        cx.update(|window, cx| {
-            let manager = manager.read(cx);
-            (
-                manager.remote_workspace_flow.is_none(),
-                manager.terminal_focus_blocker(window, cx),
-                manager
-                    .workspaces
-                    .active()
-                    .payload()
-                    .read(cx)
-                    .focused_terminal_is_focused(window, cx),
-                manager.workspaces.len(),
-                records.starts().len(),
-            )
-        }),
-        (true, None, true, 1, 1)
-    );
-}
-
-#[gpui::test]
-fn top_combo_box_unavailable_remote_should_reject_acceptance_and_keep_terminal_input_blocked(
-    cx: &mut TestAppContext,
-) {
-    cx.update(crate::ui::init)
-        .expect("UI initialization should succeed");
-    let records = TestTerminalSessionRecords::default();
-    let session_factory: Rc<dyn TerminalSessionFactory> =
-        Rc::new(TestTerminalSessionFactory::new(records.clone()).with_fallback_title("zsh"));
-    // No SSH registry is installed, as on a computer without a usable OpenSSH.
-    let (manager, cx) = cx.add_window_view(move |window, cx| {
-        new_desktop_manager(
-            session_factory,
-            std::env::temp_dir(),
-            workspace_adapters(),
-            SidebarState::Expanded,
-            window,
-            cx,
-        )
-    });
-    cx.update(|window, cx| manager.update(cx, |manager, cx| manager.focus(window, cx)));
-    cx.run_until_parked();
-    open_workspace_switcher_for_creation(cx);
-
-    click("workspace-switcher-create-remote", cx);
-    click("workspace-switcher-open-remote-directory", cx);
-    cx.simulate_keystrokes("cmd-shift-n");
-    cx.simulate_keystrokes("cmd-shift-o");
-    cx.run_until_parked();
-
-    assert_eq!(
-        cx.update(|window, cx| {
-            let manager = manager.read(cx);
-            (
-                window_combo_box_is_open(window, cx),
-                manager.remote_workspace_flow.is_none(),
-                manager.terminal_focus_blocker(window, cx),
-                manager
-                    .workspaces
-                    .active()
-                    .payload()
-                    .read(cx)
-                    .focused_terminal_is_focused(window, cx),
-                manager.workspaces.len(),
-                records.starts().len(),
-            )
-        }),
-        (
-            true,
-            true,
-            Some(TerminalFocusBlocker::CommandPalette),
-            false,
-            1,
-            1,
-        )
-    );
-
-    cx.simulate_keystrokes("escape");
-    cx.run_until_parked();
-
-    assert_eq!(
-        cx.update(|window, cx| {
-            let manager = manager.read(cx);
-            (
-                window_combo_box_is_open(window, cx),
-                manager.terminal_focus_blocker(window, cx),
-                manager
-                    .workspaces
-                    .active()
-                    .payload()
-                    .read(cx)
-                    .focused_terminal_is_focused(window, cx),
-            )
-        }),
-        (false, None, true)
-    );
-    click_new_workspace_menu("new-workspace-menu-create-remote", cx);
-    // A disabled row keeps the menu open.
-    click("new-workspace-menu-open-remote-directory", cx);
-    cx.simulate_keystrokes("escape");
-    cx.simulate_keystrokes("cmd-shift-n");
-    cx.simulate_keystrokes("cmd-shift-o");
-    cx.run_until_parked();
-    assert!(manager.read_with(cx, |manager, _| manager.remote_workspace_flow.is_none()));
-    assert_eq!(records.starts().len(), 1);
-}
-
-#[gpui::test]
-fn choosing_remote_workspace_should_strictly_replace_the_panel_and_restore_focus_on_escape(
-    cx: &mut TestAppContext,
-) {
-    let (manager, _, cx) = workspace_manager(cx);
-
-    open_workspace_switcher_for_creation(cx);
-    click("workspace-switcher-create-remote", cx);
-    let flow = manager.read_with(cx, |manager, _| {
-        manager
-            .remote_workspace_flow
-            .as_ref()
-            .expect("Remote Workspace must create its flow")
-            .clone()
-    });
-
-    let opened = cx.update(|window, cx| {
-        let manager = manager.read(cx);
-        (
-            window_combo_box_is_open(window, cx),
-            flow.read(cx).stage(),
-            flow.read(cx).owns_first_responder(window, cx),
-            manager.terminal_focus_blocker(window, cx),
-        )
-    });
-    assert_eq!(
-        opened,
-        (
-            false,
-            RemoteWorkspaceFlowStage::HostSelection,
-            true,
-            Some(TerminalFocusBlocker::CommandPalette),
-        )
-    );
-
-    cx.simulate_keystrokes("escape");
-    cx.run_until_parked();
-    let escaped = cx.update(|window, cx| {
-        let manager = manager.read(cx);
-        (
-            manager.remote_workspace_flow.is_none(),
-            manager.terminal_focus_blocker(window, cx),
-            manager
-                .workspaces
-                .active()
-                .payload()
-                .read(cx)
-                .focused_terminal_is_focused(window, cx),
-        )
-    });
-    assert_eq!(escaped, (true, None, true));
-
-    open_workspace_switcher_for_creation(cx);
-    click("workspace-switcher-create-remote", cx);
-    let reopened = manager.read_with(cx, |manager, _| {
-        manager
-            .remote_workspace_flow
-            .as_ref()
-            .expect("Remote Workspace should create a fresh flow")
-            .clone()
-    });
-    assert_ne!(reopened, flow);
-    assert_eq!(
-        reopened.read_with(cx, |flow, _| flow.stage()),
-        RemoteWorkspaceFlowStage::HostSelection
-    );
-}
-
-#[gpui::test]
-fn replacing_the_ssh_host_picker_should_release_terminal_input_and_allow_reopening(
-    cx: &mut TestAppContext,
-) {
-    let (manager, records, cx) = workspace_manager(cx);
-    cx.update(|window, _| window.activate_window());
-    cx.run_until_parked();
-
-    cx.simulate_keystrokes("cmd-shift-k cmd-shift-n cmd-shift-k");
-    cx.run_until_parked();
-    assert!(cx.update(|window, cx| window_combo_box_is_open(window, cx)));
-    assert!(!active_terminal_has_input_focus(&manager, cx));
-
-    cx.simulate_keystrokes("escape");
-    cx.run_until_parked();
-    click("terminal-pane", cx);
-    cx.simulate_keystrokes("x");
-    cx.run_until_parked();
-    assert!(
-        records
-            .commands()
-            .iter()
-            .any(|call| matches!(call.command, RecordedCommand::Key(_))),
-        "the terminal must accept input after the replacement switcher closes"
-    );
-
-    cx.simulate_keystrokes("cmd-shift-n");
-    cx.run_until_parked();
-    assert!(cx.update(|window, cx| {
-        manager
-            .read(cx)
-            .remote_workspace_flow
-            .as_ref()
-            .is_some_and(|flow| flow.read(cx).owns_first_responder(window, cx))
-    }));
-    assert!(cx.debug_bounds("command-palette-panel").is_some());
 }
 
 #[gpui::test]
@@ -4426,69 +4154,6 @@ fn the_sidebar_offers_application_commands_when_the_desktop_has_no_menu_bar(
     assert!(cx.debug_bounds("application-menu").is_none());
 }
 
-/// Disabled parity while Remote is unavailable is covered by
-/// `top_combo_box_unavailable_remote_should_reject_acceptance_and_keep_terminal_input_blocked`.
-#[gpui::test]
-fn sidebar_new_workspace_menu_should_mirror_switcher_creation_rows(cx: &mut TestAppContext) {
-    use crate::desktop_profile::testing_presentation;
-    use crate::ui::workspace_creation::WorkspaceCreation;
-
-    // The shared descriptor source both surfaces build from.
-    assert_eq!(
-        WorkspaceCreation::ALL.map(WorkspaceCreation::label),
-        [
-            "Local Workspace",
-            "Remote Workspace",
-            "Open Local Directory…",
-            "Open Remote Directory…",
-        ]
-    );
-    let presentation = cx.update(|_| testing_presentation());
-    assert_eq!(
-        WorkspaceCreation::ALL.map(|creation| creation.shortcut(&presentation)),
-        [
-            Some("Primary+N".into()),
-            Some("Primary+Shift+N".into()),
-            Some("Primary+O".into()),
-            Some("Primary+Shift+O".into()),
-        ]
-    );
-
-    let (_, _, cx) = workspace_manager(cx);
-    open_workspace_switcher_for_creation(cx);
-    let switcher_rows = WorkspaceCreation::ALL.map(|creation| {
-        // Debug selectors are static; leaking four test strings is harmless.
-        let selector: &'static str = format!("workspace-switcher-{}", creation.selector()).leak();
-        cx.debug_bounds(selector)
-            .unwrap_or_else(|| panic!("missing switcher creation row: {selector}"))
-    });
-    assert!(switcher_rows.is_sorted_by_key(|row| row.top()));
-    assert!(
-        cx.debug_bounds("workspace-switcher-open-local-directory-group-separator")
-            .is_some(),
-        "the Open rows should start a separate switcher group"
-    );
-    cx.simulate_keystrokes("escape");
-    cx.run_until_parked();
-    click("new-workspace-button", cx);
-    assert!(cx.update(|window, cx| spaceterm_ui::window_menu_is_open(window, cx)));
-    let [local, remote, open_local, open_remote] = WorkspaceCreation::ALL.map(|creation| {
-        // Debug selectors are static; leaking four test strings is harmless.
-        let selector: &'static str = format!("new-workspace-menu-{}", creation.selector()).leak();
-        cx.debug_bounds(selector)
-            .unwrap_or_else(|| panic!("missing creation row: {selector}"))
-    });
-    assert!([local, remote, open_local, open_remote].is_sorted_by_key(|row| row.top()));
-    assert!(
-        open_local.top() - remote.bottom() > remote.top() - local.bottom(),
-        "a separator should divide the New rows from the Open rows"
-    );
-    assert_eq!(
-        open_remote.top() - open_local.bottom(),
-        remote.top() - local.bottom()
-    );
-}
-
 #[gpui::test]
 fn top_chrome_buttons_should_toggle_sidebar_and_present_the_new_workspace_combo_box(
     cx: &mut TestAppContext,
@@ -4520,13 +4185,13 @@ fn top_chrome_buttons_should_toggle_sidebar_and_present_the_new_workspace_combo_
         .expect("the Workspace root should render");
     assert!(panel.left() >= workspace.left() && panel.right() <= workspace.right());
     assert!(panel.size.width >= px(240.0) && panel.size.width <= px(420.0));
-    let remote_label = cx
+    let open_label = cx
         .debug_bounds("combo-box-row-2-label")
-        .expect("the Remote Workspace label should render");
-    let remote_shortcut = cx
+        .expect("the Open Local Directory label should render");
+    let open_shortcut = cx
         .debug_bounds("combo-box-row-2-shortcut")
-        .expect("the Remote Workspace shortcut should render");
-    assert!(remote_shortcut.left() - remote_label.right() >= px(24.0));
+        .expect("the Open Local Directory shortcut should render");
+    assert!(open_shortcut.left() - open_label.right() >= px(24.0));
     let chooser = cx
         .debug_bounds("workspace-switcher")
         .expect("the top chooser should render");
@@ -4542,7 +4207,7 @@ fn top_chrome_buttons_should_toggle_sidebar_and_present_the_new_workspace_combo_
     cx.run_until_parked();
     for selector in [
         "workspace-switcher-create-local",
-        "workspace-switcher-create-remote",
+        "workspace-switcher-open-local-directory",
     ] {
         let row = cx
             .debug_bounds(selector)
@@ -4913,7 +4578,7 @@ fn collapsed_workspace_switcher_should_open_from_each_part_without_dragging(
         );
         assert!(cx.debug_bounds("workspace-switcher-create-local").is_some());
         assert!(
-            cx.debug_bounds("workspace-switcher-create-remote")
+            cx.debug_bounds("workspace-switcher-open-local-directory")
                 .is_some()
         );
         cx.simulate_keystrokes("escape");
@@ -6970,13 +6635,15 @@ fn workspace_switcher_should_append_creation_actions_for_empty_and_matching_quer
         cx.run_until_parked();
         let matched = cx.debug_bounds("workspace-switcher-result-1").unwrap();
         let local = cx.debug_bounds("workspace-switcher-create-local").unwrap();
-        let remote = cx.debug_bounds("workspace-switcher-create-remote").unwrap();
+        let open_local = cx
+            .debug_bounds("workspace-switcher-open-local-directory")
+            .unwrap();
         let separator = cx
             .debug_bounds("workspace-switcher-create-local-group-separator")
             .expect("the creation group must be separated from matching Workspaces");
         assert!(matched.bottom() <= separator.top());
         assert!(separator.bottom() <= local.top());
-        assert!(local.bottom() <= remote.top());
+        assert!(local.bottom() <= open_local.top());
     }
 }
 
@@ -6986,79 +6653,13 @@ fn workspace_switcher_menu_sizes_to_its_rows_and_keeps_shortcuts_clear(cx: &mut 
     open_workspace_switcher(cx);
 
     let panel = cx.debug_bounds("combo-box-panel").unwrap();
-    let remote_label = cx.debug_bounds("combo-box-row-2-label").unwrap();
-    let remote_shortcut = cx.debug_bounds("combo-box-row-2-shortcut").unwrap();
+    // Row 2 is Open Local Directory, after the one Workspace and Local Workspace.
+    let open_label = cx.debug_bounds("combo-box-row-2-label").unwrap();
+    let open_shortcut = cx.debug_bounds("combo-box-row-2-shortcut").unwrap();
 
     assert!(panel.size.width > px(240.0));
     assert!(panel.size.width <= px(420.0));
-    assert!(remote_shortcut.left() - remote_label.right() >= px(24.0));
-}
-
-#[gpui::test]
-fn sidebar_remote_creation_should_open_host_selection_and_restore_focus_on_cancel(
-    cx: &mut TestAppContext,
-) {
-    let (manager, records, cx) = workspace_manager(cx);
-    click_new_workspace_menu("new-workspace-menu-create-remote", cx);
-    let flow = manager.read_with(cx, |manager, _| {
-        manager.remote_workspace_flow.clone().unwrap()
-    });
-    assert_eq!(
-        flow.read_with(cx, |flow, _| flow.stage()),
-        RemoteWorkspaceFlowStage::HostSelection
-    );
-    assert_eq!(records.starts().len(), 1);
-    assert!(cx.update(|window, cx| flow.read(cx).owns_first_responder(window, cx)));
-    cx.simulate_keystrokes("escape");
-    cx.run_until_parked();
-    assert!(manager.read_with(cx, |manager, _| manager.remote_workspace_flow.is_none()));
-    assert!(cx.update(|window, cx| {
-        manager
-            .read(cx)
-            .workspaces
-            .active()
-            .payload()
-            .read(cx)
-            .focused_terminal_is_focused(window, cx)
-    }));
-}
-
-#[gpui::test]
-fn creation_shortcut_should_open_remote_setup_without_reusing_cancelled_query(
-    cx: &mut TestAppContext,
-) {
-    let (manager, records, cx) = workspace_manager(cx);
-    open_workspace_switcher_for_creation(cx);
-    cx.simulate_keystrokes("escape cmd-shift-n");
-    cx.run_until_parked();
-    let flow = manager.read_with(cx, |manager, _| {
-        assert_eq!(manager.remote_workspace_name.as_deref(), Some(""));
-        manager.remote_workspace_flow.clone().unwrap()
-    });
-    assert_eq!(
-        flow.read_with(cx, |flow, _| flow.stage()),
-        RemoteWorkspaceFlowStage::HostSelection
-    );
-    assert!(cx.update(|window, cx| flow.read(cx).owns_first_responder(window, cx)));
-    cx.simulate_keystrokes("cmd-shift-n");
-    cx.run_until_parked();
-    assert_eq!(
-        manager.read_with(cx, |manager, _| manager.remote_workspace_flow.clone()),
-        Some(flow)
-    );
-    cx.simulate_keystrokes("escape");
-    cx.run_until_parked();
-    assert!(manager.read_with(cx, |manager, _| manager.remote_workspace_flow.is_none()));
-    assert_eq!(records.starts().len(), 1);
-    assert!(cx.update(|window, cx| {
-        manager
-            .read(cx)
-            .workspaces
-            .active()
-            .payload()
-            .read(cx)
-            .focused_terminal_is_focused(window, cx)
-    }));
+    assert!(open_shortcut.left() - open_label.right() >= px(24.0));
 }
 
 #[gpui::test]
@@ -8825,7 +8426,6 @@ fn each_servers_workspaces_should_take_edits_and_withdrawal_only_from_their_own_
         workspace_manager_with_directory_selection([Ok(Some(chosen))], cx);
     let local = Rc::new(ScriptedEdits::new(Some(published("Here"))));
     let remote = Rc::new(ScriptedEdits::new(Some(published("There"))));
-    let destination = crate::domain::SshDestination::new("penguin".to_owned()).unwrap();
     let remote_key = cx.update(|window, cx| {
         manager.update(cx, |manager, cx| {
             let sessions = || {
@@ -8846,7 +8446,10 @@ fn each_servers_workspaces_should_take_edits_and_withdrawal_only_from_their_own_
                 cx,
             );
             let remote_key = manager.present_server_workspaces(
-                ServerOrigin::Ssh(destination.clone()),
+                ServerOrigin::Direct(crate::ui::shared_workspaces::DirectServer {
+                    route: named_route("penguin"),
+                    name: "penguin".into(),
+                }),
                 SharedEditSource::new(Rc::clone(&remote) as Rc<_>),
                 sessions(),
                 window,
@@ -8869,7 +8472,7 @@ fn each_servers_workspaces_should_take_edits_and_withdrawal_only_from_their_own_
         })
     };
     let here = named("Here", cx).expect("the local server's Workspace should be presented");
-    let there = named("There", cx).expect("the SSH server's Workspace should be presented");
+    let there = named("There", cx).expect("the paired server's Workspace should be presented");
 
     cx.update(|window, cx| {
         manager.update(cx, |manager, cx| {
@@ -8966,7 +8569,7 @@ fn machine_inventory(
     }
 }
 
-/// A window presenting the account-local server beside SSH servers, each with scripted edits.
+/// A window presenting the account-local server beside paired servers, each with scripted edits.
 struct MachineGroupsHarness {
     manager: Entity<WorkspaceManager>,
     local: Rc<crate::ui::shared_workspaces::testing::ScriptedEdits>,
@@ -8987,8 +8590,8 @@ impl MachineGroupsHarness {
         use crate::ui::shared_workspaces::testing::{ScriptedEdits, ScriptedPanes};
         use crate::ui::shared_workspaces::{SharedEditSource, SharedPaneSessions};
 
-        // A test installs the SSH registry its machines need.
-        let (manager, _records, cx) = workspace_manager_without_ssh_using(adapters, cx);
+        // A test installs the paired registry its machines need.
+        let (manager, _records, cx) = workspace_manager_using(adapters, cx);
         let local = Rc::new(ScriptedEdits::new(Some(machine_inventory(1, &[]))));
         cx.update(|window, cx| {
             manager.update(cx, |manager, cx| {
@@ -9024,24 +8627,28 @@ impl MachineGroupsHarness {
         )
     }
 
-    /// Presents the SSH server at `destination`, publishing `workspaces`, and attaches each one.
-    fn present_ssh(
+    /// Presents the paired server `name` at `route`, publishing `workspaces`, and attaches each
+    /// one. Its writer is registered as the Workspace Window registers a connected route's.
+    fn present_direct(
         &self,
-        destination: &str,
+        name: &str,
+        route: crate::direct_connections::DirectRouteId,
         workspaces: &[(&str, u8)],
         cx: &mut VisualTestContext,
     ) -> (
         ServerKey,
         Rc<crate::ui::shared_workspaces::testing::ScriptedEdits>,
     ) {
-        let (key, edits, _) = self.present_ssh_panes(destination, workspaces, cx);
+        let (key, edits, _) = self.present_direct_panes(name, route, workspaces, cx);
         (key, edits)
     }
 
-    /// Presents the SSH server as [`Self::present_ssh`] does, with the scripted Panes it opens.
-    fn present_ssh_panes(
+    /// Presents the paired server as [`Self::present_direct`] does, with the scripted Panes it
+    /// opens.
+    fn present_direct_panes(
         &self,
-        destination: &str,
+        name: &str,
+        route: crate::direct_connections::DirectRouteId,
         workspaces: &[(&str, u8)],
         cx: &mut VisualTestContext,
     ) -> (
@@ -9049,20 +8656,43 @@ impl MachineGroupsHarness {
         Rc<crate::ui::shared_workspaces::testing::ScriptedEdits>,
         Rc<crate::ui::shared_workspaces::testing::ScriptedPanes>,
     ) {
-        use crate::ui::shared_workspaces::testing::{ScriptedEdits, ScriptedPanes};
-        use crate::ui::shared_workspaces::{SharedEditSource, SharedPaneSessions};
+        let edits = Rc::new(crate::ui::shared_workspaces::testing::ScriptedEdits::new(
+            Some(machine_inventory(self.next_revision(), workspaces)),
+        ));
+        let (key, panes) = self.present_direct_edits(name, route, &edits, cx);
+        self.attach(key, workspaces, cx);
+        (key, edits, panes)
+    }
+
+    /// Presents the paired server `name` at `route` over `edits`, which may still be connecting.
+    fn present_direct_edits(
+        &self,
+        name: &str,
+        route: crate::direct_connections::DirectRouteId,
+        edits: &Rc<crate::ui::shared_workspaces::testing::ScriptedEdits>,
+        cx: &mut VisualTestContext,
+    ) -> (
+        ServerKey,
+        Rc<crate::ui::shared_workspaces::testing::ScriptedPanes>,
+    ) {
+        use crate::ui::shared_workspaces::testing::ScriptedPanes;
+        use crate::ui::shared_workspaces::{DirectServer, SharedEditSource, SharedPaneSessions};
 
         let panes = ScriptedPanes::new(Self::session_factory());
-        let edits = Rc::new(ScriptedEdits::new(Some(machine_inventory(
-            self.next_revision(),
-            workspaces,
-        ))));
-        let destination = crate::domain::SshDestination::new(destination.to_owned()).unwrap();
         let key = cx.update(|window, cx| {
+            crate::ui::server_worktrees::testing::present_direct(
+                route,
+                Rc::clone(edits),
+                crate::ui::server_worktrees::testing::ScriptedReads::new("~/{branch}"),
+                cx,
+            );
             self.manager.update(cx, |manager, cx| {
                 let key = manager.present_server_workspaces(
-                    ServerOrigin::Ssh(destination),
-                    SharedEditSource::new(Rc::clone(&edits) as Rc<_>),
+                    ServerOrigin::Direct(DirectServer {
+                        route,
+                        name: name.to_owned().into(),
+                    }),
+                    SharedEditSource::new(Rc::clone(edits) as Rc<_>),
                     SharedPaneSessions::with_opener(
                         Rc::clone(&panes) as Rc<_>,
                         &PaneConstruction::testing(),
@@ -9074,8 +8704,8 @@ impl MachineGroupsHarness {
                 key
             })
         });
-        self.attach(key, workspaces, cx);
-        (key, edits, panes)
+        cx.run_until_parked();
+        (key, panes)
     }
 
     /// Publishes `workspaces` from the server at `key` and attaches each one.
@@ -9157,14 +8787,14 @@ impl MachineGroupsHarness {
 fn workspaces_from_several_servers_should_stay_grouped_by_machine(cx: &mut TestAppContext) {
     let (harness, cx) = MachineGroupsHarness::new(cx);
     harness.publish(ServerKey::LOCAL, &harness.local, &[("Here", 1)], cx);
-    let (zeta, zeta_edits) = harness.present_ssh("zeta", &[("Far", 1)], cx);
+    let (zeta, zeta_edits) = harness.present_direct("zeta", named_route("zeta"), &[("Far", 1)], cx);
     harness.publish(
         ServerKey::LOCAL,
         &harness.local,
         &[("Here", 1), ("Also Here", 2)],
         cx,
     );
-    harness.present_ssh("Alpha", &[("Near", 1)], cx);
+    harness.present_direct("Alpha", named_route("Alpha"), &[("Near", 1)], cx);
     harness.publish(zeta, &zeta_edits, &[("Far", 1), ("Farther", 2)], cx);
 
     assert_eq!(
@@ -9180,7 +8810,12 @@ fn workspaces_from_several_servers_should_stay_grouped_by_machine(cx: &mut TestA
 fn moving_a_workspace_should_stay_among_its_machines_workspaces(cx: &mut TestAppContext) {
     let (harness, cx) = MachineGroupsHarness::new(cx);
     harness.publish(ServerKey::LOCAL, &harness.local, &[("Here", 1)], cx);
-    harness.present_ssh("penguin", &[("Far", 1), ("Farther", 2)], cx);
+    harness.present_direct(
+        "penguin",
+        named_route("penguin"),
+        &[("Far", 1), ("Farther", 2)],
+        cx,
+    );
     let farther = harness.named("Farther", cx);
     let default = harness.named("Default", cx);
 
@@ -9227,7 +8862,7 @@ fn moving_a_workspace_should_stay_among_its_machines_workspaces(cx: &mut TestApp
 fn workspace_shortcuts_should_follow_the_grouped_order(cx: &mut TestAppContext) {
     let (harness, cx) = MachineGroupsHarness::new(cx);
     harness.publish(ServerKey::LOCAL, &harness.local, &[("Here", 1)], cx);
-    harness.present_ssh("penguin", &[("Far", 1)], cx);
+    harness.present_direct("penguin", named_route("penguin"), &[("Far", 1)], cx);
     harness.publish(
         ServerKey::LOCAL,
         &harness.local,
@@ -9260,7 +8895,7 @@ fn withdrawing_one_server_should_keep_the_other_machines_workspaces_and_active_w
         &[("Here", 1), ("Also Here", 2)],
         cx,
     );
-    let (penguin, _) = harness.present_ssh("penguin", &[("Far", 1)], cx);
+    let (penguin, _) = harness.present_direct("penguin", named_route("penguin"), &[("Far", 1)], cx);
     let here = harness.named("Here", cx);
     cx.update(|window, cx| {
         harness.manager.update(cx, |manager, cx| {
@@ -9296,93 +8931,6 @@ fn withdrawing_one_server_should_keep_the_other_machines_workspaces_and_active_w
     );
 }
 
-/// An SSH registry whose every connection waits for the person to sign in, recording each
-/// request it receives.
-fn waiting_ssh_registry(
-    cx: &mut VisualTestContext,
-) -> (
-    crate::ssh::server_connection::SshServerConnections,
-    std::sync::mpsc::Receiver<String>,
-) {
-    use crate::ssh::cancellation::SshCancellationToken;
-    use crate::ssh::server_connection::{
-        ConnectMode, ConnectProgress, ConnectedSshServer, InteractionReason, RetainedSshConnection,
-        SshConnectBackend, SshConnectFailure, SshConnectionIntentStore, SshIntentStoreError,
-        SshServerConnections, SshServerContinuity, SshServerObservation,
-    };
-    use std::sync::{Arc, mpsc};
-
-    struct WaitingBackend(Mutex<mpsc::Sender<String>>);
-    impl SshConnectBackend for WaitingBackend {
-        fn connect(
-            &self,
-            destination: &crate::domain::SshDestination,
-            _: ConnectMode,
-            _: Option<&SshServerContinuity>,
-            _: &SshCancellationToken,
-            _: &ConnectProgress<'_>,
-        ) -> Result<ConnectedSshServer, SshConnectFailure> {
-            let _ = self.0.lock().unwrap().send(destination.as_str().to_owned());
-            Err(SshConnectFailure::NeedsPerson(
-                InteractionReason::Authentication,
-            ))
-        }
-        fn observe(
-            &self,
-            _: &crate::domain::SshDestination,
-            _: Option<&SshServerContinuity>,
-            _: &SshCancellationToken,
-            _: &ConnectProgress<'_>,
-        ) -> Result<SshServerObservation, SshConnectFailure> {
-            Err(SshConnectFailure::NeedsPerson(
-                InteractionReason::Authentication,
-            ))
-        }
-    }
-    struct NoIntents;
-    impl SshConnectionIntentStore for NoIntents {
-        fn load(&self) -> Result<Vec<RetainedSshConnection>, SshIntentStoreError> {
-            Ok(Vec::new())
-        }
-        fn retain(&self, _: RetainedSshConnection) -> Result<(), SshIntentStoreError> {
-            Ok(())
-        }
-        fn remove(&self, _: &crate::domain::SshDestination) -> Result<(), SshIntentStoreError> {
-            Ok(())
-        }
-    }
-
-    let (sender, connects) = mpsc::channel();
-    let connections = SshServerConnections::new(
-        Arc::new(WaitingBackend(Mutex::new(sender))),
-        Arc::new(NoIntents),
-    );
-    let installed = connections.clone();
-    cx.update(|_, cx| crate::ui::ssh_servers::install(installed, None, cx));
-    (connections, connects)
-}
-
-/// Waits until the registry reports that `destination` waits for the person.
-fn wait_for_person(
-    connections: &crate::ssh::server_connection::SshServerConnections,
-    destination: &str,
-) {
-    use crate::ssh::server_connection::RemoteConnectionStatus;
-
-    let destination = crate::domain::SshDestination::new(destination.to_owned()).unwrap();
-    let deadline = Instant::now() + std::time::Duration::from_secs(5);
-    while !matches!(
-        connections.status(&destination),
-        RemoteConnectionStatus::NeedsPerson { .. }
-    ) {
-        assert!(
-            Instant::now() < deadline,
-            "the connection should come to wait for the person"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(5));
-    }
-}
-
 fn heading_names(cx: &mut VisualTestContext) -> Vec<String> {
     spaceterm_ui::a11y_testing::A11yTree::read(cx)
         .with_role("Heading")
@@ -9405,7 +8953,7 @@ fn machine_headings_should_appear_only_once_a_second_machine_is_presented(cx: &m
         heading_names(cx),
     );
 
-    harness.present_ssh("penguin", &[("Far", 1)], cx);
+    harness.present_direct("penguin", named_route("penguin"), &[("Far", 1)], cx);
     redraw(cx);
     let here = harness.named("Here", cx).get();
     let far = harness.named("Far", cx).get();
@@ -9443,64 +8991,6 @@ fn machine_headings_should_appear_only_once_a_second_machine_is_presented(cx: &m
     );
 }
 
-/// A presented SSH server that isn't connected says so in its heading. Reading the state asks
-/// that server for nothing.
-#[gpui::test]
-fn an_ssh_machine_heading_should_show_a_connection_that_is_not_connected(cx: &mut TestAppContext) {
-    let (harness, cx) = MachineGroupsHarness::new(cx);
-    harness.publish(ServerKey::LOCAL, &harness.local, &[("Here", 1)], cx);
-    let (connections, connects) = waiting_ssh_registry(cx);
-    harness.present_ssh("penguin", &[("Far", 1)], cx);
-
-    connections.connect(crate::domain::SshDestination::new("penguin".to_owned()).unwrap());
-    wait_for_person(&connections, "penguin");
-    assert_eq!(connects.try_recv().ok().as_deref(), Some("penguin"));
-    redraw(cx);
-
-    assert!(
-        cx.debug_bounds("machine-heading-status-penguin").is_some(),
-        "the heading should show the connection's state"
-    );
-    assert_eq!(
-        heading_names(cx),
-        ["This Computer", "penguin, Waiting for You"]
-    );
-    assert!(
-        connects.try_recv().is_err(),
-        "presenting the state asks the server for nothing"
-    );
-}
-
-/// A presented SSH server with no attached Workspaces keeps its heading, with a quiet line in
-/// place of its Workspaces.
-#[gpui::test]
-fn an_empty_ssh_server_should_keep_its_heading_and_say_it_has_no_workspaces(
-    cx: &mut TestAppContext,
-) {
-    let (harness, cx) = MachineGroupsHarness::new(cx);
-    harness.publish(ServerKey::LOCAL, &harness.local, &[("Here", 1)], cx);
-    harness.present_ssh("penguin", &[], cx);
-    redraw(cx);
-
-    let heading = cx.debug_bounds("machine-heading-penguin");
-    let empty = cx.debug_bounds("machine-empty-penguin");
-    assert!(
-        heading
-            .zip(empty)
-            .is_some_and(|(heading, empty)| heading.bottom() <= empty.top()),
-        "the empty server's heading should stand above its No Workspaces line"
-    );
-    assert!(
-        cx.debug_bounds("machine-empty-This Computer").is_none(),
-        "a machine with Workspaces lists them instead"
-    );
-    assert!(
-        spaceterm_ui::a11y_testing::A11yTree::read(cx)
-            .find_text("No Workspaces")
-            .is_some()
-    );
-}
-
 /// Dragging a Workspace row past its machine's heading lands it at the nearer end of that
 /// machine's Workspaces.
 #[gpui::test]
@@ -9508,7 +8998,12 @@ fn dragging_a_workspace_past_its_machine_heading_should_stay_with_its_machine(
     cx: &mut TestAppContext,
 ) {
     let (harness, cx) = MachineGroupsHarness::new(cx);
-    harness.present_ssh("penguin", &[("Far", 1), ("Farther", 2)], cx);
+    harness.present_direct(
+        "penguin",
+        named_route("penguin"),
+        &[("Far", 1), ("Farther", 2)],
+        cx,
+    );
     harness.manager.update(cx, |manager, cx| {
         manager
             .workspaces
@@ -9555,50 +9050,13 @@ fn dragging_a_workspace_past_its_machine_heading_should_stay_with_its_machine(
     assert_eq!(harness.names(cx), ["Default", "Farther", "Far"]);
 }
 
-/// A machine heading's menu reaches that machine's server: Connect asks the registry as Settings
-/// does, and every heading offers the Servers Settings Section.
+/// A saved paired server keeps its heading while it isn't connected, and its commands reach that
+/// route alone.
 #[gpui::test]
-fn a_machine_headings_menu_should_connect_its_server(cx: &mut TestAppContext) {
+fn a_paired_server_heading_should_act_on_its_own_route(cx: &mut TestAppContext) {
+    // The saved route keeps retrying, and its worker reports from its own thread.
+    cx.executor().allow_parking();
     let (harness, cx) = MachineGroupsHarness::new(cx);
-    let (connections, connects) = waiting_ssh_registry(cx);
-    harness.present_ssh("penguin", &[("Far", 1)], cx);
-    connections.connect(crate::domain::SshDestination::new("penguin".to_owned()).unwrap());
-    wait_for_person(&connections, "penguin");
-    let _ = connects.try_recv();
-    redraw(cx);
-
-    right_click("machine-heading-This Computer", cx);
-    let local = (
-        cx.debug_bounds("machine-menu-server-settings").is_some(),
-        cx.debug_bounds("machine-menu-connect").is_some(),
-    );
-    cx.simulate_keystrokes("escape");
-    cx.run_until_parked();
-    right_click("machine-heading-penguin", cx);
-    let remote = (
-        cx.debug_bounds("machine-menu-server-settings").is_some(),
-        cx.debug_bounds("machine-menu-disconnect").is_some(),
-    );
-    click("machine-menu-connect", cx);
-
-    assert_eq!(local, (true, false));
-    assert_eq!(remote, (true, true));
-    assert_eq!(
-        connects
-            .recv_timeout(std::time::Duration::from_secs(5))
-            .ok()
-            .as_deref(),
-        Some("penguin"),
-        "Connect asks the registry to connect to the heading's machine"
-    );
-}
-
-/// A direct network server's heading names its route, and its commands reach that route alone:
-/// the SSH registry hears nothing, even for a computer it could also reach.
-#[gpui::test]
-fn a_direct_network_heading_should_act_on_its_own_route_and_never_on_ssh(cx: &mut TestAppContext) {
-    let (harness, cx) = MachineGroupsHarness::new(cx);
-    let (_ssh, connects) = waiting_ssh_registry(cx);
     let (direct, route) = crate::direct_connections::tests::offline("studio");
     cx.update(|_, cx| crate::ui::direct_servers::install(direct.clone(), cx));
     harness.publish(ServerKey::LOCAL, &harness.local, &[("Here", 1)], cx);
@@ -9607,8 +9065,8 @@ fn a_direct_network_heading_should_act_on_its_own_route_and_never_on_ssh(cx: &mu
     assert!(
         heading_names(cx)
             .iter()
-            .any(|name| name.starts_with("studio, Direct network")),
-        "the heading says how this client reaches the server, got {:?}",
+            .any(|name| name.starts_with("studio")),
+        "the saved server keeps its heading, got {:?}",
         heading_names(cx)
     );
     right_click("machine-heading-studio", cx);
@@ -9618,9 +9076,35 @@ fn a_direct_network_heading_should_act_on_its_own_route_and_never_on_ssh(cx: &mu
         direct.status(&route),
         Some(crate::direct_connections::DirectRouteStatus::Disconnected)
     );
-    assert!(
-        connects.try_recv().is_err(),
-        "a direct network heading never asks SSH to reach its computer"
+}
+
+/// A presented paired server whose route stopped offers Connect from its heading, which resumes
+/// that route alone.
+#[gpui::test]
+fn a_paired_server_heading_should_connect_its_own_route(cx: &mut TestAppContext) {
+    use crate::direct_connections::DirectRouteStatus;
+
+    // Connect starts the route's native job, which reports from its own thread.
+    cx.executor().allow_parking();
+    let (harness, cx) = MachineGroupsHarness::new(cx);
+    let (direct, routes) = crate::direct_connections::tests::disconnected_routes_at(&[
+        ("studio", "wss://192.168.1.2:9231"),
+        ("penguin", "wss://192.168.1.3:9231"),
+    ]);
+    cx.update(|_, cx| crate::ui::direct_servers::install(direct.clone(), cx));
+    harness.present_direct("studio", routes[0], &[("Far", 1)], cx);
+    redraw(cx);
+
+    right_click("machine-heading-studio", cx);
+    click("machine-menu-connect", cx);
+
+    assert_ne!(
+        direct.status(&routes[0]),
+        Some(DirectRouteStatus::Disconnected)
+    );
+    assert_eq!(
+        direct.status(&routes[1]),
+        Some(DirectRouteStatus::Disconnected)
     );
 }
 
@@ -9631,8 +9115,9 @@ fn a_direct_network_heading_should_act_on_its_own_route_and_never_on_ssh(cx: &mu
 fn same_named_direct_routes_should_keep_separate_headings_and_commands(cx: &mut TestAppContext) {
     use crate::direct_connections::DirectRouteStatus;
 
+    // The saved routes keep retrying, and their workers report from their own threads.
+    cx.executor().allow_parking();
     let (harness, cx) = MachineGroupsHarness::new(cx);
-    let (_ssh, _connects) = waiting_ssh_registry(cx);
     let (direct, routes) = crate::direct_connections::tests::offline_routes(&["studio", "studio"]);
     cx.update(|_, cx| crate::ui::direct_servers::install(direct.clone(), cx));
     harness.publish(ServerKey::LOCAL, &harness.local, &[("Here", 1)], cx);
@@ -9640,7 +9125,7 @@ fn same_named_direct_routes_should_keep_separate_headings_and_commands(cx: &mut 
 
     let headings = heading_names(cx)
         .into_iter()
-        .filter(|name| name.starts_with("studio, Direct network"))
+        .filter(|name| name.starts_with("studio"))
         .count();
     assert_eq!(
         headings,
@@ -9660,7 +9145,7 @@ fn same_named_direct_routes_should_keep_separate_headings_and_commands(cx: &mut 
     assert_eq!(
         heading_names(cx)
             .iter()
-            .filter(|name| name.starts_with("studio, Direct network"))
+            .filter(|name| name.starts_with("studio"))
             .count(),
         1,
         "the other route keeps its heading"
@@ -9682,13 +9167,13 @@ impl crate::platform::window_movement::WindowMovementFactory for SettingsMovemen
 fn a_machine_headings_server_settings_should_select_its_server(cx: &mut TestAppContext) {
     use spaceterm_ui::a11y_testing::A11yTree;
 
+    // Each saved route keeps retrying, so its heading shows unpresented, and its worker reports
+    // to Settings from its own thread.
+    cx.executor().allow_parking();
     let (harness, cx) = MachineGroupsHarness::new(cx);
-    let (connections, _connects) = waiting_ssh_registry(cx);
-    for name in ["alpha", "penguin"] {
-        harness.present_ssh(name, &[], cx);
-        connections.connect(crate::domain::SshDestination::new(name.to_owned()).unwrap());
-        wait_for_person(&connections, name);
-    }
+    let (direct, _routes) = crate::direct_connections::tests::offline_routes(&["alpha", "penguin"]);
+    cx.update(|_, cx| crate::ui::direct_servers::install(direct.clone(), cx));
+    harness.publish(ServerKey::LOCAL, &harness.local, &[("Here", 1)], cx);
     let settings = crate::settings::Settings::load(
         crate::settings::storage::testing::MemoryStorage::with_document(
             &crate::settings::SettingsDocument::default(),
@@ -9735,511 +9220,6 @@ fn a_machine_headings_server_settings_should_select_its_server(cx: &mut TestAppC
         ["Servers", "penguin"],
         "Settings presents the Servers section with the heading's server selected"
     );
-}
-
-/// A machine heading's Disconnect ends that machine's connection and leaves the others connected.
-#[gpui::test]
-fn a_machine_headings_menu_should_disconnect_only_its_server(cx: &mut TestAppContext) {
-    use crate::ssh::server_connection::RemoteConnectionStatus;
-
-    let (harness, cx) = MachineGroupsHarness::new(cx);
-    let (connections, _connects) = waiting_ssh_registry(cx);
-    for name in ["penguin", "zeta"] {
-        harness.present_ssh(name, &[], cx);
-        connections.connect(crate::domain::SshDestination::new(name.to_owned()).unwrap());
-        wait_for_person(&connections, name);
-    }
-    redraw(cx);
-
-    right_click("machine-heading-penguin", cx);
-    click("machine-menu-disconnect", cx);
-
-    let status = |name: &str| {
-        connections.status(&crate::domain::SshDestination::new(name.to_owned()).unwrap())
-    };
-    assert!(matches!(
-        status("penguin"),
-        RemoteConnectionStatus::Inactive
-    ));
-    assert!(matches!(
-        status("zeta"),
-        RemoteConnectionStatus::NeedsPerson { .. }
-    ));
-}
-
-/// An operations owner whose state the test sets and whose calls it counts. Nothing here reaches
-/// a computer.
-struct ScriptedMaintenance {
-    /// The destination this owner holds its entries for.
-    destination: crate::domain::SshDestination,
-    states: Mutex<Vec<crate::ssh::server_operations::RemoteOperationState>>,
-    /// What the last verified read found about updating the server, reported with each state.
-    offer: Mutex<crate::ssh::server_operations::RemoteUpdateOffer>,
-    calls: Mutex<Vec<String>>,
-    changes: (async_channel::Sender<()>, async_channel::Receiver<()>),
-}
-
-impl ScriptedMaintenance {
-    fn new(
-        destination: &str,
-        state: crate::ssh::server_operations::RemoteOperationState,
-    ) -> std::sync::Arc<Self> {
-        std::sync::Arc::new(Self {
-            destination: crate::domain::SshDestination::new(destination.to_owned())
-                .expect("destination"),
-            states: Mutex::new(vec![state]),
-            offer: Mutex::new(crate::ssh::server_operations::RemoteUpdateOffer::Unchecked),
-            calls: Mutex::new(Vec::new()),
-            changes: async_channel::unbounded(),
-        })
-    }
-
-    fn calls(&self) -> Vec<String> {
-        self.calls.lock().unwrap().clone()
-    }
-
-    fn record(&self, call: &str) {
-        self.calls.lock().unwrap().push(call.to_owned());
-    }
-}
-
-impl crate::ssh::server_operations::RemoteServerOperations for ScriptedMaintenance {
-    fn subscribe(&self) -> async_channel::Receiver<()> {
-        self.changes.1.clone()
-    }
-
-    /// The entries Settings and the sidebar read, in the same order.
-    fn entries(&self) -> Vec<crate::ssh::server_operations::RemoteOperationEntry> {
-        self.states
-            .lock()
-            .unwrap()
-            .iter()
-            .enumerate()
-            .map(
-                |(index, state)| crate::ssh::server_operations::RemoteOperationEntry {
-                    destination: self.destination.clone(),
-                    removed: false,
-                    operation: Some([index as u8 + 1; 32]),
-                    state: state.clone(),
-                    observed_at: None,
-                    update_offer: self.offer.lock().unwrap().clone(),
-                },
-            )
-            .collect()
-    }
-
-    #[cfg(test)]
-    fn state(
-        &self,
-        _: &crate::domain::SshDestination,
-    ) -> crate::ssh::server_operations::RemoteOperationState {
-        self.states
-            .lock()
-            .unwrap()
-            .first()
-            .cloned()
-            .unwrap_or(crate::ssh::server_operations::RemoteOperationState::Unread)
-    }
-
-    fn refresh(&self, _: &crate::domain::SshDestination) {
-        self.record("refresh");
-    }
-
-    fn set_automatic_start(&self, destination: &crate::domain::SshDestination, enabled: bool) {
-        assert_eq!(destination, &self.destination);
-        self.record(&format!("automatic start {enabled}"));
-    }
-
-    fn describe(
-        &self,
-        _: &crate::domain::SshDestination,
-        request: crate::ssh::server_operations::RemoteMaintenanceRequest,
-    ) {
-        self.record(&format!("describe {request:?}"));
-    }
-
-    fn confirm(&self, _: crate::ssh::server_operations::RemoteOperationHandle) {
-        self.record("confirm");
-    }
-
-    fn start(&self, _: &crate::domain::SshDestination) {
-        self.record("start");
-    }
-
-    fn cancel(&self, _: &crate::domain::SshDestination) {
-        self.record("cancel");
-    }
-
-    fn resume(&self, _: &crate::domain::SshDestination) {
-        self.record("resume");
-    }
-
-    fn acknowledge(&self, handle: crate::ssh::server_operations::RemoteOperationHandle) {
-        self.record("acknowledge");
-        self.states.lock().unwrap().retain(|state| {
-            !matches!(state, crate::ssh::server_operations::RemoteOperationState::Resolved { handle: named, .. } if *named == handle)
-        });
-        let _ = self.changes.0.try_send(());
-    }
-
-    fn discard(&self, operation: [u8; 32]) {
-        self.record(&format!("discard {}", operation[0]));
-    }
-
-    fn dismiss(&self, _: [u8; 32]) {
-        self.record("dismiss");
-    }
-
-    fn resume_retained(&self) {
-        self.record("resume retained");
-    }
-}
-
-/// The service facts one validated read found on another machine.
-fn remote_facts(
-    running: bool,
-    stopped: bool,
-) -> crate::local_server::service::maintenance::MaintenanceFacts {
-    crate::local_server::service::maintenance::MaintenanceFacts {
-        server: [2; 32],
-        account: 501,
-        build: "spaceterm-development".to_owned(),
-        status: crate::local_server::service::ServiceStatus {
-            installed: true,
-            enabled: running,
-            running,
-            stopped,
-        },
-        startup: crate::local_server::service::ServiceStartup::AtLogin,
-        approved: Some(crate::local_server::service::maintenance::RemoteBuild {
-            version: "1.4.0".to_owned(),
-            commit: "a".repeat(40),
-            digest: "a".repeat(64),
-        }),
-        activation: None,
-    }
-}
-
-/// Installs the owner and one saved connection for `destination`, so the heading's menu offers
-/// the steps that machine's server state allows.
-fn remote_maintenance(
-    state: crate::ssh::server_operations::RemoteOperationState,
-    destination: &str,
-    cx: &mut VisualTestContext,
-) -> (
-    std::sync::Arc<ScriptedMaintenance>,
-    crate::ssh::server_connection::SshServerConnections,
-) {
-    let operations = ScriptedMaintenance::new(destination, state);
-    let owner = std::sync::Arc::clone(&operations)
-        as std::sync::Arc<dyn crate::ssh::server_operations::RemoteServerOperations>;
-    cx.update(|_, cx| crate::ssh::server_operations::install(owner, cx));
-    let (connections, _connects) = waiting_ssh_registry(cx);
-    connections.connect(crate::domain::SshDestination::new(destination.to_owned()).unwrap());
-    wait_for_person(&connections, destination);
-    (operations, connections)
-}
-
-/// A machine heading offers the steps its server's observed state allows, and only explicit Start
-/// can start a server that was stopped.
-#[gpui::test]
-fn a_machine_heading_should_offer_the_steps_its_server_state_allows(cx: &mut TestAppContext) {
-    use crate::ssh::server_operations::{RemoteOperationState, RemoteUpdateOffer};
-
-    let (harness, cx) = MachineGroupsHarness::new(cx);
-    let (operations, _connections) = remote_maintenance(
-        RemoteOperationState::Read(Box::new(remote_facts(true, false))),
-        "penguin",
-        cx,
-    );
-    // The verified read found a newer verified build than the one the server approved.
-    *operations.offer.lock().unwrap() =
-        RemoteUpdateOffer::Available(crate::ssh::server_connection::ServerCandidate {
-            version: "1.5.0".to_owned(),
-            digest: "b".repeat(64),
-        });
-    harness.present_ssh("penguin", &[], cx);
-    redraw(cx);
-
-    right_click("machine-heading-penguin", cx);
-    let running = [
-        "machine-menu-stop",
-        "machine-menu-restart",
-        "machine-menu-update",
-        "machine-menu-uninstall",
-        "machine-menu-start",
-    ]
-    .map(|selector| cx.debug_bounds(selector).is_some());
-    cx.simulate_keystrokes("escape");
-    cx.run_until_parked();
-    *operations.states.lock().unwrap() = vec![RemoteOperationState::Read(Box::new(remote_facts(
-        false, true,
-    )))];
-    redraw(cx);
-    right_click("machine-heading-penguin", cx);
-    let stopped = [
-        "machine-menu-start",
-        "machine-menu-uninstall",
-        "machine-menu-stop",
-        "machine-menu-restart",
-    ]
-    .map(|selector| cx.debug_bounds(selector).is_some());
-    cx.simulate_keystrokes("escape");
-    cx.run_until_parked();
-
-    *operations.states.lock().unwrap() = vec![RemoteOperationState::Read(Box::new(remote_facts(
-        true, false,
-    )))];
-    *operations.offer.lock().unwrap() = RemoteUpdateOffer::UpToDate;
-    redraw(cx);
-    right_click("machine-heading-penguin", cx);
-    let up_to_date = cx.debug_bounds("machine-menu-update").is_some();
-    cx.simulate_keystrokes("escape");
-    cx.run_until_parked();
-
-    assert_eq!(running, [true, true, true, true, false]);
-    assert_eq!(
-        stopped,
-        [true, true, false, false],
-        "only Start reverses a deliberate Stop"
-    );
-    assert!(
-        !up_to_date,
-        "a server already running the verified build has nothing to update"
-    );
-    assert!(
-        operations.calls().is_empty(),
-        "presenting the menu asks the machine nothing, got {:?}",
-        operations.calls()
-    );
-}
-
-/// A machine heading reports an operation underway on its server, which outranks the connection
-/// state it would otherwise show.
-#[gpui::test]
-fn a_machine_heading_should_report_an_operation_underway(cx: &mut TestAppContext) {
-    use crate::local_server::service::control::Action;
-    use crate::ssh::server_maintenance::{MaintenancePhase, SubmittedKind};
-    use crate::ssh::server_operations::RemoteOperationState;
-
-    let (harness, cx) = MachineGroupsHarness::new(cx);
-    let (_operations, _connections) = remote_maintenance(
-        RemoteOperationState::Working {
-            phase: MaintenancePhase::Dispatching,
-            kind: Some(SubmittedKind::Service(Action::Stop)),
-            cancellable: false,
-        },
-        "penguin",
-        cx,
-    );
-    harness.present_ssh("penguin", &[], cx);
-    redraw(cx);
-
-    assert!(cx.debug_bounds("machine-heading-status-penguin").is_some());
-    assert_eq!(heading_names(cx), ["This Computer", "penguin, Stopping"]);
-    right_click("machine-heading-penguin", cx);
-    assert!(
-        cx.debug_bounds("machine-menu-stop").is_none(),
-        "nothing is offered while an operation is underway"
-    );
-    cx.simulate_keystrokes("escape");
-    cx.run_until_parked();
-}
-
-fn configure_maintenance_settings(cx: &mut VisualTestContext) {
-    let settings = crate::settings::Settings::load(
-        crate::settings::storage::testing::MemoryStorage::with_document(
-            &crate::settings::SettingsDocument::default(),
-        ),
-    );
-    cx.update(|_, cx| {
-        crate::ui::appearance_runtime::install(
-            settings,
-            Rc::new(crate::platform::appearance::testing::RecordingAppearancePlatform::default()),
-            cx,
-        )
-        .expect("appearance runtime should install");
-        crate::ui::settings_window::configure_window_chrome(
-            Rc::new(SettingsMovement),
-            Default::default(),
-            None,
-            cx,
-        );
-    });
-}
-
-/// Choosing a step from the heading opens the Servers Settings Section on that machine and takes
-/// the step there, where it describes its change before anything is sent.
-#[gpui::test]
-fn a_machine_headings_step_should_describe_its_change_in_settings(cx: &mut TestAppContext) {
-    use crate::ssh::server_operations::RemoteOperationState;
-
-    let (harness, cx) = MachineGroupsHarness::new(cx);
-    let (operations, _connections) = remote_maintenance(
-        RemoteOperationState::Read(Box::new(remote_facts(true, false))),
-        "penguin",
-        cx,
-    );
-    harness.present_ssh("penguin", &[], cx);
-    configure_maintenance_settings(cx);
-    redraw(cx);
-
-    right_click("machine-heading-penguin", cx);
-    click("machine-menu-stop", cx);
-
-    assert_eq!(
-        operations.calls(),
-        vec!["describe Service(Stop)".to_owned()],
-        "the step describes its change and sends nothing"
-    );
-    let settings_window = cx
-        .windows()
-        .into_iter()
-        .find(|window| {
-            window
-                .downcast::<crate::ui::settings_window::SettingsWindow>()
-                .is_some()
-        })
-        .expect("Settings should open");
-    let mut settings_cx = VisualTestContext::from_window(settings_window, cx);
-    settings_cx.run_until_parked();
-    let selected: Vec<_> = spaceterm_ui::a11y_testing::A11yTree::read(&mut settings_cx)
-        .with_role("ListBoxOption")
-        .into_iter()
-        .filter(|option| option["aria"]["selected"] == true)
-        .filter_map(|option| option["aria"]["label"].as_str().map(str::to_owned))
-        .collect();
-    assert_eq!(selected, ["Servers", "penguin"]);
-}
-
-/// A later original gets its turn after the row's reported result is acknowledged. The heading
-/// must offer the same steps as Settings throughout that transition.
-#[gpui::test]
-fn a_machine_heading_should_offer_only_the_original_settings_reports(cx: &mut TestAppContext) {
-    use crate::local_server::service::control::Action;
-    use crate::ssh::server_maintenance::SubmittedKind;
-    use crate::ssh::server_operations::{
-        RemoteOperationHandle, RemoteOperationState, RetainedOutcome,
-    };
-
-    let (harness, cx) = MachineGroupsHarness::new(cx);
-    let (operations, _connections) = remote_maintenance(
-        RemoteOperationState::Resolved {
-            handle: RemoteOperationHandle(8),
-            kind: SubmittedKind::Service(Action::Stop),
-            outcome: RetainedOutcome::Completed {
-                status: None,
-                build: None,
-            },
-        },
-        "penguin",
-        cx,
-    );
-    operations
-        .states
-        .lock()
-        .unwrap()
-        .push(RemoteOperationState::Unconfirmed {
-            kind: SubmittedKind::Service(Action::Restart),
-        });
-    harness.present_ssh("penguin", &[], cx);
-    configure_maintenance_settings(cx);
-    redraw(cx);
-    right_click("machine-heading-penguin", cx);
-    assert!(
-        cx.debug_bounds("machine-menu-check-again").is_none(),
-        "Settings reports the completed stop before the unconfirmed restart"
-    );
-    assert!(cx.debug_bounds("machine-menu-discard").is_none());
-    click("machine-menu-server-settings", cx);
-    let settings_window = cx
-        .windows()
-        .into_iter()
-        .find(|window| {
-            window
-                .downcast::<crate::ui::settings_window::SettingsWindow>()
-                .is_some()
-        })
-        .expect("Settings should open");
-    let mut settings_cx = VisualTestContext::from_window(settings_window, cx);
-    settings_cx.run_until_parked();
-    // OK in the selected server's Server row menu retires the stop's result.
-    click("settings-server-menu", &mut settings_cx);
-    click(
-        crate::ui::remote_maintenance::RemoteAction::Acknowledge.selector(),
-        &mut settings_cx,
-    );
-    assert_eq!(operations.calls(), ["acknowledge"]);
-
-    redraw(cx);
-    right_click("machine-heading-penguin", cx);
-    click("machine-menu-check-again", cx);
-    assert_eq!(
-        operations.calls(),
-        ["acknowledge", "resume"],
-        "the heading now resolves the restart Settings reports"
-    );
-}
-
-#[gpui::test]
-fn a_machine_headings_discard_should_reach_an_update_without_a_service_original(
-    cx: &mut TestAppContext,
-) {
-    use crate::ssh::server_maintenance::SubmittedKind;
-    use crate::ssh::server_operations::RemoteOperationState;
-
-    let (harness, cx) = MachineGroupsHarness::new(cx);
-    let (operations, _connections) = remote_maintenance(
-        RemoteOperationState::Unconfirmed {
-            kind: SubmittedKind::Update {
-                candidate: "b".repeat(64),
-            },
-        },
-        "penguin",
-        cx,
-    );
-    harness.present_ssh("penguin", &[], cx);
-    configure_maintenance_settings(cx);
-    redraw(cx);
-    right_click("machine-heading-penguin", cx);
-    click("machine-menu-discard", cx);
-
-    let settings_window = cx
-        .windows()
-        .into_iter()
-        .find(|window| {
-            window
-                .downcast::<crate::ui::settings_window::SettingsWindow>()
-                .is_some()
-        })
-        .expect("Settings should open");
-    let mut settings_cx = VisualTestContext::from_window(settings_window, cx);
-    settings_cx.run_until_parked();
-    assert!(
-        settings_cx
-            .debug_bounds("modal-action-settings-ssh-server-discard-confirm")
-            .is_some(),
-        "the sidebar's Discard must reach the update row that offers it"
-    );
-    assert!(
-        spaceterm_ui::a11y_testing::A11yTree::read(&mut settings_cx)
-            .with_role("Label")
-            .iter()
-            .any(|node| {
-                node["aria"]["value"].as_str().is_some_and(|value| {
-                    value.contains("Discard the update SpaceTerm sent to penguin?")
-                })
-            })
-    );
-    assert!(
-        operations.calls().is_empty(),
-        "opening the confirmation retires nothing"
-    );
-    click(
-        "modal-action-settings-ssh-server-discard-confirm",
-        &mut settings_cx,
-    );
-    assert_eq!(operations.calls(), ["discard 1"]);
 }
 
 /// A shared server Workspace presented in this window, with the server Pane its scripted
@@ -10480,7 +9460,7 @@ fn a_shared_pane_takeover_should_take_focus_only_from_the_pane_that_held_it(
 /// action that recovers the Pane.
 #[gpui::test]
 fn a_shared_pane_notice_should_never_cover_its_screen_actions(cx: &mut TestAppContext) {
-    use crate::local_server::ServerError;
+    use crate::server_connection::ServerError;
     use crate::terminal::server_session::DevelopmentPaneStatus;
 
     let (harness, cx) = shared_pane_harness(cx);
@@ -11876,9 +10856,9 @@ fn the_empty_view_action_should_open_the_switcher_with_the_detached_workspaces(
     let switcher_open = cx.update(|window, cx| window_combo_box_is_open(window, cx));
     // The switcher's creation commands share its option role, and how many of them render
     // depends on the platform's viewport, so only the remaining options are Workspaces.
-    let creations = WorkspaceCreation::ALL
+    let creations = WorkspaceCreation::LOCAL
         .into_iter()
-        .map(WorkspaceCreation::label)
+        .map(|creation| creation.label(None).to_string())
         .collect::<Vec<_>>();
     let workspaces: Vec<(String, String)> = A11yTree::read(cx)
         .with_role("ListBoxOption")
@@ -11887,7 +10867,7 @@ fn the_empty_view_action_should_open_the_switcher_with_the_detached_workspaces(
             let text = |key: &str| option["aria"][key].as_str().unwrap_or_default().to_owned();
             (text("label"), text("description"))
         })
-        .filter(|(label, _)| !creations.contains(&label.as_str()))
+        .filter(|(label, _)| !creations.contains(label))
         .collect();
     click(DETACHED_BUILD_RESULT, cx);
     harness.sync(cx);
@@ -12268,9 +11248,9 @@ mod shared_repositories {
         )
     }
 
-    /// Presents `initial` as the Workspaces of penguin's SSH server, whose writer accepts Worktree
-    /// writes and records each Worktree read it is asked.
-    fn ssh_harness(
+    /// Presents `initial` as the Workspaces of penguin's paired server, whose writer accepts
+    /// Worktree writes and records each Worktree read it is asked.
+    fn paired_harness(
         cx: &mut TestAppContext,
         initial: Inventory,
     ) -> (
@@ -12283,7 +11263,7 @@ mod shared_repositories {
         let edits = Rc::new(ScriptedEdits::new(Some(initial)));
         edits.set_worktree_writes(true);
         let reads = crate::ui::server_worktrees::testing::ScriptedReads::new("~/{branch}");
-        let penguin = crate::domain::SshDestination::new("penguin".to_owned()).unwrap();
+        let penguin = super::named_route("penguin");
         let session_factory = WorkspaceTerminalSessionFactory::new_local(
             Rc::new(
                 TestTerminalSessionFactory::new(TestTerminalSessionRecords::default())
@@ -12292,15 +11272,18 @@ mod shared_repositories {
             crate::terminal::testing::test_local_directory(std::env::temp_dir()),
         );
         cx.update(|window, cx| {
-            crate::ui::server_worktrees::testing::present_ssh(
-                &penguin,
+            crate::ui::server_worktrees::testing::present_direct(
+                penguin,
                 Rc::clone(&edits),
                 Arc::clone(&reads),
                 cx,
             );
             manager.update(cx, |manager, cx| {
                 let key = manager.present_server_workspaces(
-                    ServerOrigin::Ssh(penguin),
+                    ServerOrigin::Direct(crate::ui::shared_workspaces::DirectServer {
+                        route: penguin,
+                        name: "penguin".into(),
+                    }),
                     SharedEditSource::new(Rc::clone(&edits) as Rc<_>),
                     SharedPaneSessions::with_opener(
                         ScriptedPanes::new(session_factory) as Rc<_>,
@@ -12334,13 +11317,13 @@ mod shared_repositories {
         )
     }
 
-    /// An SSH server's Workspace offers New Worktree and Remove Worktree, because that server
+    /// A paired server's Workspace offers New Worktree and Remove Worktree, because that server
     /// runs Git on its own computer.
     #[gpui::test]
-    fn an_ssh_server_workspace_should_offer_worktree_writes_through_its_server(
+    fn a_paired_server_workspace_should_offer_worktree_writes_through_its_server(
         cx: &mut TestAppContext,
     ) {
-        let (harness, _, _, cx) = ssh_harness(cx, published(1, "main", true));
+        let (harness, _, _, cx) = paired_harness(cx, published(1, "main", true));
         let row = harness.row(cx);
         let section = row
             .worktrees
@@ -12357,16 +11340,16 @@ mod shared_repositories {
         );
     }
 
-    /// New Worktree and Remove Worktree on an SSH server's Workspace ask that server, over its
+    /// New Worktree and Remove Worktree on a paired server's Workspace ask that server, over its
     /// own route, about its own paths. This computer's server is never asked and no client-local
     /// Git or filesystem check runs on the other computer's paths.
     #[gpui::test]
-    fn ssh_server_worktree_operations_should_read_only_through_that_server(
+    fn paired_server_worktree_operations_should_read_only_through_that_server(
         cx: &mut TestAppContext,
     ) {
         use spaceterm_server::worktree::Read;
 
-        let (harness, edits, reads, cx) = ssh_harness(cx, published(1, "main", true));
+        let (harness, edits, reads, cx) = paired_harness(cx, published(1, "main", true));
         let feature = harness
             .row(cx)
             .worktrees
@@ -12425,7 +11408,7 @@ mod shared_repositories {
         use spaceterm_ui::a11y_testing::A11yTree;
 
         // This server uses ~/{branch}; the client's retained default is ~/.worktrees/....
-        let (harness, edits, _, cx) = ssh_harness(cx, published(1, "main", true));
+        let (harness, edits, _, cx) = paired_harness(cx, published(1, "main", true));
         cx.update(|window, cx| {
             window.activate_window();
             harness.manager.update(cx, |manager, cx| {
@@ -12555,7 +11538,7 @@ mod shared_repositories {
     ) -> WorktreeRemoval {
         use spaceterm_ui::a11y_testing::A11yTree;
 
-        let (harness, _, _, cx) = ssh_harness(cx, initial);
+        let (harness, _, _, cx) = paired_harness(cx, initial);
         cx.update(|window, cx| {
             window.activate_window();
             harness.manager.update(cx, |manager, cx| {
@@ -13351,811 +12334,7 @@ mod shared_repositories {
 #[path = "launch_tests.rs"]
 mod launch_tests;
 
-/// This computer's SSH configuration, naming the hosts a test lists and saving nothing.
-struct ConfiguredHosts(Vec<&'static str>);
-
-impl crate::ui::ssh_servers::SshHostSource for ConfiguredHosts {
-    fn discover(&self) -> crate::ssh::host_config::HostDiscovery {
-        crate::ssh::host_config::HostDiscovery {
-            hosts: self
-                .0
-                .iter()
-                .map(|alias| crate::ssh::host_config::DiscoveredSshHost::configured(alias))
-                .collect(),
-            issues: Vec::new(),
-        }
-    }
-
-    fn add_managed_host(
-        &self,
-        _: crate::ssh::managed_hosts::ManagedSshHost,
-    ) -> Result<(), crate::ui::ssh_host_form::ManagedHostFormBackendError> {
-        Ok(())
-    }
-}
-
-/// Installs the desktop's SSH registry for a computer with a usable OpenSSH and no configured
-/// hosts. Every connection waits for the person to sign in.
-fn install_waiting_ssh_servers(cx: &mut App) {
-    install_ssh_servers(
-        crate::ssh::server_connection::SshServerConnections::new(
-            Arc::new(ConnectsOnceThen {
-                route: Arc::new(AtomicBool::new(true)),
-                attempts: AtomicUsize::new(0),
-                requested: AtomicUsize::new(0),
-                first_succeeds: false,
-                later: || {
-                    crate::ssh::server_connection::SshConnectFailure::NeedsPerson(
-                        crate::ssh::server_connection::InteractionReason::Authentication,
-                    )
-                },
-            }),
-            Arc::new(RememberedConnections::default()),
-        ),
-        Vec::new(),
-        cx,
-    );
-}
-
-/// Installs `connections` as the desktop's SSH registry, whose SSH configuration names `hosts`.
-fn install_ssh_servers(
-    connections: crate::ssh::server_connection::SshServerConnections,
-    hosts: Vec<&'static str>,
-    cx: &mut App,
-) {
-    crate::ui::ssh_servers::install(connections, Some(Arc::new(ConfiguredHosts(hosts))), cx);
-}
-
-/// Saved connections remembered in memory, as the private record keeps them.
-#[derive(Default)]
-struct RememberedConnections(Mutex<Vec<crate::ssh::server_connection::RetainedSshConnection>>);
-
-impl RememberedConnections {
-    fn active(&self, destination: &str) -> Option<bool> {
-        self.0
-            .lock()
-            .unwrap()
-            .iter()
-            .find(|record| record.destination.as_str() == destination)
-            .map(|record| record.active)
-    }
-}
-
-impl crate::ssh::server_connection::SshConnectionIntentStore for RememberedConnections {
-    fn load(
-        &self,
-    ) -> Result<
-        Vec<crate::ssh::server_connection::RetainedSshConnection>,
-        crate::ssh::server_connection::SshIntentStoreError,
-    > {
-        Ok(self.0.lock().unwrap().clone())
-    }
-    fn retain(
-        &self,
-        record: crate::ssh::server_connection::RetainedSshConnection,
-    ) -> Result<(), crate::ssh::server_connection::SshIntentStoreError> {
-        let mut records = self.0.lock().unwrap();
-        records.retain(|other| other.destination != record.destination);
-        records.push(record);
-        Ok(())
-    }
-    fn remove(
-        &self,
-        destination: &crate::domain::SshDestination,
-    ) -> Result<(), crate::ssh::server_connection::SshIntentStoreError> {
-        self.0
-            .lock()
-            .unwrap()
-            .retain(|record| record.destination != *destination);
-        Ok(())
-    }
-}
-
-/// An SSH computer that connects once over a route the test can end, then answers every later
-/// attempt with `later`. Requested attempts are counted.
-struct ConnectsOnceThen {
-    route: Arc<AtomicBool>,
-    attempts: AtomicUsize,
-    requested: AtomicUsize,
-    first_succeeds: bool,
-    later: fn() -> crate::ssh::server_connection::SshConnectFailure,
-}
-
-struct ScriptedRoute(Arc<AtomicBool>);
-impl crate::ssh::server_connection::SshServerLease for ScriptedRoute {
-    fn is_alive(&self) -> bool {
-        self.0.load(Ordering::SeqCst)
-    }
-}
-
-impl crate::ssh::server_connection::SshConnectBackend for ConnectsOnceThen {
-    fn connect(
-        &self,
-        _: &crate::domain::SshDestination,
-        mode: crate::ssh::server_connection::ConnectMode,
-        _: Option<&crate::ssh::server_connection::SshServerContinuity>,
-        _: &crate::ssh::cancellation::SshCancellationToken,
-        _: &crate::ssh::server_connection::ConnectProgress<'_>,
-    ) -> Result<
-        crate::ssh::server_connection::ConnectedSshServer,
-        crate::ssh::server_connection::SshConnectFailure,
-    > {
-        if mode == crate::ssh::server_connection::ConnectMode::Requested {
-            self.requested.fetch_add(1, Ordering::SeqCst);
-        }
-        if !self.first_succeeds || self.attempts.fetch_add(1, Ordering::SeqCst) > 0 {
-            return Err((self.later)());
-        }
-        Ok(crate::ssh::server_connection::ConnectedSshServer {
-            server: spaceterm_server::LocalServer::for_identity("spaceterm-development").unwrap(),
-            continuity: crate::ssh::server_connection::SshServerContinuity {
-                route: [1; 32],
-                account: 501,
-                build: "spaceterm-development".into(),
-                server: [2; 32],
-            },
-            lease: Arc::new(ScriptedRoute(self.route.clone())),
-            facts: crate::ssh::server_connection::SshServerFacts {
-                platform: ("linux".into(), "x86_64".into()),
-                version: Some("1.0.0".into()),
-                starts_automatically: true,
-            },
-        })
-    }
-    fn observe(
-        &self,
-        _: &crate::domain::SshDestination,
-        _: Option<&crate::ssh::server_connection::SshServerContinuity>,
-        _: &crate::ssh::cancellation::SshCancellationToken,
-        _: &crate::ssh::server_connection::ConnectProgress<'_>,
-    ) -> Result<
-        crate::ssh::server_connection::SshServerObservation,
-        crate::ssh::server_connection::SshConnectFailure,
-    > {
-        Err((self.later)())
-    }
-}
-
-fn wait_until(mut done: impl FnMut() -> bool, cx: &mut VisualTestContext) {
-    let deadline = Instant::now() + std::time::Duration::from_secs(5);
-    while !done() {
-        assert!(Instant::now() < deadline, "the registry settles");
-        std::thread::sleep(std::time::Duration::from_millis(5));
-        cx.run_until_parked();
-    }
-    redraw(cx);
-}
-
-/// Connects to "penguin", presents it, ends its route so the next attempt answers `later`, and
-/// checks that the heading shows `state` and offers Disconnect, which withdraws the server and
-/// saves it inactive.
-fn a_failing_presented_server_should_offer_disconnect(
-    later: fn() -> crate::ssh::server_connection::SshConnectFailure,
-    state: &str,
-    cx: &mut TestAppContext,
-) {
-    use crate::ssh::server_connection::SshServerConnections;
-
-    let (harness, cx) = MachineGroupsHarness::new(cx);
-    let route = Arc::new(AtomicBool::new(true));
-    let remembered = Arc::new(RememberedConnections::default());
-    let connections = SshServerConnections::new(
-        Arc::new(ConnectsOnceThen {
-            route: route.clone(),
-            attempts: AtomicUsize::new(0),
-            requested: AtomicUsize::new(0),
-            first_succeeds: true,
-            later,
-        }),
-        remembered.clone(),
-    );
-    let installed = connections.clone();
-    cx.update(|_, cx| crate::ui::ssh_servers::install(installed, None, cx));
-    let penguin = crate::domain::SshDestination::new("penguin".to_owned()).unwrap();
-    connections.connect(penguin.clone());
-    wait_until(|| connections.server(&penguin).is_some(), cx);
-    // The window presents the connected server as its registry binding would.
-    harness.present_ssh("penguin", &[("Far", 1)], cx);
-
-    route.store(false, Ordering::SeqCst);
-    let expected = format!("penguin, {state}");
-    let deadline = Instant::now() + std::time::Duration::from_secs(5);
-    while !heading_names(cx).contains(&expected) {
-        assert!(
-            Instant::now() < deadline,
-            "the heading should show {expected:?}, got {:?}",
-            heading_names(cx)
-        );
-        std::thread::sleep(std::time::Duration::from_millis(5));
-        redraw(cx);
-    }
-
-    right_click("machine-heading-penguin", cx);
-    click("machine-menu-disconnect", cx);
-    wait_until(|| remembered.active("penguin") == Some(false), cx);
-    assert!(connections.server(&penguin).is_none());
-}
-
-/// A presented server whose reconnect fails keeps its frozen Workspaces under its heading, which
-/// still reconnects it quietly and offers Disconnect to end that.
-#[gpui::test]
-fn a_presented_server_that_fails_after_connecting_should_offer_disconnect(cx: &mut TestAppContext) {
-    use crate::ssh::server_connection::{SshConnectFailure, UnavailableKind};
-    a_failing_presented_server_should_offer_disconnect(
-        || SshConnectFailure::Unavailable(UnavailableKind::ServiceUnavailable),
-        "Unavailable",
-        cx,
-    );
-}
-
-/// A presented server stopped on its computer no longer reconnects, yet its heading still offers
-/// Disconnect, so Remove isn't the only way to withdraw it.
-#[gpui::test]
-fn a_presented_server_stopped_after_connecting_should_offer_disconnect(cx: &mut TestAppContext) {
-    a_failing_presented_server_should_offer_disconnect(
-        || crate::ssh::server_connection::SshConnectFailure::Stopped(None),
-        "Stopped",
-        cx,
-    );
-}
-
-/// An account with no SpaceTerm server, which SpaceTerm can install a verified one for. It counts
-/// every installation it actually runs.
-struct OffersInstallation {
-    installs: Arc<AtomicUsize>,
-}
-
-struct CountedInstallation(Arc<AtomicUsize>);
-
-impl crate::ssh::server_connection::SshInstallation for CountedInstallation {
-    fn install(
-        &self,
-        _: &crate::ssh::cancellation::SshCancellationToken,
-        _: &crate::ssh::server_connection::ConnectProgress<'_>,
-    ) -> Result<
-        crate::ssh::server_connection::ConnectedSshServer,
-        crate::ssh::server_connection::SshConnectFailure,
-    > {
-        self.0.fetch_add(1, Ordering::SeqCst);
-        Err(crate::ssh::server_connection::SshConnectFailure::Cancelled)
-    }
-}
-
-impl crate::ssh::server_connection::SshConnectBackend for OffersInstallation {
-    fn connect(
-        &self,
-        _: &crate::domain::SshDestination,
-        _: crate::ssh::server_connection::ConnectMode,
-        _: Option<&crate::ssh::server_connection::SshServerContinuity>,
-        _: &crate::ssh::cancellation::SshCancellationToken,
-        _: &crate::ssh::server_connection::ConnectProgress<'_>,
-    ) -> Result<
-        crate::ssh::server_connection::ConnectedSshServer,
-        crate::ssh::server_connection::SshConnectFailure,
-    > {
-        Err(
-            crate::ssh::server_connection::SshConnectFailure::InstallationOffered(
-                crate::ssh::server_connection::SshInstallationOffer {
-                    version: "1.0.0".into(),
-                    platform: ("linux".into(), "x86_64".into()),
-                    installation: Arc::new(CountedInstallation(Arc::clone(&self.installs))),
-                },
-            ),
-        )
-    }
-    fn observe(
-        &self,
-        _: &crate::domain::SshDestination,
-        _: Option<&crate::ssh::server_connection::SshServerContinuity>,
-        _: &crate::ssh::cancellation::SshCancellationToken,
-        _: &crate::ssh::server_connection::ConnectProgress<'_>,
-    ) -> Result<
-        crate::ssh::server_connection::SshServerObservation,
-        crate::ssh::server_connection::SshConnectFailure,
-    > {
-        Err(crate::ssh::server_connection::SshConnectFailure::Cancelled)
-    }
-}
-
-/// Choosing a host whose account has no server installs nothing by itself: the flow asks first,
-/// declining installs nothing and ends the connection, and only Install runs the installation.
-#[gpui::test]
-fn choosing_a_host_without_a_server_should_install_only_after_the_person_approves(
-    cx: &mut TestAppContext,
-) {
-    let (_manager, _records, cx) = workspace_manager(cx);
-    let installs = Arc::new(AtomicUsize::new(0));
-    let connections = crate::ssh::server_connection::SshServerConnections::new(
-        Arc::new(OffersInstallation {
-            installs: Arc::clone(&installs),
-        }),
-        Arc::new(RememberedConnections::default()),
-    );
-    let installed = connections.clone();
-    cx.update(|_, cx| install_ssh_servers(installed, vec!["penguin"], cx));
-    let penguin = crate::domain::SshDestination::new("penguin".to_owned()).unwrap();
-    let choose_penguin = |cx: &mut VisualTestContext| {
-        cx.simulate_keystrokes("cmd-shift-n");
-        cx.run_until_parked();
-        cx.simulate_input("penguin");
-        cx.simulate_keystrokes("enter");
-        let deadline = Instant::now() + std::time::Duration::from_secs(5);
-        while cx
-            .debug_bounds("modal-action-remote-workspace-install")
-            .is_none()
-        {
-            assert!(Instant::now() < deadline, "the flow asks before installing");
-            std::thread::sleep(std::time::Duration::from_millis(5));
-            redraw(cx);
-        }
-    };
-
-    choose_penguin(cx);
-    assert_eq!(
-        installs.load(Ordering::SeqCst),
-        0,
-        "the offer alone installs nothing"
-    );
-    click("modal-action-remote-workspace-install-cancel", cx);
-    wait_until(|| !connections.intends(&penguin), cx);
-    assert_eq!(
-        installs.load(Ordering::SeqCst),
-        0,
-        "declining installs nothing"
-    );
-
-    choose_penguin(cx);
-    click("modal-action-remote-workspace-install", cx);
-    wait_until(|| installs.load(Ordering::SeqCst) == 1, cx);
-}
-
-/// Completes Open Remote Directory as choosing `directory` in the server's Directory Picker does,
-/// after the flow connected to `destination`.
-fn choose_remote_directory(
-    flow: &Entity<RemoteWorkspaceFlow>,
-    connections: &crate::ssh::server_connection::SshServerConnections,
-    destination: &crate::domain::SshDestination,
-    directory: &str,
-    cx: &mut VisualTestContext,
-) {
-    assert!(
-        connections.server(destination).is_some(),
-        "the flow connected to the server first"
-    );
-    let destination = destination.clone();
-    let directory = PathBuf::from(directory);
-    cx.update(|window, cx| {
-        flow.update(cx, |flow, cx| {
-            flow.choose_server_directory(destination, directory, window, cx);
-        });
-    });
-    cx.run_until_parked();
-}
-
-/// penguin's server bound to edits that are still connecting and haven't read an inventory, as
-/// a first connection's separate edit channel is.
-fn present_unready_penguin(
-    harness: &MachineGroupsHarness,
-    cx: &mut VisualTestContext,
-) -> (
-    ServerKey,
-    Rc<crate::ui::shared_workspaces::testing::ScriptedEdits>,
-) {
-    use crate::ui::shared_workspaces::testing::{ScriptedEdits, ScriptedPanes};
-    use crate::ui::shared_workspaces::{SharedEditSource, SharedPaneSessions};
-
-    let edits = Rc::new(ScriptedEdits::new(None));
-    edits.set_connected(false);
-    let key = cx.update(|window, cx| {
-        harness.manager.update(cx, |manager, cx| {
-            let key = manager.present_server_workspaces(
-                ServerOrigin::Ssh(crate::domain::SshDestination::new("penguin".into()).unwrap()),
-                SharedEditSource::new(Rc::clone(&edits) as Rc<_>),
-                SharedPaneSessions::with_opener(
-                    ScriptedPanes::new(MachineGroupsHarness::session_factory()) as Rc<_>,
-                    &PaneConstruction::testing(),
-                ),
-                window,
-                cx,
-            );
-            manager.sync_shared_workspaces(key, window, cx);
-            key
-        })
-    });
-    cx.run_until_parked();
-    (key, edits)
-}
-
-/// The first New Remote Workspace for a host waits while its server's edit channel connects
-/// and reads its first inventory, showing that the Workspace is opening, then creates it.
-#[gpui::test]
-fn new_remote_workspace_should_wait_for_the_servers_edits_on_first_connect(
-    cx: &mut TestAppContext,
-) {
-    use spaceterm_server::hierarchy::Mutation;
-
-    let (harness, cx) = MachineGroupsHarness::new(cx);
-    let (connections, _backend, penguin) = connecting_penguin(cx);
-    let (key, edits) = present_unready_penguin(&harness, cx);
-
-    cx.simulate_keystrokes("cmd-shift-n");
-    cx.run_until_parked();
-    cx.simulate_input("penguin");
-    cx.simulate_keystrokes("enter");
-    wait_until(|| connections.server(&penguin).is_some(), cx);
-    let stage = |cx: &mut VisualTestContext| {
-        harness.manager.read_with(cx, |manager, cx| {
-            manager
-                .remote_workspace_flow
-                .as_ref()
-                .map(|flow| flow.read(cx).stage())
-        })
-    };
-    assert_eq!(stage(cx), Some(RemoteWorkspaceFlowStage::Opening));
-    assert!(
-        cx.debug_bounds("modal-action-remote-workspace-connect-cancel")
-            .is_some()
-    );
-    assert_eq!(
-        edits.submitted(),
-        Vec::new(),
-        "nothing is asked of an unready server"
-    );
-
-    edits.set_connected(true);
-    edits.set_inventory(machine_inventory(harness.next_revision(), &[]));
-    cx.update(|window, cx| {
-        harness.manager.update(cx, |manager, cx| {
-            manager.sync_shared_workspaces(key, window, cx)
-        })
-    });
-    cx.run_until_parked();
-
-    assert_eq!(
-        edits.submitted(),
-        vec![Mutation::CreateWorkspace {
-            name: String::new(),
-            directory: None,
-        }]
-    );
-    assert_eq!(
-        stage(cx),
-        None,
-        "the flow ends once the server takes the request"
-    );
-    assert_eq!(harness.local.submitted(), Vec::new());
-}
-
-/// Cancelling while the Workspace is opening withdraws the request: a server that becomes
-/// ready later is asked for nothing, and the connection stays up.
-#[gpui::test]
-fn cancelling_an_opening_remote_workspace_should_ask_the_server_for_nothing(
-    cx: &mut TestAppContext,
-) {
-    let (harness, cx) = MachineGroupsHarness::new(cx);
-    let (connections, _backend, penguin) = connecting_penguin(cx);
-    let (key, edits) = present_unready_penguin(&harness, cx);
-
-    cx.simulate_keystrokes("cmd-shift-n");
-    cx.run_until_parked();
-    cx.simulate_input("penguin");
-    cx.simulate_keystrokes("enter");
-    wait_until(|| connections.server(&penguin).is_some(), cx);
-    click("modal-action-remote-workspace-connect-cancel", cx);
-    edits.set_connected(true);
-    edits.set_inventory(machine_inventory(harness.next_revision(), &[]));
-    cx.update(|window, cx| {
-        harness.manager.update(cx, |manager, cx| {
-            manager.sync_shared_workspaces(key, window, cx)
-        })
-    });
-    cx.run_until_parked();
-
-    assert_eq!(edits.submitted(), Vec::new());
-    assert!(
-        harness
-            .manager
-            .read_with(cx, |manager, _| manager.remote_workspace_flow.is_none())
-    );
-    assert!(
-        connections.server(&penguin).is_some(),
-        "the connection stays up"
-    );
-}
-
-/// An SSH computer whose server runs while `running` holds and is reported stopped otherwise.
-/// Each connection's route lasts until the test ends it.
-struct StoppableServer {
-    running: Arc<AtomicBool>,
-    route: Arc<AtomicBool>,
-}
-
-impl crate::ssh::server_connection::SshConnectBackend for StoppableServer {
-    fn connect(
-        &self,
-        _: &crate::domain::SshDestination,
-        _: crate::ssh::server_connection::ConnectMode,
-        _: Option<&crate::ssh::server_connection::SshServerContinuity>,
-        _: &crate::ssh::cancellation::SshCancellationToken,
-        _: &crate::ssh::server_connection::ConnectProgress<'_>,
-    ) -> Result<
-        crate::ssh::server_connection::ConnectedSshServer,
-        crate::ssh::server_connection::SshConnectFailure,
-    > {
-        if !self.running.load(Ordering::SeqCst) {
-            return Err(crate::ssh::server_connection::SshConnectFailure::Stopped(
-                None,
-            ));
-        }
-        self.route.store(true, Ordering::SeqCst);
-        Ok(crate::ssh::server_connection::ConnectedSshServer {
-            server: spaceterm_server::LocalServer::for_identity("spaceterm-development").unwrap(),
-            continuity: crate::ssh::server_connection::SshServerContinuity {
-                route: [1; 32],
-                account: 501,
-                build: "spaceterm-development".into(),
-                server: [2; 32],
-            },
-            lease: Arc::new(ScriptedRoute(self.route.clone())),
-            facts: crate::ssh::server_connection::SshServerFacts {
-                platform: ("linux".into(), "x86_64".into()),
-                version: Some("1.0.0".into()),
-                starts_automatically: true,
-            },
-        })
-    }
-    fn observe(
-        &self,
-        _: &crate::domain::SshDestination,
-        _: Option<&crate::ssh::server_connection::SshServerContinuity>,
-        _: &crate::ssh::cancellation::SshCancellationToken,
-        _: &crate::ssh::server_connection::ConnectProgress<'_>,
-    ) -> Result<
-        crate::ssh::server_connection::SshServerObservation,
-        crate::ssh::server_connection::SshConnectFailure,
-    > {
-        Err(crate::ssh::server_connection::SshConnectFailure::Stopped(
-            None,
-        ))
-    }
-}
-
-/// When the person stops another computer's server, the SSH route reports it, and that server's
-/// interrupted Panes say it stopped rather than reconnecting. Starting it there changes nothing
-/// on its own; once the person connects again, those Panes connect once each.
-#[gpui::test]
-fn a_stopped_ssh_server_should_tell_its_panes_and_reconnect_them_after_connect(
-    cx: &mut TestAppContext,
-) {
-    use crate::ssh::server_connection::{RemoteConnectionStatus, SshServerConnections};
-    use crate::terminal::server_session::DevelopmentPaneStatus;
-
-    // The registry reports from its own worker thread.
-    cx.executor().allow_parking();
-    let (harness, cx) = MachineGroupsHarness::new(cx);
-    let running = Arc::new(AtomicBool::new(true));
-    let route = Arc::new(AtomicBool::new(true));
-    let connections = SshServerConnections::new(
-        Arc::new(StoppableServer {
-            running: running.clone(),
-            route: route.clone(),
-        }),
-        Arc::new(RememberedConnections::default()),
-    );
-    let installed = connections.clone();
-    cx.update(|_, cx| crate::ui::ssh_servers::install(installed, None, cx));
-    let penguin = crate::domain::SshDestination::new("penguin".to_owned()).unwrap();
-    connections.connect(penguin.clone());
-    wait_until(|| connections.server(&penguin).is_some(), cx);
-    // The window presents the connected server as its registry binding would, then follows it.
-    let (_, _, panes) = harness.present_ssh_panes("penguin", &[("Far", 1)], cx);
-    cx.update(|window, cx| {
-        harness
-            .manager
-            .update(cx, |manager, cx| manager.follow_ssh_servers(window, cx));
-    });
-    cx.run_until_parked();
-    let opened = panes.opened();
-    assert!(!opened.is_empty(), "the presented Workspace opens its Pane");
-    for pane in &opened {
-        pane.set(DevelopmentPaneStatus::Reconnecting);
-    }
-
-    running.store(false, Ordering::SeqCst);
-    route.store(false, Ordering::SeqCst);
-    wait_until(
-        || {
-            matches!(
-                connections.status(&penguin),
-                RemoteConnectionStatus::Stopped
-            )
-        },
-        cx,
-    );
-    for pane in &opened {
-        assert!(pane.stops() >= 1, "the Pane hears that its server stopped");
-        assert_eq!(
-            crate::ui::server_pane::ServerPaneConnection::status(pane.as_ref()),
-            DevelopmentPaneStatus::Failed(crate::local_server::ServerError::Stopped)
-        );
-        assert_eq!(pane.retries(), 0);
-    }
-
-    running.store(true, Ordering::SeqCst);
-    cx.run_until_parked();
-    assert!(
-        opened.iter().all(|pane| pane.retries() == 0),
-        "starting the server there connects nothing on its own"
-    );
-    connections.connect(penguin.clone());
-    wait_until(
-        || {
-            matches!(
-                connections.status(&penguin),
-                RemoteConnectionStatus::Connected { .. }
-            )
-        },
-        cx,
-    );
-    for pane in &opened {
-        assert_eq!(
-            pane.retries(),
-            1,
-            "the person's Connect reconnects the Pane once"
-        );
-    }
-}
-
-/// An SSH registry whose "penguin" connects on the first request, and the counts it keeps.
-fn connecting_penguin(
-    cx: &mut VisualTestContext,
-) -> (
-    crate::ssh::server_connection::SshServerConnections,
-    Arc<ConnectsOnceThen>,
-    crate::domain::SshDestination,
-) {
-    let backend = Arc::new(ConnectsOnceThen {
-        route: Arc::new(AtomicBool::new(true)),
-        attempts: AtomicUsize::new(0),
-        requested: AtomicUsize::new(0),
-        first_succeeds: true,
-        later: || crate::ssh::server_connection::SshConnectFailure::Stopped(None),
-    });
-    let connections = crate::ssh::server_connection::SshServerConnections::new(
-        backend.clone(),
-        Arc::new(RememberedConnections::default()),
-    );
-    let installed = connections.clone();
-    cx.update(|_, cx| install_ssh_servers(installed, vec!["penguin"], cx));
-    (
-        connections,
-        backend,
-        crate::domain::SshDestination::new("penguin".to_owned()).unwrap(),
-    )
-}
-
-/// Choosing an SSH host in New Remote Workspace connects to that account's SpaceTerm Server as
-/// Connect in Settings does, then asks that server, and no other, for the Workspace.
-#[gpui::test]
-fn new_remote_workspace_should_create_the_workspace_on_the_chosen_ssh_server(
-    cx: &mut TestAppContext,
-) {
-    use spaceterm_server::hierarchy::Mutation;
-
-    let (harness, cx) = MachineGroupsHarness::new(cx);
-    let (connections, backend, penguin) = connecting_penguin(cx);
-    // The window presents penguin's server once it connects, as its registry binding would.
-    let (_, penguin_edits) = harness.present_ssh("penguin", &[], cx);
-
-    cx.simulate_keystrokes("cmd-shift-n");
-    cx.run_until_parked();
-    cx.simulate_input("penguin");
-    cx.simulate_keystrokes("enter");
-    wait_until(|| !penguin_edits.submitted().is_empty(), cx);
-
-    assert!(connections.server(&penguin).is_some());
-    assert_eq!(backend.requested.load(Ordering::SeqCst), 1);
-    assert_eq!(
-        penguin_edits.submitted(),
-        vec![Mutation::CreateWorkspace {
-            name: String::new(),
-            directory: None,
-        }]
-    );
-    assert_eq!(
-        harness.local.submitted(),
-        Vec::new(),
-        "this computer's server is asked for nothing"
-    );
-    assert!(
-        harness
-            .manager
-            .read_with(cx, |manager, _| manager.remote_workspace_flow.is_none())
-    );
-}
-
-/// A host whose server is already connected is reused: the flow asks SSH for nothing more.
-#[gpui::test]
-fn new_remote_workspace_should_reuse_a_connected_server_without_connecting_again(
-    cx: &mut TestAppContext,
-) {
-    let (harness, cx) = MachineGroupsHarness::new(cx);
-    let (connections, backend, penguin) = connecting_penguin(cx);
-    connections.connect(penguin.clone());
-    wait_until(|| connections.server(&penguin).is_some(), cx);
-    let (_, penguin_edits) = harness.present_ssh("penguin", &[], cx);
-
-    cx.simulate_keystrokes("cmd-shift-n");
-    cx.run_until_parked();
-    cx.simulate_input("penguin");
-    cx.simulate_keystrokes("enter");
-    wait_until(|| !penguin_edits.submitted().is_empty(), cx);
-
-    assert_eq!(
-        backend.requested.load(Ordering::SeqCst),
-        1,
-        "one Connect only"
-    );
-}
-
-/// A directory the flow chose on penguin's server is the new Workspace's pin there. Choosing a
-/// directory one of that server's Workspaces is already pinned to opens that Workspace instead.
-#[gpui::test]
-fn open_remote_directory_should_pin_on_its_server_and_reuse_a_workspace_pinned_there(
-    cx: &mut TestAppContext,
-) {
-    use spaceterm_server::hierarchy::Mutation;
-
-    let (harness, cx) = MachineGroupsHarness::new(cx);
-    let (connections, _backend, penguin) = connecting_penguin(cx);
-    connections.connect(penguin.clone());
-    wait_until(|| connections.server(&penguin).is_some(), cx);
-    let (_, penguin_edits) = harness.present_ssh("penguin", &[("Far", 7)], cx);
-    let mut inventory = machine_inventory(harness.next_revision(), &[("Far", 7)]);
-    inventory.workspaces[0].pinned_directory = Some(PathBuf::from("/srv/app"));
-    penguin_edits.set_inventory(inventory);
-    let complete = |directory: &str, cx: &mut VisualTestContext| {
-        cx.simulate_keystrokes("cmd-shift-o");
-        cx.run_until_parked();
-        let flow = harness
-            .manager
-            .read_with(cx, |manager, _| manager.remote_workspace_flow.clone())
-            .expect("Open Remote Directory opens the flow");
-        choose_remote_directory(&flow, &connections, &penguin, directory, cx);
-    };
-    cx.update(|window, cx| {
-        harness.manager.update(cx, |manager, cx| {
-            let key = manager
-                .shared
-                .key_of(&ServerOrigin::Ssh(penguin.clone()))
-                .unwrap();
-            manager.sync_shared_workspaces(key, window, cx);
-        })
-    });
-    cx.run_until_parked();
-
-    complete("/srv/app", cx);
-    let pinned = harness.manager.read_with(cx, |manager, _| {
-        let active = manager.workspaces.active_workspace_id()?;
-        (manager.machine(active) == Some(machine_groups::Machine::Ssh(penguin.clone())))
-            .then(|| manager.workspaces.active().name().to_owned())
-    });
-    assert_eq!(pinned.as_deref(), Some("Far"), "the pinned Workspace opens");
-    assert_eq!(penguin_edits.submitted(), Vec::new());
-
-    complete("/srv/other", cx);
-    assert_eq!(
-        penguin_edits.submitted(),
-        vec![Mutation::CreateWorkspace {
-            name: String::new(),
-            directory: Some(PathBuf::from("/srv/other")),
-        }]
-    );
-    assert_eq!(harness.local.submitted(), Vec::new());
-}
-
-/// A direct network server's heading creates a Workspace on that server, and only there, so a
-/// paired server reached without SSH takes new work too.
+/// A paired server's heading creates a Workspace on that server, and only there.
 #[gpui::test]
 fn a_direct_server_heading_should_create_a_workspace_on_that_server(cx: &mut TestAppContext) {
     use crate::ui::shared_workspaces::testing::{ScriptedEdits, ScriptedPanes};
@@ -14201,198 +12380,725 @@ fn a_direct_server_heading_should_create_a_workspace_on_that_server(cx: &mut Tes
     assert_eq!(harness.local.submitted(), Vec::new());
 }
 
-/// After relaunch, a Saved Connection SpaceTerm keeps trying heads the Workspace Window while it
-/// waits for the person, even before any of its Workspaces arrive, and its Connect asks once.
+/// A stable route for the paired server a test names.
+fn named_route(name: &str) -> crate::direct_connections::DirectRouteId {
+    let mut route = [0xEE; 32];
+    for (slot, byte) in route.iter_mut().zip(name.bytes()) {
+        *slot = byte;
+    }
+    route
+}
+
+/// Two saved paired servers, "penguin" presented in the window and "studio" not connected,
+/// with penguin's scripted edits. Neither route runs a connection job.
+fn saved_servers(
+    harness: &MachineGroupsHarness,
+    cx: &mut VisualTestContext,
+) -> Rc<crate::ui::shared_workspaces::testing::ScriptedEdits> {
+    let (direct, routes) = crate::direct_connections::tests::disconnected_routes_at(&[
+        ("penguin", "wss://192.168.1.2:9231"),
+        ("studio", "wss://192.168.1.3:9231"),
+    ]);
+    cx.update(|_, cx| crate::ui::direct_servers::install(direct, cx));
+    let (_, edits) = harness.present_direct("penguin", routes[0], &[], cx);
+    redraw(cx);
+    edits
+}
+
+/// The sidebar's New Workspace menu offers remote creation only on saved servers, one row each,
+/// and ends each list with Add Server, the one journey that adds a server.
 #[gpui::test]
-fn a_saved_connection_waiting_after_relaunch_should_head_the_window_with_connect(
-    cx: &mut TestAppContext,
-) {
-    use crate::ssh::server_connection::{
-        InteractionReason, RetainedSshConnection, SshConnectFailure, SshServerConnections,
-    };
+fn sidebar_new_workspace_menu_should_offer_saved_servers_and_add_server(cx: &mut TestAppContext) {
+    use spaceterm_server::hierarchy::Mutation;
 
     let (harness, cx) = MachineGroupsHarness::new(cx);
-    let remembered = Arc::new(RememberedConnections::default());
-    remembered.0.lock().unwrap().extend([
-        RetainedSshConnection {
-            destination: crate::domain::SshDestination::new("penguin".to_owned()).unwrap(),
-            continuity: None,
-            active: true,
-        },
-        RetainedSshConnection {
-            destination: crate::domain::SshDestination::new("idle".to_owned()).unwrap(),
-            continuity: None,
-            active: false,
-        },
-    ]);
-    let backend = Arc::new(ConnectsOnceThen {
-        route: Arc::new(AtomicBool::new(true)),
-        attempts: AtomicUsize::new(0),
-        requested: AtomicUsize::new(0),
-        first_succeeds: false,
-        later: || SshConnectFailure::NeedsPerson(InteractionReason::CredentialProvider),
+    let edits = saved_servers(&harness, cx);
+
+    click("new-workspace-button", cx);
+    let rows = [
+        "new-workspace-menu-create-local",
+        "new-workspace-menu-create-remote",
+        "new-workspace-menu-open-local-directory",
+        "new-workspace-menu-open-remote-directory",
+    ]
+    .map(|selector| {
+        cx.debug_bounds(selector)
+            .unwrap_or_else(|| panic!("missing creation row: {selector}"))
     });
-    let connections = SshServerConnections::new(backend.clone(), remembered.clone());
-    let installed = connections.clone();
-    cx.update(|window, cx| {
-        crate::ui::ssh_servers::install(installed, None, cx);
-        harness
-            .manager
-            .update(cx, |manager, cx| manager.follow_ssh_servers(window, cx));
-    });
-    connections.resume_retained();
-    let penguin = crate::domain::SshDestination::new("penguin".to_owned()).unwrap();
-    wait_until(
-        || {
-            matches!(
-                connections.status(&penguin),
-                crate::ssh::server_connection::RemoteConnectionStatus::NeedsPerson { .. }
-            )
-        },
-        cx,
+    assert!(rows.is_sorted_by_key(|row| row.top()));
+    assert!(
+        rows[2].top() - rows[1].bottom() > rows[1].top() - rows[0].bottom(),
+        "a separator divides the New rows from the Open rows"
     );
 
-    assert_eq!(
-        heading_names(cx),
-        vec![
-            "This Computer".to_owned(),
-            "penguin, Waiting for You".to_owned()
-        ],
-        "the waiting connection has its heading; the inactive one has none"
-    );
-    assert!(cx.debug_bounds("machine-empty-penguin").is_some());
-    assert_eq!(
-        backend.requested.load(Ordering::SeqCst),
-        0,
-        "relaunch asks nothing"
-    );
-
-    right_click("machine-heading-penguin", cx);
-    click("machine-menu-connect", cx);
-    wait_until(|| backend.requested.load(Ordering::SeqCst) == 1, cx);
-}
-
-/// An SSH computer that waits for the person on quiet attempts and holds a requested Connect
-/// until the test opens `gate`, so the connection stays in progress meanwhile.
-struct HoldsRequestedConnect {
-    gate: Arc<AtomicBool>,
-}
-
-impl crate::ssh::server_connection::SshConnectBackend for HoldsRequestedConnect {
-    fn connect(
-        &self,
-        _: &crate::domain::SshDestination,
-        mode: crate::ssh::server_connection::ConnectMode,
-        _: Option<&crate::ssh::server_connection::SshServerContinuity>,
-        _: &crate::ssh::cancellation::SshCancellationToken,
-        _: &crate::ssh::server_connection::ConnectProgress<'_>,
-    ) -> Result<
-        crate::ssh::server_connection::ConnectedSshServer,
-        crate::ssh::server_connection::SshConnectFailure,
-    > {
-        use crate::ssh::server_connection::{ConnectMode, InteractionReason, SshConnectFailure};
-        while mode == ConnectMode::Requested && !self.gate.load(Ordering::SeqCst) {
-            std::thread::sleep(std::time::Duration::from_millis(5));
-        }
-        Err(SshConnectFailure::NeedsPerson(
-            InteractionReason::CredentialProvider,
-        ))
+    click("new-workspace-menu-create-remote", cx);
+    for selector in [
+        "new-workspace-menu-create-remote-0",
+        "new-workspace-menu-create-remote-1",
+        "new-workspace-menu-create-remote-add-server",
+    ] {
+        assert!(cx.debug_bounds(selector).is_some(), "missing {selector}");
     }
-    fn observe(
-        &self,
-        _: &crate::domain::SshDestination,
-        _: Option<&crate::ssh::server_connection::SshServerContinuity>,
-        _: &crate::ssh::cancellation::SshCancellationToken,
-        _: &crate::ssh::server_connection::ConnectProgress<'_>,
-    ) -> Result<
-        crate::ssh::server_connection::SshServerObservation,
-        crate::ssh::server_connection::SshConnectFailure,
-    > {
-        Err(
-            crate::ssh::server_connection::SshConnectFailure::NeedsPerson(
-                crate::ssh::server_connection::InteractionReason::CredentialProvider,
-            ),
-        )
-    }
+    // studio isn't connected, so its row is disabled and keeps the menu open.
+    click("new-workspace-menu-create-remote-1", cx);
+    assert!(cx.update(|window, cx| spaceterm_ui::window_menu_is_open(window, cx)));
+    assert_eq!(edits.submitted(), Vec::new());
+
+    click("new-workspace-menu-create-remote-0", cx);
+    assert_eq!(
+        edits.submitted(),
+        vec![Mutation::CreateWorkspace {
+            name: String::new(),
+            directory: None,
+        }]
+    );
+    assert_eq!(harness.local.submitted(), Vec::new());
 }
 
-/// While a Saved Connection connects from its heading, SpaceTerm hasn't read its Workspaces yet,
-/// so the line under the heading says they appear once it connects rather than that it has none.
+/// The Workspace Switcher offers New Workspace and Open Directory on each saved server, and its
+/// query names the Workspace it creates there.
 #[gpui::test]
-fn a_saved_connection_connecting_from_its_heading_should_not_claim_it_has_no_workspaces(
+fn the_switcher_should_create_on_a_saved_server_with_its_query_as_the_name(
     cx: &mut TestAppContext,
 ) {
-    use crate::ssh::server_connection::{
-        RemoteConnectionStatus, RetainedSshConnection, SshServerConnections,
-    };
+    use spaceterm_server::hierarchy::Mutation;
+
+    let (harness, cx) = MachineGroupsHarness::new(cx);
+    let edits = saved_servers(&harness, cx);
+    open_workspace_switcher_for_creation(cx);
+    let rows = [
+        "workspace-switcher-create-local",
+        "workspace-switcher-open-local-directory",
+        "workspace-switcher-create-remote-0",
+        "workspace-switcher-open-remote-directory-0",
+        "workspace-switcher-create-remote-1",
+        "workspace-switcher-open-remote-directory-1",
+    ]
+    .map(|selector| {
+        cx.debug_bounds(selector)
+            .unwrap_or_else(|| panic!("missing switcher creation row: {selector}"))
+    });
+    assert!(rows.is_sorted_by_key(|row| row.top()));
+    assert!(
+        cx.debug_bounds("workspace-switcher-create-remote-0-group-separator")
+            .is_some(),
+        "the saved servers' rows start their own group"
+    );
+
+    click("workspace-switcher-create-remote-1", cx);
+    assert!(
+        cx.update(|window, cx| window_combo_box_is_open(window, cx)),
+        "a server that isn't connected takes nothing"
+    );
+    click("workspace-switcher-create-remote-0", cx);
+
+    assert_eq!(
+        edits.submitted(),
+        vec![Mutation::CreateWorkspace {
+            name: "fresh workspace".to_owned(),
+            directory: None,
+        }]
+    );
+    assert_eq!(harness.local.submitted(), Vec::new());
+}
+
+/// Two saved servers that give one name read apart by the address each route reaches, in the
+/// sidebar's submenus and in the Workspace Switcher, and each row reaches its own route.
+#[gpui::test]
+fn same_named_saved_servers_should_read_apart_in_both_creation_surfaces(cx: &mut TestAppContext) {
+    use spaceterm_server::hierarchy::Mutation;
     use spaceterm_ui::a11y_testing::A11yTree;
 
-    // The registry's connect worker runs on its own thread and wakes the window from there.
-    cx.executor().allow_parking();
     let (harness, cx) = MachineGroupsHarness::new(cx);
-    let penguin = crate::domain::SshDestination::new("penguin".to_owned()).unwrap();
-    let remembered = Arc::new(RememberedConnections::default());
-    remembered.0.lock().unwrap().push(RetainedSshConnection {
-        destination: penguin.clone(),
-        continuity: None,
-        active: true,
-    });
-    let gate = Arc::new(AtomicBool::new(false));
-    let connections = SshServerConnections::new(
-        Arc::new(HoldsRequestedConnect { gate: gate.clone() }),
-        remembered,
-    );
-    let installed = connections.clone();
-    cx.update(|window, cx| {
-        crate::ui::ssh_servers::install(installed, None, cx);
-        harness
-            .manager
-            .update(cx, |manager, cx| manager.follow_ssh_servers(window, cx));
-    });
-    connections.resume_retained();
-    wait_until(
-        || {
-            matches!(
-                connections.status(&penguin),
-                RemoteConnectionStatus::NeedsPerson { .. }
-            )
-        },
-        cx,
-    );
-    assert!(
-        A11yTree::read(cx)
-            .find_text("Connect to show its Workspaces.")
-            .is_some()
+    let (direct, routes) = crate::direct_connections::tests::disconnected_routes_at(&[
+        ("studio", "wss://192.168.1.3:9231"),
+        ("studio", "wss://192.168.1.2:9231"),
+    ]);
+    cx.update(|_, cx| crate::ui::direct_servers::install(direct, cx));
+    // Only the route at .3 is presented, so only its rows take a Workspace.
+    let (_, edits) = harness.present_direct("studio", routes[0], &[], cx);
+    redraw(cx);
+
+    click("new-workspace-button", cx);
+    click("new-workspace-menu-create-remote", cx);
+    let tree = A11yTree::read(cx);
+    for label in ["studio (192.168.1.2:9231)", "studio (192.168.1.3:9231)"] {
+        assert!(tree.find(label).is_some(), "the submenu shows {label:?}");
+    }
+    // Rows follow the addresses, so the presented route at .3 is the second.
+    click("new-workspace-menu-create-remote-0", cx);
+    assert!(cx.update(|window, cx| spaceterm_ui::window_menu_is_open(window, cx)));
+    click("new-workspace-menu-create-remote-1", cx);
+    assert_eq!(
+        edits.submitted(),
+        vec![Mutation::CreateWorkspace {
+            name: String::new(),
+            directory: None,
+        }]
     );
 
-    // The heading offers Connect in view, not only in its menu.
-    click("machine-connect-penguin", cx);
-    wait_until(
-        || {
-            matches!(
-                connections.status(&penguin),
-                RemoteConnectionStatus::Working { .. }
-            )
-        },
-        cx,
+    // The switcher renders only the rows in view, so its rows are read at the top and again after
+    // End reveals the last ones.
+    open_workspace_switcher(cx);
+    let top = A11yTree::read(cx);
+    cx.simulate_keystrokes("end");
+    cx.run_until_parked();
+    let end = A11yTree::read(cx);
+    for label in [
+        "New Workspace on studio (192.168.1.2:9231)",
+        "Open Directory on studio (192.168.1.2:9231)\u{2026}",
+        "New Workspace on studio (192.168.1.3:9231)",
+        "Open Directory on studio (192.168.1.3:9231)\u{2026}",
+    ] {
+        assert!(
+            top.find(label).or_else(|| end.find(label)).is_some(),
+            "the switcher shows {label:?}"
+        );
+    }
+    assert_eq!(harness.local.submitted(), Vec::new());
+}
+
+/// Without a saved server, both remote submenus offer only Add Server, which opens Settings' Add
+/// Server journey, and the switcher offers no remote rows, so nothing enters a host here.
+#[gpui::test]
+fn remote_creation_without_saved_servers_should_offer_only_add_server(cx: &mut TestAppContext) {
+    let (_, _, cx) = workspace_manager(cx);
+    let requests = Rc::new(std::cell::Cell::new(0usize));
+    cx.update(|_, cx| {
+        let requests = requests.clone();
+        cx.on_action(
+            move |_: &crate::ui::settings_window::AddServer, _: &mut gpui::App| {
+                requests.set(requests.get() + 1);
+            },
+        );
+    });
+    click("new-workspace-button", cx);
+    click("new-workspace-menu-open-remote-directory", cx);
+    assert!(
+        cx.debug_bounds("new-workspace-menu-open-remote-directory-0")
+            .is_none()
     );
-    let tree = A11yTree::read(cx);
-    let note = tree.find_text("Workspaces appear once connected.");
-    let claims_none = tree.find_text("No Workspaces").is_some();
-    let has_note = note.is_some();
-    gate.store(true, Ordering::SeqCst);
-    // The connect worker ends before the test does.
-    wait_until(
-        || {
-            matches!(
-                connections.status(&penguin),
-                RemoteConnectionStatus::NeedsPerson { .. }
-            )
-        },
-        cx,
+    click("new-workspace-menu-open-remote-directory-add-server", cx);
+    assert_eq!(requests.get(), 1, "Add Server opens Settings' journey");
+    assert!(!cx.update(|window, cx| spaceterm_ui::window_menu_is_open(window, cx)));
+
+    open_workspace_switcher_for_creation(cx);
+    assert!(cx.debug_bounds("workspace-switcher-create-local").is_some());
+    assert!(
+        cx.debug_bounds("workspace-switcher-create-remote-0")
+            .is_none()
+    );
+}
+
+/// Open Remote Directory on a saved server opens the Directory Picker browsing that server.
+#[gpui::test]
+fn open_remote_directory_should_browse_the_chosen_server(cx: &mut TestAppContext) {
+    // The picker reads penguin's directories over a channel whose worker answers from its own
+    // thread.
+    cx.executor().allow_parking();
+    let (harness, cx) = MachineGroupsHarness::new(cx);
+    let route = named_route("penguin");
+    harness.present_direct("penguin", route, &[], cx);
+
+    cx.update(|window, cx| {
+        harness.manager.update(cx, |manager, cx| {
+            manager.start_workspace_creation(
+                crate::ui::workspace_creation::WorkspaceCreation::OpenRemoteDirectory(route),
+                String::new(),
+                window,
+                cx,
+            );
+        })
+    });
+    cx.run_until_parked();
+
+    assert!(
+        harness
+            .manager
+            .read_with(cx, |manager, _| manager.pin_picker.is_some()),
+        "the picker opens on the saved server"
+    );
+    assert_eq!(harness.local.submitted(), Vec::new());
+}
+
+/// Cancelling Open Remote Directory on a saved server asks that server for nothing and returns the
+/// keyboard to the Workspace's terminal.
+#[gpui::test]
+fn cancelling_open_remote_directory_should_ask_nothing_and_restore_terminal_focus(
+    cx: &mut TestAppContext,
+) {
+    // The picker reads penguin's directories over a channel whose worker answers from its own
+    // thread.
+    cx.executor().allow_parking();
+    let (harness, cx) = MachineGroupsHarness::new(cx);
+    harness.publish(ServerKey::LOCAL, &harness.local, &[("Here", 1)], cx);
+    let edits = saved_servers(&harness, cx);
+    cx.update(|window, cx| {
+        harness
+            .manager
+            .update(cx, |manager, cx| manager.focus(window, cx))
+    });
+    cx.run_until_parked();
+    let terminal_focused = |cx: &mut VisualTestContext| {
+        cx.update(|window, cx| {
+            harness
+                .manager
+                .read(cx)
+                .workspaces
+                .active()
+                .payload()
+                .read(cx)
+                .focused_terminal_is_focused(window, cx)
+        })
+    };
+    assert!(terminal_focused(cx));
+
+    click("new-workspace-button", cx);
+    click("new-workspace-menu-open-remote-directory", cx);
+    click("new-workspace-menu-open-remote-directory-0", cx);
+    assert!(
+        harness
+            .manager
+            .read_with(cx, |manager, _| manager.pin_picker.is_some())
+    );
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+
+    assert!(
+        harness
+            .manager
+            .read_with(cx, |manager, _| manager.pin_picker.is_none())
+    );
+    assert!(terminal_focused(cx));
+    assert_eq!(edits.submitted(), Vec::new());
+    assert_eq!(harness.local.submitted(), Vec::new());
+}
+
+/// A directory chosen on penguin's server is the new Workspace's pin there. Choosing a directory
+/// one of that server's Workspaces is already pinned to opens that Workspace instead.
+#[gpui::test]
+fn open_remote_directory_should_pin_on_its_server_and_reuse_a_workspace_pinned_there(
+    cx: &mut TestAppContext,
+) {
+    use spaceterm_server::hierarchy::Mutation;
+
+    // The harness's server compares no directories, so the exact pin decides here. The native
+    // adapter test covers a server matching one directory through a symbolic link. Its directory
+    // channel answers from its own thread.
+    cx.executor().allow_parking();
+    let (harness, cx) = MachineGroupsHarness::new(cx);
+    let route = named_route("penguin");
+    let (key, penguin_edits) = harness.present_direct("penguin", route, &[("Far", 7)], cx);
+    let mut inventory = machine_inventory(harness.next_revision(), &[("Far", 7)]);
+    inventory.workspaces[0].pinned_directory = Some(PathBuf::from("/srv/app"));
+    penguin_edits.set_inventory(inventory);
+    cx.update(|window, cx| {
+        harness.manager.update(cx, |manager, cx| {
+            manager.sync_shared_workspaces(key, window, cx);
+        })
+    });
+    cx.run_until_parked();
+    let open = |directory: &str, cx: &mut VisualTestContext| {
+        cx.update(|window, cx| {
+            harness.manager.update(cx, |manager, cx| {
+                manager.open_server_directory(
+                    key,
+                    String::new(),
+                    PathBuf::from(directory),
+                    window,
+                    cx,
+                );
+            })
+        });
+        // The owning server's directory worker answers before the Workspace opens.
+        let deadline = Instant::now() + std::time::Duration::from_secs(5);
+        while harness
+            .manager
+            .read_with(cx, |manager, _| manager.pending_server_directory.is_some())
+        {
+            assert!(Instant::now() < deadline, "the server answers");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            cx.run_until_parked();
+        }
+    };
+
+    open("/srv/app", cx);
+    let pinned = harness.manager.read_with(cx, |manager, _| {
+        let active = manager.workspaces.active_workspace_id()?;
+        (manager.machine(active)
+            == Some(machine_groups::Machine::Direct {
+                name: "penguin".to_owned(),
+                route,
+            }))
+        .then(|| manager.workspaces.active().name().to_owned())
+    });
+    assert_eq!(pinned.as_deref(), Some("Far"), "the pinned Workspace opens");
+    assert_eq!(penguin_edits.submitted(), Vec::new());
+
+    open("/srv/other", cx);
+    assert_eq!(
+        penguin_edits.submitted(),
+        vec![Mutation::CreateWorkspace {
+            name: String::new(),
+            directory: Some(PathBuf::from("/srv/other")),
+        }]
+    );
+    assert_eq!(harness.local.submitted(), Vec::new());
+}
+
+/// Selecting another Workspace while penguin's server answers is newer navigation. The answer
+/// naming a Workspace already pinned there then moves neither the selection nor the keyboard, and
+/// creates nothing.
+#[gpui::test]
+fn a_late_directory_answer_should_never_override_newer_navigation(cx: &mut TestAppContext) {
+    assert_eq!(
+        late_directory_answer_after("/srv/app", &[Navigation::Workspace("There")], cx),
+        ("There".to_owned(), Vec::new())
+    );
+}
+
+/// Selecting another Workspace and returning to the first while penguin's server answers is still
+/// newer navigation, though the same Workspace is active again.
+#[gpui::test]
+fn a_late_directory_answer_should_never_override_navigation_that_returned(cx: &mut TestAppContext) {
+    assert_eq!(
+        late_directory_answer_after(
+            "/srv/app",
+            &[
+                Navigation::Workspace("There"),
+                Navigation::Workspace("Here")
+            ],
+            cx
+        ),
+        ("Here".to_owned(), Vec::new())
+    );
+}
+
+/// A late answer naming no pinned Workspace still creates the one the person asked for on
+/// penguin's server, which joins the sidebar without overriding the newer selection.
+#[gpui::test]
+fn a_late_directory_creation_should_never_override_newer_navigation(cx: &mut TestAppContext) {
+    use spaceterm_server::hierarchy::Mutation;
+
+    assert_eq!(
+        late_directory_answer_after("/srv/new", &[Navigation::Workspace("There")], cx),
+        (
+            "There".to_owned(),
+            vec![Mutation::CreateWorkspace {
+                name: String::new(),
+                directory: Some(PathBuf::from("/srv/new")),
+            }]
+        )
+    );
+}
+
+/// Selecting another Tab in the Active Workspace while penguin's server answers is newer
+/// navigation, which the answer naming a Workspace pinned there never overrides.
+#[gpui::test]
+fn a_late_directory_answer_should_never_override_a_newer_tab_selection(cx: &mut TestAppContext) {
+    assert_eq!(
+        late_directory_answer_after("/srv/app", &[Navigation::OtherTab], cx),
+        ("Here".to_owned(), Vec::new())
+    );
+}
+
+/// Moving to another Pane of the Active Tab while penguin's server answers is newer navigation
+/// too.
+#[gpui::test]
+fn a_late_directory_answer_should_never_override_a_newer_pane_focus(cx: &mut TestAppContext) {
+    assert_eq!(
+        late_directory_answer_after("/srv/app", &[Navigation::OtherPane], cx),
+        ("Here".to_owned(), Vec::new())
+    );
+}
+
+/// Opening Terminal Find in the same Pane while penguin's server answers moves the keyboard, so
+/// the answer leaves it in Find.
+#[gpui::test]
+fn a_late_directory_answer_should_never_take_the_keyboard_from_terminal_find(
+    cx: &mut TestAppContext,
+) {
+    assert_eq!(
+        late_directory_answer_after("/srv/app", &[Navigation::FindOpened], cx),
+        ("Here".to_owned(), Vec::new())
+    );
+}
+
+/// Opening and closing Terminal Find before penguin's server answers is still later keyboard
+/// intent, though the keyboard is back in the same terminal.
+#[gpui::test]
+fn a_late_directory_answer_should_never_override_terminal_find_that_closed(
+    cx: &mut TestAppContext,
+) {
+    assert_eq!(
+        late_directory_answer_after("/srv/app", &[Navigation::FindClosed], cx),
+        ("Here".to_owned(), Vec::new())
+    );
+}
+
+/// One explicit navigation a person makes while a directory answer is held back.
+#[derive(Clone, Copy)]
+enum Navigation {
+    /// Selects the named Workspace's sidebar row.
+    Workspace(&'static str),
+    /// Selects the Active Workspace's other Tab in the Tab strip.
+    OtherTab,
+    /// Clicks the Active Tab's other Pane.
+    OtherPane,
+    /// Opens Terminal Find in the Focused Pane and leaves it open.
+    FindOpened,
+    /// Opens Terminal Find in the Focused Pane, then closes it, returning to the terminal.
+    FindClosed,
+}
+
+/// Opens `directory` on penguin, whose "Far" is pinned to `/srv/app`, from "Here", which has a
+/// second Tab and a split Pane. Makes each of `navigation` while penguin's answer is held back,
+/// then releases it. Returns the Active Workspace's name once the answer settles, with what
+/// penguin was asked to change.
+fn late_directory_answer_after(
+    directory: &str,
+    navigation: &[Navigation],
+    cx: &mut TestAppContext,
+) -> (String, Vec<spaceterm_server::hierarchy::Mutation>) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    // The held answer arrives from the directory worker's own thread.
+    cx.executor().allow_parking();
+    let open = Arc::new(AtomicBool::new(false));
+    let adapters = WorkspaceManagerAdapters {
+        server_directories: crate::ui::directory_picker::server_directory_testing::gated(
+            Arc::clone(&open),
+        ),
+        ..workspace_adapters()
+    };
+    let (harness, cx) = MachineGroupsHarness::using(adapters, cx);
+    // An active window reports each keyboard owner the person leaves.
+    cx.update(|window, _| window.activate_window());
+    let local = [("Here", 1), ("There", 2)];
+    harness.publish(ServerKey::LOCAL, &harness.local, &local, cx);
+    // "Here" gains a second Tab and a Pane split from its first.
+    let mut inventory = machine_inventory(harness.next_revision(), &local);
+    let here = &mut inventory.workspaces[0];
+    let mut tab = here.tabs[0].clone();
+    tab.id = [180; 32];
+    tab.root_pane = [181; 32];
+    tab.panes[0].id = [181; 32];
+    let mut split = here.tabs[0].panes[0].clone();
+    split.id = [182; 32];
+    split.source = Some(here.tabs[0].panes[0].id);
+    here.tabs[0].panes.push(split);
+    here.tabs.push(tab);
+    harness.local.set_inventory(inventory);
+    cx.update(|window, cx| {
+        harness.manager.update(cx, |manager, cx| {
+            manager.sync_shared_workspaces(ServerKey::LOCAL, window, cx);
+        })
+    });
+    let route = named_route("penguin");
+    let (key, penguin_edits) = harness.present_direct("penguin", route, &[("Far", 7)], cx);
+    let mut inventory = machine_inventory(harness.next_revision(), &[("Far", 7)]);
+    inventory.workspaces[0].pinned_directory = Some(PathBuf::from("/srv/app"));
+    penguin_edits.set_inventory(inventory);
+    cx.update(|window, cx| {
+        harness.manager.update(cx, |manager, cx| {
+            manager.sync_shared_workspaces(key, window, cx);
+        })
+    });
+    redraw(cx);
+    let here = harness.named("Here", cx);
+    cx.update(|window, cx| {
+        harness.manager.update(cx, |manager, cx| {
+            manager.activate_workspace(here, window, cx);
+            manager.open_server_directory(key, String::new(), PathBuf::from(directory), window, cx);
+        })
+    });
+    redraw(cx);
+    assert!(
+        harness
+            .manager
+            .read_with(cx, |manager, _| manager.pending_server_directory.is_some()),
+        "the server's answer is held back"
+    );
+
+    let terminal = |cx: &mut VisualTestContext| {
+        harness.manager.read_with(cx, |manager, cx| {
+            manager
+                .workspaces
+                .active()
+                .payload()
+                .read(cx)
+                .active_terminal_identity(cx)
+        })
+    };
+    for step in navigation {
+        let before = terminal(cx);
+        if let Navigation::FindOpened | Navigation::FindClosed = step {
+            cx.dispatch_action(crate::ui::OpenTerminalFind);
+            cx.run_until_parked();
+            assert!(cx.debug_bounds("terminal-find-bar").is_some());
+            if let Navigation::FindClosed = step {
+                cx.simulate_keystrokes("escape");
+                cx.run_until_parked();
+                assert!(cx.debug_bounds("terminal-find-bar").is_none());
+            }
+            continue;
+        }
+        let selector = match *step {
+            Navigation::Workspace(name) => {
+                format!("workspace-row-{}-inactive", harness.named(name, cx).get())
+            }
+            Navigation::OtherTab => (1..=20)
+                .map(|tab| format!("tab-item-{tab}-inactive"))
+                .find(|selector| cx.debug_bounds(selector.clone().leak()).is_some())
+                .expect("the Active Workspace shows its other Tab"),
+            Navigation::OtherPane => (1..=20)
+                .filter(|pane| *pane != before.1.get())
+                .map(|pane| format!("pane-surface-{pane}"))
+                .find(|selector| cx.debug_bounds(selector.clone().leak()).is_some())
+                .expect("the Active Tab shows its other Pane"),
+            Navigation::FindOpened | Navigation::FindClosed => unreachable!(),
+        };
+        click(selector.leak(), cx);
+        if !matches!(step, Navigation::Workspace(_)) {
+            assert_ne!(terminal(cx), before, "the person navigated within \"Here\"");
+        }
+    }
+    open.store(true, Ordering::Release);
+    let deadline = Instant::now() + std::time::Duration::from_secs(5);
+    while harness
+        .manager
+        .read_with(cx, |manager, _| manager.pending_server_directory.is_some())
+    {
+        assert!(Instant::now() < deadline, "the server answers");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        cx.run_until_parked();
+    }
+
+    assert_eq!(harness.local.submitted(), Vec::new());
+    let active = harness.manager.read_with(cx, |manager, _| {
+        manager.workspaces.active().name().to_owned()
+    });
+    (active, penguin_edits.submitted())
+}
+
+/// A server whose edits are still connecting holds the chosen directory until it reads its first
+/// inventory, then takes the Workspace.
+#[gpui::test]
+fn open_remote_directory_should_wait_for_the_servers_edits(cx: &mut TestAppContext) {
+    use spaceterm_server::hierarchy::Mutation;
+
+    let (harness, cx) = MachineGroupsHarness::new(cx);
+    let edits = Rc::new(crate::ui::shared_workspaces::testing::ScriptedEdits::new(
+        None,
+    ));
+    edits.set_connected(false);
+    let (key, _) = harness.present_direct_edits("penguin", named_route("penguin"), &edits, cx);
+
+    cx.update(|window, cx| {
+        harness.manager.update(cx, |manager, cx| {
+            manager.open_server_directory(
+                key,
+                String::new(),
+                PathBuf::from("/srv/app"),
+                window,
+                cx,
+            );
+        })
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        edits.submitted(),
+        Vec::new(),
+        "nothing is asked of an unready server"
     );
     assert!(
-        has_note && !claims_none,
-        "a connecting server's Workspaces haven't been read, so it doesn't claim to have none"
+        harness
+            .manager
+            .read_with(cx, |manager, _| manager.pending_server_directory.is_some())
     );
+
+    edits.set_connected(true);
+    edits.set_inventory(machine_inventory(harness.next_revision(), &[]));
+    cx.update(|window, cx| {
+        harness.manager.update(cx, |manager, cx| {
+            manager.sync_shared_workspaces(key, window, cx)
+        })
+    });
+    cx.run_until_parked();
+
+    assert_eq!(
+        edits.submitted(),
+        vec![Mutation::CreateWorkspace {
+            name: String::new(),
+            directory: Some(PathBuf::from("/srv/app")),
+        }]
+    );
+    assert!(
+        harness
+            .manager
+            .read_with(cx, |manager, _| manager.pending_server_directory.is_none())
+    );
+    assert_eq!(harness.local.submitted(), Vec::new());
+}
+
+/// A server withdrawn while a chosen directory waits for its edits ends that request and says the
+/// Workspace couldn't open, so a later connection never creates it unasked.
+#[gpui::test]
+fn open_remote_directory_should_end_when_its_server_is_withdrawn(cx: &mut TestAppContext) {
+    let (harness, cx) = MachineGroupsHarness::new(cx);
+    let edits = Rc::new(crate::ui::shared_workspaces::testing::ScriptedEdits::new(
+        None,
+    ));
+    edits.set_connected(false);
+    let (key, _) = harness.present_direct_edits("penguin", named_route("penguin"), &edits, cx);
+    cx.update(|window, cx| {
+        harness.manager.update(cx, |manager, cx| {
+            manager.open_server_directory(
+                key,
+                String::new(),
+                PathBuf::from("/srv/app"),
+                window,
+                cx,
+            );
+        })
+    });
+    cx.run_until_parked();
+    assert!(!cx.update(|window, cx| window_modal_is_open(window, cx)));
+
+    cx.update(|window, cx| {
+        harness.manager.update(cx, |manager, cx| {
+            manager.withdraw_server_workspaces(key, window, cx);
+        })
+    });
+    cx.run_until_parked();
+
+    assert!(
+        harness
+            .manager
+            .read_with(cx, |manager, _| manager.pending_server_directory.is_none())
+    );
+    assert!(cx.update(|window, cx| window_modal_is_open(window, cx)));
+    assert_eq!(edits.submitted(), Vec::new());
+}
+
+/// A presented paired server with no attached Workspaces keeps its heading, with a quiet line in
+/// place of its Workspaces.
+#[gpui::test]
+fn an_empty_paired_server_should_keep_its_heading_and_say_it_has_no_workspaces(
+    cx: &mut TestAppContext,
+) {
+    let (harness, cx) = MachineGroupsHarness::new(cx);
+    harness.publish(ServerKey::LOCAL, &harness.local, &[("Here", 1)], cx);
+    harness.present_direct("penguin", named_route("penguin"), &[], cx);
+    redraw(cx);
+
+    let heading = cx.debug_bounds("machine-heading-penguin");
+    let empty = cx.debug_bounds("machine-empty-penguin");
+    assert!(
+        heading
+            .zip(empty)
+            .is_some_and(|(heading, empty)| heading.bottom() <= empty.top()),
+        "the empty server's heading should stand above its No Workspaces line"
+    );
+    assert!(cx.debug_bounds("machine-empty-This Computer").is_none());
 }

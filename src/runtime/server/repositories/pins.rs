@@ -29,7 +29,7 @@ struct Interests {
 
 struct Resolution {
     interests: Interests,
-    cancellation: SshCancellationToken,
+    cancellation: CancellationToken,
     handle: JoinHandle<Option<Result<Vec<PathBuf>, ()>>>,
 }
 
@@ -130,7 +130,7 @@ impl PinMembership {
         if self.worker.is_some() || self.next_check.is_some_and(|next| Instant::now() < next) {
             return;
         }
-        let cancellation = SshCancellationToken::default();
+        let cancellation = CancellationToken::default();
         let token = cancellation.clone();
         let interests = self.interests.clone();
         let roots = interests.roots.clone();

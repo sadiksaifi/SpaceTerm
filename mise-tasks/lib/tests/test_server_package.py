@@ -120,7 +120,7 @@ class ServerArchiveTests(unittest.TestCase):
             os.umask(previous)
         self.assertEqual(stat.S_IMODE((self.root / "unpacked/server").stat().st_mode), 0o755)
 
-    def test_previous_production_trust_cannot_authenticate_a_new_nonproduction_candidate(self):
+    def test_production_trust_cannot_authenticate_a_nonproduction_candidate(self):
         self.archive_with([("server/build.json", json.dumps(self.info).encode(), tarfile.REGTYPE)])
         production_fixture_seed = bytes(range(32))
         release.sign_ed25519(production_fixture_seed, self.archive, self.signature)
@@ -350,9 +350,14 @@ class CrossBuildTests(unittest.TestCase):
                 server_package.compile_terminfo(destination, "aarch64-apple-darwin")
             entry = destination / "78/xterm-spaceterm"
             self.assertEqual(entry.read_bytes()[:2], bytes.fromhex("1a01"))
+            # Decode the macOS bytes through the running host's terminfo lookup layout.
+            native = Path(temporary) / "native-terminfo"
+            lookup = native / ("78" if os.uname().sysname == "Darwin" else "x")
+            lookup.mkdir(parents=True)
+            shutil.copyfile(entry, lookup / entry.name)
             result = subprocess.run(
                 ["infocmp", "-x", "-1", "xterm-spaceterm"],
-                env={**os.environ, "TERMINFO": str(destination)},
+                env={**os.environ, "TERMINFO": str(native)},
                 capture_output=True,
                 text=True,
                 check=True,

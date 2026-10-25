@@ -24,7 +24,7 @@ pub(super) trait DirectNetwork: Send + Sync {
         route: &DirectRoute,
         credential: DeviceCredential,
         gate: Arc<std::sync::atomic::AtomicBool>,
-    ) -> Result<LocalServer, DirectError>;
+    ) -> Result<ServerConnection, DirectError>;
     fn revoke(
         &self,
         endpoint: &str,
@@ -51,14 +51,14 @@ impl DirectNetwork for NativeNetwork {
         route: &DirectRoute,
         credential: DeviceCredential,
         gate: Arc<std::sync::atomic::AtomicBool>,
-    ) -> Result<LocalServer, DirectError> {
+    ) -> Result<ServerConnection, DirectError> {
         let connector = Arc::new(Connector {
             endpoint: route.endpoint.clone(),
             paired: route.paired.clone(),
             credential,
             gate,
         });
-        let server = LocalServer::direct(identity, route.id, route.paired.clone(), connector)?;
+        let server = ServerConnection::direct(identity, route.id, route.paired.clone(), connector)?;
         server.refresh()?;
         Ok(server)
     }
@@ -208,7 +208,7 @@ fn credential(
     DeviceCredential::from_bytes(&bytes)
 }
 
-fn credential_error(error: CredentialError) -> DirectError {
+pub(super) fn credential_error(error: CredentialError) -> DirectError {
     match error {
         CredentialError::InteractionRequired => DirectError::InteractionRequired,
         CredentialError::Unavailable => DirectError::CredentialUnavailable,
@@ -261,7 +261,7 @@ struct RouteJob {
     saved: SavedRoute,
     interaction: Interaction,
     gate: Arc<std::sync::atomic::AtomicBool>,
-    server: Option<LocalServer>,
+    server: Option<ServerConnection>,
     due: Instant,
 }
 
@@ -404,12 +404,12 @@ fn check_route(owner: &Arc<Inner>, job: RouteJob) {
     owner.notify();
 }
 
-fn connect(
+pub(super) fn connect(
     owner: &Inner,
     saved: &SavedRoute,
     interaction: Interaction,
     gate: Arc<std::sync::atomic::AtomicBool>,
-) -> Result<LocalServer, DirectError> {
+) -> Result<ServerConnection, DirectError> {
     let credential = credential(owner, saved, interaction)?;
     owner
         .network
@@ -917,7 +917,7 @@ pub(super) mod enrollment_tests {
             _: &DirectRoute,
             _: DeviceCredential,
             _: Arc<std::sync::atomic::AtomicBool>,
-        ) -> Result<LocalServer, DirectError> {
+        ) -> Result<ServerConnection, DirectError> {
             Err(DirectError::Transport)
         }
         fn revoke(

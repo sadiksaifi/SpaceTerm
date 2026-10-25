@@ -1,4 +1,4 @@
-//! Presents each connected direct network server's Workspaces beside the others.
+//! Presents each connected paired server's Workspaces beside the others.
 //!
 //! The desktop's direct registry decides which routes stay presented: a connected route and one
 //! reconnecting after an interruption keep their binding, so their Panes stay frozen in place, and
@@ -52,7 +52,7 @@ impl WorkspaceManager {
         {
             return;
         }
-        let presented: Vec<(DirectServer, spaceterm_server::LocalServer)> = connections
+        let presented: Vec<(DirectServer, spaceterm_server::ServerConnection)> = connections
             .routes()
             .into_iter()
             .filter_map(|(route, _)| {
@@ -89,12 +89,12 @@ impl WorkspaceManager {
         cx.notify();
     }
 
-    /// Presents one direct network server's Workspaces. Its Panes take no local file authority,
+    /// Presents one paired server's Workspaces. Its Panes take no local file authority,
     /// and its client views are this client's own for that server.
     fn present_direct_server(
         &mut self,
         direct: DirectServer,
-        server: spaceterm_server::LocalServer,
+        server: spaceterm_server::ServerConnection,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -106,15 +106,13 @@ impl WorkspaceManager {
         let client =
             crate::ui::server_worktrees::Client::for_direct(direct.route, server.clone(), cx);
         let edits = client.source.clone();
-        let Some(sessions) = SharedPaneSessions::direct(
+        let sessions = SharedPaneSessions::direct(
             server.clone(),
             client.controls.clone(),
             direct.clone(),
             client_home,
             &self.pane_construction,
-        ) else {
-            return;
-        };
+        );
         let key = self.present_server_workspaces(
             ServerOrigin::Direct(direct),
             edits,

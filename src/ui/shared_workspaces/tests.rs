@@ -118,14 +118,6 @@ struct SharedHarness {
 
 /// A Tab strip presenting one server Workspace's Root Tab, as the Workspace Window binds it.
 fn shared_tab_manager(cx: &mut TestAppContext) -> (SharedHarness, &mut VisualTestContext) {
-    shared_tab_manager_on(None, cx)
-}
-
-/// A shared Tab whose server runs on this computer, or on the computer `remote` names.
-fn shared_tab_manager_on(
-    remote: Option<crate::domain::SshDestination>,
-    cx: &mut TestAppContext,
-) -> (SharedHarness, &mut VisualTestContext) {
     cx.update(crate::ui::init)
         .expect("UI initialization should succeed");
     let session_factory: Rc<dyn TerminalSessionFactory> =
@@ -136,10 +128,7 @@ fn shared_tab_manager_on(
         session_factory,
         crate::terminal::testing::test_local_directory(PathBuf::from("/tmp/spaceterm-shared-test")),
     );
-    let panes = match remote {
-        Some(destination) => ScriptedPanes::remote(session_factory.clone(), destination),
-        None => ScriptedPanes::new(session_factory.clone()),
-    };
+    let panes = ScriptedPanes::new(session_factory.clone());
     let sessions = SharedPaneSessions::with_opener(
         Rc::clone(&panes) as Rc<dyn SharedPaneOpener>,
         &PaneConstruction::testing(),
@@ -803,146 +792,6 @@ fn taking_over_an_ended_pane_should_offer_start_session_without_starting_one(
     assert_eq!(pane.restored_starts(), 1);
 }
 
-/// An SSH server's Pane may wait for a route that needs the person to sign in again. Its Retry is
-/// the person's request, so it asks the registry to connect as the person would from Settings,
-/// once, and nothing asks again on its own.
-#[gpui::test]
-fn retry_on_an_ssh_servers_pane_should_ask_for_a_requested_connect(cx: &mut TestAppContext) {
-    use crate::ssh::cancellation::SshCancellationToken;
-    use crate::ssh::server_connection::{
-        ConnectMode, ConnectProgress, ConnectedSshServer, InteractionReason, RetainedSshConnection,
-        SshConnectBackend, SshConnectFailure, SshConnectionIntentStore, SshIntentStoreError,
-        SshServerConnections, SshServerContinuity, SshServerObservation,
-    };
-    use std::sync::{Arc, Mutex, mpsc};
-
-    struct RecordingBackend(Mutex<mpsc::Sender<(String, ConnectMode)>>);
-    impl SshConnectBackend for RecordingBackend {
-        fn connect(
-            &self,
-            destination: &crate::domain::SshDestination,
-            mode: ConnectMode,
-            _: Option<&SshServerContinuity>,
-            _: &SshCancellationToken,
-            _: &ConnectProgress<'_>,
-        ) -> Result<ConnectedSshServer, SshConnectFailure> {
-            let _ = self
-                .0
-                .lock()
-                .unwrap()
-                .send((destination.as_str().to_owned(), mode));
-            Err(SshConnectFailure::NeedsPerson(
-                InteractionReason::Authentication,
-            ))
-        }
-        fn observe(
-            &self,
-            _: &crate::domain::SshDestination,
-            _: Option<&SshServerContinuity>,
-            _: &SshCancellationToken,
-            _: &ConnectProgress<'_>,
-        ) -> Result<SshServerObservation, SshConnectFailure> {
-            Err(SshConnectFailure::NeedsPerson(
-                InteractionReason::Authentication,
-            ))
-        }
-    }
-    struct NoIntents;
-    impl SshConnectionIntentStore for NoIntents {
-        fn load(&self) -> Result<Vec<RetainedSshConnection>, SshIntentStoreError> {
-            Ok(Vec::new())
-        }
-        fn retain(&self, _: RetainedSshConnection) -> Result<(), SshIntentStoreError> {
-            Ok(())
-        }
-        fn remove(&self, _: &crate::domain::SshDestination) -> Result<(), SshIntentStoreError> {
-            Ok(())
-        }
-    }
-
-    let destination = crate::domain::SshDestination::new("penguin".to_owned()).unwrap();
-    let (harness, cx) = shared_tab_manager_on(Some(destination), cx);
-    let (sender, connects) = mpsc::channel();
-    let connections = SshServerConnections::new(
-        Arc::new(RecordingBackend(Mutex::new(sender))),
-        Arc::new(NoIntents),
-    );
-    cx.update(|_, cx| crate::ui::ssh_servers::install(connections, None, cx));
-    harness
-        .panes
-        .pane(ROOT_PANE)
-        .set(DevelopmentPaneStatus::Reconnecting);
-    settle(&harness, cx);
-    assert!(
-        connects.try_recv().is_err(),
-        "an interruption alone asks the person for nothing"
-    );
-
-    click("shared-pane-retry-1", cx);
-
-    assert_eq!(
-        connects
-            .recv_timeout(std::time::Duration::from_secs(5))
-            .ok(),
-        Some(("penguin".to_owned(), ConnectMode::Requested)),
-        "Retry should ask the registry to connect as the person requested"
-    );
-    assert_eq!(harness.panes.pane(ROOT_PANE).retries(), 1);
-    assert!(
-        connects
-            .recv_timeout(std::time::Duration::from_millis(200))
-            .is_err(),
-        "nothing should ask again on its own"
-    );
-}
-
-/// When another computer's server is stopped, its interrupted Pane says the server stopped and
-/// that it stays stopped, instead of claiming the shell keeps running, and offers no retry that
-/// can't connect. Once that server's route connects again, the Pane connects once, on its own.
-#[gpui::test]
-fn a_stopped_remote_server_says_so_in_its_pane_and_reconnects_when_its_route_returns(
-    cx: &mut TestAppContext,
-) {
-    use spaceterm_ui::a11y_testing::A11yTree;
-
-    let destination = crate::domain::SshDestination::new("penguin".to_owned()).unwrap();
-    let (harness, cx) = shared_tab_manager_on(Some(destination), cx);
-    let pane = harness.panes.pane(ROOT_PANE);
-    pane.set(DevelopmentPaneStatus::Reconnecting);
-    settle(&harness, cx);
-
-    cx.update(|_, cx| {
-        harness
-            .manager
-            .update(cx, |manager, cx| manager.server_stopped(cx))
-    });
-    settle(&harness, cx);
-
-    let description = A11yTree::read(cx).node("Server Stopped")["aria"]["description"]
-        .as_str()
-        .unwrap_or_default()
-        .to_owned();
-    assert_eq!(
-        description,
-        "Start the server on \"penguin\" to use this Pane again."
-    );
-    assert!(!description.contains("keeps running"));
-    assert!(cx.debug_bounds("shared-pane-retry-1").is_none());
-    assert_eq!(pane.retries(), 0, "nothing reconnects to a stopped server");
-
-    cx.update(|_, cx| {
-        harness
-            .manager
-            .update(cx, |manager, cx| manager.server_started(cx))
-    });
-    settle(&harness, cx);
-    assert_eq!(
-        pane.retries(),
-        1,
-        "the route's return reconnects the Pane once"
-    );
-}
-
 #[gpui::test]
 fn an_interrupted_shared_pane_should_offer_retry_until_its_screen_returns(cx: &mut TestAppContext) {
     let (harness, cx) = shared_tab_manager(cx);
@@ -1055,7 +904,7 @@ fn an_unavailable_shared_pane_offers_explicit_retry_and_keeps_terminal_content_h
         .panes
         .pane(ROOT_PANE)
         .set(DevelopmentPaneStatus::Failed(
-            crate::local_server::ServerError::DirectoryUnavailable,
+            crate::server_connection::ServerError::DirectoryUnavailable,
         ));
     settle(&harness, cx);
     assert!(
@@ -2396,7 +2245,7 @@ mod draft {
     ) {
         cx.update(|_, cx| {
             sidebar.update(cx, |sidebar, cx| {
-                sidebar.set_rows(vec![row], Vec::new(), None, cx)
+                sidebar.set_rows(vec![row], Vec::new(), Vec::new(), cx)
             });
         });
         cx.run_until_parked();

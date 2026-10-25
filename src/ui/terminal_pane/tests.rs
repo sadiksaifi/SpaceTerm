@@ -629,7 +629,7 @@ fn remote_directory_screen(generation: u64, path: &str) -> Arc<ScreenSnapshot> {
     Arc::make_mut(&mut Arc::make_mut(&mut screen).metadata).context =
         crate::terminal::metadata::TerminalMetadataContext::Remote(
             crate::terminal::metadata::RemoteTerminalMetadataContext::new(
-                crate::domain::SshDestination::new("user@remote".to_owned()).unwrap(),
+                "remote".to_owned(),
                 crate::domain::RemoteDirectory::new(path.to_owned()).unwrap(),
             ),
         );
@@ -8551,56 +8551,47 @@ fn local_origin_should_present_the_account_and_machine_without_its_mdns_suffix()
 }
 
 #[test]
-fn remote_origin_should_split_its_destination_and_stay_classified_remote() {
-    for (destination, expected) in [
-        ("user@remote.example", ("user", "remote.example")),
-        ("build-box", ("", "build-box")),
-        ("user@10.0.0.4", ("user", "10.0.0.4")),
-    ] {
-        let context = crate::terminal::metadata::TerminalMetadataContext::Remote(
-            crate::terminal::metadata::RemoteTerminalMetadataContext::new(
-                crate::domain::SshDestination::new(destination.to_owned()).unwrap(),
-                crate::domain::RemoteDirectory::new("~/project".to_owned()).unwrap(),
-            ),
-        );
+fn remote_origin_should_name_its_server_and_stay_classified_remote() {
+    let context = crate::terminal::metadata::TerminalMetadataContext::Remote(
+        crate::terminal::metadata::RemoteTerminalMetadataContext::new(
+            "build-box".to_owned(),
+            crate::domain::RemoteDirectory::new("~/project".to_owned()).unwrap(),
+        ),
+    );
 
-        let origin = PaneOrigin::from_context(&context);
+    let origin = PaneOrigin::from_context(&context);
 
-        assert_eq!(
-            (origin.user.as_ref(), origin.host.as_ref()),
-            expected,
-            "{destination}"
-        );
-        assert!(origin.remote, "{destination}");
-    }
+    assert_eq!(
+        (origin.user.as_ref(), origin.host.as_ref()),
+        ("", "build-box")
+    );
+    assert!(origin.remote);
 }
 
 #[test]
-fn a_discovered_account_should_name_the_user_a_host_alias_never_spells() {
-    for destination in ["build-box", "someone@build-box"] {
-        let context = crate::terminal::metadata::TerminalMetadataContext::Remote(
-            crate::terminal::metadata::RemoteTerminalMetadataContext::new(
-                crate::domain::SshDestination::new(destination.to_owned()).unwrap(),
-                crate::domain::RemoteDirectory::new("~/project".to_owned()).unwrap(),
-            )
-            .with_machine(crate::terminal::metadata::RemoteMachine::new(
-                Some("tester"),
-                Some("/home/tester"),
-            )),
-        );
+fn the_servers_account_should_name_the_user() {
+    let context = crate::terminal::metadata::TerminalMetadataContext::Remote(
+        crate::terminal::metadata::RemoteTerminalMetadataContext::new(
+            "build-box".to_owned(),
+            crate::domain::RemoteDirectory::new("~/project".to_owned()).unwrap(),
+        )
+        .with_machine(crate::terminal::metadata::RemoteMachine::new(
+            Some("tester"),
+            Some("/home/tester"),
+        )),
+    );
 
-        let origin = PaneOrigin::from_context(&context);
+    let origin = PaneOrigin::from_context(&context);
 
-        assert_eq!(origin.user.as_ref(), "tester", "{destination}");
-        assert_eq!(origin.host.as_ref(), "build-box", "{destination}");
-    }
+    assert_eq!(origin.user.as_ref(), "tester");
+    assert_eq!(origin.host.as_ref(), "build-box");
 }
 
 #[test]
 fn a_remote_directory_should_abbreviate_against_its_own_remote_home() {
     let context = crate::terminal::metadata::TerminalMetadataContext::Remote(
         crate::terminal::metadata::RemoteTerminalMetadataContext::new(
-            crate::domain::SshDestination::new("build-box".to_owned()).unwrap(),
+            "build-box".to_owned(),
             crate::domain::RemoteDirectory::new("~/project".to_owned()).unwrap(),
         )
         .with_machine(crate::terminal::metadata::RemoteMachine::new(

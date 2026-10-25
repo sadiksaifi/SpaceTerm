@@ -4,7 +4,7 @@
 //! these in its join stages.
 
 use crate::direct_connections::EnrollmentStage;
-use crate::local_server::direct::DirectError;
+use crate::server_connection::direct::DirectError;
 
 /// What a stop SpaceTerm couldn't save says. It states the rule rather than the server's state,
 /// since a later quiet save may already have sent it, and it stays only until a save succeeds.
@@ -36,6 +36,7 @@ pub(super) fn join_failure(error: DirectError) -> &'static str {
         | DirectError::Revoked
         | DirectError::InvalidRequest
         | DirectError::InvalidAddress
+        | DirectError::PolicyChanged
         | DirectError::AlreadyDecided => "The server refused pairing.",
     }
 }

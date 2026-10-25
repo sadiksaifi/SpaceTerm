@@ -5,11 +5,10 @@ use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, Stdio};
 
 use crate::ssh::process::{
-    ProcessExit, ProcessSignal, SpawnedSshProcess, SshProcessAdapter, SshProcessExitObservation,
-    SshProcessMechanismError, SshProcessPipes, SshProcessSpawnRequest, SshProcessStdio,
+    ProcessExit, ProcessSignal, SpawnedSshProcess, SshProcessAdapter, SshProcessMechanismError,
+    SshProcessPipes, SshProcessSpawnRequest, SshProcessStdio,
 };
 
-mod exit_observation;
 mod owner_guard;
 
 #[derive(Clone, Copy, Default)]
@@ -66,20 +65,6 @@ impl SshProcessAdapter for UnixSshProcessAdapter {
         let stdin = child.stdin.take();
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
-        use std::os::fd::AsFd;
-        let pollable = stdin
-            .as_ref()
-            .zip(stdout.as_ref())
-            .and_then(|(write, read)| {
-                Some((
-                    Box::new(std::fs::File::from(
-                        write.as_fd().try_clone_to_owned().ok()?,
-                    ))
-                        as Box<dyn spaceterm_server::account_bridge::AccountWrite>,
-                    Box::new(std::fs::File::from(read.as_fd().try_clone_to_owned().ok()?))
-                        as Box<dyn spaceterm_server::account_bridge::AccountRead>,
-                ))
-            });
         Ok(SpawnedSshProcess::new(
             UnixSshProcess {
                 child,
@@ -87,11 +72,10 @@ impl SshProcessAdapter for UnixSshProcessAdapter {
                 observed_exit: None,
                 _owner_guard: owner_guard,
             },
-            SshProcessPipes::new_pollable(
+            SshProcessPipes::new(
                 stdin.map(|pipe| Box::new(pipe) as Box<dyn std::io::Write + Send>),
                 stdout.map(|pipe| Box::new(pipe) as Box<dyn std::io::Read + Send>),
                 stderr.map(|pipe| Box::new(pipe) as Box<dyn std::io::Read + Send>),
-                pollable,
             ),
         ))
     }
@@ -109,15 +93,11 @@ impl SshProcessAdapter for UnixSshProcessAdapter {
         signal: ProcessSignal,
     ) -> Result<(), SshProcessMechanismError> {
         let signal = match signal {
-            #[cfg(test)]
+            #[cfg(all(test, feature = "native-tests"))]
             ProcessSignal::Terminate => libc::SIGTERM,
             ProcessSignal::Kill => libc::SIGKILL,
         };
         signal_group(process, signal)
-    }
-
-    fn observe_exit(&self, process: &mut Self::Process) -> Option<SshProcessExitObservation> {
-        exit_observation::observe(self, process)
     }
 
     fn reap(&self, mut process: Self::Process) -> Result<(), SshProcessMechanismError> {
@@ -307,17 +287,15 @@ mod tests {
     use crate::platform::unix_adapter_tests::short_temporary_root;
     use crate::ssh::askpass::AskPassCapabilityCopy;
 
-    use crate::ssh::server_process::SshServerBootstrap as _;
+    use crate::ssh::provisioning::SshServerBootstrap as _;
 
     const IDENTITY: &str = "spaceterm-development";
 
-    /// A remote server command names only the action and the compiled application identity, each
-    /// quoted as data. What one maintenance request asks for travels on standard input instead,
-    /// so no request value is ever a shell argument.
+    /// Discovery commands quote the action and compiled application identity.
     #[test]
-    fn a_remote_server_command_names_only_its_action_and_application_identity() {
+    fn discovery_commands_quote_the_action_and_application_identity() {
         let adapter = UnixSshProcessAdapter;
-        for action in ["ssh-maintain", "ssh-discover", "ssh-connect", "ssh-prepare"] {
+        for action in ["ssh-discover", "setup-start", "setup-direct-status"] {
             let script = adapter.locator(IDENTITY, action, action == "ssh-discover");
             assert!(
                 script.ends_with(&format!(
@@ -325,40 +303,6 @@ mod tests {
                     IDENTITY
                 )),
                 "{script}"
-            );
-        }
-    }
-
-    /// Staging retains a verified artifact beside the approved one. It shares the installer's
-    /// transfer and verification body, and asks for neither boot authorization nor installation.
-    #[test]
-    fn staging_transfers_a_verified_artifact_without_installing_or_authorizing_boot() {
-        let bootstrap = UnixSshProcessAdapter;
-        let digest = "0123456789abcdef".repeat(4);
-        let stage = bootstrap.stage(IDENTITY, 4096, &[7; 64], &digest);
-        for shared in [
-            "umask 077",
-            "cat > \"$work/artifact.tar.gz\"",
-            "[ \"$(wc -c < \"$work/artifact.tar.gz\")\" -eq 4096 ] || exit 75",
-            "tar -xzf \"$work/artifact.tar.gz\" -C \"$work/runtime\"",
-        ] {
-            assert!(stage.contains(shared), "{stage}");
-        }
-        assert!(stage.ends_with(&format!(
-            "\"$work/runtime/server/bin/spaceterm-server\" 'ssh-stage' '{}' \
-             \"$work/artifact.tar.gz\" \"$work/artifact.sig\" '{digest}'\n",
-            IDENTITY
-        )));
-        for refused in ["ssh-install", "ssh-enable-linger", "read -r authorization"] {
-            assert!(!stage.contains(refused), "staging asked for {refused}");
-        }
-        for password in [false, true] {
-            let install = bootstrap.install(IDENTITY, 4096, &[7; 64], &digest, password);
-            assert!(install.contains("ssh-enable-linger") && install.contains("'ssh-install'"));
-            assert_eq!(
-                install.contains("IFS= read -r authorization"),
-                password,
-                "only a password installation reads one"
             );
         }
     }
@@ -488,7 +432,7 @@ mod tests {
     }
 
     #[test]
-    fn observed_process_exit_should_retain_its_identity_and_remain_observable() {
+    fn status_polling_preserves_the_child_identity_until_reaping() {
         let adapter = UnixSshProcessAdapter;
         let mut spawned = adapter.spawn(shell_request("exit 7")).unwrap();
         let deadline = std::time::Instant::now() + Duration::from_secs(2);
@@ -502,13 +446,6 @@ mod tests {
             );
             std::thread::yield_now();
         };
-        let mut observation = adapter.observe_exit(spawned.process_mut()).unwrap();
-        let interrupt = observation.interrupt_handle();
-        let (sender, receiver) = std::sync::mpsc::channel();
-        let waiter = std::thread::spawn(move || sender.send(observation.wait()).unwrap());
-        let observed = receiver.recv_timeout(Duration::from_secs(2));
-        interrupt.interrupt();
-        waiter.join().unwrap();
         let process = spawned.process_mut().child.id() as libc::pid_t;
         let mut retained = MaybeUninit::<libc::siginfo_t>::zeroed();
         // SAFETY: this checks that status observation has left our child waitable. WNOWAIT
@@ -529,10 +466,6 @@ mod tests {
         // SAFETY: waitid succeeded and initialized the zeroed information structure.
         assert_eq!(unsafe { retained.assume_init().si_pid() }, process);
         assert_eq!(exit.code(), Some(7));
-        assert_eq!(
-            observed.unwrap(),
-            Ok(crate::ssh::process::SshProcessExitWake::Exit)
-        );
     }
 
     #[test]
@@ -882,13 +815,15 @@ fn quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 #[cfg(feature = "desktop")]
-impl crate::ssh::server_process::SshServerBootstrap for UnixSshProcessAdapter {
-    fn key_public(&self, path: &std::path::Path) -> Option<crate::ssh::command::SshCommandSpec> {
-        crate::ssh::command::SshCommandContext::key_public("/usr/bin/ssh-keygen".into(), path).ok()
-    }
+impl crate::ssh::provisioning::SshServerBootstrap for UnixSshProcessAdapter {
     /// This script selects only the approved digest in a fixed account/build namespace.
     /// It never evaluates a path or an endpoint supplied by the remote protocol.
     fn locator(&self, identity: &str, action: &str, missing: bool) -> String {
+        let (action, argument) = action
+            .split_once(' ')
+            .map_or((action, None), |(action, argument)| {
+                (action, Some(argument))
+            });
         let mut script = format!(
             r#"set -eu
 PATH=/usr/bin:/bin:/usr/sbin:/sbin
@@ -931,18 +866,14 @@ case "$digest" in *[!0-9a-f]*) exit 74;; esac
 [ ! -L "$root/installations" ] && [ ! -L "$root/installations/$digest" ] && [ ! -L "$root/installations/$digest/bin" ] && [ ! -L "$root/installations/$digest/bin/spaceterm-server" ] || exit 74
 "#);
         script.push_str(&format!(
-            "exec \"$root/installations/$digest/bin/spaceterm-server\" {} {}\n",
+            "exec \"$root/installations/$digest/bin/spaceterm-server\" {} {}{}\n",
             quote(action),
-            quote(identity)
+            quote(identity),
+            argument
+                .map(|argument| format!(" {}", quote(argument)))
+                .unwrap_or_default()
         ));
         script
-    }
-    fn retained_locator(&self, identity: &str, action: &str, digest: &str) -> String {
-        // The digest comes from the verified staged artifact or the client's retained original,
-        // never a remote reply. Retain the approved locator's account-storage safety checks.
-        let script = self.locator(identity, action, false);
-        let marker = "case \"$digest\" in *[!0-9a-f]*) exit 74;; esac\n";
-        script.replace(marker, &format!("{marker}digest={}\n", quote(digest)))
     }
     fn install(
         &self,
@@ -961,26 +892,9 @@ case "$digest" in *[!0-9a-f]*) exit 74;; esac
             Some(password),
         )
     }
-    fn stage(
-        &self,
-        identity: &str,
-        archive_length: usize,
-        signature: &[u8],
-        digest: &str,
-    ) -> String {
-        transfer_script(
-            "ssh-stage",
-            identity,
-            archive_length,
-            signature,
-            digest,
-            None,
-        )
-    }
 }
 
-/// The body both transferred-runtime actions share. Boot authorization belongs to installation
-/// alone: staging changes no service policy, so it never asks for one.
+/// Transfer and install one client-verified server artifact.
 #[cfg(feature = "desktop")]
 fn transfer_script(
     action: &str,

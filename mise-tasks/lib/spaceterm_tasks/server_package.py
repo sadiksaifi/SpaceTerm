@@ -481,16 +481,7 @@ def verify_tree(tree, expected, *, native=True):
         )
     except (OSError, subprocess.TimeoutExpired):
         raise TaskError("the installed server headless check failed") from None
-    # Independently signed older server artifacts retain their original success message.
-    if (
-        result.returncode
-        or result.stderr
-        or result.stdout
-        not in (
-            b"Server checks passed.\n",
-            b"Installed server PTY and shell resources verified.\n",
-        )
-    ):
+    if result.returncode or result.stderr or result.stdout != b"Server checks passed.\n":
         raise TaskError("the installed server headless check failed")
 
 
@@ -764,7 +755,7 @@ def prepare_desktop_artifact(destination, identity, release_tag=None, *, catalog
         raise TaskError("supply both SPACETERM_SERVER_ARCHIVE and SPACETERM_SERVER_SIGNATURE")
     if release_tag:
         require_clean_checkout()
-    source = os.environ.get("SPACETERM_SSH_SERVER_ARTIFACTS")
+    source = os.environ.get("SPACETERM_SERVER_ARTIFACTS")
     automatic = catalog_destination is not None and not release_tag and source is None
     if automatic:
         from spaceterm_tasks.server_builds import prepare

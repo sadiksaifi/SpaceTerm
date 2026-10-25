@@ -13,7 +13,7 @@ use spaceterm_ui::{Button, ButtonSize, ButtonVariant, FloatingLayer, FloatingRol
 use super::{PaneTerminalState, TerminalFailure, TerminalPane, TerminalPaneEvent};
 use crate::repository_status::presentation::{PopoverPullRequest, RepositoryPopover};
 use crate::repository_status::scheduler::{Interest, InterestId, SourceDirectory};
-use crate::repository_status::{RemoteMachineKey, RepositoryMachine, RepositoryView};
+use crate::repository_status::{RepositoryMachine, RepositoryView};
 use crate::terminal::metadata::{CurrentDirectory, MetadataFreshness, TerminalMetadataContext};
 use crate::ui::ShowRepositoryStatus;
 use crate::ui::appearance::gpui_color;
@@ -300,8 +300,9 @@ impl TerminalPane {
         }
     }
 
-    /// The facts to report, or `None` before the Pane knows a directory. A server-backed Pane has
-    /// none: its directory names the server's files, and the server reads their status.
+    /// The facts to report, or `None` before the Pane knows a directory. Only a Local Pane has
+    /// them: a server-backed Pane's directory names the server's files, and the server reads
+    /// their status.
     fn repository_facts(&self) -> Option<PaneRepositoryFacts> {
         if self.server_backed() {
             return None;
@@ -316,10 +317,6 @@ impl TerminalPane {
             (TerminalMetadataContext::Local { .. }, CurrentDirectory::Local(path)) => {
                 (RepositoryMachine::Local, SourceDirectory::Local(path))
             }
-            (TerminalMetadataContext::Remote(remote), CurrentDirectory::Remote(directory)) => (
-                RepositoryMachine::Remote(RemoteMachineKey::new(remote.destination().as_str())),
-                SourceDirectory::Remote(directory.as_str().into()),
-            ),
             _ => return None,
         };
         let focus = self.product_focus;

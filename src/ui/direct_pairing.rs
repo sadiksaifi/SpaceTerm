@@ -25,7 +25,7 @@ use spaceterm_ui::{
     ProgressSize, ProgressState,
 };
 
-use crate::local_server::direct::ClaimId;
+use crate::server_connection::direct::ClaimId;
 use crate::ui::appearance::gpui_color;
 use crate::ui::chrome_geometry::RadiusRole;
 use crate::ui::chrome_typography::{ChromeTextStyleExt as _, TextRole};
@@ -949,7 +949,7 @@ mod tests {
     use zeroize::Zeroizing;
 
     use super::*;
-    use crate::local_server::direct::{NetworkPolicy, PairingClaim};
+    use crate::server_connection::direct::{NetworkPolicy, PairingClaim};
     use crate::ui::direct_access::AccessState;
 
     const SERVER: &str = "studio";

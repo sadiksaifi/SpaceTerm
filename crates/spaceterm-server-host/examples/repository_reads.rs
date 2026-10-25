@@ -6,7 +6,7 @@
 )]
 mod lifecycle;
 use spaceterm_server::{
-    LocalServer,
+    ServerConnection,
     hierarchy::{CloseTarget, Mutation},
     pane::Request,
     repository::{ChangeTotal, DirectoryFacts, RepositoryHead},
@@ -17,8 +17,8 @@ mod repository;
 use repository::*;
 fn main() -> Result<(), Box<dyn Error>> {
     let major = std::env::args().nth(1).unwrap_or("1".into()).parse()?;
-    let a = LocalServer::for_development_client("repository-smoke-a", major)?;
-    let b = LocalServer::for_development_client("repository-smoke-b", major)?;
+    let a = ServerConnection::for_development_client("repository-smoke-a", major)?;
+    let b = ServerConnection::for_development_client("repository-smoke-b", major)?;
     lifecycle::require_idle(&a)?;
     a.setup()?;
     b.setup()?;

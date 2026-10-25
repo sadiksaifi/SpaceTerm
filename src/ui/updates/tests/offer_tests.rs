@@ -1,50 +1,46 @@
 use super::*;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
 
-use crate::local_server::service::maintenance::{MaintenanceFacts, RemoteBuild};
-use crate::local_server::service::{ServiceStartup, ServiceStatus};
 use crate::platform::appearance::testing::RecordingAppearancePlatform;
 use crate::settings::storage::testing::MemoryStorage;
-use crate::ssh::cancellation::SshCancellationToken;
-use crate::ssh::server_connection::{
-    ConnectMode, ConnectProgress, ConnectedSshServer, RemoteConnectionStatus,
-    RetainedSshConnection, ServerAvailability, ServerCandidate, SshConnectBackend,
-    SshConnectFailure, SshConnectionIntentStore, SshIntentStoreError, SshServerConnections,
-    SshServerContinuity, SshServerFacts, SshServerObservation,
-};
-use crate::ssh::server_operations::{
-    RemoteMaintenanceRequest, RemoteOperationEntry, RemoteOperationHandle, RemoteOperationState,
-    RemoteServerOperations, RemoteUpdateOffer,
-};
 use crate::ui::appearance::gpui_color;
 use gpui::prelude::*;
 use gpui::{Modifiers, MouseButton, TestAppContext, VisualTestContext, point, px};
 
+/// Installs this computer's server offering Update Server, as its service reports an included
+/// build newer than the approved one.
+fn local_offer(cx: &mut TestAppContext) {
+    cx.update(|cx| crate::ui::updates::server_rows::testing::install("Update Available", true, cx));
+}
+
+/// A paired server that reported a stopped update on its own computer. Its row only opens that
+/// server's Settings.
+fn paired_attention() -> ServerUpdateRow {
+    server(
+        "penguin",
+        ServerUpdateAction::Review(MachineTarget::Direct([3; 32])),
+    )
+}
+
 #[test]
-fn genuine_offers_raise_local_and_ssh_pills_without_changing_their_targets() {
-    for action in [
-        ServerUpdateAction::Local,
-        ServerUpdateAction::Ssh(ssh("penguin")),
-    ] {
-        assert_eq!(
-            pill(None, None, &[server("machine", action.clone())]),
-            Some((
-                "Update Server".into(),
-                PillTone::Primary,
-                None,
-                PillCommand::Server(action)
-            ))
-        );
-    }
+fn genuine_offers_raise_server_pills_without_changing_their_targets() {
+    assert_eq!(
+        pill(None, None, &[server("machine", ServerUpdateAction::Local)]),
+        Some((
+            "Update Server".into(),
+            PillTone::Primary,
+            None,
+            PillCommand::Server(ServerUpdateAction::Local)
+        ))
+    );
     assert_eq!(
         pill(
             None,
             None,
             &[
                 server("local", ServerUpdateAction::Local),
-                server("penguin", ServerUpdateAction::Ssh(ssh("penguin"))),
+                paired_attention()
             ]
         ),
         Some((
@@ -58,8 +54,8 @@ fn genuine_offers_raise_local_and_ssh_pills_without_changing_their_targets() {
 
 #[test]
 fn only_a_genuine_server_offer_raises_client_progress_and_retry() {
-    let offer = server("penguin", ServerUpdateAction::Ssh(ssh("penguin")));
-    let attention = server("local", ServerUpdateAction::Review(MachineTarget::Local));
+    let offer = server("local", ServerUpdateAction::Local);
+    let attention = paired_attention();
     for state in [
         UpdateState::Downloading {
             version: version(),
@@ -101,11 +97,8 @@ fn only_a_genuine_server_offer_raises_client_progress_and_retry() {
 #[test]
 fn server_attention_counts_preserve_existing_warning_precedence() {
     let attention = server("local", ServerUpdateAction::Review(MachineTarget::Local));
-    let other_attention = server(
-        "penguin",
-        ServerUpdateAction::Review(MachineTarget::Ssh(ssh("penguin"))),
-    );
-    let offer = server("macbookpro", ServerUpdateAction::Ssh(ssh("macbookpro")));
+    let other_attention = paired_attention();
+    let offer = server("local", ServerUpdateAction::Local);
     assert_eq!(
         pill(None, None, std::slice::from_ref(&attention))
             .unwrap()
@@ -113,7 +106,7 @@ fn server_attention_counts_preserve_existing_warning_precedence() {
         PillTone::Warning
     );
     assert_eq!(
-        pill(None, None, &[attention.clone(), other_attention]).unwrap(),
+        pill(None, None, &[attention.clone(), other_attention.clone()]).unwrap(),
         (
             "Review 2 Servers".into(),
             PillTone::Neutral,
@@ -122,7 +115,7 @@ fn server_attention_counts_preserve_existing_warning_precedence() {
         )
     );
     assert_eq!(
-        pill(None, None, &[attention.clone(), offer.clone()]).unwrap(),
+        pill(None, None, &[other_attention.clone(), offer.clone()]).unwrap(),
         (
             "Review 2 Servers".into(),
             PillTone::Primary,
@@ -134,7 +127,7 @@ fn server_attention_counts_preserve_existing_warning_precedence() {
         pill(
             Some(UpdateState::Ready { version: version() }),
             Some(UpdateStage::Overdue),
-            &[attention, offer]
+            &[other_attention, offer]
         ),
         Some((
             "Install 0.4.2".into(),
@@ -143,228 +136,6 @@ fn server_attention_counts_preserve_existing_warning_precedence() {
             PillCommand::Client(Some(ControlCommand::RequestInstall))
         ))
     );
-}
-
-// These adapters answer only the existing SSH boundaries. They never create a service, start a
-// connection, or touch the host's retained server files.
-struct Computers;
-
-fn continuity(name: &str) -> SshServerContinuity {
-    SshServerContinuity {
-        route: [9; 32],
-        account: 501,
-        build: "spaceterm-preflight".into(),
-        server: [if name == "penguin" { 3 } else { 4 }; 32],
-    }
-}
-
-impl SshConnectBackend for Computers {
-    fn verified_candidate(&self, _: &(String, String)) -> Option<ServerCandidate> {
-        Some(ServerCandidate {
-            version: "1.5.0".into(),
-            digest: "b".repeat(64),
-        })
-    }
-
-    fn connect(
-        &self,
-        _: &crate::domain::SshDestination,
-        _: ConnectMode,
-        _: Option<&SshServerContinuity>,
-        _: &SshCancellationToken,
-        _: &ConnectProgress<'_>,
-    ) -> Result<ConnectedSshServer, SshConnectFailure> {
-        panic!("an Updates inventory must never connect to a server")
-    }
-
-    fn observe(
-        &self,
-        destination: &crate::domain::SshDestination,
-        _: Option<&SshServerContinuity>,
-        _: &SshCancellationToken,
-        _: &ConnectProgress<'_>,
-    ) -> Result<SshServerObservation, SshConnectFailure> {
-        Ok(SshServerObservation {
-            continuity: Some(continuity(destination.as_str())),
-            availability: ServerAvailability::Running,
-            facts: SshServerFacts {
-                platform: ("Example OS".into(), "x86_64".into()),
-                version: Some("1.4.0".into()),
-                starts_automatically: true,
-            },
-        })
-    }
-}
-
-struct Saved(Vec<&'static str>);
-
-impl SshConnectionIntentStore for Saved {
-    fn load(&self) -> Result<Vec<RetainedSshConnection>, SshIntentStoreError> {
-        Ok(self
-            .0
-            .iter()
-            .map(|name| RetainedSshConnection {
-                destination: ssh(name),
-                continuity: None,
-                active: false,
-            })
-            .collect())
-    }
-    fn retain(&self, _: RetainedSshConnection) -> Result<(), SshIntentStoreError> {
-        Ok(())
-    }
-    fn remove(&self, _: &crate::domain::SshDestination) -> Result<(), SshIntentStoreError> {
-        Ok(())
-    }
-}
-
-struct ObservedOperations {
-    entries: Mutex<Vec<RemoteOperationEntry>>,
-    changes: (async_channel::Sender<()>, async_channel::Receiver<()>),
-}
-
-impl ObservedOperations {
-    fn new(names: &[&str]) -> Arc<Self> {
-        Arc::new(Self {
-            entries: Mutex::new(
-                names
-                    .iter()
-                    .map(|name| RemoteOperationEntry {
-                        destination: ssh(name),
-                        removed: false,
-                        operation: None,
-                        state: RemoteOperationState::Read(Box::new(MaintenanceFacts {
-                            server: continuity(name).server,
-                            account: 501,
-                            build: "spaceterm-preflight".into(),
-                            status: ServiceStatus {
-                                installed: true,
-                                enabled: true,
-                                running: true,
-                                stopped: false,
-                            },
-                            startup: ServiceStartup::AtLogin,
-                            approved: Some(RemoteBuild {
-                                version: "1.4.0".into(),
-                                commit: "a".repeat(40),
-                                digest: "a".repeat(64),
-                            }),
-                            activation: None,
-                        })),
-                        observed_at: Some(Instant::now()),
-                        update_offer: RemoteUpdateOffer::Unchecked,
-                    })
-                    .collect(),
-            ),
-            changes: async_channel::unbounded(),
-        })
-    }
-
-    fn completed(&self, name: &str) {
-        let mut entries = self.entries.lock().unwrap();
-        let entry = entries
-            .iter_mut()
-            .find(|entry| entry.destination == ssh(name))
-            .unwrap();
-        let RemoteOperationState::Read(facts) = &mut entry.state else {
-            panic!("the fixture holds a service read")
-        };
-        facts.approved = Some(RemoteBuild {
-            version: "1.5.0".into(),
-            commit: "b".repeat(40),
-            digest: "b".repeat(64),
-        });
-        entry.observed_at = Some(Instant::now());
-        self.changes.0.try_send(()).unwrap();
-    }
-}
-
-impl RemoteServerOperations for ObservedOperations {
-    fn subscribe(&self) -> async_channel::Receiver<()> {
-        self.changes.1.clone()
-    }
-    fn entries(&self) -> Vec<RemoteOperationEntry> {
-        self.entries.lock().unwrap().clone()
-    }
-    fn state(&self, destination: &crate::domain::SshDestination) -> RemoteOperationState {
-        self.entries()
-            .into_iter()
-            .find(|entry| entry.destination == *destination)
-            .map_or(RemoteOperationState::Unread, |entry| entry.state)
-    }
-    fn refresh(&self, _: &crate::domain::SshDestination) {
-        panic!("rendering must not request maintenance")
-    }
-    fn set_automatic_start(&self, _: &crate::domain::SshDestination, _: bool) {
-        panic!("inventory is passive")
-    }
-    fn describe(&self, _: &crate::domain::SshDestination, _: RemoteMaintenanceRequest) {
-        panic!("inventory cannot prepare an update")
-    }
-    fn confirm(&self, _: RemoteOperationHandle) {
-        panic!("inventory cannot confirm an update")
-    }
-    fn start(&self, _: &crate::domain::SshDestination) {
-        panic!("inventory cannot start a server")
-    }
-    fn cancel(&self, _: &crate::domain::SshDestination) {
-        panic!("inventory is passive")
-    }
-    fn resume(&self, _: &crate::domain::SshDestination) {
-        panic!("inventory cannot recover an update")
-    }
-    fn acknowledge(&self, _: RemoteOperationHandle) {
-        panic!("inventory is passive")
-    }
-    fn discard(&self, _: [u8; 32]) {
-        panic!("inventory is passive")
-    }
-    fn dismiss(&self, _: [u8; 32]) {
-        panic!("inventory is passive")
-    }
-    fn resume_retained(&self) {
-        panic!("inventory is passive")
-    }
-}
-
-fn observed_servers(names: Vec<&'static str>) -> (SshServerConnections, Arc<ObservedOperations>) {
-    let operations = ObservedOperations::new(&names);
-    let connections =
-        SshServerConnections::new(Arc::new(Computers), Arc::new(Saved(names.clone())));
-    connections.resume_retained();
-    let deadline = Instant::now() + Duration::from_secs(3);
-    while !connections.retained_inventory_loaded() {
-        assert!(
-            Instant::now() < deadline,
-            "saved SSH inventory did not load"
-        );
-        std::thread::sleep(Duration::from_millis(1));
-    }
-    for name in &names {
-        connections.check(&ssh(name));
-    }
-    while names.iter().any(|name| {
-        !matches!(
-            connections.status(&ssh(name)),
-            RemoteConnectionStatus::Checked { .. }
-        )
-    }) {
-        assert!(
-            Instant::now() < deadline,
-            "scripted Check Status did not finish"
-        );
-        std::thread::sleep(Duration::from_millis(1));
-    }
-    (connections, operations)
-}
-
-fn recorded_servers(names: Vec<&'static str>, cx: &mut TestAppContext) -> Arc<ObservedOperations> {
-    let (connections, operations) = observed_servers(names);
-    cx.update(|cx| {
-        crate::ui::ssh_servers::install(connections, None, cx);
-        crate::ssh::server_operations::install(operations.clone(), cx);
-    });
-    operations
 }
 
 fn appearance(appearance: Appearance, cx: &mut TestAppContext) {
@@ -485,7 +256,7 @@ fn primary_fill(selector: &'static str, state: PointerState, cx: &mut VisualTest
 fn server_offer_capsule_and_chevron_paint_authored_primary_states(cx: &mut TestAppContext) {
     appearance(Appearance::Light, cx);
     manual_updates(cx);
-    recorded_servers(vec!["penguin"], cx);
+    local_offer(cx);
     let visual = open_control(cx);
     for state in [
         PointerState::Normal,
@@ -501,7 +272,7 @@ fn server_offer_capsule_and_chevron_paint_authored_primary_states(cx: &mut TestA
 fn dark_server_offer_capsule_and_chevron_paint_authored_primary_states(cx: &mut TestAppContext) {
     appearance(Appearance::Dark, cx);
     manual_updates(cx);
-    recorded_servers(vec!["penguin"], cx);
+    local_offer(cx);
     let visual = open_control(cx);
     for state in [
         PointerState::Normal,
@@ -514,43 +285,12 @@ fn dark_server_offer_capsule_and_chevron_paint_authored_primary_states(cx: &mut 
 }
 
 #[gpui::test]
-fn multiple_offer_menu_paints_primary_and_completion_keeps_the_other_server(
-    cx: &mut TestAppContext,
-) {
-    use spaceterm_ui::a11y_testing::A11yTree;
-    appearance(Appearance::Dark, cx);
-    manual_updates(cx);
-    let operations = recorded_servers(vec!["penguin", "macbookpro"], cx);
-    let visual = open_control(cx);
-    A11yTree::read(visual).node("Review 2 Servers");
-    assert!(visual.debug_bounds("update-control").is_none());
-    primary_fill("update-control-menu", PointerState::Normal, visual);
-
-    // A completed operation publishes fresh approved facts through the real subscription. The
-    // closed menu and active window must update without another click or activation event.
-    operations.completed("penguin");
-    visual.run_until_parked();
-    primary_fill("update-control", PointerState::Normal, visual);
-    A11yTree::read(visual).node("Update Server");
-    let menu = visual.debug_bounds("update-control-menu").unwrap().center();
-    visual.simulate_click(menu, Modifiers::none());
-    visual.run_until_parked();
-    A11yTree::read(visual).node("Up to Date");
-    A11yTree::read(visual).node("Update Available");
-    A11yTree::read(visual).node("Update Server…");
-    operations.completed("macbookpro");
-    visual.run_until_parked();
-    assert!(visual.debug_bounds("update-control").is_none());
-    assert!(visual.debug_bounds("update-control-menu").is_none());
-}
-
-#[gpui::test]
 fn server_offer_behind_client_progress_retry_and_checking_paints_primary(cx: &mut TestAppContext) {
     use crate::updates::UpdateEvent;
     use spaceterm_ui::a11y_testing::A11yTree;
     appearance(Appearance::Light, cx);
     let (adapter, updates) = manual_updates(cx);
-    recorded_servers(vec!["penguin"], cx);
+    local_offer(cx);
     updates.update(cx, |updates, cx| updates.check(false, cx));
     adapter.emit(UpdateEvent::Available(version()));
     cx.run_until_parked();
@@ -649,7 +389,14 @@ fn rendered_progress_rings_stay_readable_on_primary_and_keep_neutral_and_disable
     use crate::updates::testing::RecordingAdapter;
     use gpui::AppContext as _;
 
-    for appearance in [Appearance::Light, Appearance::Dark] {
+    // This computer's server either offers an update, which makes the pill Primary, or is up to
+    // date, which leaves the client's progress Neutral.
+    for (appearance, offered) in [
+        (Appearance::Light, true),
+        (Appearance::Light, false),
+        (Appearance::Dark, true),
+        (Appearance::Dark, false),
+    ] {
         let paths = Arc::new(Mutex::new(Vec::new()));
         let mut cx = gpui::HeadlessAppContext::with_platform(
             Arc::new(gpui::NoopTextSystem),
@@ -664,7 +411,6 @@ fn rendered_progress_rings_stay_readable_on_primary_and_keep_neutral_and_disable
                 }
             },
         );
-        let (connections, operations) = observed_servers(vec!["penguin"]);
         let adapter = Rc::new(RecordingAdapter::available());
         let updates = cx.update(|cx| {
             let mut document = crate::settings::SettingsDocument::default();
@@ -679,8 +425,11 @@ fn rendered_progress_rings_stay_readable_on_primary_and_keep_neutral_and_disable
                 .unwrap();
             ApplicationUpdates::install(adapter.clone(), cx);
             crate::ui::init(cx).unwrap();
-            crate::ui::ssh_servers::install(connections, None, cx);
-            crate::ssh::server_operations::install(operations.clone(), cx);
+            if offered {
+                crate::ui::updates::server_rows::testing::install("Update Available", true, cx);
+            } else {
+                crate::ui::updates::server_rows::testing::install_up_to_date(cx);
+            }
             let updates = service(cx).unwrap();
             updates.update(cx, |updates, cx| {
                 updates.attach_settings(settings);
@@ -700,7 +449,12 @@ fn rendered_progress_rings_stay_readable_on_primary_and_keep_neutral_and_disable
             .unwrap();
         cx.run_until_parked();
 
-        for phase in ["Downloading", "Verifying", "Checking", "Neutral"] {
+        let phases: &[&str] = if offered {
+            &["Downloading", "Verifying", "Checking"]
+        } else {
+            &["Downloading"]
+        };
+        for &phase in phases {
             match phase {
                 "Downloading" => adapter.emit(UpdateEvent::Downloading {
                     received: 1,
@@ -711,12 +465,6 @@ fn rendered_progress_rings_stay_readable_on_primary_and_keep_neutral_and_disable
                     adapter.emit(UpdateEvent::Finished);
                     cx.run_until_parked();
                     cx.update(|cx| updates.update(cx, |updates, cx| updates.check(false, cx)));
-                }
-                "Neutral" => {
-                    adapter.emit(UpdateEvent::Available(version()));
-                    cx.run_until_parked();
-                    cx.update(|cx| updates.update(cx, |updates, cx| updates.download(cx)));
-                    operations.completed("penguin");
                 }
                 _ => unreachable!(),
             }
@@ -746,13 +494,13 @@ fn rendered_progress_rings_stay_readable_on_primary_and_keep_neutral_and_disable
                     let fill = quads.iter().find(|quad| quad.bounds == capsule.bounds && !quad.background.is_transparent()).expect("the progress capsule retains its fill");
                     let fill = recorded_color(gpui::Rgba::from(fill.background.as_solid().unwrap()));
                     let colors = &crate::ui::appearance::chrome(cx).title_bar_controls.colors;
-                    let (expected_fill, expected_ink) = match (phase, state) {
-                        ("Checking", _) => (colors.primary_disabled_background, colors.progress_indicator),
-                        ("Neutral", PointerState::Normal) => (colors.element_background, colors.progress_indicator),
-                        ("Neutral", PointerState::Hovered) => (colors.element_hover, colors.progress_indicator),
-                        ("Neutral", _) => (colors.element_active, colors.progress_indicator),
-                        (_, PointerState::Normal) => (colors.primary_background, colors.primary_foreground),
-                        (_, PointerState::Hovered) => (colors.primary_hover_background, colors.primary_hover_foreground),
+                    let (expected_fill, expected_ink) = match (phase, offered, state) {
+                        ("Checking", _, _) => (colors.primary_disabled_background, colors.progress_indicator),
+                        (_, false, PointerState::Normal) => (colors.element_background, colors.progress_indicator),
+                        (_, false, PointerState::Hovered) => (colors.element_hover, colors.progress_indicator),
+                        (_, false, _) => (colors.element_active, colors.progress_indicator),
+                        (_, true, PointerState::Normal) => (colors.primary_background, colors.primary_foreground),
+                        (_, true, PointerState::Hovered) => (colors.primary_hover_background, colors.primary_hover_foreground),
                         _ => (colors.primary_pressed_background, colors.primary_pressed_foreground),
                     };
                     assert_eq!(fill, expected_fill, "{appearance:?} {phase} {state:?}");

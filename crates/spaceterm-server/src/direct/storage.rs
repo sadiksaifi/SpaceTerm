@@ -20,12 +20,23 @@ pub(super) struct Revocation {
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub(super) struct SetupReservation {
+    pub operation: OperationId,
+    pub expected_policy: Option<NetworkPolicy>,
+    pub policy: NetworkPolicy,
+    pub public_key: [u8; 32],
+    pub name: ClientName,
+}
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct Record {
     pub schema: u8,
     pub server: [u8; 32],
     pub key: Vec<u8>,
     pub certificate: Vec<u8>,
     pub policy: Option<NetworkPolicy>,
+    pub setup_generation: u64,
+    pub setups: Vec<SetupReservation>,
     pub devices: Vec<Device>,
     pub revocations: Vec<Revocation>,
 }
@@ -69,6 +80,8 @@ impl Store {
                     key: key.expose_bytes().to_vec(),
                     certificate: certificate.der().to_vec(),
                     policy: None,
+                    setup_generation: 0,
+                    setups: Vec::new(),
                     devices: Vec::new(),
                     revocations: Vec::new(),
                 };
@@ -82,6 +95,7 @@ impl Store {
     fn validate(&self, record: &Record) -> Result<(), DirectError> {
         if record.schema != 1
             || record.server != self.server
+            || record.setups.len() > MAX_DEVICES
             || record.devices.len() > MAX_DEVICES
             || record.revocations.len() > MAX_REVOCATIONS
             || record.key.len() > 256
@@ -92,6 +106,28 @@ impl Store {
         crypto::public(&record.key)?;
         if let Some(policy) = &record.policy {
             NetworkPolicy::new(policy.bind).map_err(|_| DirectError::StorageUnavailable)?;
+        }
+        let mut setups = std::collections::BTreeSet::new();
+        for setup in &record.setups {
+            if let Some(policy) = &setup.expected_policy {
+                NetworkPolicy::new(policy.bind).map_err(|_| DirectError::StorageUnavailable)?;
+            }
+            NetworkPolicy::new(setup.policy.bind).map_err(|_| DirectError::StorageUnavailable)?;
+            if setup.operation == [0; 32]
+                || setup.public_key == [0; 32]
+                || setup_generation(&setup.operation) >= record.setup_generation
+                || !setups.insert(setup.operation)
+            {
+                return Err(DirectError::StorageUnavailable);
+            }
+            if let Some(device) = record
+                .devices
+                .iter()
+                .find(|device| device.claim == setup.operation)
+                && (device.info.public_key != setup.public_key || device.info.name != setup.name)
+            {
+                return Err(DirectError::StorageUnavailable);
+            }
         }
         let mut ids = std::collections::BTreeSet::new();
         let mut clients = std::collections::BTreeSet::new();

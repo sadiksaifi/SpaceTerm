@@ -44,12 +44,6 @@ const MENU_ITEM_ICONS: &[MenuItemIcon] = &[
     MenuItemIcon {
         menu: "File",
         submenu: None,
-        item: "New Remote Workspace",
-        symbol: "globe",
-    },
-    MenuItemIcon {
-        menu: "File",
-        submenu: None,
         item: "Add Server…",
         symbol: "server.rack",
     },
@@ -58,12 +52,6 @@ const MENU_ITEM_ICONS: &[MenuItemIcon] = &[
         submenu: None,
         item: "Open Local Directory…",
         symbol: "folder",
-    },
-    MenuItemIcon {
-        menu: "File",
-        submenu: None,
-        item: "Open Remote Directory…",
-        symbol: "network",
     },
     MenuItemIcon {
         menu: "File",
@@ -927,10 +915,8 @@ mod tests {
             labels(file_menu().owned()),
             [
                 "New Workspace",
-                "New Remote Workspace",
                 "Add Server…",
                 "Open Local Directory…",
-                "Open Remote Directory…",
                 "Switch Workspace",
                 "|",
                 "New Tab",
@@ -957,10 +943,8 @@ mod tests {
             actions,
             [
                 NewWorkspace.name(),
-                crate::ui::NewRemoteWorkspace.name(),
                 crate::ui::settings_window::AddServer.name(),
                 crate::ui::OpenLocalDirectory.name(),
-                crate::ui::OpenRemoteDirectory.name(),
                 SwitchWorkspace.name(),
                 CreateTab.name(),
                 crate::ui::NewWorktree.name(),

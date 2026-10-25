@@ -8,12 +8,12 @@ use super::sidebar_motion::{SidebarFrame, SidebarMotion};
 use super::workspace_chrome::{
     WorkspaceChromeIdentity, WorkspaceChromeLayout, WorkspaceChromeStatus,
 };
-use super::workspace_creation::WorkspaceCreation;
+use super::workspace_creation::{RemoteCreationServer, WorkspaceCreation};
 use super::workspace_status::{WorkspaceStatusPaint, resolve as resolve_workspace_status};
 use super::{WORKSPACE_SIDEBAR_DEFAULT_WIDTH, WORKSPACE_SIDEBAR_MINIMUM_WIDTH};
 use crate::appearance::ChromeColors;
 use crate::appearance::Color;
-use crate::domain::{RemoteConnectionPhase, SshDestination, WorkspaceId, WorktreeId};
+use crate::domain::{RemoteConnectionPhase, WorkspaceId, WorktreeId};
 use gpui::prelude::*;
 use gpui::{
     AnyElement, App, Context, DispatchPhase, Entity, EntityId, EventEmitter, FocusHandle,
@@ -112,13 +112,10 @@ pub(super) enum WorkspaceMenuCommand {
 pub(super) enum MachineMenuCommand {
     /// Creates a Workspace on the machine's presented SpaceTerm Server.
     NewWorkspace,
-    /// Connects to the machine's SpaceTerm Server, asking the person in this window if needed.
+    /// Connects to the machine's paired server, letting the system ask for this device's key.
     Connect,
-    /// Stops presenting the SSH server's Workspaces. They keep running on that machine.
+    /// Stops presenting the paired server's Workspaces. They keep running on that machine.
     Disconnect,
-    /// One maintenance step for the machine's SpaceTerm Server. A step that ends work describes
-    /// its change and asks before anything is sent.
-    Maintenance(crate::ui::remote_maintenance::RemoteAction),
     /// Opens the Servers Settings Section.
     ServerSettings,
 }
@@ -127,7 +124,6 @@ pub(super) enum MachineMenuCommand {
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum MachineTarget {
     Local,
-    Ssh(SshDestination),
     Direct(crate::direct_connections::DirectRouteId),
 }
 
@@ -135,15 +131,11 @@ pub(crate) enum MachineTarget {
 /// sections.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct MachineSection {
-    /// This computer's name, the other machine's SSH Destination, or a direct network server's
-    /// name.
+    /// This computer's name or a paired server's name.
     pub(super) label: SharedString,
-    /// How this client reaches the server, beside its name, where the name alone leaves it
-    /// unsaid.
-    pub(super) route: Option<&'static str>,
     /// The server the heading's commands act on.
     pub(super) target: MachineTarget,
-    /// The SSH server connection's state while it isn't connected.
+    /// The paired connection's state while it isn't connected.
     pub(super) status: Option<&'static str>,
     pub(super) connects: bool,
     pub(super) disconnects: bool,
@@ -154,8 +146,6 @@ pub(super) struct MachineSection {
     pub(super) awaiting_connection: bool,
     /// Whether another computer's presented server takes a new Workspace from this heading.
     pub(super) creates_workspaces: bool,
-    /// The maintenance steps the machine's observed server state allows, in menu order.
-    pub(super) maintenance: Vec<crate::ui::remote_maintenance::RemoteAction>,
     /// How many Workspace rows follow the heading.
     pub(super) workspaces: usize,
 }
@@ -385,7 +375,8 @@ pub(super) struct WorkspaceSidebar {
     /// Each heading's stable identity, by the server route it presents. Two routes may carry
     /// the same name, such as a saved direct route and a newer one to the same computer.
     section_identities: std::collections::HashMap<MachineTarget, u64>,
-    remote_unavailable: Option<String>,
+    /// The saved paired servers the creation menu offers.
+    remote_servers: Vec<RemoteCreationServer>,
     layout: SidebarLayout,
     scroll_handle: ScrollHandle,
     /// Each row's top and bottom within its Workspace group, as last painted. A group is one
@@ -462,7 +453,7 @@ impl WorkspaceSidebar {
             sections: Vec::new(),
             section_ids: Vec::new(),
             section_identities: std::collections::HashMap::new(),
-            remote_unavailable: None,
+            remote_servers: Vec::new(),
             layout: SidebarLayout {
                 visible,
                 width: px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH),
@@ -868,7 +859,7 @@ impl WorkspaceSidebar {
         &mut self,
         rows: Vec<WorkspaceRowViewModel>,
         sections: Vec<MachineSection>,
-        remote_unavailable: Option<String>,
+        remote_servers: Vec<RemoteCreationServer>,
         cx: &mut Context<Self>,
     ) {
         self.rows = rows;
@@ -882,7 +873,7 @@ impl WorkspaceSidebar {
             })
             .collect();
         self.sections = sections;
-        self.remote_unavailable = remote_unavailable;
+        self.remote_servers = remote_servers;
         if self
             .cursor
             .is_some_and(|cursor| !self.visible_keys().iter().any(|(key, _)| *key == cursor))

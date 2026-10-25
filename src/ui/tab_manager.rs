@@ -376,6 +376,9 @@ struct SharedStripControls {
 
 pub(crate) struct TabManager {
     tabs: TabCollection<Entity<TabView>>,
+    /// Counts explicit Tab activations, so a deferred completion can tell that the person moved
+    /// between Tabs since it began, even back to the same Tab.
+    tab_epoch: u64,
     readiness: super::terminal_readiness::Readiness,
     session_factory: WorkspaceTerminalSessionFactory,
     pane_construction: PaneConstruction,
@@ -467,6 +470,7 @@ impl TabManager {
         });
         Self {
             tabs,
+            tab_epoch: 0,
             readiness: super::terminal_readiness::Readiness::for_window(window, cx),
             session_factory,
             pane_construction,
@@ -635,13 +639,6 @@ impl TabManager {
         self.sync_terminal_focus_blocker(cx);
     }
 
-    /// Tells each Pane that the person stopped its server, as the server's route reported.
-    pub(crate) fn server_stopped(&self, cx: &mut App) {
-        for (_, view) in self.tabs.iter() {
-            view.update(cx, |view, cx| view.server_stopped(cx));
-        }
-    }
-
     /// Reconnects each Pane the person's stop interrupted, once they started the server.
     pub(crate) fn server_started(&self, cx: &mut App) {
         for (_, view) in self.tabs.iter() {
@@ -716,6 +713,16 @@ impl TabManager {
 
     pub(crate) fn automatic_directory(&self, cx: &App) -> Option<crate::domain::CurrentDirectory> {
         self.tabs.root_tab().read(cx).automatic_directory(cx)
+    }
+
+    /// Where explicit navigation inside this Workspace stands: its Tab activations, the Active
+    /// Tab, and that Tab's Focused Pane changes. Routine presentation updates leave it unchanged.
+    pub(crate) fn navigation(&self, cx: &App) -> (u64, TabId, u64) {
+        (
+            self.tab_epoch,
+            self.tabs.active_tab_id(),
+            self.tabs.active_tab().read(cx).focus_epoch(),
+        )
     }
 
     pub(crate) fn active_terminal_identity(&self, cx: &App) -> (TabId, PaneId) {
@@ -1233,6 +1240,7 @@ impl TabManager {
             Self::report_tab_error("activate", error);
             return false;
         }
+        self.tab_epoch = self.tab_epoch.wrapping_add(1);
 
         if previous_tab_id != tab_id {
             previous_tab.update(cx, |view, cx| view.deactivate(cx));
@@ -7563,7 +7571,7 @@ mod tests {
     ) -> crate::terminal::metadata::TerminalMetadataContext {
         crate::terminal::metadata::TerminalMetadataContext::Remote(
             crate::terminal::metadata::RemoteTerminalMetadataContext::new(
-                crate::domain::SshDestination::new("tester@remote".into()).unwrap(),
+                "remote".to_owned(),
                 crate::domain::RemoteDirectory::new(directory.into()).unwrap(),
             ),
         )

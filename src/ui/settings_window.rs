@@ -26,8 +26,6 @@ mod server_selection;
 pub(crate) mod server_update;
 pub(crate) mod servers;
 mod sidebar;
-mod ssh_maintenance;
-mod ssh_servers;
 mod theme_gallery;
 mod theme_store;
 mod themes;
@@ -254,8 +252,8 @@ pub(crate) fn open_or_activate(section: Option<SettingsSectionId>, cx: &mut App)
     }
 }
 
-/// Opens Settings on Servers with one server selected: an SSH server by its destination, or the
-/// account-local server for `None`. Selecting reads nothing from that server.
+/// Opens Settings on Servers with `target`'s server selected. Selecting reads nothing from that
+/// server.
 pub(crate) fn open_server_settings(target: crate::ui::MachineTarget, cx: &mut App) {
     open_or_activate(Some(SettingsSectionId::Servers), cx);
     // An existing window selects the section in a deferred update, so the selection follows it.
@@ -265,9 +263,6 @@ pub(crate) fn open_server_settings(target: crate::ui::MachineTarget, cx: &mut Ap
                 settings.select_server(
                     match target {
                         crate::ui::MachineTarget::Local => server_list::ServerChoice::Local,
-                        crate::ui::MachineTarget::Ssh(destination) => {
-                            server_list::ServerChoice::Ssh(destination)
-                        }
                         crate::ui::MachineTarget::Direct(route) => {
                             server_list::ServerChoice::Direct(route)
                         }
@@ -296,29 +291,9 @@ pub(crate) fn open_server_update(cx: &mut App) {
     });
 }
 
-/// Opens Settings on Servers and takes one remote maintenance step there for `destination`, for a
-/// surface that offers these steps elsewhere, such as the sidebar machine heading menu. Every step
-/// that ends work still describes its change and asks before anything is sent.
-pub(crate) fn open_remote_maintenance(
-    destination: crate::domain::SshDestination,
-    action: crate::ui::remote_maintenance::RemoteAction,
-    cx: &mut App,
-) {
-    open_or_activate(Some(SettingsSectionId::Servers), cx);
-    // An existing window selects the section in a deferred update, so the request follows it.
-    cx.defer(move |cx| {
-        if let Some(settings) = open_settings_window(cx) {
-            let _ = settings.update(cx, |settings, _, cx| {
-                settings.select_server(server_list::ServerChoice::Ssh(destination.clone()), cx);
-                settings.request_remote_maintenance(destination, action, cx);
-            });
-        }
-    });
-}
-
 /// Opens Settings on Servers and starts adding a server there. `invitation` fills in an invitation
 /// link, such as one the operating system delivered, and `host` fills in an SSH host. Neither
-/// connects nor joins: the person reviews the value and confirms first. An invitation wins when
+/// sets up nor joins: the person reviews the value and confirms first. An invitation wins when
 /// both are given, because the person followed that link most recently.
 pub(crate) fn open_add_server(invitation: Option<String>, host: Option<String>, cx: &mut App) {
     open_or_activate(Some(SettingsSectionId::Servers), cx);
@@ -444,10 +419,6 @@ pub(crate) struct SettingsWindow {
     server_service: Option<servers::ServerServiceRow>,
     /// The server version and its update journey. `None` omits its row.
     server_update: Option<server_update::ServerUpdateRow>,
-    /// The desktop's SSH server connections. `None` omits their row.
-    ssh_servers: Option<ssh_servers::SshServerRows>,
-    /// The submitted remote maintenance operations. `None` omits the maintenance rows.
-    ssh_maintenance: Option<ssh_maintenance::SshMaintenanceRows>,
     /// The desktop's direct network connections. `None` omits their rows.
     direct_routes: Option<direct_routes::DirectRouteRows>,
     /// The server the person selected in the Servers list. A server no longer listed gives way
@@ -473,8 +444,6 @@ pub(crate) struct SettingsWindow {
     check_progress: server_card::DelayedProgress,
     /// An operation changing the selected server, which the Server row names once it runs long.
     operation_progress: server_card::DelayedProgress,
-    /// The SSH server whose automatic start the person last asked to change, and to what.
-    ssh_automatic_start: Option<(crate::domain::SshDestination, bool)>,
     /// The status last observed for each listed server, which a server SpaceTerm isn't connected
     /// to presents. It grants nothing: what each server offers follows its live connection.
     retained_status: std::collections::BTreeMap<
@@ -727,11 +696,6 @@ impl SettingsWindow {
             })
             .detach();
         }
-        let ssh_servers = crate::ui::ssh_servers::installed(cx)
-            .map(|connections| ssh_servers::SshServerRows::new(connections, cx));
-        let ssh_maintenance = crate::ssh::server_operations::installed(cx).map(|operations| {
-            ssh_maintenance::SshMaintenanceRows::new(operations, window.window_handle(), cx)
-        });
         let direct_routes = crate::ui::direct_servers::installed(cx)
             .map(|connections| direct_routes::DirectRouteRows::new(connections, cx));
         let presentation = crate::desktop_profile::DesktopPresentation::get(cx);
@@ -742,7 +706,7 @@ impl SettingsWindow {
                 section_feature(*section).is_none_or(|feature| presentation.has_feature(feature))
                     && (*section != SettingsSectionId::Servers
                         || local_server.is_some()
-                        || ssh_servers.is_some())
+                        || direct_routes.is_some())
             })
             .collect();
         // Only a desktop whose Workspace windows can present a Background Image keeps its copies.
@@ -752,9 +716,8 @@ impl SettingsWindow {
             .filter(|row| {
                 row_feature(*row).is_some_and(|feature| !presentation.has_feature(feature))
                     || (*row == SettingsRowId::BackgroundImage && !presents_background_image)
-                    // Without SSH or a local service, nothing can start a server on its own.
+                    // Only this computer's service starts a server on its own.
                     || (*row == SettingsRowId::ServerAutoStart
-                        && ssh_servers.is_none()
                         && local_server
                             .as_ref()
                             .is_none_or(|offered| offered.service.is_none()))
@@ -819,8 +782,6 @@ impl SettingsWindow {
                 }),
             local_server: local_server
                 .map(|offered| servers::LocalServerRow::new(offered.connection)),
-            ssh_servers,
-            ssh_maintenance,
             direct_routes,
             selected_server: None,
             search_selected_server: None,
@@ -832,7 +793,6 @@ impl SettingsWindow {
             version_check: None,
             check_progress: server_card::DelayedProgress::default(),
             operation_progress: server_card::DelayedProgress::default(),
-            ssh_automatic_start: None,
             retained_status: std::collections::BTreeMap::new(),
             this_computer,
         };
@@ -2395,16 +2355,8 @@ impl SettingsWindow {
     /// on. Its card's footnote says why.
     fn row_dimmed(&self, row: SettingsRowId) -> bool {
         match row {
-            // This account's service changes automatic start without a connection, and so does an
-            // SSH account's route. A paired connection carries no such authority, and Terminal
+            // This account's service changes automatic start without a connection. Terminal
             // Sessions need the server itself.
-            SettingsRowId::ServerAutoStart => {
-                matches!(
-                    self.selected_server(),
-                    Some(server_list::ServerChoice::Ssh(_))
-                ) && self.ssh_maintenance.is_none()
-                    && !self.selected_server_live()
-            }
             SettingsRowId::EndAllSessions => !self.selected_server_live(),
             SettingsRowId::NetworkAccess | SettingsRowId::PairedDevices => {
                 !self.network_access_live()

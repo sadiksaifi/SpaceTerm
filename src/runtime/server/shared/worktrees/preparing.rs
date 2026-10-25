@@ -101,7 +101,7 @@ pub(super) fn prepare(
     inventory: Inventory,
     lock: Option<std::fs::File>,
 ) -> Result<Prepared, Error> {
-    let token = SshCancellationToken::default();
+    let token = CancellationToken::default();
     let (git, _) = git(lock, &token)?;
     match operation {
         Operation::OpenTab {
@@ -149,7 +149,7 @@ pub(super) fn prepare(
                 git,
                 removal: None,
                 run: Box::new(move |git| {
-                    let token = SshCancellationToken::default();
+                    let token = CancellationToken::default();
                     git.create(&root, &path, &branch, &token)
                         .map_err(|_| Error::Branch)?;
                     let snapshot = list(&git, &root, &token).map_err(|_| Error::Interrupted)?;
@@ -257,7 +257,7 @@ pub(super) fn prepare(
                         &path,
                         force,
                         &expected,
-                        &SshCancellationToken::default(),
+                        &CancellationToken::default(),
                     )
                     .map_err(removal_error)?;
                     Ok(None)

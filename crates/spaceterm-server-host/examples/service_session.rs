@@ -5,7 +5,7 @@
 )]
 mod support;
 use spaceterm_server::{
-    LocalServer, ServerError,
+    ServerConnection, ServerError,
     hierarchy::{Mutation, Outcome},
     pane::*,
     service::Service,
@@ -35,7 +35,7 @@ fn run() -> Result<(), Box<dyn Error>> {
             "Signed retained account service installed and started without administrator authorization."
         );
     }
-    let client = LocalServer::for_identity(&identity)?;
+    let client = ServerConnection::for_identity(&identity)?;
     client.setup()?;
     let mut first = client.connect_pane()?;
     let Reply::Inventory { next_sequence, .. } = first.exchange(&Request::Inventory)? else {

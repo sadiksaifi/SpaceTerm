@@ -1,6 +1,6 @@
 //! Shared owning-host Git fixtures and authenticated inventory checks.
 use spaceterm_server::{
-    LocalServer, ServerError,
+    ServerConnection, ServerError,
     hierarchy::{CloseTarget, Id, Inventory, Mutation, Outcome},
     pane::{PaneConnection, Reply, Request},
     repository::DirectoryFacts,
@@ -11,7 +11,7 @@ use std::{
     process::Command,
     time::{Duration, Instant},
 };
-pub fn connect(server: &LocalServer) -> Result<PaneConnection, Box<dyn Error>> {
+pub fn connect(server: &ServerConnection) -> Result<PaneConnection, Box<dyn Error>> {
     let until = Instant::now() + Duration::from_secs(8);
     loop {
         match server.connect_shared_pane() {

@@ -457,6 +457,9 @@ struct PaneDrag {
 
 pub(crate) struct TabView {
     tab: Tab<Entity<TerminalPane>>,
+    /// Counts explicit changes of the Focused Pane, so a deferred completion can tell that the
+    /// person moved between Panes since it began.
+    focus_epoch: u64,
     session_factory: WorkspaceTerminalSessionFactory,
     pane_construction: PaneConstruction,
     /// Each Pane's laid-out place.
@@ -554,6 +557,7 @@ impl TabView {
 
         Self {
             tab,
+            focus_epoch: 0,
             session_factory,
             pane_construction,
             pane_bounds: BTreeMap::new(),
@@ -886,6 +890,11 @@ impl TabView {
         }
     }
 
+    /// How many explicit Focused Pane changes this Tab has had.
+    pub(crate) const fn focus_epoch(&self) -> u64 {
+        self.focus_epoch
+    }
+
     pub(crate) const fn focused_pane_id(&self) -> PaneId {
         self.tab.focused_pane_id()
     }
@@ -945,6 +954,7 @@ impl TabView {
             eprintln!("failed to focus Pane: {error}");
             return;
         }
+        self.focus_epoch = self.focus_epoch.wrapping_add(1);
 
         self.sync_terminal_focus(cx);
         cx.emit(TabViewEvent::PresentationChanged {
@@ -972,6 +982,7 @@ impl TabView {
         cx: &mut Context<Self>,
     ) {
         // Moving the keyboard to a Pane is an explicit selection of it.
+        self.focus_epoch = self.focus_epoch.wrapping_add(1);
         self.select_shared_pane(pane_id);
         self.sync_terminal_focus(cx);
         cx.emit(TabViewEvent::PresentationChanged {
@@ -2994,17 +3005,14 @@ impl TabView {
                 checking,
                 unanswered,
             } => {
-                // This client restarts this computer's server and an SSH server from Server
-                // Settings. A direct network server restarts only on its own computer.
-                let sessions = self.shared.as_ref().map(|shared| shared.sessions());
-                let restart_target = match sessions {
-                    Some(sessions) if sessions.direct_route().is_some() => None,
-                    Some(sessions) => Some(sessions.remote_destination().cloned().map_or(
-                        crate::ui::MachineTarget::Local,
-                        crate::ui::MachineTarget::Ssh,
-                    )),
-                    None => None,
-                };
+                // This client restarts only this computer's server, from Server Settings.
+                // Another computer's server restarts on that computer.
+                let restart_target = self
+                    .shared
+                    .as_ref()
+                    .map(|shared| shared.sessions())
+                    .filter(|sessions| sessions.remote_name().is_none())
+                    .map(|_| crate::ui::MachineTarget::Local);
                 let owner = view.clone();
                 server_pane::StartUnknownScreen {
                     screen: selector("start-unknown"),
@@ -3222,14 +3230,14 @@ impl TabView {
                     && matches!(
                         current.status(),
                         crate::terminal::server_session::DevelopmentPaneStatus::Failed(
-                            crate::local_server::ServerError::DirectoryUnavailable
+                            crate::server_connection::ServerError::DirectoryUnavailable
                         ) | crate::terminal::server_session::DevelopmentPaneStatus::Reconnecting
                     )
             }),
             online: std::rc::Rc::new(move || {
                 online.status()
                     == crate::terminal::server_session::DevelopmentPaneStatus::Failed(
-                        crate::local_server::ServerError::DirectoryUnavailable,
+                        crate::server_connection::ServerError::DirectoryUnavailable,
                     )
             }),
             confirm: std::rc::Rc::new(move |replacement| {
@@ -3289,18 +3297,6 @@ impl TabView {
             self.focus(window, cx);
         }
     }
-    /// Tells each shared Pane that the person stopped its server, as the server's route reported.
-    pub(crate) fn server_stopped(&mut self, cx: &mut Context<Self>) {
-        let Some(shared) = self.shared.as_mut() else {
-            return;
-        };
-        for pane_id in shared.pane_ids() {
-            if let Some(view) = shared.view_mut(pane_id) {
-                view.server_stopped_elsewhere();
-            }
-        }
-        cx.notify();
-    }
     /// Reconnects each shared Pane the person's stop interrupted, once they started the server.
     pub(crate) fn server_started(&mut self, cx: &mut Context<Self>) {
         let Some(shared) = self.shared.as_mut() else {
@@ -3315,24 +3311,9 @@ impl TabView {
     }
 
     fn retry_shared_pane(&mut self, pane_id: PaneId, window: &mut Window, cx: &mut Context<Self>) {
-        // Retry is the person asking to reach the Pane's server. Another computer's route may
-        // need them to sign in again, which only a requested connection may ask for, so Retry
-        // asks for one now. An interruption alone never does.
-        if let Some(destination) = self
-            .shared
-            .as_ref()
-            .and_then(|shared| shared.sessions().remote_destination().cloned())
-            && let Some(connections) = crate::ui::ssh_servers::installed(cx)
-            && !matches!(
-                connections.status(&destination),
-                crate::ssh::server_connection::RemoteConnectionStatus::Connected { .. }
-            )
-        {
-            crate::ui::ssh_servers::present_prompts_in(window, cx);
-            connections.connect(destination);
-        }
-        // A direct network route asks the system for this device's key only now, because the
-        // person asked. It never falls back to SSH for that computer.
+        // Retry is the person asking to reach the Pane's server. A paired route asks the system
+        // for this device's key only now, because the person asked; an interruption alone never
+        // does.
         if let Some(route) = self
             .shared
             .as_ref()
@@ -6516,8 +6497,7 @@ mod tests {
             (
                 crate::terminal::metadata::TerminalMetadataContext::Remote(
                     crate::terminal::metadata::RemoteTerminalMetadataContext::new(
-                        crate::domain::SshDestination::new("tester@build.example".to_owned())
-                            .unwrap(),
+                        "build.example".to_owned(),
                         crate::domain::RemoteDirectory::new("~/app".to_owned()).unwrap(),
                     )
                     .with_machine(
@@ -6530,11 +6510,11 @@ mod tests {
                 "remote",
                 "build.example",
             ),
-            // A host alias names no account, so the discovered account is what names the user.
+            // The server's display name names the machine; the server's account names the user.
             (
                 crate::terminal::metadata::TerminalMetadataContext::Remote(
                     crate::terminal::metadata::RemoteTerminalMetadataContext::new(
-                        crate::domain::SshDestination::new("build-box".to_owned()).unwrap(),
+                        "build-box".to_owned(),
                         crate::domain::RemoteDirectory::new("~/app".to_owned()).unwrap(),
                     )
                     .with_machine(

@@ -1,18 +1,20 @@
-//! Add Server: the one sheet that connects to an SSH host or joins with an invitation link.
+//! Add Server: the one journey that adds a remote server, by SSH setup or by an invitation link.
 //!
 //! Every entry point, such as the server picker, the All Servers list, Settings Search, the
 //! application menu or an invitation link the operating system delivered, starts here. Filling in
-//! a value connects and joins nothing; the person chooses Connect or Join first.
+//! a value sets up and joins nothing; the person chooses Set Up or Join first.
 //!
-//! The sheet owns its own state and lives while it has work to finish, including while an SSH
-//! sign-in prompt has taken its place. Each stage presents its own title and actions, and a stage
-//! change replaces the sheet on screen with the next one. Connecting follows the SSH registry,
-//! which owns installation offers, prompts and cancellation. Joining follows the direct
-//! connections registry, which owns the enrollment and its exact cleanup. The invitation link
-//! stays in the obscured field until Join hands it to the registry once; the sheet keeps only the
-//! server name and address it names.
+//! Both methods end with one saved paired connection. SSH setup signs in, installs or starts the
+//! server only after the person approves the exact offer, turns on network access at the
+//! address the person entered after they approve it, enrolls this device and closes its SSH
+//! resources. It succeeds only once this device is admitted over the network, and every later
+//! operation uses that connection. Joining follows the direct connections registry, which owns
+//! the enrollment and its exact cleanup. The invitation link stays in the obscured field until
+//! Join hands it to the registry once; the sheet keeps only the server name and address it names.
 
 use std::collections::HashMap;
+use std::net::{IpAddr, SocketAddr};
+use std::sync::Arc;
 
 use gpui::prelude::*;
 use gpui::{
@@ -33,23 +35,28 @@ use zeroize::Zeroizing;
 use super::direct_join::{WITHDRAW_UNSAVED, join_failure, join_paused};
 use super::server_list::ServerChoice;
 use super::{AddServerRequest, SettingsWindow};
-use crate::direct_connections::{DirectConnections, JoinId, JoinStatus};
+use crate::cancellation::CancellationToken;
+use crate::direct_connections::{DirectConnections, DirectRouteId, JoinId, JoinStatus};
 use crate::domain::SshDestination;
-use crate::local_server::direct::{DirectError, Invitation};
-use crate::local_server::pane::control::ClientName;
-use crate::ssh::server_connection::{
-    RemoteConnectionStatus, SshFlowConnectionIntent, SshServerConnections,
+use crate::server_connection::direct::{DEFAULT_PORT, DirectError, Invitation};
+use crate::server_connection::pane::control::ClientName;
+use crate::ssh::provisioning::{
+    InstallationApproval, NetworkApproval, SetupApprovals, SetupFailure, SetupPhase, SetupProgress,
+    SetupRequest, StartupApproval, validate_endpoint,
 };
 use crate::ui::appearance::{ChromeAppearance, gpui_color};
 use crate::ui::chrome_geometry::RadiusRole;
 use crate::ui::chrome_typography::{ChromeTextStyleExt as _, TextRole};
 use crate::ui::direct_access::{code_speech, code_text};
 use crate::ui::direct_servers::DirectChanges;
-use crate::ui::ssh_servers::{SshPromptActivity, SshPromptEvent, SshServerAction, present};
+use crate::ui::ssh_setup::{
+    SetupProblem, SshHostSource, SshPromptActivity, SshPromptEvent, SshSetupFactory,
+};
 
 pub(super) const MODAL_ID: &str = "add-server";
 pub(super) const METHOD_SELECTOR: &str = "add-server-method";
 pub(super) const HOST_SELECTOR: &str = "add-server-host";
+pub(super) const ADDRESS_SELECTOR: &str = "add-server-address";
 pub(super) const HOSTS_MENU_SELECTOR: &str = "add-server-ssh-hosts";
 /// Prefixes each configured host in the SSH Hosts menu, followed by its position.
 pub(super) const HOST_CHOICE_SELECTOR: &str = "add-server-ssh-host";
@@ -63,11 +70,38 @@ pub(super) const DEFERRED_SELECTOR: &str = "add-server-deferred";
 
 /// What the host field's description says. It is also the field's accessibility hint.
 const HOST_DESCRIPTION: &str =
-    "Connect using your SSH account. SpaceTerm offers to install a SpaceTerm Server if needed.";
+    "Sign in with your SSH account to install, start and pair a SpaceTerm Server.";
 const HOST_INVALID: &str = "Enter an SSH host or alias without spaces or command options.";
+const ADDRESS_INVALID: &str =
+    "Enter an IP address of that computer, such as 192.168.1.20 or 192.168.1.20:9231.";
 const LINK_DESCRIPTION: &str = "Paste the invitation link from the other computer.";
-/// How long the host and link fields are, so a long value scrolls inside the field.
+/// How long the host, address and link fields are, so a long value scrolls inside the field.
 const FIELD_WIDTH: f32 = 260.0;
+
+/// What the address field's description says, naming the port SpaceTerm uses unless one is given.
+fn address_description() -> SharedString {
+    format!(
+        "The IP address this computer uses to reach the server over the network. Port {DEFAULT_PORT} unless you add one."
+    )
+    .into()
+}
+
+/// The network address `text` names: an IP address, with or without a port. SSH aliases and host
+/// names don't name a network address, because only an IP literal is checked against the
+/// server's own addresses.
+pub(super) fn parse_endpoint(text: &str) -> Option<SocketAddr> {
+    let text = text.trim();
+    let endpoint = text.parse::<SocketAddr>().ok().or_else(|| {
+        let ip = text
+            .strip_prefix('[')
+            .and_then(|rest| rest.strip_suffix(']'))
+            .unwrap_or(text);
+        ip.parse::<IpAddr>()
+            .ok()
+            .map(|ip| SocketAddr::new(ip, DEFAULT_PORT))
+    })?;
+    validate_endpoint(endpoint).ok().map(|()| endpoint)
+}
 
 /// The two ways to add a server.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -79,9 +113,11 @@ enum Method {
 /// What the sheet offers as a button. Each stage presents some of these.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SheetAction {
-    Connect,
+    SetUp,
     Join,
     Install,
+    Start,
+    AllowNetwork,
     TryAgain,
     Back,
     StartAgain,
@@ -93,9 +129,11 @@ enum SheetAction {
 impl SheetAction {
     const fn label(self) -> &'static str {
         match self {
-            Self::Connect => "Connect",
+            Self::SetUp => "Set Up",
             Self::Join => "Join",
             Self::Install => "Install",
+            Self::Start => "Start Server",
+            Self::AllowNetwork => "Allow",
             Self::TryAgain => "Try Again",
             Self::Back => "Back",
             Self::StartAgain => "Start Again",
@@ -107,9 +145,11 @@ impl SheetAction {
 
     const fn selector(self) -> &'static str {
         match self {
-            Self::Connect => "add-server-connect",
+            Self::SetUp => "add-server-set-up",
             Self::Join => "add-server-join",
             Self::Install => "add-server-install",
+            Self::Start => "add-server-start",
+            Self::AllowNetwork => "add-server-allow-network",
             Self::TryAgain => "add-server-try-again",
             Self::Back => "add-server-back",
             Self::StartAgain => "add-server-start-again",
@@ -127,11 +167,15 @@ impl SheetAction {
         };
         let action = ModalAction::new(self, self.label(), role, self.selector()).enabled(enabled);
         match self {
-            Self::Connect | Self::Join | Self::Install | Self::TryAgain | Self::StartAgain => {
-                action
-                    .with_emphasis(ModalActionEmphasis::Prominent)
-                    .default_action(true)
-            }
+            Self::SetUp
+            | Self::Join
+            | Self::Install
+            | Self::Start
+            | Self::AllowNetwork
+            | Self::TryAgain
+            | Self::StartAgain => action
+                .with_emphasis(ModalActionEmphasis::Prominent)
+                .default_action(true),
             Self::Withdraw => action.with_intent(ModalActionIntent::Destructive),
             _ => action,
         }
@@ -142,6 +186,7 @@ impl SheetAction {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum FocusTarget {
     Host,
+    Address,
     Link,
     Action(SheetAction),
 }
@@ -189,25 +234,48 @@ fn link_problem(error: DirectError) -> &'static str {
     }
 }
 
+/// One SSH setup the person asked for: where, and what they approved so far. Approvals bind to
+/// the exact offer the server made, so a changed host or address starts without any.
+#[derive(Clone, Debug)]
+struct Setup {
+    destination: SshDestination,
+    endpoint: SocketAddr,
+    approvals: SetupApprovals,
+}
+
+/// An offer setup paused on, which only the person's approval accepts.
+#[derive(Clone, Debug)]
+enum Offer {
+    Install {
+        version: String,
+        platform: (String, String),
+        approval: InstallationApproval,
+    },
+    Start {
+        approval: StartupApproval,
+    },
+    Network {
+        current: Option<SocketAddr>,
+        approval: NetworkApproval,
+    },
+}
+
 /// Where adding a server stands.
 enum Stage {
     /// Choosing SSH or Invitation and filling in its value.
     Form,
-    /// Connecting to an SSH host, including an installation the person approved.
-    Connecting(SshDestination),
-    /// The host's account has no server; the person reviews this exact offer first.
-    Install {
-        destination: SshDestination,
-        offer_id: u64,
-        detail: SharedString,
+    /// SSH setup underway. `phase` is the last step it reported. `cancelling` holds the sheet
+    /// until setup has closed every SSH resource it opened.
+    SettingUp {
+        setup: Setup,
+        phase: Option<SetupPhase>,
+        cancel: CancellationToken,
+        cancelling: bool,
     },
-    /// Connecting stopped with a state the person can read and maybe retry.
-    SshProblem {
-        destination: SshDestination,
-        state: &'static str,
-        explanation: SharedString,
-        retry: bool,
-    },
+    /// Setup paused on an offer the person reviews first.
+    Offered { setup: Setup, offer: Offer },
+    /// Setup stopped with a state the person can read and maybe retry.
+    SetupProblem { setup: Setup, problem: SetupProblem },
     /// Joining the server an invitation names. `join` is `None` until the registry accepts it.
     Joining {
         join: Option<JoinId>,
@@ -276,23 +344,27 @@ impl SettingsWindow {
 pub(super) struct AddServerSheet {
     settings: WeakEntity<SettingsWindow>,
     window: AnyWindowHandle,
-    ssh: Option<SshServerConnections>,
+    ssh: Option<std::rc::Rc<dyn SshSetupFactory>>,
     direct: Option<DirectConnections>,
     method: Method,
     host: Entity<TextInput>,
+    address: Entity<TextInput>,
     link: Entity<TextInput>,
-    /// The hosts this computer's SSH configuration names, read when the sheet opens.
+    /// The hosts this computer's SSH configuration names. Empty until discovery, which starts
+    /// when the sheet opens, answers.
     hosts: Vec<SshDestination>,
-    /// Whether the typed host was refused when the person last chose Connect.
+    /// Whether the typed host was refused when the person last chose Set Up.
     host_invalid: bool,
+    /// Whether the typed address was refused when the person last chose Set Up.
+    address_invalid: bool,
     /// What the link in the field names, or why it can't be used. `None` while it is empty.
     preview: Option<Result<Preview, DirectError>>,
     stage: Stage,
-    /// The connection attempt this sheet started, which only this sheet's Cancel ends.
-    intent: Option<SshFlowConnectionIntent>,
-    /// The host this sheet's attempt saved for the first time. Ending the attempt before it
-    /// connects forgets it again, so a cancelled Add Server adds nothing.
-    added: Option<SshDestination>,
+    /// Counts setup attempts, so the result of one this sheet replaced lands nowhere.
+    attempt: u64,
+    /// Whether the person dismissed an SSH prompt in the attempt underway, which returns to the
+    /// form once setup has stopped.
+    declined: bool,
     prompts: Entity<SshPromptActivity>,
     /// The shape on screen, if any.
     shown: Option<Shape>,
@@ -310,10 +382,10 @@ pub(super) struct AddServerSheet {
     /// Add Server shows it next, without touching the work underway.
     deferred: Option<AddServerRequest>,
     _subscriptions: Vec<Subscription>,
-    _ssh_changes: Option<Task<()>>,
     _direct_changes: Option<DirectChanges>,
-    _reading: Option<Task<()>>,
     _work: Option<Task<()>>,
+    _setup: Option<Task<()>>,
+    _discovery: Option<Task<()>>,
 }
 
 impl AddServerSheet {
@@ -331,6 +403,21 @@ impl AddServerSheet {
                 .escape_behavior(TextInputEscapeBehavior::Propagate)
                 .debug_selector(HOST_SELECTOR)
         });
+        let address = cx.new(|cx| {
+            TextInput::new(
+                ADDRESS_SELECTOR,
+                "Network address",
+                String::new(),
+                window,
+                cx,
+            )
+            .variant(TextInputVariant::Bare)
+            .placeholder("192.168.1.20")
+            .input_length_limit(Some(64))
+            .return_behavior(TextInputReturnBehavior::Propagate)
+            .escape_behavior(TextInputEscapeBehavior::Propagate)
+            .debug_selector(ADDRESS_SELECTOR)
+        });
         let link = cx.new(|cx| {
             TextInput::new(LINK_SELECTOR, "Invitation link", String::new(), window, cx)
                 .variant(TextInputVariant::Bare)
@@ -340,7 +427,7 @@ impl AddServerSheet {
                 .escape_behavior(TextInputEscapeBehavior::Propagate)
                 .debug_selector(LINK_SELECTOR)
         });
-        let prompts = crate::ui::ssh_servers::prompt_activity(window, cx);
+        let prompts = crate::ui::ssh_setup::prompt_activity(window, cx);
         let mut subscriptions = vec![
             cx.subscribe_in(
                 &host,
@@ -348,6 +435,16 @@ impl AddServerSheet {
                 |sheet, _, event: &TextInputEvent, window, cx| {
                     if matches!(event, TextInputEvent::ValueChanged(_)) {
                         sheet.host_invalid = false;
+                        sheet.show(window, cx);
+                    }
+                },
+            ),
+            cx.subscribe_in(
+                &address,
+                window,
+                |sheet, _, event: &TextInputEvent, window, cx| {
+                    if matches!(event, TextInputEvent::ValueChanged(_)) {
+                        sheet.address_invalid = false;
                         sheet.show(window, cx);
                     }
                 },
@@ -367,34 +464,22 @@ impl AddServerSheet {
                 &prompts,
                 window,
                 |sheet, _, event: &SshPromptEvent, window, cx| {
-                    if !matches!(sheet.stage, Stage::Connecting(_)) {
+                    let Stage::SettingUp { cancel, .. } = &sheet.stage else {
                         return;
-                    }
+                    };
                     if matches!(event, SshPromptEvent::Settled { cancelled: true }) {
-                        // The person declined to sign in, so the host stays for another try.
-                        sheet.back_to_form(window, cx);
-                    } else {
-                        sheet.observe(window, cx);
+                        // The person declined to sign in, so setup stops and the values stay
+                        // for another try.
+                        sheet.declined = true;
+                        cancel.cancel();
                     }
+                    sheet.show(window, cx);
                 },
             ),
         ];
         // The sheet ends with its window too, and ends what it started with it.
         subscriptions.push(cx.on_release(|sheet, cx| sheet.abandon(cx)));
-        let ssh = crate::ui::ssh_servers::installed(cx);
-        let ssh_changes = ssh.as_ref().map(|ssh| {
-            let changes = ssh.subscribe();
-            cx.spawn_in(window, async move |sheet, cx| {
-                while changes.recv().await.is_ok() {
-                    let followed = sheet.update_in(cx, |sheet, window, cx| {
-                        sheet.observe(window, cx);
-                    });
-                    if followed.is_err() {
-                        break;
-                    }
-                }
-            })
-        });
+        let ssh = crate::ui::ssh_setup::installed(cx);
         let direct = crate::ui::direct_servers::installed(cx);
         let direct_changes = direct.as_ref().map(|direct| {
             DirectChanges::follow(direct, |changes| {
@@ -410,17 +495,9 @@ impl AddServerSheet {
                 })
             })
         });
-        // Reading SSH configuration reaches no host.
-        let reading = crate::ui::ssh_servers::host_source(cx).map(|source| {
-            let reading = cx.background_spawn(async move { source.hosts() });
-            cx.spawn(async move |sheet, cx| {
-                let hosts = reading.await;
-                let _ = sheet.update(cx, |sheet, cx| {
-                    sheet.hosts = hosts;
-                    cx.notify();
-                });
-            })
-        });
+        let discovery = ssh
+            .as_ref()
+            .map(|factory| Self::discover_hosts(factory.hosts(), cx));
         Self {
             settings,
             window: window.window_handle(),
@@ -428,13 +505,15 @@ impl AddServerSheet {
             direct,
             method: Method::Ssh,
             host,
+            address,
             link,
             hosts: Vec::new(),
             host_invalid: false,
+            address_invalid: false,
             preview: None,
             stage: Stage::Form,
-            intent: None,
-            added: None,
+            attempt: 0,
+            declined: false,
             prompts,
             shown: None,
             presentation: None,
@@ -445,15 +524,43 @@ impl AddServerSheet {
             applied: Vec::new(),
             deferred: None,
             _subscriptions: subscriptions,
-            _ssh_changes: ssh_changes,
             _direct_changes: direct_changes,
-            _reading: reading,
             _work: None,
+            _setup: None,
+            _discovery: discovery,
         }
     }
 
+    /// Reads the configured SSH hosts on a thread of their own, since a slow or unavailable
+    /// volume can hold a read indefinitely, and fills the SSH Hosts menu with them once they
+    /// arrive. Reading reaches no host. The hosts change only the menu, never what the person
+    /// typed. A sheet that closes first takes nothing, and a read that can't start or ends
+    /// without an answer leaves the menu empty, as a configuration naming no hosts does.
+    fn discover_hosts(source: Arc<dyn SshHostSource>, cx: &mut Context<Self>) -> Task<()> {
+        let (found, hosts) = async_channel::bounded(1);
+        let started = std::thread::Builder::new()
+            .name("spaceterm-ssh-hosts".to_owned())
+            .spawn(move || {
+                let _ = found.try_send(source.hosts());
+            });
+        cx.spawn(async move |sheet, cx| {
+            if started.is_err() {
+                return;
+            }
+            let Ok(hosts) = hosts.recv().await else {
+                return;
+            };
+            let _ = sheet.update(cx, |sheet, cx| {
+                if !sheet.closed {
+                    sheet.hosts = hosts;
+                    cx.notify();
+                }
+            });
+        })
+    }
+
     /// Fills in `request`'s value when the sheet is waiting for one, then presents the sheet. Work
-    /// underway, such as a connection or a join, keeps its place.
+    /// underway, such as a setup or a join, keeps its place.
     fn fill(&mut self, request: AddServerRequest, window: &mut Window, cx: &mut Context<Self>) {
         if self.busy() {
             // The latest value waits; an empty request only brings the sheet forward.
@@ -466,7 +573,6 @@ impl AddServerSheet {
             self.show(window, cx);
             return;
         }
-        self.end_attempt();
         self.stage = Stage::Form;
         match request {
             AddServerRequest::Ssh(host) => {
@@ -496,7 +602,7 @@ impl AddServerSheet {
             return true;
         }
         match &self.stage {
-            Stage::Connecting(_) | Stage::Install { .. } => true,
+            Stage::SettingUp { .. } | Stage::Offered { .. } => true,
             Stage::Joining { join: None, .. } => true,
             Stage::Joining {
                 join: Some(join), ..
@@ -505,7 +611,7 @@ impl AddServerSheet {
                 Some(JoinStatus::Rejected | JoinStatus::Expired | JoinStatus::Failed(_)) | None
             ),
             Stage::Form
-            | Stage::SshProblem { .. }
+            | Stage::SetupProblem { .. }
             | Stage::JoinRefused { .. }
             | Stage::StopUnsaved { .. }
             | Stage::Stopped { .. }
@@ -552,6 +658,7 @@ impl AddServerSheet {
             return;
         }
         let field = match self.method {
+            Method::Ssh if self.address_invalid && !self.host_invalid => &self.address,
             Method::Ssh => &self.host,
             Method::Invitation => &self.link,
         };
@@ -583,11 +690,19 @@ impl AddServerSheet {
                 join_title(server)
             }
         };
+        let quoted =
+            |destination: &SshDestination| format!("\u{201C}{}\u{201D}", destination.as_str());
         let shape = match &self.stage {
             Stage::Form => {
                 let (primary, focus) = match self.method {
-                    Method::Ssh => (SheetAction::Connect, FocusTarget::Host),
+                    Method::Ssh => (SheetAction::SetUp, FocusTarget::Host),
                     Method::Invitation => (SheetAction::Join, FocusTarget::Link),
+                };
+                let focus = match focus {
+                    FocusTarget::Host if self.address_invalid && !self.host_invalid => {
+                        FocusTarget::Address
+                    }
+                    focus => focus,
                 };
                 Shape {
                     title: add(),
@@ -595,38 +710,55 @@ impl AddServerSheet {
                     focus,
                 }
             }
-            Stage::Connecting(_) => {
+            Stage::SettingUp { cancelling, .. } => {
                 if self.prompts.read(cx).active {
                     return None;
                 }
                 Shape {
-                    title: add(),
+                    title: if *cancelling {
+                        "Cancelling Setup".into()
+                    } else {
+                        add()
+                    },
                     actions: vec![SheetAction::Cancel],
                     focus: FocusTarget::Action(SheetAction::Cancel),
                 }
             }
-            Stage::Install { destination, .. } => Shape {
-                title: format!("Install SpaceTerm Server on \"{}\"?", destination.as_str()).into(),
-                actions: vec![SheetAction::Install, SheetAction::Cancel],
-                focus: FocusTarget::Action(SheetAction::Install),
-            },
-            Stage::SshProblem {
-                destination, retry, ..
-            } => {
+            Stage::Offered { setup, offer } => {
+                let (title, action) = match offer {
+                    Offer::Install { .. } => (
+                        format!(
+                            "Install SpaceTerm Server on {}?",
+                            quoted(&setup.destination)
+                        ),
+                        SheetAction::Install,
+                    ),
+                    Offer::Start { .. } => (
+                        format!("Start SpaceTerm Server on {}?", quoted(&setup.destination)),
+                        SheetAction::Start,
+                    ),
+                    Offer::Network { .. } => (
+                        format!("Allow Network Access on {}?", quoted(&setup.destination)),
+                        SheetAction::AllowNetwork,
+                    ),
+                };
+                Shape {
+                    title: title.into(),
+                    actions: vec![action, SheetAction::Cancel],
+                    focus: FocusTarget::Action(action),
+                }
+            }
+            Stage::SetupProblem { setup, problem } => {
                 let mut actions = Vec::with_capacity(3);
-                if *retry {
+                if problem.retry {
                     actions.push(SheetAction::TryAgain);
                 }
                 actions.push(SheetAction::Back);
                 actions.push(SheetAction::Cancel);
                 Shape {
-                    title: format!(
-                        "Couldn\u{2019}t Connect to \u{201C}{}\u{201D}",
-                        destination.as_str()
-                    )
-                    .into(),
+                    title: format!("Couldn\u{2019}t Add {}", quoted(&setup.destination)).into(),
                     actions,
-                    focus: FocusTarget::Action(if *retry {
+                    focus: FocusTarget::Action(if problem.retry {
                         SheetAction::TryAgain
                     } else {
                         SheetAction::Back
@@ -722,7 +854,13 @@ impl AddServerSheet {
                 self.applied = applied;
             }
             None => {
+                // A sheet that can't present its next stage ends, and takes the stage still on
+                // screen with it, so no presentation outlives the sheet that owns it.
                 self.shown = None;
+                self.active = false;
+                if let Some(presentation) = self.presentation.take() {
+                    let _ = presentation.dismiss(window, cx);
+                }
                 self.abandon(cx);
                 self.release(cx);
             }
@@ -730,11 +868,15 @@ impl AddServerSheet {
         cx.notify();
     }
 
-    /// Whether `action` can be chosen now. Only Connect and Join wait for a value.
+    /// Whether `action` can be chosen now. Set Up and Join wait for their values. Cancel stays
+    /// available while setup is cancelling, so it keeps keyboard focus; choosing it again changes
+    /// nothing.
     fn available(&self, action: SheetAction, cx: &App) -> bool {
         match action {
-            SheetAction::Connect => {
-                self.ssh.is_some() && !self.host.read(cx).value().trim().is_empty()
+            SheetAction::SetUp => {
+                self.ssh.is_some()
+                    && !self.host.read(cx).value().trim().is_empty()
+                    && !self.address.read(cx).value().trim().is_empty()
             }
             SheetAction::Join => self.direct.is_some() && matches!(self.preview, Some(Ok(_))),
             _ => true,
@@ -773,6 +915,7 @@ impl AddServerSheet {
         let surface = self.surface;
         let focus = match shape.focus {
             FocusTarget::Host => DialogInitialFocus::Body(self.host.read(cx).focus_handle()),
+            FocusTarget::Address => DialogInitialFocus::Body(self.address.read(cx).focus_handle()),
             FocusTarget::Link => DialogInitialFocus::Body(self.link.read(cx).focus_handle()),
             FocusTarget::Action(action) => DialogInitialFocus::Action(action),
         };
@@ -836,7 +979,8 @@ impl AddServerSheet {
     }
 
     /// Answers one action. Cancel and Close end the sheet, holding it open only while a stop
-    /// saves; every other action moves to its next stage once this answer unwinds.
+    /// saves or setup closes what it opened; every other action moves to its next stage once
+    /// this answer unwinds.
     fn decide(
         &mut self,
         surface: u64,
@@ -851,6 +995,24 @@ impl AddServerSheet {
             return deny;
         }
         match action {
+            // Setup ends truthfully: the sheet says it is cancelling until setup has stopped.
+            SheetAction::Cancel if matches!(self.stage, Stage::SettingUp { .. }) => {
+                if let Stage::SettingUp {
+                    cancel, cancelling, ..
+                } = &mut self.stage
+                {
+                    cancel.cancel();
+                    *cancelling = true;
+                }
+                let sheet = cx.entity();
+                let window = self.window;
+                cx.defer(move |cx| {
+                    let _ = window.update(cx, |_, window, cx| {
+                        sheet.update(cx, |sheet, cx| sheet.show(window, cx));
+                    });
+                });
+                deny
+            }
             SheetAction::Cancel | SheetAction::Close | SheetAction::Withdraw => {
                 // Only the person's Withdraw asks the server to remove a pairing whose save
                 // SpaceTerm couldn't confirm; closing withdraws nothing.
@@ -885,30 +1047,26 @@ impl AddServerSheet {
 
     fn perform(&mut self, action: SheetAction, window: &mut Window, cx: &mut Context<Self>) {
         match action {
-            SheetAction::Connect => self.connect_typed(window, cx),
+            SheetAction::SetUp => self.set_up_typed(window, cx),
             SheetAction::Join => self.join(window, cx),
-            SheetAction::Install => {
-                let Stage::Install {
-                    destination,
-                    offer_id,
-                    ..
-                } = &self.stage
-                else {
+            SheetAction::Install | SheetAction::Start | SheetAction::AllowNetwork => {
+                let Stage::Offered { setup, offer } = &self.stage else {
                     return;
                 };
-                let (destination, offer_id) = (destination.clone(), *offer_id);
-                if let Some(ssh) = &self.ssh {
-                    // The remote installation may ask for sudo, which appears here.
-                    crate::ui::ssh_servers::present_prompts_in(window, cx);
-                    ssh.install_for_flow(&destination, offer_id);
+                let mut setup = setup.clone();
+                match offer.clone() {
+                    Offer::Install { approval, .. } => setup.approvals.install = Some(approval),
+                    Offer::Start { approval } => setup.approvals.start = Some(approval),
+                    Offer::Network { approval, .. } => {
+                        setup.approvals.expose_network = Some(approval);
+                    }
                 }
-                self.stage = Stage::Connecting(destination);
-                self.observe(window, cx);
+                self.set_up(setup, window, cx);
             }
             SheetAction::TryAgain => match &self.stage {
-                Stage::SshProblem { destination, .. } => {
-                    let destination = destination.clone();
-                    self.connect(destination, window, cx);
+                Stage::SetupProblem { setup, .. } => {
+                    let setup = setup.clone();
+                    self.set_up(setup, window, cx);
                 }
                 Stage::Joining {
                     join: Some(join), ..
@@ -950,9 +1108,8 @@ impl AddServerSheet {
         self.focus_field(window, cx);
     }
 
-    /// Returns to the form with the host still typed, ending the attempt this sheet started.
+    /// Returns to the form with the host and address still typed.
     fn back_to_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.end_attempt();
         self.stage = Stage::Form;
         if let Some(request) = self.deferred.take() {
             self.fill(request, window, cx);
@@ -963,68 +1120,208 @@ impl AddServerSheet {
         self.focus_field(window, cx);
     }
 
-    /// Connects to the host the person typed. The text passes to SSH as one destination, so SSH
-    /// configuration still decides the host, user and keys.
-    fn connect_typed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Sets up the host and address the person typed. The host passes to SSH as one destination,
+    /// so SSH configuration still decides the host, user and keys. A new setup starts without
+    /// approvals, because each one binds to an offer this setup hasn't seen.
+    fn set_up_typed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let typed = self.host.read(cx).value().trim().to_owned();
         if typed.is_empty() {
             return;
         }
-        match SshDestination::new(typed) {
-            Ok(destination) => self.connect(destination, window, cx),
-            Err(_) => {
-                self.host_invalid = true;
-                self.focus_field(window, cx);
-                cx.notify();
-            }
-        }
+        let destination = SshDestination::new(typed).ok();
+        let endpoint = parse_endpoint(self.address.read(cx).value());
+        self.host_invalid = destination.is_none();
+        self.address_invalid = endpoint.is_none();
+        let (Some(destination), Some(endpoint)) = (destination, endpoint) else {
+            self.show(window, cx);
+            self.focus_field(window, cx);
+            cx.notify();
+            return;
+        };
+        self.set_up(
+            Setup {
+                destination,
+                endpoint,
+                approvals: SetupApprovals::default(),
+            },
+            window,
+            cx,
+        );
     }
 
-    /// Connects to `destination`, or reuses its connection when one is already up or underway.
-    fn connect(
+    /// Runs one setup attempt off the window's thread. Its OpenSSH prompts appear in this
+    /// window, and its phases and outcome return here.
+    fn set_up(&mut self, setup: Setup, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(factory) = self.ssh.clone() else {
+            return;
+        };
+        let (Some(backend), Some(prompts)) = (factory.backend(), factory.prompts(window, cx))
+        else {
+            self.stage = Stage::SetupProblem {
+                problem: crate::ui::ssh_setup::problem(
+                    &SetupFailure::Unavailable(
+                        crate::ssh::provisioning::UnavailableKind::SshFailed,
+                    ),
+                    &setup.endpoint.to_string(),
+                ),
+                setup,
+            };
+            self.show(window, cx);
+            return;
+        };
+        self.attempt = self.attempt.wrapping_add(1);
+        self.declined = false;
+        let attempt = self.attempt;
+        let cancel = CancellationToken::default();
+        let request = SetupRequest {
+            destination: setup.destination.clone(),
+            endpoint: setup.endpoint,
+            name: ClientName::this_computer(),
+            prompts,
+            approvals: setup.approvals.clone(),
+        };
+        self.stage = Stage::SettingUp {
+            setup,
+            phase: None,
+            cancel: cancel.clone(),
+            cancelling: false,
+        };
+        let (phases, reported) = async_channel::unbounded();
+        let progress = SetupProgress::new(move |phase| {
+            let _ = phases.try_send(phase);
+        });
+        let following = cx.spawn(async move |sheet, cx| {
+            while let Ok(phase) = reported.recv().await {
+                let followed = sheet.update(cx, |sheet, cx| {
+                    if sheet.attempt == attempt
+                        && let Stage::SettingUp { phase: shown, .. } = &mut sheet.stage
+                    {
+                        *shown = Some(phase);
+                        cx.notify();
+                    }
+                });
+                if followed.is_err() {
+                    break;
+                }
+            }
+        });
+        let window_handle = self.window;
+        // Setup holds SSH for as long as the person takes to answer its prompts, so it runs on a
+        // thread of its own rather than occupying a shared worker.
+        let (finished, outcome) = async_channel::bounded(1);
+        let started = std::thread::Builder::new()
+            .name("spaceterm-ssh-setup".to_owned())
+            .spawn(move || {
+                let _ = finished.try_send(backend.setup(request, &cancel, &progress));
+            });
+        if started.is_err() {
+            // Nothing reached the other computer, so the person can try again as it was.
+            if let Stage::SettingUp { setup, .. } = std::mem::replace(&mut self.stage, Stage::Form)
+            {
+                self.stage = Stage::SetupProblem {
+                    setup,
+                    problem: crate::ui::ssh_setup::start_failure(),
+                };
+            }
+            self.show(window, cx);
+            return;
+        }
+        self._setup = Some(cx.spawn(async move |sheet, cx| {
+            // A setup that ended without an answer may have changed the server, so it is
+            // reported as unconfirmed rather than as never started.
+            let outcome = outcome
+                .recv()
+                .await
+                .unwrap_or(Err(SetupFailure::Unconfirmed(
+                    crate::ssh::provisioning::SetupOperation::Enrollment,
+                )));
+            drop(following);
+            let _ = window_handle.update(cx, |_, window, cx| {
+                let _ = sheet.update(cx, |sheet, cx| {
+                    sheet.set_up_ended(attempt, outcome, window, cx)
+                });
+            });
+        }));
+        self.show(window, cx);
+    }
+
+    /// Follows the outcome of setup attempt `attempt`.
+    fn set_up_ended(
         &mut self,
-        destination: SshDestination,
+        attempt: u64,
+        outcome: Result<DirectRouteId, SetupFailure>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(ssh) = self.ssh.clone() else {
-            return;
-        };
-        // The person asked here, so a sign-in or host approval appears here.
-        crate::ui::ssh_servers::present_prompts_in(window, cx);
-        if !matches!(
-            ssh.status(&destination),
-            RemoteConnectionStatus::Connected { .. }
-        ) {
-            self.end_attempt();
-            // Only the complete saved inventory proves a host is new. Before it loads, an absent
-            // host may still be one the person saved, so the sheet never forgets it.
-            let new = ssh.retained_inventory_loaded()
-                && !ssh
-                    .connections()
-                    .iter()
-                    .any(|(listed, _)| *listed == destination);
-            self.intent = ssh.connect_for_flow(destination.clone());
-            self.added = (self.intent.is_some() && new).then(|| destination.clone());
-        }
-        self.stage = Stage::Connecting(destination);
-        self.observe(window, cx);
-    }
-
-    /// Ends the connection attempt this sheet started. An attempt another consumer shares stays,
-    /// and so does the host it saved.
-    fn end_attempt(&mut self) {
-        let Some(ssh) = &self.ssh else {
-            return;
-        };
-        if let Some(intent) = self.intent.take() {
-            ssh.cancel_flow_connection(intent);
-        }
-        if let Some(added) = self.added.take()
-            && !ssh.intends(&added)
+        if self.closed || attempt != self.attempt || !matches!(self.stage, Stage::SettingUp { .. })
         {
-            ssh.remove(&added);
+            return;
         }
+        let Stage::SettingUp {
+            setup, cancelling, ..
+        } = std::mem::replace(&mut self.stage, Stage::Form)
+        else {
+            return;
+        };
+        // A setup that finished admits the server whether or not the person asked to cancel.
+        let outcome = match outcome {
+            Ok(route) => {
+                self.succeed(ServerChoice::Direct(route), window, cx);
+                return;
+            }
+            Err(failure) => failure,
+        };
+        // Setup reports Cancelled only when it stopped before changing the other computer, so
+        // only then does the sheet close or return to the form. A step that had already run, such
+        // as an installation or a start, reports its own outcome even when the person declined a
+        // later prompt or chose Cancel.
+        if matches!(outcome, SetupFailure::Cancelled) {
+            if cancelling {
+                self.finish(window, cx);
+            } else {
+                // The person declined an SSH prompt, or the attempt ended elsewhere.
+                self.back_to_form(window, cx);
+            }
+            return;
+        }
+        // A declined sign-in can end SSH itself before setup sees the cancellation. That failure
+        // changed nothing, so the person returns to the form as for any other decline.
+        if self.declined
+            && !cancelling
+            && outcome
+                == SetupFailure::Unavailable(crate::ssh::provisioning::UnavailableKind::SshFailed)
+        {
+            self.back_to_form(window, cx);
+            return;
+        }
+        self.stage = match outcome {
+            SetupFailure::InstallationOffered {
+                version,
+                platform,
+                approval,
+            } => Stage::Offered {
+                setup,
+                offer: Offer::Install {
+                    version,
+                    platform,
+                    approval,
+                },
+            },
+            SetupFailure::StartupRequired { approval } => Stage::Offered {
+                setup,
+                offer: Offer::Start { approval },
+            },
+            SetupFailure::NetworkAuthorizationRequired { current, approval } => Stage::Offered {
+                setup,
+                offer: Offer::Network { current, approval },
+            },
+            failure => Stage::SetupProblem {
+                problem: crate::ui::ssh_setup::problem(&failure, &setup.endpoint.to_string()),
+                setup,
+            },
+        };
+        // A cancellation that arrived too late to stop the step still reports what happened.
+        self.show(window, cx);
     }
 
     /// Hands the link to the registry once. The field empties as it does, so the link lives on
@@ -1145,55 +1442,9 @@ impl AddServerSheet {
         }
     }
 
-    /// Follows the registries: the connection or join this sheet started, and what it needs next.
+    /// Follows the direct registry: the join this sheet started, and what it needs next.
     fn observe(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         match &self.stage {
-            Stage::Connecting(destination) => {
-                let Some(ssh) = self.ssh.clone() else {
-                    return;
-                };
-                let destination = destination.clone();
-                match ssh.status(&destination) {
-                    RemoteConnectionStatus::Connected { .. } => {
-                        // The registry presents the server once its route is admitted.
-                        if ssh.server(&destination).is_some() {
-                            self.succeed(ServerChoice::Ssh(destination), window, cx);
-                            return;
-                        }
-                    }
-                    RemoteConnectionStatus::Working { .. }
-                    | RemoteConnectionStatus::Reconnecting { .. }
-                    | RemoteConnectionStatus::Cancelling => {}
-                    RemoteConnectionStatus::InstallationOffered {
-                        offer_id, platform, ..
-                    } => {
-                        let detail = if platform.0 == "linux" {
-                            "SpaceTerm may ask for your sudo password on that computer."
-                        } else {
-                            ""
-                        };
-                        self.stage = Stage::Install {
-                            destination,
-                            offer_id,
-                            detail: detail.into(),
-                        };
-                    }
-                    // The attempt ended without an outcome, as when it was cancelled elsewhere.
-                    RemoteConnectionStatus::Inactive => {
-                        self.intent = None;
-                        self.stage = Stage::Form;
-                    }
-                    status => {
-                        let presentation = present(&status);
-                        self.stage = Stage::SshProblem {
-                            destination,
-                            state: presentation.state,
-                            explanation: presentation.explanation,
-                            retry: presentation.actions.contains(&SshServerAction::Connect),
-                        };
-                    }
-                }
-            }
             Stage::Joining {
                 join: Some(join), ..
             } => {
@@ -1222,16 +1473,19 @@ impl AddServerSheet {
         self.show(window, cx);
     }
 
-    /// Selects the server the person just added and closes the sheet.
+    /// Selects the server the person just added and closes the sheet. A route whose save
+    /// SpaceTerm couldn't confirm is selected too; its own detail says so.
     fn succeed(&mut self, server: ServerChoice, window: &mut Window, cx: &mut Context<Self>) {
-        // The connection now belongs to the saved server, not to this sheet.
-        self.intent = None;
-        self.added = None;
-        self.stage = Stage::Done;
-        self.closed = true;
         let _ = self
             .settings
             .update(cx, |settings, cx| settings.select_server(server, cx));
+        self.finish(window, cx);
+    }
+
+    /// Closes the sheet with nothing left to end.
+    fn finish(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.stage = Stage::Done;
+        self.closed = true;
         match self.presentation.take() {
             Some(presentation) => {
                 let _ = presentation.complete(window, None, cx);
@@ -1242,13 +1496,15 @@ impl AddServerSheet {
     }
 
     /// Ends what this sheet started and still owns. Runs once, when the sheet closes or its
-    /// window does.
+    /// window does. A setup underway is asked to stop; it closes its own SSH resources.
     fn abandon(&mut self, cx: &mut App) {
         if self.closed {
             return;
         }
         self.closed = true;
-        self.end_attempt();
+        if let Stage::SettingUp { cancel, .. } = &self.stage {
+            cancel.cancel();
+        }
         if let (Some(direct), Some(join)) = (self.direct.clone(), self.live_join()) {
             cx.background_executor()
                 .spawn(async move {
@@ -1353,7 +1609,7 @@ impl AddServerSheet {
         })
         .unwrap_or_else(|_| div().into_any_element());
         let content = match self.method {
-            Method::Ssh => self.render_host(appearance, cx),
+            Method::Ssh => self.render_ssh(appearance, cx),
             Method::Invitation => self.render_link(appearance, cx),
         };
         div()
@@ -1372,7 +1628,7 @@ impl AddServerSheet {
         appearance: &ChromeAppearance,
         id: &'static str,
         label: &'static str,
-        description: &'static str,
+        description: SharedString,
         field: AnyElement,
         trailing: Option<AnyElement>,
         problem: Option<&'static str>,
@@ -1382,7 +1638,7 @@ impl AddServerSheet {
             .id(SharedString::from(format!("{id}-row")))
             .role(accesskit::Role::Group)
             .aria_label(label)
-            .aria_description(description)
+            .aria_description(description.clone())
             .flex()
             .flex_row()
             .items_start()
@@ -1427,7 +1683,7 @@ impl AddServerSheet {
                     .when_some(problem, |column, problem| {
                         column.child(
                             div()
-                                .id(PROBLEM_SELECTOR)
+                                .id(SharedString::from(format!("{PROBLEM_SELECTOR}-{id}")))
                                 .debug_selector(|| PROBLEM_SELECTOR.to_owned())
                                 .role(accesskit::Role::Label)
                                 .aria_value(problem)
@@ -1479,9 +1735,10 @@ impl AddServerSheet {
         .into_any_element()
     }
 
-    fn render_host(&self, appearance: &ChromeAppearance, cx: &mut Context<Self>) -> AnyElement {
+    /// The SSH method's host and network address.
+    fn render_ssh(&self, appearance: &ChromeAppearance, cx: &mut Context<Self>) -> AnyElement {
         let owner = cx.weak_entity();
-        // The SSH Hosts picker sits inside the field and fills it in; Connect still connects.
+        // The SSH Hosts picker sits inside the field and fills it in; Set Up still sets up.
         let menu = (!self.hosts.is_empty()).then(|| {
             let entries = self
                 .hosts
@@ -1510,23 +1767,46 @@ impl AddServerSheet {
                 })
                 .into_any_element()
         });
-        let field = Self::field_frame(
-            appearance,
-            HOST_SELECTOR,
-            &self.host,
-            self.host_invalid,
-            menu,
-            cx,
-        );
-        Self::field_row(
+        let host = Self::field_row(
             appearance,
             HOST_SELECTOR,
             "Host",
-            HOST_DESCRIPTION,
-            field,
+            HOST_DESCRIPTION.into(),
+            Self::field_frame(
+                appearance,
+                HOST_SELECTOR,
+                &self.host,
+                self.host_invalid,
+                menu,
+                cx,
+            ),
             None,
             self.host_invalid.then_some(HOST_INVALID),
-        )
+        );
+        let address = Self::field_row(
+            appearance,
+            ADDRESS_SELECTOR,
+            "Network Address",
+            address_description(),
+            Self::field_frame(
+                appearance,
+                ADDRESS_SELECTOR,
+                &self.address,
+                self.address_invalid,
+                None,
+                cx,
+            ),
+            None,
+            self.address_invalid.then_some(ADDRESS_INVALID),
+        );
+        div()
+            .flex()
+            .flex_col()
+            .w_full()
+            .gap(appearance.spacing(12.0))
+            .child(host)
+            .child(address)
+            .into_any_element()
     }
 
     fn render_link(&self, appearance: &ChromeAppearance, cx: &mut Context<Self>) -> AnyElement {
@@ -1573,7 +1853,7 @@ impl AddServerSheet {
             appearance,
             LINK_SELECTOR,
             "Invitation Link",
-            LINK_DESCRIPTION,
+            LINK_DESCRIPTION.into(),
             field,
             Some(paste),
             problem,
@@ -1629,42 +1909,88 @@ impl AddServerSheet {
             .into_any_element()
     }
 
-    /// Everything after the form: progress, the installation offer, a problem, or the join.
+    /// Everything after the form: setup progress, an offer, a problem, or the join.
     fn render_status(&self, appearance: &ChromeAppearance) -> AnyElement {
         let colors = appearance.host_colors(spaceterm_ui::ControlHost::Floating);
         let text = StatusText(appearance);
         match &self.stage {
-            Stage::Connecting(destination) => {
-                let explanation = self
-                    .ssh
-                    .as_ref()
-                    .map(|ssh| present(&ssh.status(destination)).explanation)
-                    .unwrap_or_default();
-                text.container(accesskit::Role::Status)
-                    .child(
-                        text.progress(
-                            "connecting",
-                            format!(
-                                "Connecting to \u{201C}{}\u{201D}\u{2026}",
-                                destination.as_str()
-                            )
-                            .into(),
-                        ),
+            Stage::SettingUp {
+                setup,
+                phase,
+                cancelling,
+                ..
+            } => {
+                let (label, detail): (SharedString, SharedString) = if *cancelling {
+                    (
+                        "Cancelling\u{2026}".into(),
+                        "SpaceTerm is closing the SSH connection. A step the server already accepted can still finish.".into(),
                     )
-                    .child(text.line("detail", explanation, colors.text_secondary))
+                } else {
+                    (
+                        format!(
+                            "Setting up \u{201C}{}\u{201D}\u{2026}",
+                            setup.destination.as_str()
+                        )
+                        .into(),
+                        phase
+                            .map(crate::ui::ssh_setup::phase_detail)
+                            .unwrap_or("Connecting over SSH\u{2026}")
+                            .into(),
+                    )
+                };
+                text.container(accesskit::Role::Status)
+                    .child(text.progress("setting-up", label))
+                    .child(text.line("detail", detail, colors.text_secondary))
                     .into_any_element()
             }
-            Stage::Install { detail, .. } if !detail.is_empty() => text
-                .container(accesskit::Role::Group)
-                .child(text.line("install", detail.clone(), colors.text))
-                .into_any_element(),
-            Stage::Install { .. } => div().into_any_element(),
-            Stage::SshProblem {
-                state, explanation, ..
-            } => text
+            Stage::Offered { setup, offer } => {
+                let lines: Vec<SharedString> = match offer {
+                    Offer::Install {
+                        version, platform, ..
+                    } => {
+                        let mut lines = vec![SharedString::from(format!(
+                            "SpaceTerm installs its signed SpaceTerm Server {version} for {} and starts it.",
+                            crate::ui::ssh_setup::platform_name(&platform.0, &platform.1)
+                        ))];
+                        if platform.0.eq_ignore_ascii_case("linux") {
+                            lines.push(
+                                "SpaceTerm may ask for your sudo password on that computer.".into(),
+                            );
+                        }
+                        lines
+                    }
+                    Offer::Start { .. } => vec![
+                        "SpaceTerm Server is installed but stopped. Starting it lets paired devices reach its Workspaces.".into(),
+                    ],
+                    Offer::Network { current, .. } => {
+                        let mut lines = vec![SharedString::from(format!(
+                            "SpaceTerm Server will accept connections from paired devices at {}. Devices must still be approved before they can connect.",
+                            setup.endpoint
+                        ))];
+                        if let Some(current) = current.filter(|current| *current != setup.endpoint) {
+                            lines.push(
+                                format!("It stops listening at {current}. Paired devices that use that address can\u{2019}t connect until they use the new one.")
+                                    .into(),
+                            );
+                        }
+                        lines
+                    }
+                };
+                let mut container = text.container(accesskit::Role::Group);
+                for (index, line) in lines.into_iter().enumerate() {
+                    container =
+                        container.child(text.line(&format!("offer-{index}"), line, colors.text));
+                }
+                container.into_any_element()
+            }
+            Stage::SetupProblem { problem, .. } => text
                 .container(accesskit::Role::Alert)
-                .child(text.line("state", SharedString::new_static(state), colors.text))
-                .child(text.line("detail", explanation.clone(), colors.text_secondary))
+                .child(text.line(
+                    "state",
+                    SharedString::new_static(problem.state),
+                    colors.text,
+                ))
+                .child(text.line("detail", problem.explanation.clone(), colors.text_secondary))
                 .into_any_element(),
             Stage::Joining { join, server } => {
                 let joining = join.and_then(|join| self.join_status(join));

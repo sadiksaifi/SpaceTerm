@@ -22,8 +22,6 @@ mod drag_and_drop;
 pub(crate) mod pane_lifecycle;
 mod pane_motion;
 pub(crate) mod permission_setup;
-pub(crate) mod remote_maintenance;
-pub(crate) mod remote_workspace_flow;
 mod render_lifecycle;
 pub(crate) mod repository_status_store;
 mod selection_chip;
@@ -40,9 +38,7 @@ pub(crate) mod settings_window;
 pub(crate) mod shared_workspaces;
 mod sidebar_motion;
 mod sidebar_window;
-pub(crate) mod ssh_host_form;
-mod ssh_host_picker;
-pub(crate) mod ssh_servers;
+pub(crate) mod ssh_setup;
 mod tab_manager;
 mod tab_view;
 mod terminal_context_menu;
@@ -63,7 +59,6 @@ mod workspace_manager;
 mod workspace_sidebar;
 mod workspace_status;
 mod worktree_form;
-pub(crate) mod worktree_path_template;
 
 use gpui::{App, actions};
 
@@ -155,9 +150,7 @@ actions!(
         CloseWorkspace,
         SwitchWorkspace,
         NewWorkspace,
-        NewRemoteWorkspace,
         OpenLocalDirectory,
-        OpenRemoteDirectory,
         NewWorktree,
         NextWorktree,
         PreviousWorktree,
@@ -347,9 +340,7 @@ mod tests {
         let expected = [
             ("cmd-shift-k", SwitchWorkspace.name()),
             ("cmd-n", NewWorkspace.name()),
-            ("cmd-shift-n", NewRemoteWorkspace.name()),
             ("cmd-o", OpenLocalDirectory.name()),
-            ("cmd-shift-o", OpenRemoteDirectory.name()),
             ("cmd-t", CreateTab.name()),
             ("cmd-w", ClosePane.name()),
             ("cmd-shift-w", CloseTab.name()),

@@ -16,6 +16,12 @@ pub(crate) mod tests;
 mod wire;
 mod wss;
 
+pub(super) fn setup_generation(operation: &[u8; 32]) -> u64 {
+    let mut generation = [0; 8];
+    generation.copy_from_slice(&operation[..8]);
+    u64::from_be_bytes(generation)
+}
+
 pub type PairingId = [u8; 32];
 pub type ClaimId = [u8; 32];
 pub type OperationId = [u8; 32];
@@ -69,6 +75,7 @@ impl NetworkPolicy {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DirectStatus {
+    pub setup_generation: u64,
     pub pin: ServerPin,
     pub policy: Option<NetworkPolicy>,
     pub server_name: String,
@@ -183,6 +190,8 @@ pub enum DirectError {
     Rejected,
     #[error("The claim changed. Review it before approving.")]
     ChangedClaim,
+    #[error("Network access changed. Review it before continuing setup.")]
+    PolicyChanged,
     #[error("The server or device did not match this connection.")]
     AuthenticationRefused,
     #[error("The server no longer matches this connection.")]
@@ -240,6 +249,10 @@ impl DeviceCredential {
     }
     pub fn expose_bytes(&self) -> &[u8] {
         &self.0
+    }
+    /// The public enrollment key. The private credential stays on its client device.
+    pub fn public_key(&self) -> Result<[u8; 32], DirectError> {
+        crypto::public(&self.0)
     }
     pub fn fingerprint(&self) -> String {
         crypto::public(&self.0)

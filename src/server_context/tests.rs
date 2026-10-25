@@ -58,7 +58,7 @@ fn device(index: u16) -> PairedDeviceFacts {
 #[test]
 fn network_and_device_display_facts_survive_relaunch_independently() {
     let (paths, _) = storage();
-    let key = ServerKey::Ssh("penguin".into());
+    let key = ServerKey::Direct([1; 32]);
     let expected = LastKnownFacts {
         network_access: Some(network(30)),
         paired_devices: Some(PairedDevicesFacts {
@@ -76,7 +76,7 @@ fn network_and_device_display_facts_survive_relaunch_independently() {
 #[test]
 fn a_newer_general_observation_cannot_erase_known_network_or_devices() {
     let (paths, _) = storage();
-    let key = ServerKey::Ssh("penguin".into());
+    let key = ServerKey::Direct([1; 32]);
     let initial = LastKnownFacts {
         network_access: Some(network(30)),
         paired_devices: Some(PairedDevicesFacts {
@@ -101,7 +101,7 @@ fn a_newer_general_observation_cannot_erase_known_network_or_devices() {
 #[test]
 fn older_general_facts_can_carry_newer_network_and_device_observations() {
     let (paths, _) = storage();
-    let key = ServerKey::Ssh("penguin".into());
+    let key = ServerKey::Direct([1; 32]);
     let mut first = ServerContext::load(paths.clone()).unwrap();
     let mut stale_window = ServerContext::load(paths.clone()).unwrap();
     first
@@ -146,7 +146,7 @@ fn older_general_facts_can_carry_newer_network_and_device_observations() {
 #[test]
 fn successful_state_and_device_reads_keep_their_own_latest_timestamps() {
     let (paths, _) = storage();
-    let key = ServerKey::Ssh("penguin".into());
+    let key = ServerKey::Direct([1; 32]);
     let mut first = ServerContext::load(paths.clone()).unwrap();
     let mut second = ServerContext::load(paths.clone()).unwrap();
     let initial = LastKnownFacts {
@@ -182,7 +182,7 @@ fn successful_state_and_device_reads_keep_their_own_latest_timestamps() {
 #[test]
 fn missing_network_display_fields_remain_unknown_rather_than_off_or_empty() {
     let (paths, filesystem) = storage();
-    let key = ServerKey::Ssh("penguin".into());
+    let key = ServerKey::Direct([1; 32]);
     let mut context = ServerContext::load(paths.clone()).unwrap();
     context
         .remember(key.clone(), facts(20, ObservedServerStatus::Running))
@@ -205,7 +205,7 @@ fn missing_network_display_fields_remain_unknown_rather_than_off_or_empty() {
 #[test]
 fn malformed_network_observations_preserve_memory_and_exact_retained_bytes() {
     let (paths, filesystem) = storage();
-    let key = ServerKey::Ssh("penguin".into());
+    let key = ServerKey::Direct([1; 32]);
     let mut context = ServerContext::load(paths).unwrap();
     let initial = LastKnownFacts {
         network_access: Some(network(30)),
@@ -277,7 +277,7 @@ fn malformed_network_observations_preserve_memory_and_exact_retained_bytes() {
 #[test]
 fn malformed_device_observations_preserve_memory_and_exact_retained_bytes() {
     let (paths, filesystem) = storage();
-    let key = ServerKey::Ssh("penguin".into());
+    let key = ServerKey::Direct([1; 32]);
     let mut context = ServerContext::load(paths).unwrap();
     let initial = LastKnownFacts {
         paired_devices: Some(PairedDevicesFacts {
@@ -342,11 +342,11 @@ fn oversized_device_facts_reject_the_whole_candidate_before_changing_memory_or_d
         })
         .collect();
     for index in 0..10 {
-        let key = ServerKey::Ssh(format!("server-{index}"));
+        let key = ServerKey::Direct([index + 1; 32]);
         let before = filesystem.files.lock().unwrap().values.clone();
         let previous: Vec<_> = (0..index)
             .map(|previous| {
-                let key = ServerKey::Ssh(format!("server-{previous}"));
+                let key = ServerKey::Direct([previous + 1; 32]);
                 let facts = context.facts(&key).cloned();
                 (key, facts)
             })
@@ -384,7 +384,7 @@ fn oversized_device_facts_reject_the_whole_candidate_before_changing_memory_or_d
 #[test]
 fn storage_unavailability_applies_only_the_validated_merged_display_facts_in_memory() {
     let (paths, filesystem) = storage();
-    let key = ServerKey::Ssh("penguin".into());
+    let key = ServerKey::Direct([1; 32]);
     let mut context = ServerContext::load(paths.clone()).unwrap();
     let initial = LastKnownFacts {
         network_access: Some(network(30)),
@@ -425,7 +425,7 @@ fn storage_unavailability_applies_only_the_validated_merged_display_facts_in_mem
 #[test]
 fn malformed_network_records_are_preserved_during_load_and_later_updates() {
     let (paths, filesystem) = storage();
-    let key = ServerKey::Ssh("penguin".into());
+    let key = ServerKey::Direct([1; 32]);
     let initial = LastKnownFacts {
         network_access: Some(network(30)),
         ..facts(20, ObservedServerStatus::Running)
@@ -455,7 +455,7 @@ fn malformed_network_records_are_preserved_during_load_and_later_updates() {
 #[test]
 fn selection_and_last_known_facts_survive_relaunch_without_connection_authority() {
     let (paths, filesystem) = storage();
-    let key = ServerKey::Ssh("penguin".into());
+    let key = ServerKey::Direct([1; 32]);
     let expected = LastKnownFacts {
         worktree_location: Some("/owning-server-only/{repository}/{branch}".into()),
         ..facts(20, ObservedServerStatus::Running)
@@ -481,7 +481,7 @@ fn selection_and_last_known_facts_survive_relaunch_without_connection_authority(
 #[test]
 fn malformed_worktree_location_observations_preserve_the_prior_retained_record() {
     let (paths, filesystem) = storage();
-    let key = ServerKey::Ssh("penguin".into());
+    let key = ServerKey::Direct([1; 32]);
     let mut context = ServerContext::load(paths.clone()).unwrap();
     let expected = LastKnownFacts {
         worktree_location: Some("~/worktrees/{repository}/{branch}".into()),
@@ -521,7 +521,7 @@ fn malformed_worktree_location_observations_preserve_the_prior_retained_record()
 #[test]
 fn a_missing_retained_worktree_location_loads_as_unknown() {
     let (paths, filesystem) = storage();
-    let key = ServerKey::Ssh("penguin".into());
+    let key = ServerKey::Direct([1; 32]);
     let mut context = ServerContext::load(paths.clone()).unwrap();
     context
         .remember(key.clone(), facts(20, ObservedServerStatus::Running))
@@ -544,7 +544,7 @@ fn a_missing_retained_worktree_location_loads_as_unknown() {
 fn removing_the_selected_server_falls_back_to_local_and_forgets_its_facts() {
     let (paths, _) = storage();
     let key = ServerKey::Direct([2; 32]);
-    let other = ServerKey::Ssh("penguin".into());
+    let other = ServerKey::Direct([1; 32]);
     let mut context = ServerContext::load(paths.clone()).unwrap();
     context.select(key.clone()).unwrap();
     context
@@ -567,7 +567,7 @@ fn removing_the_selected_server_falls_back_to_local_and_forgets_its_facts() {
 fn a_missing_remembered_server_falls_back_after_the_saved_inventory_loads() {
     let (paths, _) = storage();
     let mut context = ServerContext::load(paths.clone()).unwrap();
-    context.select(ServerKey::Ssh("removed".into())).unwrap();
+    context.select(ServerKey::Direct([2; 32])).unwrap();
     let mut restored = ServerContext::load(paths.clone()).unwrap();
     restored.reconcile(&[]).unwrap();
     assert_eq!(restored.selected(), &ServerKey::Local);
@@ -580,7 +580,7 @@ fn a_missing_remembered_server_falls_back_after_the_saved_inventory_loads() {
 #[test]
 fn delayed_observations_never_replace_newer_retained_facts() {
     let (paths, _) = storage();
-    let key = ServerKey::Ssh("penguin".into());
+    let key = ServerKey::Direct([1; 32]);
     let mut first = ServerContext::load(paths.clone()).unwrap();
     let mut delayed = ServerContext::load(paths.clone()).unwrap();
     let expected = facts(20, ObservedServerStatus::Stopped);
@@ -597,7 +597,7 @@ fn delayed_observations_never_replace_newer_retained_facts() {
 #[test]
 fn remembering_facts_does_not_overwrite_another_windows_selection() {
     let (paths, _) = storage();
-    let key = ServerKey::Ssh("penguin".into());
+    let key = ServerKey::Direct([1; 32]);
     let mut first = ServerContext::load(paths.clone()).unwrap();
     let mut second = ServerContext::load(paths.clone()).unwrap();
     first.select(key.clone()).unwrap();
@@ -610,7 +610,7 @@ fn remembering_facts_does_not_overwrite_another_windows_selection() {
 #[test]
 fn failed_retention_still_removes_a_selected_server_from_presentation() {
     let (paths, filesystem) = storage();
-    let key = ServerKey::Ssh("penguin".into());
+    let key = ServerKey::Direct([1; 32]);
     let mut context = ServerContext::load(paths).unwrap();
     context.select(key).unwrap();
     filesystem.files.lock().unwrap().prepare_error = Some(SecureFilesystemError::Unavailable);
@@ -622,7 +622,7 @@ fn failed_retention_still_removes_a_selected_server_from_presentation() {
 fn malformed_storage_is_preserved_when_using_the_inert_local_fallback() {
     let (paths, filesystem) = storage();
     let mut context = ServerContext::load(paths.clone()).unwrap();
-    context.select(ServerKey::Ssh("penguin".into())).unwrap();
+    context.select(ServerKey::Direct([1; 32])).unwrap();
     {
         let mut files = filesystem.files.lock().unwrap();
         files.values.values_mut().next().unwrap().0 = b"malformed".to_vec();

@@ -19,7 +19,15 @@ def configure_trust(root):
     path.write_bytes(plistlib.dumps(info))
 
 
-def prepare(root, environment, release_tag=None, fingerprint=None, credentials=None):
+def prepare(
+    root,
+    environment,
+    release_tag=None,
+    fingerprint=None,
+    credentials=None,
+    *,
+    include_catalog=False,
+):
     commit = subprocess.run(
         ["git", "rev-parse", "HEAD"], cwd=root, check=True, capture_output=True, text=True
     ).stdout.strip()
@@ -109,10 +117,9 @@ int main(int argc, char **argv) {{
     archive, signature = archive_tree(root, tree, expected)
     environment["SPACETERM_SERVER_ARCHIVE"] = str(archive)
     environment["SPACETERM_SERVER_SIGNATURE"] = str(signature)
-    environment.pop("SPACETERM_SSH_SERVER_ARTIFACTS", None)
-    if release_tag:
-        # Native production checks run above. A release fixture also needs a signed
-        # foreign target, which catalog verification never executes on this host.
+    environment.pop("SPACETERM_SERVER_ARTIFACTS", None)
+    if release_tag or include_catalog:
+        # Catalog verification checks both signed targets and executes only the native one.
         catalog = directory / "catalog"
         local = catalog / expected["target"]
         local.mkdir(parents=True)
@@ -135,7 +142,7 @@ int main(int argc, char **argv) {{
         shutil.copyfile(other_archive, output / "artifact.tar.gz")
         shutil.copyfile(other_signature, output / "artifact.sig")
         (output / "artifact.sha256").write_text(release.sha256(other_archive) + "\n")
-        environment["SPACETERM_SSH_SERVER_ARTIFACTS"] = str(catalog)
+        environment["SPACETERM_SERVER_ARTIFACTS"] = str(catalog)
     return archive, signature
 
 

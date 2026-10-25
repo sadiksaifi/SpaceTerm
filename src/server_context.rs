@@ -4,13 +4,10 @@ use std::{collections::BTreeSet, ffi::OsStr, net::SocketAddr, sync::Arc};
 use serde::{Deserialize, Serialize};
 use spaceterm_server::{direct::NetworkAddresses, repository::GitToolStatus};
 
-use crate::{
-    domain::SshDestination,
-    platform::{
-        app_directories::AppDirectoryRoot,
-        app_paths::AppPaths,
-        secure_filesystem::{PrivateFileSnapshot, SecureCommitOutcome, SecureFilesystemError},
-    },
+use crate::platform::{
+    app_directories::AppDirectoryRoot,
+    app_paths::AppPaths,
+    secure_filesystem::{PrivateFileSnapshot, SecureCommitOutcome, SecureFilesystemError},
 };
 
 const FILE: &str = "server-context.json";
@@ -25,7 +22,6 @@ const MAX_CONNECTION_TIME: u64 = 253_402_300_799;
 pub(crate) enum ServerKey {
     #[default]
     Local,
-    Ssh(String),
     Direct([u8; 32]),
 }
 
@@ -33,7 +29,6 @@ impl std::fmt::Debug for ServerKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
             Self::Local => "ServerKey::Local",
-            Self::Ssh(_) => "ServerKey::Ssh(..)",
             Self::Direct(_) => "ServerKey::Direct(..)",
         })
     }
@@ -43,11 +38,6 @@ impl ServerKey {
     fn validate(&self) -> Result<(), ContextError> {
         match self {
             Self::Local => Ok(()),
-            Self::Ssh(destination) if destination.len() <= 255 => {
-                SshDestination::new(destination.clone())
-                    .map(drop)
-                    .map_err(|_| ContextError::Malformed)
-            }
             Self::Direct(id) if *id != [0; 32] => Ok(()),
             _ => Err(ContextError::Malformed),
         }
@@ -407,10 +397,7 @@ impl ServerContext {
         self.paths
             .filesystem()
             .read_private_file(&directory, OsStr::new(FILE), MAX_BYTES)
-            .map_err(|error| match error {
-                SecureFilesystemError::TooLarge => ContextError::Malformed,
-                _ => ContextError::Unavailable,
-            })
+            .map_err(|_| ContextError::Unavailable)
     }
 
     fn decode(snapshot: Option<&PrivateFileSnapshot>) -> Result<Document, ContextError> {

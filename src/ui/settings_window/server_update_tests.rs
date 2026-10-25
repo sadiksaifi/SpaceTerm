@@ -13,11 +13,11 @@ use super::{
     UpdateState, UpdateStep, present_update,
 };
 use crate::appearance::Appearance;
-use crate::local_server::ServerError;
-use crate::local_server::service::activation::{ActivationPhase, ActivationStatus};
 use crate::local_startup::CandidateError;
 use crate::platform::appearance::testing::RecordingAppearancePlatform;
 use crate::platform::window_movement::RecordingOperatingSystemWindowDragPlatform;
+use crate::server_connection::ServerError;
+use crate::server_connection::service::activation::{ActivationPhase, ActivationStatus};
 use crate::settings::SettingsDocument;
 use crate::settings::storage::testing::MemoryStorage;
 use crate::ui::appearance_runtime;
@@ -171,6 +171,7 @@ fn a_confirmed_update_replaces_the_running_server_once(cx: &mut TestAppContext) 
     let mut harness = open(available(), cx);
     let inventory_refreshes = Rc::new(std::cell::Cell::new(0));
     let (inventory, _observation) = harness.cx.update(|_, cx| {
+        crate::ui::updates::server_rows::testing::install_up_to_date(cx);
         let inventory = cx.new(crate::ui::updates::server_rows::ServerUpdates::new);
         let refreshes = inventory_refreshes.clone();
         let observation = cx.observe(&inventory, move |_, _| {
@@ -240,7 +241,7 @@ fn cancelling_the_confirmation_changes_nothing(cx: &mut TestAppContext) {
 #[test]
 fn the_confirmation_names_the_candidate_and_every_clients_sessions() {
     let prepared = |running, stopped| super::PreparedChange {
-        change: crate::local_server::service::control::UpdateChange::Update,
+        change: crate::server_connection::service::control::UpdateChange::Update,
         previous: approved(),
         candidate: included(),
         running,
@@ -270,7 +271,7 @@ fn the_confirmation_names_the_candidate_and_every_clients_sessions() {
 
 #[test]
 fn builds_of_one_version_and_commit_are_told_apart_by_their_package() {
-    use crate::local_server::service::control::{BuildName, build_labels};
+    use crate::server_connection::service::control::{BuildName, build_labels};
     let name = |package| BuildName {
         version: "1.5.0",
         commit: "bbbbbbbbbb",

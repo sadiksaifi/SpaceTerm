@@ -40,16 +40,8 @@ pub(super) fn profile(
             Some(DefaultBinding::new("ctrl-shift-n", &[])),
         ),
         (
-            Command::NewRemoteWorkspace,
-            Some(DefaultBinding::new("ctrl-shift-alt-n", &[])),
-        ),
-        (
             Command::OpenLocalDirectory,
             Some(DefaultBinding::new("ctrl-shift-o", &[])),
-        ),
-        (
-            Command::OpenRemoteDirectory,
-            Some(DefaultBinding::new("ctrl-shift-alt-o", &[])),
         ),
         (Command::NewWorktree, None),
         (
@@ -539,7 +531,6 @@ mod tests {
         let resolved = profile().resolve(&KeybindingPreferences::default());
         for (command, dispatch) in [
             (Command::SwitchWorkspace, &["ctrl-shift-k"][..]),
-            (Command::NewRemoteWorkspace, &["ctrl-alt-shift-n"]),
             (Command::CreateTab, &["ctrl-shift-t"]),
             (Command::CloseTab, &["ctrl-alt-shift-w"]),
             (Command::NextWorktree, &["ctrl-alt-}"]),

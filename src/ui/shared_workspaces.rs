@@ -57,7 +57,7 @@ mod development {
 
     use crate::close_confirmation::CloseTarget;
     use crate::domain::{PaneId, TabId, ValidatedLocalDirectory, WorkspaceId};
-    use crate::local_server::LocalServer;
+    use crate::server_connection::ServerConnection;
     use crate::terminal::WorkspaceTerminalSessionFactory;
     use crate::terminal::server_session::{DevelopmentServerSessionFactory, PaneControls};
     use crate::terminal::shared_workspace::{SharedWorkspaceClient, SharedWorkspaceSnapshot};
@@ -632,14 +632,13 @@ mod development {
             None
         }
 
-        /// The SSH destination of another computer's server, or `None` for this computer's
-        /// and for one reached over a direct network connection.
-        fn remote_destination(&self) -> Option<&crate::domain::SshDestination> {
-            None
+        /// The name another computer's server displays by, or `None` for this computer's.
+        fn remote_display(&self) -> Option<String> {
+            self.direct_route().map(|direct| direct.display())
         }
 
-        /// The direct network route reaching another computer's server, if that is how this
-        /// client reaches it.
+        /// The paired route reaching another computer's server, if that is how this client
+        /// reaches it.
         fn direct_route(&self) -> Option<&DirectServer> {
             None
         }
@@ -654,35 +653,21 @@ mod development {
     }
 
     impl DirectServer {
-        /// The machine name the Panes' terminal metadata displays for this server.
-        ///
-        /// Terminal metadata names a remote machine with an SSH Destination value, so this
-        /// spells the server's self-chosen name as one. It is a display label only: a
-        /// server-backed Pane reads no Repository Status and starts no SSH launch, and Retry and
-        /// every heading command reach the server through its direct route, so nothing connects
-        /// to this value or gains authority from it. A name that leaves nothing to show reads as
-        /// a generic server.
-        fn machine(&self) -> Option<crate::domain::SshDestination> {
-            let label: String = self
-                .name
-                .chars()
-                .map(|character| match character {
-                    // An account prefix would read as the Pane's user, which the name never
-                    // proves.
-                    '@' => '-',
-                    character if character.is_whitespace() || character.is_control() => '-',
-                    character => character,
-                })
-                .collect();
-            crate::domain::SshDestination::new(label.trim_start_matches('-').to_owned())
-                .or_else(|_| crate::domain::SshDestination::new("server".to_owned()))
-                .ok()
+        /// The label the Panes' terminal metadata displays for this server. It grants nothing,
+        /// and a name that leaves nothing to show reads as a generic server.
+        fn display(&self) -> String {
+            let name = self.name.trim();
+            if name.is_empty() {
+                "server".to_owned()
+            } else {
+                name.to_owned()
+            }
         }
     }
 
     /// The local server's own Panes.
     struct LocalServerPanes {
-        server: LocalServer,
+        server: ServerConnection,
         controls: Arc<PaneControls>,
         /// Completes the launch plan the server factory ignores. It is client launch scaffolding
         /// and never a directory the server's Terminal Session starts in.
@@ -717,21 +702,12 @@ mod development {
         }
     }
 
-    /// How this client reaches another computer's server, which decides what Retry may ask.
-    enum RemoteRoute {
-        Ssh(crate::domain::SshDestination),
-        Direct(DirectServer),
-    }
-
-    /// Another computer's server Panes, reached through an SSH account route or a direct network
-    /// route. Nothing here grants local file authority: the server's paths and links name files
-    /// on that computer.
+    /// Another computer's server Panes, reached over a paired route. Nothing here grants local
+    /// file authority: the server's paths and links name files on that computer.
     struct RemoteServerPanes {
-        server: LocalServer,
+        server: ServerConnection,
         controls: Arc<PaneControls>,
-        route: RemoteRoute,
-        /// The machine the Panes' terminal metadata names.
-        destination: crate::domain::SshDestination,
+        direct: DirectServer,
         /// Completes the launch plan the server factory ignores, as for the local server.
         client_home: ValidatedLocalDirectory,
     }
@@ -741,25 +717,15 @@ mod development {
             WorkspaceTerminalSessionFactory::pending(self.client_home.clone())
         }
 
-        fn remote_destination(&self) -> Option<&crate::domain::SshDestination> {
-            match &self.route {
-                RemoteRoute::Ssh(destination) => Some(destination),
-                RemoteRoute::Direct(_) => None,
-            }
-        }
-
         fn direct_route(&self) -> Option<&DirectServer> {
-            match &self.route {
-                RemoteRoute::Direct(server) => Some(server),
-                RemoteRoute::Ssh(_) => None,
-            }
+            Some(&self.direct)
         }
 
         fn open(&self, pane: Id) -> Option<SharedPaneSubscription> {
             let (factory, state) = DevelopmentServerSessionFactory::for_remote_pane(
                 self.server.clone(),
                 &self.controls,
-                self.destination.clone(),
+                self.direct.display(),
                 pane,
             );
             let permit = self.server.attachments().ok()?.permit(pane)?;
@@ -784,7 +750,7 @@ mod development {
 
     impl SharedPaneSessions {
         pub(crate) fn new(
-            server: LocalServer,
+            server: ServerConnection,
             controls: Arc<PaneControls>,
             client_home: ValidatedLocalDirectory,
             local_files: crate::platform::local_filesystem::LocalFilesystemAuthority,
@@ -801,11 +767,12 @@ mod development {
             )
         }
 
-        /// Another computer's server Panes. They take no local file authority.
-        pub(crate) fn remote(
-            server: LocalServer,
+        /// Panes of another computer's server reached over a paired route. They take no local
+        /// file authority.
+        pub(crate) fn direct(
+            server: ServerConnection,
             controls: Arc<PaneControls>,
-            destination: crate::domain::SshDestination,
+            direct: DirectServer,
             client_home: ValidatedLocalDirectory,
             panes: &PaneConstruction,
         ) -> Self {
@@ -813,34 +780,11 @@ mod development {
                 Rc::new(RemoteServerPanes {
                     server,
                     controls,
-                    route: RemoteRoute::Ssh(destination.clone()),
-                    destination,
+                    direct,
                     client_home,
                 }),
                 panes,
             )
-        }
-
-        /// Panes of another computer's server reached over a direct network route, or `None` if
-        /// its name yields no machine label.
-        pub(crate) fn direct(
-            server: LocalServer,
-            controls: Arc<PaneControls>,
-            direct: DirectServer,
-            client_home: ValidatedLocalDirectory,
-            panes: &PaneConstruction,
-        ) -> Option<Self> {
-            let destination = direct.machine()?;
-            Some(Self::with_opener(
-                Rc::new(RemoteServerPanes {
-                    server,
-                    controls,
-                    destination,
-                    route: RemoteRoute::Direct(direct),
-                    client_home,
-                }),
-                panes,
-            ))
         }
 
         pub(crate) fn with_opener(
@@ -860,23 +804,15 @@ mod development {
             self.opener.local_filesystem()
         }
 
-        /// The SSH destination of another computer's server, or `None` for this computer's. Only
-        /// this computer's server takes Start Server from this client.
-        pub(crate) fn remote_destination(&self) -> Option<&crate::domain::SshDestination> {
-            self.opener.remote_destination()
-        }
-
-        /// The direct network route reaching another computer's server, if any.
+        /// The paired route reaching another computer's server, if any.
         pub(crate) fn direct_route(&self) -> Option<&DirectServer> {
             self.opener.direct_route()
         }
 
-        /// The name of another computer's server, however this client reaches it, or `None` for
-        /// this computer's.
+        /// The name of another computer's server, or `None` for this computer's. Only this
+        /// computer's server takes Start Server from this client.
         pub(crate) fn remote_name(&self) -> Option<SharedString> {
-            self.remote_destination()
-                .map(|destination| SharedString::from(destination.as_str().to_owned()))
-                .or_else(|| self.direct_route().map(|direct| direct.name.clone()))
+            self.opener.remote_display().map(SharedString::from)
         }
 
         pub(crate) const fn panes(&self) -> &PaneConstruction {
@@ -902,15 +838,15 @@ mod development {
 
         /// Reads the Terminal Metadata the server published for one of its Panes with this
         /// route's locality, or `None` if the publication is malformed. Only this computer's
-        /// server names local directories. An SSH route names the machine as its destination
-        /// does, and a direct route by the host the server reports.
+        /// server names local directories; another computer's server is named by its display
+        /// label.
         pub(crate) fn metadata(
             &self,
             published: &spaceterm_server::pane::metadata::Snapshot,
         ) -> Option<Arc<crate::terminal::metadata::TerminalMetadataSnapshot>> {
-            let remote = self.remote_destination().map(|destination| {
+            let remote = self.opener.remote_display().map(|display| {
                 crate::terminal::metadata::RemoteTerminalMetadataContext::new(
-                    destination.clone(),
+                    display,
                     crate::domain::RemoteDirectory::home(),
                 )
             });
@@ -1475,7 +1411,7 @@ mod development {
             })
         }
 
-        pub(crate) fn retain_client_views(&mut self, server: LocalServer) {
+        pub(crate) fn retain_client_views(&mut self, server: ServerConnection) {
             self.retained_views = Some(crate::ui::client_view_state::RetainedClientViews::new(
                 server,
             ));
@@ -1498,7 +1434,7 @@ mod development {
         /// Wait for the saved arrangement before applying the first inventory.
         pub(crate) fn prepare_client_views(
             &mut self,
-        ) -> Result<bool, crate::local_server::ServerError> {
+        ) -> Result<bool, crate::server_connection::ServerError> {
             if self.saved_views.is_some() || self.retained_views.is_none() {
                 return Ok(true);
             }
@@ -2480,7 +2416,6 @@ mod development {
             take_overs: std::sync::atomic::AtomicUsize,
             restored_starts: std::sync::atomic::AtomicUsize,
             retries: std::sync::atomic::AtomicUsize,
-            stops: std::sync::atomic::AtomicUsize,
         }
 
         impl ScriptedPane {
@@ -2498,7 +2433,6 @@ mod development {
                     take_overs: std::sync::atomic::AtomicUsize::new(0),
                     restored_starts: std::sync::atomic::AtomicUsize::new(0),
                     retries: std::sync::atomic::AtomicUsize::new(0),
-                    stops: std::sync::atomic::AtomicUsize::new(0),
                 })
             }
 
@@ -2579,11 +2513,6 @@ mod development {
             pub(crate) fn retries(&self) -> usize {
                 self.retries.load(std::sync::atomic::Ordering::SeqCst)
             }
-
-            /// How many times the Pane heard that its route reported the server stopped.
-            pub(crate) fn stops(&self) -> usize {
-                self.stops.load(std::sync::atomic::Ordering::SeqCst)
-            }
         }
 
         impl crate::ui::server_pane::ServerPaneConnection for ScriptedPane {
@@ -2624,25 +2553,6 @@ mod development {
                     .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             }
 
-            /// Reports the stop as the real connection does: an interrupted Pane says the server
-            /// stopped.
-            fn report_server_stopped(&self) {
-                use crate::terminal::server_session::DevelopmentPaneStatus;
-                self.stops.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                let mut status = self.status.lock().expect("status");
-                *status = match *status {
-                    DevelopmentPaneStatus::Reconnecting => {
-                        DevelopmentPaneStatus::Failed(crate::local_server::ServerError::Stopped)
-                    }
-                    DevelopmentPaneStatus::TakeoverReconnecting => {
-                        DevelopmentPaneStatus::TakeoverFailed(
-                            crate::local_server::ServerError::Stopped,
-                        )
-                    }
-                    current => current,
-                };
-            }
-
             fn take_over(&self) {
                 self.take_overs
                     .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -2664,8 +2574,6 @@ mod development {
             local_files: crate::platform::local_filesystem::LocalFilesystemAuthority,
             session_factory: crate::terminal::WorkspaceTerminalSessionFactory,
             panes: Mutex<std::collections::BTreeMap<super::Id, std::sync::Arc<ScriptedPane>>>,
-            /// The SSH destination of a scripted server on another computer.
-            remote: Option<crate::domain::SshDestination>,
         }
 
         impl ScriptedPanes {
@@ -2676,20 +2584,6 @@ mod development {
                     local_files: crate::runtime::local_filesystem(),
                     session_factory,
                     panes: Mutex::new(std::collections::BTreeMap::new()),
-                    remote: None,
-                })
-            }
-
-            /// Scripted Panes of a server on another computer, which take no local file authority.
-            pub(crate) fn remote(
-                session_factory: crate::terminal::WorkspaceTerminalSessionFactory,
-                destination: crate::domain::SshDestination,
-            ) -> std::rc::Rc<Self> {
-                std::rc::Rc::new(Self {
-                    local_files: crate::runtime::local_filesystem(),
-                    session_factory,
-                    panes: Mutex::new(std::collections::BTreeMap::new()),
-                    remote: Some(destination),
                 })
             }
 
@@ -2727,11 +2621,7 @@ mod development {
             fn local_filesystem(
                 &self,
             ) -> Option<&crate::platform::local_filesystem::LocalFilesystemAuthority> {
-                self.remote.is_none().then_some(&self.local_files)
-            }
-
-            fn remote_destination(&self) -> Option<&crate::domain::SshDestination> {
-                self.remote.as_ref()
+                Some(&self.local_files)
             }
 
             fn open(&self, pane: super::Id) -> Option<super::SharedPaneSubscription> {

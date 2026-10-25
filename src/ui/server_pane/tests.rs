@@ -2,7 +2,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use super::{ServerPaneConnection, ServerPaneScreen, ServerPaneView};
-use crate::local_server::ServerError;
+use crate::server_connection::ServerError;
 use crate::terminal::server_session::DevelopmentPaneStatus;
 use spaceterm_server::pane::control::Controller;
 

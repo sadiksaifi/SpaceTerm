@@ -654,7 +654,7 @@ mod tests {
         let mut record = data.read_or_create().unwrap();
         let first = crate::organization::Organization::first(fixture.0.clone()).unwrap();
         record.organization = Some(
-            crate::hierarchy::State::from_legacy(&first)
+            crate::hierarchy::State::from_organization(&first)
                 .envelope(&fixture.0)
                 .unwrap(),
         );
@@ -865,7 +865,7 @@ mod tests {
         organization.name = "Retained work".into();
         organization.pinned_directory = Some(fixture.0.clone());
         organization.confirmed_directory = Some("/".into());
-        let mut shared = crate::hierarchy::State::from_legacy(&organization);
+        let mut shared = crate::hierarchy::State::from_organization(&organization);
         let creation = crate::hierarchy::Mutation::CreateTab {
             workspace: organization.workspace,
             source: None,
@@ -888,7 +888,7 @@ mod tests {
         assert_eq!(recovered.server, [42; 32]);
         assert!(recovered.organization.as_ref() == Some(&organization));
         let mut restored =
-            crate::hierarchy::State::from_legacy(recovered.organization.as_ref().unwrap());
+            crate::hierarchy::State::from_organization(recovered.organization.as_ref().unwrap());
         assert_eq!(
             restored
                 .apply([42; 32], 1, creation, &fixture.0, |_| true)

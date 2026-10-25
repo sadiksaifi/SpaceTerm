@@ -31,6 +31,7 @@ mod background_image;
     )
 )]
 mod bundled_font;
+mod cancellation;
 #[cfg_attr(
     not(feature = "desktop"),
     allow(
@@ -120,4 +121,4 @@ pub mod local_startup;
 pub mod runtime;
 
 #[cfg(feature = "desktop")]
-pub(crate) use spaceterm_server as local_server;
+pub(crate) use spaceterm_server as server_connection;

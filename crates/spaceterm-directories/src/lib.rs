@@ -8,7 +8,6 @@ use thiserror::Error;
 pub const APP_DIR_NAME: &str = "spaceterm";
 pub const SETTINGS_BACKUP_NAME: &str = "settings.json.bak";
 const SETTINGS_DOCUMENT_NAME: &str = "settings.json";
-const MANAGED_SSH_CONFIG_NAME: &str = "ssh_config";
 
 const HOME_ENVIRONMENT_VARIABLE: &str = "HOME";
 const TMPDIR_ENVIRONMENT_VARIABLE: &str = "TMPDIR";
@@ -66,45 +65,6 @@ pub enum AppDirectoryRoot {
     Data,
     State,
     Cache,
-}
-
-#[derive(Clone, Eq, PartialEq)]
-pub struct AppDirectoryFile {
-    root: AppDirectoryRoot,
-    path: PathBuf,
-    name: &'static str,
-}
-
-impl AppDirectoryFile {
-    fn new(root: AppDirectoryRoot, directory: &Path, name: &'static str) -> Self {
-        Self {
-            root,
-            path: directory.join(name),
-            name,
-        }
-    }
-
-    pub fn root(&self) -> AppDirectoryRoot {
-        self.root
-    }
-
-    pub fn path(&self) -> &Path {
-        &self.path
-    }
-
-    pub fn file_name(&self) -> &OsStr {
-        OsStr::new(self.name)
-    }
-
-    pub fn into_path(self) -> PathBuf {
-        self.path
-    }
-}
-
-impl std::fmt::Debug for AppDirectoryFile {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("AppDirectoryFile(..)")
-    }
 }
 
 /// Semantic storage locations shared by every platform adapter.
@@ -227,14 +187,6 @@ impl AppDirectories {
         self.config.join(SETTINGS_BACKUP_NAME)
     }
 
-    pub fn managed_ssh_config(&self) -> AppDirectoryFile {
-        AppDirectoryFile::new(
-            AppDirectoryRoot::Config,
-            &self.config,
-            MANAGED_SSH_CONFIG_NAME,
-        )
-    }
-
     pub fn with_config_directory(mut self, config: PathBuf) -> Self {
         self.config = config;
         self
@@ -353,8 +305,7 @@ fn absolute_environment_path(value: Option<&OsStr>) -> Option<PathBuf> {
 /// Ownership and permissions are checked when creating or opening the runtime directory.
 #[cfg(target_os = "macos")]
 fn temporary_runtime_name(app_name: &str) -> String {
-    // OpenSSH appends 17 bytes while binding a ControlPath. Keep the identity-specific
-    // runtime root short enough for the account's native temporary directory.
+    // Native socket paths include this root and the account's temporary directory.
     match app_name {
         "spaceterm" => "st",
         "spaceterm-preflight" => "st-p",
@@ -659,14 +610,6 @@ mod tests {
             directories.settings_backup_file(),
             Path::new("/home/test/.config/spaceterm/settings.json.bak")
         );
-        assert_eq!(
-            directories.managed_ssh_config().path(),
-            Path::new("/home/test/.config/spaceterm/ssh_config")
-        );
-        assert_eq!(
-            directories.managed_ssh_config().root(),
-            AppDirectoryRoot::Config
-        );
     }
 
     #[test]
@@ -683,10 +626,6 @@ mod tests {
         assert_eq!(
             directories.settings_backup_file(),
             Path::new("/isolated/spaceterm/settings.json.bak")
-        );
-        assert_eq!(
-            directories.managed_ssh_config().path(),
-            Path::new("/isolated/spaceterm/ssh_config")
         );
     }
 

@@ -312,7 +312,7 @@ fn inventory_observers_receive_unpainted_pane_metadata_without_claiming_control(
 fn presentation_is_excluded_from_retained_organization_and_maximum_inventory_fits_a_frame() {
     use spaceterm_server::hierarchy::{MAX_PANES, State};
     let organization = Organization::first("/tmp".into()).unwrap();
-    let mut state = State::from_legacy(&organization);
+    let mut state = State::from_organization(&organization);
     let tracker = MetadataTracker::new(
         LocalPathSemantics::Posix,
         "/tmp",
@@ -356,7 +356,7 @@ fn presentation_is_excluded_from_retained_organization_and_maximum_inventory_fit
 }
 
 #[test]
-fn ssh_presentation_preserves_destination_alias_and_spelled_account() {
+fn remote_presentation_uses_server_facts_without_parsing_display_as_ssh_authority() {
     let tracker = MetadataTracker::new(
         LocalPathSemantics::Posix,
         "/srv/api",
@@ -368,30 +368,25 @@ fn ssh_presentation_preserves_destination_alias_and_spelled_account() {
         ),
         Instant::now(),
     );
-    for (destination, expected_user) in [
-        ("build-alias", "discovered"),
-        ("selected@build-alias", "selected"),
-    ] {
-        let context = RemoteTerminalMetadataContext::new(
-            crate::domain::SshDestination::new(destination.into()).unwrap(),
-            crate::domain::RemoteDirectory::home(),
-        );
-        let decoded =
-            server_metadata::decode(metadata::encode(&tracker.snapshot()), None, Some(&context))
-                .unwrap();
-        assert_eq!(
-            decoded.context.origin(),
-            TerminalOrigin::Remote {
-                user: Some(expected_user),
-                host: "build-alias"
-            }
-        );
-        assert_eq!(decoded.context.home(), Some("/home/discovered"));
-        assert_eq!(
-            decoded.context.local_file_capabilities(),
-            TerminalLocalFileCapabilities::Disabled
-        );
-    }
+    let context = RemoteTerminalMetadataContext::new(
+        "selected@display label".into(),
+        crate::domain::RemoteDirectory::home(),
+    );
+    let decoded =
+        server_metadata::decode(metadata::encode(&tracker.snapshot()), None, Some(&context))
+            .unwrap();
+    assert_eq!(
+        decoded.context.origin(),
+        TerminalOrigin::Remote {
+            user: Some("discovered"),
+            host: "host.internal"
+        }
+    );
+    assert_eq!(decoded.context.home(), Some("/home/discovered"));
+    assert_eq!(
+        decoded.context.local_file_capabilities(),
+        TerminalLocalFileCapabilities::Disabled
+    );
 }
 
 #[test]

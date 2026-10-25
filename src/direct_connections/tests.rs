@@ -101,7 +101,7 @@ impl DirectNetwork for WaitingNetwork {
         route: &DirectRoute,
         credential: DeviceCredential,
         gate: Arc<AtomicBool>,
-    ) -> Result<LocalServer, DirectError> {
+    ) -> Result<ServerConnection, DirectError> {
         self.cleanup.connect(identity, route, credential, gate)
     }
     fn revoke(
@@ -215,7 +215,7 @@ impl DirectNetwork for Network {
         _: &DirectRoute,
         _: DeviceCredential,
         _: Arc<AtomicBool>,
-    ) -> Result<LocalServer, DirectError> {
+    ) -> Result<ServerConnection, DirectError> {
         panic!("inactive or removed routes must not connect")
     }
     fn revoke(
@@ -369,9 +369,69 @@ pub(crate) fn offline_with_lock(label: &str) -> (DirectConnections, DirectRouteI
     (connections, id, lock)
 }
 
-/// Offline saved routes named `labels`, in order, each keeping its own credential.
+/// Active saved routes named `labels`, in order, each keeping its own credential.
+/// Native workers retry the unavailable network; GPUI callers allow native I/O.
 pub(crate) fn offline_routes(labels: &[&str]) -> (DirectConnections, Vec<DirectRouteId>) {
     let (connections, ids, _, _) = offline_fixture_routes(labels);
+    (connections, ids)
+}
+
+/// Connected registry entries for UI tests that supply their own protocol writers.
+/// Native workers admit and refresh routes; GPUI callers allow native I/O.
+/// The network boundary admits the route; its handle cannot reach a native server.
+pub(crate) fn connected_routes(labels: &[&str]) -> (DirectConnections, Vec<DirectRouteId>) {
+    struct ConnectedNetwork;
+    impl DirectNetwork for ConnectedNetwork {
+        fn connect(
+            &self,
+            identity: &str,
+            route: &DirectRoute,
+            _: DeviceCredential,
+            _: Arc<AtomicBool>,
+        ) -> Result<ServerConnection, DirectError> {
+            struct Unreachable;
+            impl direct::DirectConnector for Unreachable {
+                fn connect(&self) -> Result<direct::DirectConnection, DirectError> {
+                    Err(DirectError::Transport)
+                }
+            }
+            ServerConnection::direct(
+                identity,
+                route.id,
+                route.paired.clone(),
+                Arc::new(Unreachable),
+            )
+            .map_err(DirectError::from)
+        }
+
+        fn revoke(
+            &self,
+            _: &str,
+            _: &PairedDevice,
+            _: &DeviceCredential,
+            _: UnpairKey,
+            _: PairingId,
+        ) -> Result<direct::RevocationReceipt, DirectError> {
+            Err(DirectError::Transport)
+        }
+
+        fn cancel_enrollment(
+            &self,
+            _: &str,
+            _: &direct::ServerPin,
+            _: [u8; 32],
+            _: &DeviceCredential,
+        ) -> Result<Option<direct::RevocationReceipt>, DirectError> {
+            Err(DirectError::Transport)
+        }
+    }
+    let routes: Vec<_> = labels.iter().map(|label| (*label, None)).collect();
+    let (connections, ids, _, _) =
+        retained_fixture_routes(&routes, true, Arc::new(ConnectedNetwork));
+    await_condition(|| {
+        ids.iter()
+            .all(|id| connections.status(id) == Some(DirectRouteStatus::Connected))
+    });
     (connections, ids)
 }
 
@@ -430,7 +490,7 @@ fn offline_fixture_reached(
             _: &DirectRoute,
             _: DeviceCredential,
             _: Arc<AtomicBool>,
-        ) -> Result<LocalServer, DirectError> {
+        ) -> Result<ServerConnection, DirectError> {
             Err(DirectError::Transport)
         }
         fn revoke(
@@ -453,6 +513,19 @@ fn offline_fixture_reached(
             Err(DirectError::Transport)
         }
     }
+    retained_fixture_routes(routes, active, Arc::new(OfflineNetwork))
+}
+
+fn retained_fixture_routes(
+    routes: &[(&str, Option<&str>)],
+    active: bool,
+    network: Arc<dyn DirectNetwork>,
+) -> (
+    DirectConnections,
+    Vec<DirectRouteId>,
+    CredentialLock,
+    Arc<MemoryRecords>,
+) {
     let records = Arc::new(MemoryRecords::default());
     let credentials = Arc::new(Credentials::default());
     let mut ids = Vec::new();
@@ -476,7 +549,7 @@ fn offline_fixture_reached(
         "spaceterm-development",
         records.clone(),
         credentials.clone(),
-        Arc::new(OfflineNetwork),
+        network,
     );
     connections.resume_retained();
     (connections, ids, CredentialLock(credentials), records)
@@ -668,7 +741,7 @@ fn disconnect_then_connect_ignores_the_previous_attempt_and_never_reopens_its_ga
             _: &DirectRoute,
             _: DeviceCredential,
             gate: Arc<AtomicBool>,
-        ) -> Result<LocalServer, DirectError> {
+        ) -> Result<ServerConnection, DirectError> {
             self.started.send(gate).unwrap();
             let _ = self
                 .finish

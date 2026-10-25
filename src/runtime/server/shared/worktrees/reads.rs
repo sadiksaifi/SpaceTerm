@@ -7,7 +7,7 @@ pub(super) struct PreparedRead {
     pub approval: Option<Approval>,
 }
 struct Job {
-    token: SshCancellationToken,
+    token: CancellationToken,
     worker: std::thread::JoinHandle<Result<PreparedRead, Error>>,
     deadline: Instant,
 }
@@ -69,7 +69,7 @@ impl Reads {
         }
         let id = self.next.checked_add(1).ok_or(Error::Unavailable)?;
         self.next = id;
-        let token = SshCancellationToken::default();
+        let token = CancellationToken::default();
         let cancellation = token.clone();
         let worker = std::thread::Builder::new()
             .name("spaceterm-worktree-read".into())
@@ -114,7 +114,7 @@ fn read_git(
     read: Read,
     inventory: Inventory,
     settings: Settings,
-    token: &SshCancellationToken,
+    token: &CancellationToken,
 ) -> Result<PreparedRead, Error> {
     let reply = match &read {
         Read::ServerFacts => Some(ReadReply::ServerFacts(

@@ -10,7 +10,7 @@ SpaceTerm organizes terminal work into Workspaces, Tabs, Pane Layouts, and Pane-
 
 **Local Workspace**: A Workspace whose Terminal Sessions run on this machine.
 
-**Remote Workspace**: A Workspace whose Terminal Sessions run on another machine, reached through SSH or a paired direct-network connection.
+**Remote Workspace**: A Workspace whose Terminal Sessions run on another machine, reached through a paired WSS connection.
 
 **Current Directory**: A Terminal Session's current working directory on its machine.
 
@@ -41,7 +41,7 @@ _Avoid_: Window, Terminal Session
 
 ## Server architecture vocabulary
 
-Each SpaceTerm Server owns terminal work on its machine. SpaceTerm Clients present that work over account-local IPC, SSH account bridges, or paired WSS connections.
+Each SpaceTerm Server owns terminal work on its machine. SpaceTerm Clients present that work over account-local IPC or paired WSS connections.
 
 **SpaceTerm Server**: The application that owns its Workspaces and their Terminal Sessions independently of the applications presenting them.
 
@@ -59,7 +59,7 @@ Each SpaceTerm Server owns terminal work on its machine. SpaceTerm Clients prese
 
 **SpaceTerm Protocol**: The versioned, language-neutral exchange of server state, terminal presentation, and client operations between SpaceTerm Clients and SpaceTerm Servers.
 
-**SSH Bootstrap**: The use of an SSH Destination to detect, install, and start a SpaceTerm Server for a client connection.
+**SSH Setup**: Temporary OpenSSH provisioning inside Add Server that prepares a SpaceTerm Server and enrolls the client for paired WSS access.
 
 **Start Server**: The explicit action that starts a SpaceTerm Server.
 
@@ -73,9 +73,9 @@ Each SpaceTerm Server owns terminal work on its machine. SpaceTerm Clients prese
 
 **Server Candidate**: A signed SpaceTerm Server build a SpaceTerm Client holds for one application identity and machine, verified before it is staged or activated.
 
-**Update Server**: The explicit journey that stages a Server Candidate on one SpaceTerm Server and activates it after confirmation, ending that server's Terminal Sessions.
+**Update Server**: The account-local journey that stages a Server Candidate and activates it after confirmation, ending that server's Terminal Sessions.
 
-**Original Operation**: An explicit operation a SpaceTerm Client submitted to a SpaceTerm Server, carrying the route, account, application identity, server, client and operation identities bound before dispatch, and retained until its outcome is validated and acknowledged.
+**Original Operation**: An explicit operation a SpaceTerm Client submitted to a SpaceTerm Server, bound to its admitted connection, application, server, client and operation identities until its outcome is validated and acknowledged.
 
 **Unconfirmed Outcome**: An Original Operation whose dispatch the server admitted and whose result could not be validated. Only resolving that same Original Operation settles it.
 
@@ -87,7 +87,7 @@ Each SpaceTerm Server owns terminal work on its machine. SpaceTerm Clients prese
 
 **Paired Device**: A client device deliberately enrolled for direct-network access to a SpaceTerm Server.
 
-**Add Server**: The client action that opens a sheet for an SSH Destination or an Invitation Link.
+**Add Server**: The Settings-owned journey that enrolls a remote SpaceTerm Server through SSH Setup or an Invitation Link.
 
 **Invite Device**: The server action that creates an Invitation Link for one new Paired Device.
 
@@ -99,9 +99,7 @@ Each SpaceTerm Server owns terminal work on its machine. SpaceTerm Clients prese
 
 **Unpair Pending**: An Unpair Device request whose server-side revocation is awaiting confirmation, independently of completed local connection removal.
 
-**Saved Connection**: An SSH Destination or paired direct-network connection a SpaceTerm Client keeps in its Servers Settings Section, together with whether it should stay connected.
-
-**Check Status**: The action that observes a Saved Connection's server once without connecting to it, starting it or installing it.
+**Saved Connection**: A paired WSS connection a SpaceTerm Client keeps in its Servers Settings Section, together with whether it should stay connected.
 
 **Client Settings**: Preferences used by a SpaceTerm Client on its own device.
 
@@ -190,8 +188,6 @@ _Avoid_: Hotkey, key equivalent
 
 **Open Local Directory**: The Command opening a Local Workspace pinned to a selected directory.
 
-**Open Remote Directory**: The Command opening a Remote Workspace pinned to a selected Remote Directory.
-
 **Directory Picker**: The chooser browsing one machine's directories to select a Pinned Directory.
 
 **System Directory Selection**: The system chooser offered for selecting a local Pinned Directory.
@@ -200,7 +196,7 @@ _Avoid_: Hotkey, key equivalent
 
 **Workspace Location**: Where a Workspace runs: Local or Remote. Pinning is independent of it.
 
-**SSH Destination**: The OpenSSH destination token selected for a Remote Workspace. Distinct aliases are distinct destinations.
+**SSH Destination**: The OpenSSH destination token used only during SSH Setup.
 
 **Remote Directory**: An absolute or home-relative directory value on a remote machine.
 

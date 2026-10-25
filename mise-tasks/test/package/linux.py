@@ -171,7 +171,9 @@ sys.exit(int(os.environ.get("BUILD_EXIT", "0")))
 
     def package(self, release_tag=None, *, candidate_digest=None):
         # Client and server releases are independent. Release fixtures reuse an older server.
-        archive, _ = prepare(self.root, self.env, "v0.0.0" if release_tag else None)
+        archive, _ = prepare(
+            self.root, self.env, "v0.0.0" if release_tag else None, include_catalog=True
+        )
         digest = (
             candidate_digest
             if candidate_digest is not None

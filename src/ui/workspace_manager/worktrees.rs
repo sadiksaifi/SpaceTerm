@@ -108,9 +108,6 @@ impl WorkspaceManager {
         };
         match origin {
             super::ServerOrigin::Local => crate::ui::server_worktrees::available(cx),
-            super::ServerOrigin::Ssh(destination) => {
-                Client::ssh(destination, cx).is_some_and(|client| client.supports_worktree_writes())
-            }
             super::ServerOrigin::Direct(direct) => Client::direct(&direct.route, cx)
                 .is_some_and(|client| client.supports_worktree_writes()),
         }

@@ -1,4 +1,4 @@
-"""Snapshot and authenticate the native server packages a packaged SSH client can offer.
+"""Snapshot and authenticate the server packages a client can offer during setup.
 
 Catalogs never execute foreign code. Matching-host entries receive full native checks;
 foreign entries receive portable resource/machine checks and retain their signed bytes.

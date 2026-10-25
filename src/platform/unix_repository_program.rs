@@ -17,10 +17,10 @@ use std::os::unix::process::CommandExt;
 use std::process::{Child, ChildStdout, Command, Stdio};
 use std::time::{Duration, Instant};
 
+use crate::cancellation::CancellationToken;
 use crate::repository_status::{
     ProgramError, ProgramExit, ProgramRequest, RepositoryProgramRunner,
 };
-use crate::ssh::cancellation::SshCancellationToken;
 
 /// The longest wait for stdout before cancellation, the deadline, and exit are checked again.
 const POLL_INTERVAL: Duration = Duration::from_millis(20);
@@ -47,7 +47,7 @@ impl RepositoryProgramRunner for UnixRepositoryProgramRunner {
         &self,
         request: &ProgramRequest,
         stdout: &mut dyn FnMut(&[u8]),
-        cancellation: &SshCancellationToken,
+        cancellation: &CancellationToken,
     ) -> Result<ProgramExit, ProgramError> {
         self.run_locked(request, stdout, cancellation, None)
     }
@@ -57,7 +57,7 @@ impl UnixRepositoryProgramRunner {
         &self,
         request: &ProgramRequest,
         stdout: &mut dyn FnMut(&[u8]),
-        cancellation: &SshCancellationToken,
+        cancellation: &CancellationToken,
         lock: Option<&std::fs::File>,
     ) -> Result<ProgramExit, ProgramError> {
         if cancellation.is_cancelled() {
@@ -175,7 +175,7 @@ impl ProgramGroup {
     fn check_abort(
         &mut self,
         deadline: Option<Instant>,
-        cancellation: &SshCancellationToken,
+        cancellation: &CancellationToken,
     ) -> Result<(), ProgramError> {
         if cancellation.is_cancelled() {
             return Err(self.abort(ProgramError::Cancelled));
@@ -463,7 +463,7 @@ mod tests {
                 chunks += 1;
                 output.extend_from_slice(chunk);
             },
-            &SshCancellationToken::default(),
+            &CancellationToken::default(),
         );
         (result, output, chunks)
     }
@@ -536,7 +536,7 @@ mod tests {
             "sleep 30 & echo $! > '{}'; wait",
             pid_file.display()
         ));
-        let cancellation = SshCancellationToken::default();
+        let cancellation = CancellationToken::default();
         let canceller = {
             let cancellation = cancellation.clone();
             let pid_file = pid_file.clone();
@@ -578,13 +578,11 @@ mod tests {
         let runner = UnixRepositoryProgramRunner::new();
         let mut expired = shell("exit 0");
         expired.deadline = Some(Instant::now());
+        let cancellation = CancellationToken::default();
+        cancellation.cancel();
 
         assert_eq!(
-            runner.run(
-                &shell("exit 0"),
-                &mut |_| {},
-                &SshCancellationToken::cancelled()
-            ),
+            runner.run(&shell("exit 0"), &mut |_| {}, &cancellation),
             Err(ProgramError::Cancelled)
         );
         assert_eq!(run(&expired).0, Err(ProgramError::TimedOut));

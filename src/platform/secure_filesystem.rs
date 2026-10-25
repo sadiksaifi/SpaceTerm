@@ -24,7 +24,6 @@ pub(crate) enum SecureFilesystemError {
     Missing,
     AlreadyExists,
     Conflict,
-    TooLarge,
     Unsafe,
     Unavailable,
 }
@@ -43,18 +42,6 @@ pub(crate) struct PreparedPrivateFile(pub(super) Box<dyn Any + Send>);
 pub(crate) struct PrivateFileSnapshot {
     pub(crate) bytes: Vec<u8>,
     pub(crate) identity: SecureEntryIdentity,
-}
-
-impl SecureDirectory {
-    #[cfg(test)]
-    pub(crate) fn from_opaque(value: impl Any + Send + Sync) -> Self {
-        Self(Arc::new(value))
-    }
-
-    #[cfg(test)]
-    pub(crate) fn opaque_ref<T: Any>(&self) -> Option<&T> {
-        self.0.downcast_ref()
-    }
 }
 
 impl SecureEntryIdentity {
@@ -211,13 +198,6 @@ pub(crate) trait SecureFilesystem: Send + Sync {
         directory: &SecureDirectory,
         name: &OsStr,
     ) -> Result<SecureEntryIdentity, SecureFilesystemError>;
-
-    fn verify_socket(
-        &self,
-        directory: &SecureDirectory,
-        name: &OsStr,
-        identity: &SecureEntryIdentity,
-    ) -> Result<(), SecureFilesystemError>;
 
     fn remove_socket(
         &self,

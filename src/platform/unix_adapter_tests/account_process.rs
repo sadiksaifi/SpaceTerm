@@ -1,7 +1,8 @@
 use super::*;
+use crate::cancellation::CancellationToken;
 
 #[test]
-fn pollable_native_pipes_deliver_eof_to_captured_commands() {
+fn native_pipes_deliver_eof_to_captured_setup_commands() {
     let adapter = crate::platform::unix_ssh_process::UnixSshProcessAdapter;
     let environment =
         SshProcessEnvironment::new_without_authentication(std::env::temp_dir(), None).unwrap();
@@ -12,7 +13,7 @@ fn pollable_native_pipes_deliver_eof_to_captured_commands() {
         &environment,
         b"bounded transfer".to_vec(),
         64,
-        &SshCancellationToken::default(),
+        &CancellationToken::default(),
         Instant::now() + Duration::from_secs(2),
     )
     .unwrap();
@@ -21,39 +22,55 @@ fn pollable_native_pipes_deliver_eof_to_captured_commands() {
 }
 
 #[test]
-fn account_bridge_cancellation_kills_owned_processes_and_unblocks_pipes() {
-    let adapter = crate::platform::unix_ssh_process::UnixSshProcessAdapter;
-    let environment =
-        SshProcessEnvironment::new_without_authentication(std::env::temp_dir(), None).unwrap();
+fn setup_command_cancellation_kills_owned_descendants_and_unblocks_captured_pipes() {
+    use std::os::unix::fs::DirBuilderExt;
+
+    let root = crate::platform::unix_adapter_tests::short_temporary_root()
+        .join(format!("st-setup-cancel-{}", std::process::id()));
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&root)
+        .unwrap();
+    let witness = root.join("processes");
     let command = SshCommandSpec::for_test(
         "/bin/sh".into(),
         vec![
             "-c".into(),
-            "/bin/sleep 30 & printf '%s %s\\n' $$ $!; wait".into(),
+            "/bin/sleep 5 & printf '%s %s\\n' $$ $! > \"$1\"; wait".into(),
+            "setup-cancellation-fixture".into(),
+            witness.clone().into_os_string(),
         ],
     );
-    let cancellation = SshCancellationToken::default();
-    let (read, write, cleanup) =
-        spawn_account_bridge(adapter, &command, &environment, cancellation.clone()).unwrap();
-    let (ready_sender, ready_receiver) = std::sync::mpsc::channel();
+    let cancellation = CancellationToken::default();
+    let worker_cancellation = cancellation.clone();
     let (sender, receiver) = std::sync::mpsc::channel();
-    let reader = std::thread::spawn(move || {
-        use std::io::BufRead;
-        let mut read = std::io::BufReader::new(read);
-        let mut line = String::new();
-        read.read_line(&mut line).unwrap();
-        let processes: Vec<libc::pid_t> = line
-            .split_whitespace()
-            .map(|pid| pid.parse().unwrap())
-            .collect();
-        ready_sender.send(processes).unwrap();
-        let mut bytes = Vec::new();
-        let result = read.read_to_end(&mut bytes);
+    let worker = std::thread::spawn(move || {
+        let environment =
+            SshProcessEnvironment::new_without_authentication(std::env::temp_dir(), None).unwrap();
+        let result = run_captured_process(
+            &crate::platform::unix_ssh_process::UnixSshProcessAdapter,
+            &command,
+            &environment,
+            Vec::new(),
+            64,
+            &worker_cancellation,
+            Instant::now() + Duration::from_secs(3),
+        );
         sender.send(result).unwrap();
     });
-    // Prove that the descendant exists in the owned group before cancelling. Immediate
-    // cancellation commonly kills the shell before its background process has been forked.
-    let processes = ready_receiver.recv_timeout(Duration::from_secs(2)).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let processes = loop {
+        if let Ok(line) = std::fs::read_to_string(&witness)
+            && line.ends_with('\n')
+        {
+            break line
+                .split_whitespace()
+                .map(|pid| pid.parse::<libc::pid_t>().unwrap())
+                .collect::<Vec<_>>();
+        }
+        assert!(Instant::now() < deadline, "owned descendant did not start");
+        std::thread::sleep(Duration::from_millis(5));
+    };
     let [command, descendant] = processes.as_slice() else {
         panic!("fixture must publish its command and descendant");
     };
@@ -63,10 +80,12 @@ fn account_bridge_cancellation_kills_owned_processes_and_unblocks_pipes() {
     let caller_group = unsafe { libc::getpgrp() };
     cancellation.cancel();
     let result = receiver.recv_timeout(Duration::from_secs(2));
-    cleanup();
-    drop(write);
-    assert!(result.unwrap().is_ok());
-    reader.join().unwrap();
+    worker.join().unwrap();
+    std::fs::remove_dir_all(root).unwrap();
+    assert!(matches!(
+        result.unwrap(),
+        Err(CapturedProcessError::Cancelled)
+    ));
     assert!(command_group > 0 && command_group != caller_group);
     assert_eq!(descendant_group, command_group);
 }

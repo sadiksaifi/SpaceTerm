@@ -3,14 +3,14 @@
 mod lifecycle;
 use lifecycle::{Server, connect, require_idle, size};
 use spaceterm::runtime::PhysicalKey;
-use spaceterm_server::{LocalServer, ServerError, hierarchy::*, pane::*};
+use spaceterm_server::{ServerConnection, ServerError, hierarchy::*, pane::*};
 use std::{
     error::Error,
     time::{Duration, Instant},
 };
 
 struct WorkspaceCleanup<'a> {
-    client: &'a LocalServer,
+    client: &'a ServerConnection,
     boot: Id,
     workspace: Option<Id>,
 }
@@ -278,8 +278,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         .nth(1)
         .unwrap_or_else(|| "1".into())
         .parse()?;
-    let first = LocalServer::for_development_client("input-first", major)?;
-    let second = LocalServer::for_development_client("input-second", major)?;
+    let first = ServerConnection::for_development_client("input-first", major)?;
+    let second = ServerConnection::for_development_client("input-second", major)?;
     require_idle(&first)?;
     first.setup()?;
     second.setup()?;

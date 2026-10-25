@@ -6,65 +6,13 @@ use super::destination::SshHostAlias;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum HostConfigSource {
-    Managed,
     User,
-}
-
-#[derive(Clone, Eq, PartialEq)]
-pub(crate) struct HostConfigProvenance {
-    source: HostConfigSource,
-    path: PathBuf,
-    line: usize,
-}
-
-impl fmt::Debug for HostConfigProvenance {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("HostConfigProvenance(<redacted>)")
-    }
-}
-
-impl HostConfigProvenance {
-    #[cfg(test)]
-    pub(crate) const fn source(&self) -> HostConfigSource {
-        self.source
-    }
-}
-
-#[derive(Clone, Eq, PartialEq)]
-pub(crate) struct DirectSshTarget {
-    user: Option<String>,
-    hostname: String,
-    port: Option<u16>,
-}
-
-impl fmt::Debug for DirectSshTarget {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("DirectSshTarget(<redacted>)")
-    }
-}
-
-impl DirectSshTarget {
-    pub(crate) fn subtitle(&self) -> String {
-        let mut subtitle = String::new();
-        if let Some(user) = &self.user {
-            subtitle.push_str(user);
-            subtitle.push('@');
-        }
-        subtitle.push_str(&self.hostname);
-        if let Some(port) = self.port {
-            subtitle.push(':');
-            subtitle.push_str(&port.to_string());
-        }
-        subtitle
-    }
+    System,
 }
 
 #[derive(Clone, Eq, PartialEq)]
 pub(crate) struct DiscoveredSshHost {
     alias: SshHostAlias,
-    provenance: Option<HostConfigProvenance>,
-    ambiguous: bool,
-    direct_target: Option<DirectSshTarget>,
 }
 
 impl fmt::Debug for DiscoveredSshHost {
@@ -77,53 +25,12 @@ impl DiscoveredSshHost {
     pub(crate) const fn alias(&self) -> &SshHostAlias {
         &self.alias
     }
-
-    /// A host a test's SSH configuration declares once, by `alias`.
-    #[cfg(test)]
-    pub(crate) fn configured(alias: &str) -> Self {
-        Self {
-            alias: SshHostAlias::new(alias.to_owned()).expect("a valid test alias"),
-            provenance: None,
-            ambiguous: false,
-            direct_target: None,
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) const fn provenance(&self) -> Option<&HostConfigProvenance> {
-        self.provenance.as_ref()
-    }
-
-    #[cfg(test)]
-    pub(crate) const fn is_ambiguous(&self) -> bool {
-        self.ambiguous
-    }
-
-    #[cfg(test)]
-    pub(crate) const fn direct_target(&self) -> Option<&DirectSshTarget> {
-        self.direct_target.as_ref()
-    }
-
-    pub(crate) fn subtitle(&self) -> String {
-        if self.ambiguous {
-            return "Multiple SSH declarations".to_owned();
-        }
-        self.direct_target.as_ref().map_or_else(
-            || {
-                self.provenance.as_ref().map_or_else(
-                    || "Multiple SSH sources".to_owned(),
-                    |provenance| provenance.path.display().to_string(),
-                )
-            },
-            DirectSshTarget::subtitle,
-        )
-    }
 }
 
 #[derive(Clone, Eq, PartialEq)]
 pub(crate) struct HostConfigRoots {
-    pub(crate) managed: PathBuf,
     pub(crate) user: PathBuf,
+    pub(crate) system: PathBuf,
     pub(crate) home: PathBuf,
 }
 
@@ -208,6 +115,7 @@ impl HostConfigIssue {
         self.line
     }
 
+    #[cfg(test)]
     pub(crate) const fn kind(&self) -> HostConfigIssueKind {
         self.kind
     }
@@ -238,20 +146,6 @@ pub(crate) trait HostConfigFilesystem: Send + Sync {
         self.read_file_limited(path, maximum_bytes)
     }
 
-    /// Hash a bounded regular file without exposing private key bytes to policy code.
-    fn file_digest_limited(
-        &self,
-        path: &Path,
-        maximum_bytes: usize,
-    ) -> Result<[u8; 32], HostConfigFilesystemError> {
-        use sha2::{Digest, Sha256};
-        let bytes = zeroize::Zeroizing::new(self.read_file_limited(path, maximum_bytes)?);
-        if bytes.len() > maximum_bytes {
-            return Err(HostConfigFilesystemError::Unavailable);
-        }
-        Ok(Sha256::digest(&bytes).into())
-    }
-
     fn read_directory_limited(
         &self,
         path: &Path,
@@ -274,8 +168,8 @@ pub(crate) fn discover_ssh_hosts(
     let mut known_aliases = BTreeSet::new();
     let mut discovered_hosts = DiscoveredHosts::default();
     for (source, root) in [
-        (HostConfigSource::Managed, roots.managed.as_path()),
         (HostConfigSource::User, roots.user.as_path()),
+        (HostConfigSource::System, roots.system.as_path()),
     ] {
         let mut scanner = SourceScanner::new(
             filesystem,
@@ -305,34 +199,11 @@ impl DiscoveredHosts {
         self.indexes.keys().map(String::as_str)
     }
 
-    fn record(
-        &mut self,
-        alias: SshHostAlias,
-        provenance: HostConfigProvenance,
-        direct_target: Option<DirectSshTarget>,
-        stanza_ambiguous: bool,
-    ) {
-        if let Some(index) = self.indexes.get(alias.as_str()).copied() {
-            let existing = &mut self.hosts[index];
-            existing.ambiguous = true;
-            existing.direct_target = None;
-        } else {
+    fn record(&mut self, alias: SshHostAlias) {
+        if !self.indexes.contains_key(alias.as_str()) {
             self.indexes
                 .insert(alias.as_str().to_owned(), self.hosts.len());
-            self.hosts.push(DiscoveredSshHost {
-                alias,
-                provenance: Some(provenance),
-                ambiguous: stanza_ambiguous,
-                direct_target,
-            });
-        }
-    }
-
-    fn mark_ambiguous(&mut self, alias: &SshHostAlias) {
-        if let Some(index) = self.indexes.get(alias.as_str()).copied() {
-            let existing = &mut self.hosts[index];
-            existing.ambiguous = true;
-            existing.direct_target = None;
+            self.hosts.push(DiscoveredSshHost { alias });
         }
     }
 
@@ -392,9 +263,6 @@ impl<'a> SourceScanner<'a> {
     }
 
     fn scan_file(&mut self, path: &Path, depth: usize) {
-        if is_system_ssh_path(path) {
-            return;
-        }
         if depth > self.limits.include_depth {
             self.issue(path, None, HostConfigIssueKind::IncludeDepthLimit);
             return;
@@ -407,9 +275,6 @@ impl<'a> SourceScanner<'a> {
                 return;
             }
         };
-        if is_system_ssh_path(&canonical) {
-            return;
-        }
         if self.active.contains(&canonical) {
             self.issue(path, None, HostConfigIssueKind::IncludeCycle);
             return;
@@ -480,7 +345,7 @@ impl<'a> SourceScanner<'a> {
                         || tokens.iter().any(|token| {
                             token.is_empty()
                                 || token.chars().any(char::is_control)
-                                || resolve_include_path(&self.roots.home, token).is_none()
+                                || self.include_path(token).is_none()
                         })
                     {
                         self.issue(path, Some(line_number), HostConfigIssueKind::MalformedLine);
@@ -506,11 +371,6 @@ impl<'a> SourceScanner<'a> {
                 "match" => {
                     self.finish_stanza(stanza.take());
                     section = ConfigSection::Match;
-                }
-                "hostname" | "user" | "port" => {
-                    if let Some(stanza) = &mut stanza {
-                        stanza.option(&keyword, &tokens);
-                    }
                 }
                 _ => {}
             }
@@ -540,8 +400,6 @@ impl<'a> SourceScanner<'a> {
         let Some(stanza) = stanza else {
             return;
         };
-        let direct_target = stanza.direct_target();
-        let stanza_ambiguous = stanza.ambiguous;
         for alias in stanza.aliases {
             let is_new = !self.known_aliases.contains(alias.as_str());
             if is_new && self.new_results >= self.limits.results {
@@ -556,7 +414,6 @@ impl<'a> SourceScanner<'a> {
                 continue;
             }
             if self.declarations >= self.limits.declarations {
-                self.discovered_hosts.mark_ambiguous(&alias);
                 if !self.declaration_limit_reported {
                     self.issue(
                         &stanza.path,
@@ -568,17 +425,7 @@ impl<'a> SourceScanner<'a> {
                 continue;
             }
             self.declarations += 1;
-            let provenance = HostConfigProvenance {
-                source: self.source,
-                path: stanza.path.clone(),
-                line: stanza.line,
-            };
-            self.discovered_hosts.record(
-                alias.clone(),
-                provenance,
-                direct_target.clone(),
-                stanza_ambiguous,
-            );
+            self.discovered_hosts.record(alias.clone());
             if is_new {
                 self.known_aliases.insert(alias.as_str().to_owned());
                 self.new_results += 1;
@@ -586,8 +433,16 @@ impl<'a> SourceScanner<'a> {
         }
     }
 
+    fn include_path(&self, token: &str) -> Option<PathBuf> {
+        let base = match self.source {
+            HostConfigSource::User => self.roots.home.join(".ssh"),
+            HostConfigSource::System => self.roots.system.parent()?.to_path_buf(),
+        };
+        resolve_include_path(&self.roots.home, &base, token)
+    }
+
     fn expand_include(&mut self, including: &Path, token: &str, line: usize) -> Vec<PathBuf> {
-        let Some(path) = resolve_include_path(&self.roots.home, token) else {
+        let Some(path) = self.include_path(token) else {
             self.issue(including, Some(line), HostConfigIssueKind::MalformedLine);
             return Vec::new();
         };
@@ -668,10 +523,6 @@ struct ParsedStanza {
     path: PathBuf,
     line: usize,
     aliases: Vec<SshHostAlias>,
-    ambiguous: bool,
-    hostname: Option<String>,
-    user: Option<String>,
-    port: Option<u16>,
 }
 
 impl ParsedStanza {
@@ -680,10 +531,8 @@ impl ParsedStanza {
             return Err(());
         }
         let mut aliases = Vec::new();
-        let mut ambiguous = false;
         for token in tokens {
             if token.starts_with('!') || token.contains(['*', '?']) {
-                ambiguous = true;
                 continue;
             }
             let alias = SshHostAlias::new(token.clone()).map_err(|_| ())?;
@@ -693,43 +542,6 @@ impl ParsedStanza {
             path: path.to_path_buf(),
             line,
             aliases,
-            ambiguous,
-            hostname: None,
-            user: None,
-            port: None,
-        })
-    }
-
-    fn option(&mut self, keyword: &str, values: &[String]) {
-        if values.len() != 1 {
-            self.ambiguous = true;
-            return;
-        }
-        let value = &values[0];
-        match keyword {
-            "hostname" if self.hostname.is_none() && valid_hostname(value) => {
-                self.hostname = Some(value.clone());
-            }
-            "user" if self.user.is_none() && valid_user(value) => {
-                self.user = Some(value.clone());
-            }
-            "port" if self.port.is_none() => match value.parse::<u16>() {
-                Ok(port) if port != 0 => self.port = Some(port),
-                _ => self.ambiguous = true,
-            },
-            "hostname" | "user" | "port" => self.ambiguous = true,
-            _ => {}
-        }
-    }
-
-    fn direct_target(&self) -> Option<DirectSshTarget> {
-        if self.ambiguous {
-            return None;
-        }
-        Some(DirectSshTarget {
-            user: self.user.clone(),
-            hostname: self.hostname.clone()?,
-            port: self.port,
         })
     }
 }
@@ -838,23 +650,7 @@ fn tokenize_config_arguments(
     Ok(tokens)
 }
 
-fn valid_hostname(value: &str) -> bool {
-    !value.is_empty()
-        && !value.starts_with('-')
-        && value.chars().all(|character| {
-            character.is_alphanumeric() || matches!(character, '.' | '_' | '-' | ':')
-        })
-}
-
-fn valid_user(value: &str) -> bool {
-    !value.is_empty()
-        && !value.starts_with('-')
-        && value.chars().all(|character| {
-            character.is_alphanumeric() || matches!(character, '.' | '_' | '-' | '@')
-        })
-}
-
-fn resolve_include_path(home: &Path, token: &str) -> Option<PathBuf> {
+fn resolve_include_path(home: &Path, base: &Path, token: &str) -> Option<PathBuf> {
     let path = if token == "~" {
         home.to_path_buf()
     } else if let Some(relative) = token.strip_prefix("~/") {
@@ -862,7 +658,7 @@ fn resolve_include_path(home: &Path, token: &str) -> Option<PathBuf> {
     } else if Path::new(token).is_absolute() {
         PathBuf::from(token)
     } else {
-        home.join(".ssh").join(token)
+        base.join(token)
     };
     normalize_absolute_path(&path)
 }
@@ -1028,10 +824,6 @@ fn unescape_glob_literal(value: &str) -> String {
     result
 }
 
-fn is_system_ssh_path(path: &Path) -> bool {
-    path.starts_with("/etc/ssh")
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -1106,8 +898,8 @@ mod tests {
 
     fn roots() -> HostConfigRoots {
         HostConfigRoots {
-            managed: PathBuf::from("/managed/ssh_config"),
             user: PathBuf::from("/home/test/.ssh/config"),
+            system: PathBuf::from("/etc/ssh/ssh_config"),
             home: PathBuf::from("/home/test"),
         }
     }
@@ -1121,31 +913,22 @@ mod tests {
     }
 
     #[test]
-    fn discovery_should_parse_multiple_quoted_literal_aliases_and_direct_subtitles() {
+    fn discovery_should_parse_multiple_quoted_literal_aliases() {
         let filesystem = MemoryFilesystem::default().file(
-            "/managed/ssh_config",
+            "/home/test/.ssh/config",
             "Host work \"build\"\n  HostName \"build.example\"\n  User deploy\n  Port 2222\n",
         );
 
         let discovery = discover_ssh_hosts(&filesystem, &roots(), HostDiscoveryLimits::default());
 
         assert_eq!(aliases(&discovery), ["work", "build"]);
-        assert_eq!(discovery.hosts[0].subtitle(), "deploy@build.example:2222");
-        assert_eq!(
-            discovery.hosts[0].provenance(),
-            Some(&HostConfigProvenance {
-                source: HostConfigSource::Managed,
-                path: PathBuf::from("/managed/ssh_config"),
-                line: 1,
-            })
-        );
     }
 
     #[test]
-    fn discovery_should_exclude_patterns_negations_and_system_candidates() {
+    fn discovery_should_include_system_aliases_and_exclude_patterns_and_negations() {
         let filesystem = MemoryFilesystem::default()
             .file(
-                "/managed/ssh_config",
+                "/home/test/.ssh/config",
                 "Include /etc/ssh/ssh_config system-alias\nHost good *.example !blocked bad/path\nHostName good.example\nMatch host *\n  Host match-derived\n",
             )
             .file("/etc/ssh/ssh_config", "Host system\n")
@@ -1157,8 +940,21 @@ mod tests {
 
         let discovery = discover_ssh_hosts(&filesystem, &roots(), HostDiscoveryLimits::default());
 
-        assert_eq!(aliases(&discovery), ["good", "bad/path", "match-derived"]);
-        assert_eq!(discovery.hosts[0].direct_target(), None);
+        assert_eq!(
+            aliases(&discovery),
+            ["system", "good", "bad/path", "match-derived"]
+        );
+    }
+
+    #[test]
+    fn discovery_resolves_relative_includes_in_each_openssh_configuration_root() {
+        let filesystem = MemoryFilesystem::default()
+            .file("/home/test/.ssh/config", "Include hosts/*.conf\n")
+            .file("/home/test/.ssh/hosts/user.conf", "Host personal\n")
+            .file("/etc/ssh/ssh_config", "Include ssh_config.d/*.conf\n")
+            .file("/etc/ssh/ssh_config.d/system.conf", "Host shared\n");
+        let discovery = discover_ssh_hosts(&filesystem, &roots(), HostDiscoveryLimits::default());
+        assert_eq!(aliases(&discovery), ["personal", "shared"]);
     }
 
     #[test]
@@ -1191,7 +987,7 @@ mod tests {
     fn malformed_host_and_include_arguments_should_reject_the_whole_directive() {
         let filesystem = MemoryFilesystem::default()
             .file(
-                "/managed/ssh_config",
+                "/home/test/.ssh/config",
                 "Include included.conf \"\"\nHost accepted -option\nHost after\n",
             )
             .file("/home/test/.ssh/included.conf", "Host included\n");
@@ -1212,28 +1008,25 @@ mod tests {
     #[test]
     fn malformed_host_tokenization_should_end_the_previous_stanza() {
         let filesystem = MemoryFilesystem::default().file(
-            "/managed/ssh_config",
+            "/home/test/.ssh/config",
             "Host prior\n  HostName prior.example\nHost \"unterminated\n  HostName leaked.example\nHost after\n",
         );
 
         let discovery = discover_ssh_hosts(&filesystem, &roots(), HostDiscoveryLimits::default());
 
         assert_eq!(aliases(&discovery), ["prior", "after"]);
-        assert_eq!(discovery.hosts[0].subtitle(), "prior.example");
-        assert_eq!(discovery.hosts[1].direct_target(), None);
     }
 
     #[test]
     fn excluded_host_patterns_should_not_be_reported_as_malformed() {
         let filesystem = MemoryFilesystem::default().file(
-            "/managed/ssh_config",
+            "/home/test/.ssh/config",
             "Host concrete *.example !excluded\n  HostName concrete.example\n",
         );
 
         let discovery = discover_ssh_hosts(&filesystem, &roots(), HostDiscoveryLimits::default());
 
         assert_eq!(aliases(&discovery), ["concrete"]);
-        assert_eq!(discovery.hosts[0].direct_target(), None);
         assert!(discovery.issues.is_empty());
     }
 
@@ -1241,7 +1034,7 @@ mod tests {
     fn discovery_should_allow_a_host_section_after_match_without_enabling_its_include() {
         let filesystem = MemoryFilesystem::default()
             .file(
-                "/managed/ssh_config",
+                "/home/test/.ssh/config",
                 "Match host old\n  Include ignored.conf\nHost later\n",
             )
             .file("/home/test/.ssh/ignored.conf", "Host ignored\n");
@@ -1255,11 +1048,11 @@ mod tests {
     fn discovery_should_consolidate_duplicates_without_spending_new_result_budget() {
         let filesystem = MemoryFilesystem::default()
             .file(
-                "/managed/ssh_config",
-                "Host duplicate\n  HostName managed.example\n",
+                "/home/test/.ssh/config",
+                "Host duplicate\n  HostName user_config.example\n",
             )
             .file(
-                "/home/test/.ssh/config",
+                "/etc/ssh/ssh_config",
                 "Host duplicate\n  HostName user.example\nHost user-only\n",
             );
         let limits = HostDiscoveryLimits {
@@ -1270,20 +1063,12 @@ mod tests {
         let discovery = discover_ssh_hosts(&filesystem, &roots(), limits);
 
         assert_eq!(aliases(&discovery), ["duplicate", "user-only"]);
-        assert_eq!(
-            discovery.hosts[0]
-                .provenance()
-                .map(HostConfigProvenance::source),
-            Some(HostConfigSource::Managed)
-        );
-        assert!(discovery.hosts[0].is_ambiguous());
-        assert_eq!(discovery.hosts[0].direct_target(), None);
     }
 
     #[test]
-    fn duplicate_declarations_should_have_an_independent_bounded_provenance_budget() {
+    fn duplicate_declarations_should_have_an_independent_bounded_declaration_budget() {
         let filesystem = MemoryFilesystem::default().file(
-            "/managed/ssh_config",
+            "/home/test/.ssh/config",
             "Host duplicate\nHost duplicate\nHost duplicate\nHost other\n",
         );
         let limits = HostDiscoveryLimits {
@@ -1294,7 +1079,6 @@ mod tests {
         let discovery = discover_ssh_hosts(&filesystem, &roots(), limits);
 
         assert_eq!(aliases(&discovery), ["duplicate"]);
-        assert!(discovery.hosts[0].is_ambiguous());
         assert!(
             discovery
                 .issues
@@ -1306,8 +1090,11 @@ mod tests {
     #[test]
     fn declaration_budget_exhaustion_in_one_root_should_not_starve_the_other_root() {
         let filesystem = MemoryFilesystem::default()
-            .file("/managed/ssh_config", "Host managed\nHost overflow\n")
-            .file("/home/test/.ssh/config", "Host user\n");
+            .file(
+                "/home/test/.ssh/config",
+                "Host user_config\nHost overflow\n",
+            )
+            .file("/etc/ssh/ssh_config", "Host user\n");
         let limits = HostDiscoveryLimits {
             declarations: 1,
             ..HostDiscoveryLimits::default()
@@ -1315,7 +1102,7 @@ mod tests {
 
         let discovery = discover_ssh_hosts(&filesystem, &roots(), limits);
 
-        assert_eq!(aliases(&discovery), ["managed", "user"]);
+        assert_eq!(aliases(&discovery), ["user_config", "user"]);
     }
 
     #[test]
@@ -1332,7 +1119,7 @@ mod tests {
     #[test]
     fn glob_expansion_should_reject_an_incomplete_match_set() {
         let filesystem = MemoryFilesystem::default()
-            .file("/managed/ssh_config", "Include conf/*.conf\n")
+            .file("/home/test/.ssh/config", "Include conf/*.conf\n")
             .file("/home/test/.ssh/conf/z.conf", "Host z\n")
             .file("/home/test/.ssh/conf/a.conf", "Host a\n")
             .file("/home/test/.ssh/conf/b.conf", "Host b\n");
@@ -1355,7 +1142,7 @@ mod tests {
     #[test]
     fn glob_expansion_should_examine_nonmatches_without_spending_match_budget() {
         let filesystem = MemoryFilesystem::default()
-            .file("/managed/ssh_config", "Include conf/*.conf\n")
+            .file("/home/test/.ssh/config", "Include conf/*.conf\n")
             .file("/home/test/.ssh/conf/a.txt", "Host ignored-a\n")
             .file("/home/test/.ssh/conf/b.txt", "Host ignored-b\n")
             .file("/home/test/.ssh/conf/z.conf", "Host z\n");
@@ -1374,7 +1161,7 @@ mod tests {
     #[test]
     fn glob_expansion_should_reject_a_directory_that_cannot_be_examined_completely() {
         let filesystem = MemoryFilesystem::default()
-            .file("/managed/ssh_config", "Include conf/*.conf\n")
+            .file("/home/test/.ssh/config", "Include conf/*.conf\n")
             .file("/home/test/.ssh/conf/a.conf", "Host a\n")
             .file("/home/test/.ssh/conf/b.conf", "Host b\n")
             .file("/home/test/.ssh/conf/c.conf", "Host c\n");
@@ -1399,7 +1186,7 @@ mod tests {
     fn discovery_should_follow_only_global_tilde_absolute_relative_and_glob_includes() {
         let filesystem = MemoryFilesystem::default()
             .file(
-                "/managed/ssh_config",
+                "/home/test/.ssh/config",
                 "Include ~/one.conf /shared/two.conf parts/*.conf\nHost root\n  Include /shared/ignored.conf\n",
             )
             .file("/home/test/one.conf", "Host one\n")
@@ -1417,7 +1204,7 @@ mod tests {
     fn discovery_should_detect_cycles_by_canonical_path_and_continue_the_source() {
         let filesystem = MemoryFilesystem::default()
             .file(
-                "/managed/ssh_config",
+                "/home/test/.ssh/config",
                 "Include alias.conf\nHost after-cycle\n",
             )
             .file(
@@ -1425,13 +1212,13 @@ mod tests {
                 "Include alias.conf\nHost included\n",
             )
             .canonical("/home/test/.ssh/alias.conf", "/canonical/shared")
-            .canonical("/managed/ssh_config", "/canonical/root");
+            .canonical("/home/test/.ssh/config", "/canonical/root");
 
         let discovery = discover_ssh_hosts(&filesystem, &roots(), HostDiscoveryLimits::default());
 
         assert_eq!(aliases(&discovery), ["included", "after-cycle"]);
         assert!(discovery.issues.iter().any(|issue| {
-            issue.source() == HostConfigSource::Managed
+            issue.source() == HostConfigSource::User
                 && issue.kind() == HostConfigIssueKind::IncludeCycle
         }));
     }
@@ -1439,28 +1226,20 @@ mod tests {
     #[test]
     fn discovery_should_report_one_bad_source_without_discarding_the_other_root() {
         let filesystem = MemoryFilesystem::default()
-            .file("/managed/ssh_config", [0xff, 0xfe])
-            .file("/home/test/.ssh/config", "Host user-host\n");
+            .file("/home/test/.ssh/config", [0xff, 0xfe])
+            .file("/etc/ssh/ssh_config", "Host user-host\n");
 
         let discovery = discover_ssh_hosts(&filesystem, &roots(), HostDiscoveryLimits::default());
 
         assert_eq!(aliases(&discovery), ["user-host"]);
-        assert_eq!(
-            discovery.hosts[0].provenance(),
-            Some(&HostConfigProvenance {
-                source: HostConfigSource::User,
-                path: PathBuf::from("/home/test/.ssh/config"),
-                line: 1,
-            })
-        );
-        assert_eq!(discovery.issues[0].source(), HostConfigSource::Managed);
+        assert_eq!(discovery.issues[0].source(), HostConfigSource::User);
         assert_eq!(discovery.issues[0].kind(), HostConfigIssueKind::InvalidUtf8);
     }
 
     #[test]
     fn discovery_should_report_a_malformed_line_and_keep_valid_entries_from_the_file() {
         let filesystem = MemoryFilesystem::default().file(
-            "/managed/ssh_config",
+            "/home/test/.ssh/config",
             "Host \"unterminated\nHost valid-after-error\n",
         );
 
@@ -1469,7 +1248,7 @@ mod tests {
         assert_eq!(aliases(&discovery), ["valid-after-error"]);
         assert!(discovery.issues.iter().any(|issue| {
             issue.kind() == HostConfigIssueKind::MalformedLine
-                && issue.path() == Path::new("/managed/ssh_config")
+                && issue.path() == Path::new("/home/test/.ssh/config")
                 && issue.line() == Some(1)
         }));
     }
@@ -1478,7 +1257,7 @@ mod tests {
     fn discovery_should_enforce_include_depth_file_and_total_byte_limits_independently() {
         let filesystem = MemoryFilesystem::default()
             .file(
-                "/managed/ssh_config",
+                "/home/test/.ssh/config",
                 "Include first.conf second.conf\nHost root\n",
             )
             .file(
@@ -1529,7 +1308,7 @@ mod tests {
     fn discovery_should_enforce_per_file_glob_result_and_token_limits() {
         let filesystem = MemoryFilesystem::default()
             .file(
-                "/managed/ssh_config",
+                "/home/test/.ssh/config",
                 "Include parts/*.conf\nHost first second third\n",
             )
             .file("/home/test/.ssh/parts/a.conf", "Host a\n")
@@ -1586,13 +1365,13 @@ mod tests {
     #[test]
     fn debug_should_redact_host_config_content_and_paths() {
         let filesystem = MemoryFilesystem::default().file(
-            "/managed/ssh_config",
+            "/home/test/.ssh/config",
             "Host sensitive-host\n  HostName sensitive.example\n",
         );
         let discovery = discover_ssh_hosts(&filesystem, &roots(), HostDiscoveryLimits::default());
 
         let debug = format!("{discovery:?} {:?}", roots());
         assert!(!debug.contains("sensitive"));
-        assert!(!debug.contains("/managed"));
+        assert!(!debug.contains("/user_config"));
     }
 }

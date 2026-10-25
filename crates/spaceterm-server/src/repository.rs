@@ -119,7 +119,7 @@ pub enum RepositoryReadError {
     OutputTooLarge,
     #[error("the repository read returned an invalid response")]
     InvalidResponse,
-    #[error("the Control Connection is unavailable")]
+    #[error("the server connection is unavailable")]
     ConnectionUnavailable,
 }
 

@@ -16,7 +16,7 @@ pub(super) fn key() -> Vec<u8> {
 pub(super) fn production_key() -> Vec<u8> {
     production_pair().public_key().as_ref().to_vec()
 }
-pub(crate) fn sign_with_previous_production_trust(archive: &Path, signature: &Path) {
+pub(crate) fn sign_with_production_trust(archive: &Path, signature: &Path) {
     std::fs::write(
         signature,
         production_pair()

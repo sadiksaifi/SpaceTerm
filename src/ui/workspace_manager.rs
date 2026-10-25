@@ -22,9 +22,6 @@ use super::directory_picker::{
     DirectoryPicker, DirectoryPickerEvent, DirectorySelection, DirectorySource,
     LocalDirectorySource, ServerDirectorySource,
 };
-use super::remote_workspace_flow::{
-    RemoteWorkspaceChoice, RemoteWorkspaceFlow, RemoteWorkspaceFlowEvent, RemoteWorkspaceStart,
-};
 use super::terminal_focus::{TerminalFocusBlocker, TerminalFocusCoordinator, WorkspaceFocusOwners};
 use super::workspace_creation::WorkspaceCreation;
 use super::{
@@ -34,11 +31,11 @@ use super::{
     ActivateWorkspace7, ActivateWorkspace8, ActivateWorkspace9, ClosePane, CloseTab,
     CloseTerminalFind, CloseWorkspace, CopySelection, CreateTab, FindNext, FindPrevious,
     FocusNextPane, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp, FocusPreviousPane,
-    MoveTabLeft, MoveTabRight, NewRemoteWorkspace, NewWorkspace, NewWorktree, NextTab,
-    NextWorktree, OpenLocalDirectory, OpenRemoteDirectory, OpenTerminalFind, PreviousTab,
-    PreviousWorktree, ScrollPageDown, ScrollPageUp, ScrollToBottom, ScrollToTop,
-    ShowRepositoryStatus, SplitDown, SplitRight, SwitchWorkspace, TERMINAL_KEY_CONTEXT, TabManager,
-    TabManagerEvent, TogglePaneZoom, ToggleSidebar, ToggleSidebarFocus,
+    MoveTabLeft, MoveTabRight, NewWorkspace, NewWorktree, NextTab, NextWorktree,
+    OpenLocalDirectory, OpenTerminalFind, PreviousTab, PreviousWorktree, ScrollPageDown,
+    ScrollPageUp, ScrollToBottom, ScrollToTop, ShowRepositoryStatus, SplitDown, SplitRight,
+    SwitchWorkspace, TERMINAL_KEY_CONTEXT, TabManager, TabManagerEvent, TogglePaneZoom,
+    ToggleSidebar, ToggleSidebarFocus,
 };
 use crate::appearance::Color;
 use crate::close_confirmation::{
@@ -152,6 +149,9 @@ enum PinTarget {
     Workspace(WorkspaceId),
     /// A new Local Workspace pinned from its first Terminal Session, named `name` unless blank.
     NewLocalWorkspace { name: String },
+    /// A new Workspace on the paired server at `key`, pinned to a directory there and named
+    /// `name` unless blank.
+    NewServerWorkspace { key: ServerKey, name: String },
 }
 
 /// How applying a chosen directory to a pin target ended.
@@ -189,24 +189,52 @@ enum SwitcherChoice {
     Detached(DetachedWorkspace),
 }
 
+/// A Workspace a person asked to open on a paired server's directory, waiting for that server's
+/// edits or its answer about an existing pin.
+#[derive(Clone)]
+pub(super) struct PendingServerDirectory {
+    key: ServerKey,
+    name: String,
+    directory: PathBuf,
+    /// Where navigation stood when the person chose the directory. Navigation while the server
+    /// answers wins over an existing pinned Workspace and over opening a new one.
+    navigation: NavigationMark,
+    /// What held the keyboard once the choice settled, after any chooser restored focus. `None`
+    /// until then. A later sidebar edit, Terminal Find, chooser or other owner wins as navigation
+    /// does.
+    keyboard: Option<Option<FocusHandle>>,
+    /// Whether the person moved the keyboard from that owner since, even if it came back.
+    keyboard_moved: bool,
+}
+
+/// Where a person's explicit navigation stands in this window: Workspace activations and the
+/// Active Workspace, then that Workspace's Tab activations, Active Tab, and Focused Pane changes.
+/// Any change, even one returning to the same place, is newer navigation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct NavigationMark {
+    activations: u64,
+    workspace: Option<WorkspaceId>,
+    within: Option<(u64, crate::domain::TabId, u64)>,
+}
+
 /// One question to the owning server about the directory a person chose in Open Remote
 /// Directory: which attached Workspace there, if any, is already pinned to it.
-struct RemoteDirectoryMatch {
+struct ServerDirectoryMatch {
     directory: PathBuf,
     /// The Workspaces asked about, with their pins, in sidebar order.
     pins: Vec<(WorkspaceId, PathBuf)>,
-    server: crate::local_server::LocalServer,
+    server: crate::server_connection::ServerConnection,
     /// The position in `pins` the server matched, once it answers.
     answer: Option<Result<Option<usize>, super::directory_picker::DirectorySourceError>>,
     _task: Task<()>,
 }
 
-impl RemoteDirectoryMatch {
+impl ServerDirectoryMatch {
     fn asks(
         &self,
         directory: &PathBuf,
         pins: &[(WorkspaceId, PathBuf)],
-        server: &crate::local_server::LocalServer,
+        server: &crate::server_connection::ServerConnection,
     ) -> bool {
         self.directory == *directory && self.pins == pins && self.server.same_handle(server)
     }
@@ -217,10 +245,11 @@ pub(crate) struct WorkspaceManager {
     window_traffic_lights: super::appearance_runtime::WindowTrafficLightOwner,
     transient: WorkspaceTransientUi,
     workspace_switcher: ComboBoxHandle<SwitcherChoice, WorkspaceCreation>,
-    remote_workspace_name: Option<String>,
+    /// The Workspace Open Remote Directory is opening, until its server takes it.
+    pub(super) pending_server_directory: Option<PendingServerDirectory>,
     /// The owning server's answer to whether a Workspace there already uses the directory the
     /// person chose to open.
-    remote_directory_match: Option<RemoteDirectoryMatch>,
+    server_directory_match: Option<ServerDirectoryMatch>,
     server_directories: super::directory_picker::ServerDirectories,
     sidebar: Entity<WorkspaceSidebar>,
     local_filesystem: LocalFilesystemAuthority,
@@ -228,10 +257,17 @@ pub(crate) struct WorkspaceManager {
     pane_construction: PaneConstruction,
     local_home_directory_path: PathBuf,
     directory_selection: Rc<dyn SystemDirectorySelection>,
-    remote_workspace_flow: Option<Entity<RemoteWorkspaceFlow>>,
     pin_picker: Option<Entity<DirectoryPicker>>,
     pin_operation: u64,
-    remote_workspace_focus_restore_pending: bool,
+    /// Counts Workspace activations, so a deferred completion can tell that navigation happened
+    /// since it began, even navigation that returned to the same Workspace.
+    activation_epoch: u64,
+    /// The server whose creation this window presents without opening it, while the reading
+    /// right after that creation's submission runs, because newer navigation superseded the
+    /// person's original choice.
+    quiet_creation: Option<ServerKey>,
+    /// Follows the keyboard owner a pending Open Remote Directory settled on.
+    server_directory_keyboard: Option<gpui::Subscription>,
     operating_system_window_drag_platform: Rc<dyn OperatingSystemWindowDragPlatform>,
     window_drag_status: WindowDragRegionStatus,
     update_control: Entity<super::updates::UpdateControl>,
@@ -248,13 +284,8 @@ pub(crate) struct WorkspaceManager {
     /// Each presented SpaceTerm Server's Workspaces, their edit state, and the answers still to
     /// present. Adopting a server adds its Workspaces beside the others and changes none of them.
     shared: ServerBindings,
-    /// Follows the desktop's SSH server connections while the window lives.
-    _ssh_servers: Option<Task<()>>,
-    /// Follows the desktop's direct network connections while the window lives.
+    /// Follows the desktop's paired connections while the window lives.
     _direct_servers: Option<crate::ui::direct_servers::DirectChanges>,
-    /// Follows the submitted remote maintenance operations, so each machine heading offers what
-    /// its server's state allows.
-    _remote_maintenance: Option<Task<()>>,
     /// Where the keyboard rests while the window presents no Workspace.
     empty_focus: FocusHandle,
     /// Normal launch of the account-local server this window presents.
@@ -332,8 +363,7 @@ impl WorkspaceManager {
             },
         )
         .detach();
-        cx.observe_window_activation(window, |manager, window, cx| {
-            manager.restore_remote_workspace_focus_after_activation(window, cx);
+        cx.observe_window_activation(window, |_, window, cx| {
             if window.is_window_active()
                 && let Some(store) =
                     crate::ui::repository_status_store::InstalledRepositoryStatus::store(cx)
@@ -353,8 +383,8 @@ impl WorkspaceManager {
                 local_selection_pending: false,
             },
             workspace_switcher: ComboBoxHandle::default(),
-            remote_workspace_name: None,
-            remote_directory_match: None,
+            pending_server_directory: None,
+            server_directory_match: None,
             server_directories,
             sidebar,
             workspaces,
@@ -362,10 +392,11 @@ impl WorkspaceManager {
             pane_construction,
             local_home_directory_path,
             directory_selection,
-            remote_workspace_flow: None,
             pin_picker: None,
             pin_operation: 0,
-            remote_workspace_focus_restore_pending: false,
+            activation_epoch: 0,
+            quiet_creation: None,
+            server_directory_keyboard: None,
             operating_system_window_drag_platform,
             window_drag_status: WindowDragRegionStatus::new(),
             update_control: cx.new(|cx| super::updates::UpdateControl::new(window, cx)),
@@ -377,16 +408,12 @@ impl WorkspaceManager {
             sidebar_worktrees: worktrees::SidebarWorktrees::default(),
             shared_repositories: shared_repositories::SharedWorkspaceRepositories::default(),
             shared: ServerBindings::default(),
-            _ssh_servers: None,
             _direct_servers: None,
-            _remote_maintenance: None,
             empty_focus: cx.focus_handle(),
             launch: launch::LocalLaunchState::new(local_server),
         };
         manager.run_local_launch(None, window, cx);
-        manager.follow_ssh_servers(window, cx);
         manager.follow_direct_servers(window, cx);
-        manager.follow_remote_maintenance(window, cx);
         manager
     }
 
@@ -593,10 +620,6 @@ impl WorkspaceManager {
                 .as_ref()
                 .is_some_and(|picker| picker.read(cx).blocks_terminal_input())
                 || self.active_directory_recovery(cx).is_some(),
-            remote_flow: self
-                .remote_workspace_flow
-                .as_ref()
-                .is_some_and(|flow| flow.read(cx).blocks_terminal_input()),
             switcher: window_combo_box_is_open(window, cx),
             window_drag: self.window_drag_status.is_active(),
             sidebar_resize: self.sidebar.read(cx).is_resizing(),
@@ -672,23 +695,6 @@ impl WorkspaceManager {
                 manager.set_parent_focus_blocker(blocker, cx);
             });
         }
-    }
-
-    fn restore_remote_workspace_focus_after_activation(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if !window.is_window_active()
-            || !std::mem::take(&mut self.remote_workspace_focus_restore_pending)
-        {
-            return;
-        }
-        if self.terminal_focus_blocker(window, cx).is_some() {
-            return;
-        }
-        self.focus(window, cx);
-        cx.notify();
     }
 
     fn handle_operating_system_window_drag_event(
@@ -872,6 +878,8 @@ impl WorkspaceManager {
             PinTarget::NewLocalWorkspace { name } => {
                 self.open_local_directory_workspace(directory, name, window, cx)
             }
+            // A paired server's Workspace never takes a directory on this computer.
+            PinTarget::NewServerWorkspace { .. } => PinApplication::Failed,
         }
     }
 
@@ -954,6 +962,7 @@ impl WorkspaceManager {
             PinTarget::NewLocalWorkspace { .. } => {
                 crate::keybindings::Command::OpenLocalDirectory.label()
             }
+            PinTarget::NewServerWorkspace { .. } => "Open Remote Directory",
         };
         // Another computer's server Workspace browses that server's own directories. Nothing on
         // this computer reads or validates them.
@@ -965,6 +974,19 @@ impl WorkspaceManager {
                 let Some(source) = self.owning_directory_source(*workspace_id, cx) else {
                     Self::show_shared_refusal(
                         "change the pinned directory",
+                        super::shared_workspaces::SharedRefusalReason::Offline,
+                        window,
+                        cx,
+                    );
+                    self.transient.end_pin();
+                    return;
+                };
+                Some(source)
+            }
+            PinTarget::NewServerWorkspace { key, .. } => {
+                let Some(source) = self.server_directory_source(*key, cx) else {
+                    Self::show_shared_refusal(
+                        "open a remote directory",
                         super::shared_workspaces::SharedRefusalReason::Offline,
                         window,
                         cx,
@@ -1027,6 +1049,16 @@ impl WorkspaceManager {
                             ) if remote => PinApplication::from_applied(
                                 manager.pin_server_directory(workspace_id, directory, window, cx),
                             ),
+                            (
+                                true,
+                                DirectorySelection::Server(directory),
+                                PinTarget::NewServerWorkspace { key, name },
+                            ) if remote => {
+                                manager.pin_operation = manager.pin_operation.wrapping_add(1);
+                                manager.transient.end_pin();
+                                manager.open_server_directory(key, name, directory, window, cx);
+                                PinApplication::Applied
+                            }
                             _ => PinApplication::Failed,
                         };
                         // A reported failure already closed the picker.
@@ -1049,6 +1081,15 @@ impl WorkspaceManager {
                                     manager.pin_picker = None;
                                     manager.sync_terminal_focus_blocker(window, cx);
                                     manager.focus(window, cx);
+                                    // A directory still waiting for its server keeps the owner
+                                    // this restoration chose, not the closing chooser.
+                                    if manager
+                                        .pending_server_directory
+                                        .as_ref()
+                                        .is_some_and(|pending| pending.keyboard.is_none())
+                                    {
+                                        manager.settle_server_directory_keyboard(window, cx);
+                                    }
                                     cx.notify();
                                 });
                             }
@@ -1086,177 +1127,179 @@ impl WorkspaceManager {
         self.choose_directory(PinTarget::Workspace(workspace_id), window, cx);
     }
 
-    /// Why this window offers no Remote Workspace, or `None` when SSH can reach servers.
-    fn remote_workspace_unavailable_reason(&self, cx: &App) -> Option<String> {
-        crate::ui::ssh_servers::installed(cx)
-            .is_none()
-            .then(|| "SSH isn't available.".to_owned())
-    }
-
-    /// Opens New Remote Workspace or Open Remote Directory: choose an SSH host, connect to the
-    /// SpaceTerm Server for that account, and create a Workspace on it named `name` unless blank.
-    fn present_remote_workspace_flow(
+    /// Opens Open Remote Directory on the saved paired server `route`: the Directory Picker
+    /// browses that server, and the chosen directory opens a Workspace there named `name` unless
+    /// blank.
+    fn open_remote_directory(
         &mut self,
+        route: crate::direct_connections::DirectRouteId,
         name: String,
-        start: RemoteWorkspaceStart,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.remote_workspace_flow.is_some() {
-            return;
-        }
-        let (Some(connections), Some(hosts)) = (
-            crate::ui::ssh_servers::installed(cx),
-            crate::ui::ssh_servers::host_source(cx),
-        ) else {
-            self.sync_terminal_focus_blocker(window, cx);
+        let Some(key) = self.server_key(&super::MachineTarget::Direct(route)) else {
+            Self::show_shared_refusal(
+                "open a remote directory",
+                super::shared_workspaces::SharedRefusalReason::Offline,
+                window,
+                cx,
+            );
             return;
         };
-        let flow = cx.new(|cx| RemoteWorkspaceFlow::new(connections, hosts, window, cx));
-        cx.subscribe_in(
-            &flow,
-            window,
-            |manager, flow, event: &RemoteWorkspaceFlowEvent, window, cx| {
-                manager.handle_remote_workspace_flow_event(flow, event, window, cx);
-            },
-        )
-        .detach();
-        if !flow.update(cx, |flow, cx| flow.open(start, window, cx)) {
-            return;
-        }
-        self.remote_workspace_flow = Some(flow);
-        self.remote_workspace_name = Some(name);
-        self.sync_terminal_focus_blocker(window, cx);
-        cx.notify();
+        self.choose_directory(PinTarget::NewServerWorkspace { key, name }, window, cx);
     }
 
-    fn handle_remote_workspace_flow_event(
+    /// Opens a Workspace on the paired server at `key` pinned to `directory` there, named `name`
+    /// unless blank, or activates the Workspace already pinned to that directory. Only that
+    /// server compares its directories, and nothing reads this computer's.
+    pub(super) fn open_server_directory(
         &mut self,
-        source: &Entity<RemoteWorkspaceFlow>,
-        event: &RemoteWorkspaceFlowEvent,
+        key: ServerKey,
+        name: String,
+        directory: PathBuf,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.remote_workspace_flow.as_ref() != Some(source) {
-            return;
+        self.server_directory_match = None;
+        self.pending_server_directory = Some(PendingServerDirectory {
+            key,
+            name,
+            directory,
+            navigation: self.navigation(cx),
+            keyboard: None,
+            keyboard_moved: false,
+        });
+        self.server_directory_keyboard = None;
+        // A chooser still open restores focus as it closes, which is not the person's intent, so
+        // the keyboard owner settles after that.
+        if self.pin_picker.is_none() {
+            self.settle_server_directory_keyboard(window, cx);
         }
-        match event {
-            RemoteWorkspaceFlowEvent::StateChanged => {}
-            RemoteWorkspaceFlowEvent::Cancelled => {
-                self.remote_workspace_focus_restore_pending = !window.is_window_active();
-                self.remote_workspace_flow = None;
-                self.remote_workspace_name = None;
-                self.remote_directory_match = None;
-            }
-            // The flow keeps showing that the Workspace is opening until its server takes it.
-            RemoteWorkspaceFlowEvent::Ready => {
-                // The flow saw the server presented; this window may not have bound it yet.
-                // Binding it also tries the request once the server's edits are ready.
-                self.sync_ssh_servers(window, cx);
-                self.open_pending_remote_workspace(window, cx);
-            }
-        }
-        self.sync_terminal_focus_blocker(window, cx);
-        cx.notify();
+        self.continue_server_directory(window, cx);
     }
 
-    /// Asks the SSH server the Remote Workspace flow connected to for its Workspace, once that
-    /// exact connection's edits are ready, or activates the Workspace already pinned to the chosen
-    /// directory there. Until then the request waits in the flow, which shows that it is
-    /// opening; a server still finishing its first reading never drops it.
-    fn open_pending_remote_workspace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Records what holds the keyboard for the pending Open Remote Directory, and follows the
+    /// person moving it elsewhere before the server answers.
+    fn settle_server_directory_keyboard(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let keyboard = window.focused(cx);
+        let Some(pending) = self.pending_server_directory.as_mut() else {
+            return;
+        };
+        pending.keyboard = Some(keyboard.clone());
+        pending.keyboard_moved = false;
+        self.server_directory_keyboard = keyboard.map(|owner| {
+            cx.on_blur(&owner, window, |manager, window, _| {
+                // Leaving SpaceTerm for another application moves no keyboard owner here.
+                if window.is_window_active()
+                    && let Some(pending) = manager.pending_server_directory.as_mut()
+                {
+                    pending.keyboard_moved = true;
+                }
+            })
+        });
+    }
+
+    /// Whether the pending Open Remote Directory still reflects the person's latest intent: no
+    /// newer navigation, and the keyboard where it settled, never moved since.
+    fn server_directory_intent_kept(&self, window: &Window, cx: &App) -> bool {
+        let Some(pending) = &self.pending_server_directory else {
+            return false;
+        };
+        self.navigation(cx) == pending.navigation
+            && pending
+                .keyboard
+                .as_ref()
+                .is_none_or(|keyboard| !pending.keyboard_moved && window.focused(cx) == *keyboard)
+    }
+
+    /// Asks the pending Workspace's server for it once that server's edits are ready, or
+    /// activates the Workspace already pinned to the chosen directory there. Until then the
+    /// request waits; a server still finishing its first reading never drops it.
+    fn continue_server_directory(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         use super::shared_workspaces::{SharedRefusalReason, SharedSubmission};
 
-        let Some(flow) = self.remote_workspace_flow.clone() else {
-            return;
-        };
-        let Some(RemoteWorkspaceChoice {
-            destination,
+        let Some(PendingServerDirectory {
+            key,
+            name,
             directory,
-            server,
-        }) = flow.read(cx).opening().cloned()
+            ..
+        }) = self.pending_server_directory.clone()
         else {
             return;
         };
-        let destination_name = destination.as_str().to_owned();
-        // The flow reports a replaced or lost connection itself; nothing reaches another one.
-        let current = crate::ui::ssh_servers::installed(cx)
-            .and_then(|connections| connections.server(&destination))
-            .is_some_and(|presented| presented.same_handle(&server));
-        let Some(key) = self
-            .shared
-            .key_of(&ServerOrigin::Ssh(destination))
-            .filter(|_| current)
-        else {
+        let Some(shared) = self.shared.get(key) else {
+            // The server stopped being presented, so nothing reaches it.
+            self.finish_server_directory();
+            Self::show_shared_refusal(
+                "open a remote directory",
+                SharedRefusalReason::Offline,
+                window,
+                cx,
+            );
+            self.sync_terminal_focus_blocker(window, cx);
+            cx.notify();
             return;
         };
-        if !self
-            .shared
-            .get(key)
-            .is_some_and(|shared| shared.accepts_edits())
-        {
+        if !shared.accepts_edits() {
             return;
         }
+        let server_name = self
+            .shared
+            .origin(key)
+            .and_then(ServerOrigin::remote_name)
+            .unwrap_or_default();
         // A server path compares only with that server's own pins, and only that server can
         // tell whether two of its paths name one directory, such as through a symbolic link.
         let pins: Vec<(WorkspaceId, PathBuf)> = self
-            .shared
-            .get(key)
-            .map(|shared| {
-                self.workspaces
-                    .iter()
-                    .filter_map(|entry| {
-                        let pin = shared
-                            .server_workspace(entry.id())?
-                            .pinned_directory
-                            .clone()?;
-                        Some((entry.id(), pin))
-                    })
-                    .collect()
+            .workspaces
+            .iter()
+            .filter_map(|entry| {
+                let pin = shared
+                    .server_workspace(entry.id())?
+                    .pinned_directory
+                    .clone()?;
+                Some((entry.id(), pin))
             })
-            .unwrap_or_default();
-        let existing = match directory.as_ref() {
-            Some(directory) if !pins.is_empty() => {
-                match self.match_remote_directory(directory, &pins, &server, window, cx) {
-                    None => return,
-                    Some(Ok(matched)) => matched.or_else(|| {
-                        pins.iter()
-                            .find(|(_, pin)| pin == directory)
-                            .map(|(workspace_id, _)| *workspace_id)
-                    }),
-                    Some(Err(())) => {
-                        self.remote_workspace_flow = None;
-                        self.remote_workspace_name = None;
-                        self.remote_directory_match = None;
-                        flow.update(cx, |flow, cx| flow.opened(window, cx));
-                        Self::show_shared_unavailable_with_title(
-                            "Couldn't Open Workspace",
-                            &format!(
-                                "Couldn't check for an existing Workspace on \"{}\". Try again.",
-                                destination_name
-                            ),
-                            window,
-                            cx,
-                        );
-                        self.sync_terminal_focus_blocker(window, cx);
-                        cx.notify();
-                        return;
-                    }
+            .collect();
+        let existing = if pins.is_empty() {
+            None
+        } else {
+            match self.match_server_directory(key, &directory, &pins, window, cx) {
+                None => return,
+                Some(Ok(matched)) => matched.or_else(|| {
+                    pins.iter()
+                        .find(|(_, pin)| *pin == directory)
+                        .map(|(workspace_id, _)| *workspace_id)
+                }),
+                Some(Err(())) => {
+                    self.finish_server_directory();
+                    Self::show_shared_unavailable_with_title(
+                        "Couldn't Open Workspace",
+                        &format!(
+                            "Couldn't check for an existing Workspace on \"{server_name}\". Try again."
+                        ),
+                        window,
+                        cx,
+                    );
+                    self.sync_terminal_focus_blocker(window, cx);
+                    cx.notify();
+                    return;
                 }
             }
-            _ => None,
         };
-        let name = self.remote_workspace_name.clone().unwrap_or_default();
+        let intent_kept = self.server_directory_intent_kept(window, cx);
         let refusal = match existing {
+            // The Workspace already exists, so nothing is created. Later navigation or keyboard
+            // intent wins: a person who moved elsewhere while the server answered stays there.
             Some(workspace_id) => {
-                if self.activate_workspace(workspace_id, window, cx) {
+                if intent_kept && self.activate_workspace(workspace_id, window, cx) {
                     self.focus(window, cx);
                     self.scroll_active_workspace_into_view(cx);
                 }
                 None
             }
             None => match self.shared.get_mut(key) {
-                Some(shared) => match shared.create_workspace(name, directory) {
+                Some(shared) => match shared.create_workspace(name, Some(directory)) {
                     SharedSubmission::Submitted => None,
                     // Readiness was just checked, so only a publication arriving between the
                     // check and the submission refuses it this way; the next reading retries.
@@ -1268,34 +1311,58 @@ impl WorkspaceManager {
                 None => return,
             },
         };
-        self.remote_workspace_flow = None;
-        self.remote_workspace_name = None;
-        self.remote_directory_match = None;
-        flow.update(cx, |flow, cx| flow.opened(window, cx));
+        self.finish_server_directory();
         if let Some(reason) = refusal {
             Self::show_shared_refusal("create a Workspace", reason, window, cx);
         } else if existing.is_none() {
+            // The server still creates the Workspace the person asked for. After newer
+            // navigation it joins the sidebar without taking the selection or the keyboard.
+            if !intent_kept {
+                self.quiet_creation = Some(key);
+            }
             self.sync_shared_workspaces(key, window, cx);
+            self.quiet_creation = None;
         }
         self.sync_terminal_focus_blocker(window, cx);
         cx.notify();
     }
 
+    /// Where the person's explicit navigation stands now.
+    fn navigation(&self, cx: &App) -> NavigationMark {
+        NavigationMark {
+            activations: self.activation_epoch,
+            workspace: self.workspaces.active_workspace_id(),
+            within: self
+                .active_tab_manager()
+                .map(|manager| manager.read(cx).navigation(cx)),
+        }
+    }
+
+    fn finish_server_directory(&mut self) {
+        self.pending_server_directory = None;
+        self.server_directory_match = None;
+        self.server_directory_keyboard = None;
+    }
+
     /// The owning server's answer to which of `pins` names `directory`, or `None` while it is
     /// asked. A new question replaces an answer to a different one; the question is always the
     /// current choice and the current pins, so a changed list is asked again.
-    fn match_remote_directory(
+    fn match_server_directory(
         &mut self,
+        key: ServerKey,
         directory: &PathBuf,
         pins: &[(WorkspaceId, PathBuf)],
-        server: &crate::local_server::LocalServer,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<Result<Option<WorkspaceId>, ()>> {
+        let Some(client) = self.server_client(key, cx) else {
+            return Some(Err(()));
+        };
+        let server = client.server.clone();
         if let Some(pending) = self
-            .remote_directory_match
+            .server_directory_match
             .as_ref()
-            .filter(|pending| pending.asks(directory, pins, server))
+            .filter(|pending| pending.asks(directory, pins, &server))
         {
             return pending.answer.as_ref().map(|answer| {
                 answer
@@ -1304,23 +1371,10 @@ impl WorkspaceManager {
                     .map_err(|_| ())
             });
         }
-        // The question goes to this exact presented server and stops once it's replaced.
-        let presented = server.clone();
-        let destination = self.remote_workspace_flow.as_ref().and_then(|flow| {
-            flow.read(cx)
-                .opening()
-                .map(|choice| choice.destination.clone())
-        });
-        let connections = crate::ui::ssh_servers::installed(cx);
-        let available: Rc<dyn Fn() -> bool> = Rc::new(move || {
-            destination
-                .as_ref()
-                .zip(connections.as_ref())
-                .and_then(|(destination, connections)| connections.server(destination))
-                .is_some_and(|current| current.same_handle(&presented))
-        });
+        // The question goes to this exact presented connection and stops once it's replaced.
+        let available: Rc<dyn Fn() -> bool> = Rc::new(move || client.availability().0);
         let source = ServerDirectorySource::browsing_through(
-            (self.server_directories)(server),
+            (self.server_directories)(&server),
             None,
             available,
         );
@@ -1333,18 +1387,18 @@ impl WorkspaceManager {
             let answer = question.await;
             drop(source);
             let _ = manager.update_in(cx, |manager, window, cx| {
-                if let Some(pending) = manager.remote_directory_match.as_mut()
+                if let Some(pending) = manager.server_directory_match.as_mut()
                     && pending.asks(&asked.0, &asked.1, &asked.2)
                 {
                     pending.answer = Some(answer);
-                    manager.open_pending_remote_workspace(window, cx);
+                    manager.continue_server_directory(window, cx);
                 }
             });
         });
-        self.remote_directory_match = Some(RemoteDirectoryMatch {
+        self.server_directory_match = Some(ServerDirectoryMatch {
             directory: directory.clone(),
             pins: pins.to_vec(),
-            server: server.clone(),
+            server,
             answer: None,
             _task: task,
         });
@@ -1368,10 +1422,7 @@ impl WorkspaceManager {
             });
             return;
         }
-        if self.transient.local_selection_pending
-            || (matches!(target, PinTarget::NewLocalWorkspace { .. })
-                && self.remote_workspace_flow.is_some())
-        {
+        if self.transient.local_selection_pending {
             return;
         }
         // A shared Workspace's draft is fenced to the pin version the chooser opened on.
@@ -1379,7 +1430,7 @@ impl WorkspaceManager {
             PinTarget::Workspace(workspace_id) => self
                 .shared_pin_version(*workspace_id)
                 .map(|version| (*workspace_id, version)),
-            PinTarget::NewLocalWorkspace { .. } => None,
+            PinTarget::NewLocalWorkspace { .. } | PinTarget::NewServerWorkspace { .. } => None,
         };
         self.transient.begin_pin(target.clone(), version);
         self.pin_operation = self.pin_operation.wrapping_add(1);
@@ -1533,6 +1584,7 @@ impl WorkspaceManager {
             Self::report_workspace_error("activate", error);
             return false;
         }
+        self.activation_epoch = self.activation_epoch.wrapping_add(1);
 
         self.synchronize_tab_manager_layout(workspace_id, window, cx);
         if previous_workspace_id != Some(workspace_id) {
@@ -2061,9 +2113,6 @@ impl WorkspaceManager {
                     .and_then(|key| self.shared.origin(key))
                     .and_then(|origin| match origin {
                         ServerOrigin::Local => None,
-                        ServerOrigin::Ssh(destination) => {
-                            Some(super::MachineTarget::Ssh(destination.clone()))
-                        }
                         ServerOrigin::Direct(direct) => {
                             Some(super::MachineTarget::Direct(direct.route))
                         }
@@ -2097,15 +2146,6 @@ impl WorkspaceManager {
         self.run_workspace_creation(WorkspaceCreation::Local, window, cx);
     }
 
-    fn on_new_remote_workspace(
-        &mut self,
-        _: &NewRemoteWorkspace,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.run_workspace_creation(WorkspaceCreation::Remote, window, cx);
-    }
-
     fn on_new_worktree(&mut self, _: &NewWorktree, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(workspace_id) = self.workspaces.active_workspace_id() {
             self.new_worktree(workspace_id, window, cx);
@@ -2132,15 +2172,6 @@ impl WorkspaceManager {
         cx: &mut Context<Self>,
     ) {
         self.run_workspace_creation(WorkspaceCreation::OpenLocalDirectory, window, cx);
-    }
-
-    fn on_open_remote_directory(
-        &mut self,
-        _: &OpenRemoteDirectory,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.run_workspace_creation(WorkspaceCreation::OpenRemoteDirectory, window, cx);
     }
 
     /// Runs a creation Command. An open Workspace Switcher runs it with its query as the name.
@@ -2175,16 +2206,13 @@ impl WorkspaceManager {
             WorkspaceCreation::Local => {
                 self.create_shared_workspace(name, None, window, cx);
             }
-            WorkspaceCreation::Remote => {
-                self.present_remote_workspace_flow(name, RemoteWorkspaceStart::Home, window, cx)
-            }
             WorkspaceCreation::OpenLocalDirectory => self.open_local_directory(name, window, cx),
-            WorkspaceCreation::OpenRemoteDirectory => self.present_remote_workspace_flow(
-                name,
-                RemoteWorkspaceStart::ChosenDirectory,
-                window,
-                cx,
-            ),
+            WorkspaceCreation::Remote(route) => {
+                self.create_workspace_on(&super::MachineTarget::Direct(route), name, window, cx)
+            }
+            WorkspaceCreation::OpenRemoteDirectory(route) => {
+                self.open_remote_directory(route, name, window, cx)
+            }
         }
     }
 
@@ -2355,32 +2383,10 @@ impl WorkspaceManager {
         cx: &App,
     ) -> Option<RemoteConnectionPhase> {
         use crate::direct_connections::DirectRouteStatus;
-        use crate::ssh::server_connection::RemoteConnectionStatus;
 
         let key = self.shared.owner(workspace_id)?;
         match self.shared.origin(key)? {
             ServerOrigin::Local => None,
-            ServerOrigin::Ssh(destination) => {
-                let status = crate::ui::ssh_servers::installed(cx)?.status(destination);
-                Some(match status {
-                    RemoteConnectionStatus::Connected { .. } => RemoteConnectionPhase::Connected,
-                    RemoteConnectionStatus::Working { .. }
-                    | RemoteConnectionStatus::Reconnecting { .. } => {
-                        RemoteConnectionPhase::Reconnecting
-                    }
-                    RemoteConnectionStatus::Paused { .. }
-                    | RemoteConnectionStatus::Incompatible { .. }
-                    | RemoteConnectionStatus::Refused { .. }
-                    | RemoteConnectionStatus::Unavailable { .. }
-                    | RemoteConnectionStatus::Unconfirmed { .. } => RemoteConnectionPhase::Failed,
-                    RemoteConnectionStatus::Inactive
-                    | RemoteConnectionStatus::Cancelling
-                    | RemoteConnectionStatus::NeedsPerson { .. }
-                    | RemoteConnectionStatus::InstallationOffered { .. }
-                    | RemoteConnectionStatus::Checked { .. }
-                    | RemoteConnectionStatus::Stopped => RemoteConnectionPhase::Disconnected,
-                })
-            }
             ServerOrigin::Direct(direct) => {
                 let status = crate::ui::direct_servers::installed(cx)?.status(&direct.route)?;
                 Some(match status {
@@ -2485,12 +2491,7 @@ impl WorkspaceManager {
         let accept_manager = manager.clone();
         let combo_lifecycle_window = window.window_handle();
         let presentation = crate::desktop_profile::DesktopPresentation::get(cx);
-        let remote_unavailable_reason = self.remote_workspace_unavailable_reason(cx);
-        let creation_rows = WorkspaceCreation::ALL.to_vec();
-        let creation_shortcuts: Vec<_> = creation_rows
-            .iter()
-            .map(|creation| creation.shortcut(presentation))
-            .collect();
+        let creation_rows = switcher_creation_rows(&self.remote_creation_servers(cx), presentation);
         let collapsed_identity = (presence > 0.0)
             .then(|| self.workspace_chrome_identity(cx))
             .flatten()
@@ -2525,27 +2526,24 @@ impl WorkspaceManager {
             self.workspace_switcher_items(cx),
             move |_| {
                 creation_rows
-                    .clone()
-                    .into_iter()
-                    .zip(creation_shortcuts.clone())
-                    .map(|(creation, shortcut)| {
-                        let mut command = ComboBoxCommand::new(creation, creation.label())
+                    .iter()
+                    .map(|row| {
+                        let creation = row.creation;
+                        let mut command = ComboBoxCommand::new(creation, row.label.clone())
                             .leading_icon(move |foreground, size| {
                                 Icon::custom(creation.icon(), size, foreground).into_any_element()
                             })
-                            .debug_selector(format!("workspace-switcher-{}", creation.selector()));
-                        if creation.starts_group() {
+                            .debug_selector(format!("workspace-switcher-{}", row.selector));
+                        if row.starts_group {
                             command = command.starts_group();
                         }
-                        if let Some(shortcut) = shortcut {
+                        if let Some(shortcut) = row.shortcut.clone() {
                             command = command.shortcut(shortcut);
                         }
-                        if creation.is_remote()
-                            && let Some(reason) = &remote_unavailable_reason
-                        {
+                        if !row.available {
                             command = command
                                 .disabled(true)
-                                .description(reason.clone())
+                                .description(super::workspace_creation::REMOTE_UNAVAILABLE)
                                 .trailing(ComboBoxAccessory::Status("Unavailable".into()));
                         }
                         command
@@ -2990,6 +2988,14 @@ impl WorkspaceManager {
         if let Some(mut withdrawn) = self.shared.remove(key) {
             withdrawn.flush_client_views();
         }
+        // A Workspace still waiting for this server says it couldn't open rather than vanishing.
+        if self
+            .pending_server_directory
+            .as_ref()
+            .is_some_and(|pending| pending.key == key)
+        {
+            self.continue_server_directory(window, cx);
+        }
         self.present_shared_repositories(cx);
         cx.notify();
     }
@@ -3089,8 +3095,8 @@ impl WorkspaceManager {
         // review; both look up their own Workspace's server.
         self.open_created_server_worktree(window, cx);
         self.revalidate_server_removal(window, cx);
-        // A Remote Workspace waiting for this server's edits may be asked for now.
-        self.open_pending_remote_workspace(window, cx);
+        // A Workspace Open Remote Directory is opening may be asked for now.
+        self.continue_server_directory(window, cx);
         // New Workspace chosen with no Workspace Window open waits for this reading.
         self.create_pending_workspace(key, window, cx);
         if let Some((operation, error)) = self
@@ -3570,12 +3576,19 @@ impl WorkspaceManager {
         workspace_id: WorkspaceId,
         cx: &mut App,
     ) -> Option<crate::ui::server_worktrees::Client> {
+        self.server_client(self.shared.owner(workspace_id)?, cx)
+    }
+
+    /// The edit writer of the server presented at `key`.
+    fn server_client(
+        &self,
+        key: ServerKey,
+        cx: &mut App,
+    ) -> Option<crate::ui::server_worktrees::Client> {
         use crate::ui::server_worktrees::Client;
 
-        let key = self.shared.owner(workspace_id)?;
         match self.shared.origin(key)? {
             ServerOrigin::Local => Client::get(cx),
-            ServerOrigin::Ssh(destination) => Client::ssh(destination, cx),
             ServerOrigin::Direct(direct) => Client::direct(&direct.route, cx),
         }
     }
@@ -3587,12 +3600,21 @@ impl WorkspaceManager {
         workspace_id: WorkspaceId,
         cx: &mut App,
     ) -> Option<ServerDirectorySource> {
+        self.server_directory_source(self.shared.owner(workspace_id)?, cx)
+    }
+
+    /// Browses the directories of the server on another computer presented at `key`, or `None`
+    /// while that server is unreachable.
+    fn server_directory_source(
+        &self,
+        key: ServerKey,
+        cx: &mut App,
+    ) -> Option<ServerDirectorySource> {
         let machine = self
             .shared
-            .owner(workspace_id)
-            .and_then(|key| self.shared.origin(key))
+            .origin(key)
             .and_then(ServerOrigin::remote_name)?;
-        let client = self.owning_client(workspace_id, cx)?;
+        let client = self.server_client(key, cx)?;
         if !client.availability().0 {
             return None;
         }
@@ -4384,7 +4406,9 @@ impl WorkspaceManager {
                 else {
                     return;
                 };
-                if self.activate_workspace(workspace_id, window, cx) {
+                if self.quiet_creation != Some(key)
+                    && self.activate_workspace(workspace_id, window, cx)
+                {
                     self.focus(window, cx);
                     self.scroll_active_workspace_into_view(cx);
                 }
@@ -4599,7 +4623,7 @@ impl WorkspaceManager {
             .collect()
     }
 
-    /// One server's detached Workspaces. Another computer's carry its SSH destination, so two
+    /// One server's detached Workspaces. Another computer's carry its server name, so two
     /// servers' Workspaces with one name stay distinguishable.
     fn detached_server_items(
         &self,
@@ -4936,10 +4960,10 @@ impl WorkspaceManager {
         };
         let rows = self.sidebar_rows(cx);
         let sections = self.machine_sections(cx);
-        let remote_unavailable = self.remote_workspace_unavailable_reason(cx);
+        let remote_servers = self.remote_creation_servers(cx);
 
         self.sidebar.update(cx, |sidebar, cx| {
-            sidebar.set_rows(rows, sections, remote_unavailable, cx)
+            sidebar.set_rows(rows, sections, remote_servers, cx)
         });
         // The New Worktree Command is available only where it can act, so its menu item disables
         // elsewhere.
@@ -5011,7 +5035,6 @@ impl WorkspaceManager {
         let transients = Self::workspace_action_scope(actions, cx)
             .absolute()
             .inset_0()
-            .children(self.remote_workspace_flow.iter().cloned())
             .children(self.pin_picker.iter().cloned())
             .children(self.active_directory_recovery(cx))
             .children(super::application_commands::overlay(window, cx));
@@ -5047,9 +5070,7 @@ impl WorkspaceManager {
                 scope
                     .on_action(cx.listener(Self::on_switch_workspace))
                     .on_action(cx.listener(Self::on_new_workspace))
-                    .on_action(cx.listener(Self::on_new_remote_workspace))
                     .on_action(cx.listener(Self::on_open_local_directory))
-                    .on_action(cx.listener(Self::on_open_remote_directory))
                     .on_action(cx.listener(Self::on_close_workspace))
                     .on_action(cx.listener(Self::on_activate_workspace_1))
                     .on_action(cx.listener(Self::on_activate_workspace_2))
@@ -5225,6 +5246,50 @@ const fn close_target_workspace(target: CloseTarget) -> Option<WorkspaceId> {
     }
 }
 
+/// One creation row the Workspace Switcher offers.
+struct SwitcherCreationRow {
+    creation: WorkspaceCreation,
+    label: gpui::SharedString,
+    selector: String,
+    shortcut: Option<gpui::SharedString>,
+    starts_group: bool,
+    available: bool,
+}
+
+/// The Workspace Switcher's creation rows: the local ones, then New Workspace and Open Directory
+/// on each saved paired server.
+fn switcher_creation_rows(
+    servers: &[super::workspace_creation::RemoteCreationServer],
+    presentation: &crate::desktop_profile::DesktopPresentation,
+) -> Vec<SwitcherCreationRow> {
+    let local = WorkspaceCreation::LOCAL
+        .into_iter()
+        .map(|creation| SwitcherCreationRow {
+            creation,
+            label: creation.label(None),
+            selector: creation.selector(0),
+            shortcut: creation.shortcut(presentation),
+            starts_group: false,
+            available: true,
+        });
+    let remote = servers.iter().enumerate().flat_map(|(position, server)| {
+        [
+            WorkspaceCreation::Remote(server.route),
+            WorkspaceCreation::OpenRemoteDirectory(server.route),
+        ]
+        .into_iter()
+        .map(move |creation| SwitcherCreationRow {
+            creation,
+            label: creation.label(Some(server.display_name().as_ref())),
+            selector: creation.selector(position),
+            shortcut: None,
+            starts_group: position == 0 && matches!(creation, WorkspaceCreation::Remote(_)),
+            available: server.available,
+        })
+    });
+    local.chain(remote).collect()
+}
+
 mod empty;
 mod launch;
 #[cfg(test)]
@@ -5238,7 +5303,6 @@ use server_bindings::ServerBindings;
 pub(crate) use server_bindings::{ServerKey, ServerOrigin};
 mod direct_servers;
 mod shared_repositories;
-mod ssh_servers;
 mod worktrees;
 
 #[cfg(test)]

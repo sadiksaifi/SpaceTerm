@@ -481,15 +481,54 @@ fn end_all_sessions_preserves_independent_grants_unclaimed_panes_and_other_serve
             axis: Axis::Right,
         },
     );
-    start(&mut selected, 1, first);
+    let first_session = start(&mut selected, 1, first);
     start(&mut selected, 2, second);
     let released = start(&mut selected, 2, unclaimed);
     selected.request([2; 32], [2; 32], Request::Release { lease: released });
-    let before = shared_inventory(&mut selected).workspaces;
+    command(
+        &mut selected,
+        1,
+        first_session,
+        "printf '\\033]2;END-ALL-LIVE-PRESENTATION\\007'\n",
+    );
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let before = loop {
+        let workspaces = shared_inventory(&mut selected).workspaces;
+        if workspaces[0].tabs[0].panes[0]
+            .presentation
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.title == "END-ALL-LIVE-PRESENTATION")
+        {
+            break workspaces;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "shell presentation was not published"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    };
+    let mut expected = before;
+    for pane in expected
+        .iter_mut()
+        .flat_map(|workspace| &mut workspace.tabs)
+        .flat_map(|tab| &mut tab.panes)
+    {
+        pane.presentation = None;
+    }
     end_all(&mut selected, 3, 1);
-    assert_eq!(shared_inventory(&mut selected).workspaces, before);
+    let ended = shared_inventory(&mut selected);
     assert!(
-        shared_inventory(&mut selected)
+        ended
+            .workspaces
+            .iter()
+            .flat_map(|workspace| &workspace.tabs)
+            .flat_map(|tab| &tab.panes)
+            .all(|pane| pane.presentation.is_none()),
+        "ended Sessions publish no live presentation"
+    );
+    assert_eq!(ended.workspaces, expected);
+    assert!(
+        ended
             .close
             .unwrap()
             .sessions

@@ -2527,7 +2527,7 @@ fn hidden_worker_should_publish_directory_changes_without_constructing_screens()
         let context = if remote {
             TerminalMetadataContext::Remote(
                 crate::terminal::metadata::RemoteTerminalMetadataContext::new(
-                    crate::domain::SshDestination::new("build".into()).unwrap(),
+                    "build".into(),
                     crate::domain::RemoteDirectory::new("~".into()).unwrap(),
                 ),
             )

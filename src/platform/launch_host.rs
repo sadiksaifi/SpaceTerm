@@ -21,24 +21,23 @@ pub(crate) fn running_executable() -> Option<PathBuf> {
     running_executable_of_host()
 }
 
-/// Where this installation keeps the verified server packages SSH Connect may install on another
-/// computer. Development and packaged clients share the installation-relative resource layout.
+/// Verified server packages available for remote setup.
 /// An explicit Development override can select a separate catalog for native checks.
-pub(crate) fn ssh_server_artifacts() -> Option<PathBuf> {
+pub(crate) fn server_artifact_catalog() -> Option<PathBuf> {
     if !cfg!(spaceterm_packaged)
-        && let Some(root) = std::env::var_os("SPACETERM_SSH_SERVER_ARTIFACTS")
+        && let Some(root) = std::env::var_os("SPACETERM_SERVER_ARTIFACTS")
     {
         return Some(PathBuf::from(root));
     }
     let executable = running_executable()?;
-    Some(executable.parent()?.parent()?.join(SSH_SERVER_ARTIFACTS))
+    Some(executable.parent()?.parent()?.join(SERVER_ARTIFACTS))
 }
 
 /// The server packages' place inside an installation, relative to its executable's parent.
 #[cfg(target_os = "macos")]
-const SSH_SERVER_ARTIFACTS: &str = "Resources/server-artifacts";
+const SERVER_ARTIFACTS: &str = "Resources/server-artifacts";
 #[cfg(target_os = "linux")]
-const SSH_SERVER_ARTIFACTS: &str = "share/spaceterm/server-artifacts";
+const SERVER_ARTIFACTS: &str = "share/spaceterm/server-artifacts";
 
 #[cfg(target_os = "macos")]
 fn running_executable_of_host() -> Option<PathBuf> {

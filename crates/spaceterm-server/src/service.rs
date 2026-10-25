@@ -6,10 +6,9 @@ pub mod control;
 mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
-pub mod maintenance;
 mod registration;
 mod runtime;
-pub use runtime::CandidateMetadata;
+pub use runtime::{CandidateMetadata, verify_candidate_bytes};
 
 use crate::{ServerError, host::Paths, storage::Directory};
 use serde::{Deserialize, Serialize};
@@ -62,6 +61,19 @@ pub struct ServiceStatus {
     /// The automatic-start preference, retained independently of deliberate Stop.
     pub enabled: bool,
     pub running: bool,
+    pub stopped: bool,
+}
+
+/// The exact stopped or dormant installation authorized during temporary SSH setup.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SetupStartObservation {
+    pub account: u32,
+    pub build: String,
+    pub server: [u8; 32],
+    pub installation: String,
+    pub version: String,
+    pub commit: String,
     pub stopped: bool,
 }
 
@@ -339,8 +351,8 @@ impl Service {
         self.snapshot(&state)
     }
     #[cfg(feature = "client")]
-    pub(crate) fn local_server(&self) -> Result<crate::LocalServer, ServerError> {
-        crate::LocalServer::with_paths(self.paths.clone())
+    pub(crate) fn local_server(&self) -> Result<crate::ServerConnection, ServerError> {
+        crate::ServerConnection::with_paths(self.paths.clone())
     }
     /// Serialize normal launch with installation and explicit service controls.
     #[cfg(feature = "client")]
@@ -412,6 +424,55 @@ impl Service {
     pub fn connect(&self) -> Result<ServiceStatus, ServerError> {
         self.start_existing(false)
     }
+    /// Observe the approved installation without recovering or starting a service.
+    pub fn setup_start_observation(&self) -> Result<Option<SetupStartObservation>, ServerError> {
+        let Some((data, _)) = self.read()? else {
+            return Ok(None);
+        };
+        let _operation = data.lock("service.lock", false)?;
+        let _intent = data.lock("service-intent.lock", false)?;
+        let state = Self::state(&data)?.ok_or(ServerError::NotInstalled)?;
+        if !state.installed {
+            return Ok(None);
+        }
+        self.check_setup_start_state(&state)?;
+        let (version, commit) = runtime::describe(&self.runtime(&state), &self.identity)?;
+        Ok(Some(SetupStartObservation {
+            // SAFETY: geteuid has no preconditions.
+            account: unsafe { libc::geteuid() },
+            build: self.identity.clone(),
+            server: data.read()?.server,
+            installation: state.installation,
+            version,
+            commit,
+            stopped: state.stopped,
+        }))
+    }
+    /// Start only the installation and server named by this setup approval.
+    /// Validation and Stop publication share the service and intent locks.
+    pub fn start_for_setup(
+        &self,
+        approved: &SetupStartObservation,
+    ) -> Result<ServiceStatus, ServerError> {
+        let (data, _) = self.read()?.ok_or(ServerError::NotInstalled)?;
+        let _operation = data.lock("service.lock", false)?;
+        let mut state = Self::state(&data)?.ok_or(ServerError::NotInstalled)?;
+        self.start_observed_locked(&data, &mut state, true, Some(approved))?;
+        self.snapshot(&state)
+    }
+    fn check_setup_start_state(&self, state: &State) -> Result<(), ServerError> {
+        if !state.installed || state.removing {
+            return Err(ServerError::Changed);
+        }
+        if state
+            .activation
+            .as_ref()
+            .is_some_and(|operation| !operation.settled())
+        {
+            return Err(ServerError::ActivationUnresolved);
+        }
+        Ok(())
+    }
     fn start_existing(&self, explicit: bool) -> Result<ServiceStatus, ServerError> {
         let (data, _) = self.read()?.ok_or(ServerError::NotInstalled)?;
         let _operation = data.lock("service.lock", false)?;
@@ -440,8 +501,33 @@ impl Service {
         state: &mut State,
         explicit: bool,
     ) -> Result<(), ServerError> {
+        self.start_observed_locked(data, state, explicit, None)
+    }
+    fn start_observed_locked(
+        &self,
+        data: &Directory,
+        state: &mut State,
+        explicit: bool,
+        approved: Option<&SetupStartObservation>,
+    ) -> Result<(), ServerError> {
         let intent = data.lock("service-intent.lock", false)?;
         *state = Self::state(data)?.ok_or(ServerError::StorageUnavailable)?;
+        if let Some(approved) = approved {
+            self.check_setup_start_state(state)?;
+            // SAFETY: geteuid has no preconditions.
+            if approved.account != unsafe { libc::geteuid() }
+                || approved.build != self.identity
+                || approved.server != data.read()?.server
+                || approved.installation != state.installation
+                || approved.stopped != state.stopped
+            {
+                return Err(ServerError::Changed);
+            }
+            let (version, commit) = runtime::describe(&self.runtime(state), &self.identity)?;
+            if approved.version != version || approved.commit != commit {
+                return Err(ServerError::Changed);
+            }
+        }
         self.supervisor
             .check(&self.runtime(state), state.removing)?;
         if state.stopped && !explicit {
@@ -1016,6 +1102,65 @@ mod tests {
         }
     }
     #[test]
+    fn setup_start_refuses_replaced_installation_server_or_stop_before_native_effects() {
+        use runtime::test_support::{COMMIT, VERSION, target, with_artifact};
+        let fixture = Fixture::new();
+        let service = Service::new(
+            fixture.paths.clone(),
+            fixture.paths.identity.clone(),
+            std::sync::Arc::new(TestSupervisor::default()),
+        );
+        with_artifact(
+            &fixture.root.join("signed"),
+            &fixture.paths.identity,
+            |archive, signature| {
+                let installed = service
+                    .provision(archive, signature, target(), COMMIT, VERSION)
+                    .unwrap();
+                let data = Directory::open(&fixture.paths.data, false).unwrap();
+                let mut original = Service::state(&data).unwrap().unwrap();
+                original.installation = installed
+                    .directory
+                    .file_name()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .to_owned();
+                original.stopped = true;
+                data.write_json(c"service.json", &original).unwrap();
+                let identity = data.read().unwrap();
+                let approved = service.setup_start_observation().unwrap().unwrap();
+                for changed in 0..4 {
+                    let mut state = original.clone();
+                    let mut current_identity = data.read().unwrap();
+                    current_identity.server = identity.server;
+                    let mut request = approved.clone();
+                    match changed {
+                        0 => state.installation = "b".repeat(64),
+                        1 => current_identity.server[0] ^= 1,
+                        2 => state.stopped = false,
+                        _ => request.commit = "b".repeat(40),
+                    }
+                    data.write_json(c"service.json", &state).unwrap();
+                    data.write(&current_identity).unwrap();
+                    let service_bytes =
+                        std::fs::read(fixture.paths.data.join("service.json")).unwrap();
+                    let identity_bytes =
+                        std::fs::read(fixture.paths.data.join("identity.json")).unwrap();
+                    assert_eq!(service.start_for_setup(&request), Err(ServerError::Changed));
+                    assert_eq!(
+                        std::fs::read(fixture.paths.data.join("service.json")).unwrap(),
+                        service_bytes
+                    );
+                    assert_eq!(
+                        std::fs::read(fixture.paths.data.join("identity.json")).unwrap(),
+                        identity_bytes
+                    );
+                }
+            },
+        );
+    }
+    #[test]
     fn automatic_start_changes_preserve_the_running_server_and_its_retained_state() {
         use std::sync::{
             Arc,
@@ -1559,7 +1704,7 @@ mod tests {
         fn no_provision() -> Result<PathBuf, ServerError> {
             panic!("retained policy must never select a different runtime")
         }
-        fn ready(outcome: StartupOutcome) -> crate::LocalServer {
+        fn ready(outcome: StartupOutcome) -> crate::ServerConnection {
             match outcome {
                 StartupOutcome::Ready { server, status } => {
                     assert_eq!(status.protocol_major, 1);

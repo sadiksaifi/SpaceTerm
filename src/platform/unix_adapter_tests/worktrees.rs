@@ -7,9 +7,9 @@ use std::process::{Command, Stdio};
 use std::sync::Arc;
 
 use super::{local_filesystem, short_temporary_root};
+use crate::cancellation::CancellationToken;
 use crate::platform::unix_repository_program::UnixRepositoryProgramRunner;
 use crate::repository_status::ToolVersion;
-use crate::ssh::cancellation::SshCancellationToken;
 use crate::worktrees::git::{LocalWorktreeGit, RemovalExpectation, WorktreeRemoveError};
 
 /// Where the fixture looks for git, in the order a person's PATH usually lists them.
@@ -102,7 +102,7 @@ fn removal_should_refuse_a_worktree_recreated_at_the_confirmed_location() {
             patch: 0,
         },
     );
-    let cancellation = SshCancellationToken::default();
+    let cancellation = CancellationToken::default();
     let filesystem = local_filesystem();
     let confirmed = git
         .check_removal(&location, &filesystem, &cancellation)
@@ -213,7 +213,7 @@ fn removal_should_force_a_clean_worktree_holding_a_submodule() {
             patch: 0,
         },
     );
-    let cancellation = SshCancellationToken::default();
+    let cancellation = CancellationToken::default();
     let check = git
         .check_removal(&location, &local_filesystem(), &cancellation)
         .unwrap();

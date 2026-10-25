@@ -37,6 +37,8 @@
 	<true/>
 	<key>NSHumanReadableCopyright</key>
 	<string>Copyright © 2026 Sadik Saifi</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>SpaceTerm uses your local network to connect to servers you add and devices you pair.</string>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
 </dict>

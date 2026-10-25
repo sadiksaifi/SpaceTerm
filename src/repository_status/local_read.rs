@@ -16,7 +16,7 @@ use super::{
     ProgramRequest, RepositoryMarkerReader, RepositoryProgramRunner, RepositoryReadError,
     RepositoryRoot, StatusHeaders, ToolVersion, tool_search_path,
 };
-use crate::ssh::cancellation::SshCancellationToken;
+use crate::cancellation::CancellationToken;
 
 pub(crate) const DISCOVERY_ARGUMENTS: [&str; 7] = [
     "rev-parse",
@@ -177,7 +177,7 @@ impl LocalRepositoryReader {
     pub(crate) fn probe(
         &self,
         directory: &Path,
-        cancellation: &SshCancellationToken,
+        cancellation: &CancellationToken,
     ) -> Result<ProbeOutcome, RepositoryReadError> {
         // Later commands name the paths git prints, so they must round-trip through text.
         let directory_text = directory.to_str().ok_or(RepositoryReadError::Unavailable)?;
@@ -227,7 +227,7 @@ impl LocalRepositoryReader {
         &self,
         root: &Path,
         fsmonitor: FsmonitorPolicy,
-        cancellation: &SshCancellationToken,
+        cancellation: &CancellationToken,
     ) -> Result<PorcelainSummary, RepositoryReadError> {
         let mut request =
             self.request(root, git_arguments(root, fsmonitor, &COUNT_ARGUMENTS), None);
@@ -243,7 +243,7 @@ impl LocalRepositoryReader {
     fn headers(
         &self,
         root: &Path,
-        cancellation: &SshCancellationToken,
+        cancellation: &CancellationToken,
     ) -> Result<StatusHeaders, RepositoryReadError> {
         let mut parser = PorcelainParser::new();
         let exit = self.run(
@@ -265,7 +265,7 @@ impl LocalRepositoryReader {
         &self,
         root: &Path,
         branch: Option<&str>,
-        cancellation: &SshCancellationToken,
+        cancellation: &CancellationToken,
     ) -> Result<super::RepositoryConfig, RepositoryReadError> {
         let mut parser = ConfigParser::new(branch, self.git_version);
         let exit = self.run(
@@ -300,7 +300,7 @@ impl LocalRepositoryReader {
         &self,
         request: ProgramRequest,
         stdout: &mut dyn FnMut(&[u8]),
-        cancellation: &SshCancellationToken,
+        cancellation: &CancellationToken,
     ) -> Result<ProgramExit, RepositoryReadError> {
         self.runner
             .run(&request, stdout, cancellation)
@@ -458,7 +458,7 @@ mod tests {
         });
 
         let outcome = reader(&runner, &markers)
-            .probe(Path::new("/src/app/src"), &SshCancellationToken::default())
+            .probe(Path::new("/src/app/src"), &CancellationToken::default())
             .unwrap();
 
         assert_eq!(
@@ -552,7 +552,7 @@ mod tests {
         ]);
 
         let outcome = reader(&runner, &Arc::default())
-            .probe(Path::new("/src/app/src"), &SshCancellationToken::default())
+            .probe(Path::new("/src/app/src"), &CancellationToken::default())
             .unwrap();
 
         let requests = runner.requests();
@@ -613,7 +613,7 @@ mod tests {
         let markers = Arc::new(FakeMarkers::default());
 
         let outcome = reader(&runner, &markers)
-            .probe(Path::new("/tmp"), &SshCancellationToken::default())
+            .probe(Path::new("/tmp"), &CancellationToken::default())
             .unwrap();
 
         assert_eq!(outcome, ProbeOutcome::NotRepository);
@@ -634,7 +634,7 @@ mod tests {
             let markers = Arc::new(FakeMarkers::default());
 
             let outcome = reader(&runner, &markers)
-                .probe(Path::new("/src/x"), &SshCancellationToken::default())
+                .probe(Path::new("/src/x"), &CancellationToken::default())
                 .unwrap();
 
             assert_eq!(outcome, ProbeOutcome::Hidden, "{output:?}");
@@ -647,7 +647,7 @@ mod tests {
         let runner = FakeRunner::new([exit(128, &discovery(""))]);
 
         let result = reader(&runner, &Arc::default())
-            .probe(Path::new("/src/app"), &SshCancellationToken::default());
+            .probe(Path::new("/src/app"), &CancellationToken::default());
 
         assert_eq!(result, Err(RepositoryReadError::Unavailable));
     }
@@ -675,7 +675,7 @@ mod tests {
             let runner = FakeRunner::new(responses);
 
             let result = reader(&runner, &Arc::default())
-                .probe(Path::new("/src/app"), &SshCancellationToken::default());
+                .probe(Path::new("/src/app"), &CancellationToken::default());
 
             assert_eq!(result, Err(expected));
         }
@@ -690,7 +690,7 @@ mod tests {
         ]);
 
         let ProbeOutcome::Repository(repository) = reader(&runner, &Arc::default())
-            .probe(Path::new("/src/app"), &SshCancellationToken::default())
+            .probe(Path::new("/src/app"), &CancellationToken::default())
             .unwrap()
         else {
             panic!("expected a repository");
@@ -718,7 +718,7 @@ mod tests {
             let runner = FakeRunner::new([Err(error)]);
 
             let result = reader(&runner, &Arc::default())
-                .probe(Path::new("/src/app"), &SshCancellationToken::default());
+                .probe(Path::new("/src/app"), &CancellationToken::default());
 
             assert_eq!(result, Err(expected));
         }
@@ -738,7 +738,7 @@ mod tests {
             .count(
                 Path::new("/src/app"),
                 FsmonitorPolicy::Disabled,
-                &SshCancellationToken::default(),
+                &CancellationToken::default(),
             )
             .unwrap();
 
@@ -763,7 +763,7 @@ mod tests {
             .count(
                 Path::new("/src/app"),
                 FsmonitorPolicy::Builtin,
-                &SshCancellationToken::default(),
+                &CancellationToken::default(),
             )
             .unwrap();
 
@@ -789,7 +789,7 @@ mod tests {
             let result = reader(&runner, &Arc::default()).count(
                 Path::new("/src/app"),
                 FsmonitorPolicy::Disabled,
-                &SshCancellationToken::default(),
+                &CancellationToken::default(),
             );
 
             assert_eq!(result, Err(expected));

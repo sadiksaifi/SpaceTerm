@@ -16,8 +16,8 @@ use std::net::SocketAddr;
 use gpui::SharedString;
 use zeroize::Zeroizing;
 
-use crate::local_server::LocalServer;
-use crate::local_server::direct::{
+use crate::server_connection::ServerConnection;
+use crate::server_connection::direct::{
     ClaimId, ComparisonCode, DeviceInfo, DirectError, DirectStatus, Invitation, ListenerState,
     NetworkAddresses, NetworkPolicy, PairingClaim, PairingId,
 };
@@ -131,7 +131,7 @@ pub(crate) trait DirectAccessControl: Send + Sync {
     fn devices(&self) -> Result<Vec<Device>, AccessFailure>;
 }
 
-impl DirectAccessControl for LocalServer {
+impl DirectAccessControl for ServerConnection {
     fn status(&self) -> Result<AccessState, AccessFailure> {
         self.direct_status().map(access_state).map_err(classify)
     }
@@ -234,6 +234,7 @@ fn classify(error: impl Into<DirectError>) -> AccessFailure {
         }
         DirectError::AuthenticationRefused
         | DirectError::PinMismatch
+        | DirectError::PolicyChanged
         | DirectError::InvalidRequest => AccessFailure::Refused,
     }
 }
@@ -315,7 +316,7 @@ pub(crate) fn unix_now() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::local_server::direct::ServerPin;
+    use crate::server_connection::direct::ServerPin;
 
     fn claim_with_exchange(prefix: [u8; 4]) -> PairingClaim {
         let mut exchange_hash = [0; 32];
@@ -346,6 +347,7 @@ mod tests {
                 available: vec!["192.168.1.21".parse().expect("an address")],
                 suggested: None,
             }),
+            setup_generation: 0,
         }
     }
 

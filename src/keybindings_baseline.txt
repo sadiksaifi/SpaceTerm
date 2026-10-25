@@ -152,9 +152,7 @@ ctrl-shift-tab	Some(Identifier("SpaceTermTextArea"))	spaceterm_text_input::Focus
 ctrl-cmd-space	Some(Identifier("SpaceTermTextArea"))	spaceterm_text_input::ShowCharacterPalette
 cmd-shift-k	None	terminal::SwitchWorkspace
 cmd-n	None	terminal::NewWorkspace
-cmd-shift-n	None	terminal::NewRemoteWorkspace
 cmd-o	None	terminal::OpenLocalDirectory
-cmd-shift-o	None	terminal::OpenRemoteDirectory
 alt-cmd-]	Some(Identifier("TerminalPane"))	terminal::NextWorktree
 alt-cmd-[	Some(Identifier("TerminalPane"))	terminal::PreviousWorktree
 ctrl-cmd-w	None	terminal::CloseWorkspace

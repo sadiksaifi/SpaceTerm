@@ -1,8 +1,8 @@
 //! The selected server's card: the Server row, Start automatically and Terminal Sessions.
 //!
-//! Each row reads what SpaceTerm already knows: this account's service and update rows, the SSH
-//! connection registry and maintenance owner, and the direct registry. Rendering asks no server
-//! anything. When SpaceTerm isn't connected to the server, the rows under Server dim and show what
+//! Each row reads what SpaceTerm already knows: this account's service and update rows, and the
+//! direct registry. Rendering asks no server anything. A paired server's native service is
+//! administered on its own machine, so its card offers only connection steps. When SpaceTerm isn't connected to the server, the rows under Server dim and show what
 //! SpaceTerm last observed, and the card's footnote says how to change them.
 
 use gpui::prelude::*;
@@ -20,21 +20,13 @@ use super::server_update::{UpdateAction, UpdateState, UpdateStep};
 use super::servers::{LocalServerStatus, ServiceAction, ServicePhase};
 use crate::desktop_profile::LocalTime;
 use crate::direct_connections::{DirectRouteStatus, RefusalReason};
-use crate::local_server::ServerError;
-use crate::local_server::service::control::Action as ServiceControlAction;
+use crate::server_connection::ServerError;
 use crate::server_context::{LastKnownFacts, ObservedServerStatus};
-use crate::ssh::server_connection::{
-    ConnectPhase, IncompatibilityKind, RemoteConnectionStatus, ServerAvailability,
-};
-use crate::ssh::server_maintenance::{MaintenancePhase, SubmittedKind};
-use crate::ssh::server_operations::{RemoteOperationState, RemoteUpdateOffer};
 use crate::ui::appearance::{ChromeAppearance, gpui_color};
 use crate::ui::chrome_icons::IconRole;
 use crate::ui::chrome_typography::{ChromeTextStyleExt as _, TextRole};
 use crate::ui::direct_servers::DirectServerAction;
-use crate::ui::remote_maintenance::{MaintenanceRow, RemoteAction};
 use crate::ui::sidebar_window::form::CaptionTone;
-use crate::ui::ssh_servers::SshServerAction;
 
 pub(super) const STATUS_SELECTOR: &str = "settings-server-status";
 pub(super) const MENU_SELECTOR: &str = "settings-server-menu";
@@ -58,9 +50,9 @@ pub(in crate::ui::settings_window) enum Tone {
 /// How one server's state reads.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(in crate::ui::settings_window) struct ServerState {
-    /// What the Server row's state says, such as "Connected over SSH" or "Stopped".
+    /// What the Server row's state says, such as "Connected over the network" or "Stopped".
     pub(in crate::ui::settings_window) state: SharedString,
-    /// What the picker and All Servers say, such as "Connected · SSH".
+    /// What the picker and All Servers say, such as "Connected · Paired".
     pub(in crate::ui::settings_window) short: SharedString,
     pub(in crate::ui::settings_window) tone: Tone,
     /// The connection is changing, such as while connecting, so a spinner stands in for the dot.
@@ -118,19 +110,6 @@ pub(super) const fn service_verb(action: ServiceAction) -> &'static str {
         ServiceAction::Restart => "Restarting\u{2026}",
         ServiceAction::Uninstall => "Uninstalling\u{2026}",
         ServiceAction::AuthorizeInstall | ServiceAction::AuthorizeStart => "Authorizing\u{2026}",
-    }
-}
-
-/// The verb a remote maintenance operation shows while it runs. Work with no submitted
-/// operation is a read.
-pub(super) fn maintenance_verb(kind: Option<&SubmittedKind>) -> &'static str {
-    match kind {
-        Some(SubmittedKind::Start) => "Starting\u{2026}",
-        Some(SubmittedKind::Service(ServiceControlAction::Stop)) => "Stopping\u{2026}",
-        Some(SubmittedKind::Service(ServiceControlAction::Restart)) => "Restarting\u{2026}",
-        Some(SubmittedKind::Service(ServiceControlAction::Uninstall)) => "Uninstalling\u{2026}",
-        Some(SubmittedKind::Update { .. } | SubmittedKind::Return) => "Updating\u{2026}",
-        None => "Checking\u{2026}",
     }
 }
 
@@ -215,134 +194,6 @@ fn local_observed(
     }
 }
 
-/// How an SSH server reads. `maintenance` is the operation underway on its account, if any: a
-/// submitted operation names itself apart from the state, and work with none submitted is a read.
-pub(super) fn ssh_state(
-    status: &RemoteConnectionStatus,
-    maintenance: Option<Option<&SubmittedKind>>,
-    service: Option<crate::local_server::service::ServiceStatus>,
-    retained: Option<ObservedServerStatus>,
-) -> ServerState {
-    let observed = ssh_observed(status, service, retained);
-    match maintenance {
-        Some(Some(kind)) => ServerState {
-            operation: Some(maintenance_verb(Some(kind))),
-            ..observed
-        },
-        Some(None) => ServerState {
-            checking: true,
-            ..observed
-        },
-        None => observed,
-    }
-}
-
-/// How an SSH server reads from its connection, a service read, or what was last observed.
-fn ssh_observed(
-    status: &RemoteConnectionStatus,
-    service: Option<crate::local_server::service::ServiceStatus>,
-    retained: Option<ObservedServerStatus>,
-) -> ServerState {
-    let connected = matches!(status, RemoteConnectionStatus::Connected { .. });
-    // A read says the server runs although SpaceTerm has no connection to it. The card says so;
-    // what the row offers still follows the connection.
-    let running_unconnected =
-        || ServerState::new("Running \u{b7} not connected", "Not connected", Tone::Idle);
-    // A service read reports the server SpaceTerm isn't connected to, such as one stopped from
-    // here, which only Start Server starts again.
-    if let (false, Some(service)) = (
-        connected
-            || matches!(
-                status,
-                RemoteConnectionStatus::Working { .. }
-                    | RemoteConnectionStatus::Reconnecting { .. }
-                    | RemoteConnectionStatus::Cancelling
-            ),
-        service,
-    ) {
-        match ServicePhase::of(service) {
-            ServicePhase::Stopped => return ServerState::new("Stopped", "Stopped", Tone::Idle),
-            ServicePhase::NotInstalled => {
-                return ServerState::new("Not installed", "Not installed", Tone::Idle);
-            }
-            ServicePhase::NotRunning => {
-                return ServerState::new("Not running", "Not running", Tone::Attention);
-            }
-            ServicePhase::Running => {}
-        }
-    }
-    match status {
-        RemoteConnectionStatus::Connected { .. } => {
-            ServerState::new("Connected over SSH", "Connected \u{b7} SSH", Tone::Live).live()
-        }
-        RemoteConnectionStatus::Working { phase, .. } => ServerState::working(
-            match phase {
-                ConnectPhase::Installing => "Installing\u{2026}",
-                ConnectPhase::Starting => "Starting\u{2026}",
-                ConnectPhase::Authenticating
-                | ConnectPhase::Discovering
-                | ConnectPhase::Connecting => "Connecting\u{2026}",
-            },
-            false,
-        ),
-        RemoteConnectionStatus::Reconnecting { .. } => {
-            ServerState::working("Reconnecting\u{2026}", false)
-        }
-        RemoteConnectionStatus::Cancelling => ServerState::working("Cancelling\u{2026}", false),
-        RemoteConnectionStatus::NeedsPerson { .. } => {
-            ServerState::new("Waiting for you", "Waiting for you", Tone::Attention)
-        }
-        RemoteConnectionStatus::InstallationOffered { .. } => {
-            ServerState::new("Not installed", "Not installed", Tone::Idle)
-        }
-        RemoteConnectionStatus::Checked { availability, .. } => match availability {
-            ServerAvailability::Running => running_unconnected(),
-            ServerAvailability::NotRunning => {
-                ServerState::new("Not running", "Not running", Tone::Idle)
-            }
-            ServerAvailability::NotInstalled => {
-                ServerState::new("Not installed", "Not installed", Tone::Idle)
-            }
-        },
-        RemoteConnectionStatus::Stopped => ServerState::new("Stopped", "Stopped", Tone::Idle),
-        RemoteConnectionStatus::Incompatible {
-            kind: IncompatibilityKind::Platform,
-        } => ServerState::new("Unsupported computer", "Unsupported", Tone::Problem),
-        RemoteConnectionStatus::Incompatible { .. } => {
-            ServerState::new("Needs update", "Needs update", Tone::Problem)
-        }
-        RemoteConnectionStatus::Paused { .. } => {
-            ServerState::new("Server changed", "Server changed", Tone::Problem)
-        }
-        RemoteConnectionStatus::Refused { .. } => {
-            ServerState::new("Refused", "Refused", Tone::Problem)
-        }
-        RemoteConnectionStatus::Unavailable { .. } => {
-            ServerState::new("Not reachable", "Not reachable", Tone::Attention)
-        }
-        RemoteConnectionStatus::Unconfirmed { .. } => {
-            ServerState::new("Unconfirmed", "Unconfirmed", Tone::Attention)
-        }
-        // A service read reaching this point found the server running.
-        RemoteConnectionStatus::Inactive if service.is_some() => running_unconnected(),
-        // Nothing reports on a saved connection that isn't active, so it shows what was last
-        // observed. That presents a state only: what the row offers follows its connection.
-        RemoteConnectionStatus::Inactive => match retained {
-            Some(ObservedServerStatus::Running) => running_unconnected(),
-            Some(ObservedServerStatus::Stopped) => {
-                ServerState::new("Stopped", "Stopped", Tone::Idle)
-            }
-            Some(ObservedServerStatus::NotInstalled) => {
-                ServerState::new("Not installed", "Not installed", Tone::Idle)
-            }
-            Some(ObservedServerStatus::NeedsUpdate) => {
-                ServerState::new("Needs update", "Needs update", Tone::Problem)
-            }
-            _ => ServerState::new("Not connected", "Not connected", Tone::Idle),
-        },
-    }
-}
-
 /// How a paired server reads.
 pub(super) fn direct_state(status: DirectRouteStatus) -> ServerState {
     match status {
@@ -388,11 +239,7 @@ pub(super) fn operating_system_name(reported: &str) -> SharedString {
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum StatusStep {
     Local(ServiceAction),
-    Ssh(SshServerAction),
-    Maintenance(RemoteAction),
     Direct(DirectServerAction),
-    /// Asks before forgetting the saved SSH connection.
-    RemoveSsh,
     UnpairThisDevice,
     /// A step of the server's update journey, or Check Now.
     Version(VersionStep),
@@ -474,74 +321,6 @@ impl SettingsWindow {
                 }
                 state
             }
-            ServerChoice::Ssh(destination) => {
-                let status = self
-                    .ssh_servers
-                    .as_ref()
-                    .map_or(RemoteConnectionStatus::Inactive, |rows| {
-                        rows.connections.status(destination)
-                    });
-                let entries: Vec<RemoteOperationState> = self
-                    .ssh_maintenance
-                    .as_ref()
-                    .map(|rows| {
-                        rows.operations
-                            .entries()
-                            .into_iter()
-                            .filter(|entry| entry.destination == *destination && !entry.removed)
-                            .map(|entry| entry.state)
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                let working = entries.iter().find_map(|state| match state {
-                    RemoteOperationState::Working { kind, .. } => Some(kind.as_ref()),
-                    _ => None,
-                });
-                // A read Check Status has since outdated no longer reports the service.
-                let service = self.current_ssh_read(destination).map(|facts| facts.status);
-                let retained = self.retained_status.get(&choice.key()).copied();
-                let mut state = ssh_state(&status, working, service, retained);
-                state.checking |= self.version_checking(choice);
-                // Only an update transfers an artifact, so transferring is that update's work.
-                let transferring = entries.iter().any(|state| {
-                    matches!(
-                        state,
-                        RemoteOperationState::Working {
-                            phase: MaintenancePhase::Transferring,
-                            kind: None,
-                            ..
-                        }
-                    )
-                });
-                if transferring {
-                    state.checking = false;
-                    state.operation = Some("Updating\u{2026}");
-                }
-                let failed = self.selected_server().as_ref() == Some(choice)
-                    && self
-                        .maintenance_presentation(MaintenanceRow::Update)
-                        .is_some_and(|update| update.actions.contains(&RemoteAction::Return));
-                if failed && state.operation.is_none() {
-                    state.state = "Update failed".into();
-                    state.short = "Update failed".into();
-                    state.tone = Tone::Problem;
-                }
-                // An operation whose result SpaceTerm couldn't confirm is what the person waits
-                // on, until resolving that same operation settles it.
-                let unconfirmed = entries
-                    .iter()
-                    .any(|state| matches!(state, RemoteOperationState::Unconfirmed { .. }));
-                if unconfirmed && !state.working && state.operation.is_none() {
-                    ServerState {
-                        state: "Unconfirmed".into(),
-                        short: "Unconfirmed".into(),
-                        tone: Tone::Attention,
-                        ..state
-                    }
-                } else {
-                    state
-                }
-            }
             ServerChoice::Direct(route) => {
                 let retained = self.retained_status.get(&choice.key()).copied();
                 match self
@@ -561,7 +340,7 @@ impl SettingsWindow {
         }
     }
 
-    /// "machine · OS" for this computer and SSH servers, "address · OS" for paired ones. A
+    /// "machine · OS" for this computer, "address · OS" for paired servers. A
     /// part SpaceTerm hasn't observed is left out, and a server it knows nothing about says how
     /// it is reached.
     pub(in crate::ui::settings_window) fn server_detail(
@@ -579,20 +358,6 @@ impl SettingsWindow {
                 facts.as_ref().and_then(|facts| facts.machine.clone()),
                 observed_system,
             ),
-            ServerChoice::Ssh(destination) => {
-                let reported = self
-                    .ssh_servers
-                    .as_ref()
-                    .and_then(|rows| rows.connections.last_facts(destination))
-                    .map(|facts| operating_system_name(&facts.platform.0));
-                (
-                    facts
-                        .as_ref()
-                        .and_then(|facts| facts.machine.clone())
-                        .or_else(|| Some(destination.as_str().to_owned())),
-                    observed_system.or(reported),
-                )
-            }
             ServerChoice::Direct(route) => (
                 self.direct_routes
                     .as_ref()
@@ -607,7 +372,6 @@ impl SettingsWindow {
             (None, Some(system)) => system,
             (None, None) => match choice {
                 ServerChoice::Local => SharedString::new_static("This account"),
-                ServerChoice::Ssh(_) => SharedString::new_static("Over SSH"),
                 ServerChoice::Direct(_) => SharedString::new_static("Paired over network"),
             },
         }
@@ -706,12 +470,6 @@ impl SettingsWindow {
                 );
                 !explained && matches!(phase, None | Some(ServicePhase::Running))
             }
-            ServerChoice::Ssh(destination) => self.ssh_servers.as_ref().is_some_and(|rows| {
-                matches!(
-                    rows.connections.status(destination),
-                    RemoteConnectionStatus::Unavailable { .. }
-                )
-            }),
             ServerChoice::Direct(route) => {
                 self.saved_direct_servers()
                     .into_iter()
@@ -748,22 +506,6 @@ impl SettingsWindow {
                     attention(local.explanation, local.tone, false)
                 })
             }
-            ServerChoice::Ssh(destination) => {
-                let maintenance = self
-                    .maintenance_presentation(MaintenanceRow::Service)
-                    .and_then(|maintenance| {
-                        if maintenance.working {
-                            return None;
-                        }
-                        let waiting = maintenance_waits(&maintenance);
-                        attention(maintenance.explanation, maintenance.tone, waiting)
-                    });
-                maintenance.or_else(|| {
-                    let status = self.ssh_servers.as_ref()?.connections.status(&destination);
-                    let connection = crate::ui::ssh_servers::present(&status);
-                    attention(connection.explanation, connection.tone, false)
-                })
-            }
             ServerChoice::Direct(route) => self
                 .direct_problem()
                 .map(|problem| (problem, CaptionTone::Error))
@@ -791,12 +533,6 @@ impl SettingsWindow {
                 (!update.working && update.tone != CaptionTone::Guidance)
                     .then_some((update.explanation, update.tone))
             }
-            ServerChoice::Ssh(_) => {
-                let update = self.maintenance_presentation(MaintenanceRow::Update)?;
-                (!update.working
-                    && (maintenance_waits(&update) || update.tone != CaptionTone::Guidance))
-                    .then_some((update.explanation, update.tone))
-            }
             ServerChoice::Direct(_) => None,
         }
     }
@@ -806,7 +542,6 @@ impl SettingsWindow {
     fn status_steps(&self, choice: &ServerChoice) -> (Vec<(StatusStep, bool)>, Vec<MenuItem>) {
         match choice {
             ServerChoice::Local => self.local_status_steps(),
-            ServerChoice::Ssh(destination) => self.ssh_status_steps(destination),
             ServerChoice::Direct(route) => self.direct_status_steps(*route),
         }
     }
@@ -872,78 +607,6 @@ impl SettingsWindow {
         (buttons, menu)
     }
 
-    fn ssh_status_steps(
-        &self,
-        destination: &crate::domain::SshDestination,
-    ) -> (Vec<(StatusStep, bool)>, Vec<MenuItem>) {
-        let status = self
-            .ssh_servers
-            .as_ref()
-            .map_or(RemoteConnectionStatus::Inactive, |rows| {
-                rows.connections.status(destination)
-            });
-        let connection = self.ssh_server_actions(destination, &status);
-        let maintenance = self
-            .maintenance_presentation(MaintenanceRow::Service)
-            .map(|presentation| presentation.actions)
-            .unwrap_or_default();
-        let offered = |action: RemoteAction| maintenance.contains(&action);
-        let mut buttons: Vec<(StatusStep, bool)> = Vec::new();
-        // A deliberately stopped server starts only by Start, which the maintenance owner runs
-        // on the account route.
-        if offered(RemoteAction::Start) {
-            buttons.push((StatusStep::Maintenance(RemoteAction::Start), false));
-        }
-        for action in [
-            RemoteAction::Finish,
-            RemoteAction::CheckAgain,
-            RemoteAction::Acknowledge,
-            RemoteAction::Dismiss,
-            RemoteAction::Cancel,
-            RemoteAction::Discard,
-        ] {
-            if offered(action) {
-                buttons.push((StatusStep::Maintenance(action), false));
-            }
-        }
-        for action in [
-            SshServerAction::Install,
-            SshServerAction::CheckStatus,
-            SshServerAction::Connect,
-            SshServerAction::Cancel,
-            SshServerAction::Disconnect,
-            SshServerAction::StopReconnecting,
-        ] {
-            if connection.contains(&action) {
-                buttons.push((
-                    StatusStep::Ssh(action),
-                    matches!(action, SshServerAction::Install),
-                ));
-            }
-        }
-        let menu = vec![
-            MenuItem::new(
-                "Restart Server",
-                StatusStep::Maintenance(RemoteAction::Restart),
-                offered(RemoteAction::Restart),
-            ),
-            MenuItem::new(
-                "Stop Server",
-                StatusStep::Maintenance(RemoteAction::Stop),
-                offered(RemoteAction::Stop),
-            ),
-            MenuItem::new(
-                "Uninstall Server\u{2026}",
-                StatusStep::Maintenance(RemoteAction::Uninstall),
-                offered(RemoteAction::Uninstall),
-            )
-            .destructive()
-            .after_separator(),
-            MenuItem::new("Remove Server\u{2026}", StatusStep::RemoveSsh, true),
-        ];
-        (buttons, menu)
-    }
-
     fn direct_status_steps(
         &self,
         route: crate::direct_connections::DirectRouteId,
@@ -1003,15 +666,6 @@ impl SettingsWindow {
             }
             (StatusStep::Local(action), ServerChoice::Local) => {
                 self.request_server_service(action, window, cx);
-            }
-            (StatusStep::Ssh(action), ServerChoice::Ssh(destination)) => {
-                self.run_ssh_server_action(destination, action, window, cx);
-            }
-            (StatusStep::Maintenance(action), ServerChoice::Ssh(destination)) => {
-                self.request_maintenance(destination, MaintenanceRow::Service, action, cx);
-            }
-            (StatusStep::RemoveSsh, ServerChoice::Ssh(destination)) => {
-                self.confirm_remove_ssh_server(destination, window, cx);
             }
             (StatusStep::Direct(action), ServerChoice::Direct(route)) => {
                 self.run_direct_action(route, action, cx);
@@ -1085,75 +739,6 @@ impl SettingsWindow {
         if result.is_err() {
             eprintln!("failed to present the SpaceTerm server installation confirmation");
         }
-    }
-
-    /// Asks before forgetting a saved SSH connection. The server, its Terminal Sessions and the
-    /// account's SSH access stay.
-    fn confirm_remove_ssh_server(
-        &mut self,
-        destination: crate::domain::SshDestination,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let owner = cx.weak_entity();
-        let name = destination.as_str().to_owned();
-        let title = format!("Remove \"{name}\"?");
-        let result = spaceterm_ui::Alert::new(
-            spaceterm_ui::ModalId::new("settings-server-remove"),
-            title.clone(),
-            title,
-            "",
-            vec![
-                spaceterm_ui::ModalAction::new(
-                    true,
-                    "Remove",
-                    spaceterm_ui::ModalActionRole::Affirmative,
-                    "settings-server-remove-confirm",
-                )
-                .with_intent(spaceterm_ui::ModalActionIntent::Destructive)
-                .with_emphasis(spaceterm_ui::ModalActionEmphasis::Prominent),
-                spaceterm_ui::ModalAction::new(
-                    false,
-                    "Cancel",
-                    spaceterm_ui::ModalActionRole::Cancel,
-                    "settings-server-remove-cancel",
-                ),
-            ],
-        )
-        .intent(spaceterm_ui::AlertIntent::Critical)
-        .present(window, cx, move |outcome, cx| {
-            if !matches!(
-                outcome,
-                spaceterm_ui::AlertOutcome::Activated {
-                    action_id: true,
-                    ..
-                }
-            ) {
-                return;
-            }
-            let _ = owner.update(cx, |settings, cx| {
-                settings.remove_ssh_server(&destination, cx);
-            });
-        });
-        if result.is_err() {
-            eprintln!("failed to present the remove server confirmation");
-        }
-    }
-
-    /// Forgets the saved connection at once. The selection then presents this computer's server,
-    /// since the removed one is no longer listed.
-    fn remove_ssh_server(
-        &mut self,
-        destination: &crate::domain::SshDestination,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(rows) = self.ssh_servers.as_ref() else {
-            return;
-        };
-        rows.connections.remove(destination);
-        self.reconcile_servers(cx);
-        self.sync_server_location(cx);
-        cx.notify();
     }
 }
 
@@ -1248,7 +833,6 @@ impl DelayedProgress {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum VersionStep {
     Local(UpdateAction),
-    Remote(RemoteAction),
     /// Check Now for a server with no update journey here, such as a paired server or a
     /// Development run: SpaceTerm checks for its own update and reads the server's facts again.
     Observe,
@@ -1270,27 +854,14 @@ impl VersionStep {
     const fn label(self) -> &'static str {
         match self {
             Self::Local(action) => action.label(),
-            Self::Remote(RemoteAction::Check) | Self::Observe => "Check Now",
-            Self::Remote(action) => action.label(),
+            Self::Observe => "Check Now",
         }
     }
 
-    /// The service offers some of the same SSH maintenance steps, such as OK and Discard, so the
-    /// update journey names its own.
     const fn selector(self) -> &'static str {
         match self {
             Self::Local(action) => action.selector(),
-            Self::Remote(RemoteAction::Update) => "settings-server-version-update",
-            Self::Remote(RemoteAction::Finish) => "settings-server-version-finish",
-            Self::Remote(RemoteAction::Return) => "settings-server-version-return",
-            Self::Remote(RemoteAction::CheckAgain) => "settings-server-version-check-again",
-            Self::Remote(RemoteAction::Cancel) => "settings-server-version-cancel",
-            Self::Remote(RemoteAction::Acknowledge) => "settings-server-version-acknowledge",
-            Self::Remote(RemoteAction::Dismiss) => "settings-server-version-dismiss",
-            Self::Remote(RemoteAction::Discard) => "settings-server-version-discard",
-            Self::Remote(RemoteAction::Check) | Self::Observe => VERSION_CHECK_SELECTOR,
-            // The row offers no service step.
-            Self::Remote(action) => action.selector(),
+            Self::Observe => VERSION_CHECK_SELECTOR,
         }
     }
 
@@ -1299,7 +870,6 @@ impl VersionStep {
     const fn slot(self) -> &'static str {
         match self {
             Self::Local(action) => action.slot(),
-            Self::Remote(action) => action.slot(),
             Self::Observe => VERSION_CHECK_SELECTOR,
         }
     }
@@ -1309,7 +879,6 @@ impl VersionStep {
         matches!(
             self,
             Self::Local(UpdateAction::Update | UpdateAction::Finish)
-                | Self::Remote(RemoteAction::Update | RemoteAction::Finish)
         )
     }
 }
@@ -1338,11 +907,8 @@ impl SettingsWindow {
         let needs_update = self.server_state(&choice).state.as_ref() == "Needs update";
         match choice {
             ServerChoice::Local => self.local_version_view(observed, needs_update),
-            ServerChoice::Ssh(destination) => {
-                self.ssh_version_view(&destination, observed, needs_update)
-            }
-            // A paired connection carries no authority to update the server, so Check Now only
-            // checks SpaceTerm and reads the server's facts again over that connection.
+            // A server is updated on its own computer, so Check Now only checks SpaceTerm and
+            // reads the paired server's facts again over its connection.
             ServerChoice::Direct(_) => {
                 let version = version_text(observed.as_ref());
                 VersionView {
@@ -1430,100 +996,6 @@ impl SettingsWindow {
         }
     }
 
-    fn ssh_version_view(
-        &self,
-        destination: &crate::domain::SshDestination,
-        observed: Option<SharedString>,
-        needs_update: bool,
-    ) -> VersionView {
-        let presentation = self.maintenance_presentation(MaintenanceRow::Update);
-        // A service read's approved build, or what the connection or Check Status reports, comes
-        // before what was retained.
-        let reported = self
-            .observation(&ServerChoice::Ssh(destination.clone()))
-            .version
-            .or_else(|| {
-                self.ssh_servers
-                    .as_ref()
-                    .and_then(|rows| rows.connections.last_facts(destination))
-                    .and_then(|facts| facts.version)
-            })
-            .map(SharedString::from);
-        let value = reported.or(observed);
-        let version = version_text(value.as_ref());
-        let Some(presentation) = presentation else {
-            return VersionView {
-                subtitle: version.into(),
-                actions: Vec::new(),
-                restore: None,
-            };
-        };
-        let offered = |action: RemoteAction| presentation.actions.contains(&action);
-        // The verified candidate's own version, which can differ from SpaceTerm's.
-        let candidate = match self.ssh_update_offer(destination) {
-            RemoteUpdateOffer::Available(candidate) => Some(candidate.version),
-            _ => None,
-        };
-        // The update's own record names both builds, ahead of what was read or offered since.
-        let activation = self
-            .current_ssh_read(destination)
-            .and_then(|facts| facts.activation)
-            .filter(|activation| !activation.returned);
-        let previous = activation.as_ref().map_or_else(
-            || value.as_ref().map_or_else(String::new, ToString::to_string),
-            |activation| activation.previous.version.clone(),
-        );
-        let attempted = activation
-            .as_ref()
-            .map(|activation| activation.candidate.version.clone())
-            .or_else(|| candidate.clone());
-        let restore = (offered(RemoteAction::Return) && !previous.is_empty())
-            .then(|| SharedString::from(previous.clone()));
-        let subtitle = if offered(RemoteAction::Return) {
-            failed_subtitle(attempted.as_deref(), &previous)
-        } else if offered(RemoteAction::Finish) {
-            unfinished_subtitle(&version, candidate.as_deref())
-        } else if offered(RemoteAction::Update) && needs_update {
-            format!("{version} · Update required")
-        } else if offered(RemoteAction::Update) && candidate.is_some() {
-            available_subtitle(&version, candidate.as_deref())
-        } else {
-            version
-        };
-        let mut actions: Vec<VersionStep> = presentation
-            .actions
-            .iter()
-            .copied()
-            .filter(|action| {
-                matches!(
-                    action,
-                    RemoteAction::Update
-                        | RemoteAction::Finish
-                        | RemoteAction::Return
-                        | RemoteAction::CheckAgain
-                        | RemoteAction::Cancel
-                        | RemoteAction::Acknowledge
-                        | RemoteAction::Discard
-                        | RemoteAction::Dismiss
-                )
-            })
-            .map(VersionStep::Remote)
-            .collect();
-        // Check Now reads the service and its approved version, whichever journey offers it.
-        let checkable = presentation.actions.contains(&RemoteAction::Check)
-            || self
-                .maintenance_presentation(MaintenanceRow::Service)
-                .is_some_and(|service| service.actions.contains(&RemoteAction::Check));
-        if checkable {
-            actions.push(VersionStep::Remote(RemoteAction::Check));
-        }
-        VersionView {
-            subtitle: subtitle.into(),
-            actions,
-            restore,
-        }
-    }
-
     /// The Server row's steps: at most one button, and every other step in the ⋯ menu. The
     /// button is a safe restore after a failed update, Update when one is offered, otherwise
     /// Start Server for a stopped server.
@@ -1546,15 +1018,9 @@ impl SettingsWindow {
             .min()
             .map(|(_, index)| index);
         let button = leading.map(|index| steps.remove(index));
-        // Stopping the wait for work underway stays possible while it runs.
-        let cancels = |step: &StatusStep| {
-            matches!(
-                step,
-                StatusStep::Maintenance(RemoteAction::Cancel)
-                    | StatusStep::Version(VersionStep::Remote(RemoteAction::Cancel))
-                    | StatusStep::Ssh(SshServerAction::Cancel)
-            )
-        };
+        // Stopping a connection attempt stays possible while it runs.
+        let cancels =
+            |step: &StatusStep| matches!(step, StatusStep::Direct(DirectServerAction::Cancel));
         let install_choices = self
             .server_service_presentation()
             .map(|presentation| presentation.install_choices)
@@ -1637,28 +1103,6 @@ impl SettingsWindow {
                     .filter(|action| *action != ServiceAction::Check)
                     .map(|action| SharedString::new_static(service_progress(action)))
             }
-            ServerChoice::Ssh(destination) => {
-                let candidate = match self.ssh_update_offer(destination) {
-                    RemoteUpdateOffer::Available(candidate) => Some(candidate.version),
-                    _ => None,
-                };
-                self.ssh_maintenance
-                    .as_ref()?
-                    .operations
-                    .entries()
-                    .into_iter()
-                    .filter(|entry| entry.destination == *destination && !entry.removed)
-                    .find_map(|entry| match entry.state {
-                        RemoteOperationState::Working { phase, kind, .. } => ssh_progress(
-                            destination.as_str(),
-                            phase,
-                            kind.as_ref(),
-                            candidate.as_deref(),
-                        ),
-                        _ => None,
-                    })
-                    .map(SharedString::from)
-            }
             ServerChoice::Direct(_) => None,
         }
     }
@@ -1716,8 +1160,8 @@ impl SettingsWindow {
 
     /// Checks for a newer SpaceTerm, which brings each server's build, then reads the server it
     /// was asked for again once that check settles. Reading connects to, starts and installs
-    /// nothing: this account's service and an SSH account's route are read as Check Status reads
-    /// them, and a paired server only over a connection SpaceTerm already has.
+    /// nothing: this account's service is read as Check Status reads it, and a paired server only
+    /// over a connection SpaceTerm already has.
     fn check_versions(&mut self, cx: &mut Context<Self>) {
         let Some(target) = self.selected_server() else {
             return;
@@ -1791,9 +1235,6 @@ impl SettingsWindow {
                 self.check_server_update(cx);
                 self.check_local_server(cx);
             }
-            ServerChoice::Ssh(destination) => {
-                self.request_remote_maintenance(destination.clone(), RemoteAction::Check, cx);
-            }
             ServerChoice::Direct(_) => {}
         }
         self.reread_facts(target, cx)
@@ -1808,30 +1249,21 @@ impl SettingsWindow {
                     .is_some_and(|row| row.state.working.is_some())
                     || self.local_server_working()
             }
-            ServerChoice::Ssh(_) if self.selected_server().as_ref() == Some(target) => {
-                [MaintenanceRow::Service, MaintenanceRow::Update]
-                    .into_iter()
-                    .filter_map(|row| self.maintenance_presentation(row))
-                    .any(|presentation| presentation.working)
-            }
-            _ => false,
+            ServerChoice::Direct(_) => false,
         }
     }
 
     fn take_version_step(&mut self, step: VersionStep, cx: &mut Context<Self>) {
         match (step, self.selected_server()) {
-            (VersionStep::Local(UpdateAction::Check), _)
-            | (VersionStep::Remote(RemoteAction::Check), _)
-            | (VersionStep::Observe, _) => self.check_versions(cx),
+            (VersionStep::Local(UpdateAction::Check), _) | (VersionStep::Observe, _) => {
+                self.check_versions(cx)
+            }
             // An update asked for while a read runs starts once the read offers it again.
             (VersionStep::Local(UpdateAction::Update), Some(ServerChoice::Local)) => {
                 self.request_server_update(cx)
             }
             (VersionStep::Local(action), Some(ServerChoice::Local)) => {
                 self.request_update_action(action, cx)
-            }
-            (VersionStep::Remote(action), Some(ServerChoice::Ssh(destination))) => {
-                self.request_maintenance(destination, MaintenanceRow::Update, action, cx)
             }
             _ => {}
         }
@@ -1905,21 +1337,13 @@ impl SettingsWindow {
                 || (reading_update
                     && step == StatusStep::Version(VersionStep::Local(UpdateAction::Return)));
             let label: SharedString = match (&step, &restore) {
-                (
-                    StatusStep::Version(
-                        VersionStep::Local(UpdateAction::Return)
-                        | VersionStep::Remote(RemoteAction::Return),
-                    ),
-                    Some(restore),
-                ) => restore.clone(),
+                (StatusStep::Version(VersionStep::Local(UpdateAction::Return)), Some(restore)) => {
+                    restore.clone()
+                }
                 // The row names the server, so its update reads as one word.
-                (
-                    StatusStep::Version(
-                        VersionStep::Local(UpdateAction::Update)
-                        | VersionStep::Remote(RemoteAction::Update),
-                    ),
-                    _,
-                ) => SharedString::new_static("Update\u{2026}"),
+                (StatusStep::Version(VersionStep::Local(UpdateAction::Update)), _) => {
+                    SharedString::new_static("Update\u{2026}")
+                }
                 _ => SharedString::new_static(status_step_label(&step)),
             };
             // Steps that replace each other share a slot, so keyboard focus stays on it when,
@@ -2003,34 +1427,22 @@ impl SettingsWindow {
 
     /// Whether the selected server starts on its own, as it reports or as last observed. A
     /// change the person asked for shows at once, until the service answers it.
-    pub(super) fn automatic_start(&self, cx: &App) -> Option<bool> {
+    pub(super) fn automatic_start(&self) -> Option<bool> {
         match self.selected_server()? {
             ServerChoice::Local => self
                 .server_service
                 .as_ref()
                 .and_then(|row| row.automatic_start_shown()),
-            ServerChoice::Ssh(destination) => self
-                .current_ssh_read(&destination)
-                .map(|facts| facts.status.enabled)
-                .or_else(|| {
-                    self.ssh_servers
-                        .as_ref()
-                        .and_then(|rows| rows.connections.last_facts(&destination))
-                        .map(|facts| facts.starts_automatically)
-                })
-                .or_else(|| self.selected_facts(cx)?.starts_automatically),
             ServerChoice::Direct(_) => None,
         }
     }
 
     /// The Start automatically row's description, naming when the server starts.
     pub(super) fn auto_start_description(&self) -> SharedString {
-        match self.selected_server() {
-            Some(ServerChoice::Ssh(destination)) => {
-                SharedString::from(format!("Start when {} starts.", destination.as_str()))
-            }
-            _ if self.this_computer == "This Mac" => SharedString::new_static("Start at login."),
-            _ => SharedString::new_static("Start the server when this computer starts."),
+        if self.this_computer == "This Mac" {
+            SharedString::new_static("Start at login.")
+        } else {
+            SharedString::new_static("Start the server when this computer starts.")
         }
     }
 
@@ -2043,27 +1455,15 @@ impl SettingsWindow {
                 .automatic_start
                 .failure
                 .map(|error| SharedString::from(error.to_string())),
-            // A change the person asked for that the account route refused, or whose answer was
-            // lost, reads as the maintenance read reports it.
-            ServerChoice::Ssh(destination) => {
-                let asked = self.ssh_automatic_start.as_ref()?;
-                if asked.0 != destination {
-                    return None;
-                }
-                self.maintenance_presentation(MaintenanceRow::Service)
-                    .filter(|maintenance| maintenance.tone == CaptionTone::Error)
-                    .map(|maintenance| maintenance.explanation)
-            }
             ServerChoice::Direct(_) => None,
         }
     }
 
     /// Whether the selected server's automatic start can change now: this account's installed
-    /// service unless another operation changes it, or an SSH account's route while its
-    /// maintenance owner is idle. A change asked for during a read or an earlier change follows
-    /// it. A paired connection carries no such authority.
-    fn automatic_start_changeable(&self, cx: &App) -> bool {
-        if self.automatic_start(cx).is_none() {
+    /// service unless another operation changes it. A change asked for during a read or an
+    /// earlier change follows it. Only this computer's service offers it.
+    fn automatic_start_changeable(&self) -> bool {
+        if self.automatic_start().is_none() {
             return false;
         }
         match self.selected_server() {
@@ -2075,28 +1475,14 @@ impl SettingsWindow {
                         .working
                         .is_none_or(|action| action == ServiceAction::Check)
             }),
-            Some(ServerChoice::Ssh(_)) => self
-                .maintenance_presentation(MaintenanceRow::Service)
-                .is_some_and(|maintenance| !maintenance.working),
             _ => false,
         }
     }
 
-    /// Asks the selected server to start on its own, or not. This account's service changes at
-    /// once; an SSH account's route changes over the route its last read bound. A deliberate Stop
-    /// stays in force either way.
+    /// Asks this computer's server to start on its own, or not. A deliberate Stop stays in force.
     fn set_automatic_start(&mut self, enabled: bool, window: &mut Window, cx: &mut Context<Self>) {
-        match self.selected_server() {
-            Some(ServerChoice::Local) => self.set_local_automatic_start(enabled, window, cx),
-            Some(ServerChoice::Ssh(destination)) => {
-                let Some(rows) = self.ssh_maintenance.as_ref() else {
-                    return;
-                };
-                rows.operations.set_automatic_start(&destination, enabled);
-                self.ssh_automatic_start = Some((destination, enabled));
-                cx.notify();
-            }
-            _ => {}
+        if self.selected_server() == Some(ServerChoice::Local) {
+            self.set_local_automatic_start(enabled, window, cx);
         }
     }
 
@@ -2107,8 +1493,8 @@ impl SettingsWindow {
         _: &ChromeAppearance,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let value = self.automatic_start(cx);
-        let changeable = self.automatic_start_changeable(cx);
+        let value = self.automatic_start();
+        let changeable = self.automatic_start_changeable();
         let owner = cx.weak_entity();
         Switch::new(
             AUTO_START_SELECTOR,
@@ -2133,10 +1519,7 @@ impl SettingsWindow {
 fn status_step_selector(step: &StatusStep) -> &'static str {
     match step {
         StatusStep::Local(action) => action.selector(),
-        StatusStep::Ssh(action) => action.selector(),
-        StatusStep::Maintenance(action) => action.selector(),
         StatusStep::Direct(action) => action.selector(),
-        StatusStep::RemoveSsh => "settings-server-remove",
         StatusStep::UnpairThisDevice => "settings-server-unpair",
         StatusStep::Version(step) => step.selector(),
         StatusStep::InstallBuild(..) => super::servers::INSTALL_CHOICE_SELECTOR,
@@ -2147,7 +1530,6 @@ fn status_step_selector(step: &StatusStep) -> &'static str {
 fn status_step_slot(step: &StatusStep) -> Option<&'static str> {
     match step {
         StatusStep::Local(action) => Some(action.slot()),
-        StatusStep::Maintenance(action) => Some(action.slot()),
         StatusStep::Version(step) => Some(step.slot()),
         _ => None,
     }
@@ -2157,18 +1539,14 @@ fn status_step_slot(step: &StatusStep) -> Option<&'static str> {
 fn status_step_consequence(step: &StatusStep, machine: &str) -> Option<SharedString> {
     match step {
         StatusStep::Local(action) => action.consequence().map(SharedString::new_static),
-        StatusStep::Maintenance(action) => Some(action.consequence(machine)),
-        StatusStep::Version(
-            VersionStep::Local(UpdateAction::Check)
-            | VersionStep::Remote(RemoteAction::Check)
-            | VersionStep::Observe,
-        ) => Some(SharedString::from(format!(
-            "Checks for a newer SpaceTerm and reads {machine} again."
-        ))),
+        StatusStep::Version(VersionStep::Local(UpdateAction::Check) | VersionStep::Observe) => {
+            Some(SharedString::from(format!(
+                "Checks for a newer SpaceTerm and reads {machine} again."
+            )))
+        }
         StatusStep::Version(VersionStep::Local(action)) => {
             action.consequence().map(SharedString::new_static)
         }
-        StatusStep::Version(VersionStep::Remote(action)) => Some(action.consequence(machine)),
         _ => None,
     }
 }
@@ -2182,15 +1560,9 @@ fn status_step_primary(step: &StatusStep) -> bool {
 /// ⋯ menu.
 fn button_rank(step: &StatusStep) -> Option<u8> {
     match step {
-        StatusStep::Version(
-            VersionStep::Local(UpdateAction::Return) | VersionStep::Remote(RemoteAction::Return),
-        ) => Some(0),
-        StatusStep::Version(
-            VersionStep::Local(UpdateAction::Update) | VersionStep::Remote(RemoteAction::Update),
-        ) => Some(1),
-        StatusStep::Local(ServiceAction::Start) | StatusStep::Maintenance(RemoteAction::Start) => {
-            Some(2)
-        }
+        StatusStep::Version(VersionStep::Local(UpdateAction::Return)) => Some(0),
+        StatusStep::Version(VersionStep::Local(UpdateAction::Update)) => Some(1),
+        StatusStep::Local(ServiceAction::Start) => Some(2),
         _ => None,
     }
 }
@@ -2287,72 +1659,13 @@ const fn service_progress(action: ServiceAction) -> &'static str {
     }
 }
 
-/// The work a submitted SSH operation is doing on `machine`, as the Server row names it. Work
-/// with none submitted is a read, except a transfer, which only an update makes.
-fn ssh_progress(
-    machine: &str,
-    phase: MaintenancePhase,
-    kind: Option<&SubmittedKind>,
-    candidate: Option<&str>,
-) -> Option<String> {
-    Some(match (phase, kind) {
-        (MaintenancePhase::Transferring, _) => candidate.map_or_else(
-            || format!("Transferring the update to {machine}\u{2026}"),
-            |candidate| format!("Transferring {candidate} to {machine}\u{2026}"),
-        ),
-        (_, None) => return None,
-        (MaintenancePhase::Authenticating, Some(_)) => format!("Signing in to {machine}\u{2026}"),
-        (MaintenancePhase::Validating, Some(_)) => format!("Checking {machine}\u{2026}"),
-        (MaintenancePhase::Resolving, Some(_)) => "Checking the result\u{2026}".to_owned(),
-        (MaintenancePhase::Dispatching, Some(SubmittedKind::Update { .. })) => candidate
-            .map_or_else(
-                || "Updating the server\u{2026}".to_owned(),
-                |candidate| format!("Updating to {candidate}\u{2026}"),
-            ),
-        (MaintenancePhase::Dispatching, Some(SubmittedKind::Return)) => {
-            "Restoring the previous version\u{2026}".to_owned()
-        }
-        (MaintenancePhase::Dispatching, Some(SubmittedKind::Start)) => {
-            "Starting the server\u{2026}".to_owned()
-        }
-        (MaintenancePhase::Dispatching, Some(SubmittedKind::Service(action))) => match action {
-            ServiceControlAction::Stop => "Stopping the server\u{2026}",
-            ServiceControlAction::Restart => "Restarting the server\u{2026}",
-            ServiceControlAction::Uninstall => "Uninstalling the server\u{2026}",
-        }
-        .to_owned(),
-    })
-}
-
-/// Whether a maintenance row reports work underway or a result that waits for the person.
-fn maintenance_waits(
-    presentation: &crate::ui::remote_maintenance::MaintenancePresentation,
-) -> bool {
-    presentation.working
-        || presentation.actions.iter().any(|action| {
-            matches!(
-                action,
-                RemoteAction::Acknowledge
-                    | RemoteAction::Discard
-                    | RemoteAction::Dismiss
-                    | RemoteAction::CheckAgain
-                    | RemoteAction::Finish
-                    | RemoteAction::Cancel
-            )
-        })
-}
-
 /// The label a Status step reads by.
 fn status_step_label(step: &StatusStep) -> &'static str {
     match step {
         StatusStep::Local(ServiceAction::Install) => "Install\u{2026}",
         StatusStep::Local(ServiceAction::Check) => "Check Status",
         StatusStep::Local(action) => action.label(),
-        StatusStep::Ssh(SshServerAction::Install) => "Install\u{2026}",
-        StatusStep::Ssh(action) => action.label(),
-        StatusStep::Maintenance(action) => action.label(),
         StatusStep::Direct(action) => action.label(),
-        StatusStep::RemoveSsh => "Remove Server\u{2026}",
         StatusStep::UnpairThisDevice => "Unpair\u{2026}",
         StatusStep::Version(step) => step.label(),
         StatusStep::InstallBuild(..) => "Install\u{2026}",

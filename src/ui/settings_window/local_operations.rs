@@ -5,8 +5,8 @@ use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Task};
 use super::SettingsWindow;
 use super::server_update::UpdateState;
 use super::servers::ServiceState;
-use crate::local_server::ServerError;
-use crate::local_server::service::activation::{ActivationPhase, ActivationStatus};
+use crate::server_connection::ServerError;
+use crate::server_connection::service::activation::{ActivationPhase, ActivationStatus};
 
 struct InstalledOperations(Entity<LocalServerOperations>);
 impl Global for InstalledOperations {}

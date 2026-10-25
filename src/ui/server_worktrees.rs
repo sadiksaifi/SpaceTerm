@@ -1,6 +1,6 @@
 //! One shared edit writer per presented server, for the Workspace Window and server Settings.
 use crate::{
-    local_server::LocalServer,
+    server_connection::ServerConnection,
     terminal::{
         server_session::{ControlRoute, PaneControlRegistry},
         shared_workspace::SharedWorkspaceClient,
@@ -20,7 +20,7 @@ pub(crate) trait WorktreeReads: Send + Sync {
     fn read(&self, read: Read) -> Result<ReadReply, Error>;
 }
 
-impl WorktreeReads for LocalServer {
+impl WorktreeReads for ServerConnection {
     fn read(&self, read: Read) -> Result<ReadReply, Error> {
         read_server(self, read)
     }
@@ -39,7 +39,7 @@ impl From<Error> for WriteError {
 
 #[derive(Clone)]
 pub(crate) struct Client {
-    pub(crate) server: LocalServer,
+    pub(crate) server: ServerConnection,
     /// Pane control sequencing outlives every window, like this client's connection.
     pub(crate) controls: std::sync::Arc<crate::terminal::server_session::PaneControls>,
     pub(crate) source: SharedEditSource,
@@ -48,12 +48,7 @@ pub(crate) struct Client {
 }
 impl Global for Client {}
 
-/// The presented SSH servers' writers, by SSH destination.
-#[derive(Default)]
-struct SshClients(std::collections::HashMap<String, Client>);
-impl Global for SshClients {}
-
-/// The presented direct network servers' writers, by route.
+/// The presented paired servers' writers, by route.
 #[derive(Default)]
 struct DirectClients(std::collections::HashMap<crate::direct_connections::DirectRouteId, Client>);
 impl Global for DirectClients {}
@@ -68,17 +63,14 @@ impl Client {
         if let Some(client) = cx.try_global::<Self>() {
             return Some(client.clone());
         }
-        let server = LocalServer::for_identity(
+        let server = ServerConnection::for_identity(
             crate::application_identity::ApplicationIdentity::current().directory_name(),
         )
         .ok()?;
-        let legacy = crate::ui::worktree_path_template::path_template(cx)
-            .unwrap_or_else(|| spaceterm_server::worktree::Settings::default().template);
         let controls = std::sync::Arc::<crate::terminal::server_session::PaneControls>::default();
         let edits = Rc::new(SharedWorkspaceClient::new(
             server.clone(),
             std::sync::Arc::clone(&controls),
-            legacy,
         ));
         let client = Self {
             reads: Arc::new(server.clone()),
@@ -90,62 +82,12 @@ impl Client {
         cx.set_global(client.clone());
         Some(client)
     }
-    /// The edit writer for a connected SSH server's account server, created once per connection
-    /// so the Workspace Window and Settings share its sequence and Pane control. A writer kept
-    /// for an earlier connection is replaced; its validated original Pane controls remain.
-    pub(crate) fn for_ssh(
-        destination: &crate::domain::SshDestination,
-        server: LocalServer,
-        cx: &mut App,
-    ) -> Self {
-        if let Some(client) = Self::ssh(destination, cx)
-            .filter(|client| client.server.same_handle(&server))
-            .filter(|client| client.controls.admission().is_ok() || server.client_scope().is_err())
-        {
-            return client;
-        }
-        let controls = cx.default_global::<RetainedPaneControls>().0.controls(
-            ControlRoute::Ssh(destination.as_str().to_owned()),
-            server.client_scope(),
-        );
-        let edits = Rc::new(SharedWorkspaceClient::remote(
-            server.clone(),
-            std::sync::Arc::clone(&controls),
-        ));
-        let client = Self {
-            reads: Arc::new(server.clone()),
-            server,
-            controls,
-            source: SharedEditSource::new(edits.clone()),
-            edits,
-        };
-        cx.default_global::<SshClients>()
-            .0
-            .insert(destination.as_str().to_owned(), client.clone());
-        client
-    }
-    /// The writer for the server the desktop's SSH registry presents for `destination`, even
-    /// while no Workspace Window presents it. Without a presented server it is the last writer
-    /// kept for that destination, whose reads fail once its connection is gone.
-    pub(crate) fn presented_ssh(
-        destination: &crate::domain::SshDestination,
-        cx: &mut App,
-    ) -> Option<Self> {
-        match crate::ui::ssh_servers::installed(cx).and_then(|ssh| ssh.server(destination)) {
-            Some(server) => Some(Self::for_ssh(destination, server, cx)),
-            None => Self::ssh(destination, cx),
-        }
-    }
-    /// The edit writer kept for an SSH destination, if any.
-    pub(crate) fn ssh(destination: &crate::domain::SshDestination, cx: &App) -> Option<Self> {
-        cx.try_global::<SshClients>()
-            .and_then(|clients| clients.0.get(destination.as_str()).cloned())
-    }
-    /// The edit writer for a connected direct network route's server, created once per
-    /// connection as for an SSH server.
+    /// The edit writer for a connected paired server, created once per connection so the
+    /// Workspace Window and Settings share its sequence and Pane control. A writer kept for an
+    /// earlier connection is replaced; its validated original Pane controls remain.
     pub(crate) fn for_direct(
         route: crate::direct_connections::DirectRouteId,
-        server: LocalServer,
+        server: ServerConnection,
         cx: &mut App,
     ) -> Self {
         if let Some(client) = Self::direct(&route, cx)
@@ -158,7 +100,7 @@ impl Client {
             .default_global::<RetainedPaneControls>()
             .0
             .controls(ControlRoute::Direct(route), server.client_scope());
-        let edits = Rc::new(SharedWorkspaceClient::remote(
+        let edits = Rc::new(SharedWorkspaceClient::new(
             server.clone(),
             std::sync::Arc::clone(&controls),
         ));
@@ -185,7 +127,7 @@ impl Client {
             None => Self::direct(route, cx),
         }
     }
-    /// The edit writer kept for a direct network route, if any.
+    /// The edit writer kept for a paired route, if any.
     pub(crate) fn direct(
         route: &crate::direct_connections::DirectRouteId,
         cx: &App,
@@ -193,16 +135,10 @@ impl Client {
         cx.try_global::<DirectClients>()
             .and_then(|clients| clients.0.get(route).cloned())
     }
-    /// Drops a withdrawn direct network server's writer.
+    /// Drops a withdrawn paired server's writer.
     pub(crate) fn forget_direct(route: &crate::direct_connections::DirectRouteId, cx: &mut App) {
         if cx.has_global::<DirectClients>() {
             cx.global_mut::<DirectClients>().0.remove(route);
-        }
-    }
-    /// Drops a withdrawn SSH server's writer. A later connection starts a new one.
-    pub(crate) fn forget_ssh(destination: &crate::domain::SshDestination, cx: &mut App) {
-        if cx.has_global::<SshClients>() {
-            cx.global_mut::<SshClients>().0.remove(destination.as_str());
         }
     }
     pub(crate) fn supports_worktree_writes(&self) -> bool {
@@ -248,7 +184,7 @@ fn write(
     })
 }
 
-pub(crate) fn read_server(server: &LocalServer, read: Read) -> Result<ReadReply, Error> {
+pub(crate) fn read_server(server: &ServerConnection, read: Read) -> Result<ReadReply, Error> {
     let mut connection = server
         .connect_shared_pane()
         .map_err(|_| Error::Unavailable)?;
@@ -454,19 +390,19 @@ pub(crate) mod testing {
         }
     }
 
-    /// Registers a presented SSH server's writer, as the Workspace Window does when it presents
-    /// that server.
-    pub(crate) fn present_ssh(
-        destination: &crate::domain::SshDestination,
+    /// Registers a presented paired server's writer, as the Workspace Window does when it
+    /// presents that server.
+    pub(crate) fn present_direct(
+        route: crate::direct_connections::DirectRouteId,
         edits: Rc<ScriptedEdits>,
         reads: Arc<ScriptedReads>,
         cx: &mut App,
     ) {
         // The writer wraps the server the registry presents, as a real presentation's does.
-        let server = crate::ui::ssh_servers::installed(cx)
-            .and_then(|ssh| ssh.server(destination))
+        let server = crate::ui::direct_servers::installed(cx)
+            .and_then(|direct| direct.server(&route))
             .unwrap_or_else(|| {
-                LocalServer::for_identity("spaceterm-development")
+                ServerConnection::for_identity("spaceterm-development")
                     .expect("the development identity resolves")
             });
         let client = Client {
@@ -476,9 +412,7 @@ pub(crate) mod testing {
             edits,
             reads,
         };
-        cx.default_global::<SshClients>()
-            .0
-            .insert(destination.as_str().to_owned(), client);
+        cx.default_global::<DirectClients>().0.insert(route, client);
     }
 }
 
@@ -488,29 +422,29 @@ mod tests {
     use crate::ui::shared_workspaces::testing::ScriptedEdits;
     use std::cell::RefCell;
 
-    /// A new connection to the same destination gets its own writer, so edits never travel
+    /// A new connection to the same paired server gets its own writer, so edits never travel
     /// through an earlier connection's.
     #[gpui::test]
-    fn a_later_connection_to_one_destination_never_reuses_the_earlier_writer(
+    fn a_later_connection_to_one_route_never_reuses_the_earlier_writer(
         cx: &mut gpui::TestAppContext,
     ) {
-        let destination = crate::domain::SshDestination::new("penguin".to_owned()).unwrap();
-        let first = LocalServer::for_identity("spaceterm-development").unwrap();
-        let later = LocalServer::for_identity("spaceterm-development").unwrap();
+        let route = [7; 32];
+        let first = ServerConnection::for_identity("spaceterm-development").unwrap();
+        let later = ServerConnection::for_identity("spaceterm-development").unwrap();
         cx.update(|cx| {
-            let original = Client::for_ssh(&destination, first.clone(), cx);
-            let again = Client::for_ssh(&destination, first.clone(), cx);
+            let original = Client::for_direct(route, first.clone(), cx);
+            let again = Client::for_direct(route, first.clone(), cx);
             assert!(
                 Arc::ptr_eq(&original.controls, &again.controls),
                 "one connection keeps one writer"
             );
-            let replaced = Client::for_ssh(&destination, later, cx);
+            let replaced = Client::for_direct(route, later, cx);
             assert!(
                 !Rc::ptr_eq(&original.edits, &replaced.edits),
                 "a new connection gets a new presentation writer"
             );
             assert!(Arc::ptr_eq(
-                &Client::ssh(&destination, cx).unwrap().controls,
+                &Client::direct(&route, cx).unwrap().controls,
                 &replaced.controls
             ));
         });

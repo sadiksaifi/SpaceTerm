@@ -9,6 +9,7 @@ use thiserror::Error;
 use super::WorktreeSnapshot;
 use super::listing::{WorktreeHead, WorktreeRecord, parse_worktree_list};
 use super::ref_format::validate_branch_name;
+use crate::cancellation::CancellationToken;
 use crate::domain::{RepositoryIdentity, ValidatedLocalDirectory};
 use crate::platform::local_filesystem::{LocalFilesystemAuthority, LocalFilesystemError};
 use crate::repository_status::discovery::{Discovery, parse_discovery};
@@ -19,7 +20,6 @@ use crate::repository_status::{
     FsmonitorPolicy, ProgramExit, ProgramRequest, RepositoryProgramRunner, RepositoryReadError,
     ToolVersion,
 };
-use crate::ssh::cancellation::SshCancellationToken;
 
 /// The oldest git whose `worktree list --porcelain` accepts `-z`.
 const NUL_LIST_VERSION: ToolVersion = ToolVersion {
@@ -144,7 +144,7 @@ impl LocalWorktreeGit {
     pub(crate) fn list(
         &self,
         directory: &Path,
-        cancellation: &SshCancellationToken,
+        cancellation: &CancellationToken,
     ) -> Result<Option<WorktreeSnapshot>, RepositoryReadError> {
         let directory_text = directory.to_str().ok_or(RepositoryReadError::Unavailable)?;
         let mut output = Vec::new();
@@ -178,7 +178,7 @@ impl LocalWorktreeGit {
     pub(crate) fn branches(
         &self,
         root: &Path,
-        cancellation: &SshCancellationToken,
+        cancellation: &CancellationToken,
     ) -> Result<BranchList, RepositoryReadError> {
         let mut output = Vec::new();
         let exit = self.git(root, &BRANCH_ARGUMENTS, &mut output, cancellation)?;
@@ -195,7 +195,7 @@ impl LocalWorktreeGit {
         root: &Path,
         path: &Path,
         branch: &WorktreeBranch,
-        cancellation: &SshCancellationToken,
+        cancellation: &CancellationToken,
     ) -> Result<(), WorktreeCreateError> {
         let path = path.to_str().ok_or(WorktreeCreateError::Failed)?;
         match branch {
@@ -236,7 +236,7 @@ impl LocalWorktreeGit {
         &self,
         path: &Path,
         filesystem: &LocalFilesystemAuthority,
-        cancellation: &SshCancellationToken,
+        cancellation: &CancellationToken,
     ) -> Result<RemovalCheck, WorktreeRemoveError> {
         let directory = filesystem
             .validate_directory(path)
@@ -259,7 +259,7 @@ impl LocalWorktreeGit {
     fn has_changes(
         &self,
         path: &Path,
-        cancellation: &SshCancellationToken,
+        cancellation: &CancellationToken,
     ) -> Result<bool, WorktreeRemoveError> {
         let mut output = Vec::new();
         match self.git(path, &CHANGES_ARGUMENTS, &mut output, cancellation) {
@@ -278,7 +278,7 @@ impl LocalWorktreeGit {
         path: &Path,
         administrative: &str,
         filesystem: &LocalFilesystemAuthority,
-        cancellation: &SshCancellationToken,
+        cancellation: &CancellationToken,
     ) -> bool {
         if filesystem
             .validate_directory(&Path::new(administrative).join("modules"))
@@ -311,7 +311,7 @@ impl LocalWorktreeGit {
         &self,
         path: &Path,
         expected: &WorktreeIdentity,
-        cancellation: &SshCancellationToken,
+        cancellation: &CancellationToken,
     ) -> Result<(), WorktreeRemoveError> {
         if expected.directory.path() != path {
             return Err(WorktreeRemoveError::Replaced);
@@ -339,7 +339,7 @@ impl LocalWorktreeGit {
         &self,
         path: &Path,
         expected: &RemovalExpectation,
-        cancellation: &SshCancellationToken,
+        cancellation: &CancellationToken,
     ) -> Result<(), WorktreeRemoveError> {
         match expected {
             RemovalExpectation::Worktree {
@@ -378,7 +378,7 @@ impl LocalWorktreeGit {
         path: &Path,
         force: bool,
         expected: &RemovalExpectation,
-        cancellation: &SshCancellationToken,
+        cancellation: &CancellationToken,
     ) -> Result<(), WorktreeRemoveError> {
         self.confirm_location(path, expected, cancellation)?;
         let path = path.to_str().ok_or(WorktreeRemoveError::Failed)?;
@@ -396,7 +396,7 @@ impl LocalWorktreeGit {
     fn administrative_directory(
         &self,
         path: &Path,
-        cancellation: &SshCancellationToken,
+        cancellation: &CancellationToken,
     ) -> Result<String, WorktreeRemoveError> {
         let mut output = Vec::new();
         match self.git(path, &IDENTITY_ARGUMENTS, &mut output, cancellation) {
@@ -413,7 +413,7 @@ impl LocalWorktreeGit {
         &self,
         root: &Path,
         options: &[&str],
-        cancellation: &SshCancellationToken,
+        cancellation: &CancellationToken,
     ) -> Result<(), WorktreeCreateError> {
         let mut arguments = vec!["worktree", "add"];
         arguments.extend_from_slice(options);
@@ -428,7 +428,7 @@ impl LocalWorktreeGit {
         &self,
         root: &Path,
         name: &str,
-        cancellation: &SshCancellationToken,
+        cancellation: &CancellationToken,
     ) -> Result<(), WorktreeCreateError> {
         validate_branch_name(name).map_err(|_| WorktreeCreateError::InvalidName)?;
         let format = self
@@ -452,7 +452,7 @@ impl LocalWorktreeGit {
         &self,
         root: &Path,
         full_name: &str,
-        cancellation: &SshCancellationToken,
+        cancellation: &CancellationToken,
     ) -> Result<(), WorktreeCreateError> {
         match self.ref_exists(root, full_name, cancellation)? {
             true => Ok(()),
@@ -464,7 +464,7 @@ impl LocalWorktreeGit {
         &self,
         root: &Path,
         full_name: &str,
-        cancellation: &SshCancellationToken,
+        cancellation: &CancellationToken,
     ) -> Result<bool, WorktreeCreateError> {
         // `show-ref --verify --quiet` exits 0 for an existing ref and 1 for a missing one.
         let exit = self
@@ -486,7 +486,7 @@ impl LocalWorktreeGit {
         &self,
         root: &Path,
         branch: &str,
-        cancellation: &SshCancellationToken,
+        cancellation: &CancellationToken,
     ) -> Result<bool, WorktreeCreateError> {
         let worktrees = self
             .list_records(root, cancellation)
@@ -499,7 +499,7 @@ impl LocalWorktreeGit {
     fn list_records(
         &self,
         root: &Path,
-        cancellation: &SshCancellationToken,
+        cancellation: &CancellationToken,
     ) -> Result<Vec<WorktreeRecord>, RepositoryReadError> {
         let nul = self.git_version >= NUL_LIST_VERSION;
         let mut list = vec!["worktree", "list", "--porcelain"];
@@ -519,7 +519,7 @@ impl LocalWorktreeGit {
         directory: &Path,
         subcommand: &[&str],
         output: &mut Vec<u8>,
-        cancellation: &SshCancellationToken,
+        cancellation: &CancellationToken,
     ) -> Result<ProgramExit, RepositoryReadError> {
         self.run(
             directory,
@@ -534,7 +534,7 @@ impl LocalWorktreeGit {
         directory: &Path,
         arguments: Vec<OsString>,
         output: &mut Vec<u8>,
-        cancellation: &SshCancellationToken,
+        cancellation: &CancellationToken,
     ) -> Result<ProgramExit, RepositoryReadError> {
         let request = ProgramRequest {
             executable: self.git.clone(),
@@ -658,10 +658,7 @@ mod tests {
         ]);
 
         let snapshot = git(&runner, 47)
-            .list(
-                Path::new("/wt/feature/src"),
-                &SshCancellationToken::default(),
-            )
+            .list(Path::new("/wt/feature/src"), &CancellationToken::default())
             .unwrap()
             .unwrap();
 
@@ -703,7 +700,7 @@ mod tests {
         ]);
 
         let snapshot = git(&runner, 30)
-            .list(Path::new("/src/app"), &SshCancellationToken::default())
+            .list(Path::new("/src/app"), &CancellationToken::default())
             .unwrap()
             .unwrap();
 
@@ -719,9 +716,9 @@ mod tests {
         let runner = FakeRunner::new([exit(128, ""), exit(128, "true\n")]);
         let git = git(&runner, 47);
 
-        let outside = git.list(Path::new("/tmp"), &SshCancellationToken::default());
+        let outside = git.list(Path::new("/tmp"), &CancellationToken::default());
         let inside_git_directory =
-            git.list(Path::new("/src/app/.git"), &SshCancellationToken::default());
+            git.list(Path::new("/src/app/.git"), &CancellationToken::default());
 
         assert_eq!(
             (
@@ -749,7 +746,7 @@ mod tests {
         )]);
 
         let branches = git(&runner, 47)
-            .branches(Path::new("/src/app"), &SshCancellationToken::default())
+            .branches(Path::new("/src/app"), &CancellationToken::default())
             .unwrap();
 
         assert_eq!(
@@ -784,7 +781,7 @@ mod tests {
                 name: "feature/login".into(),
                 base: BranchName::Remote("origin/main".into()),
             },
-            &SshCancellationToken::default(),
+            &CancellationToken::default(),
         );
 
         let requests = runner.requests();
@@ -850,7 +847,7 @@ mod tests {
                 Path::new("/src/app"),
                 Path::new("/wt/app/x"),
                 &WorktreeBranch::Existing { name: name.into() },
-                &SshCancellationToken::default(),
+                &CancellationToken::default(),
             )
         };
 
@@ -874,7 +871,7 @@ mod tests {
                 remote: "origin/fix".into(),
                 name: "fix".into(),
             },
-            &SshCancellationToken::default(),
+            &CancellationToken::default(),
         );
 
         assert_eq!(result, Ok(()));
@@ -934,7 +931,7 @@ mod tests {
                 Path::new("/src/app"),
                 Path::new("/wt/app/x"),
                 &branch,
-                &SshCancellationToken::default(),
+                &CancellationToken::default(),
             );
             assert_eq!(result, Err(error), "{branch:?}");
         }
@@ -962,7 +959,7 @@ mod tests {
         let filesystem = LocalFilesystemAuthority::testing();
         let location = std::env::temp_dir();
         let changes = || {
-            git.check_removal(&location, &filesystem, &SshCancellationToken::default())
+            git.check_removal(&location, &filesystem, &CancellationToken::default())
                 .map(|check| check.changes)
         };
 
@@ -1022,7 +1019,7 @@ mod tests {
         let git = git(&runner, 47);
         let filesystem = LocalFilesystemAuthority::testing();
         let submodules = || {
-            git.check_removal(&worktree, &filesystem, &SshCancellationToken::default())
+            git.check_removal(&worktree, &filesystem, &CancellationToken::default())
                 .map(|check| (check.changes, check.submodules))
         };
 
@@ -1057,7 +1054,7 @@ mod tests {
                 Path::new("/wt/app/x"),
                 force,
                 &missing,
-                &SshCancellationToken::default(),
+                &CancellationToken::default(),
             )
         };
 
@@ -1086,7 +1083,7 @@ mod tests {
             exit(0, ""),
         ]);
         let git = git(&runner, 47);
-        let cancellation = SshCancellationToken::default();
+        let cancellation = CancellationToken::default();
         let location = std::env::temp_dir();
         let path = location.as_path();
         let confirmed = git
@@ -1134,7 +1131,7 @@ mod tests {
             exit(1, ""),
         ]);
         let git = git(&runner, 47);
-        let cancellation = SshCancellationToken::default();
+        let cancellation = CancellationToken::default();
         let confirmed = git
             .check_removal(
                 &location,
@@ -1173,7 +1170,7 @@ mod tests {
                 &location,
                 true,
                 &RemovalExpectation::Absent(LocalFilesystemAuthority::testing()),
-                &SshCancellationToken::default(),
+                &CancellationToken::default(),
             ),
             Err(WorktreeRemoveError::Replaced)
         );

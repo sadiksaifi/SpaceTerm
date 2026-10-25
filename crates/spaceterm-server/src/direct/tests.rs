@@ -1315,3 +1315,491 @@ fn a_paired_protocol_connection_cannot_write_native_stop_policy() {
     drop(connection);
     let _ = server.join().unwrap();
 }
+
+fn setup(
+    fixture: &Fixture,
+    mut operation: OperationId,
+    credential: &DeviceCredential,
+) -> Management {
+    let ManagementReply::Status(status) = fixture.management(Management::Status).unwrap() else {
+        panic!()
+    };
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let policy = status
+        .policy
+        .clone()
+        .unwrap_or_else(|| NetworkPolicy::new(listener.local_addr().unwrap()).unwrap());
+    operation[..8].copy_from_slice(&status.setup_generation.to_be_bytes());
+    Management::Setup {
+        generation: status.setup_generation,
+        pin: status.pin,
+        expected_policy: status.policy,
+        policy,
+        operation,
+        public_key: credential.public_key().unwrap(),
+        name: "Setup device".into(),
+    }
+}
+fn reserve(fixture: &Fixture, request: &Management) {
+    let Management::Setup {
+        generation,
+        pin,
+        expected_policy,
+        policy,
+        operation,
+        public_key,
+        name,
+    } = request.clone()
+    else {
+        panic!()
+    };
+    assert!(matches!(
+        fixture.management(Management::PrepareSetup {
+            generation,
+            pin,
+            expected_policy,
+            policy,
+            operation,
+            public_key,
+            name
+        }),
+        Ok(ManagementReply::SetupPrepared)
+    ));
+}
+
+#[test]
+fn prepared_setup_can_be_cancelled_over_wss_before_admission_and_after_restart() {
+    let fixture = Fixture::new();
+    fixture.enable();
+    let endpoint = fixture.endpoint();
+    let credential = DeviceCredential::generate().unwrap();
+    let request = setup(&fixture, [90; 32], &credential);
+    reserve(&fixture, &request);
+    let Management::Setup { pin, operation, .. } = &request else {
+        panic!()
+    };
+    let mut cleanup = Enrollment::resume(&endpoint, pin.clone(), *operation, &credential).unwrap();
+    let worker = fixture.serve_next();
+    assert_eq!(cleanup.cancel().unwrap(), None);
+    worker.join().unwrap().unwrap();
+    fixture.state.lock().unwrap().stop();
+    let reopened = host::State::open(&fixture.paths).unwrap();
+    let result = reopened.lock().unwrap().manage(None, request);
+    assert!(matches!(result, Err(DirectError::AlreadyDecided)));
+    assert!(
+        matches!(reopened.lock().unwrap().manage(None, Management::Devices), Ok((ManagementReply::Devices(devices), _)) if devices.is_empty())
+    );
+    reopened.lock().unwrap().stop();
+}
+
+#[test]
+fn account_setup_cancellation_checks_the_original_pin_and_fences_admission_with_network_off() {
+    let fixture = Fixture::new();
+    let credential = DeviceCredential::generate().unwrap();
+    let operation = [95; 32];
+    let request = setup(&fixture, operation, &credential);
+    reserve(&fixture, &request);
+    let Management::Setup { pin, operation, .. } = &request else {
+        panic!()
+    };
+    let operation = *operation;
+    let mut changed = pin.clone();
+    changed.certificate[0] ^= 1;
+    assert!(matches!(
+        fixture.management(Management::CancelSetup {
+            pin: changed,
+            operation,
+        }),
+        Err(DirectError::PinMismatch)
+    ));
+    // A refusal cannot retire or alter the original prepared operation.
+    reserve(&fixture, &request);
+    for _ in 0..2 {
+        assert!(matches!(
+            fixture.management(Management::CancelSetup {
+                pin: pin.clone(),
+                operation,
+            }),
+            Ok(ManagementReply::SetupCancelled {
+                pin: confirmed,
+                operation: confirmed_operation,
+            }) if confirmed == *pin && confirmed_operation == operation
+        ));
+    }
+    fixture.state.lock().unwrap().stop();
+    let reopened = host::State::open(&fixture.paths).unwrap();
+    assert!(matches!(
+        reopened.lock().unwrap().manage(None, request),
+        Err(DirectError::AlreadyDecided)
+    ));
+    assert!(matches!(
+        reopened.lock().unwrap().manage(None, Management::Status),
+        Ok((ManagementReply::Status(status), _))
+            if status.policy.is_none() && status.listener == ListenerState::Off
+    ));
+    reopened.lock().unwrap().stop();
+}
+
+#[test]
+fn setup_retries_recover_one_pairing_after_lost_reply_and_reject_substituted_originals() {
+    let fixture = Fixture::new();
+    fixture.enable();
+    let credential = DeviceCredential::generate().unwrap();
+    let request = setup(&fixture, [91; 32], &credential);
+    assert!(matches!(
+        fixture.management(request.clone()),
+        Err(DirectError::InvalidRequest)
+    ));
+    reserve(&fixture, &request);
+    let ManagementReply::Setup(paired) = fixture.management(request.clone()).unwrap() else {
+        panic!()
+    };
+    fixture.state.lock().unwrap().stop();
+    let reopened = host::State::open(&fixture.paths).unwrap();
+    let (ManagementReply::Setup(retried), _) = reopened
+        .lock()
+        .unwrap()
+        .manage(None, request.clone())
+        .unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(retried, paired);
+    assert!(
+        matches!(reopened.lock().unwrap().manage(None, Management::Devices), Ok((ManagementReply::Devices(devices), _)) if devices.len() == 1)
+    );
+    for changed_field in 0..5 {
+        let mut changed = request.clone();
+        let Management::Setup {
+            pin,
+            expected_policy,
+            policy,
+            public_key,
+            name,
+            ..
+        } = &mut changed
+        else {
+            panic!()
+        };
+        match changed_field {
+            0 => pin.server[0] ^= 1,
+            1 => policy
+                .bind
+                .set_port(if policy.bind.port() == 1 { 2 } else { 1 }),
+            2 => public_key[0] ^= 1,
+            3 => *name = "Another client".into(),
+            _ => *expected_policy = None,
+        }
+        assert!(matches!(
+            reopened.lock().unwrap().manage(None, changed),
+            Err(DirectError::PinMismatch | DirectError::Substituted)
+        ));
+    }
+    reopened.lock().unwrap().stop();
+}
+
+#[test]
+fn setup_requires_the_observed_policy_before_preparation_and_enrollment() {
+    let fixture = Fixture::new();
+    let credential = DeviceCredential::generate().unwrap();
+    let stale = setup(&fixture, [96; 32], &credential);
+    fixture.enable();
+    let Management::Setup {
+        generation,
+        pin,
+        expected_policy,
+        policy,
+        operation,
+        public_key,
+        name,
+    } = stale
+    else {
+        panic!()
+    };
+    assert!(matches!(
+        fixture.management(Management::PrepareSetup {
+            generation,
+            pin,
+            expected_policy,
+            policy,
+            operation,
+            public_key,
+            name,
+        }),
+        Err(DirectError::PolicyChanged)
+    ));
+
+    let request = setup(&fixture, [97; 32], &credential);
+    reserve(&fixture, &request);
+    fixture.management(Management::SetPolicy(None)).unwrap();
+    fixture.state.lock().unwrap().stop();
+    let reopened = host::State::open(&fixture.paths).unwrap();
+    assert!(matches!(
+        reopened.lock().unwrap().manage(None, request),
+        Err(DirectError::PolicyChanged)
+    ));
+    assert!(matches!(
+        reopened.lock().unwrap().manage(None, Management::Devices),
+        Ok((ManagementReply::Devices(devices), _)) if devices.is_empty()
+    ));
+    assert!(matches!(
+        reopened.lock().unwrap().manage(None, Management::Status),
+        Ok((ManagementReply::Status(status), _)) if status.policy.is_none()
+    ));
+    reopened.lock().unwrap().stop();
+}
+
+#[test]
+fn admitted_setup_retry_returns_its_original_pairing_without_replacing_a_changed_policy() {
+    let fixture = Fixture::new();
+    fixture.enable();
+    let credential = DeviceCredential::generate().unwrap();
+    let request = setup(&fixture, [98; 32], &credential);
+    reserve(&fixture, &request);
+    let ManagementReply::Setup(original) = fixture.management(request.clone()).unwrap() else {
+        panic!()
+    };
+    fixture.management(Management::SetPolicy(None)).unwrap();
+    reserve(&fixture, &request);
+    assert!(matches!(
+        fixture.management(request),
+        Ok(ManagementReply::Setup(paired)) if paired == original
+    ));
+    assert!(matches!(
+        fixture.management(Management::Status),
+        Ok(ManagementReply::Status(status)) if status.policy.is_none()
+    ));
+}
+
+#[test]
+fn lost_setup_reply_uses_the_original_claim_for_key_bound_wss_cleanup() {
+    let fixture = Fixture::new();
+    fixture.enable();
+    let credential = DeviceCredential::generate().unwrap();
+    let operation = [92; 32];
+    let request = setup(&fixture, operation, &credential);
+    let Management::Setup { operation, .. } = &request else {
+        panic!()
+    };
+    let operation = *operation;
+    reserve(&fixture, &request);
+    let ManagementReply::Setup(paired) = fixture.management(request.clone()).unwrap() else {
+        panic!()
+    };
+    let mut cleanup = Enrollment::resume(
+        &fixture.endpoint(),
+        paired.pin.clone(),
+        operation,
+        &credential,
+    )
+    .unwrap();
+    let wrong = DeviceCredential::generate().unwrap();
+    let mut wrong_cleanup =
+        Enrollment::resume(&fixture.endpoint(), paired.pin.clone(), operation, &wrong).unwrap();
+    let worker = fixture.serve_next();
+    assert_eq!(wrong_cleanup.cancel(), Err(DirectError::Substituted));
+    worker.join().unwrap().unwrap();
+    for _ in 0..2 {
+        let worker = fixture.serve_next();
+        assert_eq!(cleanup.cancel().unwrap().unwrap().target, paired.pairing);
+        worker.join().unwrap().unwrap();
+    }
+    assert!(matches!(
+        fixture.management(request),
+        Err(DirectError::Revoked)
+    ));
+    let next = setup(&fixture, [93; 32], &credential);
+    reserve(&fixture, &next);
+    let ManagementReply::Setup(later) = fixture.management(next).unwrap() else {
+        panic!()
+    };
+    assert_ne!(later.pairing, paired.pairing);
+    let worker = fixture.serve_next();
+    cleanup.cancel().unwrap();
+    worker.join().unwrap().unwrap();
+    let worker = fixture.serve_next();
+    drop(DirectConnection::connect(&fixture.endpoint(), &later, &credential).unwrap());
+    let _ = worker.join().unwrap();
+}
+
+#[test]
+fn paired_wss_authority_cannot_prepare_enroll_or_cancel_account_setup() {
+    let fixture = Fixture::new();
+    fixture.enable();
+    let credential = DeviceCredential::generate().unwrap();
+    let paired = fixture.enroll(&credential);
+    let request = setup(&fixture, [94; 32], &credential);
+    reserve(&fixture, &request);
+    let Management::Setup {
+        generation,
+        pin,
+        expected_policy,
+        policy,
+        operation,
+        public_key,
+        name,
+    } = request.clone()
+    else {
+        panic!()
+    };
+    let worker = fixture.serve_next();
+    let mut connection =
+        DirectConnection::connect(&fixture.endpoint(), &paired, &credential).unwrap();
+    crate::protocol::admit_transport(
+        &mut connection,
+        (&paired.client, &"Paired client".into()),
+        &paired.pin.server,
+        &paired.pin.build,
+        &[crate::protocol::MAJOR],
+    )
+    .unwrap();
+    let mut wire = crate::protocol::Wire::terminal(&mut connection).unwrap();
+    for action in [
+        Management::PrepareSetup {
+            generation,
+            pin: pin.clone(),
+            expected_policy,
+            policy,
+            operation,
+            public_key,
+            name,
+        },
+        request.clone(),
+        Management::CancelSetup { pin, operation },
+    ] {
+        wire.write(&crate::pane::Request::Direct(action)).unwrap();
+        assert!(matches!(
+            wire.read().unwrap(),
+            crate::pane::Reply::Direct(Err(DirectError::AuthenticationRefused))
+        ));
+    }
+    drop(connection);
+    let _ = worker.join().unwrap();
+    assert!(matches!(
+        fixture.management(request),
+        Ok(ManagementReply::Setup(_))
+    ));
+}
+
+#[test]
+fn completed_cancellations_retire_capacity_and_reject_delayed_prepare_and_admission() {
+    let mut fixture = Fixture::new();
+    fixture.enable();
+    let credential = DeviceCredential::generate().unwrap();
+    let retired = setup(&fixture, [101; 32], &credential);
+    for _ in 0..257 {
+        let request = setup(&fixture, [101; 32], &credential);
+        reserve(&fixture, &request);
+        let Management::Setup { pin, operation, .. } = request else {
+            panic!()
+        };
+        assert!(matches!(
+            fixture.management(Management::CancelSetup { pin, operation }),
+            Ok(ManagementReply::SetupCancelled { .. })
+        ));
+    }
+    fixture.state.lock().unwrap().stop();
+    fixture.state = host::State::open(&fixture.paths).unwrap();
+    let Management::Setup {
+        generation,
+        pin,
+        expected_policy,
+        policy,
+        operation,
+        public_key,
+        name,
+    } = retired.clone()
+    else {
+        panic!()
+    };
+    assert!(matches!(
+        fixture.management(Management::PrepareSetup {
+            generation,
+            pin,
+            expected_policy,
+            policy,
+            operation,
+            public_key,
+            name
+        }),
+        Err(DirectError::AlreadyDecided)
+    ));
+    assert!(matches!(
+        fixture.management(retired),
+        Err(DirectError::AlreadyDecided)
+    ));
+    let next = setup(&fixture, [102; 32], &credential);
+    reserve(&fixture, &next);
+    assert!(matches!(
+        fixture.management(next),
+        Ok(ManagementReply::Setup(_))
+    ));
+}
+
+#[test]
+fn unknown_current_generation_requires_account_cancellation_to_fence_delayed_preparation() {
+    let fixture = Fixture::new();
+    fixture.enable();
+    let credential = DeviceCredential::generate().unwrap();
+    let request = setup(&fixture, [103; 32], &credential);
+    let Management::Setup {
+        pin,
+        operation,
+        generation,
+        expected_policy,
+        policy,
+        public_key,
+        name,
+    } = request
+    else {
+        panic!()
+    };
+    assert!(matches!(
+        fixture.authenticate(
+            &credential,
+            wire::Action::Cancel {
+                claim: operation,
+                key: public_key
+            }
+        ),
+        Err(DirectError::Expired)
+    ));
+    let mut future = operation;
+    future[..8].copy_from_slice(&(generation + 1).to_be_bytes());
+    assert!(matches!(
+        fixture.management(Management::CancelSetup {
+            pin: pin.clone(),
+            operation: future
+        }),
+        Err(DirectError::Expired)
+    ));
+    assert!(matches!(
+        fixture.management(Management::CancelSetup {
+            pin: pin.clone(),
+            operation
+        }),
+        Ok(ManagementReply::SetupCancelled { .. })
+    ));
+    assert!(matches!(
+        fixture.management(Management::PrepareSetup {
+            generation,
+            pin,
+            expected_policy,
+            policy,
+            operation,
+            public_key,
+            name
+        }),
+        Err(DirectError::AlreadyDecided)
+    ));
+    assert!(matches!(
+        fixture.authenticate(
+            &credential,
+            wire::Action::Cancel {
+                claim: operation,
+                key: public_key
+            }
+        ),
+        Ok(wire::Answer::Cancelled(None))
+    ));
+}

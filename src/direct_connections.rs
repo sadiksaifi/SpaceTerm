@@ -2,6 +2,7 @@
 pub(crate) mod account;
 pub(crate) mod credentials;
 pub(crate) mod records;
+mod setup;
 #[cfg(test)]
 pub(crate) mod tests;
 mod worker;
@@ -12,7 +13,7 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use spaceterm_server::LocalServer;
+use spaceterm_server::ServerConnection;
 use spaceterm_server::direct::{self, DeviceCredential, DirectError, PairedDevice, PairingId};
 use spaceterm_server::pane::control::ClientName;
 use zeroize::Zeroizing;
@@ -21,6 +22,17 @@ use credentials::{CredentialStore, Interaction};
 use records::{
     Document, Durability, PendingRecord, PrivateRecords, Records, SaveError, SavedRoute,
 };
+
+/// An exact enrollment retained before setup can change the server.
+/// Dropping an unfinished setup requests restricted WSS cancellation.
+pub(crate) struct SetupEnrollment {
+    owner: DirectConnections,
+    operation: JoinId,
+    public_key: [u8; 32],
+    endpoint: String,
+    pin: direct::ServerPin,
+    settled: std::sync::atomic::AtomicBool,
+}
 
 pub(crate) type DirectRouteId = [u8; 32];
 pub(crate) type JoinId = [u8; 32];
@@ -105,15 +117,14 @@ pub(crate) struct PendingUnpair {
     pub(crate) server_confirmed: bool,
 }
 
-/// Resolves only the retained account route. A changed alias or later connection cannot
-/// supply authority. Quiet resolution never starts discovery or authentication.
+/// Resolves account-local revocation authority without network or credential access.
 pub(crate) trait AccountRevocationResolver: Send + Sync {
-    fn route_for(&self, server: &LocalServer) -> Result<records::AccountRoute, DirectError>;
+    fn route_for(&self, server: &ServerConnection) -> Result<records::AccountRoute, DirectError>;
     fn resolve(
         &self,
         route: &records::AccountRoute,
         interaction: Interaction,
-    ) -> Result<LocalServer, DirectError>;
+    ) -> Result<ServerConnection, DirectError>;
 }
 
 #[derive(Clone)]
@@ -145,7 +156,7 @@ struct State {
 
 struct RouteState {
     status: DirectRouteStatus,
-    server: Option<LocalServer>,
+    server: Option<ServerConnection>,
     gate: Arc<std::sync::atomic::AtomicBool>,
     retry: Retry,
 }
@@ -177,13 +188,21 @@ impl Retry {
 
 impl DirectConnections {
     pub(crate) fn native(identity: &str, paths: Arc<crate::platform::app_paths::AppPaths>) -> Self {
+        Self::with_credentials(identity, paths, credentials::native(identity))
+    }
+
+    pub(crate) fn with_credentials(
+        identity: &str,
+        paths: Arc<crate::platform::app_paths::AppPaths>,
+        credentials: Arc<dyn CredentialStore>,
+    ) -> Self {
         let registry = Self::new(
             identity,
             Arc::new(PrivateRecords::new(paths)),
-            credentials::native(identity),
+            credentials,
             Arc::new(worker::NativeNetwork),
         );
-        if let Ok(local) = LocalServer::for_identity(identity) {
+        if let Ok(local) = ServerConnection::for_identity(identity) {
             registry.set_account_resolver(Arc::new(account::LocalRevocationResolver(local)));
         }
         registry
@@ -317,7 +336,7 @@ impl DirectConnections {
     }
 
     /// A retained handle keeps interrupted screens frozen until reconciliation succeeds.
-    pub(crate) fn server(&self, id: &DirectRouteId) -> Option<LocalServer> {
+    pub(crate) fn server(&self, id: &DirectRouteId) -> Option<ServerConnection> {
         self.0
             .state
             .lock()
@@ -551,7 +570,7 @@ impl DirectConnections {
 
     pub(crate) fn revoke_other(
         &self,
-        server: LocalServer,
+        server: ServerConnection,
         target: PairingId,
         label: String,
     ) -> Result<(), DirectError> {

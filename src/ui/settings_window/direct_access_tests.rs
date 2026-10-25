@@ -20,17 +20,17 @@ use super::super::server_card::MENU_SELECTOR;
 use super::super::server_list::LIST_SELECTOR;
 use super::super::server_selection;
 use super::super::servers::testing::connected;
-use super::super::servers::{LocalServerControl, OfferedServer, ServerConnection};
+use super::super::servers::{ConnectedServer, LocalServerControl, OfferedServer};
 use super::{
     ACCESS_SELECTOR, ADDRESS_SELECTOR, DEVICE_SELECTOR, INVITE_SELECTOR, REMOVE_CANCEL_SELECTOR,
     REMOVE_CONFIRM_SELECTOR, TURN_OFF_CONFIRM_SELECTOR,
 };
 use crate::appearance::Appearance;
 use crate::direct_connections::{DirectConnections, DirectRouteStatus, UnpairState};
-use crate::local_server::ServerError;
-use crate::local_server::direct::{ClaimId, NetworkAddresses, NetworkPolicy, PairingClaim};
 use crate::platform::appearance::testing::RecordingAppearancePlatform;
 use crate::platform::window_movement::RecordingOperatingSystemWindowDragPlatform;
+use crate::server_connection::ServerError;
+use crate::server_connection::direct::{ClaimId, NetworkAddresses, NetworkPolicy, PairingClaim};
 use crate::server_context::{
     LastKnownFacts, NetworkAccessFacts, NetworkListenerFacts, PairedDeviceFacts,
     PairedDevicesFacts, ServerKey,
@@ -209,7 +209,7 @@ impl LocalServerControl for ScriptedLocal {
         Some(Arc::clone(&self.0) as Arc<dyn DirectAccessControl>)
     }
 
-    fn refresh(&self) -> Result<ServerConnection, ServerError> {
+    fn refresh(&self) -> Result<ConnectedServer, ServerError> {
         Ok(connected(2))
     }
 }
@@ -277,35 +277,18 @@ fn retain(key: ServerKey, facts: LastKnownFacts, cx: &mut gpui::App) {
     server_selection::remember(key, facts, cx);
 }
 
-/// Saves penguin as an SSH server the person last left disconnected, so Servers lists it and its
-/// retained facts stay, while nothing reaches any computer.
-fn save_penguin(cx: &mut TestAppContext) {
-    use super::super::server_list::tests::{Computers, SavedConnections, destination};
-    use crate::ssh::server_connection::{
-        RetainedSshConnection, SshConnectionIntentStore as _, SshServerConnections,
-    };
-
-    // The SSH registry loads its saved connections on its own thread.
-    cx.executor().allow_parking();
-    let saved = Arc::new(SavedConnections::default());
-    saved
-        .retain(RetainedSshConnection {
-            destination: destination("penguin"),
-            continuity: None,
-            active: false,
-        })
-        .expect("penguin is saved");
-    let connections = SshServerConnections::new(Arc::new(Computers::default()), saved);
-    connections.resume_retained();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    while connections.connections().is_empty() {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the saved connections load"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(2));
-    }
-    cx.update(|cx| crate::ui::ssh_servers::install(connections, None, cx));
+/// Saved paired servers named `labels`, disconnected, so nothing reaches any computer.
+fn paired(
+    labels: &[&str],
+) -> (
+    DirectConnections,
+    Vec<crate::direct_connections::DirectRouteId>,
+) {
+    let routes: Vec<(&str, &str)> = labels
+        .iter()
+        .map(|label| (*label, "wss://192.168.1.30:9231"))
+        .collect();
+    crate::direct_connections::tests::disconnected_routes_at(&routes)
 }
 
 /// What SpaceTerm retains about this computer's server for the next launch.
@@ -787,12 +770,12 @@ fn retained_access_that_loads_after_settings_opens_replaces_unknown(cx: &mut Tes
 
 #[gpui::test]
 fn another_servers_retained_access_never_shows_for_this_one(cx: &mut TestAppContext) {
-    let penguin = ServerKey::Ssh("penguin".to_owned());
-    save_penguin(cx);
+    let (direct, routes) = paired(&["penguin"]);
+    let penguin = ServerKey::Direct(routes[0]);
     cx.update(|cx| retain(penguin.clone(), retained_on(), cx));
     let access = ScriptedAccess::listening();
     access.become_unreachable();
-    let (window, cx) = open_servers(&access, cx);
+    let (window, cx) = open_servers_with(&access, Some(direct), cx);
 
     assert!(
         cx.update(|_, cx| server_selection::facts(&penguin, cx))
@@ -828,47 +811,87 @@ fn devices_the_server_couldnt_list_read_as_unknown_rather_than_none(cx: &mut Tes
     assert!(!reads("Devices: None", cx));
 }
 
-#[gpui::test]
-fn a_paired_server_offers_no_network_access(cx: &mut TestAppContext) {
-    use super::super::server_card::AUTO_START_SELECTOR;
-    use super::super::server_list::tests::{Computers, SavedConnections};
+/// Whether any node publishes `text` as its name or value.
+fn names(text: &str, cx: &mut VisualTestContext) -> bool {
+    A11yTree::read(cx)
+        .in_order()
+        .iter()
+        .any(|node| node["aria"]["label"] == text || node["aria"]["value"] == text)
+}
 
-    cx.executor().allow_parking();
-    // An SSH registry makes Start automatically a row Servers offers, so its absence below comes
-    // from the paired connection alone.
-    cx.update(|cx| {
-        crate::ui::ssh_servers::install(
-            crate::ssh::server_connection::SshServerConnections::new(
-                Arc::new(Computers::default()),
-                Arc::new(SavedConnections::default()),
-            ),
-            None,
-            cx,
-        );
-    });
-    let access = ScriptedAccess::listening();
-    let (direct, _) = crate::direct_connections::tests::offline("studio");
-    let (_, cx) = open_servers_with(&access, Some(direct), cx);
-    assert!(
-        open(ACCESS_SELECTOR, cx),
-        "this computer's server offers it"
-    );
-    assert!(
-        open(AUTO_START_SELECTOR, cx),
-        "this computer's server offers Start automatically"
-    );
-
+/// Opens Servers on the paired server studio, disconnected, with what it last reported: access
+/// on and two devices, one of them this computer's own pairing.
+fn open_paired_studio(
+    cx: &mut TestAppContext,
+) -> (
+    Entity<SettingsWindow>,
+    DirectConnections,
+    &mut VisualTestContext,
+) {
+    let (direct, routes) = paired(&["studio"]);
+    let own = direct
+        .route(&routes[0])
+        .expect("studio is saved")
+        .paired
+        .pairing;
+    let mut facts = retained_on();
+    if let Some(known) = facts.paired_devices.as_mut() {
+        known.devices.push(PairedDeviceFacts {
+            pairing: own,
+            name: "Studio Client".to_owned(),
+            fingerprint: fingerprint(4),
+            last_connected_at: None,
+        });
+    }
+    cx.update(|cx| retain(ServerKey::Direct(routes[0]), facts, cx));
+    let access = ScriptedAccess::off();
+    let (window, cx) = open_servers_with(&access, Some(direct.clone()), cx);
     select_paired_server(cx);
+    (window, direct, cx)
+}
 
+#[gpui::test]
+fn a_paired_server_presents_its_network_access_and_devices(cx: &mut TestAppContext) {
+    let (window, _, cx) = open_paired_studio(cx);
+    let this_computer = crate::desktop_profile::testing_presentation()
+        .wording()
+        .this_computer;
+
+    assert!(open(ACCESS_SELECTOR, cx));
+    assert!(access_on(&window, cx), "studio last reported access on");
+    assert!(reads("Devices: 2 paired", cx));
+    assert!(names("MacBook", cx));
     assert!(
-        !open(ACCESS_SELECTOR, cx),
-        "a paired connection carries no authority over its server's network"
+        names(&format!("Studio Client ({this_computer})"), cx),
+        "this computer's own pairing is named as this computer"
     );
-    assert!(!open(INVITE_SELECTOR, cx));
+    assert!(reads("Connect to studio to change its network access.", cx));
+}
+
+#[gpui::test]
+fn an_offline_paired_servers_network_access_changes_nothing(cx: &mut TestAppContext) {
+    let (window, direct, cx) = open_paired_studio(cx);
+
+    click(ACCESS_SELECTOR, cx);
     assert!(
-        !open(AUTO_START_SELECTOR, cx),
-        "a paired connection carries no authority over its server's services"
+        !open(&modal_action(TURN_OFF_CONFIRM_SELECTOR), cx),
+        "Turn Off isn't offered"
     );
+    click(INVITE_SELECTOR, cx);
+    assert!(
+        !open(crate::ui::direct_pairing::COPY_SELECTOR, cx),
+        "no invitation opens"
+    );
+    for device in 0..2 {
+        click(&format!("{DEVICE_SELECTOR}-{device}-remove"), cx);
+        assert!(
+            !open(&modal_action(REMOVE_CONFIRM_SELECTOR), cx),
+            "Remove isn't offered"
+        );
+    }
+    assert!(access_on(&window, cx));
+    assert!(direct.pending_unpairs().is_empty());
+    assert_eq!(direct.routes().len(), 1, "studio stays saved");
 }
 
 #[gpui::test]
@@ -991,8 +1014,10 @@ fn unpairing_this_device_while_offline_removes_it_at_once_and_says_revocation_is
         !open(&format!("{LIST_SELECTOR}-1"), cx),
         "All Servers no longer offers the unpaired server"
     );
+    // The offline server's first revocation attempt fails, which leaves the unpair unconfirmed
+    // until the person retries it.
     settle(cx, |cx| {
-        reads("Unpair from studio isn't confirmed yet.", cx)
+        reads("Unpair from studio isn't confirmed. Choose Retry.", cx)
     });
 }
 

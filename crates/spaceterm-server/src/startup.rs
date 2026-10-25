@@ -1,12 +1,12 @@
 //! Account-local normal launch through the approved retained service runtime.
-use crate::{AuthenticatedStatus, LocalServer, ServerError, service::Service};
+use crate::{AuthenticatedStatus, ServerConnection, ServerError, service::Service};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 /// The observed result of normal launch. Only explicit Start can reverse Stop.
 pub enum StartupOutcome {
     Ready {
-        server: LocalServer,
+        server: ServerConnection,
         status: AuthenticatedStatus,
     },
     Stopped,
@@ -19,7 +19,7 @@ pub enum StartupOutcome {
 #[derive(Clone)]
 pub struct LocalStartup {
     service: Service,
-    server: LocalServer,
+    server: ServerConnection,
 }
 
 impl LocalStartup {

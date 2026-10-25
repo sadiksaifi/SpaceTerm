@@ -1,6 +1,6 @@
 //! Reads paths through the authenticated owning server; never validates them on this client.
 use super::*;
-use crate::local_server::LocalServer;
+use crate::server_connection::ServerConnection;
 use spaceterm_server::pane::{Reply, Request as PaneRequest, directories::*};
 use std::{
     path::PathBuf,
@@ -45,14 +45,14 @@ impl DirectoryConnection for spaceterm_server::pane::PaneConnection {
     }
 }
 
-impl DirectoryConnector for LocalServer {
+impl DirectoryConnector for ServerConnection {
     fn connect(&self) -> Result<Box<dyn DirectoryConnection>, ()> {
         Ok(Box::new(self.connect_pane().map_err(|_| ())?))
     }
 }
 
 /// Reaches a presented server's directory channel. Production reaches the server itself.
-pub(crate) type ServerDirectories = Rc<dyn Fn(&LocalServer) -> Arc<dyn DirectoryConnector>>;
+pub(crate) type ServerDirectories = Rc<dyn Fn(&ServerConnection) -> Arc<dyn DirectoryConnector>>;
 
 /// The directory channel of each presented server, over its own admitted route.
 pub(crate) fn owning_server_directories() -> ServerDirectories {
@@ -96,7 +96,7 @@ impl ServerDirectorySource {
     /// Chooses a replacement for `original`, starting at its nearest available ancestor. A
     /// replacement is an existing directory, so this picker never creates one.
     pub(crate) fn new(
-        server: LocalServer,
+        server: ServerConnection,
         original: PathBuf,
         available: Rc<dyn Fn() -> bool>,
     ) -> Self {
@@ -111,7 +111,7 @@ impl ServerDirectorySource {
     /// another computer. A missing directory can be created there, after the person confirms,
     /// when the server creates directories.
     pub(crate) fn browsing(
-        server: LocalServer,
+        server: ServerConnection,
         machine: Option<String>,
         available: Rc<dyn Fn() -> bool>,
     ) -> Self {
@@ -660,6 +660,7 @@ pub(crate) mod testing {
 
     /// Every presented server answers through the server runtime's own directory handler, on
     /// this computer's filesystem.
+    #[cfg(feature = "native-tests")]
     pub(crate) fn in_process() -> ServerDirectories {
         let handler: Box<dyn FnMut(&PaneRequest) -> Reply + Send> =
             Box::new(crate::runtime::directory_testing::directory_host());
@@ -670,10 +671,19 @@ pub(crate) mod testing {
     /// A server from before directories could be compared: it reads directories and answers
     /// nothing else.
     pub(crate) fn older() -> ServerDirectories {
-        struct Older;
+        gated(Arc::new(std::sync::atomic::AtomicBool::new(true)))
+    }
+
+    /// The [`older`] server over a channel that opens only once `open` is set, so a test holds
+    /// its answers back.
+    pub(crate) fn gated(open: Arc<std::sync::atomic::AtomicBool>) -> ServerDirectories {
+        struct Older(Arc<std::sync::atomic::AtomicBool>);
         struct OlderConnection;
         impl DirectoryConnector for Older {
             fn connect(&self) -> Result<Box<dyn DirectoryConnection>, ()> {
+                while !self.0.load(std::sync::atomic::Ordering::Acquire) {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
                 Ok(Box::new(OlderConnection))
             }
         }
@@ -688,6 +698,7 @@ pub(crate) mod testing {
                 Err(())
             }
         }
-        Rc::new(|_| Arc::new(Older) as Arc<dyn DirectoryConnector>)
+        let server = Arc::new(Older(open));
+        Rc::new(move |_| Arc::clone(&server) as Arc<dyn DirectoryConnector>)
     }
 }
