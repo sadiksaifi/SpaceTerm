@@ -473,7 +473,7 @@ mod tests {
                         .then_some(index)
                 })
                 .collect::<Vec<_>>();
-            assert_eq!(customizable.len(), 67);
+            assert_eq!(customizable.len(), 65);
             assert!(customizable.windows(2).all(|pair| pair[1] == pair[0] + 1));
             keymap
                 .bindings()

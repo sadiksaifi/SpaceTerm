@@ -549,7 +549,7 @@ class AccessibilityTerminalDiscoveryTests(unittest.TestCase):
         owned.action = lambda: pressed.append("owned row")
         confirmation = Accessible("button", name="Kill Workspace")
         dialog = Accessible(
-            "dialog", name=f"Kill Workspace \u201c{owned_name}\u201d?", children=[confirmation]
+            "dialog", name=f'Kill Workspace "{owned_name}"?', children=[confirmation]
         )
         menu_item = Accessible("menu item", name="Kill Workspace")
 
@@ -768,7 +768,15 @@ class AccessibilitySourceProvenanceTests(unittest.TestCase):
 
 
 class AccessibilityApplicationIsolationTests(unittest.TestCase):
-    def run_fixture(self, *, cleanup=True, source_cleanup=True, isolation_only=False):
+    def run_fixture(
+        self,
+        *,
+        cleanup=True,
+        cleanup_passed=True,
+        session_passed=True,
+        source_cleanup=True,
+        isolation_only=False,
+    ):
         specification = importlib.util.spec_from_file_location(
             "accessibility_smoke", ROOT / "mise-tasks/test/accessibility/linux.py"
         )
@@ -788,9 +796,9 @@ class AccessibilityApplicationIsolationTests(unittest.TestCase):
             def session(command, **options):
                 sessions.append((command, options["env"]))
                 output = Path(command[command.index("--output-dir") + 1])
-                report = {"passed": True}
+                report = {"passed": session_passed}
                 if cleanup:
-                    report["server_workspace_cleanup"] = {"passed": True}
+                    report["server_workspace_cleanup"] = {"passed": cleanup_passed}
                 if source_cleanup:
                     report["source_run_cleanup"] = {"passed": True}
                 measurement = output / "measurement.json"
@@ -860,6 +868,51 @@ class AccessibilityApplicationIsolationTests(unittest.TestCase):
         for report in reports:
             self.assertFalse(report["passed"])
             self.assertEqual(report["failure"], "source_run_cleanup_unconfirmed")
+
+    def test_failed_workspace_cleanup_cannot_pass_with_a_successful_child_exit(self):
+        status, _, _, reports = self.run_fixture(cleanup_passed=False)
+        self.assertEqual(status, 1)
+        for report in reports:
+            self.assertFalse(report["passed"])
+            self.assertFalse(report["server_workspace_cleanup"]["passed"])
+            self.assertEqual(report["failure"], "server_workspace_cleanup_incomplete")
+
+    def test_failed_measurement_cannot_pass_with_a_successful_child_exit(self):
+        status, _, _, reports = self.run_fixture(session_passed=False)
+        self.assertEqual(status, 1)
+        self.assertTrue(all(not report["passed"] for report in reports))
+
+    def test_source_wrapper_propagates_a_failed_measurement_after_successful_cleanup(self):
+        specification = importlib.util.spec_from_file_location(
+            "accessibility_smoke", ROOT / "mise-tasks/test/accessibility/linux.py"
+        )
+        assert specification is not None and specification.loader is not None
+        smoke = importlib.util.module_from_spec(specification)
+        specification.loader.exec_module(smoke)
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            measurement = output / "measurement.json"
+            measurement.write_text(
+                json.dumps(
+                    {
+                        "passed": False,
+                        "failure": "server_workspace_cleanup_incomplete",
+                        "server_workspace_cleanup": {"passed": False},
+                    }
+                )
+            )
+            args = SimpleNamespace(
+                binary=output / "client",
+                server_binary=output / "server",
+                source_session="x11",
+                output_dir=output,
+            )
+            with patch.object(smoke, "source_session", return_value=0):
+                self.assertEqual(smoke.supervised_session(args), 1)
+            report = json.loads(measurement.read_text())
+            self.assertFalse(report["passed"])
+            self.assertTrue(report["source_run_cleanup"]["passed"])
+            self.assertEqual(report["failure"], "server_workspace_cleanup_incomplete")
 
     def test_bus_only_isolation_run_never_builds_or_preflights_an_application_server(self):
         status, sessions, builds, _ = self.run_fixture(cleanup=False, isolation_only=True)

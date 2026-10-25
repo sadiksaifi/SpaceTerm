@@ -292,7 +292,7 @@ class Probe:
         self.open_workspace_menu(row, input_driver)
         self.activate_control("Kill Workspace")
         dialog = self.wait(
-            lambda: self.find_named_control(f"Kill Workspace \u201c{name}\u201d?"),
+            lambda: self.find_named_control(f'Kill Workspace "{name}"?'),
             "server_workspace_confirmation_missing",
         )
         self.activate_control("Kill Workspace", dialog)
@@ -2220,7 +2220,7 @@ def supervised_session(args):
     if status:
         report.update(passed=False)
     measurement.write_text(json.dumps(report, indent=2) + "\n")
-    return status
+    return int(status != 0 or not report.get("passed"))
 
 
 def main():
@@ -2446,16 +2446,21 @@ def main():
             report.setdefault("failure", "source_run_cleanup_unconfirmed")
             measurement.write_text(json.dumps(report, indent=2) + "\n")
             status = 1
-        if not args.isolation_only and "server_workspace_cleanup" not in report:
+        if not args.isolation_only and not report.get("server_workspace_cleanup", {}).get("passed"):
             # A killed or timed-out wrapper cannot confirm cleanup through its retired GUI.
             report.update(passed=False)
             report.setdefault("failure", "server_workspace_cleanup_incomplete")
-            report["server_workspace_cleanup"] = {
-                "passed": False,
-                "name": environment["SPACETERM_DEVELOPMENT_CLIENT"],
-                "failure": "server_workspace_cleanup_unconfirmed",
-            }
+            report.setdefault(
+                "server_workspace_cleanup",
+                {
+                    "passed": False,
+                    "name": environment["SPACETERM_DEVELOPMENT_CLIENT"],
+                    "failure": "server_workspace_cleanup_unconfirmed",
+                },
+            )
             measurement.write_text(json.dumps(report, indent=2) + "\n")
+            status = 1
+        if not report.get("passed"):
             status = 1
         outcome = "passed" if report.get("passed") else "failed"
         failure = (

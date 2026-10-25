@@ -86,10 +86,8 @@ class LinuxPrefixTests(unittest.TestCase):
                 self.root / directory,
                 ignore=shutil.ignore_patterns("__pycache__"),
             )
-        shutil.copyfile(
-            ROOT / "packaging/server-nonproduction-trust.json",
-            self.root / "packaging/server-nonproduction-trust.json",
-        )
+        for name in ("server-nonproduction-trust.json", "server-resources.json"):
+            shutil.copyfile(ROOT / "packaging" / name, self.root / "packaging" / name)
         (self.root / ".gitignore").write_text("target/\nrecord\n__pycache__/\n")
         for arguments in (
             ("init", "-q"),
