@@ -4,16 +4,17 @@
 //! application menu or an invitation link the operating system delivered, starts here. Filling in
 //! a value sets up and joins nothing; the person chooses Set Up or Join first.
 //!
-//! Both methods end with one saved paired connection. SSH setup signs in, installs or starts the
-//! server only after the person approves the exact offer, turns on network access at the
-//! address the person entered after they approve it, enrolls this device and closes its SSH
-//! resources. It succeeds only once this device is admitted over the network, and every later
-//! operation uses that connection. Joining follows the direct connections registry, which owns
-//! the enrollment and its exact cleanup. The invitation link stays in the obscured field until
-//! Join hands it to the registry once; the sheet keeps only the server name and address it names.
+//! Both methods end with one saved paired connection. SSH setup signs in once with the host
+//! alone, asks the person before it installs or starts the server or changes its network access,
+//! enrolls this device and closes its SSH resources. Setup waits while the sheet shows a step, and
+//! goes on or stops with the person's answer. The network address defaults to the one SSH reaches;
+//! the person enters another only when this computer reaches the server differently. Setup
+//! succeeds only once this device is admitted over the network, and every later operation uses
+//! that connection. Joining follows the direct connections registry, which owns the enrollment
+//! and its exact cleanup. The invitation link stays in the obscured field until Join hands it to
+//! the registry once; the sheet keeps only the server name and address it names.
 
 use std::collections::HashMap;
-use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
 use gpui::prelude::*;
@@ -24,7 +25,7 @@ use gpui::{
 use spaceterm_ui::{
     Button, ButtonShape, ButtonSize, ButtonVariant, Dialog, DialogActionRequest,
     DialogCloseDecision, DialogCompletion, DialogInitialFocus, DialogOutcome,
-    DialogPendingCompletion, DialogSize, FieldState, Menu, MenuEntry, ModalAction,
+    DialogPendingCompletion, DialogSize, FieldState, Icon, IconName, Menu, MenuEntry, ModalAction,
     ModalActionEmphasis, ModalActionIntent, ModalActionRole, ModalId, ModalLifecycleEvent,
     ProgressRing, ProgressSize, ProgressState, SegmentedControl, SegmentedOption, TextInput,
     TextInputContentMode, TextInputEscapeBehavior, TextInputEvent, TextInputReturnBehavior,
@@ -41,22 +42,25 @@ use crate::domain::SshDestination;
 use crate::server_connection::direct::{DEFAULT_PORT, DirectError, Invitation};
 use crate::server_connection::pane::control::ClientName;
 use crate::ssh::provisioning::{
-    InstallationApproval, NetworkApproval, SetupApprovals, SetupFailure, SetupPhase, SetupProgress,
-    SetupRequest, StartupApproval, validate_endpoint,
+    SetupAddress, SetupFailure, SetupOffer, SetupPhase, SetupProgress, SetupRequest,
 };
 use crate::ui::appearance::{ChromeAppearance, gpui_color};
 use crate::ui::chrome_geometry::RadiusRole;
+use crate::ui::chrome_icons::IconRole;
 use crate::ui::chrome_typography::{ChromeTextStyleExt as _, TextRole};
 use crate::ui::direct_access::{code_speech, code_text};
 use crate::ui::direct_servers::DirectChanges;
 use crate::ui::ssh_setup::{
-    SetupProblem, SshHostSource, SshPromptActivity, SshPromptEvent, SshSetupFactory,
+    PendingApproval, SetupProblem, SshHostSource, SshPromptActivity, SshPromptEvent,
+    SshSetupFactory,
 };
 
 pub(super) const MODAL_ID: &str = "add-server";
 pub(super) const METHOD_SELECTOR: &str = "add-server-method";
 pub(super) const HOST_SELECTOR: &str = "add-server-host";
 pub(super) const ADDRESS_SELECTOR: &str = "add-server-address";
+/// The disclosure that shows or hides the optional network address.
+pub(super) const ADDRESS_DISCLOSURE_SELECTOR: &str = "add-server-address-disclosure";
 pub(super) const HOSTS_MENU_SELECTOR: &str = "add-server-ssh-hosts";
 /// Prefixes each configured host in the SSH Hosts menu, followed by its position.
 pub(super) const HOST_CHOICE_SELECTOR: &str = "add-server-ssh-host";
@@ -71,9 +75,12 @@ pub(super) const DEFERRED_SELECTOR: &str = "add-server-deferred";
 /// What the host field's description says. It is also the field's accessibility hint.
 const HOST_DESCRIPTION: &str =
     "Sign in with your SSH account to install, start and pair a SpaceTerm Server.";
+/// What the disclosure says while the address is hidden. It is also its accessibility hint.
+const ADDRESS_DISCLOSURE_DESCRIPTION: &str =
+    "Optional. Use when this computer reaches the server at a different name or address than SSH.";
 const HOST_INVALID: &str = "Enter an SSH host or alias without spaces or command options.";
 const ADDRESS_INVALID: &str =
-    "Enter an IP address of that computer, such as 192.168.1.20 or 192.168.1.20:9231.";
+    "Enter a host name or IP address, optionally followed by a port, such as studio.local:9231.";
 const LINK_DESCRIPTION: &str = "Paste the invitation link from the other computer.";
 /// How long the host, address and link fields are, so a long value scrolls inside the field.
 const FIELD_WIDTH: f32 = 260.0;
@@ -81,26 +88,9 @@ const FIELD_WIDTH: f32 = 260.0;
 /// What the address field's description says, naming the port SpaceTerm uses unless one is given.
 fn address_description() -> SharedString {
     format!(
-        "The IP address this computer uses to reach the server over the network. Port {DEFAULT_PORT} unless you add one."
+        "The name or IP address this computer uses to reach the server. Leave it empty to use the one SSH reaches. Port {DEFAULT_PORT} unless you add one."
     )
     .into()
-}
-
-/// The network address `text` names: an IP address, with or without a port. SSH aliases and host
-/// names don't name a network address, because only an IP literal is checked against the
-/// server's own addresses.
-pub(super) fn parse_endpoint(text: &str) -> Option<SocketAddr> {
-    let text = text.trim();
-    let endpoint = text.parse::<SocketAddr>().ok().or_else(|| {
-        let ip = text
-            .strip_prefix('[')
-            .and_then(|rest| rest.strip_suffix(']'))
-            .unwrap_or(text);
-        ip.parse::<IpAddr>()
-            .ok()
-            .map(|ip| SocketAddr::new(ip, DEFAULT_PORT))
-    })?;
-    validate_endpoint(endpoint).ok().map(|()| endpoint)
 }
 
 /// The two ways to add a server.
@@ -234,48 +224,35 @@ fn link_problem(error: DirectError) -> &'static str {
     }
 }
 
-/// One SSH setup the person asked for: where, and what they approved so far. Approvals bind to
-/// the exact offer the server made, so a changed host or address starts without any.
+/// One SSH setup the person asked for. `address` is the network address they entered, or `None`
+/// to use the one SSH reaches.
 #[derive(Clone, Debug)]
 struct Setup {
     destination: SshDestination,
-    endpoint: SocketAddr,
-    approvals: SetupApprovals,
-}
-
-/// An offer setup paused on, which only the person's approval accepts.
-#[derive(Clone, Debug)]
-enum Offer {
-    Install {
-        version: String,
-        platform: (String, String),
-        approval: InstallationApproval,
-    },
-    Start {
-        approval: StartupApproval,
-    },
-    Network {
-        current: Option<SocketAddr>,
-        approval: NetworkApproval,
-    },
+    address: Option<SetupAddress>,
 }
 
 /// Where adding a server stands.
 enum Stage {
     /// Choosing SSH or Invitation and filling in its value.
     Form,
-    /// SSH setup underway. `phase` is the last step it reported. `cancelling` holds the sheet
-    /// until setup has closed every SSH resource it opened.
+    /// SSH setup underway. `phase` is the last step it reported. `offer` is a step setup waits on
+    /// until the person answers it. `cancelling` holds the sheet until setup has closed every SSH
+    /// resource it opened.
     SettingUp {
         setup: Setup,
         phase: Option<SetupPhase>,
+        offer: Option<PendingApproval>,
         cancel: CancellationToken,
         cancelling: bool,
     },
-    /// Setup paused on an offer the person reviews first.
-    Offered { setup: Setup, offer: Offer },
-    /// Setup stopped with a state the person can read and maybe retry.
-    SetupProblem { setup: Setup, problem: SetupProblem },
+    /// Setup stopped with a state the person can read and maybe retry. `unreachable` is the
+    /// address this computer couldn't reach the server at, which Back offers for editing.
+    SetupProblem {
+        setup: Setup,
+        problem: SetupProblem,
+        unreachable: Option<SetupAddress>,
+    },
     /// Joining the server an invitation names. `join` is `None` until the registry accepts it.
     Joining {
         join: Option<JoinId>,
@@ -357,6 +334,8 @@ pub(super) struct AddServerSheet {
     host_invalid: bool,
     /// Whether the typed address was refused when the person last chose Set Up.
     address_invalid: bool,
+    /// Whether the optional network address is shown.
+    address_shown: bool,
     /// What the link in the field names, or why it can't be used. `None` while it is empty.
     preview: Option<Result<Preview, DirectError>>,
     stage: Stage,
@@ -385,6 +364,7 @@ pub(super) struct AddServerSheet {
     _direct_changes: Option<DirectChanges>,
     _work: Option<Task<()>>,
     _setup: Option<Task<()>>,
+    _offers: Option<Task<()>>,
     _discovery: Option<Task<()>>,
 }
 
@@ -412,8 +392,8 @@ impl AddServerSheet {
                 cx,
             )
             .variant(TextInputVariant::Bare)
-            .placeholder("192.168.1.20")
-            .input_length_limit(Some(64))
+            .placeholder("studio.local")
+            .input_length_limit(Some(270))
             .return_behavior(TextInputReturnBehavior::Propagate)
             .escape_behavior(TextInputEscapeBehavior::Propagate)
             .debug_selector(ADDRESS_SELECTOR)
@@ -510,6 +490,7 @@ impl AddServerSheet {
             hosts: Vec::new(),
             host_invalid: false,
             address_invalid: false,
+            address_shown: false,
             preview: None,
             stage: Stage::Form,
             attempt: 0,
@@ -527,6 +508,7 @@ impl AddServerSheet {
             _direct_changes: direct_changes,
             _work: None,
             _setup: None,
+            _offers: None,
             _discovery: discovery,
         }
     }
@@ -602,7 +584,7 @@ impl AddServerSheet {
             return true;
         }
         match &self.stage {
-            Stage::SettingUp { .. } | Stage::Offered { .. } => true,
+            Stage::SettingUp { .. } => true,
             Stage::Joining { join: None, .. } => true,
             Stage::Joining {
                 join: Some(join), ..
@@ -710,6 +692,38 @@ impl AddServerSheet {
                     focus,
                 }
             }
+            Stage::SettingUp {
+                setup,
+                offer: Some(pending),
+                cancelling: false,
+                ..
+            } => {
+                if self.prompts.read(cx).active {
+                    return None;
+                }
+                let (title, action) = match &pending.offer {
+                    SetupOffer::Installation { .. } => (
+                        format!(
+                            "Install SpaceTerm Server on {}?",
+                            quoted(&setup.destination)
+                        ),
+                        SheetAction::Install,
+                    ),
+                    SetupOffer::Startup => (
+                        format!("Start SpaceTerm Server on {}?", quoted(&setup.destination)),
+                        SheetAction::Start,
+                    ),
+                    SetupOffer::Network { .. } => (
+                        format!("Allow Network Access on {}?", quoted(&setup.destination)),
+                        SheetAction::AllowNetwork,
+                    ),
+                };
+                Shape {
+                    title: title.into(),
+                    actions: vec![action, SheetAction::Cancel],
+                    focus: FocusTarget::Action(action),
+                }
+            }
             Stage::SettingUp { cancelling, .. } => {
                 if self.prompts.read(cx).active {
                     return None;
@@ -724,31 +738,7 @@ impl AddServerSheet {
                     focus: FocusTarget::Action(SheetAction::Cancel),
                 }
             }
-            Stage::Offered { setup, offer } => {
-                let (title, action) = match offer {
-                    Offer::Install { .. } => (
-                        format!(
-                            "Install SpaceTerm Server on {}?",
-                            quoted(&setup.destination)
-                        ),
-                        SheetAction::Install,
-                    ),
-                    Offer::Start { .. } => (
-                        format!("Start SpaceTerm Server on {}?", quoted(&setup.destination)),
-                        SheetAction::Start,
-                    ),
-                    Offer::Network { .. } => (
-                        format!("Allow Network Access on {}?", quoted(&setup.destination)),
-                        SheetAction::AllowNetwork,
-                    ),
-                };
-                Shape {
-                    title: title.into(),
-                    actions: vec![action, SheetAction::Cancel],
-                    focus: FocusTarget::Action(action),
-                }
-            }
-            Stage::SetupProblem { setup, problem } => {
+            Stage::SetupProblem { setup, problem, .. } => {
                 let mut actions = Vec::with_capacity(3);
                 if problem.retry {
                     actions.push(SheetAction::TryAgain);
@@ -868,15 +858,14 @@ impl AddServerSheet {
         cx.notify();
     }
 
-    /// Whether `action` can be chosen now. Set Up and Join wait for their values. Cancel stays
+    /// Whether `action` can be chosen now. Set Up waits for a host and Join for a link. Cancel stays
     /// available while setup is cancelling, so it keeps keyboard focus; choosing it again changes
     /// nothing.
     fn available(&self, action: SheetAction, cx: &App) -> bool {
         match action {
+            // The host is enough: the network address is optional.
             SheetAction::SetUp => {
-                self.ssh.is_some()
-                    && !self.host.read(cx).value().trim().is_empty()
-                    && !self.address.read(cx).value().trim().is_empty()
+                self.ssh.is_some() && !self.host.read(cx).value().trim().is_empty()
             }
             SheetAction::Join => self.direct.is_some() && matches!(self.preview, Some(Ok(_))),
             _ => true,
@@ -998,11 +987,18 @@ impl AddServerSheet {
             // Setup ends truthfully: the sheet says it is cancelling until setup has stopped.
             SheetAction::Cancel if matches!(self.stage, Stage::SettingUp { .. }) => {
                 if let Stage::SettingUp {
-                    cancel, cancelling, ..
+                    cancel,
+                    cancelling,
+                    offer,
+                    ..
                 } = &mut self.stage
                 {
                     cancel.cancel();
                     *cancelling = true;
+                    // Cancel declines a step setup waits on, so it changes nothing more.
+                    if let Some(pending) = offer.take() {
+                        pending.answer(false);
+                    }
                 }
                 let sheet = cx.entity();
                 let window = self.window;
@@ -1049,19 +1045,18 @@ impl AddServerSheet {
         match action {
             SheetAction::SetUp => self.set_up_typed(window, cx),
             SheetAction::Join => self.join(window, cx),
+            // The person approves exactly the step setup waits on, and setup goes on.
             SheetAction::Install | SheetAction::Start | SheetAction::AllowNetwork => {
-                let Stage::Offered { setup, offer } = &self.stage else {
-                    return;
-                };
-                let mut setup = setup.clone();
-                match offer.clone() {
-                    Offer::Install { approval, .. } => setup.approvals.install = Some(approval),
-                    Offer::Start { approval } => setup.approvals.start = Some(approval),
-                    Offer::Network { approval, .. } => {
-                        setup.approvals.expose_network = Some(approval);
-                    }
+                if let Stage::SettingUp {
+                    offer: offer @ Some(_),
+                    cancelling: false,
+                    ..
+                } = &mut self.stage
+                    && let Some(pending) = offer.take()
+                {
+                    pending.answer(true);
                 }
-                self.set_up(setup, window, cx);
+                self.show(window, cx);
             }
             SheetAction::TryAgain => match &self.stage {
                 Stage::SetupProblem { setup, .. } => {
@@ -1079,7 +1074,22 @@ impl AddServerSheet {
                 }
                 _ => {}
             },
-            SheetAction::Back => self.back_to_form(window, cx),
+            SheetAction::Back => {
+                // An address this computer couldn't reach comes back for editing.
+                if let Stage::SetupProblem {
+                    unreachable: Some(address),
+                    ..
+                } = &self.stage
+                {
+                    let authority = address.authority();
+                    self.address_shown = true;
+                    if self.address.read(cx).value().trim().is_empty() {
+                        self.address
+                            .update(cx, |input, cx| input.set_value(authority, cx));
+                    }
+                }
+                self.back_to_form(window, cx);
+            }
             SheetAction::StartAgain => {
                 if let Some(request) = self.deferred.take() {
                     self.stage = Stage::Form;
@@ -1120,19 +1130,27 @@ impl AddServerSheet {
         self.focus_field(window, cx);
     }
 
-    /// Sets up the host and address the person typed. The host passes to SSH as one destination,
-    /// so SSH configuration still decides the host, user and keys. A new setup starts without
-    /// approvals, because each one binds to an offer this setup hasn't seen.
+    /// Sets up the host the person typed, and the network address when they entered one. The
+    /// host passes to SSH as one destination, so SSH configuration still decides the host, user
+    /// and keys.
     fn set_up_typed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let typed = self.host.read(cx).value().trim().to_owned();
         if typed.is_empty() {
             return;
         }
         let destination = SshDestination::new(typed).ok();
-        let endpoint = parse_endpoint(self.address.read(cx).value());
+        let entered = self.address.read(cx).value().trim().to_owned();
+        let address = if entered.is_empty() {
+            Ok(None)
+        } else {
+            SetupAddress::parse(&entered).map(Some)
+        };
         self.host_invalid = destination.is_none();
-        self.address_invalid = endpoint.is_none();
-        let (Some(destination), Some(endpoint)) = (destination, endpoint) else {
+        self.address_invalid = address.is_err();
+        if self.address_invalid {
+            self.address_shown = true;
+        }
+        let (Some(destination), Ok(address)) = (destination, address) else {
             self.show(window, cx);
             self.focus_field(window, cx);
             cx.notify();
@@ -1141,8 +1159,7 @@ impl AddServerSheet {
         self.set_up(
             Setup {
                 destination,
-                endpoint,
-                approvals: SetupApprovals::default(),
+                address,
             },
             window,
             cx,
@@ -1158,13 +1175,11 @@ impl AddServerSheet {
         let (Some(backend), Some(prompts)) = (factory.backend(), factory.prompts(window, cx))
         else {
             self.stage = Stage::SetupProblem {
-                problem: crate::ui::ssh_setup::problem(
-                    &SetupFailure::Unavailable(
-                        crate::ssh::provisioning::UnavailableKind::SshFailed,
-                    ),
-                    &setup.endpoint.to_string(),
-                ),
+                problem: crate::ui::ssh_setup::problem(&SetupFailure::Unavailable(
+                    crate::ssh::provisioning::UnavailableKind::SshFailed,
+                )),
                 setup,
+                unreachable: None,
             };
             self.show(window, cx);
             return;
@@ -1173,16 +1188,18 @@ impl AddServerSheet {
         self.declined = false;
         let attempt = self.attempt;
         let cancel = CancellationToken::default();
+        let (approvals, offers) = crate::ui::ssh_setup::window_approvals();
         let request = SetupRequest {
             destination: setup.destination.clone(),
-            endpoint: setup.endpoint,
+            address: setup.address.clone(),
             name: ClientName::this_computer(),
             prompts,
-            approvals: setup.approvals.clone(),
+            approvals,
         };
         self.stage = Stage::SettingUp {
             setup,
             phase: None,
+            offer: None,
             cancel: cancel.clone(),
             cancelling: false,
         };
@@ -1206,8 +1223,19 @@ impl AddServerSheet {
             }
         });
         let window_handle = self.window;
-        // Setup holds SSH for as long as the person takes to answer its prompts, so it runs on a
-        // thread of its own rather than occupying a shared worker.
+        // Each step setup asks about waits in the sheet until the person answers it.
+        self._offers = Some(cx.spawn(async move |sheet, cx| {
+            while let Ok(pending) = offers.recv().await {
+                let shown = window_handle.update(cx, |_, window, cx| {
+                    sheet.update(cx, |sheet, cx| sheet.offered(attempt, pending, window, cx))
+                });
+                if !matches!(shown, Ok(Ok(()))) {
+                    break;
+                }
+            }
+        }));
+        // Setup holds SSH for as long as the person takes to answer its prompts and offers, so it
+        // runs on a thread of its own rather than occupying a shared worker.
         let (finished, outcome) = async_channel::bounded(1);
         let started = std::thread::Builder::new()
             .name("spaceterm-ssh-setup".to_owned())
@@ -1221,6 +1249,7 @@ impl AddServerSheet {
                 self.stage = Stage::SetupProblem {
                     setup,
                     problem: crate::ui::ssh_setup::start_failure(),
+                    unreachable: None,
                 };
             }
             self.show(window, cx);
@@ -1243,6 +1272,28 @@ impl AddServerSheet {
             });
         }));
         self.show(window, cx);
+    }
+
+    /// Shows the step setup attempt `attempt` waits on, until the person answers it. An offer for
+    /// an attempt the sheet no longer follows, or one cancelling, is declined.
+    fn offered(
+        &mut self,
+        attempt: u64,
+        pending: PendingApproval,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match &mut self.stage {
+            Stage::SettingUp {
+                offer,
+                cancelling: false,
+                ..
+            } if !self.closed && attempt == self.attempt => {
+                *offer = Some(pending);
+                self.show(window, cx);
+            }
+            _ => pending.answer(false),
+        }
     }
 
     /// Follows the outcome of setup attempt `attempt`.
@@ -1294,31 +1345,14 @@ impl AddServerSheet {
             self.back_to_form(window, cx);
             return;
         }
-        self.stage = match outcome {
-            SetupFailure::InstallationOffered {
-                version,
-                platform,
-                approval,
-            } => Stage::Offered {
-                setup,
-                offer: Offer::Install {
-                    version,
-                    platform,
-                    approval,
-                },
-            },
-            SetupFailure::StartupRequired { approval } => Stage::Offered {
-                setup,
-                offer: Offer::Start { approval },
-            },
-            SetupFailure::NetworkAuthorizationRequired { current, approval } => Stage::Offered {
-                setup,
-                offer: Offer::Network { current, approval },
-            },
-            failure => Stage::SetupProblem {
-                problem: crate::ui::ssh_setup::problem(&failure, &setup.endpoint.to_string()),
-                setup,
-            },
+        let unreachable = match &outcome {
+            SetupFailure::Unreachable { address } => Some(address.clone()),
+            _ => None,
+        };
+        self.stage = Stage::SetupProblem {
+            problem: crate::ui::ssh_setup::problem(&outcome),
+            setup,
+            unreachable,
         };
         // A cancellation that arrived too late to stop the step still reports what happened.
         self.show(window, cx);
@@ -1783,29 +1817,70 @@ impl AddServerSheet {
             None,
             self.host_invalid.then_some(HOST_INVALID),
         );
-        let address = Self::field_row(
-            appearance,
-            ADDRESS_SELECTOR,
-            "Network Address",
-            address_description(),
-            Self::field_frame(
+        // The network address is optional, so it stays folded away until the person asks for it
+        // or it needs attention.
+        let shown = self.address_shown || self.address_invalid;
+        let disclosure_owner = cx.weak_entity();
+        let icon_size = appearance.icons.metrics(IconRole::Control).glyph_size;
+        let disclosure = Button::new(ADDRESS_DISCLOSURE_SELECTOR, "Network Address")
+            .variant(ButtonVariant::Ghost)
+            .size(ButtonSize::Regular)
+            .align_start()
+            .tab_stop(true)
+            .leading(move |foreground| {
+                Icon::new(
+                    if shown {
+                        IconName::ChevronDown
+                    } else {
+                        IconName::ChevronRight
+                    },
+                    icon_size,
+                    foreground,
+                )
+                .into_any_element()
+            })
+            .debug_selector(ADDRESS_DISCLOSURE_SELECTOR)
+            .accessibility_description(if shown {
+                "Hide the network address"
+            } else {
+                ADDRESS_DISCLOSURE_DESCRIPTION
+            })
+            .on_activate(move |_, window, cx| {
+                let _ = disclosure_owner.update(cx, |sheet, cx| {
+                    sheet.address_shown = !sheet.address_shown;
+                    if sheet.address_shown {
+                        sheet.address.read(cx).focus_handle().focus(window, cx);
+                    }
+                    cx.notify();
+                });
+            })
+            .into_any_element();
+        let address = shown.then(|| {
+            Self::field_row(
                 appearance,
                 ADDRESS_SELECTOR,
-                &self.address,
-                self.address_invalid,
+                "Network Address",
+                address_description(),
+                Self::field_frame(
+                    appearance,
+                    ADDRESS_SELECTOR,
+                    &self.address,
+                    self.address_invalid,
+                    None,
+                    cx,
+                ),
                 None,
-                cx,
-            ),
-            None,
-            self.address_invalid.then_some(ADDRESS_INVALID),
-        );
+                self.address_invalid.then_some(ADDRESS_INVALID),
+            )
+        });
         div()
             .flex()
             .flex_col()
             .w_full()
             .gap(appearance.spacing(12.0))
             .child(host)
-            .child(address)
+            .child(disclosure)
+            .children(address)
             .into_any_element()
     }
 
@@ -1915,6 +1990,18 @@ impl AddServerSheet {
         let text = StatusText(appearance);
         match &self.stage {
             Stage::SettingUp {
+                offer: Some(pending),
+                cancelling: false,
+                ..
+            } => {
+                let mut container = text.container(accesskit::Role::Group);
+                for (index, line) in offer_lines(&pending.offer).into_iter().enumerate() {
+                    container =
+                        container.child(text.line(&format!("offer-{index}"), line, colors.text));
+                }
+                container.into_any_element()
+            }
+            Stage::SettingUp {
                 setup,
                 phase,
                 cancelling,
@@ -1942,46 +2029,6 @@ impl AddServerSheet {
                     .child(text.progress("setting-up", label))
                     .child(text.line("detail", detail, colors.text_secondary))
                     .into_any_element()
-            }
-            Stage::Offered { setup, offer } => {
-                let lines: Vec<SharedString> = match offer {
-                    Offer::Install {
-                        version, platform, ..
-                    } => {
-                        let mut lines = vec![SharedString::from(format!(
-                            "SpaceTerm installs its signed SpaceTerm Server {version} for {} and starts it.",
-                            crate::ui::ssh_setup::platform_name(&platform.0, &platform.1)
-                        ))];
-                        if platform.0.eq_ignore_ascii_case("linux") {
-                            lines.push(
-                                "SpaceTerm may ask for your sudo password on that computer.".into(),
-                            );
-                        }
-                        lines
-                    }
-                    Offer::Start { .. } => vec![
-                        "SpaceTerm Server is installed but stopped. Starting it lets paired devices reach its Workspaces.".into(),
-                    ],
-                    Offer::Network { current, .. } => {
-                        let mut lines = vec![SharedString::from(format!(
-                            "SpaceTerm Server will accept connections from paired devices at {}. Devices must still be approved before they can connect.",
-                            setup.endpoint
-                        ))];
-                        if let Some(current) = current.filter(|current| *current != setup.endpoint) {
-                            lines.push(
-                                format!("It stops listening at {current}. Paired devices that use that address can\u{2019}t connect until they use the new one.")
-                                    .into(),
-                            );
-                        }
-                        lines
-                    }
-                };
-                let mut container = text.container(accesskit::Role::Group);
-                for (index, line) in lines.into_iter().enumerate() {
-                    container =
-                        container.child(text.line(&format!("offer-{index}"), line, colors.text));
-                }
-                container.into_any_element()
             }
             Stage::SetupProblem { problem, .. } => text
                 .container(accesskit::Role::Alert)
@@ -2098,6 +2145,48 @@ impl AddServerSheet {
                 .container(accesskit::Role::Alert)
                 .child(text.line("failed", join_failure(error).into(), colors.text))
                 .into_any_element(),
+        }
+    }
+}
+
+/// What the person reviews before approving `offer`: what the step does, in plain terms.
+fn offer_lines(offer: &SetupOffer) -> Vec<SharedString> {
+    match offer {
+        SetupOffer::Installation { version, platform } => {
+            let mut lines = vec![SharedString::from(format!(
+                "SpaceTerm installs its signed SpaceTerm Server {version} for {} and starts it.",
+                crate::ui::ssh_setup::platform_name(&platform.0, &platform.1)
+            ))];
+            if platform.0.eq_ignore_ascii_case("linux") {
+                lines.push("SpaceTerm may ask for your sudo password on that computer.".into());
+            }
+            lines
+        }
+        SetupOffer::Startup => vec![
+            "SpaceTerm Server is installed but stopped. Starting it lets paired devices reach its Workspaces."
+                .into(),
+        ],
+        SetupOffer::Network {
+            address,
+            bind,
+            current,
+            enabled,
+        } => {
+            let mut lines = vec![SharedString::from(format!(
+                "SpaceTerm Server will accept connections from paired devices at {bind}, and this computer will reach it at {}. Devices must still be approved before they can connect.",
+                address.authority()
+            ))];
+            match current.filter(|current| current != bind) {
+                Some(current) if *enabled => lines.push(
+                    format!("It stops listening at {current}. Paired devices that use that address can\u{2019}t connect until they use the new one.")
+                        .into(),
+                ),
+                _ if !*enabled => {
+                    lines.push("Network access is off on that server. Allowing turns it on.".into());
+                }
+                _ => {}
+            }
+            lines
         }
     }
 }

@@ -1,23 +1,78 @@
 //! SSH setup for Add Server: the composition seam, OpenSSH's prompts in the asking window, and
 //! how each setup phase and outcome reads.
 //!
-//! SSH is temporary provisioning authority. One explicit attempt signs in, installs or starts the
-//! server only with the person's approval, turns on network access, enrolls this device and
+//! SSH is temporary provisioning authority. One explicit attempt signs in once, asks the person
+//! before it installs or starts the server or changes its network access, enrolls this device and
 //! closes its SSH resources. The attempt succeeds only once this device is admitted over paired
 //! WSS, so every later operation uses that connection.
 
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::sync::mpsc::{RecvTimeoutError, SyncSender, sync_channel};
+use std::time::Duration;
 
 use gpui::{App, AppContext, Entity, EventEmitter, Global, SharedString, Window, WindowId};
 
+use crate::cancellation::CancellationToken;
 use crate::domain::SshDestination;
 use crate::ssh::askpass::AskPassAttemptFactory;
 use crate::ssh::provisioning::{
-    IncompatibilityKind, RefusalKind, SetupFailure, SetupOperation, SetupPhase, SshSetupBackend,
-    UnavailableKind,
+    IncompatibilityKind, RefusalKind, SetupApprovalHandler, SetupFailure, SetupOffer,
+    SetupOperation, SetupPhase, SshSetupBackend, UnavailableKind,
 };
+
+/// How often a setup waiting for the person checks whether it was cancelled.
+const APPROVAL_POLL: Duration = Duration::from_millis(50);
+
+/// One offer a running setup waits on, until the person answers it or the setup ends.
+pub(crate) struct PendingApproval {
+    pub(crate) offer: SetupOffer,
+    answer: SyncSender<bool>,
+}
+
+impl PendingApproval {
+    /// Answers the offer. Dropping it unanswered declines it.
+    pub(crate) fn answer(self, approved: bool) {
+        let _ = self.answer.try_send(approved);
+    }
+}
+
+/// Hands each offer to the window that started setup and waits on setup's own thread for the
+/// person's answer. Cancellation, or a window that let go of the offer, declines it.
+struct WindowApprovals(async_channel::Sender<PendingApproval>);
+
+impl SetupApprovalHandler for WindowApprovals {
+    fn approve(&self, offer: SetupOffer, cancellation: &CancellationToken) -> bool {
+        let (answer, answered) = sync_channel(1);
+        if self
+            .0
+            .send_blocking(PendingApproval { offer, answer })
+            .is_err()
+        {
+            return false;
+        }
+        loop {
+            if cancellation.is_cancelled() {
+                return false;
+            }
+            match answered.recv_timeout(APPROVAL_POLL) {
+                Ok(approved) => return approved && !cancellation.is_cancelled(),
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => return false,
+            }
+        }
+    }
+}
+
+/// The approval handler one setup attempt runs with, and the offers it hands to the window.
+pub(crate) fn window_approvals() -> (
+    Arc<dyn SetupApprovalHandler>,
+    async_channel::Receiver<PendingApproval>,
+) {
+    let (offers, pending) = async_channel::bounded(1);
+    (Arc::new(WindowApprovals(offers)), pending)
+}
 
 /// Only an admitted AskPass request takes the setup sheet's place.
 #[derive(Clone, Copy)]
@@ -129,9 +184,8 @@ pub(crate) struct SetupProblem {
     pub(crate) retry: bool,
 }
 
-/// The presentation of a failure that is not an offer awaiting the person's approval. `endpoint`
-/// is the network address the person entered.
-pub(crate) fn problem(failure: &SetupFailure, endpoint: &str) -> SetupProblem {
+/// The presentation of a failure other than a cancellation, which the sheet handles itself.
+pub(crate) fn problem(failure: &SetupFailure) -> SetupProblem {
     let fixed = |state, text: &'static str, retry| SetupProblem {
         state,
         explanation: SharedString::new_static(text),
@@ -142,15 +196,17 @@ pub(crate) fn problem(failure: &SetupFailure, endpoint: &str) -> SetupProblem {
         SetupFailure::Refused(RefusalKind::MissingArtifact) => {
             fixed("Not Included", refusal_detail(RefusalKind::MissingArtifact), false)
         }
-        SetupFailure::Refused(RefusalKind::InvalidEndpoint) => SetupProblem {
-            state: "Address Not Accepted",
-            explanation: format!("The server couldn\u{2019}t listen at {endpoint}. Enter one of that computer\u{2019}s own IP addresses.").into(),
-            retry: false,
-        },
+        SetupFailure::Refused(RefusalKind::InvalidEndpoint) => {
+            fixed("Address Not Accepted", refusal_detail(RefusalKind::InvalidEndpoint), false)
+        }
         SetupFailure::Refused(kind) => fixed("Refused", refusal_detail(*kind), true),
-        SetupFailure::Unavailable(UnavailableKind::EndpointUnreachable) => SetupProblem {
+        SetupFailure::Unreachable { address } => SetupProblem {
             state: "Not Reachable",
-            explanation: format!("SpaceTerm Server is running, but this computer couldn\u{2019}t reach it at {endpoint}. Check the address and any firewall, then try again.").into(),
+            explanation: format!(
+                "SpaceTerm Server is running, but this computer couldn\u{2019}t reach it at {}. Check the address and any firewall, or enter the address this computer uses to reach it.",
+                address.authority()
+            )
+            .into(),
             retry: true,
         },
         SetupFailure::Unavailable(kind) => fixed("Unavailable", unavailable_detail(*kind), true),
@@ -162,11 +218,9 @@ pub(crate) fn problem(failure: &SetupFailure, endpoint: &str) -> SetupProblem {
                 *operation != SetupOperation::Save,
             )
         }
-        // Offers and cancellation have stages of their own; these words only cover a stray one.
-        SetupFailure::Cancelled
-        | SetupFailure::InstallationOffered { .. }
-        | SetupFailure::StartupRequired { .. }
-        | SetupFailure::NetworkAuthorizationRequired { .. } => {
+        // The sheet ends or returns to its form on a cancellation; these words only cover a
+        // stray one.
+        SetupFailure::Cancelled => {
             fixed("Not Added", "Setup stopped before the server was added.", true)
         }
     }

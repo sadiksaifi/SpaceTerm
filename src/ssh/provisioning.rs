@@ -4,8 +4,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+#[cfg(all(test, feature = "native-tests"))]
+use super::process::{SshProcessCounts, TrackedSshProcessAdapter};
 use super::{
-    askpass::AskPassAttemptFactory,
+    askpass::{AskPassAttemptFactory, AskPassBrokerLease},
     command::{
         OpenSshExecutable, SshCapability, SshCapabilityProbe, SshCommandContext,
         ValidatedRemoteShellCommand, setup_configuration, validate_setup_configuration_path,
@@ -13,8 +15,8 @@ use super::{
     host_config::{HostConfigFilesystem, HostConfigFilesystemError},
     process::{
         CapturedEffectError, CapturedProcessDeadline, CapturedProcessError, CapturedProcessOutput,
-        SshProcessAdapter, SshProcessCounts, SshProcessEnvironment, TrackedSshProcessAdapter,
-        run_captured_effect, run_captured_process, run_captured_transfer,
+        SetupMaster, SshProcessAdapter, SshProcessEnvironment, run_captured_effect,
+        run_captured_process, run_captured_transfer,
     },
     startup_environment::StartupSshEnvironment,
 };
@@ -42,62 +44,35 @@ const OBSERVATION: Duration = Duration::from_secs(15);
 const MAX_DISCOVERY: usize = 16 * 1024;
 const MAX_ARTIFACT: u64 = 256 * 1024 * 1024;
 
-#[derive(Clone, Debug, Default)]
-pub(crate) struct SetupApprovals {
-    pub install: Option<InstallationApproval>,
-    pub start: Option<StartupApproval>,
-    pub expose_network: Option<NetworkApproval>,
-}
-#[derive(Clone, Eq, PartialEq)]
-pub(crate) struct InstallationApproval(Arc<InstallationApprovalScope>);
+pub(crate) use spaceterm_server::direct::Endpoint as SetupAddress;
 
-#[derive(Eq, PartialEq)]
-struct InstallationApprovalScope {
-    destination: SshDestination,
-    account: u32,
-    target: String,
-    digest: String,
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum SetupOffer {
+    Installation {
+        version: String,
+        platform: (String, String),
+    },
+    Startup,
+    Network {
+        address: SetupAddress,
+        bind: SocketAddr,
+        current: Option<SocketAddr>,
+        enabled: bool,
+    },
 }
-#[derive(Clone, Eq, PartialEq)]
-pub(crate) struct StartupApproval(Arc<StartupApprovalScope>);
 
-#[derive(Eq, PartialEq)]
-struct StartupApprovalScope {
-    destination: SshDestination,
-    observation: SetupStartObservation,
+/// Waits for consent on the setup worker, returning false when declined or cancelled.
+/// Implementations must observe cancellation while waiting for their window's response.
+pub(crate) trait SetupApprovalHandler: Send + Sync {
+    fn approve(&self, offer: SetupOffer, cancellation: &CancellationToken) -> bool;
 }
-#[derive(Clone, Eq, PartialEq)]
-pub(crate) struct NetworkApproval(Arc<NetworkApprovalScope>);
 
-#[derive(Eq, PartialEq)]
-struct NetworkApprovalScope {
-    destination: SshDestination,
-    account: u32,
-    pin: ServerPin,
-    endpoint: SocketAddr,
-    policy: Option<NetworkPolicy>,
-}
-impl std::fmt::Debug for InstallationApproval {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("InstallationApproval(<redacted>)")
-    }
-}
-impl std::fmt::Debug for StartupApproval {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("StartupApproval(<redacted>)")
-    }
-}
-impl std::fmt::Debug for NetworkApproval {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("NetworkApproval(<redacted>)")
-    }
-}
 pub(crate) struct SetupRequest {
     pub destination: SshDestination,
-    pub endpoint: SocketAddr,
+    pub address: Option<SetupAddress>,
     pub name: ClientName,
     pub prompts: Arc<dyn AskPassAttemptFactory>,
-    pub approvals: SetupApprovals,
+    pub approvals: Arc<dyn SetupApprovalHandler>,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum SetupPhase {
@@ -151,36 +126,11 @@ pub(crate) enum UnavailableKind {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum SetupFailure {
     Cancelled,
-    InstallationOffered {
-        version: String,
-        platform: (String, String),
-        approval: InstallationApproval,
-    },
-    StartupRequired {
-        approval: StartupApproval,
-    },
-    NetworkAuthorizationRequired {
-        current: Option<SocketAddr>,
-        approval: NetworkApproval,
-    },
+    Unreachable { address: SetupAddress },
     Incompatible(IncompatibilityKind),
     Refused(RefusalKind),
     Unavailable(UnavailableKind),
     Unconfirmed(SetupOperation),
-}
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum EndpointProblem {
-    InvalidAddress,
-}
-pub(crate) fn validate_endpoint(endpoint: SocketAddr) -> Result<(), EndpointProblem> {
-    if endpoint.port() == 0
-        || endpoint.ip().is_unspecified()
-        || endpoint.ip().is_multicast()
-        || endpoint.ip().is_loopback()
-    {
-        return Err(EndpointProblem::InvalidAddress);
-    }
-    Ok(())
 }
 pub(crate) trait SshSetupBackend: Send + Sync {
     fn setup(
@@ -203,7 +153,10 @@ pub(crate) struct NativeSshSetupConfig<A: SshProcessAdapter> {
 }
 
 pub(crate) struct NativeSshSetup<A: SshProcessAdapter> {
+    #[cfg(all(test, feature = "native-tests"))]
     config: NativeSshSetupConfig<TrackedSshProcessAdapter<A>>,
+    #[cfg(not(all(test, feature = "native-tests")))]
+    config: NativeSshSetupConfig<A>,
     direct: DirectConnections,
 }
 
@@ -219,6 +172,8 @@ impl<A: SshProcessAdapter> NativeSshSetup<A> {
             adapter,
             artifacts,
         } = config;
+        #[cfg(all(test, feature = "native-tests"))]
+        let adapter = TrackedSshProcessAdapter::new(adapter);
         Self {
             config: NativeSshSetupConfig {
                 paths,
@@ -227,12 +182,13 @@ impl<A: SshProcessAdapter> NativeSshSetup<A> {
                 home,
                 startup,
                 executable,
-                adapter: TrackedSshProcessAdapter::new(adapter),
+                adapter,
                 artifacts,
             },
             direct,
         }
     }
+    #[cfg(all(test, feature = "native-tests"))]
     pub(crate) fn process_counts(&self) -> SshProcessCounts {
         self.config.adapter.counts()
     }
@@ -245,11 +201,7 @@ impl<A: SshProcessAdapter> SshSetupBackend for NativeSshSetup<A> {
         cancellation: &CancellationToken,
         progress: &SetupProgress,
     ) -> Result<DirectRouteId, SetupFailure> {
-        let result = self.run_setup(request, cancellation, progress);
-        if self.process_counts().active() != 0 {
-            return Err(SetupFailure::Unconfirmed(SetupOperation::Enrollment));
-        }
-        result
+        self.run_setup(request, cancellation, progress)
     }
 }
 
@@ -260,8 +212,6 @@ impl<A: SshProcessAdapter> NativeSshSetup<A> {
         cancellation: &CancellationToken,
         progress: &SetupProgress,
     ) -> Result<DirectRouteId, SetupFailure> {
-        validate_endpoint(request.endpoint)
-            .map_err(|_| SetupFailure::Refused(RefusalKind::InvalidEndpoint))?;
         check_cancelled(cancellation)?;
         validate_setup_configuration_path(self.config.executable.as_path())
             .map_err(|_| SetupFailure::Unavailable(UnavailableKind::SshFailed))?;
@@ -273,20 +223,16 @@ impl<A: SshProcessAdapter> NativeSshSetup<A> {
         let configuration = configuration_owner
             .create_private_file(
                 "config",
-                &setup_configuration(&self.config.home, false)
+                &setup_configuration(&self.config.home)
                     .map_err(|_| SetupFailure::Unavailable(UnavailableKind::SshFailed))?,
             )
             .map_err(|_| SetupFailure::Unavailable(UnavailableKind::SshFailed))?;
         validate_setup_configuration_path(&configuration)
             .map_err(|_| SetupFailure::Unavailable(UnavailableKind::SshFailed))?;
-        let cleanup_configuration = configuration_owner
-            .create_private_file(
-                "cleanup",
-                &setup_configuration(&self.config.home, true)
-                    .map_err(|_| SetupFailure::Unavailable(UnavailableKind::SshFailed))?,
-            )
+        let socket = configuration_owner
+            .socket_path("m")
             .map_err(|_| SetupFailure::Unavailable(UnavailableKind::SshFailed))?;
-        validate_setup_configuration_path(&cleanup_configuration)
+        validate_setup_configuration_path(&socket)
             .map_err(|_| SetupFailure::Unavailable(UnavailableKind::SshFailed))?;
         progress.report(SetupPhase::Authenticating);
         let probe = SshCapabilityProbe::from_startup(
@@ -306,6 +252,7 @@ impl<A: SshProcessAdapter> NativeSshSetup<A> {
             .prompts
             .start_attempt(&self.config.paths)
             .map_err(|_| SetupFailure::Unavailable(UnavailableKind::SshFailed))?;
+        let _authentication = SetupAuthentication(attempt.lease.clone());
         let authentication_cancel =
             CancellationToken::observing(attempt.observation.cancellation_flag());
         let ssh_cancellation = CancellationToken::linked(cancellation, &authentication_cancel);
@@ -320,55 +267,116 @@ impl<A: SshProcessAdapter> NativeSshSetup<A> {
                 return Err(SetupFailure::Unavailable(UnavailableKind::SshFailed));
             }
         };
+        let resolve = SshCommandContext::resolve_setup(
+            self.config.executable.clone(),
+            &configuration,
+            &request.destination,
+        )
+        .map_err(|_| SetupFailure::Refused(RefusalKind::InvalidEndpoint))?;
+        let resolved = run_captured_process(
+            &self.config.adapter,
+            &resolve,
+            &environment,
+            vec![],
+            256 * 1024,
+            &ssh_cancellation,
+            Instant::now() + OBSERVATION,
+        )
+        .map_err(map_process_error)?;
+        let address = match request.address.clone() {
+            Some(address) => address,
+            None => resolved_setup_address(&resolved)?,
+        };
+        let master_command = SshCommandContext::setup_master(
+            self.config.executable.clone(),
+            &configuration,
+            &socket,
+            &request.destination,
+        )
+        .map_err(|_| SetupFailure::Unavailable(UnavailableKind::SshFailed))?;
+        let master = SetupMaster::start(
+            &self.config.adapter,
+            &master_command,
+            &environment,
+            &ssh_cancellation,
+        );
+        // Authentication can fail after OpenSSH publishes its socket but before the ready
+        // preamble arrives. Capture that socket after the process has been reaped too.
+        let registered_socket = configuration_owner.register_socket("m");
+        let master = master.map_err(map_process_error)?;
+        registered_socket.map_err(|_| SetupFailure::Unavailable(UnavailableKind::SshFailed))?;
         let session = SetupSession {
             config: &self.config,
             destination: &request.destination,
             environment,
             configuration,
-            cleanup_configuration,
+            socket,
+            master,
             _configuration_owner: configuration_owner,
             completed_effect: std::cell::Cell::new(None),
         };
         progress.report(SetupPhase::Discovering);
-        let discovered = session.discover(&ssh_cancellation)?;
-        let discovery = match discovered {
-            Discovery::Existing(discovery) => discovery,
-            Discovery::Missing { account, target } => {
-                let artifact = self
-                    .config
-                    .artifacts
-                    .candidate(self.config.filesystem.as_ref(), &target)?;
-                authorize_installation(
-                    &request.destination,
-                    account,
-                    &target,
-                    &artifact,
-                    request.approvals.install.as_ref(),
-                )?;
-                progress.report(SetupPhase::Installing);
-                session.install(&artifact, &ssh_cancellation)?;
-                match session.discover(&ssh_cancellation) {
-                    Ok(Discovery::Existing(discovery))
-                        if discovery.account == account && discovery.target == target =>
+        let mut discovered = session.discover(&ssh_cancellation)?;
+        let discovery = loop {
+            match discovered {
+                Discovery::Existing(discovery) => break discovery,
+                Discovery::Missing { account, target } => {
+                    let artifact = self
+                        .config
+                        .artifacts
+                        .candidate(self.config.filesystem.as_ref(), &target)?;
+                    session.approve(
+                        request.approvals.as_ref(),
+                        SetupOffer::Installation {
+                            version: artifact.version.clone(),
+                            platform: artifact.platform.clone(),
+                        },
+                        &ssh_cancellation,
+                    )?;
+                    let current = self
+                        .config
+                        .artifacts
+                        .candidate(self.config.filesystem.as_ref(), &target)?;
+                    discovered = session.discover(&ssh_cancellation)?;
+                    if current.digest != artifact.digest
+                        || !matches!(&discovered,
+                    Discovery::Missing { account: current_account, target: current_target } if *current_account == account && current_target == &target)
                     {
-                        discovery
+                        continue;
                     }
-                    _ => return Err(SetupFailure::Unconfirmed(SetupOperation::Install)),
+                    progress.report(SetupPhase::Installing);
+                    session.install(&artifact, &ssh_cancellation)?;
+                    match session.discover(&ssh_cancellation) {
+                        Ok(Discovery::Existing(discovery))
+                            if discovery.account == account && discovery.target == target =>
+                        {
+                            break discovery;
+                        }
+                        _ => return Err(SetupFailure::Unconfirmed(SetupOperation::Install)),
+                    }
                 }
             }
         };
-        let discovery = if !discovery.running {
-            authorize_start(
-                &request.destination,
-                &discovery,
-                request.approvals.start.as_ref(),
+        let mut discovery = discovery;
+        while !discovery.running {
+            let observation = startup_observation(&discovery)?;
+            session.approve(
+                request.approvals.as_ref(),
+                SetupOffer::Startup,
+                &ssh_cancellation,
             )?;
+            let current = match session.discover(&ssh_cancellation)? {
+                Discovery::Existing(current) => current,
+                Discovery::Missing { .. } => {
+                    return Err(SetupFailure::Refused(RefusalKind::ServerChanged));
+                }
+            };
+            if current.start_observation.as_ref() != Some(&observation) {
+                discovery = current;
+                continue;
+            }
             progress.report(SetupPhase::Starting);
-            let observation = discovery
-                .start_observation
-                .as_ref()
-                .ok_or(SetupFailure::Refused(RefusalKind::ServerChanged))?;
-            let input = serde_json::to_vec(observation)
+            let input = serde_json::to_vec(&observation)
                 .map_err(|_| SetupFailure::Refused(RefusalKind::ServerChanged))?;
             session.effect(
                 "setup-start",
@@ -391,37 +399,58 @@ impl<A: SshProcessAdapter> NativeSshSetup<A> {
                                 && !current.stopped
                         }) =>
                 {
-                    current
+                    discovery = current;
                 }
                 _ => return Err(SetupFailure::Unconfirmed(SetupOperation::Start)),
             }
-        } else {
-            discovery
+        }
+        let (status, bind) = loop {
+            let status = session.direct_status(&ssh_cancellation)?;
+            if status.pin.build != identity() || Some(status.pin.server) != discovery.server {
+                return Err(SetupFailure::Refused(RefusalKind::ServerChanged));
+            }
+            let bind_ip = status
+                .policy
+                .as_ref()
+                .map(|policy| policy.bind.ip())
+                .filter(|configured| {
+                    // An explicit reachable address may forward to another server interface.
+                    // The default hostname follows the authenticated SSH destination instead.
+                    request.address.is_some()
+                        || configured.is_unspecified()
+                        || Some(*configured) == discovery.ssh_local_address
+                })
+                .or(discovery.ssh_local_address)
+                .ok_or(SetupFailure::Refused(RefusalKind::InvalidEndpoint))?;
+            let bind = SocketAddr::new(bind_ip, address.port());
+            NetworkPolicy::new(bind)
+                .map_err(|_| SetupFailure::Refused(RefusalKind::InvalidEndpoint))?;
+            if !status.enabled || status.policy.as_ref().map(|policy| policy.bind) != Some(bind) {
+                session.approve(
+                    request.approvals.as_ref(),
+                    SetupOffer::Network {
+                        address: address.clone(),
+                        bind,
+                        current: status.policy.as_ref().map(|policy| policy.bind),
+                        enabled: status.enabled,
+                    },
+                    &ssh_cancellation,
+                )?;
+                let current = session.direct_status(&ssh_cancellation)?;
+                if current.pin != status.pin
+                    || current.policy != status.policy
+                    || current.enabled != status.enabled
+                {
+                    if current.pin != status.pin {
+                        return Err(SetupFailure::Refused(RefusalKind::ServerChanged));
+                    }
+                    continue;
+                }
+            }
+            break (status, bind);
         };
-        let status = session.read("setup-direct-status", &ssh_cancellation)?;
-        let status: DirectStatus = serde_json::from_slice(&status.stdout)
-            .map_err(|_| SetupFailure::Unavailable(UnavailableKind::ServiceUnavailable))?;
-        if status.pin.build != identity() || Some(status.pin.server) != discovery.server {
-            return Err(SetupFailure::Refused(RefusalKind::ServerChanged));
-        }
-        let network_approval = NetworkApproval(Arc::new(NetworkApprovalScope {
-            destination: request.destination.clone(),
-            account: discovery.account,
-            pin: status.pin.clone(),
-            endpoint: request.endpoint,
-            policy: status.policy.clone(),
-        }));
-        if request.approvals.expose_network.as_ref() != Some(&network_approval)
-            && (request.approvals.expose_network.is_some()
-                || status.policy.as_ref().map(|policy| policy.bind) != Some(request.endpoint))
-        {
-            return Err(SetupFailure::NetworkAuthorizationRequired {
-                current: status.policy.as_ref().map(|policy| policy.bind),
-                approval: network_approval,
-            });
-        }
         session.check_cancelled(&ssh_cancellation)?;
-        let endpoint = format!("wss://{}/spaceterm", request.endpoint);
+        let endpoint = address.url();
         let prepared = self
             .direct
             .prepare_setup(
@@ -441,12 +470,14 @@ impl<A: SshProcessAdapter> NativeSshSetup<A> {
             name: request.name,
             pin: status.pin.clone(),
             expected_policy: status.policy.clone(),
+            expected_enabled: status.enabled,
+            endpoint: endpoint.clone(),
             generation: status.setup_generation,
         })
         .map_err(|_| SetupFailure::Unavailable(UnavailableKind::ServiceUnavailable))?;
         progress.report(SetupPhase::Enrolling);
         let prepared_reply = session.effect(
-            &format!("setup-direct-prepare {}", request.endpoint),
+            &format!("setup-direct-prepare {}", bind),
             input.clone(),
             &ssh_cancellation,
             SetupOperation::Enrollment,
@@ -476,7 +507,7 @@ impl<A: SshProcessAdapter> NativeSshSetup<A> {
         }
         let enrolled = session
             .effect(
-                &format!("setup-direct {}", request.endpoint),
+                &format!("setup-direct {}", bind),
                 input,
                 &ssh_cancellation,
                 SetupOperation::Enrollment,
@@ -516,9 +547,6 @@ impl<A: SshProcessAdapter> NativeSshSetup<A> {
             }
             return Err(SetupFailure::Unconfirmed(SetupOperation::Enrollment));
         }
-        if self.process_counts().active() != 0 {
-            return Err(SetupFailure::Unconfirmed(SetupOperation::Enrollment));
-        }
         progress.report(SetupPhase::Connecting);
         self.direct
             .complete_setup(
@@ -531,9 +559,23 @@ impl<A: SshProcessAdapter> NativeSshSetup<A> {
                 if cancellation.is_cancelled() {
                     SetupFailure::Unconfirmed(SetupOperation::Enrollment)
                 } else {
-                    map_direct_error(error)
+                    match map_direct_error(error) {
+                        SetupFailure::Unavailable(UnavailableKind::EndpointUnreachable) => {
+                            SetupFailure::Unreachable {
+                                address: address.clone(),
+                            }
+                        }
+                        failure => failure,
+                    }
                 }
             })
+    }
+}
+
+struct SetupAuthentication(AskPassBrokerLease);
+impl Drop for SetupAuthentication {
+    fn drop(&mut self) {
+        self.0.finish();
     }
 }
 
@@ -542,16 +584,37 @@ struct SetupSession<'a, A: SshProcessAdapter> {
     destination: &'a SshDestination,
     environment: SshProcessEnvironment,
     configuration: PathBuf,
-    cleanup_configuration: PathBuf,
+    socket: PathBuf,
+    master: SetupMaster<A>,
     _configuration_owner: RuntimeOwner,
     completed_effect: std::cell::Cell<Option<SetupOperation>>,
 }
 impl<A: SshProcessAdapter> Drop for SetupSession<'_, A> {
     fn drop(&mut self) {
+        self.master.close();
         self.environment.finish_authentication();
     }
 }
 impl<A: SshProcessAdapter> SetupSession<'_, A> {
+    fn approve(
+        &self,
+        approvals: &dyn SetupApprovalHandler,
+        offer: SetupOffer,
+        cancellation: &CancellationToken,
+    ) -> Result<(), SetupFailure> {
+        self.check_cancelled(cancellation)?;
+        if !approvals.approve(offer, cancellation) {
+            return Err(self.process_failure(CapturedProcessError::Cancelled));
+        }
+        self.check_cancelled(cancellation)
+    }
+    fn direct_status(
+        &self,
+        cancellation: &CancellationToken,
+    ) -> Result<DirectStatus, SetupFailure> {
+        serde_json::from_slice(&self.read("setup-direct-status", cancellation)?.stdout)
+            .map_err(|_| SetupFailure::Unavailable(UnavailableKind::ServiceUnavailable))
+    }
     fn process_failure(&self, error: CapturedProcessError) -> SetupFailure {
         if matches!(error, CapturedProcessError::Cancelled)
             && let Some(operation) = self.completed_effect.get()
@@ -569,9 +632,10 @@ impl<A: SshProcessAdapter> SetupSession<'_, A> {
     fn command(&self, script: &str) -> Result<super::command::SshCommandSpec, SetupFailure> {
         let command = ValidatedRemoteShellCommand::server_script(script)
             .map_err(|_| SetupFailure::Unavailable(UnavailableKind::SshFailed))?;
-        SshCommandContext::setup(
+        SshCommandContext::setup_channel(
             self.config.executable.clone(),
             &self.configuration,
+            &self.socket,
             self.destination,
             command,
         )
@@ -613,9 +677,10 @@ impl<A: SshProcessAdapter> SetupSession<'_, A> {
         ) else {
             return false;
         };
-        let Ok(command) = SshCommandContext::setup_cleanup(
+        let Ok(command) = SshCommandContext::setup_channel(
             self.config.executable.clone(),
-            &self.cleanup_configuration,
+            &self.configuration,
+            &self.socket,
             self.destination,
             command,
         ) else {
@@ -743,33 +808,9 @@ impl<A: SshProcessAdapter> SetupSession<'_, A> {
     }
 }
 
-fn authorize_installation(
-    destination: &SshDestination,
-    account: u32,
-    target: &str,
-    artifact: &VerifiedArtifact,
-    approved: Option<&InstallationApproval>,
-) -> Result<(), SetupFailure> {
-    let approval = InstallationApproval(Arc::new(InstallationApprovalScope {
-        destination: destination.clone(),
-        account,
-        target: target.to_owned(),
-        digest: artifact.digest.clone(),
-    }));
-    if approved == Some(&approval) {
-        return Ok(());
-    }
-    Err(SetupFailure::InstallationOffered {
-        version: artifact.version.clone(),
-        platform: artifact.platform.clone(),
-        approval,
-    })
-}
-fn authorize_start(
-    destination: &SshDestination,
+fn startup_observation(
     discovery: &AccountDiscovery,
-    approved: Option<&StartupApproval>,
-) -> Result<(), SetupFailure> {
+) -> Result<SetupStartObservation, SetupFailure> {
     let observation = discovery
         .start_observation
         .as_ref()
@@ -781,14 +822,34 @@ fn authorize_start(
     {
         return Err(SetupFailure::Refused(RefusalKind::ServerChanged));
     }
-    let approval = StartupApproval(Arc::new(StartupApprovalScope {
-        destination: destination.clone(),
-        observation: observation.clone(),
-    }));
-    if approved == Some(&approval) {
-        return Ok(());
+    Ok(observation.clone())
+}
+
+fn resolved_setup_address(output: &CapturedProcessOutput) -> Result<SetupAddress, SetupFailure> {
+    if !output.exit.is_success() {
+        return Err(SetupFailure::Refused(RefusalKind::InvalidEndpoint));
     }
-    Err(SetupFailure::StartupRequired { approval })
+    let output = std::str::from_utf8(&output.stdout)
+        .map_err(|_| SetupFailure::Refused(RefusalKind::InvalidEndpoint))?;
+    let mut hostname = None;
+    let mut port = None;
+    for line in output.lines() {
+        let Some((key, value)) = line.split_once(' ') else {
+            continue;
+        };
+        match key {
+            "hostname" if hostname.is_none() => hostname = Some(value),
+            "port" if port.is_none() => port = value.parse::<u16>().ok().filter(|port| *port != 0),
+            "hostname" | "port" => return Err(SetupFailure::Refused(RefusalKind::InvalidEndpoint)),
+            _ => (),
+        }
+    }
+    // SSH's port selects its authentication transport, never the WSS listener.
+    if port.is_none() {
+        return Err(SetupFailure::Refused(RefusalKind::InvalidEndpoint));
+    }
+    SetupAddress::parse(hostname.ok_or(SetupFailure::Refused(RefusalKind::InvalidEndpoint))?)
+        .map_err(|_| SetupFailure::Refused(RefusalKind::InvalidEndpoint))
 }
 
 fn check_cancelled(cancellation: &CancellationToken) -> Result<(), SetupFailure> {
@@ -1004,56 +1065,6 @@ fn validate_discovery(discovery: &AccountDiscovery) -> Result<(), SetupFailure> 
         return Err(SetupFailure::Incompatible(IncompatibilityKind::Capability));
     }
     Ok(())
-}
-
-#[cfg(test)]
-pub(crate) mod testing {
-    use super::{
-        InstallationApproval, InstallationApprovalScope, NetworkApproval, NetworkApprovalScope,
-        ServerPin, SetupStartObservation, StartupApproval, StartupApprovalScope,
-    };
-    use crate::domain::SshDestination;
-    use std::sync::Arc;
-
-    /// An approval bound to `destination`, as an offer from that host carries.
-    pub(crate) fn installation_approval(destination: &str) -> InstallationApproval {
-        InstallationApproval(Arc::new(InstallationApprovalScope {
-            destination: SshDestination::new(destination.to_owned()).unwrap(),
-            account: 501,
-            target: "x86_64-unknown-linux-gnu".into(),
-            digest: "a".repeat(64),
-        }))
-    }
-
-    pub(crate) fn startup_approval(destination: &str) -> StartupApproval {
-        StartupApproval(Arc::new(StartupApprovalScope {
-            destination: SshDestination::new(destination.to_owned()).unwrap(),
-            observation: SetupStartObservation {
-                account: 501,
-                build: super::identity().into(),
-                server: [1; 32],
-                installation: "a".repeat(64),
-                version: "1.0.0".into(),
-                commit: "a".repeat(40),
-                stopped: true,
-            },
-        }))
-    }
-
-    pub(crate) fn network_approval(destination: &str) -> NetworkApproval {
-        NetworkApproval(Arc::new(NetworkApprovalScope {
-            destination: SshDestination::new(destination.to_owned()).unwrap(),
-            account: 501,
-            pin: ServerPin {
-                build: super::identity().into(),
-                server: [1; 32],
-                public_key: [2; 32],
-                certificate: [3; 32],
-            },
-            endpoint: "192.0.2.1:9231".parse().unwrap(),
-            policy: None,
-        }))
-    }
 }
 
 #[cfg(all(

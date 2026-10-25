@@ -6,6 +6,7 @@ use super::SettingsWindow;
 use super::server_update::UpdateState;
 use super::servers::ServiceState;
 use crate::server_connection::ServerError;
+use crate::server_connection::service::ServiceStatus;
 use crate::server_connection::service::activation::{ActivationPhase, ActivationStatus};
 
 struct InstalledOperations(Entity<LocalServerOperations>);
@@ -15,6 +16,9 @@ impl Global for InstalledOperations {}
 pub(crate) enum CompletedOperation {
     Service,
     Update,
+    /// A service change made outside Settings, such as from the status item. Settings reads the
+    /// service again rather than trusting what it observed before.
+    Elsewhere,
 }
 
 pub(super) struct UpdateCompletion {
@@ -110,6 +114,31 @@ impl LocalServerOperations {
                 owner.finished(CompletedOperation::Update, running, cx);
             });
         }));
+    }
+
+    /// Records a service change that finished outside Settings, such as from the status item, and
+    /// leaves `status` as the service last reported it. Every Settings window reads the service
+    /// again, and Workspace launches waiting on a running server resume, as after a change made
+    /// in Settings.
+    pub(crate) fn changed_elsewhere(cx: &mut App, status: ServiceStatus) {
+        let owner = Self::get(cx);
+        owner.update(cx, |owner, cx| {
+            // A change Settings has underway keeps its own progress; anything Settings observed
+            // before no longer describes the service.
+            if owner
+                .service
+                .as_ref()
+                .is_none_or(|state| state.working.is_none())
+            {
+                owner.service = None;
+                owner.service_failure = None;
+            }
+            owner.finished(
+                CompletedOperation::Elsewhere,
+                status.running && !status.stopped,
+                cx,
+            );
+        });
     }
 
     fn finished(&mut self, operation: CompletedOperation, running: bool, cx: &mut Context<Self>) {

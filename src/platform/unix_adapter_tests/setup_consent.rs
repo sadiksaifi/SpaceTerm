@@ -2,7 +2,8 @@ use crate::ssh::provisioning::*;
 use std::ffi::{OsStr, OsString};
 use std::io::Cursor;
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use crate::direct_connections::credentials::{CredentialError, CredentialStore, Interaction};
 use crate::platform::app_directories::AppDirectoryEnvironment;
@@ -15,7 +16,7 @@ use crate::ssh::process::{
     SshProcessSpawnRequest,
 };
 
-struct NoPrompt;
+struct NoPrompt(Arc<AtomicUsize>);
 impl AskPassLease for NoPrompt {
     fn entries(&self) -> Vec<(&'static str, &OsStr)> {
         vec![]
@@ -27,8 +28,9 @@ impl AskPassLease for NoPrompt {
 }
 impl AskPassAttemptFactory for NoPrompt {
     fn start_attempt(&self, _: &AppPaths) -> Result<AskPassAttempt, AskPassUnavailable> {
+        self.0.fetch_add(1, Ordering::SeqCst);
         Ok(AskPassAttempt {
-            lease: AskPassBrokerLease::new(Arc::new(Self)),
+            lease: AskPassBrokerLease::new(Arc::new(Self(Arc::clone(&self.0)))),
             observation: AskPassAttemptObservation::default(),
         })
     }
@@ -56,14 +58,65 @@ struct ProcessAdapter {
     discovery: Arc<Mutex<Vec<u8>>>,
     status: Arc<Mutex<Option<DirectStatus>>>,
     effects: Arc<Mutex<Vec<Vec<OsString>>>>,
+    filesystem: Arc<RecordingFilesystem>,
+    authentications: Arc<AtomicUsize>,
+    active: Arc<AtomicUsize>,
+    resolved: Arc<Mutex<Vec<u8>>>,
+    effects_succeed: Arc<AtomicBool>,
 }
+enum FixtureProcess {
+    Master,
+    Captured(ProcessExit),
+}
+
 impl SshProcessAdapter for ProcessAdapter {
-    type Process = ProcessExit;
+    type Process = FixtureProcess;
     fn spawn(
         &self,
         request: SshProcessSpawnRequest,
     ) -> Result<SpawnedSshProcess<Self::Process>, SshProcessMechanismError> {
-        let (success, stdout, stderr) = if request.arguments() == [OsString::from("-V")] {
+        self.active.fetch_add(1, Ordering::SeqCst);
+        if request
+            .arguments()
+            .iter()
+            .any(|arg| arg == "ControlMaster=yes")
+        {
+            self.authentications.fetch_add(1, Ordering::SeqCst);
+            let control = request
+                .arguments()
+                .iter()
+                .find_map(|argument| {
+                    argument
+                        .to_str()
+                        .and_then(|value| value.strip_prefix("ControlPath="))
+                })
+                .unwrap();
+            self.filesystem.create_socket(Path::new(control));
+            return Ok(SpawnedSshProcess::new(
+                FixtureProcess::Master,
+                SshProcessPipes::new(
+                    Some(Box::new(std::io::sink())),
+                    Some(Box::new(Cursor::new(
+                        crate::ssh::command::SETUP_READY_PREAMBLE.to_vec(),
+                    ))),
+                    None,
+                ),
+            ));
+        }
+        let resolve = request.arguments().first().is_some_and(|arg| arg == "-G");
+        let probe = request.arguments() == [OsString::from("-V")];
+        if !resolve && !probe {
+            for option in ["ProxyCommand=false", "ProxyJump=none", "BatchMode=yes"] {
+                assert!(
+                    request.arguments().iter().any(|arg| arg == option),
+                    "channel permitted a new SSH authentication"
+                );
+            }
+            assert_eq!(self.authentications.load(Ordering::SeqCst), 1);
+        }
+        let (success, stdout, stderr) = if resolve {
+            (true, self.resolved.lock().unwrap().clone(), vec![])
+        } else if request.arguments() == [OsString::from("-V")] {
             (true, vec![], b"OpenSSH_9.9p2\n".to_vec())
         } else if request
             .arguments()
@@ -88,15 +141,25 @@ impl SshProcessAdapter for ProcessAdapter {
                 .lock()
                 .unwrap()
                 .push(request.arguments().to_vec());
-            (false, vec![], vec![])
+            let action = request.arguments().last().unwrap().to_string_lossy();
+            if self.effects_succeed.load(Ordering::SeqCst) && action.contains("ssh-install") {
+                *self.discovery.lock().unwrap() = serde_json::to_vec(&discovery(false)).unwrap();
+                (true, vec![], vec![])
+            } else if self.effects_succeed.load(Ordering::SeqCst) && action.contains("setup-start")
+            {
+                *self.discovery.lock().unwrap() = serde_json::to_vec(&discovery(true)).unwrap();
+                (true, vec![], vec![])
+            } else {
+                (false, vec![], vec![])
+            }
         };
-        let stdout = if request.arguments() != [OsString::from("-V")] {
+        let stdout = if !probe && !resolve {
             [crate::ssh::command::SETUP_READY_PREAMBLE, stdout.as_slice()].concat()
         } else {
             stdout
         };
         Ok(SpawnedSshProcess::new(
-            ProcessExit::new(success, Some(if success { 0 } else { 1 })),
+            FixtureProcess::Captured(ProcessExit::new(success, Some(if success { 0 } else { 1 }))),
             SshProcessPipes::new(
                 Some(Box::new(std::io::sink())),
                 Some(Box::new(Cursor::new(stdout))),
@@ -108,7 +171,10 @@ impl SshProcessAdapter for ProcessAdapter {
         &self,
         process: &mut Self::Process,
     ) -> Result<Option<ProcessExit>, SshProcessMechanismError> {
-        Ok(Some(*process))
+        Ok(match process {
+            FixtureProcess::Master => None,
+            FixtureProcess::Captured(exit) => Some(*exit),
+        })
     }
     fn signal(
         &self,
@@ -118,6 +184,7 @@ impl SshProcessAdapter for ProcessAdapter {
         Ok(())
     }
     fn reap(&self, _: Self::Process) -> Result<(), SshProcessMechanismError> {
+        self.active.fetch_sub(1, Ordering::SeqCst);
         Ok(())
     }
 }
@@ -126,6 +193,7 @@ struct Fixture {
     catalog: PathBuf,
     adapter: ProcessAdapter,
     backend: NativeSshSetup<ProcessAdapter>,
+    prompts: Arc<AtomicUsize>,
 }
 impl Fixture {
     fn new(discovery: Vec<u8>) -> Self {
@@ -144,12 +212,13 @@ impl Fixture {
             home: Some("/fixture/home".into()),
             ..Default::default()
         };
+        let secure_filesystem = Arc::new(RecordingFilesystem::default());
         let paths = Arc::new(
             resolve_app_paths(
                 &environment,
                 Some("/fixture/runtime".into()),
                 103,
-                Arc::new(RecordingFilesystem::default()),
+                secure_filesystem.clone(),
             )
             .unwrap(),
         );
@@ -162,6 +231,13 @@ impl Fixture {
             discovery: Arc::new(Mutex::new(discovery)),
             status: Arc::default(),
             effects: Arc::default(),
+            filesystem: secure_filesystem,
+            authentications: Arc::default(),
+            effects_succeed: Arc::default(),
+            active: Arc::default(),
+            resolved: Arc::new(Mutex::new(
+                b"hostname configured.example\nport 2222\n".to_vec(),
+            )),
         };
         let backend = NativeSshSetup::new(
             NativeSshSetupConfig {
@@ -180,16 +256,27 @@ impl Fixture {
             catalog,
             adapter,
             backend,
+            prompts: Arc::default(),
         }
     }
-    fn setup(&self, approvals: SetupApprovals) -> Result<DirectRouteId, SetupFailure> {
+    fn setup(
+        &self,
+        approvals: Arc<dyn SetupApprovalHandler>,
+    ) -> Result<DirectRouteId, SetupFailure> {
+        self.setup_at(None, approvals)
+    }
+    fn setup_at(
+        &self,
+        address: Option<SetupAddress>,
+        approvals: Arc<dyn SetupApprovalHandler>,
+    ) -> Result<DirectRouteId, SetupFailure> {
         let backend: &dyn SshSetupBackend = &self.backend;
         backend.setup(
             SetupRequest {
                 destination: SshDestination::new("configured-server".into()).unwrap(),
-                endpoint: "192.0.2.1:9231".parse().unwrap(),
+                address,
                 name: "Fixture".into(),
-                prompts: Arc::new(NoPrompt),
+                prompts: Arc::new(NoPrompt(Arc::clone(&self.prompts))),
                 approvals,
             },
             &CancellationToken::default(),
@@ -292,28 +379,38 @@ fn write_signed_package(catalog: &Path, executable: &[u8]) {
     std::fs::write(directory.join("artifact.tar.gz"), bytes).unwrap();
 }
 
+struct Approvals<F>(F);
+impl<F: Fn(SetupOffer, &CancellationToken) -> bool + Send + Sync> SetupApprovalHandler
+    for Approvals<F>
+{
+    fn approve(&self, offer: SetupOffer, cancellation: &CancellationToken) -> bool {
+        (self.0)(offer, cancellation)
+    }
+}
+
 #[test]
-fn setup_reoffers_changed_signed_bytes_before_dispatching_installation() {
+fn setup_reoffers_changed_signed_bytes_without_reauthenticating() {
     let fixture = Fixture::new(b"SPACETERM_MISSING 501 x86_64-unknown-linux-gnu\n".to_vec());
     write_signed_package(&fixture.catalog, b"first authenticated executable");
-    let Err(SetupFailure::InstallationOffered {
-        version, approval, ..
-    }) = fixture.setup(SetupApprovals::default())
-    else {
-        panic!("setup must offer the verified installation");
-    };
-    write_signed_package(&fixture.catalog, b"replacement authenticated executable");
-    let result = fixture.setup(SetupApprovals {
-        install: Some(approval),
-        ..Default::default()
-    });
-    assert!(
-        matches!(result, Err(SetupFailure::InstallationOffered { version: current, .. }) if current == version)
-    );
-    assert!(
-        fixture.adapter.effects.lock().unwrap().is_empty(),
-        "changed package consent reached an installation effect"
-    );
+    let catalog = fixture.catalog.clone();
+    let active = Arc::clone(&fixture.adapter.active);
+    let offered = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::clone(&offered);
+    let result = fixture.setup(Arc::new(Approvals(move |offer, _: &CancellationToken| {
+        assert!(matches!(offer, SetupOffer::Installation { .. }));
+        assert_eq!(active.load(Ordering::SeqCst), 1);
+        if observed.fetch_add(1, Ordering::SeqCst) == 0 {
+            write_signed_package(&catalog, b"replacement authenticated executable");
+            true
+        } else {
+            false
+        }
+    })));
+    assert_eq!(result, Err(SetupFailure::Cancelled));
+    assert_eq!(offered.load(Ordering::SeqCst), 2);
+    assert!(fixture.adapter.effects.lock().unwrap().is_empty());
+    assert_eq!(fixture.adapter.authentications.load(Ordering::SeqCst), 1);
+    assert_eq!(fixture.prompts.load(Ordering::SeqCst), 1);
     assert_eq!(fixture.backend.process_counts().active(), 0);
 }
 
@@ -325,29 +422,31 @@ fn setup_verifies_the_captured_signature_instead_of_rereading_the_catalog_path()
     );
     write_signed_package(&fixture.catalog, b"authenticated executable");
     assert_eq!(
-        fixture.setup(SetupApprovals::default()),
+        fixture.setup(Arc::new(Approvals(|_, _: &CancellationToken| panic!(
+            "invalid artifact must not be offered"
+        )))),
         Err(SetupFailure::Refused(RefusalKind::InvalidArtifact))
     );
     assert!(fixture.adapter.effects.lock().unwrap().is_empty());
     assert_eq!(fixture.backend.process_counts().active(), 0);
 }
 
-#[test]
-fn setup_reoffers_a_replacement_server_before_dispatching_startup() {
-    let mut discovery = AccountDiscovery {
+fn discovery(running: bool) -> AccountDiscovery {
+    AccountDiscovery {
         schema: 1,
         account: 501,
         build: identity().into(),
         server: Some([1; 32]),
         installed: true,
         enabled: true,
-        running: false,
-        stopped: true,
+        running,
+        stopped: !running,
         protocol_majors: vec![1],
         capabilities: vec!["workspace_policy".into()],
         target: "x86_64-unknown-linux-gnu".into(),
         version: "1.0.0".into(),
         commit: "a".repeat(40),
+        ssh_local_address: Some("192.0.2.9".parse().unwrap()),
         start_observation: Some(SetupStartObservation {
             account: 501,
             build: identity().into(),
@@ -355,93 +454,240 @@ fn setup_reoffers_a_replacement_server_before_dispatching_startup() {
             installation: "a".repeat(64),
             version: "1.0.0".into(),
             commit: "a".repeat(40),
-            stopped: true,
+            stopped: !running,
         }),
-    };
-    let fixture = Fixture::new(serde_json::to_vec(&discovery).unwrap());
-    let Err(SetupFailure::StartupRequired { approval }) = fixture.setup(SetupApprovals::default())
-    else {
-        panic!("setup must request startup authorization");
-    };
-    discovery.server = Some([2; 32]);
-    discovery.start_observation.as_mut().unwrap().server = [2; 32];
-    *fixture.adapter.discovery.lock().unwrap() = serde_json::to_vec(&discovery).unwrap();
-    assert!(matches!(
-        fixture.setup(SetupApprovals {
-            start: Some(approval),
-            ..Default::default()
-        }),
-        Err(SetupFailure::StartupRequired { .. })
-    ));
-    assert!(
-        fixture.adapter.effects.lock().unwrap().is_empty(),
-        "replacement server consent reached a startup effect"
-    );
+    }
+}
+
+fn status() -> DirectStatus {
+    DirectStatus {
+        pin: ServerPin {
+            build: identity().into(),
+            server: [1; 32],
+            public_key: [2; 32],
+            certificate: [3; 32],
+        },
+        policy: None,
+        enabled: false,
+        server_name: "Remote".into(),
+        listener: spaceterm_server::direct::ListenerState::Off,
+        network_addresses: Err(DirectError::Transport),
+        setup_generation: 0,
+    }
+}
+
+#[test]
+fn setup_reoffers_a_replacement_before_starting_with_one_authentication() {
+    let fixture = Fixture::new(serde_json::to_vec(&discovery(false)).unwrap());
+    let source = Arc::clone(&fixture.adapter.discovery);
+    let offered = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::clone(&offered);
+    let active = Arc::clone(&fixture.adapter.active);
+    let result = fixture.setup(Arc::new(Approvals(move |offer, _: &CancellationToken| {
+        assert_eq!(offer, SetupOffer::Startup);
+        assert_eq!(active.load(Ordering::SeqCst), 1);
+        if observed.fetch_add(1, Ordering::SeqCst) == 0 {
+            let mut replacement = discovery(false);
+            replacement.server = Some([4; 32]);
+            replacement.start_observation.as_mut().unwrap().server = [4; 32];
+            *source.lock().unwrap() = serde_json::to_vec(&replacement).unwrap();
+            true
+        } else {
+            false
+        }
+    })));
+    assert_eq!(result, Err(SetupFailure::Cancelled));
+    assert_eq!(offered.load(Ordering::SeqCst), 2);
+    assert!(fixture.adapter.effects.lock().unwrap().is_empty());
+    assert_eq!(fixture.adapter.authentications.load(Ordering::SeqCst), 1);
+    assert_eq!(fixture.prompts.load(Ordering::SeqCst), 1);
     assert_eq!(fixture.backend.process_counts().active(), 0);
 }
 
 #[test]
-fn setup_reoffers_changed_server_or_policy_before_preparing_network_exposure() {
-    use spaceterm_server::direct::ListenerState;
-    for change_server in [true, false] {
-        let mut discovery = AccountDiscovery {
-            schema: 1,
-            account: 501,
-            build: identity().into(),
-            server: Some([1; 32]),
-            installed: true,
-            enabled: true,
-            running: true,
-            stopped: false,
-            protocol_majors: vec![1],
-            capabilities: vec!["workspace_policy".into()],
-            target: "x86_64-unknown-linux-gnu".into(),
-            version: "1.0.0".into(),
-            commit: "a".repeat(40),
-            start_observation: None,
-        };
-        let fixture = Fixture::new(serde_json::to_vec(&discovery).unwrap());
-        let mut status = DirectStatus {
-            pin: ServerPin {
-                build: identity().into(),
-                server: [1; 32],
-                public_key: [2; 32],
-                certificate: [3; 32],
-            },
-            policy: None,
-            server_name: "Remote".into(),
-            listener: ListenerState::Off,
-            network_addresses: Err(DirectError::Transport),
-            setup_generation: 0,
-        };
-        *fixture.adapter.status.lock().unwrap() = Some(status.clone());
-        let Err(SetupFailure::NetworkAuthorizationRequired { approval, .. }) =
-            fixture.setup(SetupApprovals::default())
-        else {
-            panic!("setup must request deliberate exposure authorization");
-        };
-        if change_server {
-            discovery.server = Some([4; 32]);
-            status.pin.server = [4; 32];
-            status.pin.public_key = [5; 32];
-            status.pin.certificate = [6; 32];
-            *fixture.adapter.discovery.lock().unwrap() = serde_json::to_vec(&discovery).unwrap();
+fn setup_derives_dns_from_effective_hostname_and_keeps_bind_and_ssh_port_separate() {
+    let fixture = Fixture::new(serde_json::to_vec(&discovery(true)).unwrap());
+    *fixture.adapter.status.lock().unwrap() = Some(status());
+    *fixture.adapter.resolved.lock().unwrap() =
+        b"hostname actual.tail.example\nport 2222\n".to_vec();
+    let active = Arc::clone(&fixture.adapter.active);
+    let result = fixture.setup(Arc::new(Approvals(move |offer, _: &CancellationToken| {
+        assert_eq!(
+            offer,
+            SetupOffer::Network {
+                address: SetupAddress::parse("actual.tail.example:9231").unwrap(),
+                bind: "192.0.2.9:9231".parse().unwrap(),
+                current: None,
+                enabled: false,
+            }
+        );
+        assert_eq!(active.load(Ordering::SeqCst), 1);
+        false
+    })));
+    assert_eq!(result, Err(SetupFailure::Cancelled));
+    assert!(fixture.adapter.effects.lock().unwrap().is_empty());
+    assert_eq!(fixture.adapter.authentications.load(Ordering::SeqCst), 1);
+    assert_eq!(fixture.backend.process_counts().active(), 0);
+}
+
+#[test]
+fn default_hostname_offers_the_authenticated_interface_instead_of_an_unrelated_listener() {
+    let mut remote = discovery(true);
+    remote.ssh_local_address = Some("100.64.0.9".parse().unwrap());
+    let fixture = Fixture::new(serde_json::to_vec(&remote).unwrap());
+    let mut current = status();
+    current.policy = Some(NetworkPolicy::new("192.168.1.9:9231".parse().unwrap()).unwrap());
+    current.enabled = true;
+    *fixture.adapter.status.lock().unwrap() = Some(current);
+    *fixture.adapter.resolved.lock().unwrap() =
+        b"hostname actual.tail.example\nport 2222\n".to_vec();
+
+    let result = fixture.setup(Arc::new(Approvals(|offer, _: &CancellationToken| {
+        assert_eq!(
+            offer,
+            SetupOffer::Network {
+                address: SetupAddress::parse("actual.tail.example").unwrap(),
+                bind: "100.64.0.9:9231".parse().unwrap(),
+                current: Some("192.168.1.9:9231".parse().unwrap()),
+                enabled: true,
+            }
+        );
+        false
+    })));
+
+    assert_eq!(result, Err(SetupFailure::Cancelled));
+    assert!(fixture.adapter.effects.lock().unwrap().is_empty());
+    assert_eq!(fixture.adapter.authentications.load(Ordering::SeqCst), 1);
+    assert_eq!(fixture.backend.process_counts().active(), 0);
+}
+
+#[test]
+fn default_hostname_preserves_a_configured_wildcard_bind_when_enabling_exposure() {
+    let fixture = Fixture::new(serde_json::to_vec(&discovery(true)).unwrap());
+    let mut current = status();
+    current.policy = Some(NetworkPolicy::new("0.0.0.0:9231".parse().unwrap()).unwrap());
+    *fixture.adapter.status.lock().unwrap() = Some(current);
+
+    let result = fixture.setup(Arc::new(Approvals(|offer, _: &CancellationToken| {
+        assert_eq!(
+            offer,
+            SetupOffer::Network {
+                address: SetupAddress::parse("configured.example").unwrap(),
+                bind: "0.0.0.0:9231".parse().unwrap(),
+                current: Some("0.0.0.0:9231".parse().unwrap()),
+                enabled: false,
+            }
+        );
+        false
+    })));
+
+    assert_eq!(result, Err(SetupFailure::Cancelled));
+    assert!(fixture.adapter.effects.lock().unwrap().is_empty());
+    assert_eq!(fixture.backend.process_counts().active(), 0);
+}
+
+#[test]
+fn setup_reoffers_changed_policy_while_holding_the_same_authentication() {
+    let fixture = Fixture::new(serde_json::to_vec(&discovery(true)).unwrap());
+    *fixture.adapter.status.lock().unwrap() = Some(status());
+    let source = Arc::clone(&fixture.adapter.status);
+    let offered = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::clone(&offered);
+    let result = fixture.setup(Arc::new(Approvals(move |offer, _: &CancellationToken| {
+        assert!(matches!(offer, SetupOffer::Network { .. }));
+        if observed.fetch_add(1, Ordering::SeqCst) == 0 {
+            source.lock().unwrap().as_mut().unwrap().policy =
+                Some(NetworkPolicy::new("192.0.2.10:9231".parse().unwrap()).unwrap());
+            true
         } else {
-            // A concurrent change to the requested endpoint also invalidates the old offer.
-            status.policy = Some(NetworkPolicy::new("192.0.2.1:9231".parse().unwrap()).unwrap());
+            false
         }
-        *fixture.adapter.status.lock().unwrap() = Some(status);
-        let result = fixture.setup(SetupApprovals {
-            expose_network: Some(approval.clone()),
-            ..Default::default()
-        });
-        assert!(
-            matches!(result, Err(SetupFailure::NetworkAuthorizationRequired { approval: current, .. }) if current != approval)
-        );
-        assert!(
-            fixture.adapter.effects.lock().unwrap().is_empty(),
-            "stale network consent reached setup preparation or exposure"
-        );
-        assert_eq!(fixture.backend.process_counts().active(), 0);
-    }
+    })));
+    assert_eq!(result, Err(SetupFailure::Cancelled));
+    assert_eq!(offered.load(Ordering::SeqCst), 2);
+    assert!(fixture.adapter.effects.lock().unwrap().is_empty());
+    assert_eq!(fixture.adapter.authentications.load(Ordering::SeqCst), 1);
+    assert_eq!(fixture.backend.process_counts().active(), 0);
+}
+
+#[test]
+fn installation_start_and_network_approval_share_one_authentication_lifecycle() {
+    let fixture = Fixture::new(b"SPACETERM_MISSING 501 x86_64-unknown-linux-gnu\n".to_vec());
+    write_signed_package(&fixture.catalog, b"authenticated executable");
+    fixture
+        .adapter
+        .effects_succeed
+        .store(true, Ordering::SeqCst);
+    *fixture.adapter.status.lock().unwrap() = Some(status());
+    let active = Arc::clone(&fixture.adapter.active);
+    let offers = Arc::new(Mutex::new(vec![]));
+    let observed = Arc::clone(&offers);
+    let result = fixture.setup(Arc::new(Approvals(
+        move |offer: SetupOffer, _: &CancellationToken| {
+            assert_eq!(active.load(Ordering::SeqCst), 1);
+            let accept = !matches!(offer, SetupOffer::Network { .. });
+            observed.lock().unwrap().push(offer);
+            accept
+        },
+    )));
+    assert_eq!(
+        result,
+        Err(SetupFailure::Unconfirmed(SetupOperation::Start))
+    );
+    assert!(matches!(
+        offers.lock().unwrap().as_slice(),
+        [
+            SetupOffer::Installation { .. },
+            SetupOffer::Startup,
+            SetupOffer::Network { .. }
+        ]
+    ));
+    assert_eq!(fixture.adapter.authentications.load(Ordering::SeqCst), 1);
+    assert_eq!(fixture.prompts.load(Ordering::SeqCst), 1);
+    assert_eq!(fixture.adapter.effects.lock().unwrap().len(), 2);
+    assert_eq!(fixture.backend.process_counts().active(), 0);
+}
+
+#[test]
+fn cancelling_during_approval_closes_authentication_before_setup_returns() {
+    let fixture = Fixture::new(serde_json::to_vec(&discovery(false)).unwrap());
+    let active = Arc::clone(&fixture.adapter.active);
+    let result = fixture.setup(Arc::new(Approvals(
+        move |_, cancellation: &CancellationToken| {
+            assert_eq!(active.load(Ordering::SeqCst), 1);
+            cancellation.cancel();
+            true
+        },
+    )));
+    assert_eq!(result, Err(SetupFailure::Cancelled));
+    assert!(fixture.adapter.effects.lock().unwrap().is_empty());
+    assert_eq!(fixture.adapter.authentications.load(Ordering::SeqCst), 1);
+    assert_eq!(fixture.backend.process_counts().active(), 0);
+}
+
+#[test]
+fn optional_dns_override_changes_reachability_and_wss_port_without_changing_bind_ip() {
+    let fixture = Fixture::new(serde_json::to_vec(&discovery(true)).unwrap());
+    let mut current = status();
+    current.policy = Some(NetworkPolicy::new("192.168.1.9:9231".parse().unwrap()).unwrap());
+    *fixture.adapter.status.lock().unwrap() = Some(current);
+    let address = SetupAddress::parse("public.example:9443").unwrap();
+    let expected = address.clone();
+    let result = fixture.setup_at(
+        Some(address),
+        Arc::new(Approvals(move |offer, _: &CancellationToken| {
+            assert_eq!(
+                offer,
+                SetupOffer::Network {
+                    address: expected.clone(),
+                    bind: "192.168.1.9:9443".parse().unwrap(),
+                    current: Some("192.168.1.9:9231".parse().unwrap()),
+                    enabled: false
+                }
+            );
+            false
+        })),
+    );
+    assert_eq!(result, Err(SetupFailure::Cancelled));
+    assert_eq!(fixture.backend.process_counts().active(), 0);
 }

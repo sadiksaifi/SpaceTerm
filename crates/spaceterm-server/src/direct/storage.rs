@@ -23,6 +23,8 @@ pub(super) struct Revocation {
 pub(super) struct SetupReservation {
     pub operation: OperationId,
     pub expected_policy: Option<NetworkPolicy>,
+    pub expected_enabled: bool,
+    pub endpoint: String,
     pub policy: NetworkPolicy,
     pub public_key: [u8; 32],
     pub name: ClientName,
@@ -35,6 +37,7 @@ pub(super) struct Record {
     pub key: Vec<u8>,
     pub certificate: Vec<u8>,
     pub policy: Option<NetworkPolicy>,
+    pub enabled: bool,
     pub setup_generation: u64,
     pub setups: Vec<SetupReservation>,
     pub devices: Vec<Device>,
@@ -80,6 +83,7 @@ impl Store {
                     key: key.expose_bytes().to_vec(),
                     certificate: certificate.der().to_vec(),
                     policy: None,
+                    enabled: false,
                     setup_generation: 0,
                     setups: Vec::new(),
                     devices: Vec::new(),
@@ -107,8 +111,18 @@ impl Store {
         if let Some(policy) = &record.policy {
             NetworkPolicy::new(policy.bind).map_err(|_| DirectError::StorageUnavailable)?;
         }
+        if record.enabled && record.policy.is_none() {
+            return Err(DirectError::StorageUnavailable);
+        }
         let mut setups = std::collections::BTreeSet::new();
         for setup in &record.setups {
+            let endpoint =
+                Endpoint::from_url(&setup.endpoint).map_err(|_| DirectError::StorageUnavailable)?;
+            if endpoint.port() != setup.policy.bind.port()
+                || (setup.expected_enabled && setup.expected_policy.is_none())
+            {
+                return Err(DirectError::StorageUnavailable);
+            }
             if let Some(policy) = &setup.expected_policy {
                 NetworkPolicy::new(policy.bind).map_err(|_| DirectError::StorageUnavailable)?;
             }

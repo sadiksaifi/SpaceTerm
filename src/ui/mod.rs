@@ -79,7 +79,7 @@ pub(crate) use workspace_manager::tests::{
     assert_scroll_shortcuts_from_sidebar_focus, use_desktop_sessions,
 };
 pub(crate) use workspace_manager::{
-    LocalServerAdapters, WorkspaceManager, WorkspaceManagerAdapters, resume_waiting_launches,
+    LocalServerAdapters, WorkspaceManager, WorkspaceManagerAdapters,
 };
 pub(crate) use workspace_sidebar::MachineTarget;
 

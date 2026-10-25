@@ -182,3 +182,69 @@ fn cancellation_during_authentication_reaps_the_owned_process() {
     worker.join().unwrap();
     assert_eq!(adapter.state.0.lock().unwrap().reaped, 1);
 }
+
+#[test]
+fn setup_master_retains_one_authentication_until_its_owner_closes_it() {
+    let adapter = Adapter {
+        state: Arc::default(),
+        before_ready: false,
+    };
+    let command = SshCommandContext::setup_master(
+        OpenSshExecutable::new("/fixture/ssh".into()).unwrap(),
+        Path::new("/fixture/config"),
+        Path::new("/fixture/m"),
+        &SshDestination::new("configured-server".into()).unwrap(),
+    )
+    .unwrap();
+    let environment =
+        SshProcessEnvironment::new_without_authentication("/fixture/home".into(), None).unwrap();
+    let mut master = SetupMaster::start(
+        &adapter,
+        &command,
+        &environment,
+        &CancellationToken::default(),
+    )
+    .unwrap();
+    assert_eq!(adapter.state.0.lock().unwrap().reaped, 0);
+    master.close();
+    drop(master);
+    assert_eq!(adapter.state.0.lock().unwrap().reaped, 1);
+}
+
+#[test]
+fn cancelling_setup_master_authentication_reaps_before_returning() {
+    let adapter = Adapter {
+        state: Arc::default(),
+        before_ready: true,
+    };
+    let cancellation = CancellationToken::default();
+    let runner = adapter.clone();
+    let token = cancellation.clone();
+    let worker = std::thread::spawn(move || {
+        let command = SshCommandContext::setup_master(
+            OpenSshExecutable::new("/fixture/ssh".into()).unwrap(),
+            Path::new("/fixture/config"),
+            Path::new("/fixture/m"),
+            &SshDestination::new("configured-server".into()).unwrap(),
+        )
+        .unwrap();
+        let environment =
+            SshProcessEnvironment::new_without_authentication("/fixture/home".into(), None)
+                .unwrap();
+        SetupMaster::start(&runner, &command, &environment, &token).map(|_| ())
+    });
+    let state = adapter.state.0.lock().unwrap();
+    let (state, timeout) = adapter
+        .state
+        .1
+        .wait_timeout_while(state, Duration::from_secs(2), |state| !state.blocked)
+        .unwrap();
+    assert!(!timeout.timed_out() && state.blocked);
+    drop(state);
+    cancellation.cancel();
+    assert!(matches!(
+        worker.join().unwrap(),
+        Err(CapturedProcessError::Cancelled)
+    ));
+    assert_eq!(adapter.state.0.lock().unwrap().reaped, 1);
+}

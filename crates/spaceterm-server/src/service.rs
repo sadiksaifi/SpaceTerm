@@ -570,6 +570,27 @@ impl Service {
     pub fn stop(&self) -> Result<ServiceStatus, ServerError> {
         self.apply_control(control::Action::Stop, None)
     }
+    /// Confirm an already completed Stop without issuing another native service action.
+    pub fn stop_if_stopped(&self) -> Result<Option<ServiceStatus>, ServerError> {
+        let Some((data, _)) = self.read()? else {
+            return Ok(None);
+        };
+        let _operation = data.lock("service.lock", false)?;
+        let state = Self::state(&data)?.ok_or(ServerError::NotInstalled)?;
+        if !state.stopped || !state.installed {
+            return Ok(None);
+        }
+        if state
+            .activation
+            .as_ref()
+            .is_some_and(|operation| !operation.settled())
+        {
+            return Err(ServerError::ActivationUnresolved);
+        }
+        let status = self.snapshot(&state)?;
+        self.prove_quiescent()?;
+        Ok(Some(status))
+    }
     fn stop_locked(&self, data: &Directory, state: &mut State) -> Result<(), ServerError> {
         // Publication precedes all service-manager operations, so partial failure fails closed.
         {
@@ -631,6 +652,17 @@ impl Service {
         }
         if action == control::Action::Restart && state.stopped {
             return Err(ServerError::Stopped);
+        }
+        if action == control::Action::Stop && state.stopped {
+            match self.snapshot(&state) {
+                Ok(status) => {
+                    self.prove_quiescent()?;
+                    return Ok(status);
+                }
+                // An explicit Stop may retry incomplete native cleanup. This is not a no-op.
+                Err(ServerError::CleanupUnresolved) => {}
+                Err(error) => return Err(error),
+            }
         }
         self.stop_locked(&data, &mut state)?;
         match action {
@@ -1100,6 +1132,41 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.root);
         }
+    }
+    #[test]
+    fn an_already_quiescent_stop_is_a_no_op_and_incomplete_cleanup_is_not_success() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+        let fixture = Fixture::new();
+        let running = Arc::new(AtomicBool::new(false));
+        let service = Service::new(
+            fixture.paths.clone(),
+            fixture.paths.identity.clone(),
+            Arc::new(TestSupervisor {
+                stop_data: Some(fixture.paths.data.clone()),
+                running: running.clone(),
+                ..Default::default()
+            }),
+        );
+        let data = Directory::open(&fixture.paths.data, false).unwrap();
+        let mut state = Service::state(&data).unwrap().unwrap();
+        state.stopped = true;
+        data.write_json(c"service.json", &state).unwrap();
+        let retained = std::fs::read(fixture.paths.data.join("service.json")).unwrap();
+        assert!(service.stop_if_stopped().unwrap().is_some());
+        assert!(service.stop().unwrap().stopped);
+        assert_eq!(
+            std::fs::read(fixture.paths.data.join("service.json")).unwrap(),
+            retained
+        );
+        running.store(true, Ordering::Relaxed);
+        assert_eq!(
+            service.stop_if_stopped(),
+            Err(ServerError::CleanupUnresolved)
+        );
+        assert_eq!(service.stop(), Err(ServerError::ServiceUnavailable));
     }
     #[test]
     fn setup_start_refuses_replaced_installation_server_or_stop_before_native_effects() {

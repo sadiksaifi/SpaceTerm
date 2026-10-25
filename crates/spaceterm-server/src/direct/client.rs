@@ -38,11 +38,11 @@ pub(super) fn parse_invitation(text: &str) -> Result<Invitation, DirectError> {
         return Err(DirectError::InvalidInvitation);
     }
     wss::validate_endpoint(&payload.endpoint)?;
-    let now = wire::now()?;
-    if payload.expires <= now {
-        return Err(DirectError::Expired);
-    }
-    if payload.expires - now > wire::INVITATION_SECONDS {
+    if payload.expires == 0
+        || payload.expires > storage::MAX_CONNECTION_TIME
+        || payload.valid_for_seconds == 0
+        || payload.valid_for_seconds > wire::INVITATION_SECONDS
+    {
         return Err(DirectError::InvalidInvitation);
     }
     invitation(payload)
@@ -141,9 +141,6 @@ pub(super) fn prepare(
     name: ClientName,
     credential: &DeviceCredential,
 ) -> Result<Enrollment, DirectError> {
-    if invitation.payload.expires <= wire::now()? {
-        return Err(DirectError::Expired);
-    }
     let claim = wire::claim_id(
         &invitation.payload.pin,
         invitation.payload.id,
@@ -165,9 +162,6 @@ pub(super) fn submit(enrollment: &mut Enrollment) -> Result<ComparisonCode, Dire
         .prepared
         .as_ref()
         .ok_or(DirectError::InvalidRequest)?;
-    if invitation.expires <= wire::now()? {
-        return Err(DirectError::Expired);
-    }
     let (_, answer) = exchange_checked(
         &enrollment.endpoint,
         &enrollment.pin,

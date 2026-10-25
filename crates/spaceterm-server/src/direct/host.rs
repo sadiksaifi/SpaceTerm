@@ -85,7 +85,7 @@ impl State {
     }
     fn listen(&mut self) {
         self.listener = None;
-        self.listener_state = match &self.record.policy {
+        self.listener_state = match self.record.policy.as_ref().filter(|_| self.record.enabled) {
             None => ListenerState::Off,
             Some(policy) => match bind_listener(policy.bind) {
                 Ok(listener) => {
@@ -256,7 +256,9 @@ impl State {
     fn status(&self) -> DirectStatus {
         let network = network::snapshot(self.network.as_ref());
         let listener = match (&self.listener_state, &network) {
-            (ListenerState::Listening { addr }, Ok(snapshot)) if !snapshot.contains(&addr.ip()) => {
+            (ListenerState::Listening { addr }, Ok(snapshot))
+                if !addr.ip().is_unspecified() && !snapshot.contains(&addr.ip()) =>
+            {
                 ListenerState::Failed(DirectError::InvalidAddress)
             }
             _ => self.listener_state.clone(),
@@ -265,6 +267,7 @@ impl State {
             setup_generation: self.record.setup_generation,
             pin: self.pin.clone(),
             policy: self.record.policy.clone(),
+            enabled: self.record.enabled,
             server_name: Self::server_name(),
             listener,
             network_addresses: network.map(|snapshot| snapshot.addresses),
@@ -275,6 +278,24 @@ impl State {
         actor: Option<&Peer<'_>>,
         request: Management,
     ) -> Result<(ManagementReply, Option<[u8; 32]>), DirectError> {
+        // Only authenticated owning-account IPC grants administration authority.
+        // Refuse before recovery, expiry or mutation can affect retained state.
+        if actor.is_some()
+            && !matches!(
+                &request,
+                Management::Status
+                    | Management::Claims
+                    | Management::Devices
+                    | Management::Revoke { .. }
+            )
+        {
+            return Err(DirectError::AuthenticationRefused);
+        }
+        if let (Some(peer), Management::Revoke { target, .. }) = (actor, &request)
+            && peer.device.pairing != *target
+        {
+            return Err(DirectError::AuthenticationRefused);
+        }
         self.recover()?;
         self.expire()?;
         let reply = match request {
@@ -283,6 +304,8 @@ impl State {
                 generation,
                 pin,
                 expected_policy,
+                expected_enabled,
+                endpoint,
                 policy,
                 operation,
                 public_key,
@@ -294,20 +317,32 @@ impl State {
                 if setup_generation(&operation) != generation {
                     return Err(DirectError::Substituted);
                 }
-                self.check_setup(
-                    &pin,
-                    &policy,
-                    &expected_policy,
+                let binding = storage::SetupReservation {
                     operation,
+                    expected_policy,
+                    expected_enabled,
+                    endpoint,
+                    policy,
                     public_key,
-                    &name,
-                )?;
+                    name,
+                };
+                self.check_setup(&pin, &binding)?;
+                let storage::SetupReservation {
+                    operation,
+                    expected_policy,
+                    expected_enabled,
+                    endpoint,
+                    policy,
+                    public_key,
+                    name,
+                } = binding;
                 if !self
                     .record
                     .devices
                     .iter()
                     .any(|device| device.claim == operation)
-                    && self.record.policy != expected_policy
+                    && (self.record.policy != expected_policy
+                        || self.record.enabled != expected_enabled)
                 {
                     return Err(DirectError::PolicyChanged);
                 }
@@ -329,6 +364,8 @@ impl State {
                     next.setups.push(storage::SetupReservation {
                         operation,
                         expected_policy,
+                        expected_enabled,
+                        endpoint,
                         policy,
                         public_key,
                         name,
@@ -341,6 +378,8 @@ impl State {
                 generation,
                 pin,
                 expected_policy,
+                expected_enabled,
+                endpoint,
                 policy,
                 operation,
                 public_key,
@@ -352,14 +391,25 @@ impl State {
                 if setup_generation(&operation) != generation {
                     return Err(DirectError::Substituted);
                 }
-                self.check_setup(
-                    &pin,
-                    &policy,
-                    &expected_policy,
+                let binding = storage::SetupReservation {
                     operation,
+                    expected_policy,
+                    expected_enabled,
+                    endpoint,
+                    policy,
                     public_key,
-                    &name,
-                )?;
+                    name,
+                };
+                self.check_setup(&pin, &binding)?;
+                let storage::SetupReservation {
+                    operation,
+                    expected_policy,
+                    expected_enabled,
+                    endpoint: _,
+                    policy,
+                    public_key,
+                    name,
+                } = binding;
                 if self
                     .record
                     .devices
@@ -388,7 +438,9 @@ impl State {
                     }
                     device.info.clone()
                 } else {
-                    if self.record.policy != expected_policy {
+                    if self.record.policy != expected_policy
+                        || self.record.enabled != expected_enabled
+                    {
                         return Err(DirectError::PolicyChanged);
                     }
                     if self.record.devices.len() >= storage::MAX_DEVICES {
@@ -401,10 +453,12 @@ impl State {
                         public_key,
                         last_connected_at_unix_seconds: None,
                     };
-                    let changed_policy = self.record.policy.as_ref() != Some(&policy);
+                    let changed_policy =
+                        self.record.policy.as_ref() != Some(&policy) || !self.record.enabled;
                     let generation = crypto::random()?;
                     let mut next = self.record.clone();
                     next.policy = Some(policy.clone());
+                    next.enabled = true;
                     next.devices.push(storage::Device {
                         claim: operation,
                         info: info.clone(),
@@ -463,21 +517,24 @@ impl State {
                     operation,
                 }
             }
-            Management::SetPolicy(policy) => {
+            Management::SetPolicy { policy, enabled } => {
+                if enabled && policy.is_none() && self.record.policy.is_none() {
+                    return Err(DirectError::InvalidRequest);
+                }
                 if let Some(policy) = &policy {
                     NetworkPolicy::new(policy.bind)?;
                 }
                 let generation = crypto::random()?;
                 let mut next = self.record.clone();
-                next.policy = policy;
+                if let Some(policy) = policy {
+                    next.policy = Some(policy);
+                }
+                next.enabled = enabled;
                 self.commit(next)?;
                 self.generation = generation;
-                // Remove every registration now. Only this exact caller's pump
-                // remains open to deliver its final committed reply.
+                // Network administration arrives only over IPC. Retire all WSS authority.
                 for registered in &self.connections {
-                    if actor.is_none_or(|peer| peer.connection != registered.connection) {
-                        let _ = registered.stream.shutdown(std::net::Shutdown::Both);
-                    }
+                    let _ = registered.stream.shutdown(std::net::Shutdown::Both);
                 }
                 self.connections.clear();
                 self.invitations.clear();
@@ -492,7 +549,22 @@ impl State {
             Management::Invite => {
                 let status = self.status();
                 let endpoint = match status.listener {
-                    ListenerState::Listening { addr } => format!("wss://{addr}/spaceterm"),
+                    ListenerState::Listening { addr } => {
+                        let advertised = if addr.ip().is_unspecified() {
+                            let addresses =
+                                status.network_addresses.as_ref().map_err(|error| *error)?;
+                            std::net::SocketAddr::new(
+                                addresses
+                                    .suggested
+                                    .or_else(|| addresses.available.first().copied())
+                                    .ok_or(DirectError::InvalidAddress)?,
+                                addr.port(),
+                            )
+                        } else {
+                            addr
+                        };
+                        format!("wss://{advertised}/spaceterm")
+                    }
                     _ => return Err(DirectError::Disabled),
                 };
                 if self.invitations.len() >= MAX_PENDING {
@@ -506,6 +578,7 @@ impl State {
                     server_name: status.server_name,
                     token: crypto::random()?,
                     expires: wire::now()? + wire::INVITATION_SECONDS,
+                    valid_for_seconds: wire::INVITATION_SECONDS,
                 };
                 self.invitations.push(PendingInvitation {
                     id: payload.id,
@@ -599,33 +672,38 @@ impl State {
     fn check_setup(
         &self,
         pin: &ServerPin,
-        policy: &NetworkPolicy,
-        expected_policy: &Option<NetworkPolicy>,
-        operation: OperationId,
-        public_key: [u8; 32],
-        name: &ClientName,
+        requested: &storage::SetupReservation,
     ) -> Result<(), DirectError> {
         if pin != &self.pin {
             return Err(DirectError::PinMismatch);
         }
-        NetworkPolicy::new(policy.bind)?;
-        if let Some(policy) = expected_policy {
-            NetworkPolicy::new(policy.bind)?;
-        }
-        if operation == [0; 32] || public_key == [0; 32] {
-            return Err(DirectError::InvalidRequest);
-        }
-        if let Some(setup) = self
+        if let Some(original) = self
             .record
             .setups
             .iter()
-            .find(|setup| setup.operation == operation)
-            && (setup.policy != *policy
-                || setup.expected_policy != *expected_policy
-                || setup.public_key != public_key
-                || setup.name != *name)
+            .find(|setup| setup.operation == requested.operation)
+            && (original.policy != requested.policy
+                || original.expected_policy != requested.expected_policy
+                || original.expected_enabled != requested.expected_enabled
+                || original.endpoint != requested.endpoint
+                || original.public_key != requested.public_key
+                || original.name != requested.name)
         {
             return Err(DirectError::Substituted);
+        }
+        NetworkPolicy::new(requested.policy.bind)?;
+        let endpoint = Endpoint::from_url(&requested.endpoint)?;
+        if endpoint.url() != requested.endpoint || endpoint.port() != requested.policy.bind.port() {
+            return Err(DirectError::InvalidAddress);
+        }
+        if let Some(policy) = &requested.expected_policy {
+            NetworkPolicy::new(policy.bind)?;
+        }
+        if (requested.expected_enabled && requested.expected_policy.is_none())
+            || requested.operation == [0; 32]
+            || requested.public_key == [0; 32]
+        {
+            return Err(DirectError::InvalidRequest);
         }
         Ok(())
     }
@@ -665,6 +743,9 @@ impl State {
         operation: OperationId,
         target: PairingId,
     ) -> Result<(RevocationReceipt, [u8; 32]), DirectError> {
+        if actor.is_some_and(|actor| actor != target) {
+            return Err(DirectError::AuthenticationRefused);
+        }
         self.recover()?;
         if operation == [0; 32] {
             return Err(DirectError::InvalidRequest);
@@ -804,13 +885,12 @@ impl State {
             wire::Action::Claim { key, .. }
             | wire::Action::Finish { key, .. }
             | wire::Action::Cancel { key, .. } => *key,
-            wire::Action::Revoke {
-                actor,
-                operation,
-                target,
-            } => {
+            wire::Action::Revoke { actor, target, .. } => {
                 if actor.pin != self.pin {
                     return Err(DirectError::WrongServer);
+                }
+                if actor.pairing != *target {
+                    return Err(DirectError::AuthenticationRefused);
                 }
                 let device = self
                     .record
@@ -818,17 +898,6 @@ impl State {
                     .iter()
                     .find(|d| d.info.pairing == actor.pairing && d.info.client == actor.client)
                     .ok_or(DirectError::AuthenticationRefused)?;
-                // Retired authority is restricted to the exact admitted original, never a new target.
-                if device.revoked
-                    && actor.pairing != *target
-                    && !self.record.revocations.iter().any(|r| {
-                        r.actor == Some(actor.pairing)
-                            && r.receipt.operation == *operation
-                            && r.receipt.target == *target
-                    })
-                {
-                    return Err(DirectError::Revoked);
-                }
                 device.info.public_key
             }
         };
@@ -1145,6 +1214,7 @@ mod tests {
         let invitation = fixture.invite();
         let after = wire::now().unwrap();
         assert!((before + 300..=after + 300).contains(&invitation.expires_at_unix_seconds()));
+        assert_eq!(invitation.lifetime(), std::time::Duration::from_secs(300));
         let original = DeviceCredential::generate().unwrap();
         let claim = fixture.claim(&invitation, &original);
         let other = DeviceCredential::generate().unwrap();
@@ -1283,10 +1353,10 @@ mod tests {
         let mut invitation = fixture.invite();
         let credential = DeviceCredential::generate().unwrap();
         invitation.payload.expires = 0;
-        assert!(matches!(
-            Enrollment::claim(&invitation, "Expired".into(), &credential),
-            Err(DirectError::Expired)
-        ));
+        assert!(
+            Enrollment::prepare(&invitation, "Expired".into(), &credential).is_ok(),
+            "only the server's clock decides whether an invitation is expired"
+        );
         fixture.state.lock().unwrap().invitations[0].expires = 0;
         assert!(matches!(
             fixture.authenticate(

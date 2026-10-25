@@ -47,7 +47,7 @@ pub(crate) fn waiting_invitation(
         serde_json::to_vec(&serde_json::json!({
             "schema": 1, "id": invitation, "endpoint": "wss://127.0.0.1:9231/spaceterm",
             "pin": pin, "server_name": label, "token": random_id().unwrap(),
-            "expires": expires,
+            "expires": expires, "valid_for_seconds": 300,
         }))
         .unwrap(),
     );

@@ -390,6 +390,20 @@ pub(crate) mod testing {
         }
     }
 
+    /// Registers this computer's server writer, as the Workspace Window does when it presents
+    /// the account-local server.
+    pub(crate) fn present_local(edits: Rc<ScriptedEdits>, reads: Arc<ScriptedReads>, cx: &mut App) {
+        let client = Client {
+            server: ServerConnection::for_identity("spaceterm-development")
+                .expect("the development identity resolves"),
+            controls: Arc::default(),
+            source: SharedEditSource::new(edits.clone()),
+            edits,
+            reads,
+        };
+        cx.set_global(client);
+    }
+
     /// Registers a presented paired server's writer, as the Workspace Window does when it
     /// presents that server.
     pub(crate) fn present_direct(

@@ -14,6 +14,8 @@ pub struct SetupRequest {
     pub generation: u64,
     pub pin: ServerPin,
     pub expected_policy: Option<NetworkPolicy>,
+    pub expected_enabled: bool,
+    pub endpoint: String,
     pub operation: [u8; 32],
     pub public_key: [u8; 32],
     pub name: ClientName,
@@ -63,6 +65,8 @@ pub fn prepare_direct(
             generation: request.generation,
             pin: request.pin,
             expected_policy: request.expected_policy,
+            expected_enabled: request.expected_enabled,
+            endpoint: request.endpoint,
             policy,
             operation: request.operation,
             public_key: request.public_key,
@@ -81,13 +85,15 @@ pub fn setup_direct(
     policy: NetworkPolicy,
     request: SetupRequest,
 ) -> Result<SetupReply, ServerError> {
-    let endpoint = format!("wss://{}/spaceterm", policy.bind);
+    let endpoint = crate::direct::Endpoint::from_url(&request.endpoint)?.url();
     let paired = match manage(
         identity,
         Management::Setup {
             generation: request.generation,
             pin: request.pin,
             expected_policy: request.expected_policy,
+            expected_enabled: request.expected_enabled,
+            endpoint: request.endpoint,
             policy,
             operation: request.operation,
             public_key: request.public_key,
@@ -162,6 +168,7 @@ fn manage(identity: &str, request: Management) -> Result<ManagementReply, Server
 pub struct AccountDiscovery {
     pub schema: u32,
     pub account: u32,
+    pub ssh_local_address: Option<std::net::IpAddr>,
     pub build: String,
     pub server: Option<[u8; 32]>,
     pub installed: bool,
@@ -191,6 +198,9 @@ pub fn discover(identity: &str) -> Result<AccountDiscovery, ServerError> {
         schema: 1,
         // SAFETY: geteuid has no preconditions.
         account: unsafe { libc::geteuid() },
+        ssh_local_address: std::env::var("SSH_CONNECTION")
+            .ok()
+            .and_then(|value| ssh_local_address(&value)),
         build: identity.into(),
         server,
         installed: status.installed,
@@ -204,4 +214,40 @@ pub fn discover(identity: &str) -> Result<AccountDiscovery, ServerError> {
         version: String::new(),
         commit: String::new(),
     })
+}
+
+fn ssh_local_address(connection: &str) -> Option<std::net::IpAddr> {
+    if connection.len() > 256 {
+        return None;
+    }
+    let fields: Vec<_> = connection.split_ascii_whitespace().collect();
+    let [client, client_port, server, server_port] = fields.as_slice() else {
+        return None;
+    };
+    client.parse::<std::net::IpAddr>().ok()?;
+    if client_port.parse::<u16>().ok()? == 0 || server_port.parse::<u16>().ok()? == 0 {
+        return None;
+    }
+    server.parse().ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn ssh_socket_metadata_accepts_only_the_complete_connection_tuple() {
+        assert_eq!(
+            ssh_local_address("192.0.2.2 50312 192.0.2.8 22"),
+            Some("192.0.2.8".parse().unwrap())
+        );
+        for value in [
+            "192.0.2.8",
+            "host 50312 192.0.2.8 22",
+            "192.0.2.2 0 192.0.2.8 22",
+            "192.0.2.2 50312 host 22",
+            "192.0.2.2 50312 192.0.2.8 22 extra",
+        ] {
+            assert_eq!(ssh_local_address(value), None);
+        }
+    }
 }

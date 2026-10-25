@@ -10,7 +10,7 @@
 
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use gpui::prelude::*;
 use gpui::{
@@ -31,7 +31,7 @@ use crate::ui::chrome_geometry::RadiusRole;
 use crate::ui::chrome_typography::{ChromeTextStyleExt as _, TextRole};
 use crate::ui::direct_access::{
     AccessFailure, Claim, Device, DirectAccessControl, OpenInvitation, code_speech, code_text,
-    countdown, remaining, unix_now,
+    countdown, remaining,
 };
 
 pub(crate) const MODAL_ID: &str = "invite-device";
@@ -92,7 +92,7 @@ enum Stage {
     /// A device used the invitation and the person is deciding whether it may connect.
     Asking {
         invitation: ClaimId,
-        expires_at: u64,
+        deadline: Instant,
         claim: Box<Claim>,
     },
     /// The person allowed the device and the server is pairing it.
@@ -139,10 +139,10 @@ impl Stage {
         }
     }
 
-    fn expires_at(&self) -> Option<u64> {
+    fn deadline(&self) -> Option<Instant> {
         match self {
-            Self::Waiting { invitation, .. } => Some(invitation.expires_at),
-            Self::Asking { expires_at, .. } => Some(*expires_at),
+            Self::Waiting { invitation, .. } => Some(invitation.deadline),
+            Self::Asking { deadline, .. } => Some(*deadline),
             _ => None,
         }
     }
@@ -450,7 +450,7 @@ impl InviteDevice {
                 }
                 let open = body
                     .update(cx, |body, _| {
-                        body.generation == generation && body.stage.expires_at().is_some()
+                        body.generation == generation && body.stage.deadline().is_some()
                     })
                     .unwrap_or(false);
                 if !open {
@@ -467,10 +467,10 @@ impl InviteDevice {
         if self.generation != generation {
             return false;
         }
-        let Some(expires_at) = self.stage.expires_at() else {
+        let Some(deadline) = self.stage.deadline() else {
             return false;
         };
-        if remaining(expires_at, unix_now()) == 0 {
+        if remaining(deadline, Instant::now()) == 0 {
             self.expire(window, cx);
             return false;
         }
@@ -503,7 +503,7 @@ impl InviteDevice {
                 // The link has done its work, so the state that held it drops and wipes it.
                 self.stage = Stage::Asking {
                     invitation: invitation.id,
-                    expires_at: invitation.expires_at,
+                    deadline: invitation.deadline,
                     claim: Box::new(claim),
                 };
                 self.copied = false;
@@ -745,7 +745,7 @@ impl Render for InviteDevice {
             )
             .into_any_element(),
             Stage::Waiting { invitation, code } => {
-                let left = remaining(invitation.expires_at, unix_now());
+                let left = remaining(invitation.deadline, Instant::now());
                 let owner = cx.weak_entity();
                 let copy = Button::new(COPY_SELECTOR, if self.copied { "Copied" } else { "Copy" })
                     .variant(ButtonVariant::Outline)
@@ -950,7 +950,7 @@ mod tests {
 
     use super::*;
     use crate::server_connection::direct::{NetworkPolicy, PairingClaim};
-    use crate::ui::direct_access::AccessState;
+    use crate::ui::direct_access::{AccessState, unix_now};
 
     const SERVER: &str = "studio";
     const LINK: &str = "spaceterm://pair/test-invitation";
@@ -958,9 +958,8 @@ mod tests {
     /// A server's invitation operations as the test scripts them, recording what Invite Device
     /// asked of it.
     struct ScriptedServer {
-        /// When each invitation the server opens expires, in Unix seconds. Every invitation
-        /// shares it, as invitations opened in the same second do.
-        expires_at: Mutex<u64>,
+        /// How long each invitation the server opens lasts, in seconds.
+        lifetime: Mutex<u64>,
         /// The link each invitation the server opens carries.
         link: Mutex<String>,
         invitations: Mutex<Vec<(ClaimId, u64)>>,
@@ -974,7 +973,7 @@ mod tests {
         /// A server whose invitations last `lifetime` seconds from now.
         fn new(lifetime: u64) -> Arc<Self> {
             Arc::new(Self {
-                expires_at: Mutex::new(unix_now() + lifetime),
+                lifetime: Mutex::new(lifetime),
                 link: Mutex::new(LINK.to_owned()),
                 invitations: Mutex::default(),
                 claims: Mutex::default(),
@@ -1036,19 +1035,23 @@ mod tests {
             Err(AccessFailure::Unreachable)
         }
 
-        fn set_policy(&self, _: Option<NetworkPolicy>) -> Result<AccessState, AccessFailure> {
+        fn set_policy(
+            &self,
+            _: Option<NetworkPolicy>,
+            _: bool,
+        ) -> Result<AccessState, AccessFailure> {
             Err(AccessFailure::Refused)
         }
 
         fn invite(&self) -> Result<OpenInvitation, AccessFailure> {
             let mut invitations = self.invitations.lock().expect("invitations");
             let id = [u8::try_from(invitations.len() + 1).expect("few invitations"); 32];
-            let expires_at = *self.expires_at.lock().expect("expiry");
-            invitations.push((id, expires_at));
+            let lifetime = *self.lifetime.lock().expect("lifetime");
+            invitations.push((id, unix_now() + lifetime));
             Ok(OpenInvitation {
                 id,
                 text: Zeroizing::new(self.link.lock().expect("link").clone()),
-                expires_at,
+                deadline: Instant::now() + std::time::Duration::from_secs(lifetime),
             })
         }
 
@@ -1344,7 +1347,7 @@ mod tests {
         assert!(says("Expired", cx));
         assert_eq!(*server.withdrawn.lock().expect("withdrawn"), vec![expired]);
 
-        *server.expires_at.lock().expect("expiry") = unix_now() + 300;
+        *server.lifetime.lock().expect("lifetime") = 300;
         press_return(cx);
 
         assert_eq!(server.invitations.lock().expect("invitations").len(), 2);

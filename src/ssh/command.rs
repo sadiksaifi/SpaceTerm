@@ -219,6 +219,78 @@ fn parse_version_component(component: &str) -> Option<u16> {
 pub(crate) struct SshCommandContext;
 
 impl SshCommandContext {
+    /// Ask OpenSSH to evaluate the same configuration used by this setup attempt.
+    pub(crate) fn resolve_setup(
+        executable: OpenSshExecutable,
+        configuration: &Path,
+        destination: &SshDestination,
+    ) -> Result<SshCommandSpec, RemoteShellCommandError> {
+        validate_setup_configuration_path(configuration)?;
+        validate_setup_configuration_path(executable.as_path())?;
+        Ok(SshCommandSpec::new(
+            executable,
+            vec![
+                "-G".into(),
+                "-F".into(),
+                configuration.as_os_str().to_owned(),
+                "--".into(),
+                destination.as_str().into(),
+            ],
+        ))
+    }
+
+    /// A foreground master belongs only to this one setup, including consent waits.
+    pub(crate) fn setup_master(
+        executable: OpenSshExecutable,
+        configuration: &Path,
+        socket: &Path,
+        destination: &SshDestination,
+    ) -> Result<SshCommandSpec, RemoteShellCommandError> {
+        validate_setup_configuration_path(socket)?;
+        let mut spec = Self::setup(
+            executable,
+            configuration,
+            destination,
+            ValidatedRemoteShellCommand::server_script("exec /bin/cat >/dev/null")?,
+        )?;
+        spec.arguments.splice(
+            0..0,
+            [
+                "-o".into(),
+                "ControlMaster=yes".into(),
+                "-o".into(),
+                format!("ControlPath={}", socket.display()).into(),
+            ],
+        );
+        Ok(spec)
+    }
+
+    /// Refuse a fresh connection if the exact attempt-owned master is unavailable.
+    pub(crate) fn setup_channel(
+        executable: OpenSshExecutable,
+        configuration: &Path,
+        socket: &Path,
+        destination: &SshDestination,
+        command: ValidatedRemoteShellCommand,
+    ) -> Result<SshCommandSpec, RemoteShellCommandError> {
+        validate_setup_configuration_path(socket)?;
+        let mut spec = Self::setup(executable, configuration, destination, command)?;
+        spec.arguments.splice(
+            0..0,
+            [
+                "-o".into(),
+                format!("ControlPath={}", socket.display()).into(),
+                "-o".into(),
+                "ProxyCommand=false".into(),
+                "-o".into(),
+                "ProxyJump=none".into(),
+                "-o".into(),
+                "BatchMode=yes".into(),
+            ],
+        );
+        Ok(spec)
+    }
+
     /// One setup command, using normal OpenSSH configuration without sharing a master.
     pub(crate) fn setup(
         executable: OpenSshExecutable,
@@ -244,7 +316,6 @@ impl SshCommandContext {
             "RequestTTY=no",
             "SessionType=default",
             "PermitLocalCommand=no",
-            "StrictHostKeyChecking=ask",
         ] {
             push_option(&mut arguments, option.into());
         }
@@ -273,27 +344,6 @@ impl SshCommandContext {
             vec![super::askpass::prompt::REMOTE_LINGER_PROMPT.into()],
         ))
     }
-
-    pub(crate) fn setup_cleanup(
-        executable: OpenSshExecutable,
-        configuration: &Path,
-        destination: &SshDestination,
-        command: ValidatedRemoteShellCommand,
-    ) -> Result<SshCommandSpec, RemoteShellCommandError> {
-        let mut spec = Self::setup(executable, configuration, destination, command)?;
-        spec.arguments.splice(
-            0..0,
-            [
-                "-o".into(),
-                "BatchMode=yes".into(),
-                "-o".into(),
-                "StrictHostKeyChecking=yes".into(),
-                "-o".into(),
-                "ConnectTimeout=5".into(),
-            ],
-        );
-        Ok(spec)
-    }
 }
 
 pub(crate) fn validate_setup_configuration_path(
@@ -311,22 +361,14 @@ pub(crate) fn validate_setup_configuration_path(
     Ok(())
 }
 
-pub(crate) fn setup_configuration(
-    home: &Path,
-    quiet: bool,
-) -> Result<Vec<u8>, RemoteShellCommandError> {
+pub(crate) fn setup_configuration(home: &Path) -> Result<Vec<u8>, RemoteShellCommandError> {
     let user = home.join(".ssh/config");
     let user = user
         .to_str()
         .filter(|_| is_safe_absolute_path(&user))
         .ok_or(RemoteShellCommandError::UnsafeConfiguration)?;
     let user = user.replace('\\', "\\\\").replace('"', "\\\"");
-    let interaction = if quiet {
-        "    BatchMode yes\n    StrictHostKeyChecking yes\n"
-    } else {
-        ""
-    };
-    Ok(format!("Host *\n{interaction}    ControlMaster no\n    ControlPath none\n    ControlPersist no\n    IgnoreUnknown ForkAfterAuthentication,SessionType\n    ForkAfterAuthentication no\n    ClearAllForwardings yes\n    PermitLocalCommand no\nInclude \"{user}\"\nHost *\nInclude /etc/ssh/ssh_config\n").into_bytes())
+    Ok(format!("Host *\n    ControlMaster no\n    ControlPath none\n    ControlPersist no\n    IgnoreUnknown ForkAfterAuthentication,SessionType\n    ForkAfterAuthentication no\n    ClearAllForwardings yes\n    PermitLocalCommand no\nInclude \"{user}\"\nHost *\nInclude /etc/ssh/ssh_config\n").into_bytes())
 }
 
 fn is_safe_absolute_path(path: &Path) -> bool {
@@ -656,7 +698,6 @@ mod tests {
             "ForkAfterAuthentication=no",
             "ClearAllForwardings=yes",
             "PermitLocalCommand=no",
-            "StrictHostKeyChecking=ask",
         ] {
             assert!(arguments.windows(2).any(|pair| pair == ["-o", option]));
         }

@@ -137,8 +137,8 @@ fn native_server_owned_work(
         worktree::{Branch, BranchName, Operation},
     };
     use terminal_semantics::stage as api;
-    if std::env::var("SPACETERM_DEVELOPMENT_CLIENT").as_deref() != Ok("setup-native-653") {
-        return Err("WSS fixture requires its dedicated development client identity".into());
+    if identity() != "spaceterm-preflight" {
+        return Err("WSS fixture requires the installed Preflight identity".into());
     }
     let journal = api("wss-open-fixture-journal", server.shared_journal())?;
     if journal.pending().is_some() {
@@ -590,6 +590,100 @@ impl AskPassAttemptFactory for NoPrompt {
     }
 }
 
+#[derive(Default)]
+struct ObservedPrompts {
+    attempts: AtomicUsize,
+}
+impl AskPassAttemptFactory for ObservedPrompts {
+    fn start_attempt(&self, paths: &AppPaths) -> Result<AskPassAttempt, AskPassUnavailable> {
+        self.attempts.fetch_add(1, Ordering::SeqCst);
+        NoPrompt.start_attempt(paths)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NativeOfferKind {
+    Installation,
+    Startup,
+    Network,
+}
+
+struct NativeOfferObservation {
+    kind: NativeOfferKind,
+    address: Option<SetupAddress>,
+}
+
+struct NativeApprovals {
+    permissions: (bool, bool, bool),
+    pause_on_offer: bool,
+    waiting: AtomicBool,
+    release: AtomicBool,
+    observed: Mutex<Vec<NativeOfferObservation>>,
+    adapter: ObservedAdapter,
+    prompts: Arc<ObservedPrompts>,
+    expected_address: Mutex<Option<SetupAddress>>,
+    master_baseline: usize,
+}
+impl NativeApprovals {
+    fn new(adapter: &ObservedAdapter, permissions: (bool, bool, bool)) -> Arc<Self> {
+        Arc::new(Self {
+            permissions,
+            pause_on_offer: false,
+            waiting: AtomicBool::new(false),
+            release: AtomicBool::new(false),
+            observed: Mutex::default(),
+            adapter: adapter.clone(),
+            prompts: Arc::default(),
+            expected_address: Mutex::default(),
+            master_baseline: adapter.masters.load(Ordering::SeqCst),
+        })
+    }
+
+    fn assert_one_authentication(&self) {
+        assert_eq!(self.prompts.attempts.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            self.adapter.masters.load(Ordering::SeqCst),
+            self.master_baseline + 1
+        );
+    }
+}
+impl SetupApprovalHandler for NativeApprovals {
+    fn approve(&self, offer: SetupOffer, cancellation: &CancellationToken) -> bool {
+        self.assert_one_authentication();
+        assert_eq!(
+            self.adapter.active.load(Ordering::SeqCst),
+            1,
+            "approval must pause the same live setup SSH connection"
+        );
+        let (kind, address, accepted) = match offer {
+            SetupOffer::Installation { .. } => {
+                (NativeOfferKind::Installation, None, self.permissions.0)
+            }
+            SetupOffer::Startup => (NativeOfferKind::Startup, None, self.permissions.1),
+            SetupOffer::Network { address, .. } => {
+                if let Some(expected) = &*self.expected_address.lock().unwrap() {
+                    assert!(
+                        &address == expected,
+                        "network approval changed the selected WSS address"
+                    );
+                }
+                (NativeOfferKind::Network, Some(address), self.permissions.2)
+            }
+        };
+        self.observed
+            .lock()
+            .unwrap()
+            .push(NativeOfferObservation { kind, address });
+        if self.pause_on_offer {
+            self.waiting.store(true, Ordering::SeqCst);
+            while !self.release.load(Ordering::SeqCst) && !cancellation.is_cancelled() {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+        accepted && !cancellation.is_cancelled()
+    }
+}
+
 #[derive(Clone, Default)]
 struct ObservedAdapter {
     spawns: Arc<AtomicUsize>,
@@ -597,6 +691,10 @@ struct ObservedAdapter {
     sealed: Arc<AtomicBool>,
     cancel_after_spawn: Arc<Mutex<Option<CancellationToken>>>,
     refused_start_observed: Arc<AtomicBool>,
+    masters: Arc<AtomicUsize>,
+    channels: Arc<AtomicUsize>,
+    master_path: Arc<Mutex<Option<std::ffi::OsString>>>,
+    master_configuration: Arc<Mutex<Option<PathBuf>>>,
 }
 impl ObservedAdapter {
     fn assert_closed(&self) {
@@ -605,6 +703,18 @@ impl ObservedAdapter {
             0,
             "setup retained an SSH process"
         );
+        if let Some(path) = self.master_path.lock().unwrap().as_ref() {
+            assert!(
+                std::fs::symlink_metadata(path).is_err(),
+                "setup retained its private master socket"
+            );
+        }
+        if let Some(path) = self.master_configuration.lock().unwrap().as_ref() {
+            assert!(
+                std::fs::symlink_metadata(path).is_err(),
+                "setup retained its private master configuration"
+            );
+        }
     }
     fn seal(&self) -> usize {
         self.assert_closed();
@@ -622,6 +732,44 @@ impl SshProcessAdapter for ObservedAdapter {
             !self.sealed.load(Ordering::SeqCst),
             "remote use attempted SSH after setup"
         );
+        let arguments = request.arguments();
+        let options = arguments
+            .windows(2)
+            .filter(|pair| pair[0] == "-o")
+            .map(|pair| pair[1].as_os_str())
+            .collect::<Vec<_>>();
+        let option = |value: &str| options.contains(&std::ffi::OsStr::new(value));
+        let nonnetwork = arguments == [std::ffi::OsString::from("-V")]
+            || arguments.iter().any(|argument| argument == "-G");
+        if !nonnetwork {
+            let control_path = options
+                .iter()
+                .find_map(|option| option.to_str()?.strip_prefix("ControlPath="))
+                .expect("setup SSH must select its exact private master socket");
+            if option("ControlMaster=yes") {
+                self.masters.fetch_add(1, Ordering::SeqCst);
+                *self.master_path.lock().unwrap() = Some(control_path.into());
+                *self.master_configuration.lock().unwrap() = Some(
+                    arguments
+                        .windows(2)
+                        .find(|pair| pair[0] == "-F")
+                        .expect("setup master must use its attempt-owned configuration")[1]
+                        .clone()
+                        .into(),
+                );
+            } else {
+                assert!(option("ControlMaster=no"));
+                assert!(option("ProxyCommand=false"));
+                assert!(option("ProxyJump=none"));
+                assert!(option("BatchMode=yes"));
+                assert!(
+                    self.master_path.lock().unwrap().as_deref()
+                        == Some(std::ffi::OsStr::new(control_path)),
+                    "setup channel selected a different master socket"
+                );
+                self.channels.fetch_add(1, Ordering::SeqCst);
+            }
+        }
         self.spawns.fetch_add(1, Ordering::SeqCst);
         let process = crate::platform::unix_ssh_process::UnixSshProcessAdapter.spawn(request)?;
         self.active.fetch_add(1, Ordering::SeqCst);
@@ -834,17 +982,133 @@ impl Drop for NativeFixture {
     }
 }
 
+struct NativeDnsHome {
+    path: PathBuf,
+    identity: (u64, u64),
+}
+impl NativeDnsHome {
+    fn from_environment(
+        fixture: &NativeFixture,
+        request: &SetupRequest,
+        expected_address: &SetupAddress,
+    ) -> Option<Self> {
+        use std::io::Write;
+        use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+
+        let hostname = std::env::var_os("SPACETERM_SETUP_NATIVE_HOSTNAME_OVERRIDE")?;
+        let hostname = hostname
+            .to_str()
+            .expect("the fixture HostName must be UTF-8");
+        assert!(
+            request.address.is_none(),
+            "the DNS fixture must derive its address from OpenSSH"
+        );
+        let address = SetupAddress::parse(hostname).expect("select a valid DNS HostName");
+        assert!(address.host().parse::<std::net::IpAddr>().is_err());
+        assert_eq!(
+            hostname.trim_end_matches('.').to_ascii_lowercase(),
+            address.host(),
+            "the HostName override accepts DNS only, without a port"
+        );
+        assert!(
+            expected_address == &address,
+            "EXPECT_ADDRESS must independently confirm the override's default WSS address"
+        );
+        let literal_alias = |value: &str| {
+            !value.is_empty()
+                && value.len() <= 253
+                && value.as_bytes()[0].is_ascii_alphanumeric()
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
+        };
+        let destination = request.destination.as_str();
+        let alias = match destination.split_once('@') {
+            Some((user, alias)) => {
+                assert!(literal_alias(user), "select a literal SSH account name");
+                alias
+            }
+            None => destination,
+        };
+        assert!(
+            literal_alias(alias),
+            "select a literal SSH alias without patterns or a port"
+        );
+        assert!(
+            !alias.eq_ignore_ascii_case(address.host()),
+            "the DNS fixture needs an alias distinct from its effective HostName"
+        );
+        let source = PathBuf::from(std::env::var_os("HOME").expect("select the actual SSH home"))
+            .join(".ssh/config");
+        assert!(
+            source.is_absolute()
+                && !source
+                    .components()
+                    .any(|part| matches!(part, std::path::Component::ParentDir)),
+            "the existing user configuration must have an absolute literal path"
+        );
+        let include = source
+            .to_str()
+            .expect("the existing user configuration path must be UTF-8");
+        assert!(
+            !include.chars().any(|character| character.is_control()
+                || matches!(character, '*' | '?' | '[' | ']' | '%' | '$' | '~')),
+            "the existing user configuration path must not expand patterns or tokens"
+        );
+        assert!(
+            std::fs::metadata(&source).is_ok_and(|metadata| metadata.is_file()),
+            "the DNS fixture must include an existing user SSH configuration"
+        );
+        let include = include.replace('\\', "\\\\").replace('"', "\\\"");
+        let path = fixture.root.join("dns-home");
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&path)
+            .unwrap();
+        let metadata = std::fs::symlink_metadata(&path).unwrap();
+        let home = Self {
+            path,
+            identity: (metadata.dev(), metadata.ino()),
+        };
+        let ssh = home.path.join(".ssh");
+        std::fs::DirBuilder::new().mode(0o700).create(&ssh).unwrap();
+        let mut config = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(ssh.join("config"))
+            .unwrap();
+        write!(
+            config,
+            "Host {alias}\n    HostName {}\nHost *\n    Include \"{include}\"\nHost *\n",
+            address.host()
+        )
+        .unwrap();
+        Some(home)
+    }
+}
+impl Drop for NativeDnsHome {
+    fn drop(&mut self) {
+        use std::os::unix::fs::MetadataExt;
+        if std::fs::symlink_metadata(&self.path).is_ok_and(|metadata| {
+            metadata.is_dir() && (metadata.dev(), metadata.ino()) == self.identity
+        }) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+}
+
 fn expected_state() -> String {
     let expected = std::env::var("SPACETERM_SETUP_NATIVE_EXPECT")
         .expect("select missing, ready or stopped account state");
     assert!(matches!(expected.as_str(), "missing" | "ready" | "stopped"));
     expected
 }
-fn native_request(approvals: SetupApprovals) -> SetupRequest {
-    assert_ne!(
+fn native_request(approvals: Arc<NativeApprovals>) -> SetupRequest {
+    assert_eq!(
         identity(),
-        "spaceterm",
-        "native setup fixtures require a nonproduction identity"
+        "spaceterm-preflight",
+        "native setup fixtures require a compiled Preflight client and installed Preflight service"
     );
     assert_eq!(
         std::env::var("SPACETERM_SETUP_NATIVE_IDENTITY").as_deref(),
@@ -857,12 +1121,11 @@ fn native_request(approvals: SetupApprovals) -> SetupRequest {
                 .expect("select an existing OpenSSH configuration destination"),
         )
         .unwrap(),
-        endpoint: std::env::var("SPACETERM_SETUP_NATIVE_ENDPOINT")
-            .expect("select the owner-confirmed concrete reachable IP:port")
-            .parse()
-            .unwrap(),
+        address: std::env::var_os("SPACETERM_SETUP_NATIVE_ADDRESS").map(|address| {
+            SetupAddress::parse(address.to_str().expect("the setup address must be UTF-8")).unwrap()
+        }),
         name: "setup-native-653".into(),
-        prompts: Arc::new(NoPrompt),
+        prompts: approvals.prompts.clone(),
         approvals,
     }
 }
@@ -885,24 +1148,29 @@ fn wait_for(stage: &str, mut condition: impl FnMut() -> bool) {
 fn native_server_setup_requires_consent() {
     let fixture = NativeFixture::new("consent", configured_catalog(), true);
     let (progress, phases) = fixture.progress();
-    let result = fixture.backend().setup(
-        native_request(SetupApprovals::default()),
+    let approvals = NativeApprovals::new(&fixture.adapter, (false, false, false));
+    let backend = fixture.backend();
+    let result = backend.setup(
+        native_request(approvals.clone()),
         &CancellationToken::default(),
         &progress,
     );
-    match expected_state().as_str() {
-        "missing" => assert!(matches!(
-            result,
-            Err(SetupFailure::InstallationOffered { .. })
-        )),
-        "stopped" => assert!(matches!(result, Err(SetupFailure::StartupRequired { .. }))),
-        "ready" => assert!(matches!(
-            result,
-            Err(SetupFailure::NetworkAuthorizationRequired { .. })
-        )),
+    assert_eq!(result, Err(SetupFailure::Cancelled));
+    let expected = match expected_state().as_str() {
+        "missing" => NativeOfferKind::Installation,
+        "stopped" => NativeOfferKind::Startup,
+        "ready" => NativeOfferKind::Network,
         _ => unreachable!(),
-    }
+    };
+    let offers = approvals.observed.lock().unwrap();
+    assert_eq!(offers.len(), 1);
+    assert_eq!(offers[0].kind, expected);
+    approvals.assert_one_authentication();
     fixture.assert_no_connection();
+    assert_eq!(
+        backend.process_counts().spawned,
+        backend.process_counts().reaped
+    );
     assert_eq!(fixture.credentials.inserts.load(Ordering::SeqCst), 0);
     assert!(!phases.lock().unwrap().iter().any(|phase| matches!(
         phase,
@@ -942,7 +1210,10 @@ fn native_server_setup_rejects_a_damaged_signed_package_before_offering_installa
     fixture.catalog = Some(damaged);
     let (progress, phases) = fixture.progress();
     let result = fixture.backend().setup(
-        native_request(SetupApprovals::default()),
+        native_request(NativeApprovals::new(
+            &fixture.adapter,
+            (false, false, false),
+        )),
         &CancellationToken::default(),
         &progress,
     );
@@ -964,7 +1235,10 @@ fn native_server_setup_cancellation_closes_every_ssh_process() {
     let (progress, _) = fixture.progress();
     let backend = fixture.backend();
     let result = backend.setup(
-        native_request(SetupApprovals::default()),
+        native_request(NativeApprovals::new(
+            &fixture.adapter,
+            (false, false, false),
+        )),
         &cancellation,
         &progress,
     );
@@ -972,6 +1246,44 @@ fn native_server_setup_cancellation_closes_every_ssh_process() {
     fixture.assert_no_connection();
     assert_eq!(backend.process_counts().spawned, 1);
     assert_eq!(backend.process_counts().active(), 0);
+    assert_eq!(
+        backend.process_counts().spawned,
+        backend.process_counts().reaped
+    );
+    assert_eq!(fixture.credentials.inserts.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+#[ignore = "cancels at the first approval on an explicitly selected Preflight service while its authenticated setup connection remains live"]
+fn native_server_setup_cancellation_during_approval_closes_every_ssh_process() {
+    let fixture = NativeFixture::new("cancel-approval", configured_catalog(), false);
+    let mut approvals = NativeApprovals::new(&fixture.adapter, (false, false, false));
+    Arc::get_mut(&mut approvals).unwrap().pause_on_offer = true;
+    let cancellation = CancellationToken::default();
+    let (progress, _) = fixture.progress();
+    let backend = Arc::new(fixture.backend());
+    let attempted = Arc::clone(&backend);
+    let worker_cancellation = cancellation.clone();
+    let request = native_request(approvals.clone());
+    let thread =
+        std::thread::spawn(move || attempted.setup(request, &worker_cancellation, &progress));
+    let mut worker = SetupWorker {
+        cancellation,
+        thread: Some(thread),
+    };
+    wait_for("setup approval wait", || {
+        approvals.waiting.load(Ordering::SeqCst)
+    });
+    assert_eq!(backend.process_counts().active(), 1);
+    let result = worker.finish();
+    assert_eq!(result, Err(SetupFailure::Cancelled));
+    assert!(worker.cancellation.is_cancelled());
+    assert_eq!(approvals.observed.lock().unwrap().len(), 1);
+    approvals.assert_one_authentication();
+    fixture.assert_no_connection();
+    let counts = backend.process_counts();
+    assert_eq!(counts.active(), 0);
+    assert_eq!(counts.spawned, counts.reaped);
     assert_eq!(fixture.credentials.inserts.load(Ordering::SeqCst), 0);
 }
 
@@ -982,7 +1294,7 @@ fn native_server_setup_reports_unavailable_credentials_without_publishing_a_conn
     let fixture = NativeFixture::new("credentials", None, true);
     let (progress, phases) = fixture.progress();
     let backend = fixture.backend();
-    let result = setup_with_approved_offers(&backend, (false, false), &progress);
+    let result = setup_with_approvals(&backend, &fixture.adapter, (false, false), &progress);
     assert_eq!(
         result,
         Err(SetupFailure::Unavailable(
@@ -1048,55 +1360,111 @@ fn accepted_permissions() -> (bool, bool) {
     (install, start)
 }
 
-fn setup_with_approved_offers(
+fn setup_with_approvals(
     backend: &impl SshSetupBackend,
+    adapter: &ObservedAdapter,
     permissions: (bool, bool),
     progress: &SetupProgress,
 ) -> Result<crate::direct_connections::DirectRouteId, SetupFailure> {
-    let mut approvals = SetupApprovals::default();
-    loop {
-        match backend.setup(
-            native_request(approvals.clone()),
-            &CancellationToken::default(),
-            progress,
-        ) {
-            Err(SetupFailure::InstallationOffered { approval, .. })
-                if permissions.0 && approvals.install.is_none() =>
-            {
-                approvals.install = Some(approval)
-            }
-            Err(SetupFailure::StartupRequired { approval })
-                if permissions.1 && approvals.start.is_none() =>
-            {
-                approvals.start = Some(approval)
-            }
-            Err(SetupFailure::NetworkAuthorizationRequired { approval, .. })
-                if approvals.expose_network.is_none() =>
-            {
-                approvals.expose_network = Some(approval)
-            }
-            result => return result,
-        }
-    }
+    let approvals = NativeApprovals::new(adapter, (permissions.0, permissions.1, true));
+    backend.setup(
+        native_request(approvals),
+        &CancellationToken::default(),
+        progress,
+    )
 }
 
 #[test]
-#[ignore = "installs or starts only an owner-confirmed disposable service; writes a native credential, exposes its confirmed IP:port and removes only test-owned WSS work and pairing"]
+#[ignore = "requires compiled and installed Preflight; one SSH authentication spans approved setup, then WSS owns work, reconnect and exact pairing cleanup"]
 fn native_server_setup_acceptance() {
-    assert_eq!(
-        std::env::var("SPACETERM_DEVELOPMENT_CLIENT").as_deref(),
-        Ok("setup-native-653")
-    );
     let mut fixture = NativeFixture::new("accept", configured_catalog(), false);
-    let (progress, phases) = fixture.progress();
-    let backend = fixture.backend();
-    let route = setup_with_approved_offers(&backend, accepted_permissions(), &progress)
+    let permissions = accepted_permissions();
+    let approvals = NativeApprovals::new(&fixture.adapter, (permissions.0, permissions.1, true));
+    let request = native_request(approvals.clone());
+    let require_network_offer = request.address.is_none() || expected_state() == "missing";
+    let expected_address = request.address.clone().unwrap_or_else(|| {
+        let expected = std::env::var("SPACETERM_SETUP_NATIVE_EXPECT_ADDRESS")
+            .expect("confirm the SSH alias's effective DNS HostName and WSS port");
+        let address = SetupAddress::parse(&expected).unwrap();
+        assert!(
+            address.host().parse::<std::net::IpAddr>().is_err(),
+            "the default-address acceptance cell must retain a DNS name"
+        );
+        assert_ne!(
+            request.destination.as_str().rsplit('@').next().unwrap(),
+            address.host(),
+            "select an SSH alias whose HostName differs from the alias"
+        );
+        address
+    });
+    let dns_home = NativeDnsHome::from_environment(&fixture, &request, &expected_address);
+    *approvals.expected_address.lock().unwrap() = Some(expected_address.clone());
+    let observed = Arc::clone(&approvals);
+    let (base_progress, phases) = fixture.progress();
+    let connecting = Arc::new(AtomicBool::new(false));
+    let observed_connecting = Arc::clone(&connecting);
+    let expected_before_wss = expected_address.clone();
+    let progress = SetupProgress::new(move |phase| {
+        base_progress.report(phase);
+        if phase == SetupPhase::Connecting {
+            observed.assert_one_authentication();
+            let offers = observed.observed.lock().unwrap();
+            if require_network_offer {
+                assert!(
+                    offers
+                        .iter()
+                        .any(|offer| { offer.address.as_ref() == Some(&expected_before_wss) }),
+                    "the default-DNS or fresh-install cell requires a network offer before WSS admission"
+                );
+            }
+            observed_connecting.store(true, Ordering::SeqCst);
+        }
+    });
+    let backend = match &dns_home {
+        Some(home) => fixture.backend_with_home(
+            Arc::new(crate::platform::unix_ssh_process::UnixSshProcessAdapter),
+            home.path.clone(),
+        ),
+        None => fixture.backend(),
+    };
+    let route = backend
+        .setup(request, &CancellationToken::default(), &progress)
         .expect("setup must finish with admitted saved WSS");
+    drop(dns_home);
+    approvals.assert_one_authentication();
+    assert!(connecting.load(Ordering::SeqCst));
+    let offers = approvals.observed.lock().unwrap();
+    let network_offers = offers
+        .iter()
+        .filter(|offer| offer.kind == NativeOfferKind::Network)
+        .count();
+    assert!(network_offers <= 1);
+    if require_network_offer {
+        assert_eq!(network_offers, 1);
+    }
+    match expected_state().as_str() {
+        "missing" => assert!(
+            offers
+                .iter()
+                .any(|offer| offer.kind == NativeOfferKind::Installation)
+        ),
+        "stopped" => assert!(
+            offers
+                .iter()
+                .any(|offer| offer.kind == NativeOfferKind::Startup)
+        ),
+        _ => {}
+    }
+    drop(offers);
     assert_eq!(
         fixture.direct.status(&route),
         Some(DirectRouteStatus::Connected)
     );
     assert_eq!(fixture.direct.routes().len(), 1);
+    assert_eq!(
+        fixture.direct.route(&route).unwrap().endpoint,
+        expected_address.url()
+    );
     let paired = fixture.direct.route(&route).unwrap().paired;
     assert_ne!(paired.client, [0; 32]);
     let server = fixture.direct.server(&route).unwrap();
@@ -1111,10 +1479,20 @@ fn native_server_setup_acceptance() {
     assert_eq!(counts.spawned, counts.reaped);
     assert_eq!(counts.spawned, spawns);
     assert!(spawns > 0, "native acceptance did not exercise OpenSSH");
+    assert!(fixture.adapter.channels.load(Ordering::SeqCst) > 0);
     assert_eq!(fixture.credentials.inserts.load(Ordering::SeqCst), 1);
     assert!(fixture.credentials.reads.load(Ordering::SeqCst) > 0);
     assert!(fixture.direct.pending_unpairs().is_empty());
-    assert_eq!(phases.lock().unwrap().last(), Some(&SetupPhase::Connecting));
+    let phases = phases.lock().unwrap();
+    assert_eq!(phases.last(), Some(&SetupPhase::Connecting));
+    assert_eq!(
+        phases
+            .iter()
+            .filter(|phase| **phase == SetupPhase::Authenticating)
+            .count(),
+        1
+    );
+    drop(phases);
     native_server_owned_work(&server, || {
         fixture.direct.disconnect(&route);
         assert!(
@@ -1137,6 +1515,10 @@ fn native_server_setup_acceptance() {
     );
     relaunched.resume_retained();
     assert_eq!(relaunched.route(&route).unwrap().paired, paired);
+    assert_eq!(
+        relaunched.route(&route).unwrap().endpoint,
+        expected_address.url()
+    );
     relaunched.resume(&route);
     wait_for("saved WSS relaunch", || {
         relaunched.status(&route) == Some(DirectRouteStatus::Connected)
@@ -1185,7 +1567,7 @@ fn native_server_setup_save_failure_keeps_cleanup_without_publishing_a_connectio
         }
     });
     let backend = fixture.backend();
-    let result = setup_with_approved_offers(&backend, (false, false), &progress);
+    let result = setup_with_approvals(&backend, &fixture.adapter, (false, false), &progress);
     assert_eq!(result, Err(SetupFailure::Unconfirmed(SetupOperation::Save)));
     fixture.assert_no_connection();
     let spawns = fixture.adapter.seal();
@@ -1283,20 +1665,27 @@ fn native_server_setup_refuses_linux_installation_without_operating_system_autho
     let fixture = NativeFixture::new("authorization", configured_catalog(), false);
     let (progress, _) = fixture.progress();
     let backend = fixture.backend();
-    let result = setup_with_approved_offers(&backend, (true, true), &progress);
+    let result = setup_with_approvals(&backend, &fixture.adapter, (true, true), &progress);
     assert_eq!(
         result,
         Err(SetupFailure::Refused(RefusalKind::AuthorizationRefused))
     );
     fixture.assert_no_connection();
     assert_eq!(fixture.credentials.inserts.load(Ordering::SeqCst), 0);
+    let approvals = NativeApprovals::new(&fixture.adapter, (false, false, false));
     let observed = backend.setup(
-        native_request(SetupApprovals::default()),
+        native_request(approvals.clone()),
         &CancellationToken::default(),
         &progress,
     );
     assert!(
-        matches!(observed, Err(SetupFailure::InstallationOffered { .. })),
+        observed == Err(SetupFailure::Cancelled)
+            && approvals
+                .observed
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|offer| offer.kind == NativeOfferKind::Installation),
         "authorization refusal must leave the account service uninstalled"
     );
     fixture.adapter.assert_closed();
@@ -1366,7 +1755,7 @@ fn lost_enrollment_reply_cleanup(refuse_cancellation: bool) {
         cancellation_requests: AtomicUsize::new(0),
     });
     let backend = fixture.backend_with_bootstrap(bootstrap.clone());
-    let result = setup_with_approved_offers(&backend, (false, false), &progress);
+    let result = setup_with_approvals(&backend, &fixture.adapter, (false, false), &progress);
     assert_eq!(
         result,
         Err(SetupFailure::Unconfirmed(SetupOperation::Enrollment))
@@ -1501,7 +1890,7 @@ fn native_server_setup_refuses_a_replacement_at_startup_dispatch_without_clearin
     let fixture = NativeFixture::new("start-race", None, true);
     let (progress, phases) = fixture.progress();
     let backend = fixture.backend_with_bootstrap(Arc::new(ReplacementDuringStartup));
-    let result = setup_with_approved_offers(&backend, (false, true), &progress);
+    let result = setup_with_approvals(&backend, &fixture.adapter, (false, true), &progress);
     assert_eq!(
         result,
         Err(SetupFailure::Unconfirmed(SetupOperation::Start))
@@ -1516,15 +1905,21 @@ fn native_server_setup_refuses_a_replacement_at_startup_dispatch_without_clearin
     fixture.assert_no_connection();
     assert_eq!(fixture.credentials.inserts.load(Ordering::SeqCst), 0);
     assert!(!phases.lock().unwrap().contains(&SetupPhase::Enrolling));
+    let approvals = NativeApprovals::new(&fixture.adapter, (false, false, false));
     let still_stopped = backend.setup(
-        native_request(SetupApprovals::default()),
+        native_request(approvals.clone()),
         &CancellationToken::default(),
         &progress,
     );
-    assert!(matches!(
-        still_stopped,
-        Err(SetupFailure::StartupRequired { .. })
-    ));
+    assert_eq!(still_stopped, Err(SetupFailure::Cancelled));
+    assert!(
+        approvals
+            .observed
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|offer| offer.kind == NativeOfferKind::Startup)
+    );
     fixture.adapter.assert_closed();
     assert_eq!(backend.process_counts().active(), 0);
 }
@@ -1545,10 +1940,10 @@ fn native_server_setup_refuses_unsafe_runtime_config_paths_before_spawning_ssh()
         let result = backend.setup(
             SetupRequest {
                 destination: SshDestination::new("fixture-target".into()).unwrap(),
-                endpoint: "192.0.2.1:9231".parse().unwrap(),
+                address: Some(SetupAddress::parse("192.0.2.1:9231").unwrap()),
                 name: "Fixture".into(),
                 prompts: Arc::new(NoPrompt),
-                approvals: SetupApprovals::default(),
+                approvals: NativeApprovals::new(&fixture.adapter, (false, false, false)),
             },
             &CancellationToken::default(),
             &SetupProgress::new(|_| {}),
@@ -1676,6 +2071,51 @@ impl SshServerBootstrap for BlockingDiscovery {
     }
 }
 
+struct StoppedDiscovery(PathBuf);
+impl SshServerBootstrap for StoppedDiscovery {
+    fn locator(&self, identity: &str, action: &str, _: bool) -> String {
+        if action != "ssh-discover" {
+            return "exit 79\n".into();
+        }
+        // The loopback SSH account is this fixture's owning account. No native service is touched.
+        // SAFETY: geteuid has no preconditions.
+        let account = unsafe { libc::geteuid() };
+        let discovery = spaceterm_server::provisioning::AccountDiscovery {
+            schema: 1,
+            account,
+            ssh_local_address: None,
+            build: identity.into(),
+            server: Some([19; 32]),
+            installed: true,
+            enabled: false,
+            running: false,
+            stopped: true,
+            start_observation: Some(spaceterm_server::service::SetupStartObservation {
+                account,
+                build: identity.into(),
+                server: [19; 32],
+                installation: "a".repeat(64),
+                version: "1.0.0".into(),
+                commit: "b".repeat(40),
+                stopped: true,
+            }),
+            protocol_majors: vec![1],
+            capabilities: vec!["workspace_policy".into()],
+            target: env!("SPACETERM_TARGET").into(),
+            version: "1.0.0".into(),
+            commit: "b".repeat(40),
+        };
+        let response = serde_json::to_string(&discovery)
+            .unwrap()
+            .replace('\'', "'\\''");
+        let witness = self.0.to_str().unwrap().replace('\'', "'\\''");
+        format!("printf x >> '{witness}'; printf '%s\\n' '{response}'\n")
+    }
+    fn install(&self, _: &str, _: usize, _: &[u8], _: &str, _: bool) -> String {
+        panic!("the stopped-discovery fixture never installs a server")
+    }
+}
+
 struct SetupWorker {
     cancellation: CancellationToken,
     thread: Option<
@@ -1685,6 +2125,9 @@ struct SetupWorker {
 impl SetupWorker {
     fn finish(&mut self) -> Result<crate::direct_connections::DirectRouteId, SetupFailure> {
         self.cancellation.cancel();
+        self.join()
+    }
+    fn join(&mut self) -> Result<crate::direct_connections::DirectRouteId, SetupFailure> {
         self.thread
             .take()
             .unwrap()
@@ -1730,126 +2173,147 @@ fn fixture_account_name() -> String {
     account
 }
 
-#[test]
-#[ignore = "requires runnable /usr/sbin/sshd and ssh-keygen as the current nonroot account; uses only fixture keys, loopback listeners and private multiplexing sockets"]
-fn native_server_setup_proxyjump_cancellation_leaves_no_persistent_hop_and_preserves_an_unrelated_master()
- {
-    use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
-    assert!(
-        std::path::Path::new("/usr/sbin/sshd").is_file(),
-        "native ProxyJump fixture requires /usr/sbin/sshd"
-    );
-    // SAFETY: geteuid has no preconditions.
-    assert_ne!(
-        unsafe { libc::geteuid() },
-        0,
-        "native setup runs as a nonroot account"
-    );
-    let fixture = NativeFixture::new("proxyjump", None, true);
-    let root = &fixture.root;
-    for name in ["host-key", "client-key"] {
-        let status = std::process::Command::new("/usr/bin/ssh-keygen")
-            .args(["-q", "-t", "ed25519", "-N", "", "-f"])
-            .arg(root.join(name))
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .expect("fixture requires ssh-keygen");
-        assert!(status.success(), "fixture key generation failed");
-    }
-    let account = fixture_account_name();
-    let reservation = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = reservation.local_addr().unwrap().port();
-    let sshd_config = root.join("sshd-config");
-    std::fs::write(&sshd_config, format!(
+struct ProxyJumpFixture {
+    // Drop every fixture process before removing its private files.
+    unrelated: Mutex<FixtureChild>,
+    _masters: FixtureMasters,
+    _sshd: FixtureChild,
+    config: PathBuf,
+    setup: NativeFixture,
+}
+impl ProxyJumpFixture {
+    fn new() -> Self {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        assert!(
+            std::path::Path::new("/usr/sbin/sshd").is_file(),
+            "native ProxyJump fixture requires /usr/sbin/sshd"
+        );
+        // SAFETY: geteuid has no preconditions.
+        assert_ne!(
+            unsafe { libc::geteuid() },
+            0,
+            "native setup runs as a nonroot account"
+        );
+        let fixture = NativeFixture::new("proxyjump", None, true);
+        let root = &fixture.root;
+        for name in ["host-key", "client-key"] {
+            let status = std::process::Command::new("/usr/bin/ssh-keygen")
+                .args(["-q", "-t", "ed25519", "-N", "", "-f"])
+                .arg(root.join(name))
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .expect("fixture requires ssh-keygen");
+            assert!(status.success(), "fixture key generation failed");
+        }
+        let account = fixture_account_name();
+        let reservation = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = reservation.local_addr().unwrap().port();
+        let sshd_config = root.join("sshd-config");
+        std::fs::write(&sshd_config, format!(
         "Port {port}\nListenAddress 127.0.0.1\nHostKey {}/host-key\nPidFile {}/sshd-pid\nAuthorizedKeysFile {}/client-key.pub\nAllowUsers {account}\nStrictModes no\nUsePAM no\nPasswordAuthentication no\nKbdInteractiveAuthentication no\nPubkeyAuthentication yes\nAllowTcpForwarding yes\nAllowAgentForwarding no\nX11Forwarding no\nPrintMotd no\nLogLevel QUIET\n",
         root.display(), root.display(), root.display())).unwrap();
-    let public = std::fs::read_to_string(root.join("host-key.pub")).unwrap();
-    let mut fields = public.split_whitespace();
-    let algorithm = fields.next().unwrap();
-    let key = fields.next().unwrap();
-    std::fs::write(
-        root.join("known-hosts"),
-        format!("[127.0.0.1]:{port} {algorithm} {key}\n"),
-    )
-    .unwrap();
-    std::fs::DirBuilder::new()
-        .mode(0o700)
-        .create(root.join(".ssh"))
+        let public = std::fs::read_to_string(root.join("host-key.pub")).unwrap();
+        let mut fields = public.split_whitespace();
+        let algorithm = fields.next().unwrap();
+        let key = fields.next().unwrap();
+        std::fs::write(
+            root.join("known-hosts"),
+            format!("[127.0.0.1]:{port} {algorithm} {key}\n"),
+        )
         .unwrap();
-    let config = root.join(".ssh/config");
-    let mut file = std::fs::OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .mode(0o600)
-        .open(&config)
-        .unwrap();
-    write!(file,
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(root.join(".ssh"))
+            .unwrap();
+        let config = root.join(".ssh/config");
+        let mut file = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(0o600)
+            .open(&config)
+            .unwrap();
+        write!(file,
         "Host *\n ControlMaster auto\n ControlPath {}/mux-%C\n ControlPersist 600\n ForkAfterAuthentication yes\n BatchMode yes\n IdentitiesOnly yes\n IdentityFile {}/client-key\n UserKnownHostsFile {}/known-hosts\n GlobalKnownHostsFile /dev/null\n StrictHostKeyChecking yes\nHost fixture-hop fixture-target fixture-unrelated\n HostName 127.0.0.1\n Port {port}\n User {account}\nHost fixture-target\n ProxyJump fixture-hop\n",
         root.display(), root.display(), root.display()).unwrap();
-    drop(file);
-    drop(reservation);
-    let mut sshd = FixtureChild::spawn(
-        "/usr/sbin/sshd",
-        vec![
-            "-D".into(),
-            "-e".into(),
-            "-f".into(),
-            sshd_config.into_os_string(),
-        ],
-        root,
-    );
-    wait_for("loopback sshd", || {
-        assert!(
-            sshd.running(),
-            "fixture sshd exited; check native account and sshd prerequisites"
-        );
-        std::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port)).is_ok()
-    });
-    let _masters = FixtureMasters {
-        config: config.clone(),
-        home: root.clone(),
-    };
-    let effective = fixture_ssh(&config, root, &["-G".into(), "fixture-target".into()]);
-    assert!(effective.exit.is_success());
-    let effective = String::from_utf8(effective.stdout).unwrap();
-    assert!(effective.lines().any(|line| line == "controlmaster auto"));
-    assert!(effective.lines().any(|line| line == "controlpersist 600"));
-    assert!(
-        effective
-            .lines()
-            .any(|line| line == "forkafterauthentication yes")
-    );
-    assert!(
-        effective
-            .lines()
-            .any(|line| line == "proxyjump fixture-hop")
-    );
-    let user_socket = root.join("user-master");
-    let mut user_master = FixtureChild::spawn(
-        "/usr/bin/ssh",
-        vec![
-            "-F".into(),
-            config.as_os_str().into(),
-            "-S".into(),
-            user_socket.as_os_str().into(),
-            "-M".into(),
-            "-N".into(),
-            "-oControlPersist=no".into(),
-            "-oForkAfterAuthentication=no".into(),
-            "fixture-unrelated".into(),
-        ],
-        root,
-    );
-    let check_master = || {
-        fixture_ssh(
-            &config,
+        drop(file);
+        drop(reservation);
+        let mut sshd = FixtureChild::spawn(
+            "/usr/sbin/sshd",
+            vec![
+                "-D".into(),
+                "-e".into(),
+                "-f".into(),
+                sshd_config.into_os_string(),
+            ],
             root,
-            &[
+        );
+        wait_for("loopback sshd", || {
+            assert!(
+                sshd.running(),
+                "fixture sshd exited; check native account and sshd prerequisites"
+            );
+            std::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port)).is_ok()
+        });
+        let _masters = FixtureMasters {
+            config: config.clone(),
+            home: root.clone(),
+        };
+        let effective = fixture_ssh(&config, root, &["-G".into(), "fixture-target".into()]);
+        assert!(effective.exit.is_success());
+        let effective = String::from_utf8(effective.stdout).unwrap();
+        assert!(effective.lines().any(|line| line == "controlmaster auto"));
+        assert!(effective.lines().any(|line| line == "controlpersist 600"));
+        assert!(
+            effective
+                .lines()
+                .any(|line| line == "forkafterauthentication yes")
+        );
+        assert!(
+            effective
+                .lines()
+                .any(|line| line == "proxyjump fixture-hop")
+        );
+        let user_socket = root.join("user-master");
+        let user_master = FixtureChild::spawn(
+            "/usr/bin/ssh",
+            vec![
+                "-F".into(),
+                config.as_os_str().into(),
                 "-S".into(),
                 user_socket.as_os_str().into(),
+                "-M".into(),
+                "-N".into(),
+                "-oControlPersist=no".into(),
+                "-oForkAfterAuthentication=no".into(),
+                "fixture-unrelated".into(),
+            ],
+            root,
+        );
+        let fixture = Self {
+            unrelated: Mutex::new(user_master),
+            _masters,
+            _sshd: sshd,
+            config,
+            setup: fixture,
+        };
+        wait_for("unrelated fixture master", || {
+            fixture.unrelated_master_running()
+        });
+        fixture
+    }
+    fn unrelated_master_running(&self) -> bool {
+        if !self.unrelated.lock().unwrap().running() {
+            return false;
+        }
+        fixture_ssh(
+            &self.config,
+            &self.setup.root,
+            &[
+                "-S".into(),
+                self.setup.root.join("user-master").into_os_string(),
                 "-O".into(),
                 "check".into(),
                 "fixture-unrelated".into(),
@@ -1857,11 +2321,16 @@ fn native_server_setup_proxyjump_cancellation_leaves_no_persistent_hop_and_prese
         )
         .exit
         .is_success()
-    };
-    wait_for("unrelated fixture master", || {
-        assert!(user_master.running(), "unrelated fixture master exited");
-        user_socket.exists() && check_master()
-    });
+    }
+}
+
+#[test]
+#[ignore = "requires runnable /usr/sbin/sshd and ssh-keygen as the current nonroot account; uses only fixture keys, loopback listeners and private multiplexing sockets"]
+fn native_server_setup_proxyjump_cancellation_leaves_no_persistent_hop_and_preserves_an_unrelated_master()
+ {
+    let harness = ProxyJumpFixture::new();
+    let fixture = &harness.setup;
+    let root = &fixture.root;
     let witness = root.join("proxy-authenticated");
     let backend = Arc::new(
         fixture.backend_with_home(Arc::new(BlockingDiscovery(witness.clone())), root.clone()),
@@ -1869,14 +2338,16 @@ fn native_server_setup_proxyjump_cancellation_leaves_no_persistent_hop_and_prese
     let cancellation = CancellationToken::default();
     let worker_cancellation = cancellation.clone();
     let attempted = Arc::clone(&backend);
+    let approvals = NativeApprovals::new(&fixture.adapter, (false, false, false));
+    let prompts = approvals.prompts.clone();
     let thread = std::thread::spawn(move || {
         attempted.setup(
             SetupRequest {
                 destination: SshDestination::new("fixture-target".into()).unwrap(),
-                endpoint: "192.0.2.1:9231".parse().unwrap(),
+                address: Some(SetupAddress::parse("192.0.2.1:9231").unwrap()),
                 name: "ProxyJump fixture".into(),
-                prompts: Arc::new(NoPrompt),
-                approvals: SetupApprovals::default(),
+                prompts,
+                approvals,
             },
             &worker_cancellation,
             &SetupProgress::new(|_| {}),
@@ -1887,7 +2358,10 @@ fn native_server_setup_proxyjump_cancellation_leaves_no_persistent_hop_and_prese
         thread: Some(thread),
     };
     wait_for("authenticated ProxyJump discovery", || witness.exists());
-    assert!(check_master(), "setup replaced the unrelated master");
+    assert!(
+        harness.unrelated_master_running(),
+        "setup replaced the unrelated master"
+    );
     assert_eq!(worker.finish(), Err(SetupFailure::Cancelled));
     fixture.assert_no_connection();
     let spawns = fixture.adapter.seal();
@@ -1895,16 +2369,120 @@ fn native_server_setup_proxyjump_cancellation_leaves_no_persistent_hop_and_prese
     assert_eq!(counts.active(), 0);
     assert_eq!(counts.spawned, counts.reaped);
     assert!(
-        check_master(),
+        harness.unrelated_master_running(),
         "setup cancellation terminated the unrelated master"
     );
-    assert!(user_master.running());
     assert!(
         !std::fs::read_dir(root).unwrap().flatten().any(|entry| entry
             .file_name()
             .to_str()
             .is_some_and(|name| name.starts_with("mux-"))),
         "setup or a ProxyJump hop left a persistent master socket"
+    );
+    assert_eq!(fixture.adapter.spawns.load(Ordering::SeqCst), spawns);
+    assert_eq!(backend.process_counts(), counts);
+}
+
+#[test]
+#[ignore = "requires runnable loopback sshd and fixture keys; closes only the attempt-owned master while a synthetic stopped-service approval waits"]
+fn native_server_setup_missing_master_refuses_fresh_authentication_and_preserves_an_unrelated_master()
+ {
+    let harness = ProxyJumpFixture::new();
+    let fixture = &harness.setup;
+    let witness = fixture.root.join("discovery-count");
+    let backend = Arc::new(fixture.backend_with_home(
+        Arc::new(StoppedDiscovery(witness.clone())),
+        fixture.root.clone(),
+    ));
+    let mut approvals = NativeApprovals::new(&fixture.adapter, (false, true, false));
+    Arc::get_mut(&mut approvals).unwrap().pause_on_offer = true;
+    let request = SetupRequest {
+        destination: SshDestination::new("fixture-target".into()).unwrap(),
+        address: Some(SetupAddress::parse("192.0.2.1:9231").unwrap()),
+        name: "Missing setup master fixture".into(),
+        prompts: approvals.prompts.clone(),
+        approvals: approvals.clone(),
+    };
+    let cancellation = CancellationToken::default();
+    let worker_cancellation = cancellation.clone();
+    let attempted = Arc::clone(&backend);
+    let (progress, phases) = fixture.progress();
+    let thread =
+        std::thread::spawn(move || attempted.setup(request, &worker_cancellation, &progress));
+    let mut worker = SetupWorker {
+        cancellation,
+        thread: Some(thread),
+    };
+    wait_for("authenticated startup approval", || {
+        approvals.waiting.load(Ordering::SeqCst)
+    });
+    let offers = approvals.observed.lock().unwrap();
+    assert_eq!(offers.len(), 1);
+    assert_eq!(offers[0].kind, NativeOfferKind::Startup);
+    drop(offers);
+    assert_eq!(std::fs::read(&witness).unwrap(), b"x");
+    assert_eq!(backend.process_counts().active(), 1);
+    assert_eq!(fixture.adapter.channels.load(Ordering::SeqCst), 1);
+    assert!(harness.unrelated_master_running());
+    let socket = fixture.adapter.master_path.lock().unwrap().clone().unwrap();
+    let configuration = fixture
+        .adapter
+        .master_configuration
+        .lock()
+        .unwrap()
+        .clone()
+        .unwrap();
+    let closed = fixture_ssh(
+        &configuration,
+        &fixture.root,
+        &[
+            "-S".into(),
+            socket.clone(),
+            "-o".into(),
+            "ProxyCommand=false".into(),
+            "-o".into(),
+            "ProxyJump=none".into(),
+            "-o".into(),
+            "BatchMode=yes".into(),
+            "-O".into(),
+            "exit".into(),
+            "fixture-target".into(),
+        ],
+    );
+    assert!(closed.exit.is_success(), "exact setup master did not close");
+    wait_for("attempt-owned master socket removal", || {
+        std::fs::symlink_metadata(&socket).is_err()
+    });
+    approvals.release.store(true, Ordering::SeqCst);
+    assert!(matches!(
+        worker.join(),
+        Err(SetupFailure::Unavailable(
+            UnavailableKind::HostUnreachable | UnavailableKind::ServiceUnavailable
+        ))
+    ));
+    assert!(!worker.cancellation.is_cancelled());
+    assert_eq!(std::fs::read(&witness).unwrap(), b"x");
+    assert_eq!(fixture.adapter.channels.load(Ordering::SeqCst), 2);
+    approvals.assert_one_authentication();
+    fixture.assert_no_connection();
+    assert_eq!(fixture.credentials.inserts.load(Ordering::SeqCst), 0);
+    assert!(!phases.lock().unwrap().iter().any(|phase| matches!(
+        phase,
+        SetupPhase::Starting | SetupPhase::Enrolling | SetupPhase::Connecting
+    )));
+    let spawns = fixture.adapter.seal();
+    let counts = backend.process_counts();
+    assert_eq!(counts.active(), 0);
+    assert_eq!(counts.spawned, counts.reaped);
+    assert!(harness.unrelated_master_running());
+    assert!(
+        !std::fs::read_dir(&fixture.root)
+            .unwrap()
+            .flatten()
+            .any(|entry| entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.starts_with("mux-")))
     );
     assert_eq!(fixture.adapter.spawns.load(Ordering::SeqCst), spawns);
     assert_eq!(backend.process_counts(), counts);

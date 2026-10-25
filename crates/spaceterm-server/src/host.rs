@@ -430,11 +430,7 @@ pub(crate) fn serve_admitted(
             let mut wire = protocol::Wire::terminal(stream)?;
             let request: crate::pane::Request = wire.read()?;
             let shutdown = matches!(request, crate::pane::Request::Shutdown);
-            let policy_change = matches!(
-                &request,
-                crate::pane::Request::Direct(crate::direct::Management::SetPolicy(_))
-            );
-            let (reply, stopped, retired) = {
+            let (reply, stopped) = {
                 let mut panes = environment.panes.lock().unwrap_or_else(|e| e.into_inner());
                 if environment
                     .stopping
@@ -452,8 +448,16 @@ pub(crate) fn serve_admitted(
                         .unwrap_or_else(|e| e.into_inner())
                         .authorized_peer(&paired)?;
                 }
-                let reply = if shutdown && paired.is_some() {
-                    // A device credential grants protocol authority, never host service authority.
+                let account_administration = shutdown
+                    || matches!(
+                        &request,
+                        crate::pane::Request::Mutate {
+                            mutation: crate::hierarchy::Mutation::EndAllSessions { .. },
+                            ..
+                        }
+                    );
+                let mut reply = if account_administration && paired.is_some() {
+                    // A paired device cannot administer the owning account or end all its Sessions.
                     crate::pane::Reply::Refused(crate::pane::Refusal::Unsupported)
                 } else if let crate::pane::Request::Direct(request) = request {
                     let reply = match &environment.direct {
@@ -497,22 +501,23 @@ pub(crate) fn serve_admitted(
                         None => crate::pane::Reply::Refused(crate::pane::Refusal::Unsupported),
                     }
                 };
+                if paired.is_some()
+                    && let crate::pane::Reply::Capabilities {
+                        end_all_sessions, ..
+                    } = &mut reply
+                {
+                    *end_all_sessions = false;
+                }
                 let stopped = shutdown && matches!(reply, crate::pane::Reply::Closed);
                 if stopped {
                     environment
                         .stopping
                         .store(true, std::sync::atomic::Ordering::Release);
                 }
-                let retired = paired.is_some()
-                    && policy_change
-                    && matches!(
-                        &reply,
-                        crate::pane::Reply::Direct(Ok(crate::direct::ManagementReply::Status(_)))
-                    );
-                (reply, stopped, retired)
+                (reply, stopped)
             };
             wire.write(&reply)?;
-            if stopped || retired {
+            if stopped {
                 break;
             }
         }

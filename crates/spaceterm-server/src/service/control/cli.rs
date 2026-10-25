@@ -196,6 +196,17 @@ pub fn run(identity: &str, args: &[OsString], output: &mut impl Write) -> Result
             return Ok(2);
         }
         Request::Destructive { action, confirmed } => {
+            if action == Action::Stop {
+                match service.stop_if_stopped() {
+                    Ok(Some(status)) => {
+                        write_status(output, controller.display_name(), status)?;
+                        return Ok(0);
+                    }
+                    Ok(None) => {}
+                    Err(ServerError::CleanupUnresolved) if confirmed => {}
+                    Err(error) => return Err(error.into()),
+                }
+            }
             let confirmation = controller.prepare(action)?;
             if !confirmed {
                 writeln!(output, "{}", confirmation.message()).map_err(|_| Error::Output)?;

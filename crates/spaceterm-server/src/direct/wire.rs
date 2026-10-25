@@ -13,6 +13,7 @@ pub(super) struct Invite {
     pub server_name: String,
     pub token: [u8; 32],
     pub expires: u64,
+    pub valid_for_seconds: u64,
 }
 impl Drop for Invite {
     fn drop(&mut self) {
@@ -121,6 +122,8 @@ pub enum Management {
         generation: u64,
         pin: ServerPin,
         expected_policy: Option<NetworkPolicy>,
+        expected_enabled: bool,
+        endpoint: String,
         policy: NetworkPolicy,
         operation: OperationId,
         public_key: [u8; 32],
@@ -130,6 +133,8 @@ pub enum Management {
         generation: u64,
         pin: ServerPin,
         expected_policy: Option<NetworkPolicy>,
+        expected_enabled: bool,
+        endpoint: String,
         policy: NetworkPolicy,
         operation: OperationId,
         public_key: [u8; 32],
@@ -139,7 +144,10 @@ pub enum Management {
         pin: ServerPin,
         operation: OperationId,
     },
-    SetPolicy(Option<NetworkPolicy>),
+    SetPolicy {
+        policy: Option<NetworkPolicy>,
+        enabled: bool,
+    },
     Invite,
     Withdraw(ClaimId),
     Claims,
