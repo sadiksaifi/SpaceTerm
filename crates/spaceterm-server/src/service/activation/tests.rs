@@ -234,6 +234,84 @@ fn stopped_activation_changes_only_the_exact_runtime_and_preserves_stop() {
 }
 
 #[test]
+fn completed_nonproduction_updates_with_dirty_versions_remain_readable_after_relaunch() {
+    for identity in ["spaceterm-development", "spaceterm-preflight"] {
+        for dirty_previous in [false, true] {
+            with_service_identity(
+                identity,
+                |service, mut previous, mut candidate, supervisor| {
+                    // This saved-state fixture exercises the retained reader. Signed runtime
+                    // admission owns identity checks and verifies the executable separately.
+                    if dirty_previous {
+                        previous.version.push_str(".dirty");
+                    } else {
+                        candidate.version.push_str(".dirty");
+                    }
+                    let operation = interrupted(
+                        &service,
+                        &previous,
+                        &candidate,
+                        &supervisor,
+                        Step::Completed,
+                        true,
+                    );
+                    let policy = std::fs::read(service.paths.data.join("service.json")).unwrap();
+                    let reopened =
+                        Service::new(service.paths.clone(), identity.into(), supervisor.clone());
+
+                    let status = reopened.activation_status().unwrap().unwrap();
+                    assert_eq!(status.operation, operation);
+                    assert_eq!(status.previous, previous);
+                    assert_eq!(status.candidate, candidate);
+                    assert_eq!(status.phase, ActivationPhase::Completed { running: false });
+                    assert_eq!(reopened.recover_activation().unwrap(), Some(status));
+                    assert!(reopened.status().unwrap().stopped);
+                    assert_eq!(
+                        std::fs::read(service.paths.data.join("service.json")).unwrap(),
+                        policy
+                    );
+                    assert_eq!(supervisor.starts.load(Ordering::SeqCst), 0);
+                    assert_eq!(supervisor.stops.load(Ordering::SeqCst), 0);
+                },
+            );
+        }
+    }
+}
+
+#[test]
+fn malformed_dirty_activation_versions_are_refused_without_dispatch_or_mutation() {
+    for version in [
+        "dev.bbbbbbbbbbbb.dirty",
+        "dev.aaaaaaaaaaaa.dirty.dirty",
+        "1.2.3.dirty",
+    ] {
+        with_service(|service, previous, mut candidate, supervisor| {
+            candidate.version = version.into();
+            interrupted(
+                &service,
+                &previous,
+                &candidate,
+                &supervisor,
+                Step::Completed,
+                true,
+            );
+            let policy = std::fs::read(service.paths.data.join("service.json")).unwrap();
+
+            assert_eq!(
+                service.recover_activation(),
+                Err(ServerError::UnsafeStorage)
+            );
+            assert_eq!(
+                std::fs::read(service.paths.data.join("service.json")).unwrap(),
+                policy
+            );
+            assert_eq!(supervisor.starts.load(Ordering::SeqCst), 0);
+            assert_eq!(supervisor.stops.load(Ordering::SeqCst), 0);
+        });
+    }
+}
+
+#[test]
 fn changed_stop_observation_requires_fresh_approval_without_dispatch() {
     with_service(|service, _, candidate, supervisor| {
         let approval = service.prepare_activation(&candidate).unwrap().unwrap();

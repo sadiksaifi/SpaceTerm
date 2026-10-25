@@ -126,16 +126,16 @@ impl Build {
         }
     }
     fn valid(&self) -> bool {
-        let version = self
-            .version
-            .strip_prefix("dev.")
-            .is_some_and(|suffix| suffix.len() == 12 && self.commit.get(..12) == Some(suffix))
-            || (self.version.split('.').count() == 3
-                && self.version.split('.').all(|part| {
-                    !part.is_empty()
-                        && (part == "0" || !part.starts_with('0'))
-                        && part.bytes().all(|v| v.is_ascii_digit())
-                }));
+        let version = self.version.strip_prefix("dev.").is_some_and(|suffix| {
+            // Signed runtime admission owns identity policy; this record checks syntax.
+            let revision = suffix.strip_suffix(".dirty").unwrap_or(suffix);
+            revision.len() == 12 && self.commit.get(..12) == Some(revision)
+        }) || (self.version.split('.').count() == 3
+            && self.version.split('.').all(|part| {
+                !part.is_empty()
+                    && (part == "0" || !part.starts_with('0'))
+                    && part.bytes().all(|v| v.is_ascii_digit())
+            }));
         runtime::digest_valid(&self.digest)
             && self.version.len() <= 64
             && version
