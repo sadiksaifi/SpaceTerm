@@ -48,7 +48,7 @@ int main(int argc, char **argv) {{
         return 0;
     }}
     if (argc == 2 && strcmp(argv[1], "--check") == 0) {{
-        puts("Installed server PTY and shell resources verified.");
+        puts("Server checks passed.");
         return 0;
     }}
     return 1;
