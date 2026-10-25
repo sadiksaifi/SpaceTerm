@@ -304,21 +304,40 @@ impl WorkspaceManager {
         &self,
         cx: &App,
     ) -> Vec<crate::ui::workspace_creation::RemoteCreationServer> {
+        use crate::ui::workspace_creation::{RemoteCreationServer, endpoint_address};
+
         let Some(direct) = crate::ui::direct_servers::installed(cx) else {
             return Vec::new();
         };
-        let mut servers: Vec<_> = direct
+        let saved: Vec<_> = direct
             .routes()
             .into_iter()
-            .filter_map(|(route, _)| {
-                Some(crate::ui::workspace_creation::RemoteCreationServer {
-                    route,
-                    name: direct.route(&route)?.label.into(),
-                    available: self.direct_route_presented(&route),
-                })
+            .filter_map(|(route, _)| direct.route(&route))
+            .collect();
+        // Two saved servers may give one name, such as an earlier pairing and a newer one, so a
+        // shared name carries the address each route reaches.
+        let shares_name = |name: &str| {
+            saved
+                .iter()
+                .filter(|other| other.label.to_lowercase() == name.to_lowercase())
+                .count()
+                > 1
+        };
+        let mut servers: Vec<_> = saved
+            .iter()
+            .map(|route| RemoteCreationServer {
+                route: route.id,
+                name: route.label.clone().into(),
+                address: shares_name(&route.label)
+                    .then(|| endpoint_address(&route.endpoint).to_owned().into()),
+                available: self.direct_route_presented(&route.id),
             })
             .collect();
-        servers.sort_by(|a, b| by_name(&a.name, &b.name).then_with(|| a.route.cmp(&b.route)));
+        servers.sort_by(|a, b| {
+            by_name(&a.name, &b.name)
+                .then_with(|| a.address.cmp(&b.address))
+                .then_with(|| a.route.cmp(&b.route))
+        });
         servers
     }
 

@@ -2062,7 +2062,7 @@ fn remote_submenu(
         .map(|(position, server)| {
             let creation = creation(server.route);
             // A server this window doesn't present can't take a Workspace until it connects.
-            MenuEntry::action(server.name.clone(), NewWorkspaceItem::Create(creation))
+            MenuEntry::action(server.display_name(), NewWorkspaceItem::Create(creation))
                 .disabled(!server.available)
                 .debug_selector(format!(
                     "new-workspace-menu-{}",

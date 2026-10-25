@@ -12500,6 +12500,62 @@ fn the_switcher_should_create_on_a_saved_server_with_its_query_as_the_name(
     assert_eq!(harness.local.submitted(), Vec::new());
 }
 
+/// Two saved servers that give one name read apart by the address each route reaches, in the
+/// sidebar's submenus and in the Workspace Switcher, and each row reaches its own route.
+#[gpui::test]
+fn same_named_saved_servers_should_read_apart_in_both_creation_surfaces(cx: &mut TestAppContext) {
+    use spaceterm_server::hierarchy::Mutation;
+    use spaceterm_ui::a11y_testing::A11yTree;
+
+    let (harness, cx) = MachineGroupsHarness::new(cx);
+    let (direct, routes) = crate::direct_connections::tests::disconnected_routes_at(&[
+        ("studio", "wss://192.168.1.3:9231"),
+        ("studio", "wss://192.168.1.2:9231"),
+    ]);
+    cx.update(|_, cx| crate::ui::direct_servers::install(direct, cx));
+    // Only the route at .3 is presented, so only its rows take a Workspace.
+    let (_, edits) = harness.present_direct("studio", routes[0], &[], cx);
+    redraw(cx);
+
+    click("new-workspace-button", cx);
+    click("new-workspace-menu-create-remote", cx);
+    let tree = A11yTree::read(cx);
+    for label in ["studio (192.168.1.2:9231)", "studio (192.168.1.3:9231)"] {
+        assert!(tree.find(label).is_some(), "the submenu shows {label:?}");
+    }
+    // Rows follow the addresses, so the presented route at .3 is the second.
+    click("new-workspace-menu-create-remote-0", cx);
+    assert!(cx.update(|window, cx| spaceterm_ui::window_menu_is_open(window, cx)));
+    click("new-workspace-menu-create-remote-1", cx);
+    assert_eq!(
+        edits.submitted(),
+        vec![Mutation::CreateWorkspace {
+            name: String::new(),
+            directory: None,
+        }]
+    );
+
+    // The switcher renders only the rows in view, so its rows are read at the top and again after
+    // End reveals the last ones.
+    open_workspace_switcher(cx);
+    let top = A11yTree::read(cx);
+    cx.simulate_keystrokes("end");
+    cx.run_until_parked();
+    let end = A11yTree::read(cx);
+    for label in [
+        "New Workspace on studio (192.168.1.2:9231)",
+        "Open Directory on studio (192.168.1.2:9231)\u{2026}",
+        "New Workspace on studio (192.168.1.3:9231)",
+        "Open Directory on studio (192.168.1.3:9231)\u{2026}",
+    ] {
+        assert!(
+            top.find(label).or_else(|| end.find(label)).is_some(),
+            "the switcher shows {label:?}"
+        );
+    }
+    assert_eq!(harness.local.submitted(), Vec::new());
+}
+
 /// Without a saved server, both remote submenus offer only Add Server, which opens Settings' Add
 /// Server journey, and the switcher offers no remote rows, so nothing enters a host here.
 #[gpui::test]
@@ -12678,6 +12734,122 @@ fn open_remote_directory_should_pin_on_its_server_and_reuse_a_workspace_pinned_t
         }]
     );
     assert_eq!(harness.local.submitted(), Vec::new());
+}
+
+/// Selecting another Workspace while penguin's server answers is newer navigation. The answer
+/// naming a Workspace already pinned there then moves neither the selection nor the keyboard, and
+/// creates nothing.
+#[gpui::test]
+fn a_late_directory_answer_should_never_override_newer_navigation(cx: &mut TestAppContext) {
+    assert_eq!(
+        late_directory_answer_after("/srv/app", &["There"], cx),
+        ("There".to_owned(), Vec::new())
+    );
+}
+
+/// Selecting another Workspace and returning to the first while penguin's server answers is still
+/// newer navigation, though the same Workspace is active again.
+#[gpui::test]
+fn a_late_directory_answer_should_never_override_navigation_that_returned(cx: &mut TestAppContext) {
+    assert_eq!(
+        late_directory_answer_after("/srv/app", &["There", "Here"], cx),
+        ("Here".to_owned(), Vec::new())
+    );
+}
+
+/// A late answer naming no pinned Workspace still creates the one the person asked for on
+/// penguin's server, which joins the sidebar without overriding the newer selection.
+#[gpui::test]
+fn a_late_directory_creation_should_never_override_newer_navigation(cx: &mut TestAppContext) {
+    use spaceterm_server::hierarchy::Mutation;
+
+    assert_eq!(
+        late_directory_answer_after("/srv/new", &["There"], cx),
+        (
+            "There".to_owned(),
+            vec![Mutation::CreateWorkspace {
+                name: String::new(),
+                directory: Some(PathBuf::from("/srv/new")),
+            }]
+        )
+    );
+}
+
+/// Opens `directory` on penguin, whose "Far" is pinned to `/srv/app`, from "Here", selects each
+/// of `navigation` in the sidebar while penguin's answer is held back, then releases it. Returns
+/// the Active Workspace's name once the answer settles, with what penguin was asked to change.
+fn late_directory_answer_after(
+    directory: &str,
+    navigation: &[&str],
+    cx: &mut TestAppContext,
+) -> (String, Vec<spaceterm_server::hierarchy::Mutation>) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    // The held answer arrives from the directory worker's own thread.
+    cx.executor().allow_parking();
+    let open = Arc::new(AtomicBool::new(false));
+    let adapters = WorkspaceManagerAdapters {
+        server_directories: crate::ui::directory_picker::server_directory_testing::gated(
+            Arc::clone(&open),
+        ),
+        ..workspace_adapters()
+    };
+    let (harness, cx) = MachineGroupsHarness::using(adapters, cx);
+    harness.publish(
+        ServerKey::LOCAL,
+        &harness.local,
+        &[("Here", 1), ("There", 2)],
+        cx,
+    );
+    let route = named_route("penguin");
+    let (key, penguin_edits) = harness.present_direct("penguin", route, &[("Far", 7)], cx);
+    let mut inventory = machine_inventory(harness.next_revision(), &[("Far", 7)]);
+    inventory.workspaces[0].pinned_directory = Some(PathBuf::from("/srv/app"));
+    penguin_edits.set_inventory(inventory);
+    cx.update(|window, cx| {
+        harness.manager.update(cx, |manager, cx| {
+            manager.sync_shared_workspaces(key, window, cx);
+        })
+    });
+    redraw(cx);
+    let here = harness.named("Here", cx);
+    cx.update(|window, cx| {
+        harness.manager.update(cx, |manager, cx| {
+            manager.activate_workspace(here, window, cx);
+            manager.open_server_directory(key, String::new(), PathBuf::from(directory), window, cx);
+        })
+    });
+    redraw(cx);
+    assert!(
+        harness
+            .manager
+            .read_with(cx, |manager, _| manager.pending_server_directory.is_some()),
+        "the server's answer is held back"
+    );
+
+    for name in navigation {
+        let workspace_id = harness.named(name, cx);
+        click(
+            format!("workspace-row-{}-inactive", workspace_id.get()).leak(),
+            cx,
+        );
+    }
+    open.store(true, Ordering::Release);
+    let deadline = Instant::now() + std::time::Duration::from_secs(5);
+    while harness
+        .manager
+        .read_with(cx, |manager, _| manager.pending_server_directory.is_some())
+    {
+        assert!(Instant::now() < deadline, "the server answers");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        cx.run_until_parked();
+    }
+
+    assert_eq!(harness.local.submitted(), Vec::new());
+    let active = harness.manager.read_with(cx, |manager, _| {
+        manager.workspaces.active().name().to_owned()
+    });
+    (active, penguin_edits.submitted())
 }
 
 /// A server whose edits are still connecting holds the chosen directory until it reads its first

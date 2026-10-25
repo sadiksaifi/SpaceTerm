@@ -27,8 +27,28 @@ pub(crate) enum WorkspaceCreation {
 pub(crate) struct RemoteCreationServer {
     pub(crate) route: DirectRouteId,
     pub(crate) name: SharedString,
+    /// The address the route reaches, kept only while another saved server shares the name.
+    pub(crate) address: Option<SharedString>,
     /// Whether this window presents the server now, so it can take a new Workspace.
     pub(crate) available: bool,
+}
+
+impl RemoteCreationServer {
+    /// The name a creation row shows: the server's own, followed by its address when another
+    /// saved server shares that name, so the person sees which one each row reaches.
+    pub(crate) fn display_name(&self) -> SharedString {
+        match &self.address {
+            Some(address) => format!("{} ({address})", self.name).into(),
+            None => self.name.clone(),
+        }
+    }
+}
+
+/// The address an endpoint such as `wss://192.168.1.20:9231/spaceterm` reaches, as a person reads
+/// it: `192.168.1.20:9231`.
+pub(crate) fn endpoint_address(endpoint: &str) -> &str {
+    let rest = endpoint.strip_prefix("wss://").unwrap_or(endpoint);
+    rest.split('/').next().unwrap_or(rest)
 }
 
 /// Why a saved server's creation rows are disabled.

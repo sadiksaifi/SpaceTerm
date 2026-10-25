@@ -196,6 +196,10 @@ pub(super) struct PendingServerDirectory {
     key: ServerKey,
     name: String,
     directory: PathBuf,
+    /// The activation epoch and Active Workspace when the person chose the directory. Any
+    /// activation while the server answers, even one returning to the same Workspace, is newer
+    /// navigation, which an existing pinned Workspace never overrides.
+    navigation: (u64, Option<WorkspaceId>),
 }
 
 /// One question to the owning server about the directory a person chose in Open Remote
@@ -240,6 +244,13 @@ pub(crate) struct WorkspaceManager {
     directory_selection: Rc<dyn SystemDirectorySelection>,
     pin_picker: Option<Entity<DirectoryPicker>>,
     pin_operation: u64,
+    /// Counts Workspace activations, so a deferred completion can tell that navigation happened
+    /// since it began, even navigation that returned to the same Workspace.
+    activation_epoch: u64,
+    /// The server whose creation this window presents without opening it, while the reading
+    /// right after that creation's submission runs, because newer navigation superseded the
+    /// person's original choice.
+    quiet_creation: Option<ServerKey>,
     operating_system_window_drag_platform: Rc<dyn OperatingSystemWindowDragPlatform>,
     window_drag_status: WindowDragRegionStatus,
     update_control: Entity<super::updates::UpdateControl>,
@@ -366,6 +377,8 @@ impl WorkspaceManager {
             directory_selection,
             pin_picker: None,
             pin_operation: 0,
+            activation_epoch: 0,
+            quiet_creation: None,
             operating_system_window_drag_platform,
             window_drag_status: WindowDragRegionStatus::new(),
             update_control: cx.new(|cx| super::updates::UpdateControl::new(window, cx)),
@@ -1125,6 +1138,7 @@ impl WorkspaceManager {
             key,
             name,
             directory,
+            navigation: self.navigation(),
         });
         self.continue_server_directory(window, cx);
     }
@@ -1139,6 +1153,7 @@ impl WorkspaceManager {
             key,
             name,
             directory,
+            navigation,
         }) = self.pending_server_directory.clone()
         else {
             return;
@@ -1204,8 +1219,12 @@ impl WorkspaceManager {
             }
         };
         let refusal = match existing {
+            // The Workspace already exists, so nothing is created. Later navigation wins: a person
+            // who selected another Workspace while the server answered keeps that selection.
             Some(workspace_id) => {
-                if self.activate_workspace(workspace_id, window, cx) {
+                if self.navigation() == navigation
+                    && self.activate_workspace(workspace_id, window, cx)
+                {
                     self.focus(window, cx);
                     self.scroll_active_workspace_into_view(cx);
                 }
@@ -1228,10 +1247,21 @@ impl WorkspaceManager {
         if let Some(reason) = refusal {
             Self::show_shared_refusal("create a Workspace", reason, window, cx);
         } else if existing.is_none() {
+            // The server still creates the Workspace the person asked for. After newer
+            // navigation it joins the sidebar without taking the selection or the keyboard.
+            if self.navigation() != navigation {
+                self.quiet_creation = Some(key);
+            }
             self.sync_shared_workspaces(key, window, cx);
+            self.quiet_creation = None;
         }
         self.sync_terminal_focus_blocker(window, cx);
         cx.notify();
+    }
+
+    /// Where navigation stands: the activation epoch and the Active Workspace.
+    fn navigation(&self) -> (u64, Option<WorkspaceId>) {
+        (self.activation_epoch, self.workspaces.active_workspace_id())
     }
 
     fn finish_server_directory(&mut self) {
@@ -1479,6 +1509,7 @@ impl WorkspaceManager {
             Self::report_workspace_error("activate", error);
             return false;
         }
+        self.activation_epoch = self.activation_epoch.wrapping_add(1);
 
         self.synchronize_tab_manager_layout(workspace_id, window, cx);
         if previous_workspace_id != Some(workspace_id) {
@@ -4300,7 +4331,9 @@ impl WorkspaceManager {
                 else {
                     return;
                 };
-                if self.activate_workspace(workspace_id, window, cx) {
+                if self.quiet_creation != Some(key)
+                    && self.activate_workspace(workspace_id, window, cx)
+                {
                     self.focus(window, cx);
                     self.scroll_active_workspace_into_view(cx);
                 }
@@ -5172,7 +5205,7 @@ fn switcher_creation_rows(
         .into_iter()
         .map(move |creation| SwitcherCreationRow {
             creation,
-            label: creation.label(Some(server.name.as_ref())),
+            label: creation.label(Some(server.display_name().as_ref())),
             selector: creation.selector(position),
             shortcut: None,
             starts_group: position == 0 && matches!(creation, WorkspaceCreation::Remote(_)),
