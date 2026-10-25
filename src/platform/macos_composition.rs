@@ -75,7 +75,6 @@ fn desktop_profile(
         DesktopPresentation::new(
             DesktopWording {
                 file_preview: "Quick Look",
-                operating_system_name: "macOS",
                 this_computer: "This Mac",
                 system_directory_selection: "Choose in Finder…",
                 read_only_update: (
@@ -463,7 +462,6 @@ mod tests {
                 Some("⌥⌘C")
             );
             assert_eq!(presentation.wording().file_preview, "Quick Look");
-            assert_eq!(presentation.wording().operating_system_name, "macOS");
             assert_eq!(
                 presentation.wording().system_directory_selection,
                 "Choose in Finder…"

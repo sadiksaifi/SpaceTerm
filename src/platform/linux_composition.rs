@@ -168,7 +168,6 @@ fn desktop_profile(
         DesktopPresentation::new(
             DesktopWording {
                 file_preview: "Preview",
-                operating_system_name: "Linux",
                 this_computer: "This Computer",
                 system_directory_selection: "Choose Directory…",
                 read_only_update: (
@@ -438,7 +437,6 @@ mod tests {
                 assert_eq!(shortcut.as_deref(), Some(label));
             }
             assert_eq!(presentation.wording().file_preview, "Preview");
-            assert_eq!(presentation.wording().operating_system_name, "Linux");
             assert_eq!(
                 presentation.wording().system_directory_selection,
                 "Choose Directory…"
