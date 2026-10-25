@@ -26,7 +26,15 @@ class ServerCatalogTests(unittest.TestCase):
         self.identity = "spaceterm-preflight"
         self.target = server_package.host_target()
 
-    def artifact(self, native_target, **changed):
+    def artifact(
+        self,
+        native_target,
+        *,
+        check_stdout="Server checks passed.\n",
+        check_stderr="",
+        check_exit=0,
+        **changed,
+    ):
         directory = Path(tempfile.mkdtemp(dir=self.root))
         tree = directory / "server"
         executable = tree / "bin/spaceterm-server"
@@ -57,8 +65,9 @@ int main(int argc, char **argv) {{
         return 0;
     }}
     if (argc == 2 && strcmp(argv[1], "--check") == 0) {{
-        puts("Installed server PTY and shell resources verified.");
-        return 0;
+        fputs({json.dumps(check_stdout)}, stdout);
+        fputs({json.dumps(check_stderr)}, stderr);
+        return {check_exit};
     }}
     return 1;
 }}
@@ -95,6 +104,38 @@ int main(int argc, char **argv) {{
             executable.write_bytes(header)
             executable.chmod(0o755)
         return (*archive_tree(ROOT, tree, info), info)
+
+    def test_native_headless_check_accepts_current_and_legacy_success(self):
+        for output in (
+            "Server checks passed.\n",
+            "Installed server PTY and shell resources verified.\n",
+        ):
+            with self.subTest(output=output):
+                archive, signature, info = self.artifact(self.target, check_stdout=output)
+                with tempfile.TemporaryDirectory(dir=self.root) as temporary:
+                    tree, _, _ = server_package.verified_copy(
+                        archive, signature, Path(temporary), info
+                    )
+                    self.assertEqual(json.loads((tree / "build.json").read_text()), info)
+
+    def test_native_headless_check_rejects_unexpected_or_failed_responses(self):
+        for output, error, status in (
+            ("", "", 0),
+            ("Unexpected success.\n", "", 0),
+            ("Server checks passed.", "", 0),
+            ("Server checks passed.\nExtra output.\n", "", 0),
+            ("Server checks passed.\n", "", 1),
+            ("Installed server PTY and shell resources verified.\n", "warning\n", 0),
+        ):
+            with self.subTest(output=output, error=error, status=status):
+                archive, signature, info = self.artifact(
+                    self.target, check_stdout=output, check_stderr=error, check_exit=status
+                )
+                with (
+                    tempfile.TemporaryDirectory(dir=self.root) as temporary,
+                    self.assertRaisesRegex(TaskError, "installed server headless check failed"),
+                ):
+                    server_package.verified_copy(archive, signature, Path(temporary), info)
 
     def test_default_catalog_retains_the_exact_local_pair_and_complete_digest(self):
         archive, signature, info = self.artifact(self.target)

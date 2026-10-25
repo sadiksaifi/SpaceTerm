@@ -12,8 +12,9 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-from spaceterm_tasks import ROOT
+from spaceterm_tasks import ROOT, server_package
 from tests.macos_signing_fixture import certificate
 from tests.server_artifact_fixture import configure_trust, prepare
 
@@ -331,6 +332,21 @@ int main(int argc, char **argv) {{
         result = self.task("preflight/verify/macos.py", "--app", str(app), "--dmg", str(dmg))
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("dmg executable application identity", result.stderr)
+
+
+class CurrentServerPackageTests(unittest.TestCase):
+    def test_current_server_passes_signed_package_verification(self):
+        # Build the real server, including its PTY/shell check, rather than the C fixture
+        # used to isolate desktop packaging. Only the artifact destination is disposable.
+        with tempfile.TemporaryDirectory(prefix="spaceterm-current-server-package-") as temporary:
+            with patch.object(server_package, "DIST", Path(temporary)):
+                archive, signature = server_package.package("spaceterm-preflight")
+            destination = Path(temporary) / "desktop"
+            server_package.stage_desktop_artifact(
+                archive, signature, destination, identity="spaceterm-preflight"
+            )
+            self.assertEqual((destination / "artifact.tar.gz").read_bytes(), archive.read_bytes())
+            self.assertEqual((destination / "artifact.sig").read_bytes(), signature.read_bytes())
 
 
 if __name__ == "__main__":

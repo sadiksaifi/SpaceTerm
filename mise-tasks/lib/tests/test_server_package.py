@@ -214,7 +214,7 @@ class ServerArchiveTests(unittest.TestCase):
                 server_queries.append(arguments[0])
                 output = json.dumps(self.info).encode()
             elif arguments[1:] == ["--check"]:
-                output = b"Installed server PTY and shell resources verified.\n"
+                output = b"Server checks passed.\n"
             else:
                 return run(arguments, **kwargs)
             if kwargs.get("text"):
