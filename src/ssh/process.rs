@@ -500,18 +500,6 @@ pub(crate) struct CapturedProcessOutput {
     pub(crate) stderr: Vec<u8>,
 }
 
-#[derive(Clone, Copy)]
-pub(crate) enum CapturedProcessDeadline {
-    At(Instant),
-    RemoteCommand(Duration),
-    Unlimited,
-}
-impl From<Instant> for CapturedProcessDeadline {
-    fn from(deadline: Instant) -> Self {
-        Self::At(deadline)
-    }
-}
-
 impl fmt::Debug for CapturedProcessOutput {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("CapturedProcessOutput(<redacted>)")
@@ -525,7 +513,7 @@ pub(crate) fn run_captured_process<A: SshProcessAdapter>(
     input: Vec<u8>,
     stdout_limit: usize,
     cancellation: &CancellationToken,
-    deadline: impl Into<CapturedProcessDeadline>,
+    deadline: Instant,
 ) -> Result<CapturedProcessOutput, CapturedProcessError> {
     run_captured_process_with_parts(
         adapter,
@@ -536,7 +524,7 @@ pub(crate) fn run_captured_process<A: SshProcessAdapter>(
             input: Some(input),
             stdout_limit,
             stderr_limit: None,
-            deadline: deadline.into(),
+            deadline: Some(deadline),
         },
         cancellation,
     )
@@ -558,7 +546,7 @@ pub(crate) fn run_captured_effect<A: SshProcessAdapter>(
     input: Vec<u8>,
     stdout_limit: usize,
     cancellation: &CancellationToken,
-    deadline: impl Into<CapturedProcessDeadline>,
+    deadline: Instant,
 ) -> Result<CapturedProcessOutput, CapturedEffectError> {
     let admitted = Arc::new(std::sync::atomic::AtomicBool::new(false));
     run_captured_process_with_parts(
@@ -570,7 +558,7 @@ pub(crate) fn run_captured_effect<A: SshProcessAdapter>(
             input: Some(input),
             stdout_limit,
             stderr_limit: None,
-            deadline: deadline.into(),
+            deadline: Some(deadline),
         },
         cancellation,
     )
@@ -602,7 +590,7 @@ pub(crate) fn run_captured_transfer<A: SshProcessAdapter>(
             input: Some(input),
             stdout_limit,
             stderr_limit: None,
-            deadline: CapturedProcessDeadline::Unlimited,
+            deadline: None,
         },
         cancellation,
     )
@@ -626,7 +614,7 @@ pub(crate) fn run_probe_process<A: SshProcessAdapter>(
             input: None,
             stdout_limit: stream_limit,
             stderr_limit: Some(stream_limit),
-            deadline: CapturedProcessDeadline::At(deadline),
+            deadline: Some(deadline),
         },
         cancellation,
     )
@@ -637,7 +625,7 @@ struct CapturedProcessPlan {
     input: Option<Vec<u8>>,
     stdout_limit: usize,
     stderr_limit: Option<usize>,
-    deadline: CapturedProcessDeadline,
+    deadline: Option<Instant>,
 }
 
 /// Owns the sole authenticated SSH connection while setup waits for local approvals.
@@ -760,19 +748,6 @@ fn run_captured_process_with_parts<A: SshProcessAdapter>(
         stderr_limit,
         deadline,
     } = plan;
-    let active_deadline = Arc::new(std::sync::Mutex::new(match deadline {
-        CapturedProcessDeadline::At(deadline) => Some(deadline),
-        _ => None,
-    }));
-    let remote_timeout = match deadline {
-        CapturedProcessDeadline::RemoteCommand(timeout) => Some(timeout),
-        _ => None,
-    };
-    if remote_timeout.is_some() && !spec.has_setup_preamble() {
-        return Err(CapturedProcessError::Operation(
-            SshProcessMechanismError::LaunchFailed,
-        ));
-    }
     if cancellation.is_cancelled() {
         return Err(CapturedProcessError::Cancelled);
     }
@@ -818,7 +793,6 @@ fn run_captured_process_with_parts<A: SshProcessAdapter>(
         None => None,
     };
     let has_preamble = spec.has_setup_preamble();
-    let observed_deadline = Arc::clone(&active_deadline);
     let mut stdout_reader = Some(
         std::thread::Builder::new()
             .name("spaceterm-ssh-stdout".into())
@@ -831,15 +805,6 @@ fn run_captured_process_with_parts<A: SshProcessAdapter>(
                         .map_err(|_| BoundedReadError::Io)?;
                     if received != super::command::SETUP_READY_PREAMBLE {
                         return Err(BoundedReadError::Io);
-                    }
-                    if let Some(timeout) = remote_timeout {
-                        *observed_deadline
-                            .lock()
-                            .unwrap_or_else(|error| error.into_inner()) = Some(
-                            Instant::now()
-                                .checked_add(timeout)
-                                .unwrap_or_else(Instant::now),
-                        );
                     }
                 }
                 read_bounded(stdout, stdout_limit)
@@ -860,9 +825,6 @@ fn run_captured_process_with_parts<A: SshProcessAdapter>(
     let mut captured_stderr = None;
 
     let exit = loop {
-        let deadline = *active_deadline
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
         if cancellation.is_cancelled() {
             ownership.cleanup_now();
             let _ = join_writer(writer);

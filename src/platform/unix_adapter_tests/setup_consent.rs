@@ -1,9 +1,10 @@
 use crate::ssh::provisioning::*;
 use std::ffi::{OsStr, OsString};
-use std::io::Cursor;
+use std::io::{self, Cursor, Read};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex, mpsc};
+use std::time::Duration;
 
 use crate::direct_connections::credentials::{CredentialError, CredentialStore, Interaction};
 use crate::platform::app_directories::AppDirectoryEnvironment;
@@ -63,10 +64,33 @@ struct ProcessAdapter {
     active: Arc<AtomicUsize>,
     resolved: Arc<Mutex<Vec<u8>>>,
     effects_succeed: Arc<AtomicBool>,
+    stall: Arc<(Mutex<StalledObservation>, Condvar)>,
 }
 enum FixtureProcess {
     Master,
     Captured(ProcessExit),
+    Stalled,
+}
+
+#[derive(Default)]
+struct StalledObservation {
+    action: Option<&'static str>,
+    entered: bool,
+    killed: bool,
+}
+
+struct WithheldReady(Arc<(Mutex<StalledObservation>, Condvar)>);
+impl Read for WithheldReady {
+    fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+        let (state, changed) = &*self.0;
+        let mut state = state.lock().unwrap();
+        state.entered = true;
+        changed.notify_all();
+        while !state.killed {
+            state = changed.wait(state).unwrap();
+        }
+        Ok(0)
+    }
 }
 
 impl SshProcessAdapter for ProcessAdapter {
@@ -113,6 +137,28 @@ impl SshProcessAdapter for ProcessAdapter {
                 );
             }
             assert_eq!(self.authentications.load(Ordering::SeqCst), 1);
+        }
+        let stalled = self.stall.0.lock().unwrap().action.is_some_and(|action| {
+            request
+                .arguments()
+                .last()
+                .is_some_and(|command| command.to_string_lossy().contains(action))
+        });
+        if stalled {
+            if self.stall.0.lock().unwrap().action == Some("setup-start") {
+                self.effects
+                    .lock()
+                    .unwrap()
+                    .push(request.arguments().to_vec());
+            }
+            return Ok(SpawnedSshProcess::new(
+                FixtureProcess::Stalled,
+                SshProcessPipes::new(
+                    Some(Box::new(std::io::sink())),
+                    Some(Box::new(WithheldReady(Arc::clone(&self.stall)))),
+                    None,
+                ),
+            ));
         }
         let (success, stdout, stderr) = if resolve {
             (true, self.resolved.lock().unwrap().clone(), vec![])
@@ -172,15 +218,19 @@ impl SshProcessAdapter for ProcessAdapter {
         process: &mut Self::Process,
     ) -> Result<Option<ProcessExit>, SshProcessMechanismError> {
         Ok(match process {
-            FixtureProcess::Master => None,
+            FixtureProcess::Master | FixtureProcess::Stalled => None,
             FixtureProcess::Captured(exit) => Some(*exit),
         })
     }
     fn signal(
         &self,
-        _: &mut Self::Process,
+        process: &mut Self::Process,
         _: ProcessSignal,
     ) -> Result<(), SshProcessMechanismError> {
+        if matches!(process, FixtureProcess::Stalled) {
+            self.stall.0.lock().unwrap().killed = true;
+            self.stall.1.notify_all();
+        }
         Ok(())
     }
     fn reap(&self, _: Self::Process) -> Result<(), SshProcessMechanismError> {
@@ -234,6 +284,7 @@ impl Fixture {
             filesystem: secure_filesystem,
             authentications: Arc::default(),
             effects_succeed: Arc::default(),
+            stall: Arc::default(),
             active: Arc::default(),
             resolved: Arc::new(Mutex::new(
                 b"hostname configured.example\nport 2222\n".to_vec(),
@@ -270,6 +321,14 @@ impl Fixture {
         address: Option<SetupAddress>,
         approvals: Arc<dyn SetupApprovalHandler>,
     ) -> Result<DirectRouteId, SetupFailure> {
+        self.setup_with_cancellation(address, approvals, &CancellationToken::default())
+    }
+    fn setup_with_cancellation(
+        &self,
+        address: Option<SetupAddress>,
+        approvals: Arc<dyn SetupApprovalHandler>,
+        cancellation: &CancellationToken,
+    ) -> Result<DirectRouteId, SetupFailure> {
         let backend: &dyn SshSetupBackend = &self.backend;
         backend.setup(
             SetupRequest {
@@ -279,7 +338,7 @@ impl Fixture {
                 prompts: Arc::new(NoPrompt(Arc::clone(&self.prompts))),
                 approvals,
             },
-            &CancellationToken::default(),
+            cancellation,
             &SetupProgress::new(|_| {}),
         )
     }
@@ -718,4 +777,133 @@ fn optional_custom_port_uses_the_requested_port_when_no_bind_is_configured() {
     assert_eq!(result, Err(SetupFailure::Cancelled));
     assert!(fixture.adapter.effects.lock().unwrap().is_empty());
     assert_eq!(fixture.backend.process_counts().active(), 0);
+}
+
+#[test]
+fn setup_discovery_times_out_before_the_slave_ready_preamble_and_reaps_the_attempt() {
+    let fixture = Fixture::new(serde_json::to_vec(&discovery(true)).unwrap());
+    fixture.adapter.stall.0.lock().unwrap().action = Some("ssh-discover");
+    let cancellation = CancellationToken::default();
+    let token = cancellation.clone();
+    let (completed, outcome) = mpsc::sync_channel(1);
+
+    let (entered, before_watchdog, result) = std::thread::scope(|scope| {
+        let setup = &fixture;
+        let worker = scope.spawn(move || {
+            let result = setup.setup_with_cancellation(
+                None,
+                Arc::new(Approvals(|_, _: &CancellationToken| {
+                    panic!("stalled discovery must not reach approval")
+                })),
+                &token,
+            );
+            let _ = completed.send(result);
+        });
+        let (state, changed) = &*fixture.adapter.stall;
+        let (state, _) = changed
+            .wait_timeout_while(state.lock().unwrap(), Duration::from_secs(10), |state| {
+                !state.entered
+            })
+            .unwrap();
+        let entered = state.entered;
+        drop(state);
+        let observed = if entered {
+            outcome
+                .recv_timeout(OBSERVATION + Duration::from_secs(3))
+                .ok()
+        } else {
+            None
+        };
+        let before_watchdog = observed.is_some();
+        // Old source needs this cancellation to release its indefinitely stalled reader.
+        cancellation.cancel();
+        let result = observed.unwrap_or_else(|| {
+            outcome
+                .recv_timeout(Duration::from_secs(3))
+                .expect("watchdog cancellation must finish owned cleanup")
+        });
+        worker.join().unwrap();
+        (entered, before_watchdog, result)
+    });
+
+    assert!(entered, "the slave must withhold its ready preamble");
+    assert!(
+        before_watchdog,
+        "discovery exceeded its observation deadline"
+    );
+    assert_eq!(
+        result,
+        Err(SetupFailure::Unavailable(UnavailableKind::HostUnreachable))
+    );
+    assert!(fixture.adapter.effects.lock().unwrap().is_empty());
+    assert_eq!(fixture.adapter.authentications.load(Ordering::SeqCst), 1);
+    assert_eq!(fixture.prompts.load(Ordering::SeqCst), 1);
+    let counts = fixture.backend.process_counts();
+    assert_eq!(counts.active(), 0);
+    assert_eq!(counts.spawned, counts.reaped);
+}
+
+#[test]
+fn setup_start_times_out_before_the_slave_ready_preamble_as_unconfirmed_and_reaps_the_attempt() {
+    let fixture = Fixture::new(serde_json::to_vec(&discovery(false)).unwrap());
+    fixture.adapter.stall.0.lock().unwrap().action = Some("setup-start");
+    let cancellation = CancellationToken::default();
+    let token = cancellation.clone();
+    let (completed, outcome) = mpsc::sync_channel(1);
+
+    let (entered, before_watchdog, result) = std::thread::scope(|scope| {
+        let setup = &fixture;
+        let worker = scope.spawn(move || {
+            let result = setup.setup_with_cancellation(
+                None,
+                Arc::new(Approvals(|offer, _: &CancellationToken| {
+                    assert_eq!(offer, SetupOffer::Startup);
+                    true
+                })),
+                &token,
+            );
+            let _ = completed.send(result);
+        });
+        let (state, changed) = &*fixture.adapter.stall;
+        let (state, _) = changed
+            .wait_timeout_while(state.lock().unwrap(), Duration::from_secs(10), |state| {
+                !state.entered
+            })
+            .unwrap();
+        let entered = state.entered;
+        drop(state);
+        let observed = if entered {
+            outcome
+                .recv_timeout(OBSERVATION + Duration::from_secs(3))
+                .ok()
+        } else {
+            None
+        };
+        let before_watchdog = observed.is_some();
+        // Cleanup cancellation cannot itself count as observing the admitted startup.
+        cancellation.cancel();
+        let result = observed.unwrap_or_else(|| {
+            outcome
+                .recv_timeout(Duration::from_secs(3))
+                .expect("watchdog cancellation must finish owned cleanup")
+        });
+        worker.join().unwrap();
+        (entered, before_watchdog, result)
+    });
+
+    assert!(
+        entered,
+        "the dispatched startup must withhold its ready preamble"
+    );
+    assert!(before_watchdog, "startup exceeded its observation deadline");
+    assert_eq!(
+        result,
+        Err(SetupFailure::Unconfirmed(SetupOperation::Start))
+    );
+    assert_eq!(fixture.adapter.effects.lock().unwrap().len(), 1);
+    assert_eq!(fixture.adapter.authentications.load(Ordering::SeqCst), 1);
+    assert_eq!(fixture.prompts.load(Ordering::SeqCst), 1);
+    let counts = fixture.backend.process_counts();
+    assert_eq!(counts.active(), 0);
+    assert_eq!(counts.spawned, counts.reaped);
 }

@@ -14,9 +14,9 @@ use super::{
     },
     host_config::{HostConfigFilesystem, HostConfigFilesystemError},
     process::{
-        CapturedEffectError, CapturedProcessDeadline, CapturedProcessError, CapturedProcessOutput,
-        SetupMaster, SshProcessAdapter, SshProcessEnvironment, run_captured_effect,
-        run_captured_process, run_captured_transfer,
+        CapturedEffectError, CapturedProcessError, CapturedProcessOutput, SetupMaster,
+        SshProcessAdapter, SshProcessEnvironment, run_captured_effect, run_captured_process,
+        run_captured_transfer,
     },
     startup_environment::StartupSshEnvironment,
 };
@@ -662,7 +662,7 @@ impl<A: SshProcessAdapter> SetupSession<'_, A> {
             Vec::new(),
             MAX_DISCOVERY,
             cancellation,
-            CapturedProcessDeadline::RemoteCommand(OBSERVATION),
+            Instant::now() + OBSERVATION,
         )
         .map_err(|error| self.process_failure(error))?;
         if !output.exit.is_success() {
@@ -732,7 +732,7 @@ impl<A: SshProcessAdapter> SetupSession<'_, A> {
             input,
             MAX_DISCOVERY,
             cancellation,
-            CapturedProcessDeadline::RemoteCommand(OBSERVATION),
+            Instant::now() + OBSERVATION,
         )
         .map_err(|error| match error {
             CapturedEffectError::NotAdmitted(error) => self.process_failure(error),

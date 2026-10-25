@@ -121,7 +121,7 @@ fn start(
             vec![],
             64,
             &token,
-            CapturedProcessDeadline::RemoteCommand(Duration::from_millis(200)),
+            Instant::now() + Duration::from_millis(200),
         );
         completed.send(outcome).unwrap();
     });
@@ -140,22 +140,12 @@ fn start(
 }
 
 #[test]
-fn authentication_can_wait_longer_than_the_remote_observation_budget() {
+fn slave_observation_is_bounded_before_the_remote_ready_preamble() {
     let (adapter, _, result, worker) = start(true);
     assert!(matches!(
-        result.recv_timeout(Duration::from_millis(400)),
-        Err(mpsc::RecvTimeoutError::Timeout)
+        result.recv_timeout(Duration::from_secs(2)).unwrap(),
+        Err(CapturedProcessError::TimedOut)
     ));
-    adapter.state.0.lock().unwrap().released = true;
-    adapter.state.1.notify_all();
-    assert_eq!(
-        result
-            .recv_timeout(Duration::from_secs(2))
-            .unwrap()
-            .unwrap()
-            .stdout,
-        b"ready"
-    );
     worker.join().unwrap();
     assert_eq!(adapter.state.0.lock().unwrap().reaped, 1);
 }
@@ -172,7 +162,7 @@ fn remote_observation_is_bounded_after_the_authenticated_command_starts() {
 }
 
 #[test]
-fn cancellation_during_authentication_reaps_the_owned_process() {
+fn cancellation_while_the_slave_waits_for_ready_reaps_the_owned_process() {
     let (adapter, cancellation, result, worker) = start(true);
     cancellation.cancel();
     assert!(matches!(
@@ -246,5 +236,59 @@ fn cancelling_setup_master_authentication_reaps_before_returning() {
         worker.join().unwrap(),
         Err(CapturedProcessError::Cancelled)
     ));
+    assert_eq!(adapter.state.0.lock().unwrap().reaped, 1);
+}
+
+#[test]
+fn setup_master_authentication_waits_independently_of_slave_observation_deadlines() {
+    let adapter = Adapter {
+        state: Arc::default(),
+        before_ready: true,
+    };
+    let runner = adapter.clone();
+    let (completed, outcome) = mpsc::sync_channel(1);
+    let worker = std::thread::spawn(move || {
+        let command = SshCommandContext::setup_master(
+            OpenSshExecutable::new("/fixture/ssh".into()).unwrap(),
+            Path::new("/fixture/config"),
+            Path::new("/fixture/m"),
+            &SshDestination::new("configured-server".into()).unwrap(),
+        )
+        .unwrap();
+        let environment =
+            SshProcessEnvironment::new_without_authentication("/fixture/home".into(), None)
+                .unwrap();
+        let result = SetupMaster::start(
+            &runner,
+            &command,
+            &environment,
+            &CancellationToken::default(),
+        )
+        .map(|_| ());
+        completed.send(result).unwrap();
+    });
+    let state = adapter.state.0.lock().unwrap();
+    let (state, timeout) = adapter
+        .state
+        .1
+        .wait_timeout_while(state, Duration::from_secs(2), |state| !state.blocked)
+        .unwrap();
+    assert!(!timeout.timed_out() && state.blocked);
+    drop(state);
+    let waiting = matches!(
+        outcome.recv_timeout(Duration::from_millis(400)),
+        Err(mpsc::RecvTimeoutError::Timeout)
+    );
+    adapter.state.0.lock().unwrap().released = true;
+    adapter.state.1.notify_all();
+    outcome
+        .recv_timeout(Duration::from_secs(2))
+        .unwrap()
+        .unwrap();
+    worker.join().unwrap();
+    assert!(
+        waiting,
+        "master authentication inherited a slave observation deadline"
+    );
     assert_eq!(adapter.state.0.lock().unwrap().reaped, 1);
 }
