@@ -13,8 +13,10 @@ import unittest
 import xml.etree.ElementTree as ElementTree
 from pathlib import Path
 
-from spaceterm_tasks import ROOT
+from spaceterm_tasks import ROOT, server_package
 from spaceterm_tasks.development_linux import APPLICATION_ID, ICON_DOCUMENT
+
+from tests.server_artifact_fixture import archive_tree
 
 ICON_DOCUMENT = ROOT / ICON_DOCUMENT
 
@@ -45,10 +47,24 @@ print(json.dumps({"reason": "compiler-artifact", "target": {"name": binary},
 """
 
 
+# Catalog preparation keeps its real Git snapshot, signature and staging checks. Only
+# compiling the two distribution binaries uses prepared artifacts in this launcher fixture.
+CATALOG_DRIVER = """import json, pathlib, runpy, sys
+from unittest.mock import patch
+artifacts = json.loads(pathlib.Path(sys.argv[1]).read_text())
+sys.argv = sys.argv[2:]
+def package(identity, *, target):
+    assert identity == "spaceterm-development"
+    return tuple(pathlib.Path(value) for value in artifacts[target])
+with patch("spaceterm_tasks.server_builds.package", package):
+    runpy.run_path(sys.argv[0], run_name="__main__")
+"""
+
+
 @unittest.skipUnless(sys.platform == "linux", "the private prefix is Linux-only")
 class LinuxPrefixTests(unittest.TestCase):
     def setUp(self):
-        for tool in ("tic", "desktop-file-validate"):
+        for tool in ("tic", "desktop-file-validate", "git", "cc"):
             self.assertIsNotNone(shutil.which(tool), f"{tool} is required; run mise doctor project")
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
@@ -70,11 +86,74 @@ class LinuxPrefixTests(unittest.TestCase):
                 self.root / directory,
                 ignore=shutil.ignore_patterns("__pycache__"),
             )
+        shutil.copyfile(
+            ROOT / "packaging/server-nonproduction-trust.json",
+            self.root / "packaging/server-nonproduction-trust.json",
+        )
+        (self.root / ".gitignore").write_text("target/\nrecord\n__pycache__/\n")
+        for arguments in (
+            ("init", "-q"),
+            ("config", "user.name", "Fixture"),
+            ("config", "user.email", "fixture@example.invalid"),
+            ("add", "."),
+            ("-c", "core.hooksPath=/dev/null", "commit", "-qm", "fixture"),
+        ):
+            subprocess.run(["git", "-C", str(self.root), *arguments], check=True)
+        self.artifacts = self.private / "server-packages.json"
+        self.artifacts.write_text(json.dumps(self.server_artifacts()))
+        self.driver = self.private / "catalog-driver.py"
+        self.driver.write_text(CATALOG_DRIVER)
         self.commands = self.private / "commands"
         self.commands.mkdir()
         (self.commands / "cargo").write_text(f"#!{sys.executable}\n" + FAKE_CARGO)
         (self.commands / "cargo").chmod(0o755)
         self.record = self.root / "record"
+
+    def server_artifacts(self):
+        artifacts = {}
+        for target in server_package.TARGETS.values():
+            tree = self.private / "server-packages" / target / "server"
+            executable = tree / "bin/spaceterm-server"
+            executable.parent.mkdir(parents=True)
+            info = {
+                "schema": 1,
+                "identity": "spaceterm-development",
+                "target": target,
+                "commit": "a" * 40,
+                "version": "dev.aaaaaaaaaaaa",
+                "protocol_major": 1,
+                "capabilities": ["workspace_policy"],
+            }
+            if target == "x86_64-unknown-linux-gnu":
+                source = f"""
+#include <stdio.h>
+#include <string.h>
+int main(int argc, char **argv) {{
+    if (argc == 2 && strcmp(argv[1], "--build-info") == 0) {{
+        puts({json.dumps(json.dumps(info))});
+        return 0;
+    }}
+    if (argc == 2 && strcmp(argv[1], "--check") == 0) {{
+        puts("Server checks passed.");
+        return 0;
+    }}
+    return 1;
+}}
+"""
+                subprocess.run(
+                    ["cc", "-x", "c", "-", "-o", str(executable)],
+                    input=source,
+                    text=True,
+                    capture_output=True,
+                    check=True,
+                )
+            else:
+                executable.write_bytes(
+                    bytes.fromhex("cffaedfe0c0000010000000002000000") + bytes(16)
+                )
+                executable.chmod(0o755)
+            artifacts[target] = [str(path) for path in archive_tree(ROOT, tree, info)]
+        return artifacts
 
     def environment(self):
         environment = dict(os.environ)
@@ -103,6 +182,8 @@ class LinuxPrefixTests(unittest.TestCase):
     def launcher(self, *arguments):
         return [
             sys.executable,
+            str(self.driver),
+            str(self.artifacts),
             str(self.root / "mise-tasks" / "development" / "linux.py"),
             *arguments,
         ]

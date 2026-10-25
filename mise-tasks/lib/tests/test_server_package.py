@@ -350,9 +350,14 @@ class CrossBuildTests(unittest.TestCase):
                 server_package.compile_terminfo(destination, "aarch64-apple-darwin")
             entry = destination / "78/xterm-spaceterm"
             self.assertEqual(entry.read_bytes()[:2], bytes.fromhex("1a01"))
+            # Decode the macOS bytes through the running host's terminfo lookup layout.
+            native = Path(temporary) / "native-terminfo"
+            lookup = native / ("78" if os.uname().sysname == "Darwin" else "x")
+            lookup.mkdir(parents=True)
+            shutil.copyfile(entry, lookup / entry.name)
             result = subprocess.run(
                 ["infocmp", "-x", "-1", "xterm-spaceterm"],
-                env={**os.environ, "TERMINFO": str(destination)},
+                env={**os.environ, "TERMINFO": str(native)},
                 capture_output=True,
                 text=True,
                 check=True,
