@@ -32,6 +32,9 @@ enum Outcome {
     Finish(Result<DirectRouteId, SetupFailure>),
     /// Runs until the sheet cancels it, then reports the cancellation.
     UntilCancelled,
+    /// Runs until the sheet cancels it, then reports `failure`, as a setup does whose earlier
+    /// step had already changed the other computer.
+    UntilCancelledThen(SetupFailure),
 }
 
 /// One setup the sheet asked for.
@@ -78,14 +81,23 @@ impl SshSetupBackend for Computers {
         match outcome {
             Some(Outcome::Finish(result)) => result,
             Some(Outcome::UntilCancelled) | None => {
-                let deadline = Instant::now() + Duration::from_secs(5);
-                while !cancellation.is_cancelled() {
-                    assert!(Instant::now() < deadline, "the sheet cancels the setup");
-                    std::thread::sleep(Duration::from_millis(2));
-                }
+                wait_for(cancellation);
                 Err(SetupFailure::Cancelled)
             }
+            Some(Outcome::UntilCancelledThen(failure)) => {
+                wait_for(cancellation);
+                Err(failure)
+            }
         }
+    }
+}
+
+/// Waits on the setup's own thread until the sheet cancels it.
+fn wait_for(cancellation: &CancellationToken) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !cancellation.is_cancelled() {
+        assert!(Instant::now() < deadline, "the sheet cancels the setup");
+        std::thread::sleep(Duration::from_millis(2));
     }
 }
 
@@ -207,6 +219,18 @@ impl Sheet<'_> {
     fn fill(&mut self, host: &str, address: &str) {
         self.type_into(HOST_SELECTOR, host);
         self.type_into(ADDRESS_SELECTOR, address);
+    }
+
+    /// Shows an SSH sign-in prompt in the sheet's window, then has the person dismiss it, as the
+    /// AskPass presenter reports both.
+    fn decline_prompt(&mut self) {
+        self.cx
+            .update(|window, cx| crate::ui::ssh_setup::prompt_requested(window, cx));
+        self.cx.run_until_parked();
+        self.cx.update(|window, cx| {
+            crate::ui::ssh_setup::prompt_settled(window.window_handle().window_id(), true, cx);
+        });
+        self.cx.run_until_parked();
     }
 
     /// Shows `join` in the sheet as if the sheet had started it with an invitation from
@@ -634,6 +658,76 @@ fn an_unavailable_set_up_sets_up_nothing(cx: &mut TestAppContext) {
     assert!(sheet.open());
     assert_eq!(sheet.title(), "Add Server");
     assert!(sheet.computers.asked().is_empty());
+}
+
+/// Declining a sign-in before setup changed anything returns to the form with the values kept.
+#[gpui::test]
+fn declining_a_sign_in_before_any_change_returns_to_the_form(cx: &mut TestAppContext) {
+    let (mut sheet, _) = open_settings(|_| vec![Outcome::UntilCancelled], cx);
+    sheet.begin(AddServerRequest::Ssh(None));
+    sheet.fill("penguin", "192.168.1.20");
+    sheet.choose(SheetAction::SetUp.selector());
+    sheet.settle(|sheet| sheet.says("Setting up \u{201C}penguin\u{201D}"));
+
+    sheet.decline_prompt();
+    sheet.settle(|sheet| sheet.open() && sheet.title() == "Add Server");
+
+    assert!(
+        !sheet.disabled("Set Up"),
+        "the host and address stay for another try"
+    );
+    assert_eq!(sheet.computers.asked().len(), 1);
+}
+
+/// A start that already ran stays reported when the person declines the sign-in that follows
+/// it: the server may be running, so the sheet says SpaceTerm couldn't confirm the start rather
+/// than returning to the form as if nothing happened.
+#[gpui::test]
+fn declining_a_sign_in_after_a_start_reports_the_unconfirmed_start(cx: &mut TestAppContext) {
+    let (mut sheet, route) = open_settings(
+        |_| {
+            vec![Outcome::UntilCancelledThen(SetupFailure::Unconfirmed(
+                SetupOperation::Start,
+            ))]
+        },
+        cx,
+    );
+    sheet.begin(AddServerRequest::Ssh(None));
+    sheet.fill("penguin", "192.168.1.20");
+    sheet.choose(SheetAction::SetUp.selector());
+    sheet.settle(|sheet| sheet.says("Setting up \u{201C}penguin\u{201D}"));
+
+    sheet.decline_prompt();
+    sheet.settle(|sheet| sheet.title() == "Couldn\u{2019}t Add \u{201C}penguin\u{201D}");
+
+    assert!(sheet.says("couldn\u{2019}t confirm that the server started"));
+    assert!(sheet.open());
+    assert_ne!(sheet.selected(), Some(ServerChoice::Direct(route)));
+}
+
+/// An installation that already ran stays reported when the person cancels the sign-in for the
+/// discovery that follows it.
+#[gpui::test]
+fn declining_a_sign_in_after_an_installation_reports_the_unconfirmed_installation(
+    cx: &mut TestAppContext,
+) {
+    let (mut sheet, _) = open_settings(
+        |_| {
+            vec![Outcome::UntilCancelledThen(SetupFailure::Unconfirmed(
+                SetupOperation::Install,
+            ))]
+        },
+        cx,
+    );
+    sheet.begin(AddServerRequest::Ssh(None));
+    sheet.fill("penguin", "192.168.1.20");
+    sheet.choose(SheetAction::SetUp.selector());
+    sheet.settle(|sheet| sheet.says("Setting up \u{201C}penguin\u{201D}"));
+
+    sheet.decline_prompt();
+    sheet.settle(|sheet| sheet.title() == "Couldn\u{2019}t Add \u{201C}penguin\u{201D}");
+
+    assert!(sheet.says("couldn\u{2019}t confirm the installation"));
 }
 
 #[test]

@@ -1239,6 +1239,10 @@ impl AddServerSheet {
             }
             Err(failure) => failure,
         };
+        // Setup reports Cancelled only when it stopped before changing the other computer, so
+        // only then does the sheet close or return to the form. A step that had already run, such
+        // as an installation or a start, reports its own outcome even when the person declined a
+        // later prompt or chose Cancel.
         if matches!(outcome, SetupFailure::Cancelled) {
             if cancelling {
                 self.finish(window, cx);
@@ -1248,7 +1252,13 @@ impl AddServerSheet {
             }
             return;
         }
-        if self.declined && !cancelling {
+        // A declined sign-in can end SSH itself before setup sees the cancellation. That failure
+        // changed nothing, so the person returns to the form as for any other decline.
+        if self.declined
+            && !cancelling
+            && outcome
+                == SetupFailure::Unavailable(crate::ssh::provisioning::UnavailableKind::SshFailed)
+        {
             self.back_to_form(window, cx);
             return;
         }
