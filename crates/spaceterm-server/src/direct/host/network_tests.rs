@@ -144,3 +144,71 @@ fn address_loss_reports_a_failed_listener_without_changing_the_retained_policy_o
         ListenerState::Listening { .. }
     ));
 }
+
+#[test]
+fn wildcard_invitations_advertise_only_the_bound_socket_family() {
+    for (bind_ip, preferred, expected) in [
+        ("0.0.0.0", "fd00::9", "10.0.0.5"),
+        ("::", "10.0.0.9", "fd00::5"),
+        ("0.0.0.0", "10.0.0.9", "10.0.0.9"),
+        ("::", "fd00::9", "fd00::9"),
+    ] {
+        let fixture = fixture(network(
+            &["10.0.0.5", "10.0.0.9", "fd00::5", "fd00::9"],
+            &[preferred],
+        ));
+        let listener = TcpListener::bind((bind_ip, 0)).unwrap();
+        let bind = listener.local_addr().unwrap();
+        drop(listener);
+        fixture
+            .management(Management::SetPolicy {
+                policy: Some(NetworkPolicy::new(bind).unwrap()),
+                enabled: true,
+            })
+            .unwrap();
+        assert_eq!(
+            status(&fixture).listener,
+            ListenerState::Listening { addr: bind }
+        );
+        let invitation = fixture.invite();
+        let advertised = std::net::SocketAddr::new(expected.parse().unwrap(), bind.port());
+        assert_eq!(
+            invitation.endpoint(),
+            format!("wss://{advertised}/spaceterm")
+        );
+    }
+}
+
+#[test]
+fn wildcard_invitation_without_an_eligible_bound_family_refuses_before_allocation() {
+    for (bind_ip, other_family) in [("0.0.0.0", "fd00::9"), ("::", "10.0.0.9")] {
+        let fixture = fixture(network(&[other_family], &[other_family]));
+        let listener = TcpListener::bind((bind_ip, 0)).unwrap();
+        let bind = listener.local_addr().unwrap();
+        drop(listener);
+        fixture
+            .management(Management::SetPolicy {
+                policy: Some(NetworkPolicy::new(bind).unwrap()),
+                enabled: true,
+            })
+            .unwrap();
+        let before = status(&fixture);
+        assert_eq!(before.listener, ListenerState::Listening { addr: bind });
+        let retained = std::fs::read(fixture.paths.data.join("direct.json")).unwrap();
+        assert!(matches!(
+            fixture.management(Management::Invite),
+            Err(DirectError::InvalidAddress)
+        ));
+        assert!(fixture.state.lock().unwrap().invitations.is_empty());
+        assert!(fixture.state.lock().unwrap().claims.is_empty());
+        assert!(
+            retained == std::fs::read(fixture.paths.data.join("direct.json")).unwrap(),
+            "an unadvertisable listener must not change the retained record"
+        );
+        let after = status(&fixture);
+        assert_eq!(after.pin, before.pin);
+        assert_eq!(after.policy, before.policy);
+        assert_eq!(after.enabled, before.enabled);
+        assert_eq!(after.listener, before.listener);
+    }
+}

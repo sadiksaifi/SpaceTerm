@@ -556,7 +556,14 @@ impl State {
                             std::net::SocketAddr::new(
                                 addresses
                                     .suggested
-                                    .or_else(|| addresses.available.first().copied())
+                                    .filter(|ip| ip.is_ipv4() == addr.is_ipv4())
+                                    .or_else(|| {
+                                        addresses
+                                            .available
+                                            .iter()
+                                            .copied()
+                                            .find(|ip| ip.is_ipv4() == addr.is_ipv4())
+                                    })
                                     .ok_or(DirectError::InvalidAddress)?,
                                 addr.port(),
                             )
