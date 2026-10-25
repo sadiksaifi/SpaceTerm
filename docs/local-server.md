@@ -54,7 +54,7 @@ Each SSH destination you connect to stays saved in Settings > Servers until you 
 
 Check Status signs in to a saved inactive host and reads its account server's state once: running, not running, not installed, stopped or incompatible, with its version and platform. Settings reports the result as of the check and says how long ago it ran. It connects, starts and installs nothing, and it closes its SSH connection when it finishes.
 
-`mise run server:ssh:install:native:test` checks accepted installation, usable server-owned terminal work and live-shell reuse without a replacement catalog. Its opt-in account and matching-client requirements are enforced in [the native fixture](../src/platform/unix_adapter_tests/server_process.rs). It requires owner-provisioned disposable accounts and does not establish desktop presentation evidence by itself.
+`mise run server:ssh:install:native:test` checks accepted installation, usable server-owned terminal work and live-shell reuse without a replacement catalog. Its opt-in account and matching-client requirements are enforced in [the native fixture](../src/platform/unix_adapter_tests/server_process.rs). It requires owner-confirmed sdk accounts, explicit UID and build-identity scope, and fresh selected server installation state; it does not establish desktop presentation evidence by itself.
 
 ## Direct network connections
 

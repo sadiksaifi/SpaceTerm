@@ -525,7 +525,7 @@ description = "Verify an explicitly selected SSH account server on the native ho
 run = "cargo test --package spaceterm --lib --all-features --locked -- ssh::server_process::unix_adapter_tests::native_account_server_connect --ignored --exact --nocapture"
 
 [tasks."server:ssh:install:native:test"]
-description = "Verify accepted installation and live Workspace reuse in owner-provisioned disposable accounts"
+description = "Verify accepted installation and live Workspace reuse in owner-confirmed sdk account state"
 run = "cargo test --package spaceterm --lib --no-default-features --features native-tests --locked -- ssh::server_process::unix_adapter_tests::native_account_server_install_acceptance --ignored --exact --nocapture"
 
 [tasks."server:worktree:smoke"]
