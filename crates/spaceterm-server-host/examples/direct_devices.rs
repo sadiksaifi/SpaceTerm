@@ -450,12 +450,80 @@ mod exercise {
         }
     }
 
+    #[derive(Clone, serde::Serialize, serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct FixtureWorkspace {
+        workspace: Id,
+        boot: Id,
+        name: String,
+        directory: std::path::PathBuf,
+        pane: Option<Id>,
+    }
+
+    fn close_fixture_workspace(server: &ServerConnection, owned: &FixtureWorkspace) -> Result<()> {
+        let mut connection = api(server.connect_pane())?;
+        let current = inventory(&mut connection)?.0;
+        require(
+            current.close.as_ref().map(|close| close.boot) == Some(owned.boot),
+            "cleanup refused replacement server boot",
+        )?;
+        let Some(work) = current
+            .workspaces
+            .iter()
+            .find(|work| work.id == owned.workspace)
+        else {
+            return Ok(());
+        };
+        require(
+            work.name == owned.name
+                && work.pinned_directory.as_ref() == Some(&owned.directory)
+                && work.tabs.len() == 1
+                && work.tabs[0].panes.len() == 1
+                && work.root_tab == work.tabs[0].id
+                && work.tabs[0].root_pane == work.tabs[0].panes[0].id
+                && owned.pane.is_none_or(|pane| work.tabs[0].root_pane == pane),
+            "cleanup refused: test Workspace changed",
+        )?;
+        let target = CloseTarget::Workspace {
+            workspace: owned.workspace,
+        };
+        let confirmation = current
+            .close_confirmation(target)
+            .ok_or("cleanup confirmation unavailable")?;
+        mutate(
+            server,
+            &mut connection,
+            Mutation::Close {
+                target,
+                confirmation,
+            },
+        )?;
+        Ok(())
+    }
+
+    struct WorkspaceGuard<'a> {
+        server: &'a ServerConnection,
+        owned: Option<FixtureWorkspace>,
+    }
+    impl Drop for WorkspaceGuard<'_> {
+        fn drop(&mut self) {
+            if let Some(owned) = &self.owned
+                && let Err(classification) = close_fixture_workspace(self.server, owned)
+            {
+                eprintln!(
+                    "direct_devices: exact Workspace {} cleanup incomplete: {classification}",
+                    hex(&owned.workspace)
+                );
+            }
+        }
+    }
+
     struct Scope {
         owner: ServerConnection,
         policy: NetworkPolicy,
         server: Id,
         baseline: Inventory,
-        workspace: Option<(Id, Id)>,
+        workspace: Option<FixtureWorkspace>,
         invitations: Vec<Id>,
         claims: Vec<Id>,
         keys: Vec<[u8; 32]>,
@@ -482,28 +550,16 @@ mod exercise {
                 }
             }
             let mut connection = api(self.owner.connect_pane())?;
-            if let Some((workspace, pane)) = self.workspace {
-                let current = inventory(&mut connection)?.0;
-                if let Some(owned) = current.workspaces.iter().find(|work| work.id == workspace) {
-                    require(
-                        owned.tabs.len() == 1
-                            && owned.tabs[0].panes.len() == 1
-                            && owned.tabs[0].root_pane == pane,
-                        "cleanup refused: test Workspace membership changed",
-                    )?;
-                    let target = CloseTarget::Workspace { workspace };
-                    let confirmation = current
-                        .close_confirmation(target)
-                        .ok_or("cleanup confirmation unavailable")?;
-                    mutate(
-                        &self.owner,
-                        &mut connection,
-                        Mutation::Close {
-                            target,
-                            confirmation,
-                        },
-                    )?;
-                }
+            if let Some(owned) = &self.workspace {
+                require(
+                    !self
+                        .baseline
+                        .workspaces
+                        .iter()
+                        .any(|work| work.id == owned.workspace),
+                    "cleanup preserved a baseline Workspace",
+                )?;
+                close_fixture_workspace(&self.owner, owned)?;
                 self.workspace = None;
             }
             require(
@@ -671,14 +727,53 @@ mod exercise {
             println!(
                 "PASS two-host claim proofs, exact retry, substitution refusal, approval and protocol major 1"
             );
+            let failed = peer.message(json!({"create_workspace": format!("Direct devices cleanup {}", &hex(&random()?)[..12]), "fail_before_handoff": true}))?;
+            scope.workspace = Some(api(serde_json::from_value(
+                failed["workspace_owner"].clone(),
+            ))?);
+            require(
+                failed["injected_failure"] == true,
+                "post-creation failure witness missing",
+            )?;
+            require(
+                inventory(&mut connection)?.0.workspaces == scope.baseline.workspaces,
+                "creation failure before identity handoff left fixture organization",
+            )?;
+            scope.workspace = None;
+            println!("PASS exact Workspace cleanup after creation failure before identity handoff");
+
             let response = peer.message(json!({"create_workspace": format!("Direct devices native {}", &hex(&random()?)[..12])}))?;
-            let workspace: Id = api(serde_json::from_value(response["workspace"].clone()))?;
-            let expected_pane: Id = api(serde_json::from_value(response["pane"].clone()))?;
+            scope.workspace = Some(api(serde_json::from_value(
+                response["workspace_owner"].clone(),
+            ))?);
+            let owned = scope
+                .workspace
+                .as_ref()
+                .ok_or("test Workspace ownership missing")?;
+            let workspace = owned.workspace;
+            require(
+                owned.boot
+                    == inventory(&mut connection)?
+                        .0
+                        .close
+                        .ok_or("current server boot missing")?
+                        .boot,
+                "WSS-created Workspace changed server boot",
+            )?;
+            println!("SCOPE test Workspace {}", hex(&workspace));
+            let response = peer.message(json!({"workspace_owned": workspace}))?;
+            let pane: Id = api(serde_json::from_value(response["pane"].clone()))?;
             let pinned: std::path::PathBuf =
                 api(serde_json::from_value(response["directory"].clone()))?;
-            println!("SCOPE test Workspace {}", hex(&workspace));
-            // Capture the accepted Workspace immediately, before any later fixture action can fail.
-            scope.workspace = Some((workspace, expected_pane));
+            let owned = scope
+                .workspace
+                .as_mut()
+                .ok_or("test Workspace ownership missing")?;
+            require(
+                pinned == owned.directory,
+                "WSS-created Workspace directory changed during handoff",
+            )?;
+            owned.pane = Some(pane);
             let current = inventory(&mut connection)?.0;
             let work = current
                 .workspaces
@@ -689,15 +784,13 @@ mod exercise {
                 work.pinned_directory.as_ref() == Some(&pinned),
                 "WSS-created Workspace lost its owning-server directory",
             )?;
-            let pane = work.tabs.first().ok_or("test root Tab missing")?.root_pane;
             require(
-                pane == expected_pane,
+                work.tabs.first().is_some_and(|tab| tab.root_pane == pane),
                 "WSS-created root Pane identity changed",
             )?;
             println!(
                 "PASS WSS Workspace creation, directory browsing, physical matching and attachment"
             );
-            scope.workspace = Some((workspace, pane));
             let first = attached(select(&mut connection, pane, true)?)?;
             command(
                 &mut connection,
@@ -992,7 +1085,11 @@ mod exercise {
         }
     }
 
-    fn create_remote_workspace(server: &ServerConnection, name: String) -> Result<Value> {
+    fn create_remote_workspace(
+        server: &ServerConnection,
+        name: String,
+        handoff: impl FnOnce(&FixtureWorkspace) -> Result<()>,
+    ) -> Result<Value> {
         let mut connection = api(server.connect_pane())?;
         require(
             connection.supports_directory_matching(),
@@ -1040,13 +1137,34 @@ mod exercise {
             ),
             "WSS physical directory identity did not match",
         )?;
+        let boot = inventory(&mut connection)?
+            .0
+            .close
+            .ok_or("fixture boot missing")?
+            .boot;
         let workspace = mutate(
             server,
             &mut connection,
             Mutation::CreateWorkspace {
-                name,
+                name: name.clone(),
                 directory: Some(home.clone()),
             },
+        )?;
+        let mut cleanup = WorkspaceGuard {
+            server,
+            owned: Some(FixtureWorkspace {
+                workspace,
+                boot,
+                name,
+                directory: home.clone(),
+                pane: None,
+            }),
+        };
+        handoff(
+            cleanup
+                .owned
+                .as_ref()
+                .ok_or("created Workspace ownership missing")?,
         )?;
         let current = inventory(&mut connection)?.0;
         let work = current
@@ -1070,6 +1188,7 @@ mod exercise {
             api(server.attachments())?.is_attached(workspace),
             "WSS attachment did not survive reopening",
         )?;
+        cleanup.owned = None;
         Ok(json!({"workspace": workspace, "pane": pane, "directory": home}))
     }
 
@@ -1092,14 +1211,40 @@ mod exercise {
         let mut output_pipe = std::io::stdout().lock();
         send_json(&mut output_pipe, json!({"os": std::env::consts::OS}))?;
         let (server, connector) = enroll_device(&mut input, &mut output_pipe)?;
-        let request = receive_json(&mut input)?;
-        let name = request["create_workspace"]
-            .as_str()
-            .ok_or("WSS Workspace creation phase missing")?;
-        send_json(
-            &mut output_pipe,
-            create_remote_workspace(&server, name.to_owned())?,
-        )?;
+        loop {
+            let request = receive_json(&mut input)?;
+            let name = request["create_workspace"]
+                .as_str()
+                .ok_or("WSS Workspace creation phase missing")?;
+            if request["fail_before_handoff"] == true {
+                let mut owned = None;
+                let result = create_remote_workspace(&server, name.to_owned(), |workspace| {
+                    owned = Some(workspace.clone());
+                    Err("injected failure before Workspace identity handoff")
+                });
+                require(
+                    matches!(
+                        result,
+                        Err("injected failure before Workspace identity handoff")
+                    ),
+                    "creation failure did not reach its post-creation boundary",
+                )?;
+                send_json(
+                    &mut output_pipe,
+                    json!({"injected_failure": true, "workspace_owner": owned.ok_or("failed creation ownership missing")?}),
+                )?;
+                continue;
+            }
+            let created = create_remote_workspace(&server, name.to_owned(), |owned| {
+                send_json(&mut output_pipe, json!({"workspace_owner": owned}))?;
+                require(
+                    receive_json(&mut input)?["workspace_owned"] == json!(owned.workspace),
+                    "coordinator did not acknowledge exact Workspace ownership",
+                )
+            })?;
+            send_json(&mut output_pipe, created)?;
+            break;
+        }
         let scope = receive_json(&mut input)?;
         let pane: Id = api(serde_json::from_value(scope["pane"].clone()))?;
         let session: Id = api(serde_json::from_value(scope["session"].clone()))?;
