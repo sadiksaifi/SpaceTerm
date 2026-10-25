@@ -4,14 +4,86 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from unittest.mock import patch
 
 from spaceterm_tasks import TaskError
 from spaceterm_tasks.server_builds import _sync_source, snapshot
 
 
 class ServerSourceTests(unittest.TestCase):
+    def test_concurrent_first_snapshots_reuse_the_verified_winner(self):
+        self.concurrent_snapshots(corrupt_winner=False)
+
+    def test_concurrent_snapshot_refuses_a_changed_publication_winner(self):
+        self.concurrent_snapshots(corrupt_winner=True)
+
+    def concurrent_snapshots(self, *, corrupt_winner):
+        with tempfile.TemporaryDirectory() as temporary:
+            parent = Path(temporary)
+            root = parent / "project"
+            root.mkdir()
+            subprocess.run(["git", "init", "-q", str(root)], check=True)
+            (root / "source.rs").write_text("current dirty source")
+            subprocess.run(["git", "-C", str(root), "add", "."], check=True)
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(root),
+                    "-c",
+                    "user.name=Fixture",
+                    "-c",
+                    "user.email=fixture@example.invalid",
+                    "commit",
+                    "-qm",
+                    "initial",
+                ],
+                check=True,
+            )
+            barrier = threading.Barrier(2)
+            winner_ready = threading.Event()
+            rename = Path.rename
+
+            def simultaneous_publication(source, destination):
+                # Control scheduling only. Both publications still use the real filesystem.
+                barrier.wait(timeout=10)
+                try:
+                    published = rename(source, destination)
+                except OSError:
+                    self.assertTrue(winner_ready.wait(timeout=10))
+                    raise
+                if corrupt_winner:
+                    (destination / "source.rs").write_text("changed after publication")
+                winner_ready.set()
+                return published
+
+            with (
+                patch.object(Path, "rename", simultaneous_publication),
+                ThreadPoolExecutor(2) as workers,
+            ):
+                first = workers.submit(snapshot, root, parent / "snapshots")
+                second = workers.submit(snapshot, root, parent / "snapshots")
+                results, errors = [], []
+                for worker in (first, second):
+                    try:
+                        results.append(worker.result(timeout=15))
+                    except TaskError as error:
+                        errors.append(str(error))
+            if corrupt_winner:
+                self.assertEqual(len(results), 1)
+                self.assertEqual(len(errors), 1)
+                self.assertIn("cached native builder source changed", errors[0])
+            else:
+                self.assertFalse(errors)
+                self.assertEqual(results[0], results[1])
+                published, _ = results[0]
+                self.assertEqual((published / "source.rs").read_text(), "current dirty source")
+            self.assertEqual(len(list((parent / "snapshots").iterdir())), 1)
+
     def test_snapshot_retains_dirty_deleted_untracked_and_submodule_source(self):
         with tempfile.TemporaryDirectory() as temporary:
             parent = Path(temporary)

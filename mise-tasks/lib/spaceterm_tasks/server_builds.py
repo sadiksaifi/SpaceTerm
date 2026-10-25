@@ -6,6 +6,7 @@ prerequisites. Only target/server-builds is written on their existing checkout.
 """
 
 import argparse
+import errno
 import fcntl
 import hashlib
 import json
@@ -154,8 +155,13 @@ def snapshot(root, parent):
             raise TaskError("source changed during native builder snapshot; retry the command")
         try:
             staging.rename(destination)
-        except FileExistsError:
-            pass
+        except OSError as error:
+            if error.errno not in (errno.EEXIST, errno.ENOTEMPTY):
+                raise
+            if not destination.is_dir() or _source(destination)[2] != digest:
+                raise TaskError(
+                    "the cached native builder source changed; remove that snapshot and retry"
+                ) from None
     return destination, digest
 
 
