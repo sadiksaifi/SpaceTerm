@@ -958,6 +958,10 @@ mod tests {
     /// A server's invitation operations as the test scripts them, recording what Invite Device
     /// asked of it.
     struct ScriptedServer {
+        /// The server's clock when the test began, in Unix seconds. It doesn't move, so every
+        /// invitation with one lifetime expires in the same second, as on a server issuing them
+        /// within one second.
+        issued_at: u64,
         /// How long each invitation the server opens lasts, in seconds.
         lifetime: Mutex<u64>,
         /// The link each invitation the server opens carries.
@@ -973,6 +977,7 @@ mod tests {
         /// A server whose invitations last `lifetime` seconds from now.
         fn new(lifetime: u64) -> Arc<Self> {
             Arc::new(Self {
+                issued_at: unix_now(),
                 lifetime: Mutex::new(lifetime),
                 link: Mutex::new(LINK.to_owned()),
                 invitations: Mutex::default(),
@@ -1047,7 +1052,7 @@ mod tests {
             let mut invitations = self.invitations.lock().expect("invitations");
             let id = [u8::try_from(invitations.len() + 1).expect("few invitations"); 32];
             let lifetime = *self.lifetime.lock().expect("lifetime");
-            invitations.push((id, unix_now() + lifetime));
+            invitations.push((id, self.issued_at + lifetime));
             Ok(OpenInvitation {
                 id,
                 text: Zeroizing::new(self.link.lock().expect("link").clone()),
