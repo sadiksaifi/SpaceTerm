@@ -49,14 +49,20 @@ pub(crate) struct SetupApprovals {
     pub expose_network: Option<NetworkApproval>,
 }
 #[derive(Clone, Eq, PartialEq)]
-pub(crate) struct InstallationApproval {
+pub(crate) struct InstallationApproval(Arc<InstallationApprovalScope>);
+
+#[derive(Eq, PartialEq)]
+struct InstallationApprovalScope {
     destination: SshDestination,
     account: u32,
     target: String,
     digest: String,
 }
 #[derive(Clone, Eq, PartialEq)]
-pub(crate) struct StartupApproval {
+pub(crate) struct StartupApproval(Arc<StartupApprovalScope>);
+
+#[derive(Eq, PartialEq)]
+struct StartupApprovalScope {
     destination: SshDestination,
     account: u32,
     server: Option<[u8; 32]>,
@@ -65,7 +71,10 @@ pub(crate) struct StartupApproval {
     stopped: bool,
 }
 #[derive(Clone, Eq, PartialEq)]
-pub(crate) struct NetworkApproval {
+pub(crate) struct NetworkApproval(Arc<NetworkApprovalScope>);
+
+#[derive(Eq, PartialEq)]
+struct NetworkApprovalScope {
     destination: SshDestination,
     account: u32,
     pin: ServerPin,
@@ -356,13 +365,13 @@ impl<A: SshProcessAdapter> NativeSshSetup<A> {
         if status.pin.build != identity() || Some(status.pin.server) != discovery.server {
             return Err(SetupFailure::Refused(RefusalKind::ServerChanged));
         }
-        let network_approval = NetworkApproval {
+        let network_approval = NetworkApproval(Arc::new(NetworkApprovalScope {
             destination: request.destination.clone(),
             account: discovery.account,
             pin: status.pin.clone(),
             endpoint: request.endpoint,
             policy: status.policy.clone(),
-        };
+        }));
         if request.approvals.expose_network.as_ref() != Some(&network_approval)
             && (request.approvals.expose_network.is_some()
                 || status.policy.as_ref().map(|policy| policy.bind) != Some(request.endpoint))
@@ -689,12 +698,12 @@ fn authorize_installation(
     artifact: &VerifiedArtifact,
     approved: Option<&InstallationApproval>,
 ) -> Result<(), SetupFailure> {
-    let approval = InstallationApproval {
+    let approval = InstallationApproval(Arc::new(InstallationApprovalScope {
         destination: destination.clone(),
         account,
         target: target.to_owned(),
         digest: artifact.digest.clone(),
-    };
+    }));
     if approved == Some(&approval) {
         return Ok(());
     }
@@ -709,14 +718,14 @@ fn authorize_start(
     discovery: &AccountDiscovery,
     approved: Option<&StartupApproval>,
 ) -> Result<(), SetupFailure> {
-    let approval = StartupApproval {
+    let approval = StartupApproval(Arc::new(StartupApprovalScope {
         destination: destination.clone(),
         account: discovery.account,
         server: discovery.server,
         build: discovery.build.clone(),
         commit: discovery.commit.clone(),
         stopped: discovery.stopped,
-    };
+    }));
     if approved == Some(&approval) {
         return Ok(());
     }
@@ -940,32 +949,36 @@ fn validate_discovery(discovery: &AccountDiscovery) -> Result<(), SetupFailure> 
 
 #[cfg(test)]
 pub(crate) mod testing {
-    use super::{InstallationApproval, NetworkApproval, ServerPin, StartupApproval};
+    use super::{
+        InstallationApproval, InstallationApprovalScope, NetworkApproval, NetworkApprovalScope,
+        ServerPin, StartupApproval, StartupApprovalScope,
+    };
     use crate::domain::SshDestination;
+    use std::sync::Arc;
 
     /// An approval bound to `destination`, as an offer from that host carries.
     pub(crate) fn installation_approval(destination: &str) -> InstallationApproval {
-        InstallationApproval {
+        InstallationApproval(Arc::new(InstallationApprovalScope {
             destination: SshDestination::new(destination.to_owned()).unwrap(),
             account: 501,
             target: "x86_64-unknown-linux-gnu".into(),
             digest: "a".repeat(64),
-        }
+        }))
     }
 
     pub(crate) fn startup_approval(destination: &str) -> StartupApproval {
-        StartupApproval {
+        StartupApproval(Arc::new(StartupApprovalScope {
             destination: SshDestination::new(destination.to_owned()).unwrap(),
             account: 501,
             server: Some([1; 32]),
             build: super::identity().into(),
             commit: "a".repeat(40),
             stopped: true,
-        }
+        }))
     }
 
     pub(crate) fn network_approval(destination: &str) -> NetworkApproval {
-        NetworkApproval {
+        NetworkApproval(Arc::new(NetworkApprovalScope {
             destination: SshDestination::new(destination.to_owned()).unwrap(),
             account: 501,
             pin: ServerPin {
@@ -976,7 +989,7 @@ pub(crate) mod testing {
             },
             endpoint: "192.0.2.1:9231".parse().unwrap(),
             policy: None,
-        }
+        }))
     }
 }
 

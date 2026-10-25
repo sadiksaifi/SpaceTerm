@@ -300,7 +300,7 @@ pub(crate) enum SshProcessEnvironmentError {
 /// retained AskPass lease keeps its private broker alive for the process lifetime.
 pub(crate) struct SshProcessEnvironment {
     home: PathBuf,
-    authentication: SshAuthentication,
+    authentication: Option<AskPassBrokerLease>,
     startup: StartupSshEnvironment,
 }
 
@@ -313,29 +313,18 @@ pub(crate) struct SshProbeEnvironment {
     startup: StartupSshEnvironment,
 }
 
-#[derive(Clone)]
-enum SshAuthentication {
-    AskPass(AskPassBrokerLease),
-    #[cfg(test)]
-    None,
-}
-
 impl SshProcessEnvironment {
     pub(crate) fn new(
         home: PathBuf,
         authentication: AskPassBrokerLease,
         startup: &StartupSshEnvironment,
     ) -> Result<Self, SshProcessEnvironmentError> {
-        Self::validated(
-            home,
-            SshAuthentication::AskPass(authentication),
-            startup.clone(),
-        )
+        Self::validated(home, Some(authentication), startup.clone())
     }
 
     fn validated(
         home: PathBuf,
-        authentication: SshAuthentication,
+        authentication: Option<AskPassBrokerLease>,
         startup: StartupSshEnvironment,
     ) -> Result<Self, SshProcessEnvironmentError> {
         if !safe_absolute_path(&home) {
@@ -355,20 +344,17 @@ impl SshProcessEnvironment {
     }
 
     pub(crate) fn finish_authentication(&self) {
-        match &self.authentication {
-            SshAuthentication::AskPass(lease) => lease.finish(),
-            #[cfg(test)]
-            SshAuthentication::None => (),
+        if let Some(lease) = &self.authentication {
+            lease.finish();
         }
     }
     pub(crate) fn remote_authorization_command(
         &self,
     ) -> Result<SshCommandSpec, SshProcessMechanismError> {
-        let lease = match &self.authentication {
-            SshAuthentication::AskPass(lease) => lease,
-            #[cfg(test)]
-            SshAuthentication::None => return Err(SshProcessMechanismError::LaunchFailed),
-        };
+        let lease = self
+            .authentication
+            .as_ref()
+            .ok_or(SshProcessMechanismError::LaunchFailed)?;
         let helper = lease
             .ordinary_spawn_entries()
             .find(|(name, _)| *name == "SSH_ASKPASS")
@@ -383,11 +369,7 @@ impl SshProcessEnvironment {
         home: PathBuf,
         agent_socket: Option<OsString>,
     ) -> Result<Self, SshProcessEnvironmentError> {
-        Self::validated(
-            home,
-            SshAuthentication::None,
-            StartupSshEnvironment::for_test(agent_socket),
-        )
+        Self::validated(home, None, StartupSshEnvironment::for_test(agent_socket))
     }
 
     #[cfg(test)]
@@ -395,7 +377,7 @@ impl SshProcessEnvironment {
         home: PathBuf,
         startup: &StartupSshEnvironment,
     ) -> Result<Self, SshProcessEnvironmentError> {
-        Self::validated(home, SshAuthentication::None, startup.clone())
+        Self::validated(home, None, startup.clone())
     }
 
     fn launch_parts(
@@ -411,18 +393,14 @@ impl SshProcessEnvironment {
                 .entries()
                 .map(|(name, value)| (name.into(), value.to_owned())),
         );
-        let askpass_capability = match &self.authentication {
-            SshAuthentication::AskPass(authentication) => {
-                entries.extend(
-                    authentication
-                        .ordinary_spawn_entries()
-                        .map(|(name, value)| (name.into(), value.to_owned())),
-                );
-                Some(authentication.capability_copy_for_spawn())
-            }
-            #[cfg(test)]
-            SshAuthentication::None => None,
-        };
+        let askpass_capability = self.authentication.as_ref().map(|authentication| {
+            entries.extend(
+                authentication
+                    .ordinary_spawn_entries()
+                    .map(|(name, value)| (name.into(), value.to_owned())),
+            );
+            authentication.capability_copy_for_spawn()
+        });
         (self.home.clone(), entries, askpass_capability)
     }
 }
