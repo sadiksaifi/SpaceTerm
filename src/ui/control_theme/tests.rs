@@ -3875,6 +3875,76 @@ fn disabled_selected_segments_stay_apart_from_their_neighbours() {
     }
 }
 
+/// The hairline between two unselected options reads against the track it rests on, including a
+/// borderless dark track over every host and material.
+#[gpui::test]
+fn segment_dividers_read_against_every_resolved_track(cx: &mut gpui::TestAppContext) {
+    use gpui::prelude::*;
+    struct Fixture;
+    impl gpui::Render for Fixture {
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            _: &mut gpui::Context<Self>,
+        ) -> impl IntoElement {
+            gpui::div().child(
+                spaceterm_ui::SegmentedControl::new(
+                    "divider-track",
+                    "Mode",
+                    &0,
+                    vec![
+                        spaceterm_ui::SegmentedOption::new(0, "One"),
+                        spaceterm_ui::SegmentedOption::new(1, "Two"),
+                        spaceterm_ui::SegmentedOption::new(2, "Three")
+                            .disabled(true)
+                            .debug_selector("divider-track-three"),
+                    ],
+                )
+                .unwrap()
+                .on_change(|_, _, _| {}),
+            )
+        }
+    }
+    for appearance in [Appearance::Light, Appearance::Dark] {
+        for opacity in [1.0, 0.65, 0.0] {
+            let (_, prepared) =
+                resolve_case(appearance, ChromeDensity::Compact, opacity, true, true);
+            for (host_name, colors, hosts) in segmented_hosts(&prepared) {
+                cx.set_global(super::segmented_control::prepared(
+                    colors,
+                    &prepared.typography,
+                    super::segmented_control::SegmentedPolicy::prepared(&prepared),
+                ));
+                let (_, cx) = cx.add_window_view(|_, _| Fixture);
+                cx.run_until_parked();
+                let divider = cx
+                    .debug_bounds("divider-track-three-divider")
+                    .expect("Two and Three are unselected neighbours");
+                let hairline = cx.update(|window, _| {
+                    let quad = window
+                        .painted_quads()
+                        .into_iter()
+                        .find(|quad| quad.bounds == divider.scale(window.scale_factor()))
+                        .expect("the divider paints");
+                    application_color(gpui::Rgba::from(
+                        quad.background
+                            .as_solid()
+                            .expect("the divider is a solid fill"),
+                    ))
+                });
+                for host in hosts {
+                    let track = colors.element_background.source_over(host);
+                    let line = hairline.source_over(track);
+                    assert!(
+                        line.contrast_ratio(track) >= 1.3,
+                        "{appearance:?}/{host_name} at opacity {opacity} on {host:?}: divider {line:?} on track {track:?}"
+                    );
+                }
+            }
+        }
+    }
+}
+
 #[test]
 fn floating_control_content_remains_readable_on_material_state_fills() {
     for appearance in [Appearance::Light, Appearance::Dark] {

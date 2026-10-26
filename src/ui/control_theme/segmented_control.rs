@@ -14,6 +14,8 @@ use crate::ui::chrome_typography::{ChromeTypography, TextRole};
 const DISABLED_ACCENT_OPACITY: u8 = 102;
 /// The share of the selected label a disabled selection keeps, from the approved design.
 const DISABLED_LABEL_OPACITY: u8 = 140;
+/// The share of label ink in the hairline between two unselected options.
+const DIVIDER_OPACITY: u8 = 56;
 
 /// What the window and accessibility settings ask of a segmented control.
 #[derive(Clone, Copy, Debug)]
@@ -230,7 +232,9 @@ pub(in crate::ui) fn prepared(
         gpui_color(colors.focus_ring),
     )
     .card_paints(catalog(card))
-    .divider(gpui_color(colors.border))
+    // The divider is label ink at low opacity, so it keeps the same step over any track. The
+    // separator role is tuned for opaque surfaces and fades into a translucent dark track.
+    .divider(gpui_color(colors.text.multiply_opacity(DIVIDER_OPACITY)))
     // A resting segment uses its fill for selection. A drop shadow remains visible through
     // translucent fills and makes the selected segment look recessed.
     .selected_shadow(spaceterm_ui::ControlShadow::none())
@@ -609,7 +613,7 @@ mod tests {
                     .iter()
                     .find(|quad| quad.bounds == divider.scale(window.scale_factor()))
                     .expect("the divider paints");
-                assert_eq!(hairline.background, gpui_color(colors.border).into());
+                assert!(!hairline.background.is_transparent());
             });
         }
     }
