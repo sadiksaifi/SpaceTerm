@@ -56,6 +56,7 @@ mod workspace_chrome;
 mod workspace_creation;
 mod workspace_frame;
 mod workspace_manager;
+mod workspace_order_state;
 mod workspace_sidebar;
 mod workspace_status;
 mod worktree_form;

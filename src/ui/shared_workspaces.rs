@@ -18,6 +18,7 @@
 //! show, so inactive Workspaces stay current too. This client adds its own Git Settings and Pull
 //! Requests from its own GitHub CLI, and never reads git for a shared Workspace itself.
 //!
+pub(crate) use development::ArrangementUnavailable;
 #[cfg(test)]
 pub(crate) use development::testing;
 pub(crate) use development::{
@@ -1219,9 +1220,25 @@ mod development {
         Uncertain,
     }
 
+    /// Names the server one binding presents, once its connection has been admitted.
+    pub(crate) trait ServerIdentity {
+        fn server(&self) -> Option<Id>;
+    }
+
+    impl ServerIdentity for ServerConnection {
+        fn server(&self) -> Option<Id> {
+            // A reference names the admitted server whichever Workspace it names.
+            self.workspace_reference([0; 32])
+                .ok()
+                .map(|reference| reference.server)
+        }
+    }
+
     /// The Workspace Window's authoritative inventory, attachments and pending presentation.
     pub(crate) struct SharedWorkspaces {
         edits: SharedEditSource,
+        /// The server this binding presents, which names its Workspaces in this client's order.
+        identity: Option<Rc<dyn ServerIdentity>>,
         sessions: SharedPaneSessions,
         /// Each server Workspace and the local Workspace presenting it.
         workspaces: BTreeMap<WorkspaceId, SharedWorkspaceFacts>,
@@ -1287,6 +1304,7 @@ mod development {
             Self {
                 sessions: sessions.with_edits(edits.clone()),
                 edits,
+                identity: None,
                 workspaces: BTreeMap::new(),
                 revision: None,
                 presentation: None,
@@ -1353,6 +1371,35 @@ mod development {
 
         pub(crate) fn latest_inventory(&self) -> Option<&Inventory> {
             self.latest.as_ref()
+        }
+
+        /// Names the server this binding presents.
+        pub(crate) fn identify(&mut self, identity: Rc<dyn ServerIdentity>) {
+            self.identity = Some(identity);
+        }
+
+        /// The server this binding presents, once its connection names it.
+        pub(crate) fn server_identity(&self) -> Option<Id> {
+            self.identity.as_ref()?.server()
+        }
+
+        /// Names `workspace` in this client's Workspace order, once the server has published it.
+        /// A provisional Workspace has no reference yet.
+        pub(crate) fn workspace_reference(
+            &self,
+            workspace: WorkspaceId,
+        ) -> Option<spaceterm_server::workspace_order::WorkspaceReference> {
+            let server = self.server_identity()?;
+            let id = self.edits.canonical(self.facts(workspace)?.server);
+            self.latest
+                .as_ref()?
+                .workspaces
+                .iter()
+                .any(|published| published.id == id)
+                .then_some(spaceterm_server::workspace_order::WorkspaceReference {
+                    server,
+                    workspace: id,
+                })
         }
 
         /// The Git facts the server read for the directories its Workspaces show.
@@ -2398,6 +2445,15 @@ mod development {
     #[cfg(test)]
     pub(crate) mod testing {
         use std::sync::Mutex;
+
+        /// A server whose admitted identity the test names.
+        pub(crate) struct FixedServer(pub(crate) spaceterm_server::hierarchy::Id);
+
+        impl super::ServerIdentity for FixedServer {
+            fn server(&self) -> Option<spaceterm_server::hierarchy::Id> {
+                Some(self.0)
+            }
+        }
 
         use spaceterm_server::hierarchy::{Inventory, Mutation, Outcome, RetainedOutcome};
 

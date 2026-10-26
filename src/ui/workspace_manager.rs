@@ -290,6 +290,8 @@ pub(crate) struct WorkspaceManager {
     empty_focus: FocusHandle,
     /// Normal launch of the account-local server this window presents.
     launch: launch::LocalLaunchState,
+    /// This client's one Workspace order across every server, kept across launches.
+    display_order: display_order::DisplayOrder,
 }
 
 impl WorkspaceManager {
@@ -344,6 +346,7 @@ impl WorkspaceManager {
             for shared in manager.shared.iter_mut() {
                 shared.flush_client_views();
             }
+            manager.flush_display_order();
             // The direct registry outlives this window's interest in it only until quit.
             manager._direct_servers = None;
             async {}
@@ -411,7 +414,9 @@ impl WorkspaceManager {
             _direct_servers: None,
             empty_focus: cx.focus_handle(),
             launch: launch::LocalLaunchState::new(local_server),
+            display_order: display_order::DisplayOrder::default(),
         };
+        manager.follow_display_order(window, cx);
         manager.run_local_launch(None, window, cx);
         manager.follow_direct_servers(window, cx);
         manager
@@ -2006,6 +2011,7 @@ impl WorkspaceManager {
                 if let Err(error) = self.workspaces.move_workspace(workspace_id, position) {
                     Self::report_workspace_error("move", error);
                 }
+                self.record_display_order();
             }
             SidebarEvent::Create(creation) => {
                 // The creation menu returns focus to its trigger on close, so return it to
@@ -3202,10 +3208,13 @@ impl WorkspaceManager {
     }
 
     fn report_client_view_error(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(notice) = self
+        let notice = self
             .shared
             .iter_mut()
-            .find_map(|shared| shared.take_view_error())
+            .find_map(|shared| shared.take_view_error());
+        // The retained Workspace order says it couldn't be read or saved the same way.
+        let notice = notice.or_else(|| self.take_display_order_error());
+        if let Some(notice) = notice
             && !super::settings_window::present_over_active_settings(cx, move |window, cx| {
                 notice.present(window, cx)
             })
@@ -3281,6 +3290,8 @@ impl WorkspaceManager {
                 }
             }
         }
+        // Workspaces this inventory just presented take their places in this client's order.
+        self.reconcile_display_order(key);
         // Views this inventory just created, including a reattached Workspace's, present its
         // metadata now. A later poll may carry the same inventory and report no change.
         self.present_shared_metadata(key, inventory, cx);
@@ -5294,6 +5305,7 @@ mod server_bindings;
 use server_bindings::ServerBindings;
 pub(crate) use server_bindings::{ServerKey, ServerOrigin};
 mod direct_servers;
+mod display_order;
 mod shared_repositories;
 mod worktrees;
 

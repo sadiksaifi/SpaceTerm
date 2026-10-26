@@ -8568,6 +8568,11 @@ fn server_inventory(
     }
 }
 
+use crate::ui::shared_workspaces::testing::FixedServer;
+
+/// The account-local server's identity in [`MultiServerHarness`].
+const LOCAL_SERVER: spaceterm_server::hierarchy::Id = [0xA0; 32];
+
 /// A window presenting the account-local server beside paired servers, each with scripted edits.
 struct MultiServerHarness {
     manager: Entity<WorkspaceManager>,
@@ -8603,6 +8608,9 @@ impl MultiServerHarness {
                     window,
                     cx,
                 );
+                if let Some(shared) = manager.shared.local_mut() {
+                    shared.identify(Rc::new(FixedServer(LOCAL_SERVER)));
+                }
                 manager.sync_shared_workspaces(ServerKey::LOCAL, window, cx);
             });
         });
@@ -8699,6 +8707,10 @@ impl MultiServerHarness {
                     window,
                     cx,
                 );
+                // Each route reaches its own server, which keeps its identity across reconnects.
+                if let Some(shared) = manager.shared.get_mut(key) {
+                    shared.identify(Rc::new(FixedServer(route)));
+                }
                 manager.sync_shared_workspaces(key, window, cx);
                 key
             })
@@ -8930,6 +8942,34 @@ fn withdrawing_one_server_should_keep_the_other_servers_workspaces_and_active_wo
             "Here".to_owned()
         )
     );
+}
+
+/// A server that reconnects returns each of its Workspaces to the place the person gave it among
+/// other servers' Workspaces, rather than adding them at the end.
+#[gpui::test]
+fn a_reconnected_server_should_return_its_workspaces_to_their_places(cx: &mut TestAppContext) {
+    let (harness, cx) = MultiServerHarness::new(cx);
+    harness.publish(
+        ServerKey::LOCAL,
+        &harness.local,
+        &[("Here", 1), ("Also Here", 2)],
+        cx,
+    );
+    let route = named_route("penguin");
+    let (penguin, _) = harness.present_direct("penguin", route, &[("Far", 1)], cx);
+    harness.move_workspace("Far", 2, cx);
+    cx.update(|window, cx| {
+        harness.manager.update(cx, |manager, cx| {
+            manager.withdraw_server_workspaces(penguin, window, cx);
+        });
+    });
+    cx.run_until_parked();
+    let absent = harness.names(cx);
+
+    harness.present_direct("penguin", route, &[("Far", 1)], cx);
+
+    assert_eq!(absent, ["Default", "Here", "Also Here"]);
+    assert_eq!(harness.names(cx), ["Default", "Here", "Far", "Also Here"]);
 }
 
 /// The sidebar lists every server's Workspaces together in Workspace order, with no machine

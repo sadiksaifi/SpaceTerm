@@ -126,6 +126,7 @@ impl WorkspaceManager {
         let Some(shared) = self.shared.get_mut(key) else {
             return;
         };
+        shared.identify(std::rc::Rc::new(server.clone()));
         shared.retain_client_views(server);
         let read = shared.client_views_read();
         cx.spawn_in(window, async move |manager, cx| {
