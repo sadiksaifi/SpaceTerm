@@ -954,6 +954,10 @@ impl TabView {
             eprintln!("failed to focus Pane: {error}");
             return;
         }
+        spaceterm_server::measurement::record(spaceterm_server::measurement::Event::NativeAction {
+            view: cx.entity_id().as_u64(),
+            action: spaceterm_server::measurement::NativeAction::PaneFocus,
+        });
         self.focus_epoch = self.focus_epoch.wrapping_add(1);
 
         self.sync_terminal_focus(cx);
@@ -981,6 +985,10 @@ impl TabView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        spaceterm_server::measurement::record(spaceterm_server::measurement::Event::NativeAction {
+            view: cx.entity_id().as_u64(),
+            action: spaceterm_server::measurement::NativeAction::PaneFocus,
+        });
         // Moving the keyboard to a Pane is an explicit selection of it.
         self.focus_epoch = self.focus_epoch.wrapping_add(1);
         self.select_shared_pane(pane_id);

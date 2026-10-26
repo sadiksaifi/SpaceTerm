@@ -6,6 +6,8 @@
 //! cannot be subtracted. Scene submission is CPU work, not GPU completion or display visibility.
 //! Require the final summary's `complete` field before causal joins. These events do not
 //! identify which screen contains an input's output; use a controlled fixture and pixel witness.
+//! Native input and accepted-action records carry fresh clock brackets. Other records keep
+//! elapsed time only. Accepted geometry marks a changed layout handed to a live Session.
 use serde::Serialize;
 use std::{
     cell::Cell,
@@ -45,6 +47,20 @@ pub enum Operation {
     Other,
 }
 
+/// Accepted portable operations. Scope IDs name their existing GUI handler: Tab Manager for
+/// navigation, Tab View for Pane focus, and Terminal Pane for Scroll Commands and geometry.
+#[derive(Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NativeAction {
+    TabNavigation,
+    PaneFocus,
+    ScrollPageUp,
+    ScrollPageDown,
+    ScrollTop,
+    ScrollBottom,
+    GeometryAdmission,
+}
+
 /// Only fixed classifications, process-local view IDs, generations and counts can be recorded.
 #[derive(Clone, Copy, Serialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
@@ -54,6 +70,10 @@ pub enum Event {
     },
     NativeTextCommit {
         view: u64,
+    },
+    NativeAction {
+        view: u64,
+        action: NativeAction,
     },
     InputAdmission {
         accepted: bool,
@@ -165,6 +185,8 @@ impl Operation {
 struct Record {
     ns: u64,
     thread: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    calibration: Option<ClockCalibration>,
     #[serde(flatten)]
     event: Event,
 }
@@ -294,6 +316,13 @@ impl Capture {
         let record = Record {
             ns: elapsed.as_nanos().min(u64::MAX as u128) as u64,
             thread,
+            calibration: matches!(
+                event,
+                Event::NativeKey { .. }
+                    | Event::NativeTextCommit { .. }
+                    | Event::NativeAction { .. }
+            )
+            .then(|| calibration(self.start)),
             event,
         };
         if self.sender.try_send(record).is_err() {
@@ -393,6 +422,39 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     #[test]
+    fn native_boundaries_have_fresh_clock_brackets_while_rpc_records_stay_elapsed_only() {
+        let (sender, receiver) = mpsc::sync_channel(4);
+        let capture = Capture {
+            start: Instant::now(),
+            sender,
+            state: Arc::default(),
+        };
+        for event in [
+            Event::NativeKey { view: 7 },
+            Event::NativeTextCommit { view: 7 },
+            Event::NativeAction {
+                view: 7,
+                action: NativeAction::GeometryAdmission,
+            },
+        ] {
+            capture.record(event);
+        }
+        capture.record(Event::RpcQueued {
+            connection: 1,
+            operation: Operation::Resize,
+        });
+        for _ in 0..3 {
+            let native = receiver.try_recv().unwrap();
+            let calibration = native.calibration.as_ref().unwrap();
+            assert!(native.ns <= calibration.capture_ns_before);
+            assert!(calibration.capture_ns_before <= calibration.capture_ns_after);
+            assert!(calibration.unix_ns > 0);
+        }
+        let rpc = serde_json::to_value(receiver.try_recv().unwrap()).unwrap();
+        assert!(rpc.get("calibration").is_none());
+    }
+
+    #[test]
     fn a_full_observer_drops_metadata_instead_of_waiting_for_the_terminal() {
         let (sender, receiver) = mpsc::sync_channel(1);
         let capture = Capture {
@@ -453,6 +515,7 @@ mod tests {
             .send(Record {
                 ns: 123,
                 thread: 1,
+                calibration: None,
                 event: Event::SceneSubmitted {
                     view: 2,
                     generation: 3,

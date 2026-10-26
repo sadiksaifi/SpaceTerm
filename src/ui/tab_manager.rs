@@ -1240,6 +1240,14 @@ impl TabManager {
             Self::report_tab_error("activate", error);
             return false;
         }
+        if previous_tab_id != tab_id {
+            spaceterm_server::measurement::record(
+                spaceterm_server::measurement::Event::NativeAction {
+                    view: cx.entity_id().as_u64(),
+                    action: spaceterm_server::measurement::NativeAction::TabNavigation,
+                },
+            );
+        }
         self.tab_epoch = self.tab_epoch.wrapping_add(1);
 
         if previous_tab_id != tab_id {

@@ -2036,6 +2036,12 @@ impl TerminalPane {
         self.sync_scrollbar(cx);
 
         if let Some(session) = &self.terminal_session.session {
+            spaceterm_server::measurement::record(
+                spaceterm_server::measurement::Event::NativeAction {
+                    view: cx.entity_id().as_u64(),
+                    action: spaceterm_server::measurement::NativeAction::GeometryAdmission,
+                },
+            );
             session.resize(geometry);
             return;
         }
@@ -2125,6 +2131,12 @@ impl TerminalPane {
         } else if self.last_geometry != Some(geometry) {
             self.last_geometry = Some(geometry);
             if let Some(session) = &self.terminal_session.session {
+                spaceterm_server::measurement::record(
+                    spaceterm_server::measurement::Event::NativeAction {
+                        view: cx.entity_id().as_u64(),
+                        action: spaceterm_server::measurement::NativeAction::GeometryAdmission,
+                    },
+                );
                 session.resize(geometry);
             }
         }
@@ -2945,6 +2957,25 @@ impl TerminalPane {
     /// Moves the Scrollback viewport for a Scroll Command; nothing reaches the PTY.
     fn scroll_scrollback(&mut self, movement: ScrollbackMovement, cx: &mut Context<Self>) {
         if let Some(session) = &self.terminal_session.session {
+            spaceterm_server::measurement::record(
+                spaceterm_server::measurement::Event::NativeAction {
+                    view: cx.entity_id().as_u64(),
+                    action: match movement {
+                        ScrollbackMovement::PageUp => {
+                            spaceterm_server::measurement::NativeAction::ScrollPageUp
+                        }
+                        ScrollbackMovement::PageDown => {
+                            spaceterm_server::measurement::NativeAction::ScrollPageDown
+                        }
+                        ScrollbackMovement::Top => {
+                            spaceterm_server::measurement::NativeAction::ScrollTop
+                        }
+                        ScrollbackMovement::Bottom => {
+                            spaceterm_server::measurement::NativeAction::ScrollBottom
+                        }
+                    },
+                },
+            );
             session.scroll_scrollback(movement);
             self.reveal_scrollbar(cx);
         }
