@@ -10,12 +10,9 @@ use crate::ui::appearance::ChromeAppearance;
 use crate::ui::chrome_geometry::RadiusRole;
 use crate::ui::chrome_typography::{ChromeTypography, TextRole};
 
-/// The share of the accent a disabled selection keeps, from the approved design.
-const DISABLED_ACCENT_OPACITY: u8 = 102;
-/// The share of the selected label a disabled selection keeps, from the approved design.
-const DISABLED_LABEL_OPACITY: u8 = 140;
-/// The share of label ink in the hairline between two unselected options.
-const DIVIDER_OPACITY: u8 = 56;
+/// The share of label ink in the hairline between two unselected options and in a disabled card's
+/// selection ring.
+const HAIRLINE_INK_OPACITY: u8 = 56;
 
 /// What the window and accessibility settings ask of a segmented control.
 #[derive(Clone, Copy, Debug)]
@@ -99,18 +96,20 @@ pub(in crate::ui) fn prepared(
     // translucent fill. A neutral selection may sit close to its track, so it keeps an edge
     // wherever the track keeps one.
     let rimless = colors.border_transparent;
-    // A disabled selection is a dimmed accent chip with a dimmed label. The primary button's
-    // disabled roles become the ordinary disabled button fill, which a segment cannot tell apart
-    // from its unselected neighbours.
-    let dimmed_accent = colors
-        .primary_background
-        .multiply_opacity(DISABLED_ACCENT_OPACITY);
-    let dimmed_label = colors
-        .primary_foreground
-        .multiply_opacity(DISABLED_LABEL_OPACITY);
     let neutral = |fill: Color, label: Color, edge: Color| {
         paint(fill, label, if policy.edges { edge } else { rimless })
     };
+    // A disabled selection is the dimmed neutral chip in every window, as disabled checkboxes and
+    // switches lose their accent. The disabled selection roles are reconciled to step from every
+    // track and material. An accent of any opacity can share a mid-grey track's luminance, and
+    // the primary button's disabled fill matches an unselected option.
+    let disabled_selection = neutral(
+        colors.selection_disabled_background,
+        colors.selection_disabled_foreground,
+        colors.selection_disabled_border,
+    );
+    // Label ink at low opacity keeps the same step over any host or track.
+    let hairline_ink = colors.text.multiply_opacity(HAIRLINE_INK_OPACITY);
     let selected = if policy.active {
         [
             paint(
@@ -128,7 +127,7 @@ pub(in crate::ui) fn prepared(
                 colors.primary_pressed_foreground,
                 rimless,
             ),
-            paint(dimmed_accent, dimmed_label, rimless),
+            disabled_selection,
         ]
     } else {
         [
@@ -147,30 +146,25 @@ pub(in crate::ui) fn prepared(
                 colors.selection_pressed_foreground,
                 colors.selection_pressed_border,
             ),
-            neutral(
-                colors.selection_disabled_background,
-                colors.selection_disabled_foreground,
-                colors.selection_disabled_border,
-            ),
+            disabled_selection,
         ]
     };
     // A card keeps a neutral fill so its preview reads in its own colors, and its border is the
     // selection ring: the accent in a key window and a neutral rung otherwise. A disabled card
-    // drops the fill, because a dimmed ring can match a neutral fill's tone on a dark host. The
-    // ring alone then marks the selection against the host.
+    // drops the fill and keeps a ring of label ink, which reads against any host.
     let ring = if policy.active {
         [
             colors.primary_background,
             colors.primary_hover_background,
             colors.primary_pressed_background,
-            dimmed_accent,
+            hairline_ink,
         ]
     } else {
         [
             colors.border_selected,
             colors.border_selected,
             colors.border_selected,
-            colors.border_disabled,
+            hairline_ink,
         ]
     };
     let card_selected = [
@@ -234,9 +228,8 @@ pub(in crate::ui) fn prepared(
         gpui_color(colors.focus_ring),
     )
     .card_paints(catalog(card))
-    // The divider is label ink at low opacity, so it keeps the same step over any track. The
-    // separator role is tuned for opaque surfaces and fades into a translucent dark track.
-    .divider(gpui_color(colors.text.multiply_opacity(DIVIDER_OPACITY)))
+    // The separator role is tuned for opaque surfaces and fades into a translucent dark track.
+    .divider(gpui_color(hairline_ink))
     // A resting segment uses its fill for selection. A drop shadow remains visible through
     // translucent fills and makes the selected segment look recessed.
     .selected_shadow(spaceterm_ui::ControlShadow::none())
@@ -319,21 +312,17 @@ mod tests {
                 colors.border_transparent
             )
         );
-        // A disabled selection keeps a dimmed accent chip, apart from its enabled form and from
-        // its disabled neighbours.
+        // A disabled selection drops the accent for the dimmed neutral chip, as an inactive
+        // window's does.
         let disabled = theme.paint(true, false, true, true);
-        let accent = gpui_color(colors.primary_background);
         assert_eq!(
-            (
-                disabled.background().r,
-                disabled.background().g,
-                disabled.background().b
-            ),
-            (accent.r, accent.g, accent.b)
+            disabled,
+            paint(
+                colors.selection_disabled_background,
+                colors.selection_disabled_foreground,
+                colors.border_transparent
+            )
         );
-        assert!(0.0 < disabled.background().a && disabled.background().a < accent.a);
-        assert_eq!(disabled.border(), gpui_color(colors.border_transparent));
-        assert_ne!(disabled, theme.paint(true, true, false, false));
         assert_ne!(
             disabled.background(),
             theme.paint(false, false, false, false).background()

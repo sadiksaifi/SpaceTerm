@@ -3840,49 +3840,58 @@ fn segmented_hosts(prepared: &ChromeAppearance) -> [(&'static str, &ChromeColors
 /// keeps a visible ring, on every host and material the built-in appearances produce.
 #[test]
 fn disabled_selected_segments_stay_apart_from_their_neighbours() {
+    let mut failures = Vec::new();
     for appearance in [Appearance::Light, Appearance::Dark] {
         for opacity in [1.0, 0.65, 0.0] {
-            let (_, prepared) =
+            let (resolved, _) =
                 resolve_case(appearance, ChromeDensity::Compact, opacity, true, true);
-            for (host_name, colors, hosts) in segmented_hosts(&prepared) {
-                let theme = super::segmented_control::prepared(
-                    colors,
-                    &prepared.typography,
-                    super::segmented_control::SegmentedPolicy::prepared(&prepared),
-                );
-                let selected = theme.paint(true, false, false, false);
-                let unselected = theme.paint(false, false, false, false);
-                let card = theme.card_paint(true, false, false, false);
-                for host in hosts {
-                    let case =
-                        format!("{appearance:?}/{host_name} at opacity {opacity} on {host:?}");
-                    let track = colors.element_background.source_over(host);
-                    let chip = application_color(selected.background()).source_over(track);
-                    let neighbour = application_color(unselected.background()).source_over(track);
-                    assert!(
-                        chip.contrast_ratio(neighbour) >= 1.12,
-                        "{case}: disabled selected chip {chip:?} beside {neighbour:?}"
+            let (active, inactive) = ChromeAppearance::prepare_variants(&resolved.chrome);
+            for prepared in [&active, &inactive] {
+                for (host_name, colors, hosts) in segmented_hosts(prepared) {
+                    let theme = super::segmented_control::prepared(
+                        colors,
+                        &prepared.typography,
+                        super::segmented_control::SegmentedPolicy::prepared(prepared),
                     );
-                    // The ring must read against what it encloses and against the edge of a
-                    // disabled unselected card in the same place.
-                    let fill = application_color(card.background()).source_over(host);
-                    let ring = application_color(card.border()).source_over(fill);
-                    assert!(
-                        ring.contrast_ratio(fill) >= 1.12,
-                        "{case}: disabled card ring {ring:?} on {fill:?}"
-                    );
+                    let selected = theme.paint(true, false, false, false);
+                    let unselected = theme.paint(false, false, false, false);
+                    let card = theme.card_paint(true, false, false, false);
                     let neighbour_card = theme.card_paint(false, false, false, false);
-                    let neighbour_edge = application_color(neighbour_card.border()).source_over(
-                        application_color(neighbour_card.background()).source_over(host),
-                    );
-                    assert!(
-                        ring.contrast_ratio(neighbour_edge) >= 1.12,
-                        "{case}: disabled card ring {ring:?} beside an unselected edge {neighbour_edge:?}"
-                    );
+                    for host in hosts {
+                        let case = format!(
+                            "{appearance:?}/{host_name} at opacity {opacity}, active={}, on {host:?}",
+                            prepared.active
+                        );
+                        let mut check = |name: &str, paint: Color, beside: Color| {
+                            let ratio = paint.contrast_ratio(beside);
+                            if ratio < 1.12 {
+                                failures.push(format!(
+                                    "{case}: {name} {paint:?} beside {beside:?} is {ratio:.3}"
+                                ));
+                            }
+                        };
+                        let track = colors.element_background.source_over(host);
+                        check(
+                            "disabled selected chip",
+                            application_color(selected.background()).source_over(track),
+                            application_color(unselected.background()).source_over(track),
+                        );
+                        // A disabled card's selection must read against what it encloses and against
+                        // a disabled unselected card in the same place.
+                        let fill = application_color(card.background()).source_over(host);
+                        let ring = application_color(card.border()).source_over(fill);
+                        let neighbour_fill =
+                            application_color(neighbour_card.background()).source_over(host);
+                        let neighbour_edge =
+                            application_color(neighbour_card.border()).source_over(neighbour_fill);
+                        check("disabled card ring", ring, fill);
+                        check("disabled card ring", ring, neighbour_edge);
+                    }
                 }
             }
         }
     }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
 /// The hairline between two unselected options reads against the track it rests on, including a
