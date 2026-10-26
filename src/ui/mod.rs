@@ -56,6 +56,7 @@ mod workspace_chrome;
 mod workspace_creation;
 mod workspace_frame;
 mod workspace_manager;
+mod workspace_order_state;
 mod workspace_sidebar;
 mod workspace_status;
 mod worktree_form;
@@ -81,7 +82,7 @@ pub(crate) use workspace_manager::tests::{
 pub(crate) use workspace_manager::{
     LocalServerAdapters, WorkspaceManager, WorkspaceManagerAdapters,
 };
-pub(crate) use workspace_sidebar::MachineTarget;
+pub(crate) use workspace_sidebar::ServerTarget;
 
 /// Finishes every hover transition in progress, since test windows have no frame loop.
 #[cfg(test)]

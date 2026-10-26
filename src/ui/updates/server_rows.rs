@@ -10,7 +10,7 @@ use gpui::{App, Context, Global, SharedString, Subscription, Task};
 use crate::application_identity::ApplicationIdentity;
 use crate::direct_connections::{DirectConnections, DirectRouteStatus};
 use crate::server_connection::ServerError;
-use crate::ui::MachineTarget;
+use crate::ui::ServerTarget;
 use crate::ui::direct_servers::DirectChanges;
 use crate::ui::settings_window;
 
@@ -55,9 +55,9 @@ pub(crate) struct ServerUpdateRow {
 pub(crate) enum ServerUpdateAction {
     Local,
     /// The server's update stopped before it finished, and its Settings explain what to do.
-    Review(MachineTarget),
+    Review(ServerTarget),
     /// The server's Settings, which only report its status here.
-    Settings(MachineTarget),
+    Settings(ServerTarget),
 }
 
 /// What a server asks of the user. Offline, unknown, and unauthorized status asks nothing.
@@ -139,7 +139,7 @@ impl ServerUpdates {
             rows: vec![ServerUpdateRow {
                 label: "This computer".into(),
                 detail: "Reading Update Status…".into(),
-                action: Some(ServerUpdateAction::Settings(MachineTarget::Local)),
+                action: Some(ServerUpdateAction::Settings(ServerTarget::Local)),
             }],
             reading: false,
             pending: false,
@@ -227,7 +227,7 @@ fn read_inventory(sources: Sources) -> Vec<ServerUpdateRow> {
                     label: route.label.into(),
                     // A paired server is updated on its own computer.
                     detail: format!("{state} · {UPDATE_STATUS_UNKNOWN}").into(),
-                    action: Some(ServerUpdateAction::Settings(MachineTarget::Direct(id))),
+                    action: Some(ServerUpdateAction::Settings(ServerTarget::Direct(id))),
                 },
                 route_priority: 1,
             });
@@ -241,14 +241,14 @@ fn read_inventory(sources: Sources) -> Vec<ServerUpdateRow> {
 fn local_row(passive: Result<(SharedString, bool), ServerError>) -> ServerUpdateRow {
     let (detail, action) = match passive {
         Ok((detail, true)) => (detail, ServerUpdateAction::Local),
-        Ok((detail, false)) => (detail, ServerUpdateAction::Settings(MachineTarget::Local)),
+        Ok((detail, false)) => (detail, ServerUpdateAction::Settings(ServerTarget::Local)),
         Err(ServerError::ActivationUnresolved) => (
             UPDATE_NEEDS_ATTENTION.into(),
-            ServerUpdateAction::Review(MachineTarget::Local),
+            ServerUpdateAction::Review(ServerTarget::Local),
         ),
         Err(_) => (
             UPDATE_STATUS_UNKNOWN.into(),
-            ServerUpdateAction::Settings(MachineTarget::Local),
+            ServerUpdateAction::Settings(ServerTarget::Local),
         ),
     };
     ServerUpdateRow {
@@ -363,7 +363,7 @@ mod tests {
         let rows = merge_rows(vec![
             observed(
                 key.clone(),
-                ServerUpdateAction::Settings(MachineTarget::Direct([7; 32])),
+                ServerUpdateAction::Settings(ServerTarget::Direct([7; 32])),
                 1,
             ),
             observed(key, ServerUpdateAction::Local, 2),
@@ -372,7 +372,7 @@ mod tests {
                     build: "spaceterm-preflight".into(),
                     server: [4; 32],
                 },
-                ServerUpdateAction::Settings(MachineTarget::Direct([8; 32])),
+                ServerUpdateAction::Settings(ServerTarget::Direct([8; 32])),
                 1,
             ),
         ]);
@@ -380,7 +380,7 @@ mod tests {
         assert_eq!(rows[0].action, Some(ServerUpdateAction::Local));
         assert_eq!(
             rows[1].action,
-            Some(ServerUpdateAction::Settings(MachineTarget::Direct([8; 32])))
+            Some(ServerUpdateAction::Settings(ServerTarget::Direct([8; 32])))
         );
     }
 }

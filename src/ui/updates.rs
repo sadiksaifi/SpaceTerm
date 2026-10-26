@@ -997,7 +997,7 @@ impl UpdatePill {
 mod tests {
     use super::*;
     use crate::appearance::{Appearance, builtin_chrome_base};
-    use crate::ui::MachineTarget;
+    use crate::ui::ServerTarget;
 
     mod offer_tests;
 
@@ -1168,14 +1168,14 @@ mod tests {
     /// Offline, unknown, unauthorized, and up-to-date servers keep their rows in the menu only.
     fn quiet_servers() -> Vec<ServerUpdateRow> {
         vec![
-            server("local", ServerUpdateAction::Settings(MachineTarget::Local)),
+            server("local", ServerUpdateAction::Settings(ServerTarget::Local)),
             server(
                 "offline",
-                ServerUpdateAction::Settings(MachineTarget::Direct([6; 32])),
+                ServerUpdateAction::Settings(ServerTarget::Direct([6; 32])),
             ),
             server(
                 "paired",
-                ServerUpdateAction::Settings(MachineTarget::Direct([7; 32])),
+                ServerUpdateAction::Settings(ServerTarget::Direct([7; 32])),
             ),
         ]
     }
@@ -1301,7 +1301,7 @@ mod tests {
         let update = server("local", ServerUpdateAction::Local);
         let attention = server(
             "penguin",
-            ServerUpdateAction::Review(MachineTarget::Direct([3; 32])),
+            ServerUpdateAction::Review(ServerTarget::Direct([3; 32])),
         );
         let with = |row: &ServerUpdateRow| {
             let mut servers = quiet_servers();
@@ -1324,7 +1324,7 @@ mod tests {
                 "Server Needs Attention".to_owned(),
                 PillTone::Warning,
                 Some(ControlGlyph::Warning),
-                PillCommand::Server(ServerUpdateAction::Review(MachineTarget::Direct([3; 32])))
+                PillCommand::Server(ServerUpdateAction::Review(ServerTarget::Direct([3; 32])))
             ))
         );
         let mut both = with(&update);

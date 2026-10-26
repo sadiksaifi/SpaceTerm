@@ -254,7 +254,7 @@ pub(crate) fn open_or_activate(section: Option<SettingsSectionId>, cx: &mut App)
 
 /// Opens Settings on Servers with `target`'s server selected. Selecting reads nothing from that
 /// server.
-pub(crate) fn open_server_settings(target: crate::ui::MachineTarget, cx: &mut App) {
+pub(crate) fn open_server_settings(target: crate::ui::ServerTarget, cx: &mut App) {
     open_or_activate(Some(SettingsSectionId::Servers), cx);
     // An existing window selects the section in a deferred update, so the selection follows it.
     cx.defer(move |cx| {
@@ -262,8 +262,8 @@ pub(crate) fn open_server_settings(target: crate::ui::MachineTarget, cx: &mut Ap
             let _ = settings.update(cx, |settings, _, cx| {
                 settings.select_server(
                     match target {
-                        crate::ui::MachineTarget::Local => server_list::ServerChoice::Local,
-                        crate::ui::MachineTarget::Direct(route) => {
+                        crate::ui::ServerTarget::Local => server_list::ServerChoice::Local,
+                        crate::ui::ServerTarget::Direct(route) => {
                             server_list::ServerChoice::Direct(route)
                         }
                     },

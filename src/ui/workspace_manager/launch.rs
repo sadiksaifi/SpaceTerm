@@ -79,6 +79,13 @@ pub(crate) trait SharedServerConnector {
         panes: &PaneConstruction,
         cx: &mut App,
     ) -> Option<SharedServerConnection>;
+
+    /// The account-local connection whose client directory retains this desktop's Workspace
+    /// order, or `None` to keep the order for the window's life. Opening it needs no running
+    /// server.
+    fn workspace_order(&self) -> Option<ServerConnection> {
+        None
+    }
 }
 
 /// The account-local server a Workspace Window launches and presents.
@@ -160,6 +167,13 @@ impl SharedServerConnector for AccountConnector {
             ),
             retained: Some(server),
         })
+    }
+
+    fn workspace_order(&self) -> Option<ServerConnection> {
+        ServerConnection::for_identity(
+            crate::application_identity::ApplicationIdentity::current().directory_name(),
+        )
+        .ok()
     }
 }
 
@@ -438,6 +452,11 @@ impl LocalLaunchState {
         }
     }
 
+    /// The account-local connection that retains this desktop's Workspace order, if any.
+    pub(super) fn workspace_order_connection(&self) -> Option<ServerConnection> {
+        self.adapters.connector.workspace_order()
+    }
+
     /// The live status node for `message`, polite only when it changed since the last frame.
     fn announcement(&self, message: &SharedString) -> gpui::accesskit::Node {
         let mut announced = self.announced.borrow_mut();
@@ -700,6 +719,7 @@ impl WorkspaceManager {
         };
         self.present_shared_workspaces(connection.edits, connection.sessions, window, cx);
         if let (Some(shared), Some(server)) = (self.shared.local_mut(), connection.retained) {
+            shared.identify(Rc::new(server.clone()));
             shared.retain_client_views(server);
             let read = shared.client_views_read();
             self.launch._views_read = Some(cx.spawn_in(window, async move |manager, cx| {
