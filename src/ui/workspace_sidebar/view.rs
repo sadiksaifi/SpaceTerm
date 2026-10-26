@@ -1328,10 +1328,7 @@ impl WorkspaceSidebar {
             .map(|directory| format!("{OUTSIDE_PANE_LABEL}: {directory}"))
             .unwrap_or_default();
         let description = std::iter::once(head.as_str())
-            .chain([
-                worktree.directory_tooltip.as_ref(),
-                outside_pane.as_str(),
-            ])
+            .chain([worktree.directory_tooltip.as_ref(), outside_pane.as_str()])
             .chain(states.iter().copied())
             .filter(|part| !part.is_empty())
             .collect::<Vec<_>>()
