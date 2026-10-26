@@ -3797,6 +3797,84 @@ fn selected_segments_draw_no_rim_at_reduced_opacity() {
     }
 }
 
+/// Reads a resolved control paint back as an application color.
+fn application_color(color: gpui::Rgba) -> Color {
+    let byte = |channel: f32| (channel.clamp(0.0, 1.0) * 255.0).round() as u32;
+    Color::rgba(byte(color.r) << 24 | byte(color.g) << 16 | byte(color.b) << 8 | byte(color.a))
+}
+
+/// Every host a segmented control rests on, with the opaque backgrounds beneath its track.
+fn segmented_hosts(prepared: &ChromeAppearance) -> [(&'static str, &ChromeColors, [Color; 2]); 5] {
+    let shell = prepared.floating_surfaces().shell(FloatingRole::Popover);
+    let host = |host| [prepared.control_host_background(host); 2];
+    [
+        (
+            "Window",
+            &prepared.segmented_control_colors,
+            host(spaceterm_ui::ControlHost::Window),
+        ),
+        (
+            "TitleBar",
+            &prepared.title_bar_controls.segmented,
+            host(spaceterm_ui::ControlHost::TitleBar),
+        ),
+        (
+            "Panel",
+            &prepared.panel_controls.segmented,
+            host(spaceterm_ui::ControlHost::Panel),
+        ),
+        (
+            "Card",
+            &prepared.card_controls.segmented,
+            host(spaceterm_ui::ControlHost::Card),
+        ),
+        (
+            "Floating",
+            &prepared.floating_segmented_colors,
+            [Color::BLACK, Color::WHITE].map(|underlay| shell_endpoint_background(shell, underlay)),
+        ),
+    ]
+}
+
+/// A disabled selection stays a visible chip beside its disabled neighbours, and a disabled card
+/// keeps a visible ring, on every host and material the built-in appearances produce.
+#[test]
+fn disabled_selected_segments_stay_apart_from_their_neighbours() {
+    for appearance in [Appearance::Light, Appearance::Dark] {
+        for opacity in [1.0, 0.65, 0.0] {
+            let (_, prepared) =
+                resolve_case(appearance, ChromeDensity::Compact, opacity, true, true);
+            for (host_name, colors, hosts) in segmented_hosts(&prepared) {
+                let theme = super::segmented_control::prepared(
+                    colors,
+                    &prepared.typography,
+                    super::segmented_control::SegmentedPolicy::prepared(&prepared),
+                );
+                let selected = theme.paint(true, false, false, false);
+                let unselected = theme.paint(false, false, false, false);
+                let card = theme.card_paint(true, false, false, false);
+                for host in hosts {
+                    let case =
+                        format!("{appearance:?}/{host_name} at opacity {opacity} on {host:?}");
+                    let track = colors.element_background.source_over(host);
+                    let chip = application_color(selected.background()).source_over(track);
+                    let neighbour = application_color(unselected.background()).source_over(track);
+                    assert!(
+                        chip.contrast_ratio(neighbour) >= 1.12,
+                        "{case}: disabled selected chip {chip:?} beside {neighbour:?}"
+                    );
+                    let fill = application_color(card.background()).source_over(host);
+                    let ring = application_color(card.border()).source_over(fill);
+                    assert!(
+                        ring.contrast_ratio(fill) >= 1.12,
+                        "{case}: disabled card ring {ring:?} on {fill:?}"
+                    );
+                }
+            }
+        }
+    }
+}
+
 #[test]
 fn floating_control_content_remains_readable_on_material_state_fills() {
     for appearance in [Appearance::Light, Appearance::Dark] {

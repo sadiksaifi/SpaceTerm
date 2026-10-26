@@ -10,6 +10,11 @@ use crate::ui::appearance::ChromeAppearance;
 use crate::ui::chrome_geometry::RadiusRole;
 use crate::ui::chrome_typography::{ChromeTypography, TextRole};
 
+/// The share of the accent a disabled selection keeps, from the approved design.
+const DISABLED_ACCENT_OPACITY: u8 = 102;
+/// The share of the selected label a disabled selection keeps, from the approved design.
+const DISABLED_LABEL_OPACITY: u8 = 140;
+
 /// What the window and accessibility settings ask of a segmented control.
 #[derive(Clone, Copy, Debug)]
 pub(in crate::ui) struct SegmentedPolicy {
@@ -92,6 +97,15 @@ pub(in crate::ui) fn prepared(
     // translucent fill. A neutral selection may sit close to its track, so it keeps an edge
     // wherever the track keeps one.
     let rimless = colors.border_transparent;
+    // A disabled selection is a dimmed accent chip with a dimmed label. The primary button's
+    // disabled roles become the ordinary disabled button fill, which a segment cannot tell apart
+    // from its unselected neighbours.
+    let dimmed_accent = colors
+        .primary_background
+        .multiply_opacity(DISABLED_ACCENT_OPACITY);
+    let dimmed_label = colors
+        .primary_foreground
+        .multiply_opacity(DISABLED_LABEL_OPACITY);
     let neutral = |fill: Color, label: Color, edge: Color| {
         paint(fill, label, if policy.edges { edge } else { rimless })
     };
@@ -112,11 +126,7 @@ pub(in crate::ui) fn prepared(
                 colors.primary_pressed_foreground,
                 rimless,
             ),
-            paint(
-                colors.primary_disabled_background,
-                colors.primary_disabled_foreground,
-                rimless,
-            ),
+            paint(dimmed_accent, dimmed_label, rimless),
         ]
     } else {
         [
@@ -149,7 +159,7 @@ pub(in crate::ui) fn prepared(
             colors.primary_background,
             colors.primary_hover_background,
             colors.primary_pressed_background,
-            colors.primary_disabled_background,
+            dimmed_accent,
         ]
     } else {
         [
@@ -264,7 +274,8 @@ mod tests {
             primary_pressed_background: Color::rgb(0x1a56b0),
             primary_pressed_foreground: Color::rgb(0xfefefe),
             primary_pressed_border: Color::rgb(0x0a3d8f),
-            primary_disabled_background: Color::rgb(0x23436a),
+            // Final disabled preparation gives the primary button the ordinary disabled fill.
+            primary_disabled_background: Color::rgba(0x00000000),
             primary_disabled_foreground: Color::rgb(0x8a8a8a),
             primary_disabled_border: Color::rgb(0x0a3d8f),
             selection_background: Color::rgb(0x4a4a4a),
@@ -302,18 +313,24 @@ mod tests {
                 colors.border_transparent
             )
         );
+        // A disabled selection keeps a dimmed accent chip, apart from its enabled form and from
+        // its disabled neighbours.
+        let disabled = theme.paint(true, false, true, true);
+        let accent = gpui_color(colors.primary_background);
         assert_eq!(
-            theme.paint(true, false, true, true),
-            paint(
-                colors.primary_disabled_background,
-                colors.primary_disabled_foreground,
-                colors.border_transparent
+            (
+                disabled.background().r,
+                disabled.background().g,
+                disabled.background().b
             ),
-            "a disabled selection keeps a dimmed accent"
+            (accent.r, accent.g, accent.b)
         );
+        assert!(0.0 < disabled.background().a && disabled.background().a < accent.a);
+        assert_eq!(disabled.border(), gpui_color(colors.border_transparent));
+        assert_ne!(disabled, theme.paint(true, true, false, false));
         assert_ne!(
-            theme.paint(true, false, false, false),
-            theme.paint(true, true, false, false)
+            disabled.background(),
+            theme.paint(false, false, false, false).background()
         );
         // A card keeps its neutral fill and carries the accent as its ring.
         let card = theme.card_paint(true, true, false, false);
@@ -561,6 +578,7 @@ mod tests {
             element_border: Color::rgb(0x556677),
             ..ChromeColors::default()
         };
+        // The track edge, when kept, is the separator role.
         for (edges, expected) in [
             (false, None),
             (true, Some(gpui::Hsla::from(gpui_color(colors.border)))),
