@@ -7,6 +7,8 @@
 //! server reconnecting later therefore returns each Workspace to where the person left it,
 //! whichever server arrives first.
 
+use std::collections::BTreeSet;
+
 use gpui::{Context, Task, Window};
 use spaceterm_server::workspace_order::{WorkspaceOrder, WorkspaceReference};
 
@@ -26,6 +28,9 @@ pub(super) struct DisplayOrder {
     /// Whether the person arranged Workspaces while the saved order was being read. Their
     /// arrangement is newer than the saved one, so it wins once reading ends.
     reordered_while_reading: bool,
+    /// The presented Workspaces whose creation the server hadn't confirmed at the last
+    /// arrangement. They have no reference yet, so the order can't hold their places.
+    pending_creations: BTreeSet<WorkspaceId>,
     /// Whether this window already said the order couldn't be read or saved.
     error_reported: bool,
     _read: Option<Task<()>>,
@@ -156,6 +161,7 @@ impl WorkspaceManager {
     /// Records the order the person just arranged. Absent Workspaces keep their places. Before
     /// the saved order is read, the arrangement waits for it and then wins over it.
     pub(super) fn record_display_order(&mut self) {
+        self.note_pending_creations();
         if !self.display_order.ready {
             self.display_order.reordered_while_reading = true;
             return;
@@ -173,13 +179,21 @@ impl WorkspaceManager {
 
     /// Moves the presented Workspaces into their retained order, then records it, so a Workspace
     /// seen for the first time joins the end. A Workspace with no reference yet keeps its
-    /// position, and the referenced ones share the positions they already hold.
+    /// position, and the referenced ones share the positions they already hold. A creation the
+    /// server just confirmed also keeps its position, which may be where the person moved it
+    /// while it waited.
     fn restore_display_order(&mut self) {
-        let presented = self.presented_references();
-        let references: Vec<_> = presented.iter().map(|(_, reference)| *reference).collect();
+        let restorable: Vec<_> = self
+            .presented_references()
+            .into_iter()
+            .filter(|(workspace_id, _)| {
+                !self.display_order.pending_creations.contains(workspace_id)
+            })
+            .collect();
+        let references: Vec<_> = restorable.iter().map(|(_, reference)| *reference).collect();
         let restored = self.display_order.order.restore(&references);
         let local = |reference: &WorkspaceReference| {
-            presented
+            restorable
                 .iter()
                 .find(|(_, candidate)| candidate == reference)
                 .map(|(workspace_id, _)| *workspace_id)
@@ -189,7 +203,7 @@ impl WorkspaceManager {
             .workspaces
             .iter()
             .map(|workspace| {
-                if presented
+                if restorable
                     .iter()
                     .any(|(workspace_id, _)| *workspace_id == workspace.id())
                 {
@@ -204,8 +218,29 @@ impl WorkspaceManager {
                 Self::report_workspace_error("arrange", error);
             }
         }
+        let presented: Vec<_> = self
+            .presented_references()
+            .into_iter()
+            .map(|(_, reference)| reference)
+            .collect();
         // A recording the order refuses leaves the retained order as it was.
-        let _ = self.display_order.order.record(&restored);
+        let _ = self.display_order.order.record(&presented);
+        self.note_pending_creations();
+    }
+
+    /// Notes which presented Workspaces still wait for their server to confirm their creation.
+    fn note_pending_creations(&mut self) {
+        let pending = self
+            .workspaces
+            .iter()
+            .map(|workspace| workspace.id())
+            .filter(|workspace_id| {
+                self.shared
+                    .owning(*workspace_id)
+                    .is_some_and(|shared| shared.is_provisional(*workspace_id))
+            })
+            .collect();
+        self.display_order.pending_creations = pending;
     }
 
     /// Saves the order when it differs from `previous`, including a change pruning alone made.

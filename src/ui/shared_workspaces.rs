@@ -1383,6 +1383,12 @@ mod development {
             self.identity.as_ref()?.server()
         }
 
+        /// Whether `workspace` presents a creation the server hasn't confirmed yet.
+        pub(crate) fn is_provisional(&self, workspace: WorkspaceId) -> bool {
+            self.facts(workspace)
+                .is_some_and(|facts| self.edits.provisional(facts.server))
+        }
+
         /// Names `workspace` in this client's Workspace order, once the server has published it.
         /// A provisional Workspace has no reference yet.
         pub(crate) fn workspace_reference(
