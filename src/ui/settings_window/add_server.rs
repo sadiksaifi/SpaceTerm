@@ -1577,6 +1577,28 @@ impl AddServerSheet {
     }
 }
 
+/// One connection method. An unavailable method stays visible, disabled, with a tooltip that
+/// says why.
+fn method_option(
+    method: Method,
+    label: &'static str,
+    key: &'static str,
+    available: bool,
+    reason: &'static str,
+) -> SegmentedOption<Method> {
+    let selector = format!("{METHOD_SELECTOR}-{key}");
+    let option = SegmentedOption::new(method, label).disabled(!available);
+    let option = if available {
+        option
+    } else {
+        option.tooltip(
+            spaceterm_ui::Tooltip::new(SharedString::from(format!("{selector}-reason")), reason)
+                .debug_selector(format!("{selector}-reason")),
+        )
+    };
+    option.debug_selector(selector)
+}
+
 /// Text that assistive technology reads, with an identity of its own.
 fn readable(id: impl Into<SharedString>, text: impl Into<SharedString>) -> gpui::Text {
     gpui::Text::new(ElementId::from(id.into()), text.into())
@@ -1623,12 +1645,20 @@ impl AddServerSheet {
             "Connection method",
             &self.method,
             vec![
-                SegmentedOption::new(Method::Ssh, "SSH")
-                    .disabled(self.ssh.is_none())
-                    .debug_selector(format!("{METHOD_SELECTOR}-ssh")),
-                SegmentedOption::new(Method::Invitation, "Invitation")
-                    .disabled(self.direct.is_none())
-                    .debug_selector(format!("{METHOD_SELECTOR}-invitation")),
+                method_option(
+                    Method::Ssh,
+                    "SSH",
+                    "ssh",
+                    self.ssh.is_some(),
+                    "SSH setup isn't available in this build.",
+                ),
+                method_option(
+                    Method::Invitation,
+                    "Invitation",
+                    "invitation",
+                    self.direct.is_some(),
+                    "Invitations aren't available in this build.",
+                ),
             ],
         )
         .map(|control| {
