@@ -1062,7 +1062,36 @@ fn spacing_scale_grows_option_height_but_not_text() {
     let grown = scaled.sizes.resolve(SegmentedSize::Card);
     assert_eq!(grown.font_size, base.font_size);
     assert!(grown.option_height > base.option_height);
-    assert_eq!(grown.border_width, base.border_width);
+}
+
+#[gpui::test]
+fn density_scales_the_card_selection_ring_but_not_the_joined_hairline(cx: &mut TestAppContext) {
+    let (root, _, cx) = segmented_window(cx);
+    cx.update(|_, cx| cx.set_global(test_theme().scaled_spacing(2.0)));
+    // The test theme draws both presentations with a 1 px border.
+    for (size, expected) in [
+        (SegmentedSize::Regular, px(1.0)),
+        (SegmentedSize::Card, px(2.0)),
+    ] {
+        cx.update(|_, cx| {
+            root.update(cx, |root, cx| {
+                root.size = size;
+                cx.notify();
+            })
+        });
+        cx.run_until_parked();
+        let selected = cx.debug_bounds("test-segmented-dark").unwrap();
+        cx.update(|window, _| {
+            let scale = window.scale_factor();
+            let border = window
+                .painted_quads()
+                .into_iter()
+                .find(|quad| quad.bounds == selected.scale(scale))
+                .map(|quad| quad.border_widths.left)
+                .expect("the selected option paints");
+            assert_eq!(border, expected.scale(scale), "{size:?}");
+        });
+    }
 }
 
 #[gpui::test]

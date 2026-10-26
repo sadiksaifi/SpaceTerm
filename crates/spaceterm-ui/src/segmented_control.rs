@@ -359,7 +359,15 @@ impl SegmentedSizes {
     fn scaled(self, spacing_scale: f32) -> Self {
         Self {
             regular: self.regular.scaled(spacing_scale),
-            card: self.card.scaled(spacing_scale),
+            // A card's border is its selection ring, which grows with density like the space it
+            // surrounds. A joined option's border stays a hairline.
+            card: SegmentedMetrics {
+                border_width: crate::appearance::scale_metric(
+                    self.card.border_width,
+                    spacing_scale,
+                ),
+                ..self.card.scaled(spacing_scale)
+            },
         }
     }
 }
