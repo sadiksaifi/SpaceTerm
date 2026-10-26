@@ -5,8 +5,8 @@ use super::workspace_chrome::{
     WorkspaceChromeStatusHosts,
 };
 use super::workspace_sidebar::{
-    SERVER_WORKSPACE_BADGE, SidebarEvent, WorkspaceMenuCommand, WorkspaceRowViewModel,
-    WorkspaceSidebar, WorktreeMenuCommand, remote_connection_status,
+    OUTSIDE_PANE_LABEL, SERVER_WORKSPACE_BADGE, SidebarEvent, WorkspaceMenuCommand,
+    WorkspaceRowViewModel, WorkspaceSidebar, WorktreeMenuCommand, remote_connection_status,
 };
 #[cfg(test)]
 use super::workspace_sidebar::{SIDEBAR_MAXIMUM_WIDTH, TERMINAL_CONTENT_MINIMUM_WIDTH};
@@ -2814,7 +2814,14 @@ impl WorkspaceManager {
                         Some(worktree) => {
                             path = worktree.directory.clone();
                             repository = worktree.repository.clone();
-                            format!("Worktree {}: {}", worktree.name, worktree.directory_tooltip)
+                            let mut tooltip = format!(
+                                "Worktree {}: {}",
+                                worktree.name, worktree.directory_tooltip
+                            );
+                            if let Some(pane) = &worktree.outside_pane_directory {
+                                tooltip.push_str(&format!("\n{OUTSIDE_PANE_LABEL}: {pane}"));
+                            }
+                            tooltip
                         }
                         None => section
                             .repository

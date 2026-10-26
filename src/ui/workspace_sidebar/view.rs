@@ -1320,14 +1320,28 @@ impl WorkspaceSidebar {
         if !worktree.has_tabs {
             states.push("No Tabs");
         }
+        // A Pane that left the Worktree is named apart, so its directory never reads as the
+        // Worktree's.
+        let outside_pane = worktree
+            .outside_pane_directory
+            .as_ref()
+            .map(|directory| format!("{OUTSIDE_PANE_LABEL}: {directory}"))
+            .unwrap_or_default();
         let description = std::iter::once(head.as_str())
-            .chain(std::iter::once(worktree.directory_tooltip.as_ref()))
+            .chain([
+                worktree.directory_tooltip.as_ref(),
+                outside_pane.as_str(),
+            ])
             .chain(states.iter().copied())
             .filter(|part| !part.is_empty())
             .collect::<Vec<_>>()
             .join(", ");
         let tooltip_detail = std::iter::once(worktree.name.as_ref())
-            .chain([head.as_str(), worktree.directory_tooltip.as_ref()])
+            .chain([
+                head.as_str(),
+                worktree.directory_tooltip.as_ref(),
+                outside_pane.as_str(),
+            ])
             .filter(|part| !part.is_empty())
             .chain(
                 states
