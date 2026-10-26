@@ -1504,7 +1504,7 @@ impl SettingsWindow {
             SettingsRowId::Opacity => self.render_opacity(appearance, cx),
             SettingsRowId::Blur => self.render_blur(cx),
             SettingsRowId::BackgroundImage => self.render_background_image(cx),
-            SettingsRowId::TerminalTheme => self.render_current_theme(appearance, window, cx),
+            SettingsRowId::TerminalTheme => self.render_current_theme(appearance, cx),
             SettingsRowId::Density => self.render_density(cx),
             SettingsRowId::SidebarDefaultState => self.render_sidebar_default_state(cx),
             SettingsRowId::TerminalFontFamily => self.render_terminal_font(appearance, cx),

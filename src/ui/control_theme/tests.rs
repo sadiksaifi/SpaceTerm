@@ -3750,6 +3750,220 @@ fn segmented_options_preserve_their_authored_step_against_each_actual_track() {
     }
 }
 
+/// Reduced Opacity turns selection fills into translucent overlays. A selected segment must still
+/// draw no rim of its own, on every host, whether its window is active or not.
+#[test]
+fn selected_segments_draw_no_rim_at_reduced_opacity() {
+    for opacity in [1.0, 0.65, 0.0] {
+        let (resolved, _) = resolve_case(
+            Appearance::Dark,
+            ChromeDensity::Compact,
+            opacity,
+            true,
+            true,
+        );
+        let (active, inactive) = ChromeAppearance::prepare_variants(&resolved.chrome);
+        for prepared in [&active, &inactive] {
+            for (host, colors) in [
+                ("Window", &prepared.segmented_control_colors),
+                ("TitleBar", &prepared.title_bar_controls.segmented),
+                ("Panel", &prepared.panel_controls.segmented),
+                ("Card", &prepared.card_controls.segmented),
+                ("Floating", &prepared.floating_segmented_colors),
+            ] {
+                let theme = super::segmented_control::prepared(
+                    colors,
+                    &prepared.typography,
+                    super::segmented_control::SegmentedPolicy::prepared(prepared),
+                );
+                for (enabled, hovered, pressed) in [
+                    (true, false, false),
+                    (true, true, false),
+                    (true, false, true),
+                    (false, false, false),
+                ] {
+                    let paint = theme.paint(true, enabled, hovered, pressed);
+                    let (fill, border) = (paint.background(), paint.border());
+                    // An edge is invisible when it is clear, or when it repeats an opaque fill.
+                    // Over a translucent fill, any visible edge paint composites into a rim.
+                    assert!(
+                        border.a == 0.0 || (border == fill && fill.a == 1.0),
+                        "{host} at opacity {opacity}, active={}, enabled={enabled}, hovered={hovered}, pressed={pressed}: border {border:?} over fill {fill:?}",
+                        prepared.active
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Reads a resolved control paint back as an application color.
+fn application_color(color: gpui::Rgba) -> Color {
+    let byte = |channel: f32| (channel.clamp(0.0, 1.0) * 255.0).round() as u32;
+    Color::rgba(byte(color.r) << 24 | byte(color.g) << 16 | byte(color.b) << 8 | byte(color.a))
+}
+
+/// Every host a segmented control rests on, with the opaque backgrounds beneath its track.
+fn segmented_hosts(prepared: &ChromeAppearance) -> [(&'static str, &ChromeColors, [Color; 2]); 5] {
+    let shell = prepared.floating_surfaces().shell(FloatingRole::Popover);
+    let host = |host| [prepared.control_host_background(host); 2];
+    [
+        (
+            "Window",
+            &prepared.segmented_control_colors,
+            host(spaceterm_ui::ControlHost::Window),
+        ),
+        (
+            "TitleBar",
+            &prepared.title_bar_controls.segmented,
+            host(spaceterm_ui::ControlHost::TitleBar),
+        ),
+        (
+            "Panel",
+            &prepared.panel_controls.segmented,
+            host(spaceterm_ui::ControlHost::Panel),
+        ),
+        (
+            "Card",
+            &prepared.card_controls.segmented,
+            host(spaceterm_ui::ControlHost::Card),
+        ),
+        (
+            "Floating",
+            &prepared.floating_segmented_colors,
+            [Color::BLACK, Color::WHITE].map(|underlay| shell_endpoint_background(shell, underlay)),
+        ),
+    ]
+}
+
+/// A disabled selection stays a visible chip beside its disabled neighbours, and a disabled card
+/// keeps a visible ring, on every host and material the built-in appearances produce.
+#[test]
+fn disabled_selected_segments_stay_apart_from_their_neighbours() {
+    let mut failures = Vec::new();
+    for appearance in [Appearance::Light, Appearance::Dark] {
+        for opacity in [1.0, 0.65, 0.0] {
+            let (resolved, _) =
+                resolve_case(appearance, ChromeDensity::Compact, opacity, true, true);
+            let (active, inactive) = ChromeAppearance::prepare_variants(&resolved.chrome);
+            for prepared in [&active, &inactive] {
+                for (host_name, colors, hosts) in segmented_hosts(prepared) {
+                    let theme = super::segmented_control::prepared(
+                        colors,
+                        &prepared.typography,
+                        super::segmented_control::SegmentedPolicy::prepared(prepared),
+                    );
+                    let selected = theme.paint(true, false, false, false);
+                    let unselected = theme.paint(false, false, false, false);
+                    let card = theme.card_paint(true, false, false, false);
+                    let neighbour_card = theme.card_paint(false, false, false, false);
+                    for host in hosts {
+                        let case = format!(
+                            "{appearance:?}/{host_name} at opacity {opacity}, active={}, on {host:?}",
+                            prepared.active
+                        );
+                        let mut check = |name: &str, paint: Color, beside: Color| {
+                            let ratio = paint.contrast_ratio(beside);
+                            if ratio < 1.12 {
+                                failures.push(format!(
+                                    "{case}: {name} {paint:?} beside {beside:?} is {ratio:.3}"
+                                ));
+                            }
+                        };
+                        let track = colors.element_background.source_over(host);
+                        check(
+                            "disabled selected chip",
+                            application_color(selected.background()).source_over(track),
+                            application_color(unselected.background()).source_over(track),
+                        );
+                        // A disabled card's selection must read against what it encloses and against
+                        // a disabled unselected card in the same place.
+                        let fill = application_color(card.background()).source_over(host);
+                        let ring = application_color(card.border()).source_over(fill);
+                        let neighbour_fill =
+                            application_color(neighbour_card.background()).source_over(host);
+                        let neighbour_edge =
+                            application_color(neighbour_card.border()).source_over(neighbour_fill);
+                        check("disabled card ring", ring, fill);
+                        check("disabled card ring", ring, neighbour_edge);
+                    }
+                }
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// The hairline between two unselected options reads against the track it rests on, including a
+/// borderless dark track over every host and material.
+#[gpui::test]
+fn segment_dividers_read_against_every_resolved_track(cx: &mut gpui::TestAppContext) {
+    use gpui::prelude::*;
+    struct Fixture;
+    impl gpui::Render for Fixture {
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            _: &mut gpui::Context<Self>,
+        ) -> impl IntoElement {
+            gpui::div().child(
+                spaceterm_ui::SegmentedControl::new(
+                    "divider-track",
+                    "Mode",
+                    &0,
+                    vec![
+                        spaceterm_ui::SegmentedOption::new(0, "One"),
+                        spaceterm_ui::SegmentedOption::new(1, "Two"),
+                        spaceterm_ui::SegmentedOption::new(2, "Three")
+                            .disabled(true)
+                            .debug_selector("divider-track-three"),
+                    ],
+                )
+                .unwrap()
+                .on_change(|_, _, _| {}),
+            )
+        }
+    }
+    for appearance in [Appearance::Light, Appearance::Dark] {
+        for opacity in [1.0, 0.65, 0.0] {
+            let (_, prepared) =
+                resolve_case(appearance, ChromeDensity::Compact, opacity, true, true);
+            for (host_name, colors, hosts) in segmented_hosts(&prepared) {
+                cx.set_global(super::segmented_control::prepared(
+                    colors,
+                    &prepared.typography,
+                    super::segmented_control::SegmentedPolicy::prepared(&prepared),
+                ));
+                let (_, cx) = cx.add_window_view(|_, _| Fixture);
+                cx.run_until_parked();
+                let divider = cx
+                    .debug_bounds("divider-track-three-divider")
+                    .expect("Two and Three are unselected neighbours");
+                let hairline = cx.update(|window, _| {
+                    let quad = window
+                        .painted_quads()
+                        .into_iter()
+                        .find(|quad| quad.bounds == divider.scale(window.scale_factor()))
+                        .expect("the divider paints");
+                    application_color(gpui::Rgba::from(
+                        quad.background
+                            .as_solid()
+                            .expect("the divider is a solid fill"),
+                    ))
+                });
+                for host in hosts {
+                    let track = colors.element_background.source_over(host);
+                    let line = hairline.source_over(track);
+                    assert!(
+                        line.contrast_ratio(track) >= 1.3,
+                        "{appearance:?}/{host_name} at opacity {opacity} on {host:?}: divider {line:?} on track {track:?}"
+                    );
+                }
+            }
+        }
+    }
+}
+
 #[test]
 fn floating_control_content_remains_readable_on_material_state_fills() {
     for appearance in [Appearance::Light, Appearance::Dark] {
@@ -4022,7 +4236,7 @@ fn installed_floating_catalog_uses_the_material_control_presentation(
         super::segmented_control::prepared(
             &prepared.floating_segmented_colors,
             &prepared.typography,
-            prepared.capabilities.show_borders,
+            super::segmented_control::SegmentedPolicy::prepared(&prepared),
         ),
         super::search_field::prepared(
             &prepared.floating_field_reference,

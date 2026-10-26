@@ -810,6 +810,42 @@ fn every_mode_shows_the_theme_in_use_and_auto_shows_both_slots(cx: &mut TestAppC
     }
 }
 
+/// The Light and Dark slots under Auto fit the Settings Window's content column at every density.
+#[gpui::test]
+fn auto_theme_slots_fit_the_settings_row_at_every_density(cx: &mut TestAppContext) {
+    let (window, _harness, cx) = open_settings(cx);
+    cx.simulate_resize(gpui::size(
+        px(super::WINDOW_WIDTH),
+        px(super::WINDOW_HEIGHT),
+    ));
+    select_section(SettingsSectionId::Themes, cx);
+    for density in [ChromeDensity::Compact, ChromeDensity::Comfortable] {
+        cx.update(|_, cx| {
+            window.update(cx, |settings, cx| {
+                settings.set_appearance_mode(AppearanceMode::Auto, cx);
+                settings.edit(move |draft| draft.appearance.window.density = density, cx);
+            })
+        });
+        cx.run_until_parked();
+        let row = cx
+            .debug_bounds("settings-current-theme")
+            .expect("the current theme row renders");
+        for selector in [
+            "settings-theme-slots",
+            "settings-theme-slot-light",
+            "settings-theme-slot-dark",
+        ] {
+            let bounds = cx
+                .debug_bounds(selector)
+                .unwrap_or_else(|| panic!("{selector} renders"));
+            assert!(
+                row.left() <= bounds.left() && bounds.right() <= row.right(),
+                "{density:?}: {selector} {bounds:?} must fit the row {row:?}"
+            );
+        }
+    }
+}
+
 #[gpui::test]
 fn auto_theme_slots_publish_a_radio_group_that_selects_on_press(cx: &mut TestAppContext) {
     use gpui::accesskit::Action;
@@ -1010,19 +1046,26 @@ fn keyboard_navigation_selects_slots_applies_themes_and_opens_removal(cx: &mut T
     set_query(&settings, "theme", cx);
     cx.update(|window, cx| window.focus(&settings.read(cx).focus_handle.clone(), cx));
 
-    // Search, section navigation, About, then the Light slot.
-    cx.simulate_keystrokes("tab tab tab tab enter");
+    // Search, section navigation, About, then the slots, one Tab stop that starts on the Dark
+    // slot the system appearance shows. Arrows, Home, and End choose a slot and edit nothing.
+    let before = document_of(&settings, cx).appearance;
+    cx.simulate_keystrokes("tab tab tab tab");
     cx.run_until_parked();
-    assert_eq!(
-        settings.read_with(cx, |settings, cx| settings.theme_slot(cx)),
-        Appearance::Light
-    );
-    cx.simulate_keystrokes("tab space");
-    cx.run_until_parked();
-    assert_eq!(
-        settings.read_with(cx, |settings, cx| settings.theme_slot(cx)),
-        Appearance::Dark
-    );
+    for (keys, slot) in [
+        ("home", Appearance::Light),
+        ("end", Appearance::Dark),
+        ("left", Appearance::Light),
+        ("right", Appearance::Dark),
+    ] {
+        cx.simulate_keystrokes(keys);
+        cx.run_until_parked();
+        assert_eq!(
+            settings.read_with(cx, |settings, cx| settings.theme_slot(cx)),
+            slot,
+            "{keys}"
+        );
+        assert_eq!(document_of(&settings, cx).appearance, before, "{keys}");
+    }
 
     // The list's search and Get More Themes lead its rows. The built-in theme is in use, so the
     // imported theme's Use and removal buttons follow.

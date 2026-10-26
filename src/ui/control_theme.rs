@@ -90,7 +90,7 @@ pub(super) fn catalog(
         segmented_control::prepared(
             segmented,
             &appearance.typography,
-            appearance.capabilities.show_borders,
+            segmented_control::SegmentedPolicy::prepared(appearance),
         ),
         search_field::prepared(reference, colors, &appearance.typography, &appearance.icons),
         menu::prepared_with_rows(
@@ -140,7 +140,7 @@ pub(super) fn catalog(
             segmented_control::prepared(
                 floating_segmented,
                 &appearance.typography,
-                appearance.capabilities.show_borders,
+                segmented_control::SegmentedPolicy::prepared(appearance),
             ),
             search_field::prepared(
                 field_reference,
@@ -249,7 +249,11 @@ pub(super) fn surface_control_themes(
         button::prepared(&host.colors, typography, icons, show_borders),
         toggle::prepared(&host.colors, typography),
         progress::theme(&host.colors),
-        segmented_control::prepared(&host.segmented, typography, show_borders),
+        segmented_control::prepared(
+            &host.segmented,
+            typography,
+            segmented_control::SegmentedPolicy::prepared(appearance),
+        ),
         search_field::prepared(&host.reference, &host.colors, typography, icons),
         text_input::theme(&host.colors),
     )

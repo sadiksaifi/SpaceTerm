@@ -90,7 +90,9 @@ fn unavailable_window_effects_show_defaults_and_refuse_preview_edits(cx: &mut Te
                 let theme = crate::ui::control_theme::segmented_control::prepared(
                     &appearance.card_controls.segmented,
                     &appearance.typography,
-                    appearance.capabilities.show_borders,
+                    crate::ui::control_theme::segmented_control::SegmentedPolicy::prepared(
+                        appearance,
+                    ),
                 );
                 let fill = |bounds: gpui::Bounds<gpui::Pixels>| {
                     window
@@ -885,6 +887,62 @@ fn state_matrices_and_their_text_fit_the_default_window_at_every_density(cx: &mu
             (last.left(), last.size.width),
             "{density:?}: every matrix must share one set of columns"
         );
+        // Segmented fixtures are wider than a state column, so each has a row's width. None
+        // may leave its cell or the card, and no fixture or focus outline may reach another.
+        let segmented_card = cx.debug_bounds("workbench-group-segmented-card").unwrap();
+        let fixtures = [
+            ("workbench-segmented-cell-0", "workbench-segmented-0"),
+            ("workbench-segmented-cell-1", "workbench-segmented-1"),
+            ("workbench-segmented-cell-2", "workbench-segmented-2"),
+            ("workbench-segmented-cell-3", "workbench-segmented-3"),
+            ("workbench-segmented-cell-4", "workbench-segmented-4"),
+            (
+                "workbench-segmented-options-cell-0",
+                "workbench-segmented-options-0",
+            ),
+            (
+                "workbench-segmented-options-cell-1",
+                "workbench-segmented-options-1",
+            ),
+        ]
+        .map(|(cell, fixture)| {
+            let cell_bounds = cx.debug_bounds(cell).unwrap();
+            let fixture_bounds = cx.debug_bounds(fixture).unwrap();
+            assert!(
+                cell_bounds.left() <= fixture_bounds.left()
+                    && fixture_bounds.right() <= cell_bounds.right(),
+                "{density:?}: {fixture} {fixture_bounds:?} must stay inside its cell {cell_bounds:?}"
+            );
+            assert!(
+                cell_bounds.right() <= segmented_card.right(),
+                "{density:?}: {cell} {cell_bounds:?} must stay inside the card {segmented_card:?}"
+            );
+            (fixture, fixture_bounds)
+        });
+        let focus = cx
+            .debug_bounds("workbench-segmented-4-keyboard-focus")
+            .expect("the Focused fixture draws its focus outline");
+        assert!(
+            segmented_card.left() <= focus.left()
+                && focus.right() <= segmented_card.right()
+                && segmented_card.top() <= focus.top()
+                && focus.bottom() <= segmented_card.bottom(),
+            "{density:?}: the focus outline {focus:?} must stay inside the card {segmented_card:?}"
+        );
+        for (index, (name, bounds)) in fixtures.iter().enumerate() {
+            for (other, other_bounds) in &fixtures[index + 1..] {
+                assert!(
+                    !bounds.intersects(other_bounds),
+                    "{density:?}: {name} {bounds:?} overlaps {other} {other_bounds:?}"
+                );
+            }
+            if *name != "workbench-segmented-4" {
+                assert!(
+                    !focus.intersects(bounds),
+                    "{density:?}: the focus outline {focus:?} reaches {name} {bounds:?}"
+                );
+            }
+        }
         let field = cx.debug_bounds("workbench-field-4").unwrap();
         for text in [controls::FIELD_SAMPLE, controls::FIELD_PLACEHOLDER] {
             let width = cx.update(|window, cx| {

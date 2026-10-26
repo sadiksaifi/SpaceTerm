@@ -873,9 +873,9 @@ impl SurfaceControlThemes {
         self.toggle = self
             .toggle
             .elevation(track_shadow, track_border, thumb_shadow, thumb_border);
-        self.segmented_control =
-            self.segmented_control
-                .track_elevation(track_shadow, track_border, track_border);
+        self.segmented_control = self
+            .segmented_control
+            .track_elevation(track_shadow, track_border);
         self
     }
 
