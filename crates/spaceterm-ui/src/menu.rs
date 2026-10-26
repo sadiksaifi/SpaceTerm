@@ -1617,6 +1617,17 @@ enum TriggerKind {
     Picker,
 }
 
+impl TriggerKind {
+    /// Reports whether a press on this trigger opens or closes its menu.
+    fn toggles_with(self, event: &MouseDownEvent, cx: &App) -> bool {
+        let pointer = crate::PointerConventions::get(cx);
+        match self {
+            Self::Context => pointer.secondary(event.button, event.modifiers),
+            Self::Menu | Self::Picker => pointer.primary(event.button, event.modifiers),
+        }
+    }
+}
+
 type TypedActivationHandler<A> = Rc<dyn Fn(&MenuActivation<A>, &mut Window, &mut App)>;
 
 struct MenuControl<A> {
@@ -1729,8 +1740,7 @@ impl<A: Clone + 'static> MenuControl<A> {
                 style,
                 self.placement,
                 enabled,
-                self.kind != TriggerKind::Context,
-                self.kind == TriggerKind::Context,
+                self.kind,
                 lifecycle.clone(),
             );
             should_close
@@ -1770,17 +1780,11 @@ impl<A: Clone + 'static> MenuControl<A> {
                     trigger_bounds_state.update(cx, |state, _| state.trigger_bounds = Some(bounds));
                 let hitbox = hitbox.clone();
                 window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
-                    if !phase.capture() || !hitbox.is_hovered(window) || !enabled {
-                        return;
-                    }
-                    let pointer = crate::PointerConventions::get(cx);
-                    let context_gesture = pointer.secondary(event.button, event.modifiers);
-                    let ordinary_gesture = pointer.primary(event.button, event.modifiers);
-                    let accepts = match trigger_kind {
-                        TriggerKind::Context => context_gesture,
-                        TriggerKind::Menu | TriggerKind::Picker => ordinary_gesture,
-                    };
-                    if !accepts {
+                    if !phase.capture()
+                        || !hitbox.is_hovered(window)
+                        || !enabled
+                        || !trigger_kind.toggles_with(event, cx)
+                    {
                         return;
                     }
                     let requesting_open = !trigger_state
@@ -2408,7 +2412,7 @@ struct MenuState {
     style: MenuStyle,
     placement: MenuPlacementConfig,
     enabled: bool,
-    freeze_entries_while_open: bool,
+    trigger_kind: TriggerKind,
     awaiting_context_snapshot: bool,
     open: bool,
     open_generation: u64,
@@ -2501,7 +2505,7 @@ impl MenuState {
             },
             placement: MenuPlacementConfig::default(),
             enabled: false,
-            freeze_entries_while_open: false,
+            trigger_kind: TriggerKind::Menu,
             awaiting_context_snapshot: false,
             open: false,
             open_generation: 0,
@@ -2525,20 +2529,17 @@ impl MenuState {
         }
     }
 
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "the private synchronization boundary receives one complete control snapshot"
-    )]
     fn synchronize(
         &mut self,
         entries: Vec<InternalEntry>,
         style: MenuStyle,
         placement: MenuPlacementConfig,
         enabled: bool,
-        trigger_focusable: bool,
-        freeze_entries_while_open: bool,
+        trigger_kind: TriggerKind,
         lifecycle: Option<MenuLifecycleHandler>,
     ) {
+        // A context menu keeps the entries captured for its target while open.
+        let freeze_entries_while_open = trigger_kind == TriggerKind::Context;
         if !self.open || !freeze_entries_while_open || self.awaiting_context_snapshot {
             self.entries = entries;
             self.awaiting_context_snapshot = false;
@@ -2546,12 +2547,12 @@ impl MenuState {
         self.style = style;
         self.placement = placement;
         self.enabled = enabled;
-        self.freeze_entries_while_open = freeze_entries_while_open;
+        self.trigger_kind = trigger_kind;
         self.lifecycle = lifecycle;
         self.focus_handle = self
             .focus_handle
             .clone()
-            .tab_stop(enabled && trigger_focusable);
+            .tab_stop(enabled && trigger_kind != TriggerKind::Context);
         self.repair_path();
     }
 
@@ -2615,7 +2616,7 @@ impl MenuState {
         self.hovered_row = None;
         self.open_generation = self.open_generation.wrapping_add(1);
         self.reservation = reservation;
-        self.awaiting_context_snapshot = self.freeze_entries_while_open;
+        self.awaiting_context_snapshot = self.trigger_kind == TriggerKind::Context;
         self.active_path.clear();
         self.panel_scroll.clear();
         self.highlighted.clear();
@@ -3285,7 +3286,7 @@ fn render_overlay_root(state: Entity<MenuState>, window: &mut Window, cx: &mut A
     let content = crate::content_viewport(window);
     let viewport = content.size;
     let hovered_row = state.read(cx).hovered_row;
-    let (anchor, entries, active_path, highlighted, style, placement, trigger_bounds) = {
+    let (anchor, entries, active_path, highlighted, style, placement, trigger) = {
         let menu = state.read(cx);
         (
             menu.context_anchor.map_or_else(
@@ -3297,7 +3298,8 @@ fn render_overlay_root(state: Entity<MenuState>, window: &mut Window, cx: &mut A
             menu.highlighted.clone(),
             menu.style,
             menu.placement,
-            menu.trigger_bounds,
+            menu.trigger_bounds
+                .map(|bounds| (bounds, menu.trigger_kind)),
         )
     };
     let root_size = constrain_anchored_size(
@@ -3385,9 +3387,12 @@ fn render_overlay_root(state: Entity<MenuState>, window: &mut Window, cx: &mut A
                 let inside_panel = chain_bounds
                     .iter()
                     .any(|bounds| bounds.contains(&event.position));
-                let inside_trigger =
-                    trigger_bounds.is_some_and(|bounds| bounds.contains(&event.position));
-                if !inside_panel && !inside_trigger {
+                // The trigger closes the menu itself only for its own gesture. Every other press
+                // on it, such as a primary click in a context menu's content, is outside the menu.
+                let trigger_toggles = trigger.is_some_and(|(bounds, kind)| {
+                    bounds.contains(&event.position) && kind.toggles_with(event, cx)
+                });
+                if !inside_panel && !trigger_toggles {
                     window.prevent_default();
                     dismiss_menu(&outside_state, MenuCloseReason::Outside, true, window, cx);
                     cx.stop_propagation();
@@ -6193,8 +6198,7 @@ mod tests {
                     style,
                     MenuPlacementConfig::default(),
                     true,
-                    true,
-                    false,
+                    TriggerKind::Menu,
                     lifecycle,
                 );
                 state.open(None, None, None, false, window, cx);
@@ -6287,8 +6291,7 @@ mod tests {
                     style,
                     MenuPlacementConfig::default(),
                     true,
-                    false,
-                    true,
+                    TriggerKind::Context,
                     None,
                 );
                 state.open(
@@ -6304,8 +6307,7 @@ mod tests {
                     style,
                     MenuPlacementConfig::default(),
                     true,
-                    false,
-                    true,
+                    TriggerKind::Context,
                     None,
                 );
                 state.synchronize(
@@ -6313,8 +6315,7 @@ mod tests {
                     style,
                     MenuPlacementConfig::default(),
                     true,
-                    false,
-                    true,
+                    TriggerKind::Context,
                     None,
                 );
             });
@@ -6352,8 +6353,7 @@ mod tests {
                     style,
                     MenuPlacementConfig::default(),
                     true,
-                    true,
-                    false,
+                    TriggerKind::Menu,
                     Some(Rc::new(move |event, _| {
                         first_events.borrow_mut().push((1, *event))
                     })),
@@ -6369,8 +6369,7 @@ mod tests {
                     style,
                     MenuPlacementConfig::default(),
                     true,
-                    true,
-                    false,
+                    TriggerKind::Menu,
                     Some(Rc::new(move |event, _| {
                         second_events.borrow_mut().push((2, *event))
                     })),
@@ -6411,8 +6410,7 @@ mod tests {
                     style,
                     MenuPlacementConfig::default(),
                     true,
-                    true,
-                    false,
+                    TriggerKind::Menu,
                     Some(Rc::new(move |event, _| {
                         lifecycle_events
                             .borrow_mut()
@@ -6548,6 +6546,38 @@ mod tests {
             [target.center(), accepted_position]
         );
         assert_eq!(secondary_presses.get(), 1);
+    }
+
+    #[gpui::test]
+    fn primary_press_on_context_content_should_dismiss_the_menu(cx: &mut TestAppContext) {
+        cx.update(super::init);
+        cx.set_global(test_theme());
+        let (root, cx) = cx.add_window_view(move |_, cx| ContextRequestRoot {
+            accept: Rc::new(Cell::new(true)),
+            requests: Rc::new(RefCell::new(Vec::new())),
+            secondary_presses: Rc::new(Cell::new(0)),
+            predecessor: cx.focus_handle(),
+        });
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        let target = cx
+            .debug_bounds("request-target")
+            .unwrap_or_else(|| panic!("request target not painted"));
+        let predecessor = root.read_with(cx, |root, _| root.predecessor.clone());
+        cx.update(|window, cx| predecessor.focus(window, cx));
+        cx.simulate_mouse_down(target.center(), MouseButton::Right, Modifiers::none());
+        cx.simulate_mouse_up(target.center(), MouseButton::Right, Modifiers::none());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("Inspect").is_some());
+
+        // The menu opens below and after the pointer, so the target's leading corner lies outside it.
+        let content = target.origin + point(px(2.0), px(2.0));
+        cx.simulate_mouse_down(content, MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_up(content, MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+
+        assert!(cx.debug_bounds("Inspect").is_none());
+        assert!(cx.update(|window, _| predecessor.is_focused(window)));
     }
 
     struct KeyboardContextRoot {

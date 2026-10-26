@@ -6919,6 +6919,61 @@ fn context_menu_keys_never_reach_the_terminal_session(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn primary_press_in_the_grid_dismisses_the_context_menu_without_reaching_the_terminal_session(
+    cx: &mut TestAppContext,
+) {
+    for mouse_tracking in [false, true] {
+        let (pane, cx, records) = connected_terminal_pane(cx);
+        pane.update(cx, |pane, cx| {
+            let mut screen = context_action_screen(None, false);
+            Arc::make_mut(&mut screen).mouse_tracking = mouse_tracking;
+            pane.screen = screen;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let grid = pane.read_with(cx, |pane, _| {
+            pane.grid_bounds.expect("terminal grid was painted")
+        });
+        // Application mouse tracking keeps plain secondary clicks, so Shift opens the menu.
+        let open_modifiers = if mouse_tracking {
+            Modifiers::shift()
+        } else {
+            Modifiers::none()
+        };
+        cx.simulate_mouse_down(grid.center(), MouseButton::Right, open_modifiers);
+        cx.simulate_mouse_up(grid.center(), MouseButton::Right, open_modifiers);
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("terminal-context-menu-row-paste-enabled")
+                .is_some()
+        );
+
+        // The menu opens below and after the pointer, so the grid's leading corner lies outside it.
+        let press = grid.origin + point(px(4.0), px(4.0));
+        cx.simulate_mouse_down(press, MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_move(
+            press + point(px(40.0), px(0.0)),
+            Some(MouseButton::Left),
+            Modifiers::none(),
+        );
+        cx.simulate_mouse_up(press, MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+
+        assert!(
+            cx.debug_bounds("terminal-context-menu-row-paste-enabled")
+                .is_none(),
+            "a primary press outside the menu must dismiss it (mouse tracking: {mouse_tracking})"
+        );
+        assert!(pane.read_with(cx, |pane, _| pane.context_menu.is_none()));
+        assert!(cx.update(|window, cx| pane.read(cx).focus_handle.is_focused(window)));
+        assert!(records.commands().iter().all(|call| !matches!(
+            call.command,
+            RecordedCommand::Pointer(_) | RecordedCommand::PointerAndCopySelection(_)
+        )));
+    }
+}
+
+#[gpui::test]
 fn terminal_context_menu_publishes_its_target_and_opens_from_accessibility(
     cx: &mut TestAppContext,
 ) {
