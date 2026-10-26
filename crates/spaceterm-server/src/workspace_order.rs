@@ -7,11 +7,24 @@ use std::collections::BTreeSet;
 // Bound client state independently of any one server's Workspace limit.
 const MAX_ENTRIES: usize = 16_384;
 
+/// A nonsecret fingerprint of one authenticated client presentation scope.
+/// Possession grants no connection or filesystem authority.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct OwnerId(Id);
+
+impl OwnerId {
+    /// Restores a presentation fingerprint, without granting its owner's authority.
+    pub const fn from_bytes(bytes: Id) -> Self {
+        Self(bytes)
+    }
+}
+
 /// Stable presentation identity. These values grant no connection or filesystem authority.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkspaceReference {
-    pub server: Id,
+    pub owner: OwnerId,
     pub workspace: Id,
 }
 
@@ -65,12 +78,12 @@ impl WorkspaceOrder {
         Ok(())
     }
 
-    /// Forgets deleted Workspaces only after a complete inventory from their owning server.
-    /// Detached Workspaces still in that inventory retain their positions.
-    pub fn reconcile_server(&mut self, server: Id, inventory: &[Id]) {
+    /// Forgets deleted Workspaces only after a complete inventory for this presentation owner.
+    /// Detached Workspaces and other owners' presentations retain their positions.
+    pub fn reconcile_owner(&mut self, owner: OwnerId, inventory: &[Id]) {
         let surviving: BTreeSet<_> = inventory.iter().copied().collect();
         self.workspaces.retain(|workspace| {
-            workspace.server != server || surviving.contains(&workspace.workspace)
+            workspace.owner != owner || surviving.contains(&workspace.workspace)
         });
     }
 
@@ -85,7 +98,7 @@ fn validate(workspaces: &[WorkspaceReference]) -> Result<(), ServerError> {
     }
     let mut unique = BTreeSet::new();
     for workspace in workspaces {
-        if workspace.server == [0; 32]
+        if workspace.owner.0 == [0; 32]
             || workspace.workspace == [0; 32]
             || !unique.insert(*workspace)
         {
@@ -181,9 +194,9 @@ impl Drop for OrderLock {
 mod tests {
     use super::*;
 
-    fn workspace(server: u8, workspace: u8) -> WorkspaceReference {
+    fn workspace(owner: u8, workspace: u8) -> WorkspaceReference {
         WorkspaceReference {
-            server: [server; 32],
+            owner: OwnerId::from_bytes([owner; 32]),
             workspace: [workspace; 32],
         }
     }
@@ -218,14 +231,29 @@ mod tests {
     }
 
     #[test]
-    fn complete_inventory_prunes_only_its_servers_deleted_workspaces() {
+    fn complete_inventory_prunes_only_its_owners_deleted_workspaces() {
         let a = workspace(1, 1);
         let b = workspace(2, 1);
         let c = workspace(1, 2);
         let mut order = WorkspaceOrder::default();
         order.record(&[a, b, c]).unwrap();
-        order.reconcile_server(a.server, &[c.workspace]);
+        order.reconcile_owner(a.owner, &[c.workspace]);
         assert_eq!(order.restore(&[a, b, c]), [b, c, a]);
+    }
+
+    #[test]
+    fn owners_of_the_same_workspace_keep_independent_positions_across_roundtrip() {
+        let a = workspace(1, 1);
+        let b = workspace(2, 1);
+        let c = workspace(3, 1);
+        let mut order = WorkspaceOrder::default();
+        order.record(&[b, c, a]).unwrap();
+        order.record(&[c, a]).unwrap();
+        let mut restored: WorkspaceOrder =
+            serde_json::from_slice(&serde_json::to_vec(&order).unwrap()).unwrap();
+        assert_eq!(restored.restore(&[a, b, c]), [b, c, a]);
+        restored.reconcile_owner(c.owner, &[]);
+        assert_eq!(restored.restore(&[a, b, c]), [b, a, c]);
     }
 
     #[test]

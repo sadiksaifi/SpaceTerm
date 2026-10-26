@@ -57,6 +57,7 @@ pub struct ServerConnection {
     client_cache: std::sync::Arc<ClientCache>,
 }
 struct DirectRoute {
+    id: [u8; 32],
     paired: crate::direct::PairedDevice,
     connector: std::sync::Arc<dyn crate::direct::DirectConnector>,
 }
@@ -217,13 +218,50 @@ impl ServerConnection {
         )
     }
 
+    /// Fingerprints this bound presentation without storage, network or credential access.
+    /// Paths, environment values and credentials never contribute to its retained identity.
+    pub fn workspace_owner(&self) -> Result<crate::workspace_order::OwnerId, ServerError> {
+        let scope = self
+            .client_cache
+            .scope
+            .get()
+            .ok_or(ServerError::AuthenticationRefused)?;
+        let mut digest = ring::digest::Context::new(&ring::digest::SHA256);
+        digest.update(b"spaceterm-workspace-presentation-owner-1\0");
+        digest.update(&(scope.application.len() as u64).to_be_bytes());
+        digest.update(scope.application.as_bytes());
+        digest.update(&scope.server);
+        digest.update(&scope.client);
+        match &scope.authority {
+            ClientAuthority::Local => digest.update(b"account-local\0"),
+            ClientAuthority::Direct {
+                pairing,
+                public_key,
+                certificate,
+            } => {
+                let direct = self
+                    .direct
+                    .as_ref()
+                    .ok_or(ServerError::AuthenticationRefused)?;
+                digest.update(b"paired-direct\0");
+                digest.update(public_key);
+                digest.update(certificate);
+                digest.update(pairing);
+                digest.update(&direct.id);
+            }
+        }
+        let mut owner = [0; 32];
+        owner.copy_from_slice(digest.finish().as_ref());
+        Ok(crate::workspace_order::OwnerId::from_bytes(owner))
+    }
+
     /// Names a Workspace on this admitted server without storage or network access.
     pub fn workspace_reference(
         &self,
         workspace: crate::hierarchy::Id,
     ) -> Result<crate::workspace_order::WorkspaceReference, ServerError> {
         Ok(crate::workspace_order::WorkspaceReference {
-            server: self.client_scope()?.server,
+            owner: self.workspace_owner()?,
             workspace,
         })
     }
@@ -383,7 +421,11 @@ impl ServerConnection {
             self.account,
             route.iter().map(|b| format!("{b:02x}")).collect::<String>()
         );
-        self.direct = Some(std::sync::Arc::new(DirectRoute { paired, connector }));
+        self.direct = Some(std::sync::Arc::new(DirectRoute {
+            id: route,
+            paired,
+            connector,
+        }));
         self.client_cache = std::sync::Arc::default();
         let direct = self
             .direct
@@ -541,9 +583,17 @@ mod tests {
                     "status must send no operation"
                 );
             });
+            assert_eq!(
+                server.workspace_owner().err(),
+                Some(ServerError::AuthenticationRefused)
+            );
             let result = server.refresh();
             peer.join().unwrap();
             if workspace_policy == Some(true) {
+                assert_eq!(
+                    server.workspace_owner().unwrap(),
+                    server.clone().workspace_owner().unwrap()
+                );
                 assert_eq!(
                     result,
                     Ok(AuthenticatedStatus {
@@ -554,6 +604,10 @@ mod tests {
                 );
             } else {
                 assert_eq!(result, Err(ServerError::MissingRequiredCapability));
+                assert_eq!(
+                    server.workspace_owner().err(),
+                    Some(ServerError::AuthenticationRefused)
+                );
             }
             std::fs::remove_dir_all(root).unwrap();
         }
@@ -682,8 +736,111 @@ mod tests {
             .unwrap()
     }
     #[test]
+    fn workspace_owners_distinguish_full_pins_clients_pairings_and_saved_routes() {
+        let paired = paired_identity();
+        let reference = direct_fixture(std::path::Path::new("/unused"), paired.clone())
+            .workspace_reference([42; 32])
+            .unwrap();
+        for (field, changed) in [
+            ("server", {
+                let mut changed = paired.clone();
+                changed.pin.server[0] ^= 1;
+                changed
+            }),
+            ("public key", {
+                let mut changed = paired.clone();
+                changed.pin.public_key[0] ^= 1;
+                changed
+            }),
+            ("certificate", {
+                let mut changed = paired.clone();
+                changed.pin.certificate[0] ^= 1;
+                changed
+            }),
+            ("client", {
+                let mut changed = paired.clone();
+                changed.client[0] ^= 1;
+                changed
+            }),
+            ("pairing", {
+                let mut changed = paired.clone();
+                changed.pairing[0] ^= 1;
+                changed
+            }),
+        ] {
+            let other = direct_fixture(std::path::Path::new("/unused"), changed);
+            assert_ne!(
+                other.workspace_reference(reference.workspace).unwrap(),
+                reference,
+                "changing {field} must not reuse another presentation's order"
+            );
+        }
+        let other_route = ServerConnection::direct(
+            "spaceterm-development",
+            [4; 32],
+            paired,
+            Arc::new(NoConnect),
+        )
+        .unwrap();
+        assert_ne!(
+            other_route
+                .workspace_reference(reference.workspace)
+                .unwrap(),
+            reference,
+            "two saved routes retain independent presentations even with identical pairing fences"
+        );
+    }
+
+    #[test]
+    fn local_and_direct_workspace_owners_stay_distinct_when_server_and_client_ids_collide() {
+        let paired = paired_identity();
+        let local = ServerConnection::for_development_client("first", 1).unwrap();
+        // Supply the admitted identity at the transport boundary without starting a server.
+        local
+            .bind_scope(local.scope_for(paired.client, paired.pin.server))
+            .unwrap();
+        let remote = direct_fixture(std::path::Path::new("/unused"), paired);
+        assert_ne!(
+            local.workspace_reference([42; 32]).unwrap(),
+            remote.workspace_reference([42; 32]).unwrap()
+        );
+    }
+
+    #[test]
+    fn workspace_owners_ignore_storage_paths_and_development_client_environment_names() {
+        let paired = paired_identity();
+        let original = direct_fixture(std::path::Path::new("/first"), paired.clone());
+        let mut relaunched = ServerConnection::for_development_client("second", 1).unwrap();
+        relaunched.paths.data = std::path::PathBuf::from("/second");
+        let relaunched = relaunched
+            .with_direct([3; 32], paired, Arc::new(NoConnect))
+            .unwrap();
+        assert_eq!(
+            [
+                original.clone().workspace_owner().unwrap(),
+                relaunched.workspace_owner().unwrap()
+            ],
+            [original.workspace_owner().unwrap(); 2]
+        );
+    }
+
+    #[test]
+    fn workspace_owners_distinguish_application_identity() {
+        let original = direct_fixture(std::path::Path::new("/unused"), paired_identity());
+        let mut paired = paired_identity();
+        paired.pin.build = "spaceterm-preflight".into();
+        let other =
+            ServerConnection::direct("spaceterm-preflight", [3; 32], paired, Arc::new(NoConnect))
+                .unwrap();
+        assert_ne!(
+            original.workspace_owner().unwrap(),
+            other.workspace_owner().unwrap()
+        );
+    }
+
+    #[test]
     fn desktop_workspace_order_is_available_offline_and_isolated_from_other_clients_and_routes() {
-        use crate::workspace_order::{WorkspaceOrder, WorkspaceReference};
+        use crate::workspace_order::{OwnerId, WorkspaceOrder, WorkspaceReference};
         let root = std::env::temp_dir().canonicalize().unwrap().join(format!(
             "st-desktop-order-{:x}",
             u128::from_be_bytes(protocol::random().unwrap()[..16].try_into().unwrap())
@@ -698,11 +855,11 @@ mod tests {
             connection
         };
         let a = WorkspaceReference {
-            server: [1; 32],
+            owner: OwnerId::from_bytes([1; 32]),
             workspace: [3; 32],
         };
         let b = WorkspaceReference {
-            server: [2; 32],
+            owner: OwnerId::from_bytes([2; 32]),
             workspace: [3; 32],
         };
         let mut order = WorkspaceOrder::default();
@@ -733,8 +890,8 @@ mod tests {
         );
         let remote = direct_fixture(&root, paired_identity());
         assert_eq!(
-            remote.workspace_reference([3; 32]).unwrap().server,
-            paired_identity().pin.server
+            remote.workspace_reference([3; 32]).unwrap().owner,
+            remote.workspace_owner().unwrap()
         );
         assert_eq!(
             remote.workspace_order_store().err(),
@@ -754,6 +911,7 @@ mod tests {
             u64::from_be_bytes(protocol::random().unwrap()[..8].try_into().unwrap())
         ));
         let first = direct_fixture(&root, paired_identity());
+        let reference = first.workspace_reference([9; 32]).unwrap();
         let client = first.client_id().unwrap();
         let mutation = Mutation::CreateWorkspace {
             name: "Remote original".into(),
@@ -793,6 +951,7 @@ mod tests {
             .unwrap();
         drop(first);
         let relaunched = direct_fixture(&root, paired_identity());
+        assert_eq!(relaunched.workspace_reference([9; 32]).unwrap(), reference);
         assert_eq!(relaunched.client_id().unwrap(), client);
         assert_eq!(
             relaunched
