@@ -9010,7 +9010,8 @@ fn a_reconnected_server_should_return_its_workspaces_to_their_places(cx: &mut Te
 
 /// Two saved routes may reach one server, each through its own pairing with its own client
 /// identity. Each route keeps its own presentation: its Workspaces, their places in the order
-/// across a reconnect, and the edits it submits stay with that route.
+/// across a reconnect, and the edits it submits stay with that route, even while the other route
+/// is offline.
 #[gpui::test]
 fn routes_paired_separately_to_one_server_should_stay_independent(cx: &mut TestAppContext) {
     use spaceterm_server::hierarchy::Mutation;
@@ -9079,6 +9080,20 @@ fn routes_paired_separately_to_one_server_should_stay_independent(cx: &mut TestA
         &[("Far", 1)],
         cx,
     );
+    // The earlier route loses its connection while the newer one stays connected.
+    earlier_edits.set_connected(false);
+    cx.update(|window, cx| {
+        harness.manager.update(cx, |manager, cx| {
+            manager.sync_shared_workspaces(earlier, window, cx);
+        });
+    });
+    cx.run_until_parked();
+    let earlier_offline = harness.manager.read_with(cx, |manager, _| {
+        manager
+            .shared
+            .get(earlier)
+            .is_some_and(|shared| !shared.accepts_edits())
+    });
     cx.update(|window, cx| {
         harness.manager.update(cx, |manager, cx| {
             manager.create_workspace_on(
@@ -9091,6 +9106,10 @@ fn routes_paired_separately_to_one_server_should_stay_independent(cx: &mut TestA
     });
 
     assert_eq!(presented, [None, Some(earlier), Some(newer)]);
+    assert!(
+        earlier_offline,
+        "the earlier route is offline when the newer one creates"
+    );
     // The window's own Workspace isn't a server's, so it keeps its place.
     assert_eq!(
         owners(cx),
