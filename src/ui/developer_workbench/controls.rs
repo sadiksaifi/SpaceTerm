@@ -163,6 +163,29 @@ impl ControlStates {
             .on_change(|_, _, _| {})
             .into_any_element()
         })];
+        // Three options show the divider between unselected neighbours and a disabled option.
+        selection.push(state_row(
+            "Segmented options",
+            appearance,
+            |column, state| {
+                SegmentedControl::new(
+                    ("workbench-segmented-options", column),
+                    "Option fixture",
+                    &0,
+                    vec![
+                        SegmentedOption::new(0, "One"),
+                        SegmentedOption::new(1, "Two"),
+                        SegmentedOption::new(2, "Three").disabled(true),
+                    ],
+                )
+                .expect("three options are within the bounded option set")
+                .full_width(true)
+                .disabled(column == DISABLED_COLUMN)
+                .preview_state(state)
+                .on_change(|_, _, _| {})
+                .into_any_element()
+            },
+        ));
         selection.extend(
             [
                 ("Unchecked", CheckboxState::Unchecked),

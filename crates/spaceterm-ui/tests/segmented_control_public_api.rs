@@ -22,6 +22,8 @@ const _: fn() = || {
             SegmentedOption::new(PublicMode::Light, "Light")
                 .disabled(false)
                 .debug_selector("public-segmented-light")
+                .description("Solarized Light")
+                .tooltip(Tooltip::new("public-segmented-light-tooltip", "Light"))
                 .preview(|color, extent| div().w(extent).h(extent).bg(color).into_any_element()),
             SegmentedOption::new(PublicMode::Dark, "Dark"),
         ],
@@ -30,6 +32,7 @@ const _: fn() = || {
     let control = result
         .expect("two options are within the bounded option set")
         .size(SegmentedSize::Card)
+        .preview_size(gpui::size(px(160.0), px(100.0)))
         .disabled(false)
         .tab_stop(true)
         .full_width(true)
@@ -49,7 +52,8 @@ const _: fn() = || {
         gpui::rgba(0x00000000),
         gpui::rgba(0xffffffff),
         gpui::rgba(0x00000000),
-    );
+    )
+    .description(gpui::rgba(0xffffffaa));
     let _: gpui::Rgba = paint.background();
     let _: gpui::Rgba = paint.label();
     let _: gpui::Rgba = paint.border();
@@ -68,8 +72,12 @@ const _: fn() = || {
         gpui::rgba(0x00000014),
         gpui::rgba(0x2277ddff),
     )
+    .card_paints(SegmentedPaints::new(values, values, values, values))
+    .divider(gpui::rgba(0x0000001f))
+    .track_elevation(spaceterm_ui::ControlShadow::none(), None)
     .selected_shadow(spaceterm_ui::ControlShadow::none())
     .scaled_spacing(1.0);
+    let _: SegmentedPaint = theme.card_paint(true, true, false, false);
 
     let _ = (control, theme);
 };

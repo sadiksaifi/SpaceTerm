@@ -90,7 +90,9 @@ fn unavailable_window_effects_show_defaults_and_refuse_preview_edits(cx: &mut Te
                 let theme = crate::ui::control_theme::segmented_control::prepared(
                     &appearance.card_controls.segmented,
                     &appearance.typography,
-                    appearance.capabilities.show_borders,
+                    crate::ui::control_theme::segmented_control::SegmentedPolicy::prepared(
+                        appearance,
+                    ),
                 );
                 let fill = |bounds: gpui::Bounds<gpui::Pixels>| {
                     window

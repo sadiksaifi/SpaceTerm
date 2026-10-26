@@ -361,9 +361,9 @@ impl ControlThemeCatalog {
         self.toggle = self
             .toggle
             .elevation(track_shadow, track_border, thumb_shadow, thumb_border);
-        self.segmented_control =
-            self.segmented_control
-                .track_elevation(track_shadow, track_border, track_border);
+        self.segmented_control = self
+            .segmented_control
+            .track_elevation(track_shadow, track_border);
         for host in [
             &mut self.title_bar_controls,
             &mut self.panel_controls,

@@ -8,8 +8,8 @@ use std::rc::Rc;
 use gpui::{
     AnyElement, App, ClickEvent, ElementId, FocusHandle, Global, InteractiveElement as _,
     IntoElement, KeyDownEvent, MouseButton, ParentElement as _, Pixels, RenderOnce, Rgba,
-    SharedString, StatefulInteractiveElement as _, StyleRefinement, Styled as _, Window, accesskit,
-    div, prelude::FluentBuilder as _, px, rgba,
+    SharedString, Size, StatefulInteractiveElement as _, StyleRefinement, Styled as _, Window,
+    accesskit, div, prelude::FluentBuilder as _, px, rgba,
 };
 
 use crate::{
@@ -79,8 +79,10 @@ pub enum SegmentedSize {
 pub struct SegmentedOption<T> {
     value: T,
     label: SharedString,
+    description: Option<SharedString>,
     preview: Option<SegmentedPreviewBuilder>,
     disabled: bool,
+    tooltip: Option<Tooltip>,
     debug_selector: Option<String>,
 }
 
@@ -90,10 +92,20 @@ impl<T> SegmentedOption<T> {
         Self {
             value,
             label: label.into(),
+            description: None,
             preview: None,
             disabled: false,
+            tooltip: None,
             debug_selector: None,
         }
+    }
+
+    /// Adds a logical accessibility description. [`SegmentedSize::Card`] also draws it under the
+    /// label, truncated to the option's width.
+    pub fn description(mut self, description: impl Into<SharedString>) -> Self {
+        let description = description.into();
+        self.description = (!description.is_empty()).then_some(description);
+        self
     }
 
     /// Adds a preview element drawn above the label, built with the resolved label color and the
@@ -108,6 +120,13 @@ impl<T> SegmentedOption<T> {
         self
     }
 
+    /// Adds a tooltip to this option alone. It shows while the option is disabled too, so it can
+    /// say why the option is unavailable.
+    pub fn tooltip(mut self, tooltip: Tooltip) -> Self {
+        self.tooltip = Some(tooltip);
+        self
+    }
+
     pub fn debug_selector(mut self, selector: impl Into<String>) -> Self {
         self.debug_selector = Some(selector.into());
         self
@@ -119,17 +138,26 @@ impl<T> SegmentedOption<T> {
 pub struct SegmentedPaint {
     background: Rgba,
     label: Rgba,
+    description: Rgba,
     border: Rgba,
 }
 
 impl SegmentedPaint {
-    /// Creates resolved option paint.
+    /// Creates resolved option paint. An option description uses the label color until
+    /// [`Self::description`] sets its own.
     pub const fn new(background: Rgba, label: Rgba, border: Rgba) -> Self {
         Self {
             background,
             label,
+            description: label,
             border,
         }
+    }
+
+    /// Sets the color of the description a card draws under its label.
+    pub const fn description(mut self, color: Rgba) -> Self {
+        self.description = color;
+        self
     }
 
     /// The paint `level` of the way from this paint to `other`.
@@ -137,6 +165,7 @@ impl SegmentedPaint {
         Self {
             background: crate::mix_rgba(self.background, other.background, level),
             label: crate::mix_rgba(self.label, other.label, level),
+            description: crate::mix_rgba(self.description, other.description, level),
             border: crate::mix_rgba(self.border, other.border, level),
         }
     }
@@ -339,9 +368,11 @@ impl SegmentedSizes {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SegmentedControlTheme {
     paints: SegmentedPaints,
+    card_paints: SegmentedPaints,
     sizes: SegmentedSizes,
     track_background: Rgba,
     track_border: Rgba,
+    divider: Rgba,
     focus_border: Rgba,
     track_shadow: ControlShadow,
     selected_shadow: ControlShadow,
@@ -349,6 +380,9 @@ pub struct SegmentedControlTheme {
 
 impl SegmentedControlTheme {
     /// Creates a complete resolved segmented theme.
+    ///
+    /// Cards use `paints` until [`Self::card_paints`] gives them their own, and neighbouring
+    /// options are undivided until [`Self::divider`] sets a color.
     pub fn new(
         paints: SegmentedPaints,
         sizes: SegmentedSizes,
@@ -358,36 +392,41 @@ impl SegmentedControlTheme {
     ) -> Self {
         Self {
             paints,
+            card_paints: paints,
             sizes,
             track_background,
             track_border,
+            divider: rgba(0x00000000),
             focus_border,
             track_shadow: ControlShadow::none(),
             selected_shadow: ControlShadow::none(),
         }
     }
 
-    /// Adds the application-owned elevation treatment to the track and selected option.
-    pub fn track_elevation(
-        mut self,
-        shadow: ControlShadow,
-        track_border: Option<Rgba>,
-        selected_border: Option<Rgba>,
-    ) -> Self {
+    /// Gives [`SegmentedSize::Card`] its own paint, whose selected border is the card's selection
+    /// ring.
+    pub const fn card_paints(mut self, paints: SegmentedPaints) -> Self {
+        self.card_paints = paints;
+        self
+    }
+
+    /// Sets the hairline drawn between two neighbouring unselected options on a joined track.
+    pub const fn divider(mut self, color: Rgba) -> Self {
+        self.divider = color;
+        self
+    }
+
+    /// Adds the application-owned elevation treatment to the track. Options keep their own edges.
+    pub fn track_elevation(mut self, shadow: ControlShadow, track_border: Option<Rgba>) -> Self {
         self.track_shadow = shadow;
         if let Some(border) = track_border {
             self.track_border = border;
         }
-        if let Some(border) = selected_border {
-            self.paints.normal.selected.border = border;
-            self.paints.hovered.selected.border = border;
-            self.paints.pressed.selected.border = border;
-            self.paints.disabled.selected.border = border;
-        }
         self
     }
 
-    /// Resolves value and interaction together, with disabled state taking precedence.
+    /// Resolves value and interaction together for a joined option, with disabled state taking
+    /// precedence.
     pub fn paint(
         self,
         selected: bool,
@@ -395,16 +434,25 @@ impl SegmentedControlTheme {
         hovered: bool,
         pressed: bool,
     ) -> SegmentedPaint {
-        let paints = if !enabled {
-            self.paints.disabled
-        } else if pressed {
-            self.paints.pressed
-        } else if hovered {
-            self.paints.hovered
-        } else {
-            self.paints.normal
-        };
-        paints.resolve(selected)
+        resolve_paint(self.paints, selected, enabled, hovered, pressed)
+    }
+
+    /// Resolves value and interaction together for a card, with disabled state taking precedence.
+    pub fn card_paint(
+        self,
+        selected: bool,
+        enabled: bool,
+        hovered: bool,
+        pressed: bool,
+    ) -> SegmentedPaint {
+        resolve_paint(self.card_paints, selected, enabled, hovered, pressed)
+    }
+
+    const fn paints_for(self, size: SegmentedSize) -> SegmentedPaints {
+        match size {
+            SegmentedSize::Regular => self.paints,
+            SegmentedSize::Card => self.card_paints,
+        }
     }
 
     pub const fn selected_shadow(mut self, shadow: ControlShadow) -> Self {
@@ -422,10 +470,11 @@ impl SegmentedControlTheme {
 
     fn resolve(self, size: SegmentedSize) -> SegmentedStyle {
         SegmentedStyle {
-            paints: self.paints,
+            paints: self.paints_for(size),
             metrics: self.sizes.resolve(size),
             track_background: self.track_background,
             track_border: self.track_border,
+            divider: self.divider,
             focus_border: self.focus_border,
             track_shadow: self.track_shadow,
             selected_shadow: self.selected_shadow,
@@ -435,6 +484,25 @@ impl SegmentedControlTheme {
 
 impl Global for SegmentedControlTheme {}
 
+fn resolve_paint(
+    paints: SegmentedPaints,
+    selected: bool,
+    enabled: bool,
+    hovered: bool,
+    pressed: bool,
+) -> SegmentedPaint {
+    let paints = if !enabled {
+        paints.disabled
+    } else if pressed {
+        paints.pressed
+    } else if hovered {
+        paints.hovered
+    } else {
+        paints.normal
+    };
+    paints.resolve(selected)
+}
+
 /// A segmented control was built with an unusable option set.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SegmentedBuildError {
@@ -442,6 +510,8 @@ pub enum SegmentedBuildError {
     EmptyOptions,
     /// More options were supplied than this control family presents at once.
     TooManyOptions,
+    /// Two options carry equal values, so a selection could not name one of them.
+    DuplicateValues,
 }
 
 impl std::fmt::Display for SegmentedBuildError {
@@ -451,6 +521,9 @@ impl std::fmt::Display for SegmentedBuildError {
             Self::TooManyOptions => {
                 formatter.write_str("a segmented control presents a bounded option set")
             }
+            Self::DuplicateValues => {
+                formatter.write_str("a segmented control requires distinct option values")
+            }
         }
     }
 }
@@ -459,7 +532,7 @@ impl std::error::Error for SegmentedBuildError {}
 
 /// A controlled single-selection control over a bounded option set.
 ///
-/// The first option matching `current` is selected. When none matches, no option is drawn as
+/// The option matching `current` is selected. When none matches, no option is drawn as
 /// selected, so malformed caller state never presents two options as current; a change request
 /// then carries no previous value.
 #[derive(IntoElement)]
@@ -471,6 +544,7 @@ pub struct SegmentedControl<T: Clone + PartialEq + 'static> {
     options: Vec<SegmentedOption<T>>,
     selected: Option<usize>,
     size: SegmentedSize,
+    preview_size: Option<Size<Pixels>>,
     disabled: bool,
     tab_stop: bool,
     full_width: bool,
@@ -492,8 +566,9 @@ impl<T: Clone + PartialEq + 'static> SegmentedControl<T> {
     ///
     /// # Errors
     ///
-    /// Returns [`SegmentedBuildError::EmptyOptions`] when no option is supplied and
-    /// [`SegmentedBuildError::TooManyOptions`] beyond [`MAXIMUM_SEGMENTED_OPTIONS`].
+    /// Returns [`SegmentedBuildError::EmptyOptions`] when no option is supplied,
+    /// [`SegmentedBuildError::TooManyOptions`] beyond [`MAXIMUM_SEGMENTED_OPTIONS`], and
+    /// [`SegmentedBuildError::DuplicateValues`] when two options carry equal values.
     pub fn new(
         id: impl Into<ElementId>,
         accessibility_name: impl Into<SharedString>,
@@ -506,6 +581,14 @@ impl<T: Clone + PartialEq + 'static> SegmentedControl<T> {
         if options.len() > MAXIMUM_SEGMENTED_OPTIONS {
             return Err(SegmentedBuildError::TooManyOptions);
         }
+        let duplicated = options.iter().enumerate().any(|(index, option)| {
+            options[..index]
+                .iter()
+                .any(|earlier| earlier.value == option.value)
+        });
+        if duplicated {
+            return Err(SegmentedBuildError::DuplicateValues);
+        }
         let selected = options.iter().position(|option| &option.value == current);
         Ok(Self {
             #[cfg(feature = "control-preview")]
@@ -515,6 +598,7 @@ impl<T: Clone + PartialEq + 'static> SegmentedControl<T> {
             options,
             selected,
             size: SegmentedSize::default(),
+            preview_size: None,
             disabled: false,
             tab_stop: true,
             full_width: false,
@@ -527,6 +611,13 @@ impl<T: Clone + PartialEq + 'static> SegmentedControl<T> {
 
     pub fn size(mut self, size: SegmentedSize) -> Self {
         self.size = size;
+        self
+    }
+
+    /// Gives every card preview this exact size in place of the themed preview height, and sizes
+    /// each card to it. The caller owns density scaling of `size`.
+    pub fn preview_size(mut self, size: Size<Pixels>) -> Self {
+        self.preview_size = Some(size);
         self
     }
 
@@ -613,15 +704,18 @@ impl<T: Clone + PartialEq + 'static> RenderOnce for SegmentedControl<T> {
             metrics.minimum_option_width
         };
         let enabled = !self.disabled && self.on_change.is_some();
+        // With every option disabled there is nothing for the keyboard to select, so the control
+        // is no Tab stop and lets go of focus it held, like a disabled control.
+        let focusable = enabled && self.options.iter().any(|option| !option.disabled);
         let state = window.use_keyed_state(self.id.clone(), cx, |window, cx| {
             SegmentedControlState::new(window, cx)
         });
         let focus_handle = state.read(cx).focus_handle.clone();
-        if !enabled && focus_handle.is_focused(window) {
+        if !focusable && focus_handle.is_focused(window) {
             window.blur(cx);
         }
         state.update(cx, |state, cx| {
-            state.synchronize(enabled, self.tab_stop, cx);
+            state.synchronize(focusable, self.tab_stop, cx);
         });
         let holds_focus = focus_handle.is_focused(window);
         let focused = holds_focus && state.read(cx).focus_visible;
@@ -632,6 +726,7 @@ impl<T: Clone + PartialEq + 'static> RenderOnce for SegmentedControl<T> {
             .clone()
             .unwrap_or_else(|| self.accessibility_name.to_string());
         let card = matches!(self.size, SegmentedSize::Card);
+        let preview_size = self.preview_size.filter(|_| card);
         let previous = self
             .selected
             .and_then(|index| self.options.get(index))
@@ -675,6 +770,9 @@ impl<T: Clone + PartialEq + 'static> RenderOnce for SegmentedControl<T> {
             .enumerate()
             .map(|(index, option)| {
                 let selected = self.selected == Some(index);
+                // A joined track divides two unselected neighbours, as AppKit does. A selected
+                // option's fill already states where it ends.
+                let divided = !card && index > 0 && !selected && self.selected != Some(index - 1);
                 let option_enabled = enabled && !option.disabled;
                 let paint = if option_enabled {
                     style.paints.normal.resolve(selected)
@@ -730,7 +828,7 @@ impl<T: Clone + PartialEq + 'static> RenderOnce for SegmentedControl<T> {
                 let accessibility_activate = request.clone();
                 let value = option.value.clone();
                 let accessibility_value = option.value.clone();
-                div()
+                let segment = div()
                     .id(SharedString::from(format!("{option_selector}-state")))
                     .role(accesskit::Role::RadioButton)
                     .aria_label(option.label.clone())
@@ -738,6 +836,9 @@ impl<T: Clone + PartialEq + 'static> RenderOnce for SegmentedControl<T> {
                     .aria_disabled(!option_enabled)
                     .aria_position_in_set(index + 1)
                     .aria_size_of_set(option_count)
+                    .when_some(option.description.clone(), |segment, description| {
+                        segment.aria_description(description)
+                    })
                     // While the track holds keyboard focus, arrows move the selection, so the
                     // selected option is the focused one.
                     .when(selected && holds_focus, |segment| {
@@ -767,6 +868,13 @@ impl<T: Clone + PartialEq + 'static> RenderOnce for SegmentedControl<T> {
                     .min_h(metrics.option_height)
                     .px(metrics.horizontal_padding)
                     .py(metrics.vertical_padding)
+                    .when_some(
+                        preview_size.filter(|_| !self.full_width),
+                        |segment, size| {
+                            segment.w(size.width
+                                + (metrics.horizontal_padding + metrics.border_width) * 2.0)
+                        },
+                    )
                     .when(self.full_width, |segment| segment.flex_1())
                     .rounded(metrics.radius)
                     .border(metrics.border_width)
@@ -779,6 +887,34 @@ impl<T: Clone + PartialEq + 'static> RenderOnce for SegmentedControl<T> {
                     .cursor_default()
                     .when(selected && !card, |segment| {
                         segment.shadow(style.selected_shadow.layers())
+                    })
+                    .when(divided, |segment| {
+                        let width = px(1.0);
+                        // Insets are measured from inside the option's border, and the divider is
+                        // centred on the boundary it shares with its leading neighbour.
+                        let offset =
+                            -(metrics.border_width + metrics.option_gap / 2.0 + width / 2.0);
+                        let inset =
+                            (metrics.option_height / 4.0 - metrics.border_width).max(px(0.0));
+                        segment.child(
+                            div()
+                                .debug_selector({
+                                    let option_selector = option_selector.clone();
+                                    move || format!("{option_selector}-divider")
+                                })
+                                .absolute()
+                                .top(inset)
+                                .bottom(inset)
+                                .w(width)
+                                .map(|divider| {
+                                    if self.right_to_left {
+                                        divider.right(offset)
+                                    } else {
+                                        divider.left(offset)
+                                    }
+                                })
+                                .bg(style.divider),
+                        )
                     })
                     .when(refine_interaction, |segment| {
                         segment
@@ -807,28 +943,59 @@ impl<T: Clone + PartialEq + 'static> RenderOnce for SegmentedControl<T> {
                     .when_some(
                         option.preview.clone().filter(|_| card),
                         |segment, preview| {
+                            let height =
+                                preview_size.map_or(metrics.preview_height, |size| size.height);
                             segment.child(
                                 div()
                                     .flex()
                                     .flex_none()
                                     .w_full()
-                                    .h(metrics.preview_height)
+                                    .h(height)
                                     .items_center()
                                     .justify_center()
-                                    .child(preview(paint.label, metrics.preview_height)),
+                                    .child(preview(paint.label, height)),
                             )
                         },
                     )
                     .child(
                         div()
-                            .debug_selector({
-                                let option_selector = option_selector.clone();
-                                move || format!("{option_selector}-label")
-                            })
-                            .flex_none()
-                            .child(option.label.clone()),
-                    )
-                    .into_any_element()
+                            .flex()
+                            .flex_col()
+                            .items_center()
+                            .max_w_full()
+                            .child(
+                                div()
+                                    .debug_selector({
+                                        let option_selector = option_selector.clone();
+                                        move || format!("{option_selector}-label")
+                                    })
+                                    .flex_none()
+                                    .child(option.label.clone()),
+                            )
+                            .when_some(
+                                option.description.clone().filter(|_| card),
+                                |text, description| {
+                                    text.child(
+                                        div()
+                                            .debug_selector({
+                                                let option_selector = option_selector.clone();
+                                                move || format!("{option_selector}-description")
+                                            })
+                                            .max_w_full()
+                                            .truncate()
+                                            .text_color(paint.description)
+                                            .child(description),
+                                    )
+                                },
+                            ),
+                    );
+                // An option's own tooltip explains it even while it is disabled.
+                match option.tooltip.clone() {
+                    Some(tooltip) => tooltip
+                        .attach(segment, TooltipTargetVisibility::Visible)
+                        .into_any_element(),
+                    None => segment.into_any_element(),
+                }
             })
             .collect::<Vec<_>>();
 
@@ -875,7 +1042,7 @@ impl<T: Clone + PartialEq + 'static> RenderOnce for SegmentedControl<T> {
             .id(self.id)
             .role(accesskit::Role::RadioGroup)
             .aria_label(self.accessibility_name.clone())
-            .aria_disabled(!enabled)
+            .aria_disabled(!focusable)
             .debug_selector({
                 let selector = selector.clone();
                 move || selector
@@ -914,7 +1081,7 @@ impl<T: Clone + PartialEq + 'static> RenderOnce for SegmentedControl<T> {
             })
             .cursor_default()
             .block_mouse_except_scroll()
-            .when(enabled, |track| {
+            .when(focusable, |track| {
                 track.track_focus(&focus_handle).on_key_down(
                     move |event: &KeyDownEvent, window, cx| {
                         if event.keystroke.modifiers.modified() {
@@ -1017,6 +1184,7 @@ struct SegmentedStyle {
     metrics: SegmentedMetrics,
     track_background: Rgba,
     track_border: Rgba,
+    divider: Rgba,
     focus_border: Rgba,
     track_shadow: ControlShadow,
     selected_shadow: ControlShadow,
@@ -1067,6 +1235,7 @@ fn default_theme() -> SegmentedControlTheme {
         rgba(0x00000014),
         rgba(0x2277ddff),
     )
+    .divider(rgba(0x0000001f))
 }
 
 struct SegmentedControlState {

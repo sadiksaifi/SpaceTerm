@@ -19,7 +19,7 @@ fn density_scales_segment_bounds_but_not_radius() {
 }
 
 #[test]
-fn elevation_belongs_to_the_segmented_track_and_selected_chip_border() {
+fn elevation_belongs_to_the_segmented_track_alone() {
     let shadow = ControlShadow::single(crate::ControlShadowLayer::new(
         rgba(0x11111159).into(),
         px(0.0),
@@ -28,22 +28,14 @@ fn elevation_belongs_to_the_segmented_track_and_selected_chip_border() {
         px(-1.0),
     ));
     let track_border = rgba(0x00000026);
-    let selected_border = rgba(0x00000026);
-    let theme = test_theme().track_elevation(shadow, Some(track_border), Some(selected_border));
+    let theme = test_theme().track_elevation(shadow, Some(track_border));
     let style = theme.resolve(SegmentedSize::Regular);
 
     assert_eq!(style.track_shadow, shadow);
     assert_eq!(style.track_border, track_border);
     assert_eq!(style.selected_shadow, ControlShadow::none());
-    for paints in [
-        theme.paints.normal,
-        theme.paints.hovered,
-        theme.paints.pressed,
-        theme.paints.disabled,
-    ] {
-        assert_eq!(paints.selected.border, selected_border);
-        assert_eq!(paints.unselected.border, rgba(0x00000000));
-    }
+    // A selected option states its shape with its fill, so elevation adds no rim to it.
+    assert_eq!(theme.paints, test_theme().paints);
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -238,9 +230,11 @@ struct TestRoot {
     current: Mode,
     size: SegmentedSize,
     disabled: bool,
+    disable_light: bool,
     disable_auto: bool,
     disable_dark: bool,
     omit_auto: bool,
+    preview_size: Option<Size<Pixels>>,
     right_to_left: bool,
     changes: Rc<RefCell<Vec<SegmentedChange<Mode>>>>,
     other_focus: FocusHandle,
@@ -259,6 +253,8 @@ impl Render for TestRoot {
             vec![
                 SegmentedOption::new(Mode::Light, "Light")
                     .debug_selector("test-segmented-light")
+                    .description("Solarized Light")
+                    .disabled(self.disable_light)
                     .preview(move |color, extent| {
                         let preview_font = Rc::clone(&preview_font);
                         div()
@@ -294,6 +290,9 @@ impl Render for TestRoot {
         .size(self.size)
         .disabled(self.disabled)
         .right_to_left(self.right_to_left)
+        .when_some(self.preview_size, |control, size| {
+            control.preview_size(size)
+        })
         .debug_selector("test-segmented")
         .on_change(move |change, _, _| changes.borrow_mut().push(change.clone()));
         div()
@@ -322,9 +321,11 @@ fn segmented_window(cx: &mut TestAppContext) -> SegmentedWindow<'_> {
         current: Mode::Dark,
         size: SegmentedSize::Regular,
         disabled: false,
+        disable_light: false,
         disable_auto: false,
         disable_dark: false,
         omit_auto: false,
+        preview_size: None,
         right_to_left: false,
         changes: root_changes,
         other_focus: cx.focus_handle().tab_stop(true),
@@ -438,6 +439,19 @@ fn an_option_set_beyond_the_bound_is_rejected() {
     let result = SegmentedControl::new("id", "Appearance", &0, options);
 
     assert_eq!(result.err(), Some(SegmentedBuildError::TooManyOptions));
+}
+
+#[test]
+fn an_option_set_with_a_repeated_value_is_rejected() {
+    let options = vec![
+        SegmentedOption::new(Mode::Light, "Light"),
+        SegmentedOption::new(Mode::Dark, "Dark"),
+        SegmentedOption::new(Mode::Light, "Also Light"),
+    ];
+
+    let result = SegmentedControl::new("id", "Appearance", &Mode::Light, options);
+
+    assert_eq!(result.err(), Some(SegmentedBuildError::DuplicateValues));
 }
 
 #[test]
@@ -679,6 +693,220 @@ fn a_disabled_control_refuses_pointer_and_keyboard_activation(cx: &mut TestAppCo
 }
 
 #[gpui::test]
+fn a_control_whose_options_are_all_disabled_lets_go_of_focus_and_is_no_tab_stop(
+    cx: &mut TestAppContext,
+) {
+    let (root, changes, cx) = segmented_window(cx);
+    focus_control(cx);
+    assert!(cx.debug_bounds("test-segmented-keyboard-focus").is_some());
+
+    cx.update(|_, cx| {
+        root.update(cx, |root, cx| {
+            root.disable_light = true;
+            root.disable_dark = true;
+            root.disable_auto = true;
+            cx.notify();
+        })
+    });
+    cx.run_until_parked();
+
+    assert!(cx.update(|window, cx| window.focused(cx).is_none()));
+    assert_eq!(cx.debug_bounds("test-segmented-keyboard-focus"), None);
+    let other = root.read_with(cx, |root, _| root.other_focus.clone());
+    for _ in 0..3 {
+        cx.update(|window, cx| window.focus_next(cx));
+        assert!(cx.update(|window, _| other.is_focused(window)));
+    }
+    cx.simulate_keystrokes("right");
+    cx.run_until_parked();
+    assert!(changes.borrow().is_empty());
+
+    // Enabling one option restores the Tab stop.
+    cx.update(|_, cx| {
+        root.update(cx, |root, cx| {
+            root.disable_auto = false;
+            cx.notify();
+        })
+    });
+    cx.run_until_parked();
+    cx.update(|window, cx| window.focus_next(cx));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("test-segmented-keyboard-focus").is_some());
+}
+
+#[gpui::test]
+fn dividers_separate_only_neighbouring_unselected_options(cx: &mut TestAppContext) {
+    let (root, _, cx) = segmented_window(cx);
+    // Dark is selected in the middle, so neither boundary is divided.
+    assert_eq!(cx.debug_bounds("test-segmented-dark-divider"), None);
+    assert_eq!(cx.debug_bounds("test-segmented-auto-divider"), None);
+
+    for right_to_left in [false, true] {
+        cx.update(|_, cx| {
+            root.update(cx, |root, cx| {
+                root.current = Mode::Light;
+                root.right_to_left = right_to_left;
+                cx.notify();
+            })
+        });
+        cx.run_until_parked();
+
+        assert_eq!(cx.debug_bounds("test-segmented-dark-divider"), None);
+        let dark = cx.debug_bounds("test-segmented-dark").unwrap();
+        let auto = cx.debug_bounds("test-segmented-auto").unwrap();
+        let divider = cx
+            .debug_bounds("test-segmented-auto-divider")
+            .expect("Dark and Auto are unselected neighbours");
+        let boundary = if right_to_left {
+            auto.right()
+        } else {
+            auto.left()
+        };
+        assert_eq!(
+            if right_to_left {
+                dark.left()
+            } else {
+                dark.right()
+            },
+            boundary
+        );
+        assert_eq!(divider.center().x, boundary, "rtl={right_to_left}");
+        assert!(auto.top() < divider.top() && divider.bottom() < auto.bottom());
+    }
+
+    cx.update(|_, cx| {
+        root.update(cx, |root, cx| {
+            root.size = SegmentedSize::Card;
+            cx.notify();
+        })
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        cx.debug_bounds("test-segmented-auto-divider"),
+        None,
+        "separated cards need no divider"
+    );
+}
+
+#[gpui::test]
+fn a_card_draws_its_description_and_every_option_publishes_it(cx: &mut TestAppContext) {
+    use crate::a11y_testing::A11yTree;
+
+    let (root, _, cx) = segmented_window(cx);
+    assert_eq!(cx.debug_bounds("test-segmented-light-description"), None);
+    assert_eq!(
+        A11yTree::read(cx).node("Light")["aria"]["description"],
+        "Solarized Light"
+    );
+
+    cx.update(|_, cx| {
+        root.update(cx, |root, cx| {
+            root.size = SegmentedSize::Card;
+            cx.notify();
+        })
+    });
+    cx.run_until_parked();
+    let light = cx.debug_bounds("test-segmented-light").unwrap();
+    let label = cx.debug_bounds("test-segmented-light-label").unwrap();
+    let description = cx
+        .debug_bounds("test-segmented-light-description")
+        .expect("a card draws its description");
+    assert!(light.contains(&description.center()));
+    assert!(description.top() >= label.bottom());
+}
+
+#[gpui::test]
+fn a_preview_size_sizes_every_card_preview(cx: &mut TestAppContext) {
+    let (root, _, cx) = segmented_window(cx);
+    let size = gpui::size(px(160.0), px(100.0));
+    cx.update(|_, cx| {
+        root.update(cx, |root, cx| {
+            root.size = SegmentedSize::Card;
+            root.preview_size = Some(size);
+            cx.notify();
+        })
+    });
+    cx.run_until_parked();
+
+    let preview = cx.debug_bounds("test-segmented-light-preview").unwrap();
+    assert_eq!(preview.size, gpui::size(px(100.0), px(100.0)));
+    let metrics = test_theme().resolve(SegmentedSize::Card).metrics;
+    let width = size.width + (metrics.horizontal_padding + metrics.border_width) * 2.0;
+    for selector in [
+        "test-segmented-light",
+        "test-segmented-dark",
+        "test-segmented-auto",
+    ] {
+        let option = cx.debug_bounds(selector).unwrap();
+        assert_eq!(option.size.width, width, "{selector}");
+        assert!(option.size.height > size.height, "{selector}");
+    }
+}
+
+struct TooltipRoot;
+
+impl Render for TooltipRoot {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        crate::tooltip::TooltipLayer::new(
+            div().p(px(40.0)).child(
+                SegmentedControl::new(
+                    "reason-segmented",
+                    "Method",
+                    &Mode::Light,
+                    vec![
+                        SegmentedOption::new(Mode::Light, "Light")
+                            .debug_selector("reason-segmented-light"),
+                        SegmentedOption::new(Mode::Dark, "Dark")
+                            .disabled(true)
+                            .tooltip(
+                                Tooltip::new(
+                                    "reason-segmented-dark-tooltip",
+                                    "Dark is unavailable",
+                                )
+                                .debug_selector("reason-segmented-dark-tooltip"),
+                            )
+                            .debug_selector("reason-segmented-dark"),
+                    ],
+                )
+                .unwrap()
+                .on_change(|_, _, _| {}),
+            ),
+        )
+    }
+}
+
+#[gpui::test]
+fn a_disabled_option_shows_its_own_tooltip(cx: &mut TestAppContext) {
+    cx.set_global(test_theme());
+    cx.set_global(crate::tooltip::TooltipTheme::new(
+        crate::tooltip::TooltipPaint::new(rgba(0xffffffff), rgba(0xaaaaaaff), rgba(0xccccccff)),
+        crate::tooltip::TooltipMetrics::new(px(320.0)),
+    ));
+    cx.update(crate::tooltip::init);
+    let (_, cx) = cx.add_window_view(|_, _| TooltipRoot);
+    cx.update(|window, _| window.activate_window());
+    cx.run_until_parked();
+
+    let light = cx.debug_bounds("reason-segmented-light").unwrap();
+    cx.simulate_mouse_move(light.center(), None, Modifiers::none());
+    cx.executor()
+        .advance_clock(std::time::Duration::from_secs(1));
+    cx.run_until_parked();
+    assert_eq!(
+        cx.debug_bounds("reason-segmented-dark-tooltip"),
+        None,
+        "the tooltip belongs to its own option"
+    );
+
+    let dark = cx.debug_bounds("reason-segmented-dark").unwrap();
+    cx.simulate_mouse_move(dark.center(), None, Modifiers::none());
+    cx.executor()
+        .advance_clock(std::time::Duration::from_secs(1));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("reason-segmented-dark-tooltip").is_some());
+}
+
+#[gpui::test]
 fn keyboard_focus_rings_the_selected_segment(cx: &mut TestAppContext) {
     let (_root, _changes, cx) = segmented_window(cx);
 
@@ -802,9 +1030,11 @@ fn a_value_matching_no_option_requests_the_chosen_value_without_a_previous(
         current: Mode::Auto,
         size: SegmentedSize::Regular,
         disabled: false,
+        disable_light: false,
         disable_auto: false,
         disable_dark: false,
         omit_auto: true,
+        preview_size: None,
         right_to_left: false,
         changes: root_changes,
         other_focus: cx.focus_handle().tab_stop(true),

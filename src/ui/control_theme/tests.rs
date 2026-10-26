@@ -4022,7 +4022,7 @@ fn installed_floating_catalog_uses_the_material_control_presentation(
         super::segmented_control::prepared(
             &prepared.floating_segmented_colors,
             &prepared.typography,
-            prepared.capabilities.show_borders,
+            super::segmented_control::SegmentedPolicy::prepared(&prepared),
         ),
         super::search_field::prepared(
             &prepared.floating_field_reference,
