@@ -5,6 +5,10 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(feature = "client")]
+#[path = "tests/transport.rs"]
+mod transport;
+
 pub(crate) struct Fixture {
     root: std::path::PathBuf,
     pub(crate) paths: crate::host::Paths,
