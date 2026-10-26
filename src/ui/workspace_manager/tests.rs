@@ -9203,6 +9203,38 @@ fn the_sidebar_should_list_every_servers_workspaces_together(cx: &mut TestAppCon
     );
 }
 
+/// Same-named Workspaces in the same directory on two paired servers stay distinguishable to
+/// assistive technology: each row's own description names its machine, as its first line shows.
+#[gpui::test]
+fn same_named_remote_rows_should_each_name_their_machine(cx: &mut TestAppContext) {
+    use spaceterm_ui::a11y_testing::A11yTree;
+
+    let (harness, cx) = MultiServerHarness::new(cx);
+    harness.present_direct("penguin", named_route("penguin"), &[("SpaceTerm", 1)], cx);
+    harness.present_direct("studio", named_route("studio"), &[("SpaceTerm", 1)], cx);
+    redraw(cx);
+
+    let mut machines: Vec<String> = A11yTree::read(cx)
+        .with_role("TreeItem")
+        .into_iter()
+        .filter(|node| {
+            node["aria"]["label"]
+                .as_str()
+                .is_some_and(|label| label.starts_with("SpaceTerm"))
+        })
+        .map(|node| {
+            node["aria"]["description"]
+                .as_str()
+                .and_then(|description| description.split(", ").next())
+                .unwrap_or_default()
+                .to_owned()
+        })
+        .collect();
+    machines.sort();
+
+    assert_eq!(machines, ["penguin", "studio"]);
+}
+
 /// Dragging a paired server's Workspace onto this computer's lands it there.
 #[gpui::test]
 fn dragging_a_workspace_should_land_it_among_other_servers_workspaces(cx: &mut TestAppContext) {
