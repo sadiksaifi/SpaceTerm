@@ -148,8 +148,14 @@ fn intrinsic_track_hugs_options_in_every_parent_layout(cx: &mut TestAppContext) 
 
 #[gpui::test]
 fn full_width_track_distributes_all_available_width_between_options(cx: &mut TestAppContext) {
-    for scale in [1.0, 1.25] {
-        cx.set_global(test_theme().scaled_spacing(scale));
+    // A 2 px card ring at 1.25 density would be 2.5 px, which no pixel grid centres a ring on.
+    for (scale, card_border) in [1.0, 1.25]
+        .into_iter()
+        .flat_map(|scale| [px(1.0), px(2.0)].map(|border| (scale, border)))
+    {
+        let mut theme = test_theme();
+        theme.sizes.card = theme.sizes.card.border_width(card_border);
+        cx.set_global(theme.scaled_spacing(scale));
         for host in [SizingHost::Block, SizingHost::Row, SizingHost::Column] {
             for size in [SegmentedSize::Regular, SegmentedSize::Card] {
                 for right_to_left in [false, true] {
@@ -191,7 +197,11 @@ fn full_width_track_distributes_all_available_width_between_options(cx: &mut Tes
                     assert_eq!(cx.debug_bounds("sizing-control").unwrap(), track);
                     assert_eq!(cx.debug_bounds("sizing-on").unwrap(), on);
                     let ring = cx.debug_bounds("sizing-control-keyboard-focus").unwrap();
-                    assert_eq!(on.left() - ring.left(), ring.right() - on.right());
+                    assert_eq!(
+                        on.left() - ring.left(),
+                        ring.right() - on.right(),
+                        "{host:?}/{size:?}/rtl={right_to_left}/scale={scale}/card border {card_border:?}"
+                    );
                 }
             }
         }
@@ -1083,12 +1093,15 @@ fn density_scales_the_card_selection_ring_but_not_the_joined_hairline(cx: &mut T
         let selected = cx.debug_bounds("test-segmented-dark").unwrap();
         cx.update(|window, _| {
             let scale = window.scale_factor();
+            // The option's border is drawn by the quad at its bounds that has one.
             let border = window
                 .painted_quads()
                 .into_iter()
-                .find(|quad| quad.bounds == selected.scale(scale))
+                .find(|quad| {
+                    quad.bounds == selected.scale(scale) && quad.border_widths.left.0 > 0.0
+                })
                 .map(|quad| quad.border_widths.left)
-                .expect("the selected option paints");
+                .expect("the selected option paints its border");
             assert_eq!(border, expected.scale(scale), "{size:?}");
         });
     }
