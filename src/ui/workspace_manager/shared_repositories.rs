@@ -321,6 +321,7 @@ mod development {
             let inventory = self.shared_inventory(workspace_id);
             // The owning server runs Git for its Workspace, on its own computer.
             let worktree_writes = self.owner_writes_worktrees(workspace_id, cx);
+            let repositories = self.shared.owning(workspace_id)?.repositories();
             let current =
                 inventory.map(|inventory| RepositoryIdentity::new(inventory.main_root.clone()));
             // `listed` says whether the repository the Workspace reads lists the Worktree now.
@@ -331,8 +332,10 @@ mod development {
                     WorktreeHead::Bare => ("", false),
                 };
                 let label = sanitize_for_display(label, MAXIMUM_NAME_CHARS);
-                // The row describes the Pane last used in the Worktree, else its root.
-                let directory = manager
+                // The row describes the Pane last used in the Worktree, else its root. A Pane
+                // that left keeps its Tab here, but its directory and Repository Status are its
+                // own, so the row describes the root and names the Pane's directory apart.
+                let pane = manager
                     .shared_worktree_pane(id, cx)
                     .and_then(|pane| {
                         server
@@ -341,7 +344,12 @@ mod development {
                             .flat_map(|tab| &tab.panes)
                             .find(|candidate| candidate.id == pane)
                     })
-                    .map_or(record.root.as_path(), pane_directory);
+                    .map(pane_directory);
+                let outside_pane = pane
+                    .filter(|directory| !within_worktree(directory, &record.root, repositories));
+                let directory = pane
+                    .filter(|_| outside_pane.is_none())
+                    .unwrap_or(record.root.as_path());
                 // The listing names the branch until the server reads the Worktree's status.
                 let repository = SidebarBadge::from_view(&self.shared_repository_view(
                     workspace_id,
@@ -410,6 +418,8 @@ mod development {
                             .into()
                     },
                     directory_tooltip: directory.display().to_string().into(),
+                    outside_pane_directory: outside_pane
+                        .map(|directory| directory.display().to_string().into()),
                     repository,
                     main,
                     has_tabs: counts.contains_key(&id),
@@ -595,6 +605,32 @@ mod development {
             return named.clone();
         }
         key(inventory.map_or(root, |inventory| inventory.main_root.as_path()))
+    }
+
+    /// Whether a Pane's directory is in the Worktree at `root`. The Worktree the server last read
+    /// the directory in decides, so a Worktree nested in another's directory is its own. A failed
+    /// read keeps that Worktree, as it keeps the directory's last Repository Status. Only a
+    /// directory the server never placed in a Worktree is compared by path, unless a successful
+    /// read found it outside every repository.
+    fn within_worktree(directory: &Path, root: &Path, repositories: &SharedRepositories) -> bool {
+        let Some(facts) = repositories.facts(directory) else {
+            return directory.starts_with(root);
+        };
+        let known = facts
+            .worktrees
+            .as_ref()
+            .and_then(|list| list.worktrees.get(list.current?))
+            .map(|record| record.root.as_path())
+            .or_else(|| {
+                facts
+                    .repository
+                    .as_ref()
+                    .map(|repository| repository.root.as_path())
+            });
+        match known {
+            Some(known) => known == root,
+            None => facts.failure.is_some() && directory.starts_with(root),
+        }
     }
 
     /// The listing of the repository a Tab's membership is in: the server's reading of its

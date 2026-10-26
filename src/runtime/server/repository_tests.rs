@@ -575,6 +575,144 @@ fn abandoned_server_git_reads_cancel_on_disconnect_and_stop_without_losing_tabs(
 }
 
 #[test]
+fn non_root_tab_retains_its_repository_until_closed_after_both_shells_change_repositories() {
+    use spaceterm_server::hierarchy::{CloseTarget, Mutation, Outcome};
+    use spaceterm_server::repository::RepositoryHead;
+    let original = GitFixture::new();
+    let destination = GitFixture::new();
+    destination.git(&["checkout", "-b", "destination"]);
+    let mut prototype = host();
+    prototype.directory = original.0.clone();
+    let mut host = SharedWorkspaceHost::new(prototype);
+    host.prepare_initial_organization().unwrap();
+    let first = git_facts(&mut host, &original.0, |facts| facts.worktrees.is_some());
+    let workspace = first.workspaces[0].id;
+    let root_id = first.workspaces[0].root_tab;
+    let Reply::Outcome(created) = host.request(
+        [1; 32],
+        [1; 32],
+        Request::Mutate {
+            sequence: 1,
+            mutation: Mutation::CreateTab {
+                workspace,
+                source: None,
+            },
+        },
+    ) else {
+        panic!("second Tab creation unavailable")
+    };
+    let Outcome::Accepted { target: other_id } = created.outcome else {
+        panic!("second Tab creation refused")
+    };
+    let initial = shared_inventory(&mut host);
+    assert!(initial.workspaces[0].pinned_directory.is_none());
+    assert_ne!(root_id, other_id);
+    assert_eq!(initial.workspaces[0].tabs.len(), 2);
+    for tab in &initial.workspaces[0].tabs {
+        assert_eq!(tab.worktree.as_ref(), Some(&original.0));
+        assert_eq!(tab.worktree_repository.as_ref(), Some(&original.0));
+        assert_eq!(tab.panes[0].starting_directory, original.0);
+    }
+    for (tab_id, marker) in [
+        (root_id, "ROOT-IN-DESTINATION"),
+        (other_id, "OTHER-IN-DESTINATION"),
+    ] {
+        let tab = initial.workspaces[0]
+            .tabs
+            .iter()
+            .find(|tab| tab.id == tab_id)
+            .unwrap();
+        let Reply::Attached { lease } = host.request(
+            [1; 32],
+            [1; 32],
+            Request::SelectPane {
+                pane: tab.root_pane,
+                explicit: true,
+                size: size(),
+                style: None,
+            },
+        ) else {
+            panic!("Pane did not start")
+        };
+        command(
+            &mut host,
+            1,
+            lease,
+            &format!(
+                "stty -echo; cd '{}'; printf '\\033]7;file://localhost%s\\007\\033]133;A;spaceterm=%s\\007' \"$PWD\" \"$SPACETERM_PROMPT_OWNER\"; printf '\\033[2J\\033[H{marker}\\n'",
+                destination.0.display()
+            ),
+        );
+        await_text(&mut host, 1, lease, marker);
+        let moved = git_facts(&mut host, &destination.0, |facts| {
+            facts.repository.as_ref().is_some_and(|repository| {
+                repository.root == destination.0
+                    && repository.head == RepositoryHead::Branch("destination".into())
+            }) && facts.worktrees.is_some()
+        });
+        let current = &moved.workspaces[0];
+        assert_eq!(current.root_tab, root_id);
+        assert_eq!(
+            super::repositories::workspace_directory(current),
+            Some(destination.0.as_path())
+        );
+        for tab in &current.tabs {
+            let assigned = if tab.id == root_id {
+                &destination.0
+            } else {
+                &original.0
+            };
+            assert_eq!(tab.worktree.as_ref(), Some(assigned));
+            assert_eq!(tab.worktree_repository.as_ref(), Some(assigned));
+            if tab.id == tab_id {
+                assert_eq!(
+                    tab.panes[0].confirmed_directory.as_ref(),
+                    Some(&destination.0)
+                );
+                assert_eq!(tab.panes[0].presented_directory(), destination.0.as_path());
+                assert_eq!(tab.panes[0].repository_directory(), destination.0.as_path());
+            }
+        }
+    }
+    let retained = git_facts(&mut host, &original.0, |facts| facts.worktrees.is_some());
+    assert!(retained.workspaces[0].tabs.iter().all(|tab| {
+        tab.panes[0].repository_directory() == destination.0
+            && tab.panes[0].presented_directory() == destination.0
+    }));
+    let target = CloseTarget::Tab {
+        workspace,
+        tab: other_id,
+    };
+    let confirmation = retained.close_confirmation(target).unwrap();
+    assert!(matches!(
+        host.request(
+            [1; 32],
+            [1; 32],
+            Request::Mutate {
+                sequence: 2,
+                mutation: Mutation::Close {
+                    target,
+                    confirmation,
+                },
+            }
+        ),
+        Reply::Outcome(result) if matches!(result.outcome, Outcome::Accepted { .. })
+    ));
+    let closed = shared_inventory(&mut host);
+    assert_eq!(closed.workspaces[0].tabs.len(), 1);
+    assert_eq!(closed.workspaces[0].tabs[0].id, root_id);
+    assert_eq!(
+        closed.workspaces[0].tabs[0].worktree.as_ref(),
+        Some(&destination.0)
+    );
+    let facts = &closed.repositories.as_ref().unwrap().directories;
+    assert!(facts.iter().any(|facts| facts.directory == destination.0));
+    assert!(facts.iter().all(|facts| facts.directory != original.0));
+    assert!(original.0.is_dir());
+    host.shutdown().unwrap();
+}
+
+#[test]
 fn an_unpinned_root_tab_follows_entering_and_leaving_git_without_moving_other_tabs() {
     use spaceterm_server::hierarchy::Mutation;
     let git = GitFixture::new();

@@ -188,6 +188,9 @@ pub(super) struct WorkspaceRowViewModel {
 /// Names a shared Workspace's origin wherever the sidebar and the Tab strip describe it.
 pub(super) const SERVER_WORKSPACE_BADGE: &str = "Server";
 
+/// Introduces the directory of a Worktree's last-used Pane once that Pane has left the Worktree.
+pub(super) const OUTSIDE_PANE_LABEL: &str = "Pane outside this Worktree";
+
 /// What a shared server Workspace's row presents and offers.
 ///
 /// A shared edit goes to the server, so Rename, the pin commands, and Kill Workspace wait while
@@ -254,10 +257,14 @@ pub(super) struct WorktreeRowViewModel {
     pub(super) detached: bool,
     /// The Worktree's root.
     pub(super) path: SharedString,
-    /// The directory line 2 shows: the last-used Pane's, else the root, compacted against home.
+    /// The directory line 2 shows: the last-used Pane's while it is inside the Worktree, else the
+    /// root, compacted against home.
     pub(super) directory: SharedString,
     /// The full directory line 2 shows.
     pub(super) directory_tooltip: SharedString,
+    /// The full directory of the Pane last used in the Worktree, once that Pane has left it.
+    /// Line 2 then shows the Worktree's root and Repository Status rather than the Pane's.
+    pub(super) outside_pane_directory: Option<SharedString>,
     /// The branch or Pull Request that ends line 2.
     pub(super) repository: Option<crate::repository_status::presentation::SidebarBadge>,
     /// The repository's Main Worktree, which is never removed.
