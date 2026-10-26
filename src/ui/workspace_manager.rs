@@ -1149,7 +1149,7 @@ impl WorkspaceManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(key) = self.server_key(&super::ServerTarget::Direct(route), cx) else {
+        let Some(key) = self.server_key(&super::ServerTarget::Direct(route)) else {
             Self::show_shared_refusal(
                 "open a remote directory",
                 super::shared_workspaces::SharedRefusalReason::Offline,
@@ -3010,14 +3010,6 @@ impl WorkspaceManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // A second route to a server another binding presents adds none of its Workspaces. Its
-        // own reading task calls this, so the binding goes after it returns.
-        if self.duplicates_presented_server(key) {
-            cx.defer_in(window, move |manager, window, cx| {
-                manager.withdraw_server_workspaces(key, window, cx);
-            });
-            return;
-        }
         let ready = self
             .shared
             .get_mut(key)

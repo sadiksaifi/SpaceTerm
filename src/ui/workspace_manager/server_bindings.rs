@@ -169,16 +169,6 @@ impl ServerBindings {
             .find(|workspaces| workspaces.is_shared(workspace_id))
     }
 
-    /// The first binding that presents the server `server`. Two saved routes may reach one
-    /// server; the account-local binding comes first, then each route in the order it was
-    /// presented.
-    pub(crate) fn presenting(&self, server: spaceterm_server::hierarchy::Id) -> Option<ServerKey> {
-        self.bindings
-            .iter()
-            .find(|binding| binding.workspaces.server_identity() == Some(server))
-            .map(|binding| binding.key)
-    }
-
     pub(crate) fn keys(&self) -> Vec<ServerKey> {
         self.bindings.iter().map(|binding| binding.key).collect()
     }

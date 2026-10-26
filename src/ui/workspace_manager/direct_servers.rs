@@ -12,7 +12,7 @@ use gpui::{App, Context, SharedString, Window};
 use super::{ServerKey, ServerOrigin, WorkspaceManager};
 use crate::direct_connections::DirectRouteId;
 use crate::ui::ServerTarget;
-use crate::ui::shared_workspaces::{DirectServer, ServerIdentity, SharedPaneSessions};
+use crate::ui::shared_workspaces::{DirectServer, SharedPaneSessions};
 
 impl WorkspaceManager {
     /// Follows the desktop's direct registry for this window's life. A build without one follows
@@ -84,11 +84,7 @@ impl WorkspaceManager {
             }
         }
         for (direct, server) in presented {
-            // Another route already presents this server's Workspaces.
-            let duplicate = server
-                .server()
-                .is_some_and(|server| self.shared.presenting(server).is_some());
-            if !duplicate && !self.direct_route_presented(&direct.route) {
+            if !self.direct_route_presented(&direct.route) {
                 self.present_direct_server(direct, server, window, cx);
             }
         }
@@ -142,17 +138,6 @@ impl WorkspaceManager {
         .detach();
     }
 
-    /// Whether an earlier binding presents the server the binding at `key` reaches, as when two
-    /// saved routes reach one server. Only the earlier one presents that server's Workspaces, so
-    /// each appears once. The saved routes stay as they are.
-    pub(super) fn duplicates_presented_server(&self, key: ServerKey) -> bool {
-        self.shared
-            .get(key)
-            .and_then(|shared| shared.server_identity())
-            .and_then(|server| self.shared.presenting(server))
-            .is_some_and(|first| first != key)
-    }
-
     /// The direct route `route`'s presented binding, if any.
     pub(super) fn direct_route_presented(&self, route: &DirectRouteId) -> bool {
         self.shared.keys().into_iter().any(|key| {
@@ -176,7 +161,7 @@ impl WorkspaceManager {
         use crate::ui::shared_workspaces::{SharedRefusalReason, SharedSubmission};
 
         let Some(shared) = self
-            .server_key(target, cx)
+            .server_key(target)
             .and_then(|key| self.shared.get_mut(key))
         else {
             WorkspaceManager::show_shared_refusal(
@@ -193,8 +178,8 @@ impl WorkspaceManager {
         cx.notify();
     }
 
-    /// Every saved paired server the creation menus offer, by name. Only a route whose server
-    /// this window presents, through that route or another, can take a new Workspace now.
+    /// Every saved paired server the creation menus offer, by name. Only one this window
+    /// presents can take a new Workspace now.
     pub(super) fn remote_creation_servers(
         &self,
         cx: &App,
@@ -225,9 +210,7 @@ impl WorkspaceManager {
                 name: route.label.clone().into(),
                 address: shares_name(&route.label)
                     .then(|| endpoint_address(&route.endpoint).to_owned().into()),
-                available: self
-                    .server_key(&ServerTarget::Direct(route.id), cx)
-                    .is_some(),
+                available: self.direct_route_presented(&route.id),
             })
             .collect();
         servers.sort_by(|a, b| {
@@ -238,30 +221,18 @@ impl WorkspaceManager {
         servers
     }
 
-    /// The binding presenting `target`'s server, if this window presents it. A connected saved
-    /// route to a server another route presents reaches that presentation, so creating and
-    /// opening directories through either route acts on the one server.
-    pub(super) fn server_key(&self, target: &ServerTarget, cx: &App) -> Option<ServerKey> {
-        let bound =
-            self.shared
-                .keys()
-                .into_iter()
-                .find(|key| match (self.shared.origin(*key), target) {
-                    (Some(ServerOrigin::Local), ServerTarget::Local) => true,
-                    (Some(ServerOrigin::Direct(bound)), ServerTarget::Direct(route)) => {
-                        bound.route == *route
-                    }
-                    _ => false,
-                });
-        bound.or_else(|| {
-            let ServerTarget::Direct(route) = target else {
-                return None;
-            };
-            let server = crate::ui::direct_servers::installed(cx)?
-                .server(route)?
-                .server()?;
-            self.shared.presenting(server)
-        })
+    /// The binding presenting `target`'s server, if this window presents it.
+    pub(super) fn server_key(&self, target: &ServerTarget) -> Option<ServerKey> {
+        self.shared
+            .keys()
+            .into_iter()
+            .find(|key| match (self.shared.origin(*key), target) {
+                (Some(ServerOrigin::Local), ServerTarget::Local) => true,
+                (Some(ServerOrigin::Direct(bound)), ServerTarget::Direct(route)) => {
+                    bound.route == *route
+                }
+                _ => false,
+            })
     }
 }
 

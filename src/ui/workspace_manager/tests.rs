@@ -8682,41 +8682,8 @@ impl MultiServerHarness {
         ServerKey,
         Rc<crate::ui::shared_workspaces::testing::ScriptedPanes>,
     ) {
-        // Each route reaches its own server, which keeps its identity across reconnects.
-        self.present_direct_edits_reaching(name, route, route, edits, cx)
-    }
-
-    /// Presents the saved route `route` named `name` to the server `server`, publishing
-    /// `workspaces`, and attaches each one. Two saved routes may reach one server.
-    fn present_direct_reaching(
-        &self,
-        name: &str,
-        route: crate::direct_connections::DirectRouteId,
-        server: spaceterm_server::hierarchy::Id,
-        workspaces: &[(&str, u8)],
-        cx: &mut VisualTestContext,
-    ) -> ServerKey {
-        let edits = Rc::new(crate::ui::shared_workspaces::testing::ScriptedEdits::new(
-            Some(server_inventory(self.next_revision(), workspaces)),
-        ));
-        let (key, _) = self.present_direct_edits_reaching(name, route, server, &edits, cx);
-        self.attach(key, workspaces, cx);
-        key
-    }
-
-    /// Presents the paired server `name` at `route` over `edits`, reaching the server `server`.
-    fn present_direct_edits_reaching(
-        &self,
-        name: &str,
-        route: crate::direct_connections::DirectRouteId,
-        server: spaceterm_server::hierarchy::Id,
-        edits: &Rc<crate::ui::shared_workspaces::testing::ScriptedEdits>,
-        cx: &mut VisualTestContext,
-    ) -> (
-        ServerKey,
-        Rc<crate::ui::shared_workspaces::testing::ScriptedPanes>,
-    ) {
-        self.present_direct_edits_identified(name, route, Rc::new(FixedServer(server)), edits, cx)
+        // Each route has its own owner, which keeps its identity across reconnects.
+        self.present_direct_edits_identified(name, route, Rc::new(FixedServer(route)), edits, cx)
     }
 
     /// Presents the saved route `route` named `name` over the connection `identity` names,
@@ -9039,33 +9006,6 @@ fn a_reconnected_server_should_return_its_workspaces_to_their_places(cx: &mut Te
 
     assert_eq!(absent, ["Default", "Here", "Also Here"]);
     assert_eq!(harness.names(cx), ["Default", "Here", "Far", "Also Here"]);
-}
-
-/// Two saved routes may reach one server, such as an earlier pairing and a newer one to the same
-/// computer. The window presents that server's Workspaces once, so the person's arrangement of
-/// them is kept and returns when the server reconnects.
-#[gpui::test]
-fn two_routes_to_one_server_should_present_its_workspaces_once(cx: &mut TestAppContext) {
-    let (harness, cx) = MultiServerHarness::new(cx);
-    let server = [0xB0; 32];
-    let earlier = named_route("penguin");
-    let workspaces = [("Far", 1), ("Farther", 2)];
-    let first = harness.present_direct_reaching("penguin", earlier, server, &workspaces, cx);
-    harness.present_direct_reaching("penguin", named_route("penguin 2"), server, &workspaces, cx);
-    let presented = harness.names(cx);
-    harness.move_workspace("Farther", 0, cx);
-    cx.update(|window, cx| {
-        harness.manager.update(cx, |manager, cx| {
-            manager.withdraw_server_workspaces(first, window, cx);
-        });
-    });
-    cx.run_until_parked();
-
-    harness.present_direct_reaching("penguin", earlier, server, &workspaces, cx);
-
-    assert_eq!(presented, ["Default", "Far", "Farther"]);
-    // The window's own Workspace isn't a server's, so it keeps its place.
-    assert_eq!(harness.names(cx), ["Default", "Farther", "Far"]);
 }
 
 /// Two saved routes may reach one server, each through its own pairing with its own client
@@ -12468,41 +12408,6 @@ fn saved_servers(
     let (_, edits) = harness.present_direct("penguin", routes[0], &[], cx);
     redraw(cx);
     edits
-}
-
-/// A connected saved route to a server another route already presents stays available in the
-/// creation menu, and a Workspace created through it goes to that one server.
-#[gpui::test]
-fn a_second_route_to_a_presented_server_should_create_there(cx: &mut TestAppContext) {
-    use spaceterm_server::hierarchy::Mutation;
-
-    // The registry connects each route on its own thread.
-    cx.executor().allow_parking();
-    let (harness, cx) = MultiServerHarness::new(cx);
-    let server = [0x5E; 32];
-    let (direct, routes) = crate::direct_connections::tests::connected_routes_to_one_server(
-        &["penguin", "penguin new"],
-        server,
-    );
-    cx.update(|_, cx| crate::ui::direct_servers::install(direct, cx));
-    let edits = Rc::new(crate::ui::shared_workspaces::testing::ScriptedEdits::new(
-        Some(server_inventory(harness.next_revision(), &[])),
-    ));
-    harness.present_direct_edits_reaching("penguin", routes[0], server, &edits, cx);
-    redraw(cx);
-
-    click("new-workspace-button", cx);
-    click("new-workspace-menu-create-remote", cx);
-    click("new-workspace-menu-create-remote-1", cx);
-
-    assert_eq!(
-        edits.submitted(),
-        vec![Mutation::CreateWorkspace {
-            name: String::new(),
-            directory: None,
-        }]
-    );
-    assert_eq!(harness.local.submitted(), Vec::new());
 }
 
 /// The sidebar's New Workspace menu offers remote creation only on saved servers, one row each,
