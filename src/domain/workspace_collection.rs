@@ -355,12 +355,6 @@ impl<T> WorkspaceCollection<T> {
         Ok(true)
     }
 
-    /// Orders the Workspaces by the group `group` assigns each one, keeping each group's own
-    /// order, so a Workspace added last ends its group. Only presentation order changes.
-    pub(crate) fn arrange_by<K: Ord>(&mut self, group: impl FnMut(&WorkspaceEntry<T>) -> K) {
-        self.workspaces.sort_by_cached_key(group);
-    }
-
     /// A supplied name is explicit even when it matches an automatic name.
     pub(crate) fn rename_workspace(
         &mut self,

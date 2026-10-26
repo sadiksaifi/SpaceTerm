@@ -203,6 +203,31 @@ impl ServerConnection {
             self.client_id()?,
         )
     }
+    /// Opens this desktop's continuous Workspace order without requiring a running server.
+    /// Call on the account-local handle; remote routes do not own desktop-wide state.
+    pub fn workspace_order_store(
+        &self,
+    ) -> Result<crate::workspace_order::WorkspaceOrderStore, ServerError> {
+        if !self.is_account_local() {
+            return Err(ServerError::AuthenticationRefused);
+        }
+        crate::workspace_order::WorkspaceOrderStore::open(
+            self.client_directory()?,
+            self.client_id()?,
+        )
+    }
+
+    /// Names a Workspace on this admitted server without storage or network access.
+    pub fn workspace_reference(
+        &self,
+        workspace: crate::hierarchy::Id,
+    ) -> Result<crate::workspace_order::WorkspaceReference, ServerError> {
+        Ok(crate::workspace_order::WorkspaceReference {
+            server: self.client_scope()?.server,
+            workspace,
+        })
+    }
+
     pub fn for_identity(directory_name: &str) -> Result<Self, ServerError> {
         Self::with_paths(Paths::for_identity(directory_name)?)
     }
@@ -656,6 +681,68 @@ mod tests {
             .with_direct([3; 32], paired, Arc::new(NoConnect))
             .unwrap()
     }
+    #[test]
+    fn desktop_workspace_order_is_available_offline_and_isolated_from_other_clients_and_routes() {
+        use crate::workspace_order::{WorkspaceOrder, WorkspaceReference};
+        let root = std::env::temp_dir().canonicalize().unwrap().join(format!(
+            "st-desktop-order-{:x}",
+            u128::from_be_bytes(protocol::random().unwrap()[..16].try_into().unwrap())
+        ));
+        let local = |name| {
+            let mut connection = ServerConnection::for_development_client(name, 1).unwrap();
+            connection.paths = Paths {
+                identity: "spaceterm-development".into(),
+                data: root.join("data"),
+                runtime: root.join("runtime"),
+            };
+            connection
+        };
+        let a = WorkspaceReference {
+            server: [1; 32],
+            workspace: [3; 32],
+        };
+        let b = WorkspaceReference {
+            server: [2; 32],
+            workspace: [3; 32],
+        };
+        let mut order = WorkspaceOrder::default();
+        order.record(&[b, a]).unwrap();
+        {
+            let connection = local("first");
+            assert_eq!(
+                connection.client_scope().err(),
+                Some(ServerError::AuthenticationRefused)
+            );
+            connection
+                .workspace_order_store()
+                .unwrap()
+                .save(order)
+                .unwrap();
+        }
+        assert_eq!(
+            local("first")
+                .workspace_order_store()
+                .unwrap()
+                .order()
+                .restore(&[a, b]),
+            [b, a]
+        );
+        assert_eq!(
+            local("second").workspace_order_store().unwrap().order(),
+            &WorkspaceOrder::default()
+        );
+        let remote = direct_fixture(&root, paired_identity());
+        assert_eq!(
+            remote.workspace_reference([3; 32]).unwrap().server,
+            paired_identity().pin.server
+        );
+        assert_eq!(
+            remote.workspace_order_store().err(),
+            Some(ServerError::AuthenticationRefused)
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn paired_relaunch_keeps_originals_attachments_and_views_and_refuses_rebinding() {
         use crate::{
