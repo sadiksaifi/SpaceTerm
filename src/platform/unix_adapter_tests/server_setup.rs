@@ -1550,6 +1550,226 @@ fn native_server_setup_acceptance() {
 }
 
 #[test]
+#[ignore = "requires installed Preflight and reachable WSS; overlaps read-only admission on one saved pairing, then revokes only that pairing"]
+fn native_server_setup_refresh_overlaps_first_shared_pane_without_losing_admission() {
+    use spaceterm_server::{
+        ServerError,
+        pane::{Reply, Request},
+    };
+    use std::sync::{Barrier, mpsc};
+
+    fn observed<T>(
+        cycle: usize,
+        stage: &'static str,
+        started: Instant,
+        result: Result<T, ServerError>,
+    ) -> Result<T, ServerError> {
+        eprintln!(
+            "native.cycle={cycle} stage={stage} elapsed_ms={} error={:?}",
+            started.elapsed().as_millis(),
+            result.as_ref().err()
+        );
+        result
+    }
+
+    assert_eq!(expected_state(), "ready");
+    let fixture = NativeFixture::new("overlap", configured_catalog(), false);
+    let permissions = accepted_permissions();
+    assert!(
+        !permissions.0 && !permissions.1,
+        "the overlap fixture requires a ready server without installation or startup authority"
+    );
+    let approvals = NativeApprovals::new(&fixture.adapter, (permissions.0, permissions.1, true));
+    let request = native_request(approvals.clone());
+    let requested_address = request.address.clone();
+    let backend = fixture.backend();
+    let (progress, _) = fixture.progress();
+    let route = backend
+        .setup(request, &CancellationToken::default(), &progress)
+        .expect("setup must finish with admitted saved WSS");
+    approvals.assert_one_authentication();
+    assert_eq!(
+        fixture.direct.status(&route),
+        Some(DirectRouteStatus::Connected)
+    );
+    assert_eq!(fixture.direct.routes().len(), 1);
+    assert!(fixture.direct.pending_unpairs().is_empty());
+    let saved = fixture.direct.route(&route).unwrap();
+    if let Some(address) = requested_address {
+        assert!(
+            saved.endpoint == address.url(),
+            "setup changed the requested endpoint"
+        );
+    }
+    let server = fixture.direct.server(&route).unwrap();
+    assert!(!server.is_account_local());
+    let spawns = fixture.adapter.seal();
+    let counts = backend.process_counts();
+    assert_eq!(counts.active(), 0);
+    assert_eq!(counts.spawned, counts.reaped);
+    assert_eq!(counts.spawned, spawns);
+    assert!(spawns > 0);
+    assert_eq!(fixture.credentials.inserts.load(Ordering::SeqCst), 1);
+
+    let started = Instant::now();
+    let deadline = started + Duration::from_secs(45);
+    let captured = server.clone();
+    let (finished, completion) = mpsc::sync_channel(1);
+    let worker = std::thread::spawn(move || {
+        let exercise = (|| -> Result<(), ServerError> {
+            for cycle in 0..16 {
+                // Six seconds of pacing crosses natural route health checks and
+                // timestamp seconds without manufacturing an inner transport seam.
+                let due = started + Duration::from_millis(cycle as u64 * 400);
+                if let Some(wait) = due.checked_duration_since(Instant::now()) {
+                    std::thread::sleep(wait);
+                }
+                observed(
+                    cycle,
+                    "cycle-budget",
+                    started,
+                    if Instant::now() < deadline {
+                        Ok(())
+                    } else {
+                        Err(ServerError::Protocol)
+                    },
+                )?;
+                let barrier = Barrier::new(2);
+                let (refresh_done, refresh_dropped) = mpsc::sync_channel(1);
+                let (refreshed, connected) = std::thread::scope(|scope| {
+                    let barrier = &barrier;
+                    let captured = &captured;
+                    let refresh = scope.spawn(move || {
+                        barrier.wait();
+                        let result = observed(cycle, "refresh", started, captured.refresh())
+                            .and_then(|status| {
+                                observed(
+                                    cycle,
+                                    "refresh-protocol",
+                                    started,
+                                    if status.protocol_major == 1 {
+                                        Ok(())
+                                    } else {
+                                        Err(ServerError::Protocol)
+                                    },
+                                )
+                            });
+                        // refresh's short-lived Pane transport has been dropped.
+                        let _ = refresh_done.send(());
+                        result
+                    });
+                    let shared = scope.spawn(move || {
+                        barrier.wait();
+                        let mut connection = observed(
+                            cycle,
+                            "first-shared-connect",
+                            started,
+                            captured.connect_shared_pane(),
+                        )?;
+                        observed(
+                            cycle,
+                            "refresh-drop",
+                            started,
+                            refresh_dropped
+                                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                                .map_err(|_| ServerError::Protocol),
+                        )?;
+                        let reply = observed(
+                            cycle,
+                            "sibling-capabilities",
+                            started,
+                            connection.exchange(&Request::Capabilities),
+                        )?;
+                        observed(
+                            cycle,
+                            "sibling-capability-reply",
+                            started,
+                            match reply {
+                                Reply::Capabilities {
+                                    development_pane: true,
+                                    workspace_policy: true,
+                                    ..
+                                } => Ok(()),
+                                _ => Err(ServerError::MissingRequiredCapability),
+                            },
+                        )
+                        // Drop the only shared Pane before the next cycle.
+                    });
+                    (
+                        refresh.join().unwrap_or(Err(ServerError::StartupFailed)),
+                        shared.join().unwrap_or(Err(ServerError::StartupFailed)),
+                    )
+                });
+                observed(cycle, "refresh-worker", started, refreshed)?;
+                observed(cycle, "shared-worker", started, connected)?;
+            }
+            Ok(())
+        })();
+        drop(captured);
+        let _ = finished.send(exercise);
+    });
+    let result = completion.recv_timeout(deadline.saturating_duration_since(Instant::now()));
+    let Ok(result) = result else {
+        // The worker owns only read-only handles. Preserve the normal fixture's
+        // saved pairing on failure; never retry or revoke under an in-flight call.
+        drop(worker);
+        observed::<()>(16, "wall-budget", started, Err(ServerError::Protocol))
+            .unwrap_or_else(|error| panic!("{error:?}"));
+        unreachable!();
+    };
+    observed(
+        16,
+        "exercise-worker",
+        started,
+        worker.join().map_err(|_| ServerError::StartupFailed),
+    )
+    .unwrap_or_else(|error| panic!("{error:?}"));
+    observed(16, "exercise", started, result).unwrap_or_else(|error| panic!("{error:?}"));
+    assert!(
+        Instant::now() < deadline,
+        "native overlap exceeded its wall budget"
+    );
+    let retained = fixture.direct.route(&route).unwrap();
+    assert!(
+        retained.paired == saved.paired,
+        "overlap changed the saved pairing"
+    );
+    assert!(
+        retained.endpoint == saved.endpoint,
+        "overlap changed the saved endpoint"
+    );
+    assert_eq!(fixture.adapter.spawns.load(Ordering::SeqCst), spawns);
+    assert_eq!(backend.process_counts(), counts);
+    observed(
+        16,
+        "self-unpair",
+        started,
+        fixture
+            .direct
+            .unpair_self(&route)
+            .map_err(ServerError::Direct),
+    )
+    .unwrap_or_else(|error| panic!("{error:?}"));
+    while !fixture.direct.pending_unpairs().is_empty()
+        || !fixture.credentials.keys.lock().unwrap().is_empty()
+    {
+        assert!(
+            Instant::now() < deadline,
+            "native overlap credential cleanup exceeded its wall budget"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(fixture.direct.routes().is_empty());
+    assert!(
+        server.refresh().is_err(),
+        "self-unpair left an admitted handle"
+    );
+    fixture.adapter.assert_closed();
+    assert_eq!(fixture.adapter.spawns.load(Ordering::SeqCst), spawns);
+    assert_eq!(backend.process_counts(), counts);
+}
+
+#[test]
 #[ignore = "requires a running disposable server and reachable WSS; fails only the fixture's save directory after enrollment, then resolves its exact cleanup over WSS"]
 fn native_server_setup_save_failure_keeps_cleanup_without_publishing_a_connection() {
     assert_eq!(expected_state(), "ready");

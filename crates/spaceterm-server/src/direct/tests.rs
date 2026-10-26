@@ -2270,3 +2270,212 @@ fn end_all_sessions_requires_account_local_admission_but_workspace_mutations_do_
     drop(connection);
     let _ = server.join().unwrap();
 }
+
+#[cfg(feature = "client")]
+#[test]
+fn same_pairing_refresh_drop_preserves_concurrent_first_shared_pane_admission() {
+    use crate::{
+        ServerConnection,
+        pane::{PaneService, Reply, Request},
+    };
+    use std::sync::{Barrier, mpsc};
+
+    struct ReadOnlyHost;
+    impl PaneService for ReadOnlyHost {
+        fn request(&mut self, _client: [u8; 32], _connection: [u8; 32], request: Request) -> Reply {
+            match request {
+                Request::Capabilities => Reply::Capabilities {
+                    development_pane: true,
+                    pane_takeover: false,
+                    interactive_input: false,
+                    key_input_batches: false,
+                    native_effects: false,
+                    reading: false,
+                    graphics: false,
+                    accessibility: false,
+                    directory_recovery: false,
+                    directory_creation: false,
+                    directory_matching: false,
+                    worktree_writes: false,
+                    end_all_sessions: false,
+                    workspace_policy: true,
+                    presentation_changes: false,
+                },
+                _ => Reply::Refused(crate::pane::Refusal::Unsupported),
+            }
+        }
+        fn disconnected(&mut self, _connection: [u8; 32]) {}
+        fn shutdown(&mut self) -> Result<(), ServerError> {
+            Ok(())
+        }
+    }
+    fn observed<T>(
+        cycle: usize,
+        stage: &'static str,
+        started: Instant,
+        result: Result<T, ServerError>,
+    ) -> Result<T, ServerError> {
+        if let Err(error) = &result {
+            eprintln!(
+                "DIAGNOSTIC direct-admission cycle={cycle} stage={stage} elapsed_ms={} error={error:?}",
+                started.elapsed().as_millis()
+            );
+        }
+        result
+    }
+    struct Connector {
+        endpoint: String,
+        paired: PairedDevice,
+        credential: Arc<DeviceCredential>,
+        admitted: Barrier,
+        cycle: usize,
+    }
+    impl DirectConnector for Connector {
+        fn connect(&self) -> Result<DirectConnection, DirectError> {
+            let started = Instant::now();
+            let result = DirectConnection::connect(&self.endpoint, &self.paired, &self.credential);
+            if let Err(error) = result.as_ref() {
+                let error = ServerError::Direct(*error);
+                eprintln!(
+                    "DIAGNOSTIC direct-admission cycle={} stage=direct-connect elapsed_ms={} error={error:?}",
+                    self.cycle,
+                    started.elapsed().as_millis()
+                );
+            }
+            // Both independent WSS transports finish authentication before either
+            // starts protocol/capability admission. Errors also rendezvous so the
+            // sibling cannot be stranded merely because this connect was refused.
+            self.admitted.wait();
+            result
+        }
+    }
+
+    let fixture = Fixture::new();
+    fixture.enable();
+    let credential = DeviceCredential::generate().unwrap();
+    let paired = fixture.enroll(&credential);
+    let credential = Arc::new(credential);
+    let endpoint = fixture.endpoint();
+    let runtime: Arc<Mutex<Option<Box<dyn PaneService>>>> =
+        Arc::new(Mutex::new(Some(Box::new(ReadOnlyHost))));
+    let started = Instant::now();
+    // More than 64 cycles exercise registration pruning, with only two admitted
+    // transports at once. Pacing crosses timestamp seconds and the five-second
+    // route-health interval without holding a host lock or delaying host progress.
+    for cycle in 0..68 {
+        let due = started + Duration::from_millis(cycle as u64 * 100);
+        if let Some(wait) = due.checked_duration_since(Instant::now()) {
+            std::thread::sleep(wait);
+        }
+        observed(
+            cycle,
+            "overall-deadline",
+            started,
+            if started.elapsed() < Duration::from_secs(60) {
+                Ok(())
+            } else {
+                Err(ServerError::Protocol)
+            },
+        )
+        .unwrap();
+        let server = observed(
+            cycle,
+            "construct-handle",
+            started,
+            ServerConnection::direct(
+                &paired.pin.build,
+                [42; 32],
+                paired.clone(),
+                Arc::new(Connector {
+                    endpoint: endpoint.clone(),
+                    paired: paired.clone(),
+                    credential: Arc::clone(&credential),
+                    admitted: Barrier::new(2),
+                    cycle,
+                }),
+            ),
+        )
+        .unwrap();
+        let first_host = fixture.serve_next_with(Arc::clone(&runtime));
+        let second_host = fixture.serve_next_with(Arc::clone(&runtime));
+        let (refresh_done, refresh_dropped) = mpsc::sync_channel(1);
+        let refresh_server = server.clone();
+        let refresh = std::thread::spawn(move || {
+            let began = Instant::now();
+            // refresh negotiates and drops its short-lived Pane transport before returning.
+            let result = observed(
+                cycle,
+                "refresh",
+                began,
+                refresh_server.refresh().map(|_| ()),
+            );
+            let _ = refresh_done.send(());
+            result
+        });
+        let shared = std::thread::spawn(move || {
+            let began = Instant::now();
+            let mut connection = observed(
+                cycle,
+                "first-shared-connect",
+                began,
+                server.connect_shared_pane(),
+            )?;
+            observed(
+                cycle,
+                "refresh-drop-barrier",
+                began,
+                refresh_dropped
+                    .recv_timeout(Duration::from_secs(35))
+                    .map_err(|_| ServerError::Protocol),
+            )?;
+            let reply = observed(
+                cycle,
+                "sibling-capabilities",
+                began,
+                connection.exchange(&Request::Capabilities),
+            )?;
+            observed(
+                cycle,
+                "sibling-capability-reply",
+                began,
+                match reply {
+                    Reply::Capabilities {
+                        development_pane: true,
+                        workspace_policy: true,
+                        ..
+                    } => Ok(()),
+                    _ => Err(ServerError::Unsupported),
+                },
+            )
+        });
+        let refreshed = observed(
+            cycle,
+            "refresh-worker",
+            started,
+            refresh.join().unwrap_or(Err(ServerError::StartupFailed)),
+        );
+        let connected = observed(
+            cycle,
+            "shared-worker",
+            started,
+            shared.join().unwrap_or(Err(ServerError::StartupFailed)),
+        );
+        let mut released = true;
+        for (stage, worker) in [
+            ("first-host-release", first_host),
+            ("second-host-release", second_host),
+        ] {
+            // A dropped client ends the server's next frame read with Protocol/EOF.
+            let result = match worker.join() {
+                Ok(Ok(()) | Err(ServerError::Protocol)) => Ok(()),
+                Ok(Err(error)) => Err(error),
+                Err(_) => Err(ServerError::StartupFailed),
+            };
+            released &= observed(cycle, stage, started, result).is_ok();
+        }
+        assert!(
+            refreshed.is_ok() && connected.is_ok() && released,
+            "same-pair concurrent admission failed; see bounded stage diagnostic"
+        );
+    }
+}
