@@ -492,3 +492,35 @@ fn measure_production_wss_small_frames_and_shared_large_replies() {
     // Freeze latency bounds only after the unchanged baseline reproduces the cause.
     mixed_workload(16, 64, 16, true);
 }
+
+#[test]
+#[ignore = "requires an isolated pipeline on the native host and --release"]
+fn split_wss_round_trips_meet_isolated_release_latency_budget() {
+    const WARMUP: u8 = 16;
+    const SAMPLES: u8 = 128;
+    const BUDGET: Duration = Duration::from_millis(40);
+
+    let mut elapsed = split_frame_round_trips(WARMUP + SAMPLES);
+    let mut samples = elapsed.split_off(usize::from(WARMUP));
+    for (index, duration) in samples.iter().enumerate() {
+        eprintln!(
+            "DIAGNOSTIC wss-split-budget sample={index} round_trip_us={}",
+            duration.as_micros()
+        );
+    }
+    samples.sort_unstable();
+    let p95 = samples[(samples.len() * 95).div_ceil(100) - 1];
+    eprintln!(
+        "DIAGNOSTIC wss-split-budget samples={} p95_us={} budget_us={}",
+        samples.len(),
+        p95.as_micros(),
+        BUDGET.as_micros()
+    );
+    assert!(
+        p95 < BUDGET,
+        "isolated Release split-frame p95 must stay below the budget: samples={} p95_us={} budget_us={}",
+        samples.len(),
+        p95.as_micros(),
+        BUDGET.as_micros()
+    );
+}

@@ -140,6 +140,7 @@ pub(super) fn connect(endpoint: &str, pin: &ServerPin) -> Result<Ws, DirectError
         }
     }
     let tcp = connected.ok_or(DirectError::Transport)?;
+    tcp.set_nodelay(true).map_err(|_| DirectError::Transport)?;
     tcp.set_nonblocking(true)
         .map_err(|_| DirectError::Transport)?;
     let mismatch = Arc::new(AtomicBool::new(false));
@@ -191,6 +192,7 @@ pub(super) fn connect(endpoint: &str, pin: &ServerPin) -> Result<Ws, DirectError
     }
 }
 pub(super) fn accept(tcp: TcpStream, certificate: &[u8], key: &[u8]) -> Result<Ws, DirectError> {
+    tcp.set_nodelay(true).map_err(|_| DirectError::Transport)?;
     tcp.set_nonblocking(true)
         .map_err(|_| DirectError::Transport)?;
     let deadline = Instant::now() + HANDSHAKE_LIMIT;
