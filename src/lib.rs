@@ -60,5 +60,6 @@ pub fn run_desktop() {
         eprintln!("{error}");
         return;
     }
+    spaceterm_server::measurement::initialize();
     platform::main();
 }

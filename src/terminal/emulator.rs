@@ -220,6 +220,10 @@ pub type RowSnapshot = Arc<[CellSnapshot]>;
 pub struct PresentationGeneration(u64);
 
 impl PresentationGeneration {
+    pub(crate) const fn as_u64(self) -> u64 {
+        self.0
+    }
+
     pub(crate) fn next(self) -> Self {
         Self(self.0.saturating_add(1))
     }

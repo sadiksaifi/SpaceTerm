@@ -43,6 +43,11 @@ impl PtyInput {
             match writer.write(&chunk[self.offset..end]) {
                 Ok(0) => return Err(io::ErrorKind::WriteZero.into()),
                 Ok(written) => {
+                    spaceterm_server::measurement::record(
+                        spaceterm_server::measurement::Event::PtyInputWritten {
+                            bytes: written as u64,
+                        },
+                    );
                     self.offset += written;
                     budget -= written;
                     if self.offset == chunk.len() {

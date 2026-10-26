@@ -1906,6 +1906,13 @@ impl TerminalPane {
             return;
         }
         self.render_lifecycle.mark_presented(generation);
+        // This validates CPU scene construction. It is not a native display timestamp.
+        spaceterm_server::measurement::record(
+            spaceterm_server::measurement::Event::SceneSubmitted {
+                view: cx.entity_id().as_u64(),
+                generation: generation.as_u64(),
+            },
+        );
         self.record_successfully_presented_screen(screen);
         if let Some(recovery) = operation.recovery
             && generation >= recovery.generation
@@ -2434,6 +2441,12 @@ impl TerminalPane {
                 }
                 let _ = self.render_lifecycle.observe_snapshot(screen.generation);
                 self.terminal_session.accepted_screen_generation = Some(screen.generation);
+                spaceterm_server::measurement::record(
+                    spaceterm_server::measurement::Event::ScreenAccepted {
+                        view: cx.entity_id().as_u64(),
+                        generation: screen.generation.as_u64(),
+                    },
+                );
                 let caption_changed =
                     !self.server_backed() && self.accept_metadata(Arc::clone(&screen.metadata));
                 self.screen = screen;
@@ -2714,6 +2727,9 @@ impl TerminalPane {
     }
 
     fn on_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        spaceterm_server::measurement::record(spaceterm_server::measurement::Event::NativeKey {
+            view: cx.entity_id().as_u64(),
+        });
         if !window.is_offering_key_equivalent()
             && self.server_backed()
             && self.terminal_session_available()
@@ -4706,6 +4722,11 @@ impl EntityInputHandler for TerminalPane {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        spaceterm_server::measurement::record(
+            spaceterm_server::measurement::Event::NativeTextCommit {
+                view: cx.entity_id().as_u64(),
+            },
+        );
         let input_generation = self.input_method_generation.take();
         if input_generation.is_some_and(|generation| generation != self.current_input_generation())
         {

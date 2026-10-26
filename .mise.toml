@@ -423,6 +423,14 @@ run = "cargo fmt --package spaceterm-server --package spaceterm-server-host {% i
 description = "Test the server without native credential adapters"
 run = "cargo test --package spaceterm-server --no-default-features --locked"
 
+[tasks."server:measurement:test"]
+description = "Test bounded opt-in native latency capture without opening native resources"
+run = "cargo test --package spaceterm-server --lib --features client --locked -- measurement::"
+
+[tasks."server:measurement:check"]
+description = "Lint the native latency recorder and protocol hooks"
+run = "cargo clippy --package spaceterm-server --lib --features client --locked -- -D warnings"
+
 [tasks."server:check"]
 description = "Check the local server and desktop account admission"
 run = [

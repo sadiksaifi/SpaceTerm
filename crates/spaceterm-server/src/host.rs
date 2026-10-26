@@ -211,6 +211,7 @@ fn serve_runtime_ready(
     ready: impl FnOnce() -> Result<(), ServerError>,
 ) -> Result<(), ServerError> {
     crate::service::check_runtime(paths, supervised)?;
+    crate::measurement::initialize();
     let data = Directory::open(&paths.data, false)?;
     // Verify retained identity before changing any runtime state. Never generate a replacement.
     data.read()?;
@@ -418,6 +419,8 @@ pub(crate) fn serve_admitted(
             panes.admitted(client, name);
         }
     }
+    let measurement_connection = crate::measurement::scope();
+    let mut measurement_sequence = 0;
     let result = (|| {
         loop {
             if environment
@@ -429,9 +432,24 @@ pub(crate) fn serve_admitted(
             }
             let mut wire = protocol::Wire::terminal(stream)?;
             let request: crate::pane::Request = wire.read()?;
+            let operation = crate::measurement::Operation::of(&request);
+            if measurement_connection != 0 {
+                measurement_sequence += 1;
+            }
+            let measured = |event| crate::measurement::record(event);
+            measured(crate::measurement::Event::ServerRequestRead {
+                connection: measurement_connection,
+                sequence: measurement_sequence,
+                operation,
+            });
             let shutdown = matches!(request, crate::pane::Request::Shutdown);
             let (reply, stopped) = {
                 let mut panes = environment.panes.lock().unwrap_or_else(|e| e.into_inner());
+                measured(crate::measurement::Event::ServerAdmitted {
+                    connection: measurement_connection,
+                    sequence: measurement_sequence,
+                    operation,
+                });
                 if environment
                     .stopping
                     .load(std::sync::atomic::Ordering::Acquire)
@@ -516,7 +534,17 @@ pub(crate) fn serve_admitted(
                 }
                 (reply, stopped)
             };
+            measured(crate::measurement::Event::ServerCompleted {
+                connection: measurement_connection,
+                sequence: measurement_sequence,
+                operation,
+            });
             wire.write(&reply)?;
+            measured(crate::measurement::Event::ServerReplyWritten {
+                connection: measurement_connection,
+                sequence: measurement_sequence,
+                operation,
+            });
             if stopped {
                 break;
             }

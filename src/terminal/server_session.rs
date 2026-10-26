@@ -14,6 +14,9 @@ use super::{emulator::*, geometry::TerminalGeometry, key::*};
 use crate::server_connection::{ServerConnection, ServerError};
 pub(crate) use control::{ControlRoute, PaneControlRegistry, PaneControls};
 use effects::ClientEffects;
+use spaceterm_server::measurement::{
+    self, Event as MeasurementEvent, Operation as MeasurementOperation,
+};
 use spaceterm_server::pane::{self, Lease, PaneSize, Reply, Request};
 use std::sync::{
     Arc, Mutex,
@@ -559,6 +562,16 @@ struct SubmittedInput {
     focus_generation: u64,
     command: Input,
 }
+impl Input {
+    fn measurement_operation(&self) -> MeasurementOperation {
+        match self {
+            Self::Key(_) => MeasurementOperation::Key,
+            Self::Commit(..) => MeasurementOperation::TextCommit,
+            Self::Resize(_) => MeasurementOperation::Resize,
+            _ => MeasurementOperation::Other,
+        }
+    }
+}
 #[derive(Clone, Copy)]
 struct PendingPaste {
     id: super::paste::PasteConfirmationId,
@@ -788,9 +801,14 @@ fn submit_input(
         focus_generation,
         command: input,
     };
+    let operation = submitted.command.measurement_operation();
     let sent = sender.try_send(submitted);
     drop(interaction);
     let accepted = sent.is_ok();
+    measurement::record(MeasurementEvent::InputAdmission {
+        accepted,
+        operation,
+    });
     if accepted {
         state.wake.notify();
     }
@@ -897,6 +915,9 @@ impl ActiveInput {
             let Ok(submitted) = input.try_recv() else {
                 break;
             };
+            measurement::record(MeasurementEvent::InputDequeued {
+                operation: submitted.command.measurement_operation(),
+            });
             if state.epoch.load(Ordering::Acquire) != self.epoch {
                 return Err(ServerError::Protocol);
             }
@@ -1729,6 +1750,10 @@ fn present(
                             state.connected(epoch, mapping, paste_unconfirmed)?;
                             reader.screen(&state, mapping, screen.selection_present);
                             latest_screen = Some((Arc::clone(&screen), mapping));
+                            measurement::record(MeasurementEvent::ScreenDecoded {
+                                generation: generation.as_u64(),
+                                wire_generation: mapping.wire,
+                            });
                             let _ = events.force_send(TerminalSessionEvent::Screen(screen));
                             if let Some(model) = semantic.rebind(&state, generation) {
                                 let _ = semantics.force_send(model);

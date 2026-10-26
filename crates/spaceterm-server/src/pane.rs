@@ -573,6 +573,8 @@ pub struct ExchangeTiming {
 }
 #[cfg(feature = "client")]
 struct PaneTransport {
+    measurement_id: u64,
+    measurement_sequence: std::sync::atomic::AtomicU64,
     admission: transport::Admission,
     presentation_changes: bool,
     stream: std::sync::Mutex<Option<Box<dyn crate::transport::Transport>>>,
@@ -702,6 +704,8 @@ impl PaneConnection {
     pub(crate) fn new(stream: impl crate::transport::Transport + 'static, takeover: bool) -> Self {
         Self {
             transport: std::sync::Arc::new(PaneTransport {
+                measurement_id: crate::measurement::scope(),
+                measurement_sequence: std::sync::atomic::AtomicU64::new(0),
                 admission: transport::Admission::default(),
                 presentation_changes: false,
                 stream: std::sync::Mutex::new(Some(Box::new(stream))),
@@ -755,9 +759,29 @@ impl PaneConnection {
         self.transport.interactive_input
     }
     pub fn exchange(&mut self, request: &Request) -> Result<Reply, ServerError> {
+        use crate::measurement::{self, Event};
+        let operation = measurement::Operation::of(request);
+        let connection = self.transport.measurement_id;
+        measurement::record(Event::RpcQueued {
+            connection,
+            operation,
+        });
         let queued = std::time::Instant::now();
         let _turn = self.transport.admission.enter()?;
         let admitted = std::time::Instant::now();
+        let sequence = if connection == 0 {
+            0
+        } else {
+            self.transport
+                .measurement_sequence
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                + 1
+        };
+        measurement::record(Event::RpcAdmitted {
+            connection,
+            sequence,
+            operation,
+        });
         let mut stream = self
             .transport
             .stream
@@ -768,7 +792,17 @@ impl PaneConnection {
                 stream.as_deref_mut().ok_or(ServerError::NotRunning)?,
             )?;
             wire.write(request)?;
+            measurement::record(Event::RequestWritten {
+                connection,
+                sequence,
+                operation,
+            });
             let reply: Reply = wire.read()?;
+            measurement::record(Event::ReplyRead {
+                connection,
+                sequence,
+                operation,
+            });
             if let Reply::Inventory { inventory, .. } = &reply {
                 let panes: Vec<_> = inventory
                     .workspaces

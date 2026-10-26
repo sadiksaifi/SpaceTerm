@@ -369,6 +369,7 @@ fn pump(
     let mut receive_stalled = None;
     let mut buffer = vec![0; CHUNK];
     let mut drain_started = None;
+    let mut idle_sleeps = 0;
     while !stop.load(Ordering::Acquire) {
         let finishing = draining.load(Ordering::Acquire);
         if finishing && drain_started.get_or_insert_with(Instant::now).elapsed() > STALL_LIMIT {
@@ -378,6 +379,7 @@ fn pump(
         if outgoing {
             match ws.flush() {
                 Ok(()) => {
+                    crate::measurement::record(crate::measurement::Event::WebsocketFlushed);
                     outgoing = false;
                     send_stalled = None;
                     progress = true;
@@ -389,6 +391,9 @@ fn pump(
             match bridge.read(&mut buffer) {
                 Ok(0) => return Ok(()),
                 Ok(count) => {
+                    crate::measurement::record(crate::measurement::Event::BridgeRead {
+                        bytes: count as u64,
+                    });
                     match ws.write(Message::Binary(buffer[..count].to_vec().into())) {
                         Ok(()) => {}
                         Err(e) if retryable(&e) => {} // tungstenite retained this message.
@@ -413,6 +418,9 @@ fn pump(
             match bridge.write(&incoming[offset..]) {
                 Ok(0) => return Err(DirectError::Transport),
                 Ok(count) => {
+                    crate::measurement::record(crate::measurement::Event::BridgeWritten {
+                        bytes: count as u64,
+                    });
                     offset += count;
                     progress = true;
                 }
@@ -429,6 +437,9 @@ fn pump(
             receive_stalled = None;
             match ws.read() {
                 Ok(Message::Binary(bytes)) => {
+                    crate::measurement::record(crate::measurement::Event::WebsocketRead {
+                        bytes: bytes.len() as u64,
+                    });
                     incoming = bytes.to_vec();
                     receive_stalled = Some(Instant::now());
                     progress = true;
@@ -451,6 +462,10 @@ fn pump(
         }
         if !progress {
             std::thread::sleep(Duration::from_millis(2));
+            idle_sleeps += 1;
+        } else if idle_sleeps > 0 {
+            crate::measurement::record(crate::measurement::Event::BridgeWoke { idle_sleeps });
+            idle_sleeps = 0;
         }
     }
     Ok(())

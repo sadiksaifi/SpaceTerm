@@ -907,9 +907,13 @@ impl TerminalSessionHandle for TerminalRuntime {
     }
 
     fn key(&self, input: KeyInput) {
-        if let Some(commands) = &self.commands
-            && commands.send(Command::Key(input)).is_err()
-        {
+        let Some(commands) = &self.commands else {
+            return;
+        };
+        spaceterm_server::measurement::record(
+            spaceterm_server::measurement::Event::KeyQueueStarted,
+        );
+        if commands.send(Command::Key(input)).is_err() {
             eprintln!("terminal key input was dropped because the worker has stopped");
         }
     }
@@ -1175,6 +1179,9 @@ struct TerminalSessionNativePtyOutputSink {
 
 impl NativePtyOutputSink for TerminalSessionNativePtyOutputSink {
     fn publish(&self, output: NativePtyOutput) -> bool {
+        spaceterm_server::measurement::record(
+            spaceterm_server::measurement::Event::PtyOutputReceived,
+        );
         // ReaderReady orders bounded PTY output against the reliable control command lane.
         let epoch = self.clipboard_authority.output_epoch();
         self.events.send(output).is_ok() && self.commands.send(Command::ReaderReady(epoch)).is_ok()
@@ -2438,6 +2445,9 @@ impl TerminalWorker {
         }
 
         if received_output {
+            spaceterm_server::measurement::record(
+                spaceterm_server::measurement::Event::EmulatorOutputApplied,
+            );
             if self.server_reading.is_some() {
                 self.schedules.note_hidden_server_content_changed();
             }
@@ -2560,6 +2570,7 @@ impl TerminalWorker {
     }
 
     fn process_key(&mut self, input: KeyInput) -> bool {
+        spaceterm_server::measurement::record(spaceterm_server::measurement::Event::KeyProcessed);
         if !self.held_keys.route(&input) {
             return true;
         }
@@ -2737,6 +2748,11 @@ impl TerminalWorker {
             .update_graphics_animation(self.emulator.graphics_animation_deadline());
         match snapshot {
             Ok(Some(snapshot)) => {
+                spaceterm_server::measurement::record(
+                    spaceterm_server::measurement::Event::ScreenPublished {
+                        generation: snapshot.generation.as_u64(),
+                    },
+                );
                 let semantics_changed = semantic_content_changed
                     || !matches!(
                         snapshot.damage.content,

@@ -697,6 +697,11 @@ impl DevelopmentPaneHost {
                 {
                     pane.sent = Some(screen.generation);
                     let mut screen = encode_screen(screen);
+                    spaceterm_server::measurement::record(
+                        spaceterm_server::measurement::Event::ScreenEncoded {
+                            generation: pane.screen_generation,
+                        },
+                    );
                     screen.generation = pane.screen_generation;
                     screen.accessibility_revision = pane
                         .accessibility

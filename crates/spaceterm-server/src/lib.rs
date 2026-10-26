@@ -8,6 +8,7 @@ mod computer_name;
 pub mod direct;
 pub mod hierarchy;
 mod host;
+pub mod measurement;
 pub mod organization;
 pub mod pane;
 mod protocol;
