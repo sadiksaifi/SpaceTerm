@@ -163,29 +163,6 @@ impl ControlStates {
             .on_change(|_, _, _| {})
             .into_any_element()
         })];
-        // Three options show the divider between unselected neighbours and a disabled option.
-        selection.push(state_row(
-            "Segmented options",
-            appearance,
-            |column, state| {
-                SegmentedControl::new(
-                    ("workbench-segmented-options", column),
-                    "Option fixture",
-                    &0,
-                    vec![
-                        SegmentedOption::new(0, "One"),
-                        SegmentedOption::new(1, "Two"),
-                        SegmentedOption::new(2, "Three").disabled(true),
-                    ],
-                )
-                .expect("three options are within the bounded option set")
-                .full_width(true)
-                .disabled(column == DISABLED_COLUMN)
-                .preview_state(state)
-                .on_change(|_, _, _| {})
-                .into_any_element()
-            },
-        ));
         selection.extend(
             [
                 ("Unchecked", CheckboxState::Unchecked),
@@ -222,6 +199,44 @@ impl ControlStates {
                 "Selection",
                 header(STATES.map(|(label, _)| label), appearance),
                 selection,
+            )
+            .render(surface, window, cx),
+        );
+        // Three options need more width than a state column, so they get rows of their own. They
+        // show the divider between unselected neighbours and a disabled option.
+        let segmented_options = [("Enabled", false), ("Disabled", true)]
+            .into_iter()
+            .enumerate()
+            .map(|(index, (label, disabled))| {
+                wide_row(
+                    label,
+                    format!("workbench-segmented-options-cell-{index}"),
+                    appearance,
+                    SegmentedControl::new(
+                        ("workbench-segmented-options", index),
+                        "Option fixture",
+                        &0,
+                        vec![
+                            SegmentedOption::new(0, "One"),
+                            SegmentedOption::new(1, "Two"),
+                            SegmentedOption::new(2, "Three").disabled(true),
+                        ],
+                    )
+                    .expect("three options are within the bounded option set")
+                    .disabled(disabled)
+                    .debug_selector(format!("workbench-segmented-options-{index}"))
+                    .on_change(|_, _, _| {})
+                    .into_any_element(),
+                )
+            })
+            .collect();
+        groups.push(
+            StateMatrix::new(
+                "workbench-group-segmented-options",
+                "workbench-row-segmented-options",
+                "Segmented options",
+                header([], appearance),
+                segmented_options,
             )
             .render(surface, window, cx),
         );
@@ -376,6 +391,34 @@ fn cells(
                 .child(label),
         )
         .children(cells.map(|cell| column().child(cell)))
+}
+
+/// One fixture too wide for a state column, given the width of every column together.
+fn wide_row(
+    label: &'static str,
+    cell_selector: String,
+    appearance: &ChromeAppearance,
+    fixture: AnyElement,
+) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .gap(px(COLUMN_GAP))
+        .child(
+            div()
+                .w(px(LABEL_WIDTH))
+                .flex_none()
+                .text_color(gpui_color(appearance.colors.text_secondary))
+                .child(label),
+        )
+        .child(
+            div()
+                .debug_selector(move || cell_selector)
+                .flex()
+                .flex_1()
+                .min_w_0()
+                .child(fixture),
+        )
 }
 
 fn state_row(

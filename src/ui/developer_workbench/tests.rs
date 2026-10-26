@@ -887,6 +887,31 @@ fn state_matrices_and_their_text_fit_the_default_window_at_every_density(cx: &mu
             (last.left(), last.size.width),
             "{density:?}: every matrix must share one set of columns"
         );
+        // The three-option fixtures are wider than a state column, so each has a row's width.
+        let options_card = cx
+            .debug_bounds("workbench-group-segmented-options-card")
+            .unwrap();
+        for (cell, fixture) in [
+            (
+                "workbench-segmented-options-cell-0",
+                "workbench-segmented-options-0",
+            ),
+            (
+                "workbench-segmented-options-cell-1",
+                "workbench-segmented-options-1",
+            ),
+        ] {
+            let cell = cx.debug_bounds(cell).unwrap();
+            let fixture = cx.debug_bounds(fixture).unwrap();
+            assert!(
+                cell.left() <= fixture.left() && fixture.right() <= cell.right(),
+                "{density:?}: fixture {fixture:?} must stay inside its cell {cell:?}"
+            );
+            assert!(
+                cell.right() <= options_card.right(),
+                "{density:?}: cell {cell:?} must stay inside the card {options_card:?}"
+            );
+        }
         let field = cx.debug_bounds("workbench-field-4").unwrap();
         for text in [controls::FIELD_SAMPLE, controls::FIELD_PLACEHOLDER] {
             let width = cx.update(|window, cx| {
