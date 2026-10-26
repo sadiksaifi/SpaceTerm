@@ -369,13 +369,6 @@ pub(crate) fn offline_with_lock(label: &str) -> (DirectConnections, DirectRouteI
     (connections, id, lock)
 }
 
-/// Active saved routes named `labels`, in order, each keeping its own credential.
-/// Native workers retry the unavailable network; GPUI callers allow native I/O.
-pub(crate) fn offline_routes(labels: &[&str]) -> (DirectConnections, Vec<DirectRouteId>) {
-    let (connections, ids, _, _) = offline_fixture_routes(labels);
-    (connections, ids)
-}
-
 /// Connected registry entries for UI tests that supply their own protocol writers.
 /// Native workers admit and refresh routes; GPUI callers allow native I/O.
 /// The network boundary admits the route; its handle cannot reach a native server.
