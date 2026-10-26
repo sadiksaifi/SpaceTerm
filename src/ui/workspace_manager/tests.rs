@@ -8568,10 +8568,10 @@ fn server_inventory(
     }
 }
 
-use crate::ui::shared_workspaces::testing::FixedServer;
+use crate::ui::shared_workspaces::testing::FixedOwner;
 
-/// The account-local server's identity in [`MultiServerHarness`].
-const LOCAL_SERVER: spaceterm_server::hierarchy::Id = [0xA0; 32];
+/// The account-local presentation's owner in [`MultiServerHarness`].
+const LOCAL_OWNER: spaceterm_server::hierarchy::Id = [0xA0; 32];
 
 /// A window presenting the account-local server beside paired servers, each with scripted edits.
 struct MultiServerHarness {
@@ -8609,7 +8609,7 @@ impl MultiServerHarness {
                     cx,
                 );
                 if let Some(shared) = manager.shared.local_mut() {
-                    shared.identify(Rc::new(FixedServer(LOCAL_SERVER)));
+                    shared.identify(Rc::new(FixedOwner(LOCAL_OWNER)));
                 }
                 manager.sync_shared_workspaces(ServerKey::LOCAL, window, cx);
             });
@@ -8683,7 +8683,7 @@ impl MultiServerHarness {
         Rc<crate::ui::shared_workspaces::testing::ScriptedPanes>,
     ) {
         // Each route has its own owner, which keeps its identity across reconnects.
-        self.present_direct_edits_identified(name, route, Rc::new(FixedServer(route)), edits, cx)
+        self.present_direct_edits_identified(name, route, Rc::new(FixedOwner(route)), edits, cx)
     }
 
     /// Presents the saved route `route` named `name` over the connection `identity` names,
@@ -8692,7 +8692,7 @@ impl MultiServerHarness {
         &self,
         name: &str,
         route: crate::direct_connections::DirectRouteId,
-        identity: Rc<dyn crate::ui::shared_workspaces::ServerIdentity>,
+        identity: Rc<dyn crate::ui::shared_workspaces::WorkspaceOwner>,
         workspaces: &[(&str, u8)],
         cx: &mut VisualTestContext,
     ) -> (
@@ -8712,7 +8712,7 @@ impl MultiServerHarness {
         &self,
         name: &str,
         route: crate::direct_connections::DirectRouteId,
-        identity: Rc<dyn crate::ui::shared_workspaces::ServerIdentity>,
+        identity: Rc<dyn crate::ui::shared_workspaces::WorkspaceOwner>,
         edits: &Rc<crate::ui::shared_workspaces::testing::ScriptedEdits>,
         cx: &mut VisualTestContext,
     ) -> (
@@ -9025,7 +9025,7 @@ fn routes_paired_separately_to_one_server_should_stay_independent(cx: &mut TestA
     cx.update(|_, cx| crate::ui::direct_servers::install(direct.clone(), cx));
     let connection = |route| {
         Rc::new(direct.server(route).expect("the route is connected"))
-            as Rc<dyn crate::ui::shared_workspaces::ServerIdentity>
+            as Rc<dyn crate::ui::shared_workspaces::WorkspaceOwner>
     };
     let owners = |cx: &mut VisualTestContext| {
         harness.manager.read_with(cx, |manager, _| {

@@ -5,7 +5,8 @@
 //! The order outlives server connections: a Workspace whose server is absent, or that this client
 //! detached, keeps its place until its server's complete inventory says it was deleted. A
 //! server reconnecting later therefore returns each Workspace to where the person left it,
-//! whichever server arrives first.
+//! whichever server arrives first. Each reference names the authenticated presentation that shows
+//! the Workspace, so two saved routes to one server keep their own places.
 
 use std::collections::BTreeSet;
 
@@ -141,10 +142,11 @@ impl WorkspaceManager {
         self.save_display_order(&previous);
     }
 
-    /// Forgets the Workspaces the server at `key` no longer has, by its last complete inventory.
+    /// Forgets the Workspaces the server behind `key` no longer has, by the last complete inventory
+    /// that binding read. Other bindings' Workspaces keep their places.
     fn prune_display_order(&mut self, key: super::ServerKey) {
         if let Some(shared) = self.shared.get(key)
-            && let Some(server) = shared.server_identity()
+            && let Some(owner) = shared.owner()
             && let Some(inventory) = shared.latest_inventory()
         {
             let surviving: Vec<_> = inventory
@@ -152,9 +154,7 @@ impl WorkspaceManager {
                 .iter()
                 .map(|workspace| workspace.id)
                 .collect();
-            self.display_order
-                .order
-                .reconcile_server(server, &surviving);
+            self.display_order.order.reconcile_owner(owner, &surviving);
         }
     }
 
@@ -271,9 +271,9 @@ impl WorkspaceManager {
 mod tests {
     use super::*;
 
-    fn reference(server: u8, workspace: u8) -> WorkspaceReference {
+    fn reference(owner: u8, workspace: u8) -> WorkspaceReference {
         WorkspaceReference {
-            server: [server; 32],
+            owner: spaceterm_server::workspace_order::OwnerId::from_bytes([owner; 32]),
             workspace: [workspace; 32],
         }
     }

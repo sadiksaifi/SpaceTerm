@@ -28,7 +28,7 @@ pub(crate) use development::{
     SharedWorkspaces, presenting_window, shared_close_changed_title,
 };
 #[cfg(test)]
-pub(crate) use development::{ServerIdentity, testing};
+pub(crate) use development::{WorkspaceOwner, testing};
 
 #[path = "shared_workspaces/repositories.rs"]
 mod repositories;
@@ -55,6 +55,8 @@ mod development {
         ConfirmedControl, Id, Inventory, Mutation, Outcome, RetainedOutcome,
         Workspace as ServerWorkspace,
     };
+
+    use spaceterm_server::workspace_order::OwnerId;
 
     use crate::close_confirmation::CloseTarget;
     use crate::domain::{PaneId, TabId, ValidatedLocalDirectory, WorkspaceId};
@@ -1220,25 +1222,23 @@ mod development {
         Uncertain,
     }
 
-    /// Names the server one binding presents, once its connection has been admitted.
-    pub(crate) trait ServerIdentity {
-        fn server(&self) -> Option<Id>;
+    /// Names the authenticated client presentation one binding is, once its connection has been
+    /// admitted. Two saved routes to one server are two owners.
+    pub(crate) trait WorkspaceOwner {
+        fn owner(&self) -> Option<OwnerId>;
     }
 
-    impl ServerIdentity for ServerConnection {
-        fn server(&self) -> Option<Id> {
-            // A reference names the admitted server whichever Workspace it names.
-            self.workspace_reference([0; 32])
-                .ok()
-                .map(|reference| reference.server)
+    impl WorkspaceOwner for ServerConnection {
+        fn owner(&self) -> Option<OwnerId> {
+            self.workspace_owner().ok()
         }
     }
 
     /// The Workspace Window's authoritative inventory, attachments and pending presentation.
     pub(crate) struct SharedWorkspaces {
         edits: SharedEditSource,
-        /// The server this binding presents, which names its Workspaces in this client's order.
-        identity: Option<Rc<dyn ServerIdentity>>,
+        /// The presentation this binding is, which names its Workspaces in this client's order.
+        owner: Option<Rc<dyn WorkspaceOwner>>,
         sessions: SharedPaneSessions,
         /// Each server Workspace and the local Workspace presenting it.
         workspaces: BTreeMap<WorkspaceId, SharedWorkspaceFacts>,
@@ -1304,7 +1304,7 @@ mod development {
             Self {
                 sessions: sessions.with_edits(edits.clone()),
                 edits,
-                identity: None,
+                owner: None,
                 workspaces: BTreeMap::new(),
                 revision: None,
                 presentation: None,
@@ -1373,14 +1373,14 @@ mod development {
             self.latest.as_ref()
         }
 
-        /// Names the server this binding presents.
-        pub(crate) fn identify(&mut self, identity: Rc<dyn ServerIdentity>) {
-            self.identity = Some(identity);
+        /// Names the presentation this binding is.
+        pub(crate) fn identify(&mut self, owner: Rc<dyn WorkspaceOwner>) {
+            self.owner = Some(owner);
         }
 
-        /// The server this binding presents, once its connection names it.
-        pub(crate) fn server_identity(&self) -> Option<Id> {
-            self.identity.as_ref()?.server()
+        /// The presentation this binding is, once its connection names it.
+        pub(crate) fn owner(&self) -> Option<OwnerId> {
+            self.owner.as_ref()?.owner()
         }
 
         /// Whether `workspace` presents a creation the server hasn't confirmed yet.
@@ -1395,7 +1395,7 @@ mod development {
             &self,
             workspace: WorkspaceId,
         ) -> Option<spaceterm_server::workspace_order::WorkspaceReference> {
-            let server = self.server_identity()?;
+            let owner = self.owner()?;
             let id = self.edits.canonical(self.facts(workspace)?.server);
             self.latest
                 .as_ref()?
@@ -1403,7 +1403,7 @@ mod development {
                 .iter()
                 .any(|published| published.id == id)
                 .then_some(spaceterm_server::workspace_order::WorkspaceReference {
-                    server,
+                    owner,
                     workspace: id,
                 })
         }
@@ -2452,12 +2452,14 @@ mod development {
     pub(crate) mod testing {
         use std::sync::Mutex;
 
-        /// A server whose admitted identity the test names.
-        pub(crate) struct FixedServer(pub(crate) spaceterm_server::hierarchy::Id);
+        /// A presentation whose owner the test names.
+        pub(crate) struct FixedOwner(pub(crate) spaceterm_server::hierarchy::Id);
 
-        impl super::ServerIdentity for FixedServer {
-            fn server(&self) -> Option<spaceterm_server::hierarchy::Id> {
-                Some(self.0)
+        impl super::WorkspaceOwner for FixedOwner {
+            fn owner(&self) -> Option<spaceterm_server::workspace_order::OwnerId> {
+                Some(spaceterm_server::workspace_order::OwnerId::from_bytes(
+                    self.0,
+                ))
             }
         }
 
