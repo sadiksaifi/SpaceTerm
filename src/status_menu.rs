@@ -108,7 +108,7 @@ pub(crate) fn after_operations(cx: &mut App, work: impl FnOnce(&mut App) + 'stat
 /// A status-surface operation succeeded. A server it left running reaches every Workspace Window
 /// still waiting on it, as a Start from Settings does. Nothing here opens a window.
 pub(crate) fn operation_succeeded(cx: &mut App, status: ServiceStatus) {
-    if status.running && !status.stopped {
-        crate::ui::resume_waiting_launches(cx);
-    }
+    crate::ui::settings_window::local_operations::LocalServerOperations::changed_elsewhere(
+        cx, status,
+    );
 }

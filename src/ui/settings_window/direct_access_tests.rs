@@ -56,6 +56,8 @@ struct ScriptedAccess {
     /// The refusal the next policy change returns, leaving the state unchanged.
     refusal: Mutex<Option<AccessFailure>>,
     policies: Mutex<Vec<Option<NetworkPolicy>>>,
+    /// Every policy change exactly as asked: the address, if any, and whether access is on.
+    requests: Mutex<Vec<(Option<NetworkPolicy>, bool)>>,
     claims: Mutex<Vec<Claim>>,
     devices: Mutex<Vec<Device>>,
     /// Why the server can't list its devices, when it can't.
@@ -71,6 +73,7 @@ impl ScriptedAccess {
         Self::with_state(AccessState {
             server_name: SERVER.into(),
             policy,
+            configured: policy,
             listener,
             addresses,
         })
@@ -81,6 +84,7 @@ impl ScriptedAccess {
             status: Mutex::new(Ok(state)),
             refusal: Mutex::default(),
             policies: Mutex::default(),
+            requests: Mutex::default(),
             claims: Mutex::default(),
             devices: Mutex::default(),
             devices_failure: Mutex::default(),
@@ -113,6 +117,10 @@ impl ScriptedAccess {
 
     fn policies(&self) -> Vec<Option<NetworkPolicy>> {
         self.policies.lock().expect("policies").clone()
+    }
+
+    fn requests(&self) -> Vec<(Option<NetworkPolicy>, bool)> {
+        self.requests.lock().expect("requests").clone()
     }
 
     fn pair(&self, id: u8, name: &str, last_connected_at: Option<u64>) {
@@ -154,15 +162,30 @@ impl DirectAccessControl for ScriptedAccess {
         self.status.lock().expect("status").clone()
     }
 
-    fn set_policy(&self, policy: Option<NetworkPolicy>) -> Result<AccessState, AccessFailure> {
-        self.policies.lock().expect("policies").push(policy.clone());
+    fn set_policy(
+        &self,
+        policy: Option<NetworkPolicy>,
+        enabled: bool,
+    ) -> Result<AccessState, AccessFailure> {
+        self.requests
+            .lock()
+            .expect("requests")
+            .push((policy.clone(), enabled));
+        // Records what the person turned on, or `None` for off, as the server applies it.
+        self.policies
+            .lock()
+            .expect("policies")
+            .push(policy.clone().filter(|_| enabled));
         if let Some(refusal) = *self.refusal.lock().expect("refusal") {
             return Err(refusal);
         }
         let mut status = self.status.lock().expect("status");
         let state = status.as_mut().map_err(|failure| *failure)?;
-        state.policy = policy.as_ref().map(|policy| policy.bind);
-        state.listener = policy.map_or(Listener::Off, |policy| Listener::Listening(policy.bind));
+        if let Some(policy) = &policy {
+            state.configured = Some(policy.bind);
+        }
+        state.policy = state.configured.filter(|_| enabled);
+        state.listener = state.policy.map_or(Listener::Off, Listener::Listening);
         Ok(state.clone())
     }
 
@@ -170,7 +193,7 @@ impl DirectAccessControl for ScriptedAccess {
         Ok(OpenInvitation {
             id: INVITATION_ID,
             text: Zeroizing::new(INVITATION.to_owned()),
-            expires_at: unix_now() + 300,
+            deadline: std::time::Instant::now() + std::time::Duration::from_secs(300),
         })
     }
 
@@ -230,7 +253,7 @@ fn addresses(available: &[&str], suggested: Option<&str>) -> NetworkAddresses {
 }
 
 fn policy(text: &str) -> Option<NetworkPolicy> {
-    Some(NetworkPolicy::new(address(text)).expect("a concrete address"))
+    Some(NetworkPolicy::new(address(text)).expect("an address the server can listen at"))
 }
 
 fn device(id: u8, name: &str, last_connected_at: Option<u64>) -> Device {
@@ -497,6 +520,7 @@ fn a_listening_address_that_disappeared_asks_for_another_and_keeps_the_port(
     let access = ScriptedAccess::with_state(AccessState {
         server_name: SERVER.into(),
         policy: Some(address("192.168.1.20:9300")),
+        configured: Some(address("192.168.1.20:9300")),
         listener: Listener::AddressGone,
         addresses: Some(addresses(
             &["192.168.1.21", "192.168.1.22"],
@@ -514,6 +538,74 @@ fn a_listening_address_that_disappeared_asks_for_another_and_keeps_the_port(
 
     assert_eq!(access.policies(), vec![policy("192.168.1.22:9300")]);
     assert!(reads("Listening on 192.168.1.22:9300.", cx));
+}
+
+/// An address chosen while access is off keeps access off and keeps the port chosen before, and
+/// turning access on later listens there.
+#[gpui::test]
+fn an_address_chosen_while_off_keeps_its_port_for_turning_on(cx: &mut TestAppContext) {
+    let access = ScriptedAccess::with_state(AccessState {
+        server_name: SERVER.into(),
+        policy: None,
+        configured: Some(address("192.168.1.20:9300")),
+        listener: Listener::Off,
+        addresses: Some(addresses(
+            &["192.168.1.20", "192.168.1.21"],
+            Some("192.168.1.20"),
+        )),
+    });
+    let (_, cx) = open_servers(&access, cx);
+
+    click(ADDRESS_SELECTOR, cx);
+    click("192.168.1.21", cx);
+
+    assert_eq!(
+        access.requests(),
+        vec![(policy("192.168.1.21:9300"), false)],
+        "choosing an address keeps access off and the port chosen before"
+    );
+
+    click(ACCESS_SELECTOR, cx);
+
+    assert_eq!(
+        access.requests().last(),
+        Some(&(policy("192.168.1.21:9300"), true))
+    );
+    assert!(reads("Listening on 192.168.1.21:9300.", cx));
+}
+
+/// Access off with every interface kept, as `0.0.0.0:9300` or `[::]:9300`: turning it on again
+/// without choosing an address listens on every interface again, at the same port.
+fn turning_on_keeps_a_wildcard_listener(kept: &str, cx: &mut TestAppContext) {
+    let access = ScriptedAccess::with_state(AccessState {
+        server_name: SERVER.into(),
+        policy: None,
+        configured: Some(address(kept)),
+        listener: Listener::Off,
+        addresses: Some(addresses(
+            &["192.168.1.20", "192.168.1.21"],
+            Some("192.168.1.20"),
+        )),
+    });
+    let (_, cx) = open_servers(&access, cx);
+
+    click(ACCESS_SELECTOR, cx);
+
+    assert_eq!(
+        access.requests(),
+        vec![(policy(kept), true)],
+        "turning access on keeps the listener on every interface"
+    );
+}
+
+#[gpui::test]
+fn turning_on_keeps_an_ipv4_wildcard_listener(cx: &mut TestAppContext) {
+    turning_on_keeps_a_wildcard_listener("0.0.0.0:9300", cx);
+}
+
+#[gpui::test]
+fn turning_on_keeps_an_ipv6_wildcard_listener(cx: &mut TestAppContext) {
+    turning_on_keeps_a_wildcard_listener("[::]:9300", cx);
 }
 
 #[gpui::test]
@@ -850,46 +942,20 @@ fn open_paired_studio(
     (window, direct, cx)
 }
 
+/// A paired server is administered on its own computer, so Servers shows none of its network
+/// access or devices, even what it last reported, and offers no step that would change them.
 #[gpui::test]
-fn a_paired_server_presents_its_network_access_and_devices(cx: &mut TestAppContext) {
-    let (window, _, cx) = open_paired_studio(cx);
-    let this_computer = crate::desktop_profile::testing_presentation()
-        .wording()
-        .this_computer;
-
-    assert!(open(ACCESS_SELECTOR, cx));
-    assert!(access_on(&window, cx), "studio last reported access on");
-    assert!(reads("Devices: 2 paired", cx));
-    assert!(names("MacBook", cx));
-    assert!(
-        names(&format!("Studio Client ({this_computer})"), cx),
-        "this computer's own pairing is named as this computer"
-    );
-    assert!(reads("Connect to studio to change its network access.", cx));
-}
-
-#[gpui::test]
-fn an_offline_paired_servers_network_access_changes_nothing(cx: &mut TestAppContext) {
+fn a_paired_server_presents_no_network_access_or_devices(cx: &mut TestAppContext) {
     let (window, direct, cx) = open_paired_studio(cx);
 
-    click(ACCESS_SELECTOR, cx);
+    assert!(!open(ACCESS_SELECTOR, cx), "no Network Access switch");
+    assert!(!open(INVITE_SELECTOR, cx), "no Invite Device");
     assert!(
-        !open(&modal_action(TURN_OFF_CONFIRM_SELECTOR), cx),
-        "Turn Off isn't offered"
+        !open(&format!("{DEVICE_SELECTOR}-0-remove"), cx),
+        "no device to remove"
     );
-    click(INVITE_SELECTOR, cx);
-    assert!(
-        !open(crate::ui::direct_pairing::COPY_SELECTOR, cx),
-        "no invitation opens"
-    );
-    for device in 0..2 {
-        click(&format!("{DEVICE_SELECTOR}-{device}-remove"), cx);
-        assert!(
-            !open(&modal_action(REMOVE_CONFIRM_SELECTOR), cx),
-            "Remove isn't offered"
-        );
-    }
-    assert!(access_on(&window, cx));
+    assert!(!names("MacBook", cx), "no devices listed");
+    assert!(!access_on(&window, cx));
     assert!(direct.pending_unpairs().is_empty());
     assert_eq!(direct.routes().len(), 1, "studio stays saved");
 }
@@ -900,6 +966,7 @@ fn invite_device_waits_while_the_server_cant_listen(cx: &mut TestAppContext) {
     let access = ScriptedAccess::with_state(AccessState {
         server_name: SERVER.into(),
         policy: Some(address("192.168.1.20:9231")),
+        configured: Some(address("192.168.1.20:9231")),
         listener: Listener::Failed,
         addresses: Some(addresses(&["192.168.1.20"], Some("192.168.1.20"))),
     });

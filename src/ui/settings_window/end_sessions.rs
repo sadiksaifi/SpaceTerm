@@ -1,4 +1,5 @@
-//! End All Sessions for the server selected in the Servers list.
+//! End All Sessions for this computer's server, when Servers presents it. A paired server is
+//! administered on its own computer, so it offers no End All Sessions here.
 //!
 //! The action ends every live Terminal Session on that server for every client. The server keeps
 //! running, and its Workspaces, Tabs, Panes, and control grants remain. The row reads the
@@ -239,8 +240,11 @@ impl SettingsWindow {
     pub(super) fn sync_end_all_sessions(&mut self, cx: &mut Context<Self>) {
         // The presented server's facts follow the same selection, section and connection changes.
         self.sync_server_facts(cx);
+        // Ending every Terminal Session administers the server, which only this computer's
+        // server offers.
         let target = if self.active_section == SettingsSectionId::Servers {
             self.selected_server()
+                .filter(|target| matches!(target, ServerChoice::Local))
         } else {
             None
         };
@@ -261,7 +265,7 @@ impl SettingsWindow {
                 // window hears of it, so each reading looks the writer up again.
                 let client = cx.update(|cx| match &target {
                     ServerChoice::Local => Client::get(cx),
-                    ServerChoice::Direct(route) => Client::presented_direct(route, cx),
+                    ServerChoice::Direct(_) => None,
                 });
                 let availability = client.as_ref().map_or(Availability::Unknown, |client| {
                     Availability::of(&client.source.snapshot())

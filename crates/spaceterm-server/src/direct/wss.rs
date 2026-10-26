@@ -6,7 +6,7 @@ use rustls::{
 };
 use std::{
     io::{Read, Write},
-    net::{SocketAddr, TcpStream},
+    net::TcpStream,
     os::{
         fd::{AsRawFd, RawFd},
         unix::net::UnixStream,
@@ -121,34 +121,25 @@ impl rustls::client::danger::ServerCertVerifier for Pinned {
     }
 }
 
-pub(super) fn validate_endpoint(endpoint: &str) -> Result<SocketAddr, DirectError> {
-    if endpoint.len() > 1024 {
-        return Err(DirectError::InvalidAddress);
-    }
-    let uri: tungstenite::http::Uri = endpoint.parse().map_err(|_| DirectError::InvalidAddress)?;
-    if uri.scheme_str() != Some("wss")
-        || uri.authority().is_none_or(|a| a.as_str().contains('@'))
-        || uri.path() != "/spaceterm"
-        || uri.query().is_some()
-    {
-        return Err(DirectError::InvalidAddress);
-    }
-    let host = uri
-        .host()
-        .ok_or(DirectError::InvalidAddress)?
-        .trim_start_matches('[')
-        .trim_end_matches(']')
-        .parse()
-        .map_err(|_| DirectError::InvalidAddress)?;
-    Ok(SocketAddr::new(host, uri.port_u16().unwrap_or(443)))
+pub(super) fn validate_endpoint(endpoint: &str) -> Result<Endpoint, DirectError> {
+    Endpoint::from_url(endpoint)
 }
 pub(super) fn connect(endpoint: &str, pin: &ServerPin) -> Result<Ws, DirectError> {
-    // Invitations advertise the same concrete IP policy the owner enabled. A synchronous
-    // resolver would introduce an unbounded native wait outside the connection deadline.
     let address = validate_endpoint(endpoint)?;
     let deadline = Instant::now() + HANDSHAKE_LIMIT;
-    let tcp = TcpStream::connect_timeout(&address, HANDSHAKE_LIMIT)
-        .map_err(|_| DirectError::Transport)?;
+    let addresses = address.resolve(deadline)?;
+    let mut connected = None;
+    for address in addresses {
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .ok_or(DirectError::Transport)?;
+        if let Ok(tcp) = TcpStream::connect_timeout(&address, remaining.min(Duration::from_secs(1)))
+        {
+            connected = Some(tcp);
+            break;
+        }
+    }
+    let tcp = connected.ok_or(DirectError::Transport)?;
     tcp.set_nonblocking(true)
         .map_err(|_| DirectError::Transport)?;
     let mismatch = Arc::new(AtomicBool::new(false));
@@ -178,7 +169,11 @@ pub(super) fn connect(endpoint: &str, pin: &ServerPin) -> Result<Ws, DirectError
                 std::thread::sleep(Duration::from_millis(2))
             }
             Err(_) if mismatch.load(Ordering::Acquire) => return Err(DirectError::PinMismatch),
-            Err(_) => return Err(DirectError::AuthenticationRefused),
+            // Rustls wraps TLS validation failures in InvalidData; socket failures remain retryable.
+            Err(error) if error.kind() == std::io::ErrorKind::InvalidData => {
+                return Err(DirectError::AuthenticationRefused);
+            }
+            Err(_) => return Err(DirectError::Transport),
         }
     }
     let stream = Socket::Client(StreamOwned::new(connection, tcp));

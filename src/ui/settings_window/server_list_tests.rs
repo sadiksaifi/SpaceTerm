@@ -321,11 +321,19 @@ fn a_disconnected_paired_server_offers_connect_and_dims_its_settings(cx: &mut Te
 
     for row in [
         "settings-row-server-status",
-        "settings-row-end-all-sessions",
-        "settings-row-network-access",
         DirectServerAction::Connect.selector(),
     ] {
         assert!(rendered(row, servers.cx), "{row} presents penguin");
+    }
+    // A paired server is administered on its own computer.
+    for row in [
+        "settings-row-end-all-sessions",
+        "settings-row-network-access",
+    ] {
+        assert!(
+            !rendered(row, servers.cx),
+            "{row} stays with penguin's computer"
+        );
     }
     assert!(
         footnote(&servers).contains("Connect to penguin to change these settings."),
@@ -336,30 +344,30 @@ fn a_disconnected_paired_server_offers_connect_and_dims_its_settings(cx: &mut Te
         settings.network_access_footnote(cx)
     });
     assert_eq!(
-        network.as_deref(),
-        Some("Connect to penguin to change its network access.")
+        network, None,
+        "penguin's network access isn't presented here"
     );
     assert!(servers.all_disconnected());
 }
 
-/// A server's native service is administered on its own computer, so only this computer's
-/// server offers Start Automatically. Network access and devices are managed over any server's
-/// connection.
+/// Server administration stays on the server's own computer: only this computer's server
+/// presents Start Automatically, Network Access, Devices and End All Sessions.
 #[test]
-fn only_this_computers_server_presents_automatic_start() {
+fn only_this_computers_server_presents_administration_rows() {
     use super::super::catalog::SettingsRowId;
 
     let paired = ServerChoice::Direct([1; 32]);
-    assert!(super::row_presents(
+    for row in [
         SettingsRowId::ServerAutoStart,
-        Some(&ServerChoice::Local)
-    ));
-    assert!(!super::row_presents(
-        SettingsRowId::ServerAutoStart,
-        Some(&paired)
-    ));
-    for row in [SettingsRowId::NetworkAccess, SettingsRowId::PairedDevices] {
-        assert!(super::row_presents(row, Some(&paired)), "{row:?}");
+        SettingsRowId::NetworkAccess,
+        SettingsRowId::PairedDevices,
+        SettingsRowId::EndAllSessions,
+    ] {
+        assert!(
+            super::row_presents(row, Some(&ServerChoice::Local)),
+            "{row:?}"
+        );
+        assert!(!super::row_presents(row, Some(&paired)), "{row:?}");
     }
 }
 
@@ -989,55 +997,78 @@ fn running_sessions(boot: u8, live: u8) -> spaceterm_server::hierarchy::Inventor
     }
 }
 
+/// This computer's server's scripted writer, starting with `inventory`.
+fn local_writer(
+    inventory: spaceterm_server::hierarchy::Inventory,
+) -> Rc<crate::ui::shared_workspaces::testing::ScriptedEdits> {
+    Rc::new(crate::ui::shared_workspaces::testing::ScriptedEdits::new(
+        Some(inventory),
+    ))
+}
+
+/// Settings with this computer's server, selected and presented through `local`, and one saved
+/// paired server, `bravo`. The writer is registered before Settings opens, so its first reading
+/// is the scripted one and no real server is asked.
+fn present_local_sessions(
+    local: Rc<crate::ui::shared_workspaces::testing::ScriptedEdits>,
+    cx: &mut TestAppContext,
+) -> Servers<'_> {
+    use crate::ui::server_worktrees::testing::{ScriptedReads, present_local};
+
+    let reads = ScriptedReads::new("~/{repository}/{branch}");
+    cx.update(|cx| present_local(local, reads, cx));
+    let servers = open_servers(true, &["bravo"], cx);
+    servers.cx.run_until_parked();
+    servers
+}
+
 fn end_all_sessions_caption(servers: &Servers<'_>) -> String {
     servers.window.read_with(servers.cx, |settings, _| {
         settings.end_all_sessions_caption().0.to_string()
     })
 }
 
-/// The confirmation names the selected server, and only that server's current run is asked to
-/// end its Sessions, once. Cancelling asks nothing.
+/// The confirmation names this computer's server, and only its current run is asked to end its
+/// Sessions, once. Cancelling asks nothing. A paired server offers no End All Sessions, because a
+/// server is administered on its own computer.
 #[gpui::test]
-fn end_all_sessions_confirms_and_reaches_only_the_selected_server(cx: &mut TestAppContext) {
+fn end_all_sessions_confirms_and_reaches_only_this_computers_server(cx: &mut TestAppContext) {
     use super::super::end_sessions::{END_CANCEL_SELECTOR, END_CONFIRM_SELECTOR, END_SELECTOR};
     use spaceterm_server::hierarchy::{Mutation, Outcome};
 
-    let (servers, alpha, bravo) = present_both(cx);
-    alpha.set_inventory(running_sessions(1, 3));
-    bravo.set_inventory(running_sessions(2, 2));
-    select("bravo", servers.cx);
+    let local = local_writer(running_sessions(2, 2));
+    let servers = present_local_sessions(local.clone(), cx);
+    let name = local_name();
     servers.cx.run_until_parked();
     assert!(rendered("settings-row-end-all-sessions", servers.cx));
     assert_eq!(
         end_all_sessions_caption(&servers),
-        "Ends all 2 running Terminal Sessions on bravo for every client and clears their output. \
-         The server keeps running, and its Workspaces, Tabs, and Panes remain."
+        format!(
+            "Ends all 2 running Terminal Sessions on {name} for every client and clears their \
+             output. The server keeps running, and its Workspaces, Tabs, and Panes remain."
+        )
     );
 
     click(END_SELECTOR, servers.cx);
     let tree = A11yTree::read(servers.cx);
     assert!(
-        tree.find("End All Sessions on bravo?").is_some(),
-        "the confirmation names the selected server"
+        tree.find(&format!("End All Sessions on {name}?")).is_some(),
+        "the confirmation names the server"
     );
     answer_alert(END_CANCEL_SELECTOR, servers.cx);
-    assert!(bravo.submitted().is_empty(), "Cancel asks nothing");
+    assert!(local.submitted().is_empty(), "Cancel asks nothing");
 
     click(END_SELECTOR, servers.cx);
     answer_alert(END_CONFIRM_SELECTOR, servers.cx);
     assert_eq!(
-        bravo.submitted(),
+        local.submitted(),
         vec![Mutation::EndAllSessions {
             confirmation: running_sessions(2, 2).close.unwrap()
         }],
-        "the request names the exact Sessions bravo's confirmation showed"
-    );
-    assert!(
-        alpha.submitted().is_empty(),
-        "the other server is untouched"
+        "the request names the exact Sessions the confirmation showed"
     );
 
-    bravo.answer(Outcome::Accepted { target: [2; 32] });
+    local.answer(Outcome::Accepted { target: [2; 32] });
     let caption = |cx: &mut VisualTestContext| {
         servers
             .window
@@ -1045,9 +1076,15 @@ fn end_all_sessions_confirms_and_reaches_only_the_selected_server(cx: &mut TestA
     };
     settle(servers.cx, |cx| {
         cx.executor().advance_clock(Duration::from_millis(100));
-        caption(cx).starts_with("Every Terminal Session on bravo ended.")
+        caption(cx).starts_with(&format!("Every Terminal Session on {name} ended."))
     });
-    assert_eq!(bravo.submitted().len(), 1, "nothing asks again");
+    assert_eq!(local.submitted().len(), 1, "nothing asks again");
+
+    select("bravo", servers.cx);
+    assert!(
+        !rendered("settings-row-end-all-sessions", servers.cx),
+        "a paired server offers no End All Sessions"
+    );
 }
 
 /// A confirmation answers for the server run it showed. A restart since then submits nothing,
@@ -1057,21 +1094,21 @@ fn end_all_sessions_refuses_a_confirmation_for_an_earlier_server_run(cx: &mut Te
     use super::super::end_sessions::{END_CONFIRM_SELECTOR, END_SELECTOR};
     use spaceterm_server::hierarchy::{Mutation, Outcome};
 
-    let (servers, _alpha, bravo) = present_both(cx);
-    bravo.set_inventory(running_sessions(2, 1));
-    select("bravo", servers.cx);
+    let local = local_writer(running_sessions(2, 1));
+    let servers = present_local_sessions(local.clone(), cx);
+    let name = local_name();
     servers.cx.run_until_parked();
 
     click(END_SELECTOR, servers.cx);
-    bravo.set_inventory(running_sessions(3, 1));
+    local.set_inventory(running_sessions(3, 1));
     answer_alert(END_CONFIRM_SELECTOR, servers.cx);
     assert!(
-        bravo.submitted().is_empty(),
+        local.submitted().is_empty(),
         "a restarted server's Sessions were never confirmed"
     );
     assert_eq!(
         end_all_sessions_caption(&servers),
-        "bravo restarted, so nothing ended. Try again."
+        format!("{name} restarted, so nothing ended. Try again.")
     );
 
     // The server itself answers a confirmation it outran with the same explanation.
@@ -1083,13 +1120,13 @@ fn end_all_sessions_refuses_a_confirmation_for_an_earlier_server_run(cx: &mut Te
     click(END_SELECTOR, servers.cx);
     answer_alert(END_CONFIRM_SELECTOR, servers.cx);
     assert_eq!(
-        bravo.submitted(),
+        local.submitted(),
         vec![Mutation::EndAllSessions {
             confirmation: running_sessions(3, 1).close.unwrap()
         }]
     );
     // The server's stale answer can't say whether it restarted, so the row claims only a change.
-    bravo.answer(Outcome::StaleConfirmation);
+    local.answer(Outcome::StaleConfirmation);
     let caption = |cx: &mut VisualTestContext| {
         servers
             .window
@@ -1097,7 +1134,8 @@ fn end_all_sessions_refuses_a_confirmation_for_an_earlier_server_run(cx: &mut Te
     };
     settle(servers.cx, |cx| {
         cx.executor().advance_clock(Duration::from_millis(100));
-        caption(cx) == "The Terminal Sessions on bravo changed, so nothing ended. Try again."
+        caption(cx)
+            == format!("The Terminal Sessions on {name} changed, so nothing ended. Try again.")
     });
 }
 
@@ -1108,25 +1146,25 @@ fn end_all_sessions_refuses_a_confirmation_for_an_earlier_server_run(cx: &mut Te
 fn end_all_sessions_refuses_a_confirmation_whose_sessions_changed(cx: &mut TestAppContext) {
     use super::super::end_sessions::{END_CONFIRM_SELECTOR, END_SELECTOR};
 
-    let (servers, _alpha, bravo) = present_both(cx);
-    bravo.set_inventory(running_sessions(2, 1));
-    select("bravo", servers.cx);
+    let local = local_writer(running_sessions(2, 1));
+    let servers = present_local_sessions(local.clone(), cx);
+    let name = local_name();
     servers.cx.run_until_parked();
 
     click(END_SELECTOR, servers.cx);
     // Another client ends the confirmed Session and starts a replacement in the same run.
     let mut replaced = running_sessions(2, 1);
     replaced.close.as_mut().unwrap().sessions[0].session = Some([200; 32]);
-    bravo.set_inventory(replaced);
+    local.set_inventory(replaced);
     answer_alert(END_CONFIRM_SELECTOR, servers.cx);
 
     assert!(
-        bravo.submitted().is_empty(),
+        local.submitted().is_empty(),
         "a replacement Session was never confirmed"
     );
     let caption = end_all_sessions_caption(&servers);
     assert!(
-        caption == "The Terminal Sessions on bravo changed, so nothing ended. Try again.",
+        caption == format!("The Terminal Sessions on {name} changed, so nothing ended. Try again."),
         "got {caption:?}"
     );
     assert!(!caption.contains("restarted"), "got {caption:?}");
@@ -1137,25 +1175,27 @@ fn end_all_sessions_refuses_a_confirmation_whose_sessions_changed(cx: &mut TestA
 fn end_all_sessions_is_unavailable_on_a_server_without_it(cx: &mut TestAppContext) {
     use super::super::end_sessions::END_SELECTOR;
 
-    let (servers, _alpha, bravo) = present_both(cx);
-    bravo.set_inventory(running_sessions(2, 2));
-    bravo.set_end_all_sessions(false);
-    select("bravo", servers.cx);
+    let local = local_writer(running_sessions(2, 2));
+    local.set_end_all_sessions(false);
+    let servers = present_local_sessions(local.clone(), cx);
+    let name = local_name();
     servers.cx.run_until_parked();
 
     assert_eq!(
         end_all_sessions_caption(&servers),
-        "bravo doesn\u{2019}t support ending all its Terminal Sessions. Update the server to use \
-         End All Sessions."
+        format!(
+            "{name} doesn\u{2019}t support ending all its Terminal Sessions. Update the server to \
+             use End All Sessions."
+        )
     );
     click(END_SELECTOR, servers.cx);
     assert!(
         A11yTree::read(servers.cx)
-            .find("End All Sessions on bravo?")
+            .find(&format!("End All Sessions on {name}?"))
             .is_none(),
         "nothing asks to confirm an action the server doesn't offer"
     );
-    assert!(bravo.submitted().is_empty());
+    assert!(local.submitted().is_empty());
 }
 
 fn bounds(selector: &str, cx: &mut VisualTestContext) -> gpui::Bounds<gpui::Pixels> {

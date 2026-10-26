@@ -1231,9 +1231,11 @@ impl SettingsWindow {
     ) -> Option<gpui::Task<()>> {
         match target {
             ServerChoice::Local => {
-                // A read is always allowed, whichever steps the last read offered.
+                // A read is always allowed, whichever steps the last read offered. The service is
+                // read too, so a change made outside Settings shows.
                 self.check_server_update(cx);
                 self.check_local_server(cx);
+                self.check_server_service(cx);
             }
             ServerChoice::Direct(_) => {}
         }

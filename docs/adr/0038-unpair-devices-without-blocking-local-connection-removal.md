@@ -1,6 +1,6 @@
 # Unpair devices without blocking local connection removal
 
-Every remote connection is paired WSS. Account-local IPC has no pairing to revoke. After confirmation, Unpair Device may target the initiating device, including the last Paired Device. Self-unpair immediately removes its Saved Connection and Workspace Attachments, independently of reachability. Unpairing another device preserves the initiating connection. Neither action kills server-owned work or creates a replacement Workspace.
+Every remote connection is paired WSS. Account-local IPC has no pairing to revoke. After confirmation, a paired client can unpair itself, including when it is the last Paired Device. Only an account-local client can unpair another device. Self-unpair immediately removes its Saved Connection and Workspace Attachments, independently of reachability. Unpairing another device preserves the initiating connection. Neither action kills server-owned work or creates a replacement Workspace.
 
 The server durably records revocation, closes that device's connections and releases its Pane control. Revoked credentials cannot reconnect or resume control. Other pairings and servers remain unaffected.
 

@@ -27,8 +27,11 @@ use crate::server_connection::direct::{
 pub(crate) struct AccessState {
     /// The server's name, which every step that changes its access names.
     pub(crate) server_name: SharedString,
-    /// The address the owner chose, which the server keeps across restarts. `None` is off.
+    /// The address the server listens at while access is on. `None` is off.
     pub(crate) policy: Option<SocketAddr>,
+    /// The address the owner chose last, which the server keeps while access is off too, so
+    /// turning access on again uses it.
+    pub(crate) configured: Option<SocketAddr>,
     pub(crate) listener: Listener,
     /// The addresses the server can listen at, as the server read them from its own machine.
     /// `None` means the server couldn't read them.
@@ -76,7 +79,9 @@ pub(crate) struct Claim {
 pub(crate) struct OpenInvitation {
     pub(crate) id: ClaimId,
     pub(crate) text: Zeroizing<String>,
-    pub(crate) expires_at: u64,
+    /// When the countdown reaches zero, on this computer's monotonic clock. It only presents the
+    /// lifetime the server gave the invitation: the server alone decides when it expires.
+    pub(crate) deadline: std::time::Instant,
 }
 
 impl OpenInvitation {
@@ -116,9 +121,14 @@ pub(crate) enum AccessFailure {
 /// The blocking direct network operations on one server, through an existing connection.
 pub(crate) trait DirectAccessControl: Send + Sync {
     fn status(&self) -> Result<AccessState, AccessFailure>;
-    /// Saves `policy` durably and answers once the server has applied it. `None` turns access off
-    /// and leaves every pairing in place.
-    fn set_policy(&self, policy: Option<NetworkPolicy>) -> Result<AccessState, AccessFailure>;
+    /// Saves whether access is on, and at `policy` when given, durably, and answers once the server
+    /// has applied it. `None` keeps the address chosen before. Turning access off leaves every
+    /// pairing in place.
+    fn set_policy(
+        &self,
+        policy: Option<NetworkPolicy>,
+        enabled: bool,
+    ) -> Result<AccessState, AccessFailure>;
     /// Opens one single-use expiring invitation.
     fn invite(&self) -> Result<OpenInvitation, AccessFailure>;
     /// Ends an invitation nobody needs any more, so no device can use it.
@@ -136,8 +146,12 @@ impl DirectAccessControl for ServerConnection {
         self.direct_status().map(access_state).map_err(classify)
     }
 
-    fn set_policy(&self, policy: Option<NetworkPolicy>) -> Result<AccessState, AccessFailure> {
-        self.set_direct_policy(policy)
+    fn set_policy(
+        &self,
+        policy: Option<NetworkPolicy>,
+        enabled: bool,
+    ) -> Result<AccessState, AccessFailure> {
+        self.set_direct_policy(policy, enabled)
             .map(access_state)
             .map_err(classify)
     }
@@ -172,9 +186,11 @@ impl DirectAccessControl for ServerConnection {
 }
 
 fn access_state(status: DirectStatus) -> AccessState {
+    let configured = status.policy.map(|policy| policy.bind);
     AccessState {
         server_name: status.server_name.into(),
-        policy: status.policy.map(|policy| policy.bind),
+        policy: configured.filter(|_| status.enabled),
+        configured,
         listener: match status.listener {
             ListenerState::Off => Listener::Off,
             ListenerState::Listening { addr } => Listener::Listening(addr),
@@ -189,7 +205,7 @@ fn open_invitation(invitation: Invitation) -> OpenInvitation {
     OpenInvitation {
         id: invitation.id(),
         text: invitation.display_text(),
-        expires_at: invitation.expires_at_unix_seconds(),
+        deadline: std::time::Instant::now() + invitation.lifetime(),
     }
 }
 
@@ -247,6 +263,16 @@ impl From<DirectError> for AccessFailure {
 
 impl AccessFailure {
     /// What happened, in one sentence naming `server`.
+    /// Why reading the server's access failed. A read changes nothing, so it never says that a
+    /// change failed.
+    pub(crate) fn read_explanation(self, server: &str) -> String {
+        match self {
+            Self::Storage => format!("\"{server}\" couldn't read its network settings. Try again."),
+            other => other.explanation(server),
+        }
+    }
+
+    /// Why the person's change didn't take effect.
     pub(crate) fn explanation(self, server: &str) -> String {
         match self {
             Self::Unreachable => format!("SpaceTerm can't reach \"{server}\". Try again."),
@@ -296,9 +322,9 @@ pub(crate) fn code_speech(code: ComparisonCode) -> SharedString {
     speech.into()
 }
 
-/// How long until `expires_at`, in whole seconds, as of `now`. Both are Unix seconds.
-pub(crate) fn remaining(expires_at: u64, now: u64) -> u64 {
-    expires_at.saturating_sub(now)
+/// How long until `deadline`, in whole seconds, as of `now`.
+pub(crate) fn remaining(deadline: std::time::Instant, now: std::time::Instant) -> u64 {
+    deadline.saturating_duration_since(now).as_secs()
 }
 
 /// A countdown such as "4:05", which the person reads at a glance.
@@ -341,6 +367,7 @@ mod tests {
                 certificate: [5; 32],
             },
             policy: NetworkPolicy::parse("192.168.1.20").ok(),
+            enabled: true,
             server_name: "studio".to_owned(),
             listener,
             network_addresses: Ok(NetworkAddresses {
@@ -393,7 +420,7 @@ mod tests {
         let invitation = OpenInvitation {
             id: [7; 32],
             text: Zeroizing::new("spaceterm://pair/test".to_owned()),
-            expires_at: 1_000,
+            deadline: std::time::Instant::now(),
         };
 
         assert!(invitation.claimed_by(&claim(claim_with_exchange([0; 4]))));
@@ -404,7 +431,7 @@ mod tests {
         let invitation = OpenInvitation {
             id: [7; 32],
             text: Zeroizing::new("spaceterm://pair/test".to_owned()),
-            expires_at: 1_000,
+            deadline: std::time::Instant::now(),
         };
         let mut other = claim_with_exchange([0; 4]);
         other.invitation_id = [8; 32];

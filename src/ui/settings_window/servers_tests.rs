@@ -1078,6 +1078,57 @@ fn stop_asks_first_and_cancelling_leaves_the_server_running(cx: &mut TestAppCont
     assert_eq!(service_presentation(&window, cx).state, "Running");
 }
 
+/// A Start from the status item reaches a Settings window already open, which reads the service
+/// again rather than keep showing the server stopped.
+#[gpui::test]
+fn a_start_from_the_status_item_shows_the_server_running_in_open_settings(cx: &mut TestAppContext) {
+    let (window, server, service, cx) = open_servers_with_service(Ok(stopped()), cx);
+    server.answer_refresh(Err(ServerError::Stopped));
+    assert_eq!(status(&window, cx), "Stopped");
+
+    // The status item started the server, outside Settings.
+    service.report(Ok(running()));
+    server.answer_refresh(Ok(connected(1)));
+    cx.update(|_, cx| crate::status_menu::operation_succeeded(cx, running()));
+    cx.run_until_parked();
+
+    assert_eq!(status(&window, cx), "Running");
+}
+
+/// A read Settings began before the status item started the server answers what it saw then.
+/// Settings sets that answer aside and reads again, so it shows the server running rather than
+/// stopped.
+#[gpui::test]
+fn a_read_begun_before_a_status_item_start_doesnt_leave_settings_stopped(cx: &mut TestAppContext) {
+    let (window, _server, service, cx) = open_servers_with_service(Ok(stopped()), cx);
+    assert_eq!(status(&window, cx), "Stopped");
+
+    // Settings begins a read, which observes the stopped server before the start.
+    service.read_before_change();
+    window.update(cx, |settings, cx| settings.check_server_service(cx));
+    // The status item starts the server while that read is still pending.
+    service.report(Ok(running()));
+    cx.update(|_, cx| crate::status_menu::operation_succeeded(cx, running()));
+    cx.run_until_parked();
+
+    assert_eq!(status(&window, cx), "Running");
+}
+
+/// Check Now reads the service again, so a start made where Settings didn't hear of it shows.
+#[gpui::test]
+fn check_now_reads_the_service_again(cx: &mut TestAppContext) {
+    use crate::ui::settings_window::server_card::VERSION_CHECK_SELECTOR;
+
+    let (window, _server, service, cx) = open_servers_with_service(Ok(stopped()), cx);
+    assert_eq!(status(&window, cx), "Stopped");
+
+    service.report(Ok(running()));
+    click(VERSION_CHECK_SELECTOR, cx);
+    cx.run_until_parked();
+
+    assert_eq!(status(&window, cx), "Running");
+}
+
 #[gpui::test]
 fn a_confirmed_stop_stays_stopped_and_offers_start(cx: &mut TestAppContext) {
     let (window, server, service, cx) = open_servers_with_service(Ok(running()), cx);

@@ -39,9 +39,10 @@ impl Fixture {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         drop(listener);
-        self.management(Management::SetPolicy(Some(
-            NetworkPolicy::new(address).unwrap(),
-        )))
+        self.management(Management::SetPolicy {
+            enabled: true,
+            policy: Some(NetworkPolicy::new(address).unwrap()),
+        })
         .unwrap();
     }
     pub(super) fn invite(&self) -> Invitation {
@@ -134,6 +135,25 @@ impl Fixture {
             }
         })
     }
+    fn serve_local_with(
+        &self,
+        panes: Arc<Mutex<Option<Box<dyn crate::pane::PaneService>>>>,
+    ) -> (
+        std::os::unix::net::UnixStream,
+        std::thread::JoinHandle<Result<(), ServerError>>,
+    ) {
+        let (client, mut server) = std::os::unix::net::UnixStream::pair().unwrap();
+        let environment = crate::host::Environment {
+            panes,
+            direct: Some(Arc::clone(&self.state)),
+            paths: self.paths.clone(),
+            stopping: Arc::default(),
+        };
+        let worker = std::thread::spawn(move || {
+            crate::host::serve_admitted(&mut server, [9; 32], "Local".into(), None, &environment)
+        });
+        (client, worker)
+    }
     pub(crate) fn endpoint(&self) -> String {
         self.invite().endpoint().to_owned()
     }
@@ -211,18 +231,18 @@ fn invitation_links_round_trip_the_endpoint_pin_secret_and_expiry() {
 }
 
 #[test]
-fn malformed_links_cannot_extend_the_enrollment_lifetime_or_replace_trust_with_dns() {
+fn malformed_links_cannot_change_the_transport_or_remove_the_invitation_secret() {
     let fixture = Fixture::new();
     fixture.enable();
     let invitation = fixture.invite();
     for (field, value) in [
-        ("expires", serde_json::json!(wire::now().unwrap() + 600)),
-        ("endpoint", serde_json::json!("wss://example.com/spaceterm")),
         (
             "endpoint",
             serde_json::json!("ws://127.0.0.1:9231/spaceterm"),
         ),
         ("token", serde_json::json!(vec![0; 32])),
+        ("valid_for_seconds", serde_json::json!(0)),
+        ("valid_for_seconds", serde_json::json!(301)),
     ] {
         use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
         let mut payload = serde_json::to_value(&invitation.payload).unwrap();
@@ -759,6 +779,23 @@ fn a_revoked_credential_can_repeat_only_its_exact_original_without_affecting_a_n
     fixture.enable();
     let credential = DeviceCredential::generate().unwrap();
     let old = fixture.enroll(&credential);
+    let other = fixture.enroll(&credential);
+    let before = std::fs::read(fixture.paths.data.join("direct.json")).unwrap();
+    assert!(matches!(
+        fixture.authenticate(
+            &credential,
+            wire::Action::Revoke {
+                actor: old.clone(),
+                operation: crypto::random().unwrap(),
+                target: other.pairing,
+            }
+        ),
+        Err(DirectError::AuthenticationRefused)
+    ));
+    assert_eq!(
+        before,
+        std::fs::read(fixture.paths.data.join("direct.json")).unwrap()
+    );
     let operation = crypto::random().unwrap();
     let wire::Answer::Revoked(original) = fixture
         .authenticate(
@@ -818,7 +855,7 @@ fn a_revoked_credential_can_repeat_only_its_exact_original_without_affecting_a_n
                 target: new.pairing
             }
         ),
-        Err(DirectError::Revoked)
+        Err(DirectError::AuthenticationRefused)
     ));
     assert!(matches!(
         fixture.authenticate(&credential, wire::Action::Connect { paired: new }),
@@ -1063,9 +1100,17 @@ fn a_retired_exposure_generation_refuses_inflight_proof_and_late_registration_af
     let ManagementReply::Status(status) = fixture.management(Management::Status).unwrap() else {
         panic!()
     };
-    fixture.management(Management::SetPolicy(None)).unwrap();
     fixture
-        .management(Management::SetPolicy(status.policy))
+        .management(Management::SetPolicy {
+            enabled: false,
+            policy: None,
+        })
+        .unwrap();
+    fixture
+        .management(Management::SetPolicy {
+            enabled: true,
+            policy: status.policy,
+        })
         .unwrap();
     let mut state = fixture.state.lock().unwrap();
     assert_eq!(
@@ -1109,9 +1154,17 @@ fn a_tcp_socket_accepted_before_policy_replacement_cannot_join_the_new_listener(
     let ManagementReply::Status(status) = fixture.management(Management::Status).unwrap() else {
         panic!()
     };
-    fixture.management(Management::SetPolicy(None)).unwrap();
     fixture
-        .management(Management::SetPolicy(status.policy))
+        .management(Management::SetPolicy {
+            enabled: false,
+            policy: None,
+        })
+        .unwrap();
+    fixture
+        .management(Management::SetPolicy {
+            enabled: true,
+            policy: status.policy,
+        })
         .unwrap();
     let environment = crate::host::Environment {
         panes: Arc::new(Mutex::new(None)),
@@ -1188,7 +1241,7 @@ fn revocation_closes_every_authorized_connection_and_notifies_only_the_target_ru
         let reply: crate::pane::Reply = wire.read().unwrap();
         assert!(matches!(
             reply,
-            crate::pane::Reply::Direct(Ok(ManagementReply::Revoked(_)))
+            crate::pane::Reply::Direct(Err(DirectError::AuthenticationRefused))
         ));
         wire.write(&crate::pane::Request::Direct(Management::Status))
             .unwrap();
@@ -1197,6 +1250,20 @@ fn revocation_closes_every_authorized_connection_and_notifies_only_the_target_ru
             crate::pane::Reply::Direct(Ok(ManagementReply::Status(_)))
         ));
     }
+    assert!(retired.lock().unwrap().is_empty());
+    let (mut local, local_worker) = fixture.serve_local_with(Arc::clone(&runtime));
+    let mut wire = crate::protocol::Wire::terminal(&mut local).unwrap();
+    wire.write(&crate::pane::Request::Direct(Management::Revoke {
+        operation: crypto::random().unwrap(),
+        target: target.pairing,
+    }))
+    .unwrap();
+    assert!(matches!(
+        wire.read::<crate::pane::Reply>().unwrap(),
+        crate::pane::Reply::Direct(Ok(ManagementReply::Revoked(_)))
+    ));
+    drop(local);
+    let _ = local_worker.join().unwrap();
     assert_eq!(*retired.lock().unwrap(), vec![target.client]);
     assert!(
         crate::protocol::Wire::terminal(&mut first)
@@ -1210,7 +1277,12 @@ fn revocation_closes_every_authorized_connection_and_notifies_only_the_target_ru
             .read_frame()
             .is_err()
     );
-    fixture.management(Management::SetPolicy(None)).unwrap();
+    fixture
+        .management(Management::SetPolicy {
+            enabled: false,
+            policy: None,
+        })
+        .unwrap();
     assert!(
         crate::protocol::Wire::terminal(&mut other)
             .unwrap()
@@ -1233,7 +1305,7 @@ fn revocation_closes_every_authorized_connection_and_notifies_only_the_target_ru
 }
 
 #[test]
-fn a_policy_reply_retires_the_direct_issuer_without_processing_its_pipelined_request() {
+fn a_paired_policy_request_is_refused_without_mutation_or_retiring_its_connection() {
     use std::io::{Read, Write};
     for change_address in [false, true] {
         let fixture = Fixture::new();
@@ -1255,13 +1327,25 @@ fn a_policy_reply_retires_the_direct_issuer_without_processing_its_pipelined_req
             let listener = TcpListener::bind("127.0.0.1:0").unwrap();
             NetworkPolicy::new(listener.local_addr().unwrap()).unwrap()
         });
-        // Encode both requests before one socket write, so retirement cannot race
-        // the test while it is still trying to enqueue the follow-up frame.
+        {
+            // The admission reply precedes the retained connection timestamp. A server
+            // request completes after that metadata write and fences this baseline.
+            let mut wire = crate::protocol::Wire::terminal(&mut connection).unwrap();
+            wire.write(&crate::pane::Request::Direct(Management::Status))
+                .unwrap();
+            assert!(matches!(
+                wire.read::<crate::pane::Reply>().unwrap(),
+                crate::pane::Reply::Direct(Ok(ManagementReply::Status(_)))
+            ));
+        }
+        let before = std::fs::read(fixture.paths.data.join("direct.json")).unwrap();
+        // Refusal leaves this connection usable for the already-enqueued next request.
         let (mut encoded, mut pending) = std::os::unix::net::UnixStream::pair().unwrap();
         let mut wire = crate::protocol::Wire::terminal(&mut encoded).unwrap();
-        wire.write(&crate::pane::Request::Direct(Management::SetPolicy(
-            policy.clone(),
-        )))
+        wire.write(&crate::pane::Request::Direct(Management::SetPolicy {
+            enabled: policy.is_some(),
+            policy,
+        }))
         .unwrap();
         wire.write(&crate::pane::Request::Capabilities).unwrap();
         encoded.shutdown(std::net::Shutdown::Write).unwrap();
@@ -1270,12 +1354,17 @@ fn a_policy_reply_retires_the_direct_issuer_without_processing_its_pipelined_req
         connection.write_all(&requests).unwrap();
         let mut wire = crate::protocol::Wire::terminal(&mut connection).unwrap();
         let reply = wire.read::<crate::pane::Reply>().unwrap();
+        assert!(matches!(
+            reply,
+            crate::pane::Reply::Direct(Err(DirectError::AuthenticationRefused))
+        ));
+        assert!(matches!(
+            wire.read::<crate::pane::Reply>().unwrap(),
+            crate::pane::Reply::Capabilities { .. }
+        ));
         assert!(
-            matches!(reply, crate::pane::Reply::Direct(Ok(ManagementReply::Status(status))) if status.policy == policy)
-        );
-        assert!(
-            wire.read_frame().is_err(),
-            "the retired issuer must receive no follow-up reply"
+            before == std::fs::read(fixture.paths.data.join("direct.json")).unwrap(),
+            "a refused policy request must leave the complete retained record unchanged"
         );
         drop(connection);
         let _ = server.join().unwrap();
@@ -1334,6 +1423,8 @@ fn setup(
         generation: status.setup_generation,
         pin: status.pin,
         expected_policy: status.policy,
+        expected_enabled: status.enabled,
+        endpoint: format!("wss://{}/spaceterm", policy.bind),
         policy,
         operation,
         public_key: credential.public_key().unwrap(),
@@ -1345,6 +1436,8 @@ fn reserve(fixture: &Fixture, request: &Management) {
         generation,
         pin,
         expected_policy,
+        expected_enabled,
+        endpoint,
         policy,
         operation,
         public_key,
@@ -1358,6 +1451,8 @@ fn reserve(fixture: &Fixture, request: &Management) {
             generation,
             pin,
             expected_policy,
+            expected_enabled,
+            endpoint,
             policy,
             operation,
             public_key,
@@ -1435,7 +1530,7 @@ fn account_setup_cancellation_checks_the_original_pin_and_fences_admission_with_
     assert!(matches!(
         reopened.lock().unwrap().manage(None, Management::Status),
         Ok((ManagementReply::Status(status), _))
-            if status.policy.is_none() && status.listener == ListenerState::Off
+            if !status.enabled && status.listener == ListenerState::Off
     ));
     reopened.lock().unwrap().stop();
 }
@@ -1468,11 +1563,13 @@ fn setup_retries_recover_one_pairing_after_lost_reply_and_reject_substituted_ori
     assert!(
         matches!(reopened.lock().unwrap().manage(None, Management::Devices), Ok((ManagementReply::Devices(devices), _)) if devices.len() == 1)
     );
-    for changed_field in 0..5 {
+    for changed_field in 0..7 {
         let mut changed = request.clone();
         let Management::Setup {
             pin,
             expected_policy,
+            expected_enabled,
+            endpoint,
             policy,
             public_key,
             name,
@@ -1488,7 +1585,9 @@ fn setup_retries_recover_one_pairing_after_lost_reply_and_reject_substituted_ori
                 .set_port(if policy.bind.port() == 1 { 2 } else { 1 }),
             2 => public_key[0] ^= 1,
             3 => *name = "Another client".into(),
-            _ => *expected_policy = None,
+            4 => *expected_policy = None,
+            5 => *expected_enabled = !*expected_enabled,
+            _ => *endpoint = format!("wss://another.example:{}/spaceterm", policy.bind.port()),
         }
         assert!(matches!(
             reopened.lock().unwrap().manage(None, changed),
@@ -1508,6 +1607,8 @@ fn setup_requires_the_observed_policy_before_preparation_and_enrollment() {
         generation,
         pin,
         expected_policy,
+        expected_enabled,
+        endpoint,
         policy,
         operation,
         public_key,
@@ -1521,6 +1622,8 @@ fn setup_requires_the_observed_policy_before_preparation_and_enrollment() {
             generation,
             pin,
             expected_policy,
+            expected_enabled,
+            endpoint,
             policy,
             operation,
             public_key,
@@ -1531,7 +1634,12 @@ fn setup_requires_the_observed_policy_before_preparation_and_enrollment() {
 
     let request = setup(&fixture, [97; 32], &credential);
     reserve(&fixture, &request);
-    fixture.management(Management::SetPolicy(None)).unwrap();
+    fixture
+        .management(Management::SetPolicy {
+            enabled: false,
+            policy: None,
+        })
+        .unwrap();
     fixture.state.lock().unwrap().stop();
     let reopened = host::State::open(&fixture.paths).unwrap();
     assert!(matches!(
@@ -1544,7 +1652,7 @@ fn setup_requires_the_observed_policy_before_preparation_and_enrollment() {
     ));
     assert!(matches!(
         reopened.lock().unwrap().manage(None, Management::Status),
-        Ok((ManagementReply::Status(status), _)) if status.policy.is_none()
+        Ok((ManagementReply::Status(status), _)) if !status.enabled
     ));
     reopened.lock().unwrap().stop();
 }
@@ -1559,7 +1667,12 @@ fn admitted_setup_retry_returns_its_original_pairing_without_replacing_a_changed
     let ManagementReply::Setup(original) = fixture.management(request.clone()).unwrap() else {
         panic!()
     };
-    fixture.management(Management::SetPolicy(None)).unwrap();
+    fixture
+        .management(Management::SetPolicy {
+            enabled: false,
+            policy: None,
+        })
+        .unwrap();
     reserve(&fixture, &request);
     assert!(matches!(
         fixture.management(request),
@@ -1567,7 +1680,7 @@ fn admitted_setup_retry_returns_its_original_pairing_without_replacing_a_changed
     ));
     assert!(matches!(
         fixture.management(Management::Status),
-        Ok(ManagementReply::Status(status)) if status.policy.is_none()
+        Ok(ManagementReply::Status(status)) if !status.enabled
     ));
 }
 
@@ -1634,6 +1747,8 @@ fn paired_wss_authority_cannot_prepare_enroll_or_cancel_account_setup() {
         generation,
         pin,
         expected_policy,
+        expected_enabled,
+        endpoint,
         policy,
         operation,
         public_key,
@@ -1659,6 +1774,8 @@ fn paired_wss_authority_cannot_prepare_enroll_or_cancel_account_setup() {
             generation,
             pin: pin.clone(),
             expected_policy,
+            expected_enabled,
+            endpoint,
             policy,
             operation,
             public_key,
@@ -1704,6 +1821,8 @@ fn completed_cancellations_retire_capacity_and_reject_delayed_prepare_and_admiss
         generation,
         pin,
         expected_policy,
+        expected_enabled,
+        endpoint,
         policy,
         operation,
         public_key,
@@ -1717,6 +1836,8 @@ fn completed_cancellations_retire_capacity_and_reject_delayed_prepare_and_admiss
             generation,
             pin,
             expected_policy,
+            expected_enabled,
+            endpoint,
             policy,
             operation,
             public_key,
@@ -1747,6 +1868,8 @@ fn unknown_current_generation_requires_account_cancellation_to_fence_delayed_pre
         operation,
         generation,
         expected_policy,
+        expected_enabled,
+        endpoint,
         policy,
         public_key,
         name,
@@ -1785,6 +1908,8 @@ fn unknown_current_generation_requires_account_cancellation_to_fence_delayed_pre
             generation,
             pin,
             expected_policy,
+            expected_enabled,
+            endpoint,
             policy,
             operation,
             public_key,
@@ -1802,4 +1927,612 @@ fn unknown_current_generation_requires_account_cancellation_to_fence_delayed_pre
         ),
         Ok(wire::Answer::Cancelled(None))
     ));
+}
+
+#[test]
+fn configured_listener_survives_off_on_and_can_be_selected_before_exposure() {
+    let mut fixture = Fixture::new();
+    assert!(matches!(
+        fixture.management(Management::SetPolicy {
+            policy: None,
+            enabled: true
+        }),
+        Err(DirectError::InvalidRequest)
+    ));
+    let socket = TcpListener::bind("127.0.0.1:0").unwrap();
+    let policy = NetworkPolicy::new(socket.local_addr().unwrap()).unwrap();
+    drop(socket);
+    fixture
+        .management(Management::SetPolicy {
+            policy: Some(policy.clone()),
+            enabled: false,
+        })
+        .unwrap();
+    for enabled in [false, true, false, true, false] {
+        let ManagementReply::Status(status) = fixture
+            .management(Management::SetPolicy {
+                policy: None,
+                enabled,
+            })
+            .unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(status.policy, Some(policy.clone()));
+        assert_eq!(status.enabled, enabled);
+        assert_eq!(
+            status.listener,
+            if enabled {
+                ListenerState::Listening { addr: policy.bind }
+            } else {
+                ListenerState::Off
+            }
+        );
+        fixture.state.lock().unwrap().stop();
+        fixture.state = host::State::open(&fixture.paths).unwrap();
+        let ManagementReply::Status(reopened) = fixture.management(Management::Status).unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(
+            (reopened.policy, reopened.enabled),
+            (Some(policy.clone()), enabled)
+        );
+    }
+}
+
+#[test]
+fn dns_wss_connections_reconnect_with_the_saved_name_and_require_the_original_pin() {
+    let fixture = Fixture::new();
+    fixture.enable();
+    let credential = DeviceCredential::generate().unwrap();
+    let paired = fixture.enroll(&credential);
+    let port = Endpoint::from_url(&fixture.endpoint()).unwrap().port();
+    let endpoint = format!("wss://localhost:{port}/spaceterm");
+    for _ in 0..2 {
+        let worker = fixture.serve_next();
+        let mut connection = DirectConnection::connect(&endpoint, &paired, &credential).unwrap();
+        crate::protocol::admit_transport(
+            &mut connection,
+            (&paired.client, &"DNS client".into()),
+            &paired.pin.server,
+            &paired.pin.build,
+            &[crate::protocol::MAJOR],
+        )
+        .unwrap();
+        drop(connection);
+        let _ = worker.join().unwrap();
+    }
+    let mut wrong = paired;
+    wrong.pin.certificate[0] ^= 1;
+    let worker = fixture.serve_next();
+    assert!(matches!(
+        DirectConnection::connect(&endpoint, &wrong, &credential),
+        Err(DirectError::PinMismatch)
+    ));
+    let _ = worker.join().unwrap();
+}
+
+#[test]
+fn client_clock_cannot_expire_or_reject_an_invitation_before_server_observation() {
+    let fixture = Fixture::new();
+    fixture.enable();
+    let invitation = fixture.invite();
+    let credential = DeviceCredential::generate().unwrap();
+    for expires in [1, wire::now().unwrap() + 600] {
+        let mut payload = invitation.payload.clone();
+        payload.expires = expires;
+        let encoded = client::invitation(payload).unwrap();
+        let parsed = Invitation::parse(&encoded.display_text()).unwrap();
+        assert!(Enrollment::prepare(&parsed, "Clock skew".into(), &credential).is_ok());
+    }
+}
+
+#[test]
+fn setup_preserves_distinct_public_and_listener_ports_across_reopen_and_exact_replay() {
+    let mut fixture = Fixture::new();
+    let credential = DeviceCredential::generate().unwrap();
+    let mut request = setup(&fixture, [104; 32], &credential);
+    let Management::Setup {
+        endpoint, policy, ..
+    } = &mut request
+    else {
+        panic!()
+    };
+    let bind = policy.bind;
+    let public_port = if bind.port() == 9443 { 9444 } else { 9443 };
+    *endpoint = format!("wss://public.example:{public_port}/spaceterm");
+    assert_ne!(public_port, bind.port());
+    reserve(&fixture, &request);
+
+    // A proxy/NAT endpoint and its exact upstream listener remain independently bound
+    // when the durable reservation is reloaded before admission.
+    fixture.state.lock().unwrap().stop();
+    fixture.state = host::State::open(&fixture.paths).unwrap();
+    for change_bind in [false, true] {
+        let mut substituted = request.clone();
+        let Management::Setup {
+            endpoint, policy, ..
+        } = &mut substituted
+        else {
+            panic!()
+        };
+        if change_bind {
+            policy.bind.set_port(public_port);
+        } else {
+            *endpoint = format!("wss://other.example:{public_port}/spaceterm");
+        }
+        assert!(matches!(
+            fixture.management(substituted),
+            Err(DirectError::Substituted)
+        ));
+    }
+    let ManagementReply::Setup(original) = fixture.management(request.clone()).unwrap() else {
+        panic!()
+    };
+    fixture.state.lock().unwrap().stop();
+    fixture.state = host::State::open(&fixture.paths).unwrap();
+    let ManagementReply::Setup(repeated) = fixture.management(request).unwrap() else {
+        panic!()
+    };
+    assert_eq!(repeated, original);
+    let ManagementReply::Status(status) = fixture.management(Management::Status).unwrap() else {
+        panic!()
+    };
+    assert_eq!(status.policy.unwrap().bind, bind);
+    assert!(status.enabled);
+}
+
+#[test]
+fn paired_administration_is_refused_without_changing_invitations_claims_or_devices() {
+    let fixture = Fixture::new();
+    fixture.enable();
+    let credential = DeviceCredential::generate().unwrap();
+    let paired = fixture.enroll(&credential);
+    let other_key = DeviceCredential::generate().unwrap();
+    let other = fixture.enroll(&other_key);
+    let invitation = fixture.invite();
+    let pending_key = DeviceCredential::generate().unwrap();
+    let claim = fixture.claim(&invitation, &pending_key);
+    let setup = setup(&fixture, [77; 32], &pending_key);
+    let Management::Setup { pin, operation, .. } = &setup else {
+        panic!()
+    };
+    let cancel = Management::CancelSetup {
+        pin: pin.clone(),
+        operation: *operation,
+    };
+    let server = fixture.serve_next();
+    let mut connection =
+        DirectConnection::connect(&fixture.endpoint(), &paired, &credential).unwrap();
+    crate::protocol::admit_transport(
+        &mut connection,
+        (&paired.client, &"Device".into()),
+        &paired.pin.server,
+        &paired.pin.build,
+        &[crate::protocol::MAJOR],
+    )
+    .unwrap();
+    let mut wire = crate::protocol::Wire::terminal(&mut connection).unwrap();
+    // Observe the completed admission timestamp write before measuring admin effects.
+    wire.write(&crate::pane::Request::Direct(Management::Status))
+        .unwrap();
+    assert!(matches!(
+        wire.read::<crate::pane::Reply>().unwrap(),
+        crate::pane::Reply::Direct(Ok(ManagementReply::Status(_)))
+    ));
+    let before = std::fs::read(fixture.paths.data.join("direct.json")).unwrap();
+    for request in [
+        Management::Invite,
+        Management::Withdraw(invitation.id()),
+        Management::Approve(claim.clone()),
+        Management::Reject(claim.id),
+        Management::Revoke {
+            operation: crypto::random().unwrap(),
+            target: other.pairing,
+        },
+        setup,
+        cancel,
+    ] {
+        wire.write(&crate::pane::Request::Direct(request)).unwrap();
+        assert!(matches!(
+            wire.read::<crate::pane::Reply>().unwrap(),
+            crate::pane::Reply::Direct(Err(DirectError::AuthenticationRefused))
+        ));
+    }
+    for request in [Management::Status, Management::Claims, Management::Devices] {
+        wire.write(&crate::pane::Request::Direct(request)).unwrap();
+        assert!(matches!(
+            wire.read::<crate::pane::Reply>().unwrap(),
+            crate::pane::Reply::Direct(Ok(_))
+        ));
+    }
+    assert!(
+        before == std::fs::read(fixture.paths.data.join("direct.json")).unwrap(),
+        "refused administration must leave the complete retained record unchanged"
+    );
+    assert!(matches!(
+        fixture.management(Management::Approve(claim)),
+        Ok(ManagementReply::Approved(_))
+    ));
+    assert!(matches!(
+        fixture.authenticate(&other_key, wire::Action::Connect { paired: other }),
+        Ok(wire::Answer::Connected)
+    ));
+    drop(connection);
+    let _ = server.join().unwrap();
+}
+
+#[test]
+fn end_all_sessions_requires_account_local_admission_but_workspace_mutations_do_not() {
+    #[derive(Default)]
+    struct Effects {
+        session_ended: bool,
+        workspace_created: bool,
+        requests: usize,
+    }
+    struct Runtime(Arc<Mutex<Effects>>);
+    impl crate::pane::PaneService for Runtime {
+        fn request(
+            &mut self,
+            _client: [u8; 32],
+            _connection: [u8; 32],
+            request: crate::pane::Request,
+        ) -> crate::pane::Reply {
+            let mut effects = self.0.lock().unwrap();
+            effects.requests += 1;
+            match request {
+                crate::pane::Request::Mutate {
+                    mutation: crate::hierarchy::Mutation::EndAllSessions { .. },
+                    ..
+                } => effects.session_ended = true,
+                crate::pane::Request::Mutate {
+                    mutation: crate::hierarchy::Mutation::CreateWorkspace { .. },
+                    ..
+                } => effects.workspace_created = true,
+                _ => panic!("unexpected PaneService dispatch"),
+            }
+            crate::pane::Reply::Unchanged
+        }
+        fn disconnected(&mut self, _connection: [u8; 32]) {}
+        fn shutdown(&mut self) -> Result<(), ServerError> {
+            Ok(())
+        }
+    }
+    let fixture = Fixture::new();
+    fixture.enable();
+    let key = DeviceCredential::generate().unwrap();
+    let paired = fixture.enroll(&key);
+    let effects = Arc::new(Mutex::new(Effects::default()));
+    let runtime: Arc<Mutex<Option<Box<dyn crate::pane::PaneService>>>> =
+        Arc::new(Mutex::new(Some(Box::new(Runtime(Arc::clone(&effects))))));
+    let server = fixture.serve_next_with(Arc::clone(&runtime));
+    let mut connection = DirectConnection::connect(&fixture.endpoint(), &paired, &key).unwrap();
+    crate::protocol::admit_transport(
+        &mut connection,
+        (&paired.client, &"Device".into()),
+        &paired.pin.server,
+        &paired.pin.build,
+        &[crate::protocol::MAJOR],
+    )
+    .unwrap();
+    let end = crate::pane::Request::Mutate {
+        sequence: 1,
+        mutation: crate::hierarchy::Mutation::EndAllSessions {
+            confirmation: crate::hierarchy::CloseInventory {
+                boot: [1; 32],
+                sessions: vec![crate::hierarchy::ConfirmedPane {
+                    id: [2; 32],
+                    session: Some([3; 32]),
+                }],
+                controls: None,
+            },
+        },
+    };
+    let mut wire = crate::protocol::Wire::terminal(&mut connection).unwrap();
+    wire.write(&end).unwrap();
+    assert!(matches!(
+        wire.read::<crate::pane::Reply>().unwrap(),
+        crate::pane::Reply::Refused(crate::pane::Refusal::Unsupported)
+    ));
+    {
+        let effects = effects.lock().unwrap();
+        assert!(!effects.session_ended);
+        assert_eq!(effects.requests, 0);
+    }
+    wire.write(&crate::pane::Request::Mutate {
+        sequence: 1,
+        mutation: crate::hierarchy::Mutation::CreateWorkspace {
+            name: "Remote Workspace".into(),
+            directory: None,
+        },
+    })
+    .unwrap();
+    assert!(matches!(
+        wire.read::<crate::pane::Reply>().unwrap(),
+        crate::pane::Reply::Unchanged
+    ));
+    assert!(effects.lock().unwrap().workspace_created);
+    let (mut local, local_worker) = fixture.serve_local_with(Arc::clone(&runtime));
+    let mut wire = crate::protocol::Wire::terminal(&mut local).unwrap();
+    wire.write(&end).unwrap();
+    assert!(matches!(
+        wire.read::<crate::pane::Reply>().unwrap(),
+        crate::pane::Reply::Unchanged
+    ));
+    {
+        let effects = effects.lock().unwrap();
+        assert!(effects.session_ended);
+        assert_eq!(effects.requests, 2);
+    }
+    drop(local);
+    let _ = local_worker.join().unwrap();
+    drop(connection);
+    let _ = server.join().unwrap();
+}
+
+#[cfg(feature = "client")]
+#[test]
+fn same_pairing_refresh_drop_preserves_concurrent_first_shared_pane_admission() {
+    use crate::{
+        ServerConnection,
+        pane::{PaneService, Reply, Request},
+    };
+    use std::sync::{Barrier, mpsc};
+
+    struct ReadOnlyHost;
+    impl PaneService for ReadOnlyHost {
+        fn request(&mut self, _client: [u8; 32], _connection: [u8; 32], request: Request) -> Reply {
+            match request {
+                Request::Capabilities => Reply::Capabilities {
+                    development_pane: true,
+                    pane_takeover: false,
+                    interactive_input: false,
+                    key_input_batches: false,
+                    native_effects: false,
+                    reading: false,
+                    graphics: false,
+                    accessibility: false,
+                    directory_recovery: false,
+                    directory_creation: false,
+                    directory_matching: false,
+                    worktree_writes: false,
+                    end_all_sessions: false,
+                    workspace_policy: true,
+                    presentation_changes: false,
+                },
+                _ => Reply::Refused(crate::pane::Refusal::Unsupported),
+            }
+        }
+        fn disconnected(&mut self, _connection: [u8; 32]) {}
+        fn shutdown(&mut self) -> Result<(), ServerError> {
+            Ok(())
+        }
+    }
+    fn observed<T>(
+        cycle: usize,
+        stage: &'static str,
+        started: Instant,
+        result: Result<T, ServerError>,
+    ) -> Result<T, ServerError> {
+        if let Err(error) = &result {
+            eprintln!(
+                "DIAGNOSTIC direct-admission cycle={cycle} stage={stage} elapsed_ms={} error={error:?}",
+                started.elapsed().as_millis()
+            );
+        }
+        result
+    }
+    struct Connector {
+        endpoint: String,
+        paired: PairedDevice,
+        credential: Arc<DeviceCredential>,
+        admitted: Barrier,
+        cycle: usize,
+    }
+    impl DirectConnector for Connector {
+        fn connect(&self) -> Result<DirectConnection, DirectError> {
+            let started = Instant::now();
+            let result = DirectConnection::connect(&self.endpoint, &self.paired, &self.credential);
+            if let Err(error) = result.as_ref() {
+                let error = ServerError::Direct(*error);
+                eprintln!(
+                    "DIAGNOSTIC direct-admission cycle={} stage=direct-connect elapsed_ms={} error={error:?}",
+                    self.cycle,
+                    started.elapsed().as_millis()
+                );
+            }
+            // Both independent WSS transports finish authentication before either
+            // starts protocol/capability admission. Errors also rendezvous so the
+            // sibling cannot be stranded merely because this connect was refused.
+            self.admitted.wait();
+            result
+        }
+    }
+
+    let fixture = Fixture::new();
+    fixture.enable();
+    let credential = DeviceCredential::generate().unwrap();
+    let paired = fixture.enroll(&credential);
+    let credential = Arc::new(credential);
+    let endpoint = fixture.endpoint();
+    let runtime: Arc<Mutex<Option<Box<dyn PaneService>>>> =
+        Arc::new(Mutex::new(Some(Box::new(ReadOnlyHost))));
+    let started = Instant::now();
+    // More than 64 cycles exercise registration pruning, with only two admitted
+    // transports at once. Pacing crosses timestamp seconds and the five-second
+    // route-health interval without holding a host lock or delaying host progress.
+    for cycle in 0..68 {
+        let due = started + Duration::from_millis(cycle as u64 * 100);
+        if let Some(wait) = due.checked_duration_since(Instant::now()) {
+            std::thread::sleep(wait);
+        }
+        observed(
+            cycle,
+            "overall-deadline",
+            started,
+            if started.elapsed() < Duration::from_secs(60) {
+                Ok(())
+            } else {
+                Err(ServerError::Protocol)
+            },
+        )
+        .unwrap();
+        let server = observed(
+            cycle,
+            "construct-handle",
+            started,
+            ServerConnection::direct(
+                &paired.pin.build,
+                [42; 32],
+                paired.clone(),
+                Arc::new(Connector {
+                    endpoint: endpoint.clone(),
+                    paired: paired.clone(),
+                    credential: Arc::clone(&credential),
+                    admitted: Barrier::new(2),
+                    cycle,
+                }),
+            ),
+        )
+        .unwrap();
+        let first_host = fixture.serve_next_with(Arc::clone(&runtime));
+        let second_host = fixture.serve_next_with(Arc::clone(&runtime));
+        let (refresh_done, refresh_dropped) = mpsc::sync_channel(1);
+        let refresh_server = server.clone();
+        let refresh = std::thread::spawn(move || {
+            let began = Instant::now();
+            // refresh negotiates and drops its short-lived Pane transport before returning.
+            let result = observed(
+                cycle,
+                "refresh",
+                began,
+                refresh_server.refresh().map(|_| ()),
+            );
+            let _ = refresh_done.send(());
+            result
+        });
+        let shared = std::thread::spawn(move || {
+            let began = Instant::now();
+            let mut connection = observed(
+                cycle,
+                "first-shared-connect",
+                began,
+                server.connect_shared_pane(),
+            )?;
+            observed(
+                cycle,
+                "refresh-drop-barrier",
+                began,
+                refresh_dropped
+                    .recv_timeout(Duration::from_secs(35))
+                    .map_err(|_| ServerError::Protocol),
+            )?;
+            let reply = observed(
+                cycle,
+                "sibling-capabilities",
+                began,
+                connection.exchange(&Request::Capabilities),
+            )?;
+            observed(
+                cycle,
+                "sibling-capability-reply",
+                began,
+                match reply {
+                    Reply::Capabilities {
+                        development_pane: true,
+                        workspace_policy: true,
+                        ..
+                    } => Ok(()),
+                    _ => Err(ServerError::Unsupported),
+                },
+            )
+        });
+        let refreshed = observed(
+            cycle,
+            "refresh-worker",
+            started,
+            refresh.join().unwrap_or(Err(ServerError::StartupFailed)),
+        );
+        let connected = observed(
+            cycle,
+            "shared-worker",
+            started,
+            shared.join().unwrap_or(Err(ServerError::StartupFailed)),
+        );
+        let mut released = true;
+        for (stage, worker) in [
+            ("first-host-release", first_host),
+            ("second-host-release", second_host),
+        ] {
+            // A dropped client ends the server's next frame read with Protocol/EOF.
+            let result = match worker.join() {
+                Ok(Ok(()) | Err(ServerError::Protocol)) => Ok(()),
+                Ok(Err(error)) => Err(error),
+                Err(_) => Err(ServerError::StartupFailed),
+            };
+            released &= observed(cycle, stage, started, result).is_ok();
+        }
+        assert!(
+            refreshed.is_ok() && connected.is_ok() && released,
+            "same-pair concurrent admission failed; see bounded stage diagnostic"
+        );
+    }
+}
+
+#[test]
+fn a_tcp_close_before_tls_is_a_transport_failure() {
+    let fixture = Fixture::new();
+    fixture.enable();
+    let credential = DeviceCredential::generate().unwrap();
+    let paired = fixture.enroll(&credential);
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = format!("wss://{}/spaceterm", listener.local_addr().unwrap());
+    let peer = std::thread::spawn(move || {
+        let (socket, _) = listener.accept().unwrap();
+        // This peer closes before sending any TLS certificate or device admission proof.
+        drop(socket);
+    });
+    let started = Instant::now();
+    let result = DirectConnection::connect(&endpoint, &paired, &credential);
+    peer.join().unwrap();
+    if let Err(error) = &result
+        && *error != DirectError::Transport
+    {
+        eprintln!(
+            "DIAGNOSTIC direct-admission cycle=0 stage=tcp-close-before-tls elapsed_ms={} error={error:?}",
+            started.elapsed().as_millis()
+        );
+    }
+    assert!(
+        matches!(result, Err(DirectError::Transport)),
+        "a TCP close before TLS authentication must remain a transport failure"
+    );
+}
+
+#[test]
+fn invalid_tls_data_is_still_an_authentication_refusal() {
+    use std::io::{Read, Write};
+
+    let fixture = Fixture::new();
+    fixture.enable();
+    let credential = DeviceCredential::generate().unwrap();
+    let paired = fixture.enroll(&credential);
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = format!("wss://{}/spaceterm", listener.local_addr().unwrap());
+    let peer = std::thread::spawn(move || {
+        let (mut socket, _) = listener.accept().unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut hello = [0; 4096];
+        assert!(socket.read(&mut hello).unwrap() > 0);
+        // An invalid TLS content type must not turn into a retryable socket failure.
+        socket.write_all(&[0xff, 0x03, 0x03, 0, 0]).unwrap();
+        socket.shutdown(std::net::Shutdown::Write).unwrap();
+        let _ = std::io::copy(&mut socket, &mut std::io::sink());
+    });
+    let result = DirectConnection::connect(&endpoint, &paired, &credential);
+    peer.join().unwrap();
+    assert!(matches!(result, Err(DirectError::AuthenticationRefused)));
 }

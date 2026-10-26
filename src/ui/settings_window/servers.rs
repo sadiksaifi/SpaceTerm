@@ -1180,6 +1180,9 @@ pub(super) struct ServerServiceRow {
     /// Start Server was chosen while a read ran. It follows once the reads finish, if they still
     /// offer it.
     start_requested: bool,
+    /// The service changed outside Settings while a read ran. That read may have observed the
+    /// service before the change, so its answer is set aside and the service is read again.
+    read_outdated: bool,
     /// The window owns passive reads; admitted changes belong to LocalServerOperations.
     _operation: Option<Task<()>>,
 }
@@ -1199,6 +1202,7 @@ impl ServerServiceRow {
             queued_automatic_start: None,
             last_confirmed_automatic_start: None,
             start_requested: false,
+            read_outdated: false,
             _operation: None,
         }
     }
@@ -1441,6 +1445,19 @@ impl SettingsWindow {
     /// Reads the service as the section comes into view. A running action keeps its place.
     pub(super) fn check_server_service(&mut self, cx: &mut Context<Self>) {
         self.run_server_service(ServiceAction::Check, cx);
+    }
+
+    /// Reads the service after it changed outside Settings. A read already running may have seen
+    /// it before the change, so its answer is set aside and the service is read again once it
+    /// ends.
+    pub(super) fn reread_server_service(&mut self, cx: &mut Context<Self>) {
+        if let Some(row) = &mut self.server_service
+            && row.state.working == Some(ServiceAction::Check)
+        {
+            row.read_outdated = true;
+            return;
+        }
+        self.check_server_service(cx);
     }
 
     /// Runs one action from the service row. Install installs the one verified build the row
@@ -1773,6 +1790,15 @@ impl SettingsWindow {
             row._operation = Some(cx.spawn(async move |settings, cx| {
                 let state = result.await;
                 let _ = settings.update(cx, |settings, cx| {
+                    // An answer from before an outside change describes nothing current.
+                    if let Some(row) = &mut settings.server_service
+                        && std::mem::take(&mut row.read_outdated)
+                    {
+                        row.state.working = None;
+                        settings.check_server_service(cx);
+                        cx.notify();
+                        return;
+                    }
                     settings
                         .local_operations
                         .update(cx, |owner, _| owner.service = Some(state.clone()));
@@ -2002,6 +2028,9 @@ pub(super) mod testing {
         authorized: Mutex<bool>,
         prompt: Mutex<Prompt>,
         calls: Mutex<Vec<ServiceCall>>,
+        /// What the next status read answers, as a read the service began before a later change
+        /// would, ahead of what the service reports now.
+        earlier: Mutex<Option<Result<ServiceStatus, ServerError>>>,
     }
 
     impl ScriptedService {
@@ -2032,6 +2061,7 @@ pub(super) mod testing {
                 authorized: Mutex::new(startup == ServiceStartup::AtLogin),
                 prompt: Mutex::new(Prompt::Approve),
                 calls: Mutex::new(Vec::new()),
+                earlier: Mutex::new(None),
             })
         }
 
@@ -2041,6 +2071,13 @@ pub(super) mod testing {
             status: Result<ServiceStatus, ServerError>,
         ) {
             *self.status.lock().expect("status") = status;
+        }
+
+        /// Makes the next status read answer what the service reports now, even after a later
+        /// change, as a read that began before the change does.
+        pub(in crate::ui::settings_window) fn read_before_change(&self) {
+            let now = *self.status.lock().expect("status");
+            *self.earlier.lock().expect("earlier") = Some(now);
         }
 
         /// Sets what the next authorization prompt does.
@@ -2099,6 +2136,9 @@ pub(super) mod testing {
     impl ServerServiceControl for ScriptedService {
         fn status(&self) -> Result<ServiceStatus, ServerError> {
             self.calls.lock().expect("calls").push(ServiceCall::Status);
+            if let Some(earlier) = self.earlier.lock().expect("earlier").take() {
+                return earlier;
+            }
             *self.status.lock().expect("status")
         }
 

@@ -572,7 +572,7 @@ mod exercise {
                 "cleanup preserved a changed exposure policy",
             )?;
             if policy.is_some() {
-                api(self.owner.set_direct_policy(None))?;
+                api(self.owner.set_direct_policy(None, false))?;
             }
             require(
                 inventory(&mut connection)?.0.workspaces == self.baseline.workspaces,
@@ -670,13 +670,20 @@ mod exercise {
             "expected Development server identity changed",
         )?;
         require(
-            initial.policy.is_none()
+            !initial.enabled
                 && initial.listener == ListenerState::Off
                 && api(owner.paired_devices())?.is_empty()
                 && api(owner.pairing_claims())?.is_empty(),
             "scope guard refused: exposure, paired devices or pending claims already exist",
         )?;
         let policy = api(NetworkPolicy::new(bind))?;
+        require(
+            initial
+                .policy
+                .as_ref()
+                .is_none_or(|configured| configured == &policy),
+            "scope guard refused: configured listener differs from the fixture endpoint",
+        )?;
         let mut scope = Scope {
             owner,
             policy,
@@ -689,7 +696,9 @@ mod exercise {
         };
         println!("SCOPE named Development client {name}");
         let result = (|| {
-            let status = api(scope.owner.set_direct_policy(Some(scope.policy.clone())))?;
+            let status = api(scope
+                .owner
+                .set_direct_policy(Some(scope.policy.clone()), true))?;
             require(
                 status.pin == initial.pin
                     && status.listener == ListenerState::Listening { addr: bind },
@@ -1406,7 +1415,7 @@ mod exercise {
                     random()?,
                     other_pairing
                 ),
-                Err(DirectError::Revoked)
+                Err(DirectError::AuthenticationRefused)
             ) && matches!(connector.connect(), Err(DirectError::Revoked)),
             "retired authority accepted another target or ordinary reconnect",
         )?;

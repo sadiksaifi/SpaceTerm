@@ -730,6 +730,10 @@ impl SettingsWindow {
             match operation {
                 local_operations::CompletedOperation::Service => settings.check_server_update(cx),
                 local_operations::CompletedOperation::Update => settings.check_server_service(cx),
+                local_operations::CompletedOperation::Elsewhere => {
+                    settings.reread_server_service(cx);
+                    settings.reread_server_update(cx);
+                }
             }
             settings.continue_requested_update(cx);
             cx.notify();

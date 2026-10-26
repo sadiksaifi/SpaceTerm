@@ -128,13 +128,8 @@ impl DirectConnections {
         }
         let id = random_id()?;
         let now = Instant::now();
-        let lifetime = std::time::UNIX_EPOCH
-            .checked_add(Duration::from_secs(invitation.expires_at_unix_seconds()))
-            .ok_or(DirectError::InvalidInvitation)?
-            .duration_since(std::time::SystemTime::now())
-            .map_err(|_| DirectError::Expired)?;
         let deadline = now
-            .checked_add(lifetime)
+            .checked_add(invitation.lifetime())
             .ok_or(DirectError::InvalidInvitation)?;
         {
             let mut state = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -866,6 +861,7 @@ pub(super) mod enrollment_tests {
     /// The server accepts each original before its first reply is lost at the network boundary.
     struct EnrollmentNetwork {
         lost: EnrollmentStage,
+        expired: std::sync::atomic::AtomicBool,
         calls: Mutex<Vec<(EnrollmentStage, [u8; 32])>>,
         claims: Mutex<std::collections::BTreeSet<[u8; 32]>>,
         cancellations: Mutex<Vec<[u8; 32]>>,
@@ -881,7 +877,9 @@ pub(super) mod enrollment_tests {
             self.claims.lock().unwrap().insert(claim);
             let mut calls = self.calls.lock().unwrap();
             calls.push((EnrollmentStage::Claim, claim));
-            if self.lost == EnrollmentStage::Claim && calls.len() == 1 {
+            if self.expired.load(Ordering::Acquire) {
+                Err(DirectError::Expired)
+            } else if self.lost == EnrollmentStage::Claim && calls.len() == 1 {
                 Err(DirectError::Transport)
             } else {
                 Ok(direct::PairingClaim {
@@ -952,10 +950,20 @@ pub(super) mod enrollment_tests {
 
     impl LiveJoin {
         fn new(label: &str, stage: EnrollmentStage) -> Self {
+            let expires = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs()
+                + 60;
+            Self::with_server_expiry(label, stage, expires)
+        }
+
+        fn with_server_expiry(label: &str, stage: EnrollmentStage, expires: u64) -> Self {
             use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
             let credentials = Arc::new(Credentials::default());
             let network = Arc::new(EnrollmentNetwork {
                 lost: stage,
+                expired: std::sync::atomic::AtomicBool::new(false),
                 calls: Mutex::default(),
                 claims: Mutex::default(),
                 cancellations: Mutex::default(),
@@ -968,16 +976,11 @@ pub(super) mod enrollment_tests {
                 network.clone(),
             );
             owner.resume_retained();
-            let expires = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs()
-                + 60;
             let payload = Zeroizing::new(
                 serde_json::to_vec(&serde_json::json!({
                     "schema": 1, "id": ([7_u8; 32]), "endpoint": "wss://127.0.0.1:9231/spaceterm",
                     "pin": network.paired.pin, "server_name": label, "token": ([8_u8; 32]),
-                    "expires": expires,
+                    "expires": expires, "valid_for_seconds": 300,
                 }))
                 .unwrap(),
             );
@@ -1026,6 +1029,73 @@ pub(super) mod enrollment_tests {
     ) -> (DirectConnections, JoinId) {
         let fixture = LiveJoin::new(label, stage);
         (fixture.owner, fixture.id)
+    }
+
+    #[test]
+    fn server_approved_join_ignores_wall_clock_skew_and_bounds_its_local_wait() {
+        // The network boundary accepts a live invitation on a server whose wall clock
+        // differs from this client's. Neither timestamp determines the local wait.
+        for expires in [1, 253_402_300_799] {
+            let fixture = LiveJoin::with_server_expiry(
+                "Clock-skewed server",
+                EnrollmentStage::Claim,
+                expires,
+            );
+            let remaining = fixture.owner.0.state.lock().unwrap().joins[&fixture.id]
+                .deadline
+                .checked_duration_since(Instant::now())
+                .unwrap();
+            assert!(remaining <= Duration::from_secs(300));
+
+            let original = fixture.original();
+            fixture.owner.retry_join(fixture.id).unwrap();
+            fixture.wait(|status| matches!(status, JoinStatus::Approved(id) if *id == fixture.id));
+
+            let route = fixture.owner.route(&fixture.id).unwrap();
+            assert_eq!(route.endpoint, "wss://127.0.0.1:9231/spaceterm");
+            assert_eq!(route.paired, fixture.network.paired);
+            assert!(fixture.owner.pending_unpairs().is_empty());
+            assert_eq!(fixture.credentials.values.lock().unwrap().len(), 1);
+            let Authority::Enrollment { claim, .. } = original.authority else {
+                panic!("join must retain its original enrollment authority")
+            };
+            assert!(
+                fixture
+                    .network
+                    .calls
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .all(|(_, id)| *id == claim)
+            );
+        }
+    }
+
+    #[test]
+    fn server_expiry_refuses_a_join_despite_a_future_invitation_timestamp() {
+        let fixture = LiveJoin::with_server_expiry(
+            "Expired server invitation",
+            EnrollmentStage::Claim,
+            253_402_300_799,
+        );
+        let original = fixture.original();
+        fixture.network.expired.store(true, Ordering::Release);
+        fixture.owner.retry_join(fixture.id).unwrap();
+        fixture.wait(|status| matches!(status, JoinStatus::Expired));
+
+        assert!(fixture.owner.route(&fixture.id).is_none());
+        let pending = fixture.original();
+        assert_eq!(pending.operation, original.operation);
+        assert_eq!(
+            serde_json::to_value(&pending.authority).unwrap(),
+            serde_json::to_value(&original.authority).unwrap()
+        );
+        assert!(pending.cancel_requested);
+        assert_eq!(fixture.credentials.values.lock().unwrap().len(), 1);
+        assert_eq!(
+            fixture.owner.retry_join(fixture.id),
+            Err(DirectError::InvalidRequest)
+        );
     }
 
     #[test]

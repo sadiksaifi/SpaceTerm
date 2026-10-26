@@ -124,9 +124,14 @@ pub(super) fn looks_like_host(query: &str) -> bool {
             .all(|character| character.is_ascii_alphanumeric() || ".-_@:[]".contains(character))
 }
 
-/// Rows that present this computer's server only. Its native service is administered on its own
-/// machine, so no other server offers them.
-const ACCOUNT_ROWS: [SettingsRowId; 1] = [SettingsRowId::ServerAutoStart];
+/// Rows that administer this computer's server. A server is administered on its own computer, so
+/// a paired server presents none of them.
+const ACCOUNT_ROWS: [SettingsRowId; 4] = [
+    SettingsRowId::ServerAutoStart,
+    SettingsRowId::NetworkAccess,
+    SettingsRowId::PairedDevices,
+    SettingsRowId::EndAllSessions,
+];
 
 /// Whether `row` presents something about `server`. Rows outside Servers and Git always do.
 pub(super) fn row_presents(row: SettingsRowId, server: Option<&ServerChoice>) -> bool {
@@ -312,7 +317,6 @@ impl SettingsWindow {
     fn presents_server_row(&self, row: SettingsRowId, selected: Option<&ServerChoice>) -> bool {
         match row {
             SettingsRowId::ServerStatus
-            | SettingsRowId::EndAllSessions
             | SettingsRowId::GitTool
             | SettingsRowId::ServerWorktreeLocation => selected.is_some(),
             // Devices appear once other devices may connect.

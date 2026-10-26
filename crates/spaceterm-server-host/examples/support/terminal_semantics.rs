@@ -15,6 +15,7 @@ type Result<T> = std::result::Result<T, Failure>;
 pub struct Failure {
     stage: &'static str,
     classification: &'static str,
+    cause: Option<ServerError>,
 }
 impl Failure {
     pub fn at(mut self, stage: &'static str) -> Self {
@@ -27,12 +28,17 @@ impl From<&'static str> for Failure {
         Self {
             stage: "semantic-assertion",
             classification,
+            cause: None,
         }
     }
 }
 impl std::fmt::Display for Failure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}: {}", self.stage, self.classification)
+        write!(f, "{}: {}", self.stage, self.classification)?;
+        if let Some(cause) = self.cause {
+            write!(f, " ({cause:?})")?;
+        }
+        Ok(())
     }
 }
 impl std::error::Error for Failure {}
@@ -65,8 +71,41 @@ pub fn stage<T, E: 'static>(stage: &'static str, result: std::result::Result<T, 
         Failure {
             stage,
             classification,
+            cause: server.copied(),
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stage_retains_the_bounded_direct_cause_when_context_changes() {
+        let failure = stage::<(), _>(
+            "wss-connect-pane",
+            Err(ServerError::Direct(
+                spaceterm_server::direct::DirectError::Transport,
+            )),
+        )
+        .unwrap_err();
+        let failure = stage::<(), _>("reconnect-pane", Err(failure)).unwrap_err();
+        assert_eq!(
+            failure.to_string(),
+            "reconnect-pane: server-unavailable (Direct(Transport))"
+        );
+    }
+
+    #[test]
+    fn stage_never_formats_an_unclassified_native_error() {
+        let error: Box<dyn std::error::Error> =
+            std::io::Error::other("private native detail").into();
+        let failure = stage::<(), _>("wss-connect-pane", Err(error)).unwrap_err();
+        assert_eq!(
+            failure.to_string(),
+            "wss-connect-pane: fixture-operation-unavailable"
+        );
+    }
 }
 const ROWS: usize = 5000;
 const DEADLINE: Duration = Duration::from_secs(60);

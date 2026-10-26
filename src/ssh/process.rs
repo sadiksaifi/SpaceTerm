@@ -216,11 +216,13 @@ pub(crate) trait SshProcessAdapter: Clone + Send + Sync + 'static {
     fn reap(&self, process: Self::Process) -> Result<(), SshProcessMechanismError>;
 }
 
+#[cfg(all(test, feature = "native-tests"))]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct SshProcessCounts {
     pub spawned: usize,
     pub reaped: usize,
 }
+#[cfg(all(test, feature = "native-tests"))]
 impl SshProcessCounts {
     pub(crate) fn active(self) -> usize {
         self.spawned.saturating_sub(self.reaped)
@@ -228,11 +230,13 @@ impl SshProcessCounts {
 }
 
 /// Counts owned process admission and completed reaping without recording process metadata.
+#[cfg(all(test, feature = "native-tests"))]
 #[derive(Clone)]
 pub(crate) struct TrackedSshProcessAdapter<A: SshProcessAdapter> {
     inner: A,
     counts: Arc<std::sync::Mutex<SshProcessCounts>>,
 }
+#[cfg(all(test, feature = "native-tests"))]
 impl<A: SshProcessAdapter> TrackedSshProcessAdapter<A> {
     pub(crate) fn new(inner: A) -> Self {
         Self {
@@ -247,6 +251,7 @@ impl<A: SshProcessAdapter> TrackedSshProcessAdapter<A> {
             .unwrap_or_else(|error| error.into_inner())
     }
 }
+#[cfg(all(test, feature = "native-tests"))]
 impl<A: SshProcessAdapter> SshProcessAdapter for TrackedSshProcessAdapter<A> {
     type Process = A::Process;
     fn spawn(
@@ -495,18 +500,6 @@ pub(crate) struct CapturedProcessOutput {
     pub(crate) stderr: Vec<u8>,
 }
 
-#[derive(Clone, Copy)]
-pub(crate) enum CapturedProcessDeadline {
-    At(Instant),
-    RemoteCommand(Duration),
-    Unlimited,
-}
-impl From<Instant> for CapturedProcessDeadline {
-    fn from(deadline: Instant) -> Self {
-        Self::At(deadline)
-    }
-}
-
 impl fmt::Debug for CapturedProcessOutput {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("CapturedProcessOutput(<redacted>)")
@@ -520,7 +513,7 @@ pub(crate) fn run_captured_process<A: SshProcessAdapter>(
     input: Vec<u8>,
     stdout_limit: usize,
     cancellation: &CancellationToken,
-    deadline: impl Into<CapturedProcessDeadline>,
+    deadline: Instant,
 ) -> Result<CapturedProcessOutput, CapturedProcessError> {
     run_captured_process_with_parts(
         adapter,
@@ -531,7 +524,7 @@ pub(crate) fn run_captured_process<A: SshProcessAdapter>(
             input: Some(input),
             stdout_limit,
             stderr_limit: None,
-            deadline: deadline.into(),
+            deadline: Some(deadline),
         },
         cancellation,
     )
@@ -553,7 +546,7 @@ pub(crate) fn run_captured_effect<A: SshProcessAdapter>(
     input: Vec<u8>,
     stdout_limit: usize,
     cancellation: &CancellationToken,
-    deadline: impl Into<CapturedProcessDeadline>,
+    deadline: Instant,
 ) -> Result<CapturedProcessOutput, CapturedEffectError> {
     let admitted = Arc::new(std::sync::atomic::AtomicBool::new(false));
     run_captured_process_with_parts(
@@ -565,7 +558,7 @@ pub(crate) fn run_captured_effect<A: SshProcessAdapter>(
             input: Some(input),
             stdout_limit,
             stderr_limit: None,
-            deadline: deadline.into(),
+            deadline: Some(deadline),
         },
         cancellation,
     )
@@ -597,7 +590,7 @@ pub(crate) fn run_captured_transfer<A: SshProcessAdapter>(
             input: Some(input),
             stdout_limit,
             stderr_limit: None,
-            deadline: CapturedProcessDeadline::Unlimited,
+            deadline: None,
         },
         cancellation,
     )
@@ -621,7 +614,7 @@ pub(crate) fn run_probe_process<A: SshProcessAdapter>(
             input: None,
             stdout_limit: stream_limit,
             stderr_limit: Some(stream_limit),
-            deadline: CapturedProcessDeadline::At(deadline),
+            deadline: Some(deadline),
         },
         cancellation,
     )
@@ -632,7 +625,109 @@ struct CapturedProcessPlan {
     input: Option<Vec<u8>>,
     stdout_limit: usize,
     stderr_limit: Option<usize>,
-    deadline: CapturedProcessDeadline,
+    deadline: Option<Instant>,
+}
+
+/// Owns the sole authenticated SSH connection while setup waits for local approvals.
+/// Channel commands use its private control socket and cannot open a fallback connection.
+pub(crate) struct SetupMaster<A: SshProcessAdapter> {
+    ownership: CapturedProcessOwnership<A>,
+    stdin: Option<Box<dyn Write + Send>>,
+    ready: Option<JoinHandle<io::Result<()>>>,
+}
+
+impl<A: SshProcessAdapter> SetupMaster<A> {
+    pub(crate) fn start(
+        adapter: &A,
+        spec: &SshCommandSpec,
+        environment: &SshProcessEnvironment,
+        cancellation: &CancellationToken,
+    ) -> Result<Self, CapturedProcessError> {
+        if cancellation.is_cancelled() {
+            return Err(CapturedProcessError::Cancelled);
+        }
+        let request = process_request(
+            spec,
+            environment.launch_parts(),
+            SshProcessStdio::Piped,
+            SshProcessStdio::Piped,
+            SshProcessStdio::Null,
+        );
+        let SpawnedSshProcess { process, mut pipes } = adapter
+            .spawn(request)
+            .map_err(CapturedProcessError::Operation)?;
+        let mut master = Self {
+            ownership: CapturedProcessOwnership::new(adapter.clone(), process),
+            stdin: pipes.stdin.take(),
+            ready: None,
+        };
+        let mut stdout = pipes.stdout.take().ok_or(CapturedProcessError::Operation(
+            SshProcessMechanismError::PipesUnavailable,
+        ))?;
+        if master.stdin.is_none() {
+            return Err(CapturedProcessError::Operation(
+                SshProcessMechanismError::PipesUnavailable,
+            ));
+        }
+        master.ready = Some(
+            std::thread::Builder::new()
+                .name("spaceterm-ssh-authentication".into())
+                .spawn(move || {
+                    let mut received = [0; super::command::SETUP_READY_PREAMBLE.len()];
+                    stdout.read_exact(&mut received)?;
+                    if received != super::command::SETUP_READY_PREAMBLE {
+                        return Err(io::ErrorKind::InvalidData.into());
+                    }
+                    Ok(())
+                })
+                .map_err(|_| {
+                    CapturedProcessError::Operation(SshProcessMechanismError::LaunchFailed)
+                })?,
+        );
+        loop {
+            if cancellation.is_cancelled() {
+                return Err(CapturedProcessError::Cancelled);
+            }
+            if master.ready.as_ref().is_some_and(JoinHandle::is_finished) {
+                let ready = master.ready.take().ok_or(CapturedProcessError::Operation(
+                    SshProcessMechanismError::PipesUnavailable,
+                ))?;
+                ready
+                    .join()
+                    .map_err(|_| {
+                        CapturedProcessError::Operation(SshProcessMechanismError::PipesUnavailable)
+                    })?
+                    .map_err(|_| {
+                        CapturedProcessError::Operation(SshProcessMechanismError::PipesUnavailable)
+                    })?;
+                return Ok(master);
+            }
+            if adapter
+                .try_status(master.ownership.process_mut()?)
+                .map_err(CapturedProcessError::Operation)?
+                .is_some()
+            {
+                return Err(CapturedProcessError::Operation(
+                    SshProcessMechanismError::PipesUnavailable,
+                ));
+            }
+            std::thread::sleep(PROCESS_POLL_INTERVAL);
+        }
+    }
+
+    pub(crate) fn close(&mut self) {
+        self.stdin.take();
+        self.ownership.cleanup_now();
+        if let Some(ready) = self.ready.take() {
+            let _ = ready.join();
+        }
+    }
+}
+
+impl<A: SshProcessAdapter> Drop for SetupMaster<A> {
+    fn drop(&mut self) {
+        self.close();
+    }
 }
 
 fn run_captured_process_with_parts<A: SshProcessAdapter>(
@@ -653,19 +748,6 @@ fn run_captured_process_with_parts<A: SshProcessAdapter>(
         stderr_limit,
         deadline,
     } = plan;
-    let active_deadline = Arc::new(std::sync::Mutex::new(match deadline {
-        CapturedProcessDeadline::At(deadline) => Some(deadline),
-        _ => None,
-    }));
-    let remote_timeout = match deadline {
-        CapturedProcessDeadline::RemoteCommand(timeout) => Some(timeout),
-        _ => None,
-    };
-    if remote_timeout.is_some() && !spec.has_setup_preamble() {
-        return Err(CapturedProcessError::Operation(
-            SshProcessMechanismError::LaunchFailed,
-        ));
-    }
     if cancellation.is_cancelled() {
         return Err(CapturedProcessError::Cancelled);
     }
@@ -711,7 +793,6 @@ fn run_captured_process_with_parts<A: SshProcessAdapter>(
         None => None,
     };
     let has_preamble = spec.has_setup_preamble();
-    let observed_deadline = Arc::clone(&active_deadline);
     let mut stdout_reader = Some(
         std::thread::Builder::new()
             .name("spaceterm-ssh-stdout".into())
@@ -724,15 +805,6 @@ fn run_captured_process_with_parts<A: SshProcessAdapter>(
                         .map_err(|_| BoundedReadError::Io)?;
                     if received != super::command::SETUP_READY_PREAMBLE {
                         return Err(BoundedReadError::Io);
-                    }
-                    if let Some(timeout) = remote_timeout {
-                        *observed_deadline
-                            .lock()
-                            .unwrap_or_else(|error| error.into_inner()) = Some(
-                            Instant::now()
-                                .checked_add(timeout)
-                                .unwrap_or_else(Instant::now),
-                        );
                     }
                 }
                 read_bounded(stdout, stdout_limit)
@@ -753,9 +825,6 @@ fn run_captured_process_with_parts<A: SshProcessAdapter>(
     let mut captured_stderr = None;
 
     let exit = loop {
-        let deadline = *active_deadline
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
         if cancellation.is_cancelled() {
             ownership.cleanup_now();
             let _ = join_writer(writer);

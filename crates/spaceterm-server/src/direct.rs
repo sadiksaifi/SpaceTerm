@@ -8,6 +8,8 @@ pub const DEFAULT_PORT: u16 = 9231;
 
 mod client;
 mod crypto;
+mod endpoint;
+pub use endpoint::Endpoint;
 pub(crate) mod host;
 mod network;
 mod storage;
@@ -58,7 +60,7 @@ pub struct NetworkPolicy {
 }
 impl NetworkPolicy {
     pub fn new(bind: SocketAddr) -> Result<Self, DirectError> {
-        if bind.port() == 0 || bind.ip().is_multicast() || bind.ip().is_unspecified() {
+        if bind.port() == 0 || bind.ip().is_multicast() {
             return Err(DirectError::InvalidAddress);
         }
         Ok(Self { bind })
@@ -78,6 +80,7 @@ pub struct DirectStatus {
     pub setup_generation: u64,
     pub pin: ServerPin,
     pub policy: Option<NetworkPolicy>,
+    pub enabled: bool,
     pub server_name: String,
     pub listener: ListenerState,
     /// Fresh observations from the machine that owns this server.
@@ -206,7 +209,7 @@ pub enum DirectError {
     Disabled,
     #[error("This connection request is invalid.")]
     InvalidRequest,
-    #[error("Enter an IP address and a nonzero TCP port.")]
+    #[error("Enter a DNS name or IP address and a nonzero TCP port.")]
     InvalidAddress,
     #[error("This claim has already been decided.")]
     AlreadyDecided,
@@ -285,6 +288,11 @@ impl Invitation {
     pub fn expires_at_unix_seconds(&self) -> u64 {
         self.payload.expires
     }
+    /// Server-issued lifetime for a local monotonic display or wait deadline.
+    /// The server alone decides actual expiry; this is not remaining validity.
+    pub fn lifetime(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.payload.valid_for_seconds)
+    }
     /// For transient display and explicit Copy only.
     pub fn display_text(&self) -> zeroize::Zeroizing<String> {
         self.text.clone()
@@ -310,8 +318,7 @@ pub struct DirectConnection {
     paired: PairedDevice,
 }
 impl DirectConnection {
-    /// Connects to the literal IP endpoint advertised by an explicitly enabled policy.
-    /// TLS, HTTP and device admission are bounded; this operation never runs a DNS resolver.
+    /// Resolves the retained DNS name afresh and admits the server using pinned trust.
     pub fn connect(
         endpoint: &str,
         paired: &PairedDevice,

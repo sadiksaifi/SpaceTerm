@@ -387,11 +387,13 @@ impl ServerConnection {
             _ => Err(crate::direct::DirectError::InvalidRequest),
         }
     }
+    /// Select a bind policy and its exposure atomically. None retains the configured address.
     pub fn set_direct_policy(
         &self,
         policy: Option<crate::direct::NetworkPolicy>,
+        enabled: bool,
     ) -> Result<crate::direct::DirectStatus, crate::direct::DirectError> {
-        match self.direct_manage(crate::direct::Management::SetPolicy(policy))? {
+        match self.direct_manage(crate::direct::Management::SetPolicy { policy, enabled })? {
             crate::direct::ManagementReply::Status(status) => Ok(status),
             _ => Err(crate::direct::DirectError::InvalidRequest),
         }
@@ -533,7 +535,7 @@ mod tests {
     }
 
     #[test]
-    fn paired_direct_policy_changes_return_the_committed_status_before_disconnect() {
+    fn paired_direct_policy_changes_are_refused_without_changing_policy_or_other_connections() {
         use crate::direct::{self, DirectConnection, DirectConnector, Management, ManagementReply};
         struct Connector {
             endpoint: String,
@@ -551,7 +553,7 @@ mod tests {
             let credential = direct::DeviceCredential::generate().unwrap();
             let paired = fixture.enroll(&credential);
             let endpoint = fixture.endpoint();
-            // The same pairing has another transport, which must close immediately.
+            // Refusing administration must preserve the same pairing's other transport.
             let other_worker = fixture.serve_next();
             let mut other = DirectConnection::connect(&endpoint, &paired, &credential).unwrap();
             protocol::admit_transport(
@@ -578,26 +580,26 @@ mod tests {
                     }),
                 )
                 .unwrap();
-            let issuer_worker = fixture.serve_next();
-            let result = local.set_direct_policy(policy.clone());
-            let _ = issuer_worker.join().unwrap();
-            let ManagementReply::Status(committed) =
-                fixture.management(Management::Status).unwrap()
+            let ManagementReply::Status(initial) = fixture.management(Management::Status).unwrap()
             else {
                 panic!()
             };
-            assert_eq!(committed.policy, policy);
-            assert_eq!(
-                result,
-                Ok(committed),
-                "a successful durable policy change must reach its paired caller"
-            );
-            assert!(
-                protocol::Wire::terminal(&mut other)
-                    .unwrap()
-                    .read_frame()
-                    .is_err()
-            );
+            let issuer_worker = fixture.serve_next();
+            let result = local.set_direct_policy(policy.clone(), policy.is_some());
+            let _ = issuer_worker.join().unwrap();
+            let ManagementReply::Status(observed) = fixture.management(Management::Status).unwrap()
+            else {
+                panic!()
+            };
+            assert_eq!(result, Err(direct::DirectError::AuthenticationRefused));
+            assert_eq!(observed.enabled, initial.enabled);
+            assert_eq!(observed.policy, initial.policy);
+            let mut wire = protocol::Wire::terminal(&mut other).unwrap();
+            wire.write(&crate::pane::Request::Direct(Management::Status))
+                .unwrap();
+            assert!(matches!(wire.read::<crate::pane::Reply>().unwrap(),
+                crate::pane::Reply::Direct(Ok(ManagementReply::Status(status)))
+                if status.enabled == initial.enabled && status.policy == initial.policy));
             drop(other);
             let _ = other_worker.join().unwrap();
             assert!(
@@ -614,9 +616,10 @@ mod tests {
                 panic!()
             };
             assert_eq!(
-                restored.policy, policy,
-                "the reply must describe the policy retained across restart"
+                restored.policy, initial.policy,
+                "refused remote administration must not change retained listener policy"
             );
+            assert_eq!(restored.enabled, initial.enabled);
             reopened.lock().unwrap().stop();
         }
     }
