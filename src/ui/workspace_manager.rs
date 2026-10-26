@@ -1149,7 +1149,7 @@ impl WorkspaceManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(key) = self.server_key(&super::ServerTarget::Direct(route)) else {
+        let Some(key) = self.server_key(&super::ServerTarget::Direct(route), cx) else {
             Self::show_shared_refusal(
                 "open a remote directory",
                 super::shared_workspaces::SharedRefusalReason::Offline,

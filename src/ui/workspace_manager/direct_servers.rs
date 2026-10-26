@@ -176,7 +176,7 @@ impl WorkspaceManager {
         use crate::ui::shared_workspaces::{SharedRefusalReason, SharedSubmission};
 
         let Some(shared) = self
-            .server_key(target)
+            .server_key(target, cx)
             .and_then(|key| self.shared.get_mut(key))
         else {
             WorkspaceManager::show_shared_refusal(
@@ -193,8 +193,8 @@ impl WorkspaceManager {
         cx.notify();
     }
 
-    /// Every saved paired server the creation menus offer, by name. Only one this window
-    /// presents can take a new Workspace now.
+    /// Every saved paired server the creation menus offer, by name. Only a route whose server
+    /// this window presents, through that route or another, can take a new Workspace now.
     pub(super) fn remote_creation_servers(
         &self,
         cx: &App,
@@ -225,7 +225,9 @@ impl WorkspaceManager {
                 name: route.label.clone().into(),
                 address: shares_name(&route.label)
                     .then(|| endpoint_address(&route.endpoint).to_owned().into()),
-                available: self.direct_route_presented(&route.id),
+                available: self
+                    .server_key(&ServerTarget::Direct(route.id), cx)
+                    .is_some(),
             })
             .collect();
         servers.sort_by(|a, b| {
@@ -236,18 +238,30 @@ impl WorkspaceManager {
         servers
     }
 
-    /// The binding presenting `target`'s server, if this window presents it.
-    pub(super) fn server_key(&self, target: &ServerTarget) -> Option<ServerKey> {
-        self.shared
-            .keys()
-            .into_iter()
-            .find(|key| match (self.shared.origin(*key), target) {
-                (Some(ServerOrigin::Local), ServerTarget::Local) => true,
-                (Some(ServerOrigin::Direct(bound)), ServerTarget::Direct(route)) => {
-                    bound.route == *route
-                }
-                _ => false,
-            })
+    /// The binding presenting `target`'s server, if this window presents it. A connected saved
+    /// route to a server another route presents reaches that presentation, so creating and
+    /// opening directories through either route acts on the one server.
+    pub(super) fn server_key(&self, target: &ServerTarget, cx: &App) -> Option<ServerKey> {
+        let bound =
+            self.shared
+                .keys()
+                .into_iter()
+                .find(|key| match (self.shared.origin(*key), target) {
+                    (Some(ServerOrigin::Local), ServerTarget::Local) => true,
+                    (Some(ServerOrigin::Direct(bound)), ServerTarget::Direct(route)) => {
+                        bound.route == *route
+                    }
+                    _ => false,
+                });
+        bound.or_else(|| {
+            let ServerTarget::Direct(route) = target else {
+                return None;
+            };
+            let server = crate::ui::direct_servers::installed(cx)?
+                .server(route)?
+                .server()?;
+            self.shared.presenting(server)
+        })
     }
 }
 

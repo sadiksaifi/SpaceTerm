@@ -12335,6 +12335,41 @@ fn saved_servers(
     edits
 }
 
+/// A connected saved route to a server another route already presents stays available in the
+/// creation menu, and a Workspace created through it goes to that one server.
+#[gpui::test]
+fn a_second_route_to_a_presented_server_should_create_there(cx: &mut TestAppContext) {
+    use spaceterm_server::hierarchy::Mutation;
+
+    // The registry connects each route on its own thread.
+    cx.executor().allow_parking();
+    let (harness, cx) = MultiServerHarness::new(cx);
+    let server = [0x5E; 32];
+    let (direct, routes) = crate::direct_connections::tests::connected_routes_to_one_server(
+        &["penguin", "penguin new"],
+        server,
+    );
+    cx.update(|_, cx| crate::ui::direct_servers::install(direct, cx));
+    let edits = Rc::new(crate::ui::shared_workspaces::testing::ScriptedEdits::new(
+        Some(server_inventory(harness.next_revision(), &[])),
+    ));
+    harness.present_direct_edits_reaching("penguin", routes[0], server, &edits, cx);
+    redraw(cx);
+
+    click("new-workspace-button", cx);
+    click("new-workspace-menu-create-remote", cx);
+    click("new-workspace-menu-create-remote-1", cx);
+
+    assert_eq!(
+        edits.submitted(),
+        vec![Mutation::CreateWorkspace {
+            name: String::new(),
+            directory: None,
+        }]
+    );
+    assert_eq!(harness.local.submitted(), Vec::new());
+}
+
 /// The sidebar's New Workspace menu offers remote creation only on saved servers, one row each,
 /// and ends each list with Add Server, the one journey that adds a server.
 #[gpui::test]
