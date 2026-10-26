@@ -1010,19 +1010,26 @@ fn keyboard_navigation_selects_slots_applies_themes_and_opens_removal(cx: &mut T
     set_query(&settings, "theme", cx);
     cx.update(|window, cx| window.focus(&settings.read(cx).focus_handle.clone(), cx));
 
-    // Search, section navigation, About, then the Light slot.
-    cx.simulate_keystrokes("tab tab tab tab enter");
+    // Search, section navigation, About, then the slots, one Tab stop that starts on the Dark
+    // slot the system appearance shows. Arrows, Home, and End choose a slot and edit nothing.
+    let before = document_of(&settings, cx).appearance;
+    cx.simulate_keystrokes("tab tab tab tab");
     cx.run_until_parked();
-    assert_eq!(
-        settings.read_with(cx, |settings, cx| settings.theme_slot(cx)),
-        Appearance::Light
-    );
-    cx.simulate_keystrokes("tab space");
-    cx.run_until_parked();
-    assert_eq!(
-        settings.read_with(cx, |settings, cx| settings.theme_slot(cx)),
-        Appearance::Dark
-    );
+    for (keys, slot) in [
+        ("home", Appearance::Light),
+        ("end", Appearance::Dark),
+        ("left", Appearance::Light),
+        ("right", Appearance::Dark),
+    ] {
+        cx.simulate_keystrokes(keys);
+        cx.run_until_parked();
+        assert_eq!(
+            settings.read_with(cx, |settings, cx| settings.theme_slot(cx)),
+            slot,
+            "{keys}"
+        );
+        assert_eq!(document_of(&settings, cx).appearance, before, "{keys}");
+    }
 
     // The list's search and Get More Themes lead its rows. The built-in theme is in use, so the
     // imported theme's Use and removal buttons follow.

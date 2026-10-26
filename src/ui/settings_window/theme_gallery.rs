@@ -2,13 +2,14 @@
 
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, App, Entity, FocusHandle, Font, KeyDownEvent, SharedString, StyledText, Text,
-    Window, accesskit, div, px, relative,
+    AnyElement, App, Entity, Font, SharedString, StyledText, Text, Window, accesskit, div, px,
+    relative,
 };
 use spaceterm_ui::{
-    Alert, AlertIntent, AlertOutcome, HoverFade, Icon, IconName, ModalAction, ModalActionEmphasis,
-    ModalActionIntent, ModalActionRole, ModalId, SearchField, TextInput, TextInputEscapeBehavior,
-    TextInputEvent, TextInputReturnBehavior, TextInputVariant, fuzzy_filter,
+    Alert, AlertIntent, AlertOutcome, Icon, IconName, ModalAction, ModalActionEmphasis,
+    ModalActionIntent, ModalActionRole, ModalId, SearchField, SegmentedControl, SegmentedOption,
+    SegmentedSize, TextInput, TextInputEscapeBehavior, TextInputEvent, TextInputReturnBehavior,
+    TextInputVariant, fuzzy_filter,
 };
 
 use crate::appearance::{
@@ -33,9 +34,6 @@ const SLOT_PREVIEW_WIDTH: f32 = 216.0;
 const ROW_PREVIEW_WIDTH: f32 = 64.0;
 /// The width of a row's Use button, wider than its label so the target is easy to hit.
 const USE_BUTTON_WIDTH: f32 = 60.0;
-/// The space between a selected preview and the ring around it.
-const RING_GAP: f32 = 3.0;
-const RING_WIDTH: f32 = 2.0;
 
 pub(super) const GALLERY_SEARCH_SELECTOR: &str = "settings-theme-gallery-search";
 pub(super) const GET_MORE_SELECTOR: &str = "settings-get-more-themes";
@@ -53,7 +51,6 @@ pub(super) struct ThemeGallery {
     query: SharedString,
     /// The slot the gallery edits under Auto. Unset, it follows the appearance on screen.
     auto_slot: Option<Appearance>,
-    slot_focus: [FocusHandle; 2],
 }
 
 impl ThemeGallery {
@@ -86,14 +83,12 @@ impl ThemeGallery {
             search,
             query: SharedString::default(),
             auto_slot: None,
-            slot_focus: std::array::from_fn(|_| cx.focus_handle().tab_stop(true)),
         }
     }
 }
 
 /// What the preview of one slot shows: the theme chosen for it and the colors panes paint.
 struct SlotPreview {
-    slot: Appearance,
     /// The chosen theme, absent only when the catalog cannot be read.
     summary: Option<ThemeSummary>,
     /// The colors terminal panes use for this slot, including the person's overrides.
@@ -149,11 +144,7 @@ impl SettingsWindow {
             || crate::appearance::builtin_terminal_base(slot),
             |resolved| resolved.terminal.colors.clone(),
         );
-        SlotPreview {
-            slot,
-            summary,
-            colors,
-        }
+        SlotPreview { summary, colors }
     }
 
     /// The theme in use, large enough to judge: one preview when the appearance is fixed, and the
@@ -161,7 +152,6 @@ impl SettingsWindow {
     pub(super) fn render_current_theme(
         &mut self,
         appearance: &ChromeAppearance,
-        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let summaries = self.editor.theme_summaries().unwrap_or_default();
@@ -182,33 +172,51 @@ impl SettingsWindow {
                 .into_any_element();
         }
         let chosen = self.theme_slot(cx);
-        let slots = [Appearance::Light, Appearance::Dark].map(|slot| {
-            let preview = self.slot_preview(slot, &summaries);
-            self.render_slot_card(
-                preview,
-                chosen == slot,
-                font.clone(),
-                appearance,
-                window,
-                cx,
-            )
-        });
+        let edge = appearance
+            .host_colors(spaceterm_ui::ControlHost::Card)
+            .border;
+        let slots = [Appearance::Light, Appearance::Dark]
+            .into_iter()
+            .map(|slot| {
+                let preview = self.slot_preview(slot, &summaries);
+                let label = match slot {
+                    Appearance::Light => "Light",
+                    Appearance::Dark => "Dark",
+                };
+                let colors = preview.colors.clone();
+                let font = font.clone();
+                // The theme's name is both the card's caption and its accessibility description.
+                SegmentedOption::new(slot, label)
+                    .description(preview_name(&preview))
+                    .debug_selector(format!(
+                        "settings-theme-slot-{}",
+                        label.to_ascii_lowercase()
+                    ))
+                    .preview(move |_, _| {
+                        terminal_preview(&colors, font.clone(), PreviewSize::Small, edge)
+                            .w_full()
+                            .rounded(RadiusRole::Control.pixels())
+                            .into_any_element()
+                    })
+            })
+            .collect::<Vec<_>>();
+        let width = appearance.spacing(SLOT_PREVIEW_WIDTH);
+        let owner = cx.weak_entity();
+        let slots = SegmentedControl::new("settings-theme-slots", "Current theme", &chosen, slots)
+            .expect("two slots are within the bounded option set")
+            .size(SegmentedSize::Card)
+            .preview_size(gpui::size(width, width / PREVIEW_ASPECT))
+            .debug_selector("settings-theme-slots")
+            .on_change(move |change, _, cx| {
+                let slot = *change.requested();
+                let _ = owner.update(cx, |settings, cx| settings.select_auto_slot(slot, cx));
+            });
         let colors = appearance.host_colors(spaceterm_ui::ControlHost::Card);
         content
             .flex()
             .flex_col()
             .gap(appearance.spacing(12.0))
-            .child(
-                div()
-                    .id("settings-theme-slots")
-                    .role(accesskit::Role::RadioGroup)
-                    .aria_label("Current theme")
-                    .flex()
-                    .flex_row()
-                    .justify_center()
-                    .gap(appearance.spacing(32.0))
-                    .children(slots),
-            )
+            .child(div().flex().flex_row().justify_center().child(slots))
             .child(
                 div()
                     .text_center()
@@ -219,94 +227,6 @@ impl SettingsWindow {
                         "settings-theme-slots-guidance".into(),
                         SharedString::from("Select Light or Dark, then choose its theme."),
                     )),
-            )
-            .into_any_element()
-    }
-
-    /// One slot under Auto: its preview, its name, and the theme chosen for it.
-    fn render_slot_card(
-        &self,
-        preview: SlotPreview,
-        selected: bool,
-        font: Font,
-        appearance: &ChromeAppearance,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let colors = appearance.host_colors(spaceterm_ui::ControlHost::Card);
-        let slot = preview.slot;
-        let label = match slot {
-            Appearance::Light => "Light",
-            Appearance::Dark => "Dark",
-        };
-        let name = preview_name(&preview);
-        let focus = &self.theme_gallery.slot_focus[usize::from(slot == Appearance::Dark)];
-        let selector = format!("settings-theme-slot-{}", label.to_ascii_lowercase());
-        let hover = HoverFade::new(SharedString::from(format!("{selector}-hover")), window, cx);
-        let hover_level = hover.level(window, cx);
-        let focused = focus.is_focused(window) && window.last_input_was_keyboard();
-        let description = name.clone();
-        let selecting = cx.weak_entity();
-        div()
-            .id(SharedString::from(selector.clone()))
-            .role(accesskit::Role::RadioButton)
-            .aria_label(label)
-            .when(!description.is_empty(), |card| {
-                card.aria_description(description)
-            })
-            .aria_toggled(accesskit::Toggled::from(selected))
-            .aria_position_in_set(usize::from(slot == Appearance::Dark) + 1)
-            .aria_size_of_set(2)
-            .on_a11y_action(accesskit::Action::Click, move |_, _, cx| {
-                let _ = selecting.update(cx, |settings, cx| settings.select_auto_slot(slot, cx));
-            })
-            .debug_selector(move || selector.clone())
-            .track_focus(focus)
-            .flex()
-            .flex_col()
-            .w(appearance.spacing(SLOT_PREVIEW_WIDTH))
-            .gap(appearance.spacing(8.0))
-            .child(selection_ring(
-                terminal_preview(&preview.colors, font, PreviewSize::Small, appearance).w_full(),
-                selected,
-                &hover,
-                hover_level,
-                RadiusRole::Card,
-                appearance,
-                focused,
-            ))
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .min_w_0()
-                    .child(
-                        div()
-                            .chrome_text(appearance.typography.style(TextRole::BodyEmphasis))
-                            .text_color(gpui_color(colors.text))
-                            .child(label),
-                    )
-                    .child(
-                        div()
-                            .max_w_full()
-                            .truncate()
-                            .chrome_text(appearance.typography.style(TextRole::Secondary))
-                            .text_color(gpui_color(colors.text_secondary))
-                            .child(name),
-                    ),
-            )
-            .on_click(cx.listener(move |settings, _, _, cx| {
-                settings.select_auto_slot(slot, cx);
-            }))
-            .on_key_down(
-                cx.listener(move |settings, event: &KeyDownEvent, window, cx| {
-                    if keyboard_activation(event) {
-                        settings.select_auto_slot(slot, cx);
-                        window.prevent_default();
-                        cx.stop_propagation();
-                    }
-                }),
             )
             .into_any_element()
     }
@@ -701,12 +621,6 @@ fn installed_together(theme: &ThemeSummary, other: &ThemeSummary) -> bool {
     }
 }
 
-fn keyboard_activation(event: &KeyDownEvent) -> bool {
-    !event.is_held
-        && !event.keystroke.modifiers.modified()
-        && matches!(event.keystroke.key.as_str(), "enter" | "space")
-}
-
 /// The theme in use beside its name, where it came from, and its sixteen colors.
 fn current_theme_details(
     preview: &SlotPreview,
@@ -723,10 +637,17 @@ fn current_theme_details(
         .items_center()
         .gap(appearance.spacing(22.0))
         .child(
-            terminal_preview(&preview.colors, font, PreviewSize::Large, appearance)
-                .rounded(RadiusRole::Card.pixels())
-                .flex_none()
-                .w(appearance.spacing(CURRENT_PREVIEW_WIDTH)),
+            terminal_preview(
+                &preview.colors,
+                font,
+                PreviewSize::Large,
+                appearance
+                    .host_colors(spaceterm_ui::ControlHost::Card)
+                    .border,
+            )
+            .rounded(RadiusRole::Card.pixels())
+            .flex_none()
+            .w(appearance.spacing(CURRENT_PREVIEW_WIDTH)),
         )
         .child(
             div()
@@ -788,50 +709,6 @@ fn theme_origin(summary: &ThemeSummary) -> SharedString {
     }
 }
 
-/// A ring in the accent color around a selected preview, held clear when unselected so selecting
-/// never moves anything.
-fn selection_ring(
-    content: gpui::Div,
-    selected: bool,
-    hover: &HoverFade,
-    hover_level: f32,
-    radius: RadiusRole,
-    appearance: &ChromeAppearance,
-    focused: bool,
-) -> impl IntoElement {
-    let accent = appearance.colors.border_focused;
-    let hover_ring = appearance
-        .host_colors(spaceterm_ui::ControlHost::Card)
-        .border;
-    let outer_radius = radius.pixels() + px(RING_GAP + RING_WIDTH);
-    // Keyboard focus surrounds the selection ring so the two states stay distinct: the focus ring
-    // treats the selection ring's outer edge as the control's edge.
-    let focus_ring = focused.then(|| {
-        spaceterm_ui::focus_ring(
-            "focus-ring",
-            gpui_color(appearance.colors.focus_ring),
-            outer_radius,
-            px(0.0),
-        )
-    });
-    let tile = div()
-        .relative()
-        .w_full()
-        .p(px(RING_GAP))
-        .rounded(outer_radius)
-        .border(px(RING_WIDTH))
-        .border_color(gpui_color(if selected {
-            accent
-        } else {
-            hover_ring
-                .with_alpha(0)
-                .fade(hover_ring, f64::from(hover_level))
-        }))
-        .child(content.rounded(radius.pixels()))
-        .when(!selected, |ring| ring.child(hover.tracker()));
-    spaceterm_ui::Ringed::new(tile, focus_ring)
-}
-
 #[derive(Clone, Copy)]
 enum PreviewSize {
     /// The theme in use when one appearance is fixed.
@@ -845,15 +722,12 @@ fn terminal_preview(
     colors: &TerminalColors,
     font: Font,
     size: PreviewSize,
-    appearance: &ChromeAppearance,
+    edge: Color,
 ) -> gpui::Div {
     let (text_size, line_height, inset) = match size {
         PreviewSize::Large => (11.0, 16.0, 14.0),
         PreviewSize::Small => (8.5, 12.0, 10.0),
     };
-    let edge = appearance
-        .host_colors(spaceterm_ui::ControlHost::Card)
-        .border;
     let prompt = [
         ("~/spaceterm", colors.normal[4]),
         (" main", colors.normal[5]),
