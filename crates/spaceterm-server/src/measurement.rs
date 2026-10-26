@@ -8,6 +8,8 @@
 //! identify which screen contains an input's output; use a controlled fixture and pixel witness.
 //! Native input and accepted-action records carry fresh clock brackets. Other records keep
 //! elapsed time only. Accepted geometry marks a changed layout handed to a live Session.
+//! Headers declare record and event-row byte limits, excluding the header and summary.
+//! A capture stopped by either limit is incomplete.
 use serde::Serialize;
 use std::{
     cell::Cell,
@@ -24,8 +26,8 @@ use std::{
 };
 
 const CAPACITY: usize = 4096;
-const MAX_RECORDS: u64 = 131_072;
-const MAX_BYTES: usize = 32 * 1024 * 1024;
+const MAX_RECORDS: u64 = 1_048_576;
+const MAX_BYTES: usize = 128 * 1024 * 1024;
 const LIFETIME: Duration = Duration::from_secs(300);
 static CAPTURE: OnceLock<Option<Capture>> = OnceLock::new();
 static NEXT_THREAD: AtomicU64 = AtomicU64::new(1);
@@ -360,7 +362,8 @@ fn write_capture(
         &serde_json::json!({
             "schema": 1, "clock": "process_monotonic_ns", "host_clock": "CLOCK_MONOTONIC",
             "endpoint": "gpui_scene_submission_not_display", "calibration": calibration(start),
-            "max_records": MAX_RECORDS, "lifetime_ms": LIFETIME.as_millis(),
+            "max_records": MAX_RECORDS, "max_bytes": MAX_BYTES,
+            "lifetime_ms": LIFETIME.as_millis(),
         }),
     )?;
     writer.write_all(b"\n")?;
