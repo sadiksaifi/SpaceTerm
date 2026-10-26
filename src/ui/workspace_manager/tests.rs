@@ -8716,6 +8716,42 @@ impl MultiServerHarness {
         ServerKey,
         Rc<crate::ui::shared_workspaces::testing::ScriptedPanes>,
     ) {
+        self.present_direct_edits_identified(name, route, Rc::new(FixedServer(server)), edits, cx)
+    }
+
+    /// Presents the saved route `route` named `name` over the connection `identity` names,
+    /// publishing `workspaces`, and attaches each one.
+    fn present_direct_identified(
+        &self,
+        name: &str,
+        route: crate::direct_connections::DirectRouteId,
+        identity: Rc<dyn crate::ui::shared_workspaces::ServerIdentity>,
+        workspaces: &[(&str, u8)],
+        cx: &mut VisualTestContext,
+    ) -> (
+        ServerKey,
+        Rc<crate::ui::shared_workspaces::testing::ScriptedEdits>,
+    ) {
+        let edits = Rc::new(crate::ui::shared_workspaces::testing::ScriptedEdits::new(
+            Some(server_inventory(self.next_revision(), workspaces)),
+        ));
+        let (key, _) = self.present_direct_edits_identified(name, route, identity, &edits, cx);
+        self.attach(key, workspaces, cx);
+        (key, edits)
+    }
+
+    /// Presents the paired server `name` at `route` over `edits`, named by `identity`.
+    fn present_direct_edits_identified(
+        &self,
+        name: &str,
+        route: crate::direct_connections::DirectRouteId,
+        identity: Rc<dyn crate::ui::shared_workspaces::ServerIdentity>,
+        edits: &Rc<crate::ui::shared_workspaces::testing::ScriptedEdits>,
+        cx: &mut VisualTestContext,
+    ) -> (
+        ServerKey,
+        Rc<crate::ui::shared_workspaces::testing::ScriptedPanes>,
+    ) {
         use crate::ui::shared_workspaces::testing::ScriptedPanes;
         use crate::ui::shared_workspaces::{DirectServer, SharedEditSource, SharedPaneSessions};
 
@@ -8742,7 +8778,7 @@ impl MultiServerHarness {
                     cx,
                 );
                 if let Some(shared) = manager.shared.get_mut(key) {
-                    shared.identify(Rc::new(FixedServer(server)));
+                    shared.identify(identity);
                 }
                 manager.sync_shared_workspaces(key, window, cx);
                 key
@@ -9030,6 +9066,105 @@ fn two_routes_to_one_server_should_present_its_workspaces_once(cx: &mut TestAppC
     assert_eq!(presented, ["Default", "Far", "Farther"]);
     // The window's own Workspace isn't a server's, so it keeps its place.
     assert_eq!(harness.names(cx), ["Default", "Farther", "Far"]);
+}
+
+/// Two saved routes may reach one server, each through its own pairing with its own client
+/// identity. Each route keeps its own presentation: its Workspaces, their places in the order
+/// across a reconnect, and the edits it submits stay with that route.
+#[gpui::test]
+fn routes_paired_separately_to_one_server_should_stay_independent(cx: &mut TestAppContext) {
+    use spaceterm_server::hierarchy::Mutation;
+
+    // The registry connects each route on its own thread.
+    cx.executor().allow_parking();
+    let (harness, cx) = MultiServerHarness::new(cx);
+    let (direct, routes) = crate::direct_connections::tests::connected_routes_to_one_server(
+        &["penguin", "penguin new"],
+        [0x5E; 32],
+    );
+    cx.update(|_, cx| crate::ui::direct_servers::install(direct.clone(), cx));
+    let connection = |route| {
+        Rc::new(direct.server(route).expect("the route is connected"))
+            as Rc<dyn crate::ui::shared_workspaces::ServerIdentity>
+    };
+    let owners = |cx: &mut VisualTestContext| {
+        harness.manager.read_with(cx, |manager, _| {
+            manager
+                .workspaces
+                .iter()
+                .map(|workspace| manager.shared.owner(workspace.id()))
+                .collect::<Vec<_>>()
+        })
+    };
+    let (earlier, earlier_edits) = harness.present_direct_identified(
+        "penguin",
+        routes[0],
+        connection(&routes[0]),
+        &[("Far", 1)],
+        cx,
+    );
+    let (newer, _) = harness.present_direct_identified(
+        "penguin new",
+        routes[1],
+        connection(&routes[1]),
+        &[("Far", 1)],
+        cx,
+    );
+    let presented = owners(cx);
+    let newer_far = harness.manager.read_with(cx, |manager, _| {
+        manager
+            .shared
+            .get(newer)
+            .and_then(|shared| shared.local([1; 32]))
+    });
+    cx.update(|window, cx| {
+        harness.manager.update(cx, |manager, cx| {
+            manager.handle_sidebar_event(
+                SidebarEvent::Move {
+                    workspace_id: newer_far.expect("the newer route presents Far"),
+                    position: 0,
+                },
+                window,
+                cx,
+            );
+            manager.withdraw_server_workspaces(newer, window, cx);
+        });
+    });
+    cx.run_until_parked();
+
+    let (returned, returned_edits) = harness.present_direct_identified(
+        "penguin new",
+        routes[1],
+        connection(&routes[1]),
+        &[("Far", 1)],
+        cx,
+    );
+    cx.update(|window, cx| {
+        harness.manager.update(cx, |manager, cx| {
+            manager.create_workspace_on(
+                &crate::ui::ServerTarget::Direct(routes[1]),
+                String::new(),
+                window,
+                cx,
+            );
+        });
+    });
+
+    assert_eq!(presented, [None, Some(earlier), Some(newer)]);
+    // The window's own Workspace isn't a server's, so it keeps its place.
+    assert_eq!(
+        owners(cx),
+        [None, Some(returned), Some(earlier)],
+        "the newer route's Workspace returns before the earlier route's, where the person put it"
+    );
+    assert_eq!(
+        returned_edits.submitted(),
+        vec![Mutation::CreateWorkspace {
+            name: String::new(),
+            directory: None,
+        }]
+    );
+    assert_eq!(earlier_edits.submitted(), Vec::new());
 }
 
 /// A Workspace the person moves while its server hasn't confirmed creating it keeps that place
