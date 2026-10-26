@@ -1154,8 +1154,8 @@ fn a_dismissed_unpair_keeps_trying_and_returns_with_resume_once_only_the_person_
 
     // The key the request was made with now needs the person's permission.
     credentials.set_locked(true);
-    settle(cx, |_| {
-        state(&direct) == Some(UnpairState::NeedsInteraction)
+    settle(cx, |cx| {
+        state(&direct) == Some(UnpairState::NeedsInteraction) && open(&resume, cx)
     });
 
     assert!(
