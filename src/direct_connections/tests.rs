@@ -377,8 +377,9 @@ pub(crate) fn offline_routes(labels: &[&str]) -> (DirectConnections, Vec<DirectR
 }
 
 /// Connected registry entries for UI tests that supply their own protocol writers.
-/// Native workers admit and refresh routes; GPUI callers allow native I/O.
-/// The network boundary admits the route; its handle cannot reach a native server.
+/// Seeds retained routes and handles without starting native maintenance workers, because the
+/// scripted writers answer protocol operations and the handles cannot reach a native server.
+/// Registry mutations still use DirectConnections.
 pub(crate) fn connected_routes(labels: &[&str]) -> (DirectConnections, Vec<DirectRouteId>) {
     struct ConnectedNetwork;
     impl DirectNetwork for ConnectedNetwork {
@@ -425,13 +426,45 @@ pub(crate) fn connected_routes(labels: &[&str]) -> (DirectConnections, Vec<Direc
             Err(DirectError::Transport)
         }
     }
-    let routes: Vec<_> = labels.iter().map(|label| (*label, None)).collect();
-    let (connections, ids, _, _) =
-        retained_fixture_routes(&routes, true, Arc::new(ConnectedNetwork));
-    await_condition(|| {
-        ids.iter()
-            .all(|id| connections.status(id) == Some(DirectRouteStatus::Connected))
-    });
+    let records = Arc::new(MemoryRecords::default());
+    let credentials = Arc::new(Credentials::default());
+    let connections = DirectConnections::new(
+        "spaceterm-development",
+        records.clone(),
+        credentials.clone(),
+        Arc::new(ConnectedNetwork),
+    );
+    let mut state = connections.0.state.lock().unwrap();
+    let mut ids = Vec::new();
+    for (index, label) in (0_u8..).zip(labels) {
+        let mut saved = saved(1 + index, 5 + index);
+        saved.route.label = (*label).to_owned();
+        saved.active = true;
+        credentials
+            .insert(
+                &saved.credential,
+                DeviceCredential::generate().unwrap().expose_bytes(),
+            )
+            .unwrap();
+        let gate = Arc::new(AtomicBool::new(true));
+        let server = worker::connect(&connections.0, &saved, Interaction::Quiet, gate.clone())
+            .expect("the scripted route connects without network I/O");
+        ids.push(saved.route.id);
+        state.routes.insert(
+            saved.route.id,
+            RouteState {
+                status: DirectRouteStatus::Connected,
+                server: Some(server),
+                gate,
+                retry: Retry::new(Interaction::Quiet),
+            },
+        );
+        state.document.routes.push(saved);
+    }
+    *records.0.lock().unwrap() = state.document.clone();
+    state.loaded = true;
+    state.inventory_loaded = true;
+    drop(state);
     (connections, ids)
 }
 
