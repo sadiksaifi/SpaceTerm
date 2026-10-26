@@ -12107,41 +12107,58 @@ mod shared_repositories {
 
     /// A linked Worktree inside the Main Worktree's directory is its own: a Pane that moved into
     /// it has left the Main Worktree, though its directory starts with the Main Worktree's root.
+    /// A later failed read keeps the nested Worktree the server last read there.
     #[gpui::test]
     fn a_pane_in_a_nested_worktree_should_be_outside_the_main_worktree(cx: &mut TestAppContext) {
         const NESTED_ROOT: &str = "/srv/app/.worktrees/nested";
-        let mut inventory = moved_to_orbit(1, NESTED_ROOT);
         let listed = [
             record(MAIN_ROOT, "main", false),
             record(NESTED_ROOT, "nested", false),
         ];
-        if let Some(snapshot) = &mut inventory.repositories {
-            snapshot.directories.push(facts(NESTED_ROOT, "nested", &listed));
-        }
-        let (harness, cx) = harness(cx, inventory);
-
-        let row = harness
-            .row(cx)
-            .worktrees
-            .and_then(|section| {
-                section
-                    .rows()
-                    .find(|row| row.name.as_ref() == "app")
-                    .cloned()
-            })
-            .expect("the Main Worktree keeps the second Tab");
-
-        assert_eq!(
+        let nested = |revision: u64, failure: Option<RepositoryReadError>| {
+            let mut inventory = moved_to_orbit(revision, NESTED_ROOT);
+            if let Some(snapshot) = &mut inventory.repositories {
+                // The server keeps a failed read's last repository and Worktree listing.
+                snapshot.directories.push(DirectoryFacts {
+                    failure,
+                    ..facts(NESTED_ROOT, "nested", &listed)
+                });
+            }
+            inventory
+        };
+        let (harness, cx) = harness(cx, nested(1, None));
+        let app_row = |cx: &mut VisualTestContext| {
+            let row = harness
+                .row(cx)
+                .worktrees
+                .and_then(|section| {
+                    section
+                        .rows()
+                        .find(|row| row.name.as_ref() == "app")
+                        .cloned()
+                })
+                .expect("the Main Worktree keeps the second Tab");
             (
                 row.directory.to_string(),
                 row.repository.map(|badge| badge.text().to_owned()),
-                row.outside_pane_directory.map(|directory| directory.to_string()),
-            ),
-            (
-                MAIN_ROOT.to_owned(),
-                Some("main".to_owned()),
-                Some(NESTED_ROOT.to_owned()),
+                row.outside_pane_directory
+                    .map(|directory| directory.to_string()),
             )
+        };
+
+        let read = app_row(cx);
+        harness.publish(nested(2, Some(RepositoryReadError::Unavailable)), cx);
+        let failed = app_row(cx);
+
+        let outside = (
+            MAIN_ROOT.to_owned(),
+            Some("main".to_owned()),
+            Some(NESTED_ROOT.to_owned()),
+        );
+        assert_eq!(read, outside);
+        assert_eq!(
+            failed, outside,
+            "a failed read keeps the Pane in the nested Worktree it was last read in"
         );
     }
 

@@ -607,17 +607,16 @@ mod development {
         key(inventory.map_or(root, |inventory| inventory.main_root.as_path()))
     }
 
-    /// Whether a Pane's directory is in the Worktree at `root`. The server's reading of the
-    /// directory decides, so a Worktree nested in another's directory is its own; an unread
-    /// directory is compared by path.
+    /// Whether a Pane's directory is in the Worktree at `root`. The Worktree the server last read
+    /// the directory in decides, so a Worktree nested in another's directory is its own. A failed
+    /// read keeps that Worktree, as it keeps the directory's last Repository Status. Only a
+    /// directory the server never placed in a Worktree is compared by path, unless a successful
+    /// read found it outside every repository.
     fn within_worktree(directory: &Path, root: &Path, repositories: &SharedRepositories) -> bool {
-        let Some(facts) = repositories
-            .facts(directory)
-            .filter(|facts| facts.failure.is_none())
-        else {
+        let Some(facts) = repositories.facts(directory) else {
             return directory.starts_with(root);
         };
-        facts
+        let known = facts
             .worktrees
             .as_ref()
             .and_then(|list| list.worktrees.get(list.current?))
@@ -627,8 +626,11 @@ mod development {
                     .repository
                     .as_ref()
                     .map(|repository| repository.root.as_path())
-            })
-            == Some(root)
+            });
+        match known {
+            Some(known) => known == root,
+            None => facts.failure.is_some() && directory.starts_with(root),
+        }
     }
 
     /// The listing of the repository a Tab's membership is in: the server's reading of its
