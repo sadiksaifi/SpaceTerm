@@ -384,7 +384,12 @@ impl WorkspaceSidebar {
         } else {
             detail.clone()
         };
-        // Another computer's Workspace names that computer, as its title does.
+        // Another computer's Workspace names that computer, as its title does, so same-named rows
+        // on different servers stay distinguishable when a row is reached on its own.
+        let target_detail: SharedString = match &machine {
+            Some(machine) => format!("{machine}, {target_detail}").into(),
+            None => target_detail,
+        };
         let on_machine = machine
             .as_ref()
             .map_or_else(String::new, |machine| format!(" on {machine}"));
