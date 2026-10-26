@@ -5,10 +5,13 @@
 //! a disconnected, refused or unpaired one is withdrawn. Following the registry performs no
 //! network work and asks for no credential.
 
-use gpui::{Context, SharedString, Window};
+use std::cmp::Ordering;
 
-use super::{ServerOrigin, WorkspaceManager};
+use gpui::{App, Context, SharedString, Window};
+
+use super::{ServerKey, ServerOrigin, WorkspaceManager};
 use crate::direct_connections::DirectRouteId;
+use crate::ui::ServerTarget;
 use crate::ui::shared_workspaces::{DirectServer, SharedPaneSessions};
 
 impl WorkspaceManager {
@@ -85,7 +88,7 @@ impl WorkspaceManager {
                 self.present_direct_server(direct, server, window, cx);
             }
         }
-        // Machine headings show each route's state, which changes without a new binding.
+        // The creation menus show each saved route, which changes without a new binding.
         cx.notify();
     }
 
@@ -143,4 +146,98 @@ impl WorkspaceManager {
             )
         })
     }
+
+    /// Asks the server `target` names for a new Workspace named `name` unless blank, which it
+    /// presents to every connected client and this window activates once the server publishes
+    /// it.
+    pub(super) fn create_workspace_on(
+        &mut self,
+        target: &ServerTarget,
+        name: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::ui::shared_workspaces::{SharedRefusalReason, SharedSubmission};
+
+        let Some(shared) = self
+            .server_key(target)
+            .and_then(|key| self.shared.get_mut(key))
+        else {
+            WorkspaceManager::show_shared_refusal(
+                "create a Workspace",
+                SharedRefusalReason::Offline,
+                window,
+                cx,
+            );
+            return;
+        };
+        if let SharedSubmission::Refused(reason) = shared.create_workspace(name, None) {
+            WorkspaceManager::show_shared_refusal("create a Workspace", reason, window, cx);
+        }
+        cx.notify();
+    }
+
+    /// Every saved paired server the creation menus offer, by name. Only one this window
+    /// presents can take a new Workspace now.
+    pub(super) fn remote_creation_servers(
+        &self,
+        cx: &App,
+    ) -> Vec<crate::ui::workspace_creation::RemoteCreationServer> {
+        use crate::ui::workspace_creation::{RemoteCreationServer, endpoint_address};
+
+        let Some(direct) = crate::ui::direct_servers::installed(cx) else {
+            return Vec::new();
+        };
+        let saved: Vec<_> = direct
+            .routes()
+            .into_iter()
+            .filter_map(|(route, _)| direct.route(&route))
+            .collect();
+        // Two saved servers may give one name, such as an earlier pairing and a newer one, so a
+        // shared name carries the address each route reaches.
+        let shares_name = |name: &str| {
+            saved
+                .iter()
+                .filter(|other| other.label.to_lowercase() == name.to_lowercase())
+                .count()
+                > 1
+        };
+        let mut servers: Vec<_> = saved
+            .iter()
+            .map(|route| RemoteCreationServer {
+                route: route.id,
+                name: route.label.clone().into(),
+                address: shares_name(&route.label)
+                    .then(|| endpoint_address(&route.endpoint).to_owned().into()),
+                available: self.direct_route_presented(&route.id),
+            })
+            .collect();
+        servers.sort_by(|a, b| {
+            by_name(&a.name, &b.name)
+                .then_with(|| a.address.cmp(&b.address))
+                .then_with(|| a.route.cmp(&b.route))
+        });
+        servers
+    }
+
+    /// The binding presenting `target`'s server, if this window presents it.
+    pub(super) fn server_key(&self, target: &ServerTarget) -> Option<ServerKey> {
+        self.shared
+            .keys()
+            .into_iter()
+            .find(|key| match (self.shared.origin(*key), target) {
+                (Some(ServerOrigin::Local), ServerTarget::Local) => true,
+                (Some(ServerOrigin::Direct(bound)), ServerTarget::Direct(route)) => {
+                    bound.route == *route
+                }
+                _ => false,
+            })
+    }
+}
+
+/// Orders names ignoring case, so spellings that differ only in case stay distinct but adjacent.
+fn by_name(a: &str, b: &str) -> Ordering {
+    a.to_lowercase()
+        .cmp(&b.to_lowercase())
+        .then_with(|| a.cmp(b))
 }

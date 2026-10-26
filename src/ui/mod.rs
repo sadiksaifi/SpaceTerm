@@ -81,7 +81,7 @@ pub(crate) use workspace_manager::tests::{
 pub(crate) use workspace_manager::{
     LocalServerAdapters, WorkspaceManager, WorkspaceManagerAdapters,
 };
-pub(crate) use workspace_sidebar::MachineTarget;
+pub(crate) use workspace_sidebar::ServerTarget;
 
 /// Finishes every hover transition in progress, since test windows have no frame loop.
 #[cfg(test)]

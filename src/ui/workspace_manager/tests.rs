@@ -531,7 +531,6 @@ impl WorkspaceManager {
                 .activate_workspace(previous)
                 .expect("the previous Workspace remains");
         }
-        self.arrange_by_machine();
         self.activate_workspace(workspace_id, window, cx);
         workspace_id
     }
@@ -8527,7 +8526,7 @@ fn each_servers_workspaces_should_take_edits_and_withdrawal_only_from_their_own_
 }
 
 /// One inventory at `revision` publishing each named Workspace, identified by its number below 50.
-fn machine_inventory(
+fn server_inventory(
     revision: u64,
     workspaces: &[(&str, u8)],
 ) -> spaceterm_server::hierarchy::Inventory {
@@ -8570,14 +8569,14 @@ fn machine_inventory(
 }
 
 /// A window presenting the account-local server beside paired servers, each with scripted edits.
-struct MachineGroupsHarness {
+struct MultiServerHarness {
     manager: Entity<WorkspaceManager>,
     local: Rc<crate::ui::shared_workspaces::testing::ScriptedEdits>,
     /// The revision the next publication carries, so every server reads it as new.
     revision: std::cell::Cell<u64>,
 }
 
-impl MachineGroupsHarness {
+impl MultiServerHarness {
     fn new(cx: &mut TestAppContext) -> (Self, &mut VisualTestContext) {
         Self::using(workspace_adapters(), cx)
     }
@@ -8592,7 +8591,7 @@ impl MachineGroupsHarness {
 
         // A test installs the paired registry its machines need.
         let (manager, _records, cx) = workspace_manager_using(adapters, cx);
-        let local = Rc::new(ScriptedEdits::new(Some(machine_inventory(1, &[]))));
+        let local = Rc::new(ScriptedEdits::new(Some(server_inventory(1, &[]))));
         cx.update(|window, cx| {
             manager.update(cx, |manager, cx| {
                 manager.present_shared_workspaces(
@@ -8657,7 +8656,7 @@ impl MachineGroupsHarness {
         Rc<crate::ui::shared_workspaces::testing::ScriptedPanes>,
     ) {
         let edits = Rc::new(crate::ui::shared_workspaces::testing::ScriptedEdits::new(
-            Some(machine_inventory(self.next_revision(), workspaces)),
+            Some(server_inventory(self.next_revision(), workspaces)),
         ));
         let (key, panes) = self.present_direct_edits(name, route, &edits, cx);
         self.attach(key, workspaces, cx);
@@ -8716,7 +8715,7 @@ impl MachineGroupsHarness {
         workspaces: &[(&str, u8)],
         cx: &mut VisualTestContext,
     ) {
-        edits.set_inventory(machine_inventory(self.next_revision(), workspaces));
+        edits.set_inventory(server_inventory(self.next_revision(), workspaces));
         cx.update(|window, cx| {
             self.manager.update(cx, |manager, cx| {
                 manager.sync_shared_workspaces(key, window, cx);
@@ -8779,13 +8778,31 @@ impl MachineGroupsHarness {
             manager.workspaces.active().name().to_owned()
         })
     }
+
+    /// Moves the Workspace `name` to `position`, as dropping its sidebar row there does.
+    fn move_workspace(&self, name: &str, position: usize, cx: &mut VisualTestContext) {
+        let workspace_id = self.named(name, cx);
+        cx.update(|window, cx| {
+            self.manager.update(cx, |manager, cx| {
+                manager.handle_sidebar_event(
+                    SidebarEvent::Move {
+                        workspace_id,
+                        position,
+                    },
+                    window,
+                    cx,
+                );
+            });
+        });
+        cx.run_until_parked();
+    }
 }
 
-/// Each machine's Workspaces stay together in Workspace order, the local ones first and then each
-/// other machine's by name, so a Workspace published later joins the end of its own machine's.
+/// Workspaces join the end of Workspace order as their servers publish them, whichever server
+/// owns them, so no server's Workspaces are gathered together.
 #[gpui::test]
-fn workspaces_from_several_servers_should_stay_grouped_by_machine(cx: &mut TestAppContext) {
-    let (harness, cx) = MachineGroupsHarness::new(cx);
+fn workspaces_from_several_servers_should_keep_the_order_they_arrived_in(cx: &mut TestAppContext) {
+    let (harness, cx) = MultiServerHarness::new(cx);
     harness.publish(ServerKey::LOCAL, &harness.local, &[("Here", 1)], cx);
     let (zeta, zeta_edits) = harness.present_direct("zeta", named_route("zeta"), &[("Far", 1)], cx);
     harness.publish(
@@ -8799,16 +8816,14 @@ fn workspaces_from_several_servers_should_stay_grouped_by_machine(cx: &mut TestA
 
     assert_eq!(
         harness.names(cx),
-        ["Default", "Here", "Also Here", "Near", "Far", "Farther",],
-        "local Workspaces come first, then each machine's by name regardless of case, and a new \
-         Workspace lands at the end of its machine's"
+        ["Default", "Here", "Far", "Also Here", "Near", "Farther"]
     );
 }
 
-/// Moving a Workspace past its machine's Workspaces leaves it at the nearer end of them.
+/// A Workspace moves to any place in the list, between other servers' Workspaces too.
 #[gpui::test]
-fn moving_a_workspace_should_stay_among_its_machines_workspaces(cx: &mut TestAppContext) {
-    let (harness, cx) = MachineGroupsHarness::new(cx);
+fn moving_a_workspace_should_interleave_it_with_other_servers_workspaces(cx: &mut TestAppContext) {
+    let (harness, cx) = MultiServerHarness::new(cx);
     harness.publish(ServerKey::LOCAL, &harness.local, &[("Here", 1)], cx);
     harness.present_direct(
         "penguin",
@@ -8816,51 +8831,35 @@ fn moving_a_workspace_should_stay_among_its_machines_workspaces(cx: &mut TestApp
         &[("Far", 1), ("Farther", 2)],
         cx,
     );
-    let farther = harness.named("Farther", cx);
-    let default = harness.named("Default", cx);
 
-    let move_to = |workspace_id: WorkspaceId, position: usize, cx: &mut VisualTestContext| {
-        cx.update(|window, cx| {
-            harness.manager.update(cx, |manager, cx| {
-                manager.handle_sidebar_event(
-                    SidebarEvent::Move {
-                        workspace_id,
-                        position,
-                    },
-                    window,
-                    cx,
-                );
-            });
-        });
-    };
-    move_to(farther, 0, cx);
+    harness.move_workspace("Farther", 0, cx);
     let toward_start = harness.names(cx);
-    move_to(default, 3, cx);
+    harness.move_workspace("Default", 3, cx);
 
     assert_eq!(
         (toward_start, harness.names(cx)),
         (
             vec![
+                "Farther".to_owned(),
                 "Default".to_owned(),
                 "Here".to_owned(),
-                "Farther".to_owned(),
                 "Far".to_owned(),
             ],
             vec![
-                "Here".to_owned(),
-                "Default".to_owned(),
                 "Farther".to_owned(),
+                "Here".to_owned(),
                 "Far".to_owned(),
+                "Default".to_owned(),
             ]
-        ),
-        "a move past a machine's Workspaces stops at their nearer end"
+        )
     );
 }
 
-/// Position shortcuts follow the grouped order the sidebar shows, not the order Workspaces arrived.
+/// The Workspace Switcher and the position shortcuts follow the order the person arranged across
+/// servers, the same order the sidebar shows.
 #[gpui::test]
-fn workspace_shortcuts_should_follow_the_grouped_order(cx: &mut TestAppContext) {
-    let (harness, cx) = MachineGroupsHarness::new(cx);
+fn the_switcher_and_shortcuts_should_follow_the_interleaved_order(cx: &mut TestAppContext) {
+    let (harness, cx) = MultiServerHarness::new(cx);
     harness.publish(ServerKey::LOCAL, &harness.local, &[("Here", 1)], cx);
     harness.present_direct("penguin", named_route("penguin"), &[("Far", 1)], cx);
     harness.publish(
@@ -8869,26 +8868,35 @@ fn workspace_shortcuts_should_follow_the_grouped_order(cx: &mut TestAppContext) 
         &[("Here", 1), ("Also Here", 2)],
         cx,
     );
+    harness.move_workspace("Far", 1, cx);
 
-    cx.simulate_keystrokes("ctrl-3");
+    let switcher: Vec<String> = harness.manager.read_with(cx, |manager, cx| {
+        manager
+            .workspace_switcher_items(cx)
+            .iter()
+            .map(|item| item.label().to_owned())
+            .collect()
+    });
+    cx.simulate_keystrokes("ctrl-2");
     cx.run_until_parked();
-    let third = harness.active_name(cx);
+    let second = harness.active_name(cx);
     cx.simulate_keystrokes("ctrl-4");
     cx.run_until_parked();
 
+    assert_eq!(switcher, ["Default", "Far", "Here", "Also Here"]);
     assert_eq!(
-        (third, harness.active_name(cx)),
-        ("Also Here".to_owned(), "Far".to_owned())
+        (second, harness.active_name(cx)),
+        ("Far".to_owned(), "Also Here".to_owned())
     );
 }
 
-/// Disconnecting from one server removes only its machine's Workspaces. The Active Workspace and
-/// the order of the others stay as the person left them.
+/// Disconnecting from one server removes only its Workspaces. The Active Workspace and the order
+/// of the others stay as the person left them.
 #[gpui::test]
-fn withdrawing_one_server_should_keep_the_other_machines_workspaces_and_active_workspace(
+fn withdrawing_one_server_should_keep_the_other_servers_workspaces_and_active_workspace(
     cx: &mut TestAppContext,
 ) {
-    let (harness, cx) = MachineGroupsHarness::new(cx);
+    let (harness, cx) = MultiServerHarness::new(cx);
     harness.publish(
         ServerKey::LOCAL,
         &harness.local,
@@ -8896,17 +8904,10 @@ fn withdrawing_one_server_should_keep_the_other_machines_workspaces_and_active_w
         cx,
     );
     let (penguin, _) = harness.present_direct("penguin", named_route("penguin"), &[("Far", 1)], cx);
+    harness.move_workspace("Here", 3, cx);
     let here = harness.named("Here", cx);
     cx.update(|window, cx| {
         harness.manager.update(cx, |manager, cx| {
-            manager.handle_sidebar_event(
-                SidebarEvent::Move {
-                    workspace_id: here,
-                    position: 2,
-                },
-                window,
-                cx,
-            );
             manager.activate_workspace(here, window, cx);
         });
     });
@@ -8931,29 +8932,16 @@ fn withdrawing_one_server_should_keep_the_other_machines_workspaces_and_active_w
     );
 }
 
-fn heading_names(cx: &mut VisualTestContext) -> Vec<String> {
-    spaceterm_ui::a11y_testing::A11yTree::read(cx)
-        .with_role("Heading")
-        .iter()
-        .filter_map(|node| node["aria"]["label"].as_str().map(str::to_owned))
-        .collect()
-}
-
-/// One machine's Workspaces need no heading. Once another machine's server is presented, each
-/// machine heads its own Workspaces, and each row names its machine to assistive technology.
+/// The sidebar lists every server's Workspaces together in Workspace order, with no machine
+/// headings, and a paired server's row names its machine on its first line. A presented server
+/// with no attached Workspaces adds nothing to the list.
 #[gpui::test]
-fn machine_headings_should_appear_only_once_a_second_machine_is_presented(cx: &mut TestAppContext) {
-    use spaceterm_ui::a11y_testing::A11yTree;
-
-    let (harness, cx) = MachineGroupsHarness::new(cx);
+fn the_sidebar_should_list_every_servers_workspaces_together(cx: &mut TestAppContext) {
+    let (harness, cx) = MultiServerHarness::new(cx);
     harness.publish(ServerKey::LOCAL, &harness.local, &[("Here", 1)], cx);
-    redraw(cx);
-    let alone = (
-        cx.debug_bounds("machine-heading-This Computer").is_some(),
-        heading_names(cx),
-    );
-
     harness.present_direct("penguin", named_route("penguin"), &[("Far", 1)], cx);
+    harness.present_direct("studio", named_route("studio"), &[], cx);
+    harness.move_workspace("Far", 1, cx);
     redraw(cx);
     let here = harness.named("Here", cx).get();
     let far = harness.named("Far", cx).get();
@@ -8961,43 +8949,35 @@ fn machine_headings_should_appear_only_once_a_second_machine_is_presented(cx: &m
         cx.debug_bounds(selector.leak())
             .expect("the sidebar should present it")
     };
-    let local = bounds("machine-heading-This Computer".to_owned(), cx);
-    let first = bounds("workspace-row-1-inactive".to_owned(), cx);
-    let here_row = bounds(format!("workspace-group-{here}"), cx);
-    let remote = bounds("machine-heading-penguin".to_owned(), cx);
-    let far_row = bounds(format!("workspace-group-{far}"), cx);
+    let list = bounds("workspace-list".to_owned(), cx);
+    let groups = [1, far, here].map(|id| bounds(format!("workspace-group-{id}"), cx));
 
-    assert_eq!(alone, (false, Vec::<String>::new()));
+    assert_eq!(groups[0].top(), list.top(), "the first row starts the list");
     assert!(
-        local.bottom() <= first.top()
-            && here_row.bottom() <= remote.top()
-            && remote.bottom() <= far_row.top(),
-        "each machine's heading stands above its own Workspaces"
+        groups
+            .windows(2)
+            .all(|pair| (pair[1].top() - pair[0].bottom()).abs() < px(0.5)),
+        "each row follows the one before it with nothing between them: {groups:?}"
     );
-    assert_eq!(heading_names(cx), ["This Computer", "penguin"]);
-    let far_item = A11yTree::read(cx)
-        .with_role("TreeItem")
-        .into_iter()
-        .find(|node| node["aria"]["label"] == "Far")
-        .map(|node| {
-            node["aria"]["description"]
-                .as_str()
-                .unwrap_or("")
-                .to_owned()
-        });
     assert!(
-        far_item.is_some_and(|description| description.starts_with("penguin")),
-        "a row reached on its own names its machine"
+        spaceterm_ui::a11y_testing::A11yTree::read(cx)
+            .with_role("Heading")
+            .is_empty()
+    );
+    assert!(
+        cx.debug_bounds(format!("workspace-machine-{far}").leak())
+            .is_some()
+    );
+    assert!(
+        cx.debug_bounds(format!("workspace-machine-{here}").leak())
+            .is_none()
     );
 }
 
-/// Dragging a Workspace row past its machine's heading lands it at the nearer end of that
-/// machine's Workspaces.
+/// Dragging a paired server's Workspace onto this computer's lands it there.
 #[gpui::test]
-fn dragging_a_workspace_past_its_machine_heading_should_stay_with_its_machine(
-    cx: &mut TestAppContext,
-) {
-    let (harness, cx) = MachineGroupsHarness::new(cx);
+fn dragging_a_workspace_should_land_it_among_other_servers_workspaces(cx: &mut TestAppContext) {
+    let (harness, cx) = MultiServerHarness::new(cx);
     harness.present_direct(
         "penguin",
         named_route("penguin"),
@@ -9013,18 +8993,12 @@ fn dragging_a_workspace_past_its_machine_heading_should_stay_with_its_machine(
     });
     redraw(cx);
     let farther = harness.named("Farther", cx).get();
-    let far = harness.named("Far", cx).get();
     let row = cx
         .debug_bounds(format!("workspace-row-{farther}-inactive").leak())
         .expect("the row to drag");
-    let group_start = cx
-        .debug_bounds(format!("workspace-row-{far}-inactive").leak())
-        .expect("the machine's first row")
-        .origin;
-    let top = cx
+    let first = cx
         .debug_bounds("workspace-row-1-active")
-        .expect("the local row")
-        .center();
+        .expect("the local row");
 
     cx.simulate_mouse_move(row.center(), None, Modifiers::none());
     cx.simulate_mouse_down(row.center(), MouseButton::Left, Modifiers::none());
@@ -9034,69 +9008,50 @@ fn dragging_a_workspace_past_its_machine_heading_should_stay_with_its_machine(
         Modifiers::none(),
     );
     cx.run_until_parked();
-    cx.simulate_mouse_move(top, MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_move(first.center(), MouseButton::Left, Modifiers::none());
     finish_slides(cx);
     let landing = cx
         .debug_bounds(format!("workspace-row-{farther}-inactive").leak())
         .map(|face| face.origin);
-    cx.simulate_mouse_up(top, MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_up(first.center(), MouseButton::Left, Modifiers::none());
     cx.run_until_parked();
 
     assert_eq!(
         landing,
-        Some(group_start),
-        "the dragged row's place opens at the start of its machine's Workspaces"
+        Some(first.origin),
+        "the dragged row's place opens before this computer's Workspace"
     );
-    assert_eq!(harness.names(cx), ["Default", "Farther", "Far"]);
+    assert_eq!(harness.names(cx), ["Farther", "Default", "Far"]);
 }
 
-/// A saved paired server keeps its heading while it isn't connected, and its commands reach that
-/// route alone.
+/// Reconnect on a paired server's Workspace resumes that Workspace's route alone.
 #[gpui::test]
-fn a_paired_server_heading_should_act_on_its_own_route(cx: &mut TestAppContext) {
-    // The saved route keeps retrying, and its worker reports from its own thread.
-    cx.executor().allow_parking();
-    let (harness, cx) = MachineGroupsHarness::new(cx);
-    let (direct, route) = crate::direct_connections::tests::offline("studio");
-    cx.update(|_, cx| crate::ui::direct_servers::install(direct.clone(), cx));
-    harness.publish(ServerKey::LOCAL, &harness.local, &[("Here", 1)], cx);
-    redraw(cx);
-
-    assert!(
-        heading_names(cx)
-            .iter()
-            .any(|name| name.starts_with("studio")),
-        "the saved server keeps its heading, got {:?}",
-        heading_names(cx)
-    );
-    right_click("machine-heading-studio", cx);
-    click("machine-menu-disconnect", cx);
-
-    assert_eq!(
-        direct.status(&route),
-        Some(crate::direct_connections::DirectRouteStatus::Disconnected)
-    );
-}
-
-/// A presented paired server whose route stopped offers Connect from its heading, which resumes
-/// that route alone.
-#[gpui::test]
-fn a_paired_server_heading_should_connect_its_own_route(cx: &mut TestAppContext) {
+fn reconnecting_a_remote_workspace_should_resume_its_route_alone(cx: &mut TestAppContext) {
     use crate::direct_connections::DirectRouteStatus;
 
-    // Connect starts the route's native job, which reports from its own thread.
+    // Reconnect starts the route's native job, which reports from its own thread.
     cx.executor().allow_parking();
-    let (harness, cx) = MachineGroupsHarness::new(cx);
+    let (harness, cx) = MultiServerHarness::new(cx);
     let (direct, routes) = crate::direct_connections::tests::disconnected_routes_at(&[
         ("studio", "wss://192.168.1.2:9231"),
         ("penguin", "wss://192.168.1.3:9231"),
     ]);
     cx.update(|_, cx| crate::ui::direct_servers::install(direct.clone(), cx));
     harness.present_direct("studio", routes[0], &[("Far", 1)], cx);
-    redraw(cx);
+    let far = harness.named("Far", cx);
 
-    right_click("machine-heading-studio", cx);
-    click("machine-menu-connect", cx);
+    cx.update(|window, cx| {
+        harness.manager.update(cx, |manager, cx| {
+            manager.handle_sidebar_event(
+                SidebarEvent::Command {
+                    workspace_id: far,
+                    command: crate::ui::workspace_sidebar::WorkspaceMenuCommand::Reconnect,
+                },
+                window,
+                cx,
+            );
+        });
+    });
 
     assert_ne!(
         direct.status(&routes[0]),
@@ -9105,120 +9060,6 @@ fn a_paired_server_heading_should_connect_its_own_route(cx: &mut TestAppContext)
     assert_eq!(
         direct.status(&routes[1]),
         Some(DirectRouteStatus::Disconnected)
-    );
-}
-
-/// Two direct routes that carry the same server name, such as an earlier pairing and a newer
-/// one to the same computer, keep separate headings: assistive technology reaches each one, and
-/// a command from one heading's menu reaches that route alone.
-#[gpui::test]
-fn same_named_direct_routes_should_keep_separate_headings_and_commands(cx: &mut TestAppContext) {
-    use crate::direct_connections::DirectRouteStatus;
-
-    // The saved routes keep retrying, and their workers report from their own threads.
-    cx.executor().allow_parking();
-    let (harness, cx) = MachineGroupsHarness::new(cx);
-    let (direct, routes) = crate::direct_connections::tests::offline_routes(&["studio", "studio"]);
-    cx.update(|_, cx| crate::ui::direct_servers::install(direct.clone(), cx));
-    harness.publish(ServerKey::LOCAL, &harness.local, &[("Here", 1)], cx);
-    redraw(cx);
-
-    let headings = heading_names(cx)
-        .into_iter()
-        .filter(|name| name.starts_with("studio"))
-        .count();
-    assert_eq!(
-        headings,
-        2,
-        "each route has its own heading, got {:?}",
-        heading_names(cx)
-    );
-
-    right_click("machine-heading-studio", cx);
-    click("machine-menu-disconnect", cx);
-
-    let disconnected = routes
-        .iter()
-        .filter(|route| direct.status(route) == Some(DirectRouteStatus::Disconnected))
-        .count();
-    assert_eq!(disconnected, 1, "Disconnect reaches only its own route");
-    assert_eq!(
-        heading_names(cx)
-            .iter()
-            .filter(|name| name.starts_with("studio"))
-            .count(),
-        1,
-        "the other route keeps its heading"
-    );
-}
-
-struct SettingsMovement;
-
-impl crate::platform::window_movement::WindowMovementFactory for SettingsMovement {
-    fn create(
-        &self,
-    ) -> Rc<dyn crate::platform::window_movement::OperatingSystemWindowDragPlatform> {
-        Rc::new(RecordingOperatingSystemWindowDragPlatform::default())
-    }
-}
-
-/// A machine heading's Server Settings opens Settings with that machine's server selected.
-#[gpui::test]
-fn a_machine_headings_server_settings_should_select_its_server(cx: &mut TestAppContext) {
-    use spaceterm_ui::a11y_testing::A11yTree;
-
-    // Each saved route keeps retrying, so its heading shows unpresented, and its worker reports
-    // to Settings from its own thread.
-    cx.executor().allow_parking();
-    let (harness, cx) = MachineGroupsHarness::new(cx);
-    let (direct, _routes) = crate::direct_connections::tests::offline_routes(&["alpha", "penguin"]);
-    cx.update(|_, cx| crate::ui::direct_servers::install(direct.clone(), cx));
-    harness.publish(ServerKey::LOCAL, &harness.local, &[("Here", 1)], cx);
-    let settings = crate::settings::Settings::load(
-        crate::settings::storage::testing::MemoryStorage::with_document(
-            &crate::settings::SettingsDocument::default(),
-        ),
-    );
-    cx.update(|_, cx| {
-        crate::ui::appearance_runtime::install(
-            settings,
-            Rc::new(crate::platform::appearance::testing::RecordingAppearancePlatform::default()),
-            cx,
-        )
-        .expect("appearance runtime should install");
-        crate::ui::settings_window::configure_window_chrome(
-            Rc::new(SettingsMovement),
-            Default::default(),
-            None,
-            cx,
-        );
-    });
-    redraw(cx);
-
-    right_click("machine-heading-penguin", cx);
-    click("machine-menu-server-settings", cx);
-
-    let settings_window = cx
-        .windows()
-        .into_iter()
-        .find(|window| {
-            window
-                .downcast::<crate::ui::settings_window::SettingsWindow>()
-                .is_some()
-        })
-        .expect("Settings should open");
-    let mut settings_cx = VisualTestContext::from_window(settings_window, cx);
-    settings_cx.run_until_parked();
-    let selected: Vec<_> = A11yTree::read(&mut settings_cx)
-        .with_role("ListBoxOption")
-        .into_iter()
-        .filter(|option| option["aria"]["selected"] == true)
-        .filter_map(|option| option["aria"]["label"].as_str().map(str::to_owned))
-        .collect();
-    assert_eq!(
-        selected,
-        ["Servers", "penguin"],
-        "Settings presents the Servers section with the heading's server selected"
     );
 }
 
@@ -12334,52 +12175,6 @@ mod shared_repositories {
 #[path = "launch_tests.rs"]
 mod launch_tests;
 
-/// A paired server's heading creates a Workspace on that server, and only there.
-#[gpui::test]
-fn a_direct_server_heading_should_create_a_workspace_on_that_server(cx: &mut TestAppContext) {
-    use crate::ui::shared_workspaces::testing::{ScriptedEdits, ScriptedPanes};
-    use crate::ui::shared_workspaces::{DirectServer, SharedEditSource, SharedPaneSessions};
-    use spaceterm_server::hierarchy::Mutation;
-
-    let (harness, cx) = MachineGroupsHarness::new(cx);
-    let edits = Rc::new(ScriptedEdits::new(Some(machine_inventory(
-        harness.next_revision(),
-        &[],
-    ))));
-    cx.update(|window, cx| {
-        harness.manager.update(cx, |manager, cx| {
-            let key = manager.present_server_workspaces(
-                ServerOrigin::Direct(DirectServer {
-                    route: [9; 32],
-                    name: "Studio".into(),
-                }),
-                SharedEditSource::new(Rc::clone(&edits) as Rc<_>),
-                SharedPaneSessions::with_opener(
-                    ScriptedPanes::new(MachineGroupsHarness::session_factory()) as Rc<_>,
-                    &PaneConstruction::testing(),
-                ),
-                window,
-                cx,
-            );
-            manager.sync_shared_workspaces(key, window, cx);
-        })
-    });
-    cx.run_until_parked();
-    redraw(cx);
-
-    right_click("machine-heading-Studio", cx);
-    click("machine-menu-new-workspace", cx);
-
-    assert_eq!(
-        edits.submitted(),
-        vec![Mutation::CreateWorkspace {
-            name: String::new(),
-            directory: None,
-        }]
-    );
-    assert_eq!(harness.local.submitted(), Vec::new());
-}
-
 /// A stable route for the paired server a test names.
 fn named_route(name: &str) -> crate::direct_connections::DirectRouteId {
     let mut route = [0xEE; 32];
@@ -12392,7 +12187,7 @@ fn named_route(name: &str) -> crate::direct_connections::DirectRouteId {
 /// Two saved paired servers, "penguin" presented in the window and "studio" not connected,
 /// with penguin's scripted edits. Neither route runs a connection job.
 fn saved_servers(
-    harness: &MachineGroupsHarness,
+    harness: &MultiServerHarness,
     cx: &mut VisualTestContext,
 ) -> Rc<crate::ui::shared_workspaces::testing::ScriptedEdits> {
     let (direct, routes) = crate::direct_connections::tests::disconnected_routes_at(&[
@@ -12411,7 +12206,7 @@ fn saved_servers(
 fn sidebar_new_workspace_menu_should_offer_saved_servers_and_add_server(cx: &mut TestAppContext) {
     use spaceterm_server::hierarchy::Mutation;
 
-    let (harness, cx) = MachineGroupsHarness::new(cx);
+    let (harness, cx) = MultiServerHarness::new(cx);
     let edits = saved_servers(&harness, cx);
 
     click("new-workspace-button", cx);
@@ -12463,7 +12258,7 @@ fn the_switcher_should_create_on_a_saved_server_with_its_query_as_the_name(
 ) {
     use spaceterm_server::hierarchy::Mutation;
 
-    let (harness, cx) = MachineGroupsHarness::new(cx);
+    let (harness, cx) = MultiServerHarness::new(cx);
     let edits = saved_servers(&harness, cx);
     open_workspace_switcher_for_creation(cx);
     let rows = [
@@ -12509,7 +12304,7 @@ fn same_named_saved_servers_should_read_apart_in_both_creation_surfaces(cx: &mut
     use spaceterm_server::hierarchy::Mutation;
     use spaceterm_ui::a11y_testing::A11yTree;
 
-    let (harness, cx) = MachineGroupsHarness::new(cx);
+    let (harness, cx) = MultiServerHarness::new(cx);
     let (direct, routes) = crate::direct_connections::tests::disconnected_routes_at(&[
         ("studio", "wss://192.168.1.3:9231"),
         ("studio", "wss://192.168.1.2:9231"),
@@ -12596,7 +12391,7 @@ fn open_remote_directory_should_browse_the_chosen_server(cx: &mut TestAppContext
     // The picker reads penguin's directories over a channel whose worker answers from its own
     // thread.
     cx.executor().allow_parking();
-    let (harness, cx) = MachineGroupsHarness::new(cx);
+    let (harness, cx) = MultiServerHarness::new(cx);
     let route = named_route("penguin");
     harness.present_direct("penguin", route, &[], cx);
 
@@ -12630,7 +12425,7 @@ fn cancelling_open_remote_directory_should_ask_nothing_and_restore_terminal_focu
     // The picker reads penguin's directories over a channel whose worker answers from its own
     // thread.
     cx.executor().allow_parking();
-    let (harness, cx) = MachineGroupsHarness::new(cx);
+    let (harness, cx) = MultiServerHarness::new(cx);
     harness.publish(ServerKey::LOCAL, &harness.local, &[("Here", 1)], cx);
     let edits = saved_servers(&harness, cx);
     cx.update(|window, cx| {
@@ -12686,10 +12481,10 @@ fn open_remote_directory_should_pin_on_its_server_and_reuse_a_workspace_pinned_t
     // adapter test covers a server matching one directory through a symbolic link. Its directory
     // channel answers from its own thread.
     cx.executor().allow_parking();
-    let (harness, cx) = MachineGroupsHarness::new(cx);
+    let (harness, cx) = MultiServerHarness::new(cx);
     let route = named_route("penguin");
     let (key, penguin_edits) = harness.present_direct("penguin", route, &[("Far", 7)], cx);
-    let mut inventory = machine_inventory(harness.next_revision(), &[("Far", 7)]);
+    let mut inventory = server_inventory(harness.next_revision(), &[("Far", 7)]);
     inventory.workspaces[0].pinned_directory = Some(PathBuf::from("/srv/app"));
     penguin_edits.set_inventory(inventory);
     cx.update(|window, cx| {
@@ -12725,12 +12520,11 @@ fn open_remote_directory_should_pin_on_its_server_and_reuse_a_workspace_pinned_t
     open("/srv/app", cx);
     let pinned = harness.manager.read_with(cx, |manager, _| {
         let active = manager.workspaces.active_workspace_id()?;
-        (manager.machine(active)
-            == Some(machine_groups::Machine::Direct {
-                name: "penguin".to_owned(),
-                route,
-            }))
-        .then(|| manager.workspaces.active().name().to_owned())
+        let on_penguin = matches!(
+            manager.shared.owner(active).and_then(|key| manager.shared.origin(key)),
+            Some(ServerOrigin::Direct(direct)) if direct.route == route
+        );
+        on_penguin.then(|| manager.workspaces.active().name().to_owned())
     });
     assert_eq!(pinned.as_deref(), Some("Far"), "the pinned Workspace opens");
     assert_eq!(penguin_edits.submitted(), Vec::new());
@@ -12871,13 +12665,13 @@ fn late_directory_answer_after(
         ),
         ..workspace_adapters()
     };
-    let (harness, cx) = MachineGroupsHarness::using(adapters, cx);
+    let (harness, cx) = MultiServerHarness::using(adapters, cx);
     // An active window reports each keyboard owner the person leaves.
     cx.update(|window, _| window.activate_window());
     let local = [("Here", 1), ("There", 2)];
     harness.publish(ServerKey::LOCAL, &harness.local, &local, cx);
     // "Here" gains a second Tab and a Pane split from its first.
-    let mut inventory = machine_inventory(harness.next_revision(), &local);
+    let mut inventory = server_inventory(harness.next_revision(), &local);
     let here = &mut inventory.workspaces[0];
     let mut tab = here.tabs[0].clone();
     tab.id = [180; 32];
@@ -12896,7 +12690,7 @@ fn late_directory_answer_after(
     });
     let route = named_route("penguin");
     let (key, penguin_edits) = harness.present_direct("penguin", route, &[("Far", 7)], cx);
-    let mut inventory = machine_inventory(harness.next_revision(), &[("Far", 7)]);
+    let mut inventory = server_inventory(harness.next_revision(), &[("Far", 7)]);
     inventory.workspaces[0].pinned_directory = Some(PathBuf::from("/srv/app"));
     penguin_edits.set_inventory(inventory);
     cx.update(|window, cx| {
@@ -12987,7 +12781,7 @@ fn late_directory_answer_after(
 fn open_remote_directory_should_wait_for_the_servers_edits(cx: &mut TestAppContext) {
     use spaceterm_server::hierarchy::Mutation;
 
-    let (harness, cx) = MachineGroupsHarness::new(cx);
+    let (harness, cx) = MultiServerHarness::new(cx);
     let edits = Rc::new(crate::ui::shared_workspaces::testing::ScriptedEdits::new(
         None,
     ));
@@ -13018,7 +12812,7 @@ fn open_remote_directory_should_wait_for_the_servers_edits(cx: &mut TestAppConte
     );
 
     edits.set_connected(true);
-    edits.set_inventory(machine_inventory(harness.next_revision(), &[]));
+    edits.set_inventory(server_inventory(harness.next_revision(), &[]));
     cx.update(|window, cx| {
         harness.manager.update(cx, |manager, cx| {
             manager.sync_shared_workspaces(key, window, cx)
@@ -13045,7 +12839,7 @@ fn open_remote_directory_should_wait_for_the_servers_edits(cx: &mut TestAppConte
 /// Workspace couldn't open, so a later connection never creates it unasked.
 #[gpui::test]
 fn open_remote_directory_should_end_when_its_server_is_withdrawn(cx: &mut TestAppContext) {
-    let (harness, cx) = MachineGroupsHarness::new(cx);
+    let (harness, cx) = MultiServerHarness::new(cx);
     let edits = Rc::new(crate::ui::shared_workspaces::testing::ScriptedEdits::new(
         None,
     ));
@@ -13079,26 +12873,4 @@ fn open_remote_directory_should_end_when_its_server_is_withdrawn(cx: &mut TestAp
     );
     assert!(cx.update(|window, cx| window_modal_is_open(window, cx)));
     assert_eq!(edits.submitted(), Vec::new());
-}
-
-/// A presented paired server with no attached Workspaces keeps its heading, with a quiet line in
-/// place of its Workspaces.
-#[gpui::test]
-fn an_empty_paired_server_should_keep_its_heading_and_say_it_has_no_workspaces(
-    cx: &mut TestAppContext,
-) {
-    let (harness, cx) = MachineGroupsHarness::new(cx);
-    harness.publish(ServerKey::LOCAL, &harness.local, &[("Here", 1)], cx);
-    harness.present_direct("penguin", named_route("penguin"), &[], cx);
-    redraw(cx);
-
-    let heading = cx.debug_bounds("machine-heading-penguin");
-    let empty = cx.debug_bounds("machine-empty-penguin");
-    assert!(
-        heading
-            .zip(empty)
-            .is_some_and(|(heading, empty)| heading.bottom() <= empty.top()),
-        "the empty server's heading should stand above its No Workspaces line"
-    );
-    assert!(cx.debug_bounds("machine-empty-This Computer").is_none());
 }

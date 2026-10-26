@@ -19,7 +19,7 @@ fn local_offer(cx: &mut TestAppContext) {
 fn paired_attention() -> ServerUpdateRow {
     server(
         "penguin",
-        ServerUpdateAction::Review(MachineTarget::Direct([3; 32])),
+        ServerUpdateAction::Review(ServerTarget::Direct([3; 32])),
     )
 }
 
@@ -96,7 +96,7 @@ fn only_a_genuine_server_offer_raises_client_progress_and_retry() {
 
 #[test]
 fn server_attention_counts_preserve_existing_warning_precedence() {
-    let attention = server("local", ServerUpdateAction::Review(MachineTarget::Local));
+    let attention = server("local", ServerUpdateAction::Review(ServerTarget::Local));
     let other_attention = paired_attention();
     let offer = server("local", ServerUpdateAction::Local);
     assert_eq!(
