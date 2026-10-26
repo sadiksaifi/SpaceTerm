@@ -3750,6 +3750,53 @@ fn segmented_options_preserve_their_authored_step_against_each_actual_track() {
     }
 }
 
+/// Reduced Opacity turns selection fills into translucent overlays. A selected segment must still
+/// draw no rim of its own, on every host, whether its window is active or not.
+#[test]
+fn selected_segments_draw_no_rim_at_reduced_opacity() {
+    for opacity in [1.0, 0.65, 0.0] {
+        let (resolved, _) = resolve_case(
+            Appearance::Dark,
+            ChromeDensity::Compact,
+            opacity,
+            true,
+            true,
+        );
+        let (active, inactive) = ChromeAppearance::prepare_variants(&resolved.chrome);
+        for prepared in [&active, &inactive] {
+            for (host, colors) in [
+                ("Window", &prepared.segmented_control_colors),
+                ("TitleBar", &prepared.title_bar_controls.segmented),
+                ("Panel", &prepared.panel_controls.segmented),
+                ("Card", &prepared.card_controls.segmented),
+                ("Floating", &prepared.floating_segmented_colors),
+            ] {
+                let theme = super::segmented_control::prepared(
+                    colors,
+                    &prepared.typography,
+                    super::segmented_control::SegmentedPolicy::prepared(prepared),
+                );
+                for (enabled, hovered, pressed) in [
+                    (true, false, false),
+                    (true, true, false),
+                    (true, false, true),
+                    (false, false, false),
+                ] {
+                    let paint = theme.paint(true, enabled, hovered, pressed);
+                    let (fill, border) = (paint.background(), paint.border());
+                    // An edge is invisible when it is clear, or when it repeats an opaque fill.
+                    // Over a translucent fill, any visible edge paint composites into a rim.
+                    assert!(
+                        border.a == 0.0 || (border == fill && fill.a == 1.0),
+                        "{host} at opacity {opacity}, active={}, enabled={enabled}, hovered={hovered}, pressed={pressed}: border {border:?} over fill {fill:?}",
+                        prepared.active
+                    );
+                }
+            }
+        }
+    }
+}
+
 #[test]
 fn floating_control_content_remains_readable_on_material_state_fills() {
     for appearance in [Appearance::Light, Appearance::Dark] {

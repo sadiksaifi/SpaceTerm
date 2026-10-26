@@ -87,32 +87,35 @@ pub(in crate::ui) fn prepared(
             ),
         ),
     ];
-    // The accent fill states the selected option's shape, so it has no rim. A neutral selection
-    // may sit close to its track, so it keeps an edge wherever the track keeps one.
+    // The accent fill states the selected option's shape, so it has no rim. Its edge is clear
+    // rather than the primary button's border, which reduced Opacity leaves opaque over a
+    // translucent fill. A neutral selection may sit close to its track, so it keeps an edge
+    // wherever the track keeps one.
+    let rimless = colors.border_transparent;
     let neutral = |fill: Color, label: Color, edge: Color| {
-        paint(fill, label, if policy.edges { edge } else { fill })
+        paint(fill, label, if policy.edges { edge } else { rimless })
     };
     let selected = if policy.active {
         [
             paint(
                 colors.primary_background,
                 colors.primary_foreground,
-                colors.primary_border,
+                rimless,
             ),
             paint(
                 colors.primary_hover_background,
                 colors.primary_hover_foreground,
-                colors.primary_hover_border,
+                rimless,
             ),
             paint(
                 colors.primary_pressed_background,
                 colors.primary_pressed_foreground,
-                colors.primary_pressed_border,
+                rimless,
             ),
             paint(
                 colors.primary_disabled_background,
                 colors.primary_disabled_foreground,
-                colors.primary_disabled_border,
+                rimless,
             ),
         ]
     } else {
@@ -257,13 +260,13 @@ mod tests {
         ChromeColors {
             primary_background: Color::rgb(0x1f66d1),
             primary_foreground: Color::rgb(0xffffff),
-            primary_border: Color::rgb(0x1f66d1),
+            primary_border: Color::rgb(0x0a3d8f),
             primary_pressed_background: Color::rgb(0x1a56b0),
             primary_pressed_foreground: Color::rgb(0xfefefe),
-            primary_pressed_border: Color::rgb(0x1a56b0),
+            primary_pressed_border: Color::rgb(0x0a3d8f),
             primary_disabled_background: Color::rgb(0x23436a),
             primary_disabled_foreground: Color::rgb(0x8a8a8a),
-            primary_disabled_border: Color::rgb(0x23436a),
+            primary_disabled_border: Color::rgb(0x0a3d8f),
             selection_background: Color::rgb(0x4a4a4a),
             selection_foreground: Color::rgb(0xe4e4e4),
             selection_border: Color::rgb(0x8e8e8e),
@@ -288,7 +291,7 @@ mod tests {
             paint(
                 colors.primary_background,
                 colors.primary_foreground,
-                colors.primary_background
+                colors.border_transparent
             )
         );
         assert_eq!(
@@ -296,7 +299,7 @@ mod tests {
             paint(
                 colors.primary_pressed_background,
                 colors.primary_pressed_foreground,
-                colors.primary_pressed_background
+                colors.border_transparent
             )
         );
         assert_eq!(
@@ -304,7 +307,7 @@ mod tests {
             paint(
                 colors.primary_disabled_background,
                 colors.primary_disabled_foreground,
-                colors.primary_disabled_background
+                colors.border_transparent
             ),
             "a disabled selection keeps a dimmed accent"
         );
@@ -331,7 +334,7 @@ mod tests {
             paint(
                 colors.selection_background,
                 colors.selection_foreground,
-                colors.selection_background
+                colors.border_transparent
             )
         );
         assert_eq!(
@@ -339,7 +342,7 @@ mod tests {
             paint(
                 colors.selection_disabled_background,
                 colors.selection_disabled_foreground,
-                colors.selection_disabled_background
+                colors.border_transparent
             )
         );
         assert_eq!(
