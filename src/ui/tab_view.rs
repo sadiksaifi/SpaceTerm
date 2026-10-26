@@ -3012,7 +3012,7 @@ impl TabView {
                     .as_ref()
                     .map(|shared| shared.sessions())
                     .filter(|sessions| sessions.remote_name().is_none())
-                    .map(|_| crate::ui::MachineTarget::Local);
+                    .map(|_| crate::ui::ServerTarget::Local);
                 let owner = view.clone();
                 server_pane::StartUnknownScreen {
                     screen: selector("start-unknown"),

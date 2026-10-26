@@ -521,7 +521,7 @@ impl crate::platform::window_movement::WindowMovementFactory for RecordingMoveme
     }
 }
 
-/// A surface outside Settings, such as a machine heading, opens Settings on the server it names,
+/// A surface outside Settings, such as the updates menu, opens Settings on the server it names,
 /// whether Settings is closed or already open on another server.
 #[gpui::test]
 fn opening_server_settings_selects_the_named_server(cx: &mut TestAppContext) {
@@ -545,7 +545,7 @@ fn opening_server_settings_selects_the_named_server(cx: &mut TestAppContext) {
             cx,
         );
     });
-    let opened = |target: crate::ui::MachineTarget, cx: &mut TestAppContext| {
+    let opened = |target: crate::ui::ServerTarget, cx: &mut TestAppContext| {
         cx.update(|cx| super::super::open_server_settings(target, cx));
         cx.run_until_parked();
         let windows: Vec<_> = cx
@@ -563,8 +563,8 @@ fn opening_server_settings_selects_the_named_server(cx: &mut TestAppContext) {
             .expect("Settings should stay open")
     };
 
-    let new_window = opened(crate::ui::MachineTarget::Direct(routes[1]), cx);
-    let open_window = opened(crate::ui::MachineTarget::Local, cx);
+    let new_window = opened(crate::ui::ServerTarget::Direct(routes[1]), cx);
+    let open_window = opened(crate::ui::ServerTarget::Local, cx);
 
     assert_eq!(
         new_window,

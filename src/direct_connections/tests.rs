@@ -369,17 +369,26 @@ pub(crate) fn offline_with_lock(label: &str) -> (DirectConnections, DirectRouteI
     (connections, id, lock)
 }
 
-/// Active saved routes named `labels`, in order, each keeping its own credential.
-/// Native workers retry the unavailable network; GPUI callers allow native I/O.
-pub(crate) fn offline_routes(labels: &[&str]) -> (DirectConnections, Vec<DirectRouteId>) {
-    let (connections, ids, _, _) = offline_fixture_routes(labels);
-    (connections, ids)
-}
-
 /// Connected registry entries for UI tests that supply their own protocol writers.
 /// Native workers admit and refresh routes; GPUI callers allow native I/O.
 /// The network boundary admits the route; its handle cannot reach a native server.
 pub(crate) fn connected_routes(labels: &[&str]) -> (DirectConnections, Vec<DirectRouteId>) {
+    connected_fixture(labels, None)
+}
+
+/// Connected saved routes that all reach the server `server`, as an earlier pairing and a newer
+/// one to the same computer do.
+pub(crate) fn connected_routes_to_one_server(
+    labels: &[&str],
+    server: [u8; 32],
+) -> (DirectConnections, Vec<DirectRouteId>) {
+    connected_fixture(labels, Some(server))
+}
+
+fn connected_fixture(
+    labels: &[&str],
+    server: Option<[u8; 32]>,
+) -> (DirectConnections, Vec<DirectRouteId>) {
     struct ConnectedNetwork;
     impl DirectNetwork for ConnectedNetwork {
         fn connect(
@@ -427,7 +436,7 @@ pub(crate) fn connected_routes(labels: &[&str]) -> (DirectConnections, Vec<Direc
     }
     let routes: Vec<_> = labels.iter().map(|label| (*label, None)).collect();
     let (connections, ids, _, _) =
-        retained_fixture_routes(&routes, true, Arc::new(ConnectedNetwork));
+        retained_fixture_routes(&routes, true, server, Arc::new(ConnectedNetwork));
     await_condition(|| {
         ids.iter()
             .all(|id| connections.status(id) == Some(DirectRouteStatus::Connected))
@@ -513,12 +522,13 @@ fn offline_fixture_reached(
             Err(DirectError::Transport)
         }
     }
-    retained_fixture_routes(routes, active, Arc::new(OfflineNetwork))
+    retained_fixture_routes(routes, active, None, Arc::new(OfflineNetwork))
 }
 
 fn retained_fixture_routes(
     routes: &[(&str, Option<&str>)],
     active: bool,
+    server: Option<[u8; 32]>,
     network: Arc<dyn DirectNetwork>,
 ) -> (
     DirectConnections,
@@ -536,6 +546,9 @@ fn retained_fixture_routes(
             route.route.endpoint = (*endpoint).to_owned();
         }
         route.active = active;
+        if let Some(server) = server {
+            route.route.paired.pin.server = server;
+        }
         ids.push(route.route.id);
         records.0.lock().unwrap().routes.push(route);
         credentials

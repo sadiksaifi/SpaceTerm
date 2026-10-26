@@ -1,7 +1,9 @@
 # Present Workspaces from several servers together
 
-One SpaceTerm Client connects to several SpaceTerm Servers and groups its [Workspace Attachments](0032-keep-workspace-attachments-specific-to-each-client.md) by server in one Workspace Window. Each server exposes only its own Workspaces.
+One SpaceTerm Client connects to several SpaceTerm Servers and presents its [Workspace Attachments](0032-keep-workspace-attachments-specific-to-each-client.md) in one continuous list in its Workspace Window. Each server exposes only its own Workspaces.
 
-The sidebar places this computer first, followed by saved remote servers using their reported names and connection states. Reordering stays within a server's group. A server with no attached Workspaces keeps its heading while presented or reconnecting. Disconnect ends connection intent and keeps the Saved Connection.
+The client owns one persistent Workspace display order across all servers. People can interleave local and remote Workspaces freely. The sidebar, Workspace Switcher and position shortcuts follow that order. Each remote Workspace carries its machine's reported name inline; the list has no machine headings or empty-server placeholders. Server ownership determines where work runs without constraining how the person arranges it.
+
+Separately paired Client Identities retain independent attachments and views, including when their Saved Connections reach the same server. Workspace ordering preserves those scopes; it transfers no connection, operation or Pane-control authority between them.
 
 Both sidebar creation menus offer Workspace creation and directory selection on explicitly selected saved servers. Directory browsing, creation, physical matching, pinning and recovery use the owning server's filesystem. Adding another server belongs exclusively to [Add Server](0029-enroll-remote-servers-through-add-server.md).

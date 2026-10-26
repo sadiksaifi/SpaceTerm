@@ -18,6 +18,7 @@ pub mod service;
 mod startup;
 mod storage;
 mod transport;
+pub mod workspace_order;
 pub mod worktree;
 
 #[cfg(feature = "client")]

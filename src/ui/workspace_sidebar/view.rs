@@ -30,10 +30,6 @@ const ROW_CONTENT_GAP: f32 = 10.0;
 const SINGLE_LINE_ROW_HEIGHT: f32 = 32.0;
 const WORKTREE_LEVEL_INDENT: f32 = 14.0;
 const FORMER_REPOSITORY_ROW_HEIGHT: f32 = 22.0;
-/// A machine heading's height, which leaves air above it to separate it from the machine before.
-const MACHINE_HEADING_HEIGHT: f32 = 30.0;
-const MACHINE_HEADING_BOTTOM_PADDING: f32 = 4.0;
-const MACHINE_EMPTY_ROW_HEIGHT: f32 = 24.0;
 
 /// The chip carrying a Workspace row's hover and persistent selection. An emphasized selection
 /// marks a sidebar with keyboard focus.
@@ -294,11 +290,7 @@ impl WorkspaceSidebar {
         let (chip, row_colors) = row_paint(selected, emphasized, hover, appearance, cx);
         let chip = if lifted {
             chip
-        } else if self
-            .workspace_reorder
-            .motion(SidebarItem::Workspace(workspace_id), cx)
-            .lifted
-        {
+        } else if self.workspace_reorder.motion(workspace_id, cx).lifted {
             chip.landing(row_colors.row_foreground)
         } else {
             self.outline_menu_target(chip, SidebarRowKey::Workspace(workspace_id), appearance)
@@ -392,17 +384,15 @@ impl WorkspaceSidebar {
         } else {
             detail.clone()
         };
-        // Under machine headings, a row reached on its own still names its machine.
-        let heading = self.machine_label(workspace_id);
-        let target_detail: SharedString = match &heading {
+        // Another computer's Workspace names that computer, as its title does, so same-named rows
+        // on different servers stay distinguishable when a row is reached on its own.
+        let target_detail: SharedString = match &machine {
             Some(machine) => format!("{machine}, {target_detail}").into(),
             None => target_detail,
         };
-        let on_machine = match &heading {
-            Some(machine) => format!(" on {machine}"),
-            None if shared.is_some() => " on a SpaceTerm Server".to_owned(),
-            None => String::new(),
-        };
+        let on_machine = machine
+            .as_ref()
+            .map_or_else(String::new, |machine| format!(" on {machine}"));
         let accessibility_name = match (shared_status, remote_status) {
             (Some(status), _) => {
                 format!("Workspace actions for {name}{on_machine}, {}", status.text)
@@ -459,9 +449,7 @@ impl WorkspaceSidebar {
         let lift = if lifted {
             1.0
         } else {
-            self.workspace_reorder
-                .motion(SidebarItem::Workspace(workspace_id), cx)
-                .lift
+            self.workspace_reorder.motion(workspace_id, cx).lift
         };
         let element_name = if lifted {
             "workspace-row-preview"
@@ -533,9 +521,7 @@ impl WorkspaceSidebar {
                 } else if lifted {
                     chip.render(selector, hover)
                 } else {
-                    let motion = self
-                        .workspace_reorder
-                        .motion(SidebarItem::Workspace(workspace_id), cx);
+                    let motion = self.workspace_reorder.motion(workspace_id, cx);
                     chip.displaced(motion.selection_offset)
                         .render(selector, hover)
                 }
@@ -609,12 +595,7 @@ impl WorkspaceSidebar {
                             .child(div().min_w_0().flex_1().child(text::title(
                                 name,
                                 first_line,
-                                // A machine heading already names the row's machine.
-                                if renaming || self.machine_label(workspace_id).is_some() {
-                                    None
-                                } else {
-                                    machine
-                                },
+                                if renaming { None } else { machine },
                                 pinned && disclosing && !renaming,
                                 workspace_id.get(),
                                 row_text_appearance.clone(),
@@ -870,23 +851,9 @@ impl WorkspaceSidebar {
                 sidebar.finish_workspace_drag(pointer, cx);
             });
         });
-        // Each machine heading, and each Workspace with its Worktrees, is one scroll child, so
-        // reordering, revealing, and drag previews stay indexed by strip item.
-        let mut rows = self.rows.iter().zip(hovers);
-        for item in self.items() {
-            if let Some(section) = self.section(item) {
-                list = list.child(self.render_machine_heading(
-                    item,
-                    section,
-                    sidebar.clone(),
-                    appearance,
-                    cx,
-                ));
-                continue;
-            }
-            let Some((row, fade)) = rows.next() else {
-                break;
-            };
+        // Each Workspace and its Worktrees are one scroll child, so reordering, revealing, and
+        // drag previews stay indexed by Workspace.
+        for (row, fade) in self.rows.iter().zip(hovers) {
             let workspace_id = row.workspace_id;
             let disclosed = row.worktrees.as_ref().filter(|section| section.expanded);
             let parent = self.render_workspace_row(
@@ -923,9 +890,7 @@ impl WorkspaceSidebar {
                     .collect();
             let measure_sidebar = sidebar.clone();
             let grow_sidebar = sidebar.clone();
-            let motion = self
-                .workspace_reorder
-                .motion(SidebarItem::Workspace(workspace_id), cx);
+            let motion = self.workspace_reorder.motion(workspace_id, cx);
             // The slot keeps the group's laid-out place, so a drag measures every group at rest
             // while the group itself slides. It also grows a new group in and closes the gap a
             // removed one leaves.
@@ -934,9 +899,7 @@ impl WorkspaceSidebar {
                 div().w_full().flex_shrink_0(),
                 move |size, cx| {
                     let _ = grow_sidebar.update(cx, |sidebar, _| {
-                        sidebar
-                            .workspace_reorder
-                            .measure(SidebarItem::Workspace(workspace_id), size);
+                        sidebar.workspace_reorder.measure(workspace_id, size);
                     });
                 },
             );
@@ -1106,175 +1069,6 @@ impl WorkspaceSidebar {
             .into_any_element();
         spaceterm_ui::ControlHost::Panel
             .mount(sidebar)
-            .into_any_element()
-    }
-
-    /// A machine's heading, with its server's status while it isn't connected, and a quiet line
-    /// saying so when the machine presents no Workspaces. Its menu reaches the machine's server.
-    fn render_machine_heading(
-        &self,
-        item: SidebarItem,
-        section: &MachineSection,
-        sidebar: WeakEntity<Self>,
-        appearance: &crate::ui::appearance::ChromeAppearance,
-        cx: &App,
-    ) -> AnyElement {
-        let colors = appearance.host_colors(spaceterm_ui::ControlHost::Panel);
-        let (leading, trailing) = row_padding(appearance, cx);
-        let label = section.label.clone();
-        let selector = format!("machine-heading-{label}");
-        // Element identity follows the heading's route, so same-named routes keep their own
-        // state, menu and accessibility node. The name stays the label people read.
-        let identity = match item {
-            SidebarItem::Machine(id) => format!("machine-{id}"),
-            SidebarItem::Workspace(_) => selector.clone(),
-        };
-        let caption = appearance.typography.style(TextRole::Caption);
-        let heading = div()
-            .id(SharedString::from(format!("{identity}-heading")))
-            .debug_selector({
-                let selector = selector.clone();
-                move || selector.clone()
-            })
-            .w_full()
-            .h(appearance.spacing(MACHINE_HEADING_HEIGHT))
-            .flex_shrink_0()
-            .pl(leading)
-            .pr(trailing)
-            .pb(appearance.spacing(MACHINE_HEADING_BOTTOM_PADDING))
-            .flex()
-            .flex_row()
-            .items_end()
-            .gap(appearance.spacing(ROW_CONTENT_GAP))
-            .chrome_text(caption)
-            .text_color(gpui_color(colors.row_secondary))
-            .child(
-                div()
-                    .min_w_0()
-                    .truncate()
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .child(label.clone()),
-            )
-            .when_some(section.status, |heading, status| {
-                heading.child(
-                    div()
-                        .debug_selector({
-                            let label = label.clone();
-                            move || format!("machine-heading-status-{label}")
-                        })
-                        .flex_shrink_0()
-                        .child(status),
-                )
-            });
-        let accessible = match section.status {
-            Some(status) => format!("{label}, {status}"),
-            None => label.to_string(),
-        };
-        let target = section.target.clone();
-        let grow_sidebar = sidebar.clone();
-        // A connection waiting for the person offers Connect in view, not only in its menu.
-        let connect = (section.awaiting_connection && section.connects).then(|| {
-            let target = target.clone();
-            let sidebar = sidebar.clone();
-            spaceterm_ui::Button::new(SharedString::from(format!("{identity}-connect")), "Connect")
-                .variant(spaceterm_ui::ButtonVariant::Link)
-                .size(spaceterm_ui::ButtonSize::Compact)
-                .tab_stop(true)
-                .debug_selector(format!("machine-connect-{label}"))
-                .accessibility_description(SharedString::from(format!("Connect to {label}")))
-                .on_activate(move |_, _, cx| {
-                    let target = target.clone();
-                    let _ = sidebar.update(cx, |_, cx| {
-                        cx.emit(SidebarEvent::Machine {
-                            target,
-                            command: MachineMenuCommand::Connect,
-                        });
-                    });
-                })
-        });
-        let entries = machine_menu_entries(section);
-        // A machine without a server SpaceTerm can act on has no menu, only its name.
-        let heading = if entries.is_empty() {
-            div()
-                .id(SharedString::from(format!("{identity}-name")))
-                .role(accesskit::Role::Heading)
-                .aria_label(accessible)
-                .child(heading)
-                .into_any_element()
-        } else {
-            ContextMenu::new(
-                SharedString::from(format!("{identity}-menu")),
-                format!("Server actions for {label}"),
-                heading,
-                entries,
-            )
-            .size(MenuSize::Wide)
-            .target(ContextMenuTarget::new(accesskit::Role::Heading, accessible))
-            .debug_selector(format!("{selector}-menu"))
-            .on_activate(move |activation, _, cx| {
-                let command = *activation.action();
-                let target = target.clone();
-                let _ = sidebar.update(cx, |_, cx| {
-                    cx.emit(SidebarEvent::Machine { target, command });
-                });
-            })
-            .into_any_element()
-        };
-        // A connection that isn't presented yet has no Workspaces to show until it connects, and
-        // SpaceTerm hasn't read them, so it never claims there are none.
-        let (empty_note, empty_label) = match (section.awaiting_connection, section.connects) {
-            // The Connect button before it starts the sentence.
-            (true, true) => ("to show its Workspaces.", "Connect to show its Workspaces."),
-            (true, false) => (
-                "Workspaces appear once connected.",
-                "Workspaces appear once connected.",
-            ),
-            (false, _) => ("No Workspaces", "No Workspaces"),
-        };
-        let empty = (section.workspaces == 0).then(|| {
-            div()
-                .id(SharedString::from(format!("{identity}-empty")))
-                .role(accesskit::Role::Label)
-                .aria_value(empty_label)
-                .debug_selector({
-                    let label = label.clone();
-                    move || format!("machine-empty-{label}")
-                })
-                .w_full()
-                .h(appearance.spacing(MACHINE_EMPTY_ROW_HEIGHT))
-                .flex_shrink_0()
-                .flex()
-                .items_center()
-                .pl(leading + appearance.spacing(ICON_COLUMN_WIDTH + ROW_CONTENT_GAP))
-                .pr(trailing)
-                .gap(appearance.spacing(4.0))
-                .chrome_text(appearance.typography.style(TextRole::Secondary))
-                .text_color(gpui_color(colors.row_secondary))
-                .children(connect)
-                .child(div().min_w_0().truncate().child(empty_note))
-        });
-        let motion = self.workspace_reorder.motion(item, cx);
-        motion
-            .frame_slot(
-                gpui::Axis::Vertical,
-                div().w_full().flex_shrink_0(),
-                move |size, cx| {
-                    let _ = grow_sidebar.update(cx, |sidebar, _| {
-                        sidebar.workspace_reorder.measure(item, size);
-                    });
-                },
-            )
-            .child(
-                div()
-                    .relative()
-                    .top(motion.offset.y)
-                    .opacity(motion.opacity())
-                    .w_full()
-                    .flex()
-                    .flex_col()
-                    .child(heading)
-                    .children(empty),
-            )
             .into_any_element()
     }
 
@@ -1885,55 +1679,6 @@ fn new_worktree_button(
             }),
         )
         .into_any_element()
-}
-
-/// A machine heading's commands: New Workspace on a presented remote server, connecting and
-/// disconnecting a paired server where its status allows, and the Servers Settings Section.
-fn machine_menu_entries(section: &MachineSection) -> Vec<MenuEntry<MachineMenuCommand>> {
-    let mut entries = Vec::new();
-    if section.creates_workspaces {
-        entries.push(
-            MenuEntry::action("New Workspace", MachineMenuCommand::NewWorkspace)
-                .icon(|foreground, size| {
-                    Icon::new(IconName::Plus, size, foreground).into_any_element()
-                })
-                .debug_selector("machine-menu-new-workspace"),
-        );
-        entries.push(MenuEntry::separator());
-    }
-    if section.connects {
-        entries.push(
-            MenuEntry::action("Connect", MachineMenuCommand::Connect)
-                .icon(|foreground, size| {
-                    Icon::new(IconName::RotateCw, size, foreground).into_any_element()
-                })
-                .debug_selector("machine-menu-connect"),
-        );
-    }
-    if section.disconnects {
-        entries.push(
-            MenuEntry::action("Disconnect", MachineMenuCommand::Disconnect)
-                .icon(|foreground, size| {
-                    Icon::new(IconName::X, size, foreground).into_any_element()
-                })
-                .debug_selector("machine-menu-disconnect"),
-        );
-    }
-    if !section.has_settings {
-        return entries;
-    }
-    if !entries.is_empty() {
-        entries.push(MenuEntry::separator());
-    }
-    entries.push(
-        MenuEntry::action(
-            "Server Settings\u{2026}",
-            MachineMenuCommand::ServerSettings,
-        )
-        .icon(|foreground, size| Icon::new(IconName::Cog, size, foreground).into_any_element())
-        .debug_selector("machine-menu-server-settings"),
-    );
-    entries
 }
 
 /// An application command the sidebar footer offers in place of a menu bar.

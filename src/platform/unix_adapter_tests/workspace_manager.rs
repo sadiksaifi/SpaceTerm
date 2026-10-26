@@ -142,10 +142,10 @@ fn open_paired_server_directory_reuses_the_workspace_pinned_through_a_symlink(
         server_directories: crate::ui::directory_picker::server_directory_testing::in_process(),
         ..workspace_adapters()
     };
-    let (harness, cx) = MachineGroupsHarness::using(adapters, cx);
+    let (harness, cx) = MultiServerHarness::using(adapters, cx);
     let route = [9; 32];
     let workspaces = [("Other", 6), ("Far", 7)];
-    let mut inventory = machine_inventory(harness.next_revision(), &workspaces);
+    let mut inventory = server_inventory(harness.next_revision(), &workspaces);
     inventory.workspaces[0].pinned_directory = Some(root.join("elsewhere"));
     inventory.workspaces[1].pinned_directory = Some(root.join("project"));
     let edits = Rc::new(ScriptedEdits::new(Some(inventory)));
@@ -164,7 +164,7 @@ fn open_paired_server_directory_reuses_the_workspace_pinned_through_a_symlink(
                 }),
                 SharedEditSource::new(Rc::clone(&edits) as Rc<_>),
                 SharedPaneSessions::with_opener(
-                    ScriptedPanes::new(MachineGroupsHarness::session_factory()) as Rc<_>,
+                    ScriptedPanes::new(MultiServerHarness::session_factory()) as Rc<_>,
                     &PaneConstruction::testing(),
                 ),
                 window,

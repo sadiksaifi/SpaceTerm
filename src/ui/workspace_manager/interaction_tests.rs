@@ -192,9 +192,9 @@ fn batched_conflict_notices_are_reviewed_one_at_a_time_beyond_the_modal_queue_li
 fn disconnect_drops_a_parked_remote_presentation_without_closing_other_servers(
     cx: &mut TestAppContext,
 ) {
-    let (harness, cx) = MachineGroupsHarness::new(cx);
+    let (harness, cx) = MultiServerHarness::new(cx);
     let (remote, edits) = harness.present_direct("penguin", [9; 32], &[("Far", 1)], cx);
-    let mut inventory = machine_inventory(900, &[("Far", 1)]);
+    let mut inventory = server_inventory(900, &[("Far", 1)]);
     inventory.close = Some(spaceterm_server::hierarchy::CloseInventory {
         controls: None,
         boot: [1; 32],

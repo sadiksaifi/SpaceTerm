@@ -105,7 +105,7 @@ Each SpaceTerm Server owns terminal work on its machine. SpaceTerm Clients prese
 
 **Server Settings**: Preferences owned by one SpaceTerm Server and shared by its authorized clients.
 
-**Client View State**: A SpaceTerm Client's presentation choices for server-owned work, including Tab display order, Pane Layouts and Split ratios, Active Workspace, Active Tab, Focused Pane, Zoomed Pane, Selection, Terminal Find, and scroll position.
+**Client View State**: A SpaceTerm Client's presentation choices for server-owned work, including Workspace and Tab display order, Pane Layouts and Split ratios, Active Workspace, Active Tab, Focused Pane, Zoomed Pane, Selection, Terminal Find, and scroll position.
 
 **Controlling Client**: The SpaceTerm Client with authority to supply terminal input and terminal dimensions to a Pane.
 

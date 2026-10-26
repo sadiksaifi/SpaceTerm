@@ -2245,7 +2245,7 @@ mod draft {
     ) {
         cx.update(|_, cx| {
             sidebar.update(cx, |sidebar, cx| {
-                sidebar.set_rows(vec![row], Vec::new(), Vec::new(), cx)
+                sidebar.set_rows(vec![row], Vec::new(), cx)
             });
         });
         cx.run_until_parked();

@@ -18,8 +18,7 @@
 //! show, so inactive Workspaces stay current too. This client adds its own Git Settings and Pull
 //! Requests from its own GitHub CLI, and never reads git for a shared Workspace itself.
 //!
-#[cfg(test)]
-pub(crate) use development::testing;
+pub(crate) use development::ArrangementUnavailable;
 pub(crate) use development::{
     DirectServer, POLL_INTERVAL, SharedAcceptance, SharedAttachmentFailure, SharedCloseApproval,
     SharedCloseIntent, SharedCloseReview, SharedCloseState, SharedCloseUnavailable,
@@ -28,6 +27,8 @@ pub(crate) use development::{
     SharedWorkspaceEdits, SharedWorkspaceFacts, SharedWorkspaceHost, SharedWorkspacePlan,
     SharedWorkspaces, presenting_window, shared_close_changed_title,
 };
+#[cfg(test)]
+pub(crate) use development::{WorkspaceOwner, testing};
 
 #[path = "shared_workspaces/repositories.rs"]
 mod repositories;
@@ -54,6 +55,8 @@ mod development {
         ConfirmedControl, Id, Inventory, Mutation, Outcome, RetainedOutcome,
         Workspace as ServerWorkspace,
     };
+
+    use spaceterm_server::workspace_order::OwnerId;
 
     use crate::close_confirmation::CloseTarget;
     use crate::domain::{PaneId, TabId, ValidatedLocalDirectory, WorkspaceId};
@@ -1219,9 +1222,23 @@ mod development {
         Uncertain,
     }
 
+    /// Names the authenticated client presentation one binding is, once its connection has been
+    /// admitted. Two saved routes to one server are two owners.
+    pub(crate) trait WorkspaceOwner {
+        fn owner(&self) -> Option<OwnerId>;
+    }
+
+    impl WorkspaceOwner for ServerConnection {
+        fn owner(&self) -> Option<OwnerId> {
+            self.workspace_owner().ok()
+        }
+    }
+
     /// The Workspace Window's authoritative inventory, attachments and pending presentation.
     pub(crate) struct SharedWorkspaces {
         edits: SharedEditSource,
+        /// The presentation this binding is, which names its Workspaces in this client's order.
+        owner: Option<Rc<dyn WorkspaceOwner>>,
         sessions: SharedPaneSessions,
         /// Each server Workspace and the local Workspace presenting it.
         workspaces: BTreeMap<WorkspaceId, SharedWorkspaceFacts>,
@@ -1287,6 +1304,7 @@ mod development {
             Self {
                 sessions: sessions.with_edits(edits.clone()),
                 edits,
+                owner: None,
                 workspaces: BTreeMap::new(),
                 revision: None,
                 presentation: None,
@@ -1353,6 +1371,41 @@ mod development {
 
         pub(crate) fn latest_inventory(&self) -> Option<&Inventory> {
             self.latest.as_ref()
+        }
+
+        /// Names the presentation this binding is.
+        pub(crate) fn identify(&mut self, owner: Rc<dyn WorkspaceOwner>) {
+            self.owner = Some(owner);
+        }
+
+        /// The presentation this binding is, once its connection names it.
+        pub(crate) fn owner(&self) -> Option<OwnerId> {
+            self.owner.as_ref()?.owner()
+        }
+
+        /// Whether `workspace` presents a creation the server hasn't confirmed yet.
+        pub(crate) fn is_provisional(&self, workspace: WorkspaceId) -> bool {
+            self.facts(workspace)
+                .is_some_and(|facts| self.edits.provisional(facts.server))
+        }
+
+        /// Names `workspace` in this client's Workspace order, once the server has published it.
+        /// A provisional Workspace has no reference yet.
+        pub(crate) fn workspace_reference(
+            &self,
+            workspace: WorkspaceId,
+        ) -> Option<spaceterm_server::workspace_order::WorkspaceReference> {
+            let owner = self.owner()?;
+            let id = self.edits.canonical(self.facts(workspace)?.server);
+            self.latest
+                .as_ref()?
+                .workspaces
+                .iter()
+                .any(|published| published.id == id)
+                .then_some(spaceterm_server::workspace_order::WorkspaceReference {
+                    owner,
+                    workspace: id,
+                })
         }
 
         /// The Git facts the server read for the directories its Workspaces show.
@@ -2398,6 +2451,17 @@ mod development {
     #[cfg(test)]
     pub(crate) mod testing {
         use std::sync::Mutex;
+
+        /// A presentation whose owner the test names.
+        pub(crate) struct FixedOwner(pub(crate) spaceterm_server::hierarchy::Id);
+
+        impl super::WorkspaceOwner for FixedOwner {
+            fn owner(&self) -> Option<spaceterm_server::workspace_order::OwnerId> {
+                Some(spaceterm_server::workspace_order::OwnerId::from_bytes(
+                    self.0,
+                ))
+            }
+        }
 
         use spaceterm_server::hierarchy::{Inventory, Mutation, Outcome, RetainedOutcome};
 

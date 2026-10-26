@@ -290,6 +290,8 @@ pub(crate) struct WorkspaceManager {
     empty_focus: FocusHandle,
     /// Normal launch of the account-local server this window presents.
     launch: launch::LocalLaunchState,
+    /// This client's one Workspace order across every server, kept across launches.
+    display_order: display_order::DisplayOrder,
 }
 
 impl WorkspaceManager {
@@ -344,6 +346,7 @@ impl WorkspaceManager {
             for shared in manager.shared.iter_mut() {
                 shared.flush_client_views();
             }
+            manager.flush_display_order();
             // The direct registry outlives this window's interest in it only until quit.
             manager._direct_servers = None;
             async {}
@@ -411,7 +414,9 @@ impl WorkspaceManager {
             _direct_servers: None,
             empty_focus: cx.focus_handle(),
             launch: launch::LocalLaunchState::new(local_server),
+            display_order: display_order::DisplayOrder::default(),
         };
+        manager.follow_display_order(window, cx);
         manager.run_local_launch(None, window, cx);
         manager.follow_direct_servers(window, cx);
         manager
@@ -645,9 +650,16 @@ impl WorkspaceManager {
             .iter()
             .enumerate()
             .map(|(index, workspace)| {
-                let icon = match self.machine(workspace.id()) {
-                    Some(machine_groups::Machine::Local) | None => IconName::Terminal,
-                    Some(_) => IconName::Globe,
+                // Another computer's Workspace carries the globe its sidebar row shows.
+                let remote = self
+                    .shared
+                    .owner(workspace.id())
+                    .and_then(|key| self.shared.origin(key))
+                    .is_some_and(|origin| matches!(origin, ServerOrigin::Direct(_)));
+                let icon = if remote {
+                    IconName::Globe
+                } else {
+                    IconName::Terminal
                 };
                 let item = ComboBoxItem::new(
                     SwitcherChoice::Presented(workspace.id()),
@@ -1137,7 +1149,7 @@ impl WorkspaceManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(key) = self.server_key(&super::MachineTarget::Direct(route)) else {
+        let Some(key) = self.server_key(&super::ServerTarget::Direct(route)) else {
             Self::show_shared_refusal(
                 "open a remote directory",
                 super::shared_workspaces::SharedRefusalReason::Offline,
@@ -1996,11 +2008,10 @@ impl WorkspaceManager {
                 workspace_id,
                 position,
             } => {
-                // Each machine's Workspaces stay together, so a move stops at their ends.
-                let position = self.position_within_machine(workspace_id, position);
                 if let Err(error) = self.workspaces.move_workspace(workspace_id, position) {
                     Self::report_workspace_error("move", error);
                 }
+                self.record_display_order();
             }
             SidebarEvent::Create(creation) => {
                 // The creation menu returns focus to its trigger on close, so return it to
@@ -2051,9 +2062,6 @@ impl WorkspaceManager {
                     self.request_worktree_removal(workspace_id, worktree_id, window, cx);
                 }
             },
-            SidebarEvent::Machine { target, command } => {
-                self.perform_machine_command(target, command, window, cx)
-            }
             SidebarEvent::LayoutChanged => self.synchronize_tab_manager_layouts(window, cx),
             SidebarEvent::FocusPane => {
                 if let Some(manager) = self.active_tab_manager() {
@@ -2104,26 +2112,21 @@ impl WorkspaceManager {
             WorkspaceMenuCommand::NewWorktree => {
                 self.new_worktree(workspace_id, window, cx);
             }
-            // A Workspace of another computer's server reconnects by connecting to that server,
-            // as its machine heading does.
+            // A Workspace of another computer's server reconnects by connecting to that server.
+            // The person asked, so the system may ask for this device's key.
             WorkspaceMenuCommand::Reconnect => {
-                let target = self
+                let route = self
                     .shared
                     .owner(workspace_id)
                     .and_then(|key| self.shared.origin(key))
                     .and_then(|origin| match origin {
                         ServerOrigin::Local => None,
-                        ServerOrigin::Direct(direct) => {
-                            Some(super::MachineTarget::Direct(direct.route))
-                        }
+                        ServerOrigin::Direct(direct) => Some(direct.route),
                     });
-                if let Some(target) = target {
-                    self.perform_machine_command(
-                        target,
-                        super::workspace_sidebar::MachineMenuCommand::Connect,
-                        window,
-                        cx,
-                    );
+                if let Some(route) = route
+                    && let Some(direct) = crate::ui::direct_servers::installed(cx)
+                {
+                    direct.resume(&route);
                 }
             }
             WorkspaceMenuCommand::Detach => self.detach_shared_workspace(workspace_id, window, cx),
@@ -2208,7 +2211,7 @@ impl WorkspaceManager {
             }
             WorkspaceCreation::OpenLocalDirectory => self.open_local_directory(name, window, cx),
             WorkspaceCreation::Remote(route) => {
-                self.create_workspace_on(&super::MachineTarget::Direct(route), name, window, cx)
+                self.create_workspace_on(&super::ServerTarget::Direct(route), name, window, cx)
             }
             WorkspaceCreation::OpenRemoteDirectory(route) => {
                 self.open_remote_directory(route, name, window, cx)
@@ -3205,10 +3208,13 @@ impl WorkspaceManager {
     }
 
     fn report_client_view_error(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(notice) = self
+        let notice = self
             .shared
             .iter_mut()
-            .find_map(|shared| shared.take_view_error())
+            .find_map(|shared| shared.take_view_error());
+        // The retained Workspace order says it couldn't be read or saved the same way.
+        let notice = notice.or_else(|| self.take_display_order_error());
+        if let Some(notice) = notice
             && !super::settings_window::present_over_active_settings(cx, move |window, cx| {
                 notice.present(window, cx)
             })
@@ -3284,6 +3290,8 @@ impl WorkspaceManager {
                 }
             }
         }
+        // Workspaces this inventory just presented take their places in this client's order.
+        self.reconcile_display_order(key);
         // Views this inventory just created, including a reattached Workspace's, present its
         // metadata now. A later poll may carry the same inventory and report no change.
         self.present_shared_metadata(key, inventory, cx);
@@ -3402,8 +3410,6 @@ impl WorkspaceManager {
         if let Some(shared) = self.shared.get_mut(key) {
             shared.register(workspace_id, facts.clone());
         }
-        // Registration names the Workspace's server, and so its machine's group.
-        self.arrange_by_machine();
         self.synchronize_tab_manager_layout(workspace_id, window, cx);
         if let Some(manager) = self
             .workspaces
@@ -4959,12 +4965,10 @@ impl WorkspaceManager {
             ),
         };
         let rows = self.sidebar_rows(cx);
-        let sections = self.machine_sections(cx);
         let remote_servers = self.remote_creation_servers(cx);
 
-        self.sidebar.update(cx, |sidebar, cx| {
-            sidebar.set_rows(rows, sections, remote_servers, cx)
-        });
+        self.sidebar
+            .update(cx, |sidebar, cx| sidebar.set_rows(rows, remote_servers, cx));
         // The New Worktree Command is available only where it can act, so its menu item disables
         // elsewhere.
         let actions = WorkspaceActions {
@@ -5295,13 +5299,13 @@ mod launch;
 #[cfg(test)]
 pub(crate) use launch::testing as launch_testing;
 pub(crate) use launch::{LocalServerAdapters, resume_waiting_launches, start_local_server};
-mod machine_groups;
 #[path = "workspace_manager/repository.rs"]
 mod repository;
 mod server_bindings;
 use server_bindings::ServerBindings;
 pub(crate) use server_bindings::{ServerKey, ServerOrigin};
 mod direct_servers;
+mod display_order;
 mod shared_repositories;
 mod worktrees;
 
