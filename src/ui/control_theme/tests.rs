@@ -3863,11 +3863,21 @@ fn disabled_selected_segments_stay_apart_from_their_neighbours() {
                         chip.contrast_ratio(neighbour) >= 1.12,
                         "{case}: disabled selected chip {chip:?} beside {neighbour:?}"
                     );
+                    // The ring must read against what it encloses and against the edge of a
+                    // disabled unselected card in the same place.
                     let fill = application_color(card.background()).source_over(host);
                     let ring = application_color(card.border()).source_over(fill);
                     assert!(
                         ring.contrast_ratio(fill) >= 1.12,
                         "{case}: disabled card ring {ring:?} on {fill:?}"
+                    );
+                    let neighbour_card = theme.card_paint(false, false, false, false);
+                    let neighbour_edge = application_color(neighbour_card.border()).source_over(
+                        application_color(neighbour_card.background()).source_over(host),
+                    );
+                    assert!(
+                        ring.contrast_ratio(neighbour_edge) >= 1.12,
+                        "{case}: disabled card ring {ring:?} beside an unselected edge {neighbour_edge:?}"
                     );
                 }
             }

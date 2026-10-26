@@ -155,7 +155,9 @@ pub(in crate::ui) fn prepared(
         ]
     };
     // A card keeps a neutral fill so its preview reads in its own colors, and its border is the
-    // selection ring: the accent in a key window and a neutral rung otherwise.
+    // selection ring: the accent in a key window and a neutral rung otherwise. A disabled card
+    // drops the fill, because a dimmed ring can match a neutral fill's tone on a dark host. The
+    // ring alone then marks the selection against the host.
     let ring = if policy.active {
         [
             colors.primary_background,
@@ -182,7 +184,7 @@ pub(in crate::ui) fn prepared(
             colors.selection_pressed_foreground,
         ),
         (
-            colors.selection_disabled_background,
+            colors.border_transparent,
             colors.selection_disabled_foreground,
         ),
     ];
