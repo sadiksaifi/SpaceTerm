@@ -8682,6 +8682,40 @@ impl MultiServerHarness {
         ServerKey,
         Rc<crate::ui::shared_workspaces::testing::ScriptedPanes>,
     ) {
+        // Each route reaches its own server, which keeps its identity across reconnects.
+        self.present_direct_edits_reaching(name, route, route, edits, cx)
+    }
+
+    /// Presents the saved route `route` named `name` to the server `server`, publishing
+    /// `workspaces`, and attaches each one. Two saved routes may reach one server.
+    fn present_direct_reaching(
+        &self,
+        name: &str,
+        route: crate::direct_connections::DirectRouteId,
+        server: spaceterm_server::hierarchy::Id,
+        workspaces: &[(&str, u8)],
+        cx: &mut VisualTestContext,
+    ) -> ServerKey {
+        let edits = Rc::new(crate::ui::shared_workspaces::testing::ScriptedEdits::new(
+            Some(server_inventory(self.next_revision(), workspaces)),
+        ));
+        let (key, _) = self.present_direct_edits_reaching(name, route, server, &edits, cx);
+        self.attach(key, workspaces, cx);
+        key
+    }
+
+    /// Presents the paired server `name` at `route` over `edits`, reaching the server `server`.
+    fn present_direct_edits_reaching(
+        &self,
+        name: &str,
+        route: crate::direct_connections::DirectRouteId,
+        server: spaceterm_server::hierarchy::Id,
+        edits: &Rc<crate::ui::shared_workspaces::testing::ScriptedEdits>,
+        cx: &mut VisualTestContext,
+    ) -> (
+        ServerKey,
+        Rc<crate::ui::shared_workspaces::testing::ScriptedPanes>,
+    ) {
         use crate::ui::shared_workspaces::testing::ScriptedPanes;
         use crate::ui::shared_workspaces::{DirectServer, SharedEditSource, SharedPaneSessions};
 
@@ -8707,9 +8741,8 @@ impl MultiServerHarness {
                     window,
                     cx,
                 );
-                // Each route reaches its own server, which keeps its identity across reconnects.
                 if let Some(shared) = manager.shared.get_mut(key) {
-                    shared.identify(Rc::new(FixedServer(route)));
+                    shared.identify(Rc::new(FixedServer(server)));
                 }
                 manager.sync_shared_workspaces(key, window, cx);
                 key
@@ -8970,6 +9003,67 @@ fn a_reconnected_server_should_return_its_workspaces_to_their_places(cx: &mut Te
 
     assert_eq!(absent, ["Default", "Here", "Also Here"]);
     assert_eq!(harness.names(cx), ["Default", "Here", "Far", "Also Here"]);
+}
+
+/// Two saved routes may reach one server, such as an earlier pairing and a newer one to the same
+/// computer. The window presents that server's Workspaces once, so the person's arrangement of
+/// them is kept and returns when the server reconnects.
+#[gpui::test]
+fn two_routes_to_one_server_should_present_its_workspaces_once(cx: &mut TestAppContext) {
+    let (harness, cx) = MultiServerHarness::new(cx);
+    let server = [0xB0; 32];
+    let earlier = named_route("penguin");
+    let workspaces = [("Far", 1), ("Farther", 2)];
+    let first = harness.present_direct_reaching("penguin", earlier, server, &workspaces, cx);
+    harness.present_direct_reaching("penguin", named_route("penguin 2"), server, &workspaces, cx);
+    let presented = harness.names(cx);
+    harness.move_workspace("Farther", 0, cx);
+    cx.update(|window, cx| {
+        harness.manager.update(cx, |manager, cx| {
+            manager.withdraw_server_workspaces(first, window, cx);
+        });
+    });
+    cx.run_until_parked();
+
+    harness.present_direct_reaching("penguin", earlier, server, &workspaces, cx);
+
+    assert_eq!(presented, ["Default", "Far", "Farther"]);
+    assert_eq!(harness.names(cx), ["Farther", "Default", "Far"]);
+}
+
+/// A Workspace the person moves while its server hasn't confirmed creating it keeps that place
+/// once the server confirms it.
+#[gpui::test]
+fn a_pending_creation_should_keep_the_place_it_was_moved_to(cx: &mut TestAppContext) {
+    use spaceterm_server::hierarchy::Outcome;
+
+    let (harness, cx) = MultiServerHarness::new(cx);
+    harness.publish(ServerKey::LOCAL, &harness.local, &[("A", 1), ("B", 2)], cx);
+    cx.update(|window, cx| {
+        harness.manager.update(cx, |manager, cx| {
+            manager.create_workspace_on(
+                &crate::ui::ServerTarget::Local,
+                "C".to_owned(),
+                window,
+                cx,
+            );
+            manager.sync_shared_workspaces(ServerKey::LOCAL, window, cx);
+        });
+    });
+    cx.run_until_parked();
+    let pending = harness.names(cx);
+    harness.move_workspace("C", 1, cx);
+
+    harness.local.answer(Outcome::Accepted { target: [3; 32] });
+    harness.publish(
+        ServerKey::LOCAL,
+        &harness.local,
+        &[("A", 1), ("B", 2), ("C", 3)],
+        cx,
+    );
+
+    assert_eq!(pending, ["Default", "A", "B", "C"]);
+    assert_eq!(harness.names(cx), ["Default", "C", "A", "B"]);
 }
 
 /// The sidebar lists every server's Workspaces together in Workspace order, with no machine
