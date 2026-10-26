@@ -79,6 +79,7 @@ struct SizingRoot {
     full_width: bool,
     size: SegmentedSize,
     right_to_left: bool,
+    preview_size: Option<Size<Pixels>>,
 }
 
 impl Render for SizingRoot {
@@ -95,13 +96,22 @@ impl Render for SizingRoot {
                     "sizing-control",
                     "Selection",
                     &true,
-                    vec![
+                    [
                         SegmentedOption::new(false, "Off").debug_selector("sizing-off"),
                         SegmentedOption::new(true, "Comfortable").debug_selector("sizing-on"),
-                    ],
+                    ]
+                    .into_iter()
+                    .map(|option| match self.preview_size {
+                        Some(_) => option.preview(|_, _| div().w_full().into_any_element()),
+                        None => option,
+                    })
+                    .collect(),
                 )
                 .unwrap()
                 .size(self.size)
+                .when_some(self.preview_size, |control, size| {
+                    control.preview_size(size)
+                })
                 .full_width(self.full_width)
                 .right_to_left(self.right_to_left)
                 .debug_selector("sizing-control")
@@ -123,6 +133,7 @@ fn intrinsic_track_hugs_options_in_every_parent_layout(cx: &mut TestAppContext) 
                         full_width: false,
                         size,
                         right_to_left,
+                        preview_size: None,
                     });
                     cx.run_until_parked();
                     let track = cx.debug_bounds("sizing-control").unwrap();
@@ -165,6 +176,7 @@ fn full_width_track_distributes_all_available_width_between_options(cx: &mut Tes
                         full_width: true,
                         size,
                         right_to_left,
+                        preview_size: None,
                     });
                     cx.run_until_parked();
                     let host_bounds = cx.debug_bounds("sizing-host").unwrap();
@@ -218,6 +230,7 @@ fn narrow_full_width_track_contains_equal_options_and_their_labels(cx: &mut Test
             full_width: true,
             size,
             right_to_left: false,
+            preview_size: None,
         });
         cx.run_until_parked();
         let track = cx.debug_bounds("sizing-control").unwrap();
@@ -850,6 +863,50 @@ fn a_preview_size_sizes_every_card_preview(cx: &mut TestAppContext) {
         let option = cx.debug_bounds(selector).unwrap();
         assert_eq!(option.size.width, width, "{selector}");
         assert!(option.size.height > size.height, "{selector}");
+    }
+}
+
+#[gpui::test]
+fn sized_cards_shrink_to_a_narrow_row_and_keep_their_preview_shape(cx: &mut TestAppContext) {
+    cx.set_global(test_theme());
+    let preview = gpui::size(px(160.0), px(100.0));
+    let metrics = test_theme().resolve(SegmentedSize::Card).metrics;
+    let widest = preview.width + (metrics.horizontal_padding + metrics.border_width) * 2.0;
+    for host_width in [px(600.0), px(300.0)] {
+        let (_, cx) = cx.add_window_view(move |_, _| SizingRoot {
+            host: SizingHost::Row,
+            host_width,
+            full_width: false,
+            size: SegmentedSize::Card,
+            right_to_left: false,
+            preview_size: Some(preview),
+        });
+        cx.run_until_parked();
+        let host = cx.debug_bounds("sizing-host").unwrap();
+        let track = cx.debug_bounds("sizing-control").unwrap();
+        let off = cx.debug_bounds("sizing-off").unwrap();
+        let on = cx.debug_bounds("sizing-on").unwrap();
+        let frame = cx.debug_bounds("sizing-on-preview-frame").unwrap();
+        let device_pixel = cx.update(|window, _| px(1.0 / window.scale_factor()));
+        assert!(
+            host.left() <= track.left() && track.right() <= host.right(),
+            "{host_width:?}: track {track:?} must fit the row {host:?}"
+        );
+        assert!(
+            (off.size.width - on.size.width).abs() <= device_pixel,
+            "{host_width:?}: cards share the row equally: {off:?}, {on:?}"
+        );
+        assert!(on.size.width <= widest, "{host_width:?}: {on:?}");
+        let aspect = frame.size.width / frame.size.height;
+        assert!(
+            (aspect - 1.6).abs() < 0.02,
+            "{host_width:?}: the preview keeps its shape: {frame:?}"
+        );
+        if host_width > widest * 2.0 + metrics.option_gap {
+            assert_eq!(on.size.width, widest, "a roomy row keeps the full card");
+        } else {
+            assert!(frame.size.width < preview.width, "{frame:?}");
+        }
     }
 }
 

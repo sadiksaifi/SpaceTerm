@@ -624,8 +624,9 @@ impl<T: Clone + PartialEq + 'static> SegmentedControl<T> {
         self
     }
 
-    /// Gives every card preview this exact size in place of the themed preview height, and sizes
-    /// each card to it. The caller owns density scaling of `size`.
+    /// Gives every card preview this size in place of the themed preview height, and sizes each
+    /// card to it. In a row narrower than the cards, the cards shrink equally and each preview
+    /// keeps this aspect ratio. The caller owns density scaling of `size`.
     pub fn preview_size(mut self, size: Size<Pixels>) -> Self {
         self.preview_size = Some(size);
         self
@@ -737,6 +738,8 @@ impl<T: Clone + PartialEq + 'static> RenderOnce for SegmentedControl<T> {
             .unwrap_or_else(|| self.accessibility_name.to_string());
         let card = matches!(self.size, SegmentedSize::Card);
         let preview_size = self.preview_size.filter(|_| card);
+        // Sized cards may shrink to their row. Other tracks keep their intrinsic width.
+        let shrinkable = preview_size.is_some() && !self.full_width;
         let previous = self
             .selected
             .and_then(|index| self.options.get(index))
@@ -957,10 +960,19 @@ impl<T: Clone + PartialEq + 'static> RenderOnce for SegmentedControl<T> {
                                 preview_size.map_or(metrics.preview_height, |size| size.height);
                             segment.child(
                                 div()
+                                    .debug_selector({
+                                        let option_selector = option_selector.clone();
+                                        move || format!("{option_selector}-preview-frame")
+                                    })
                                     .flex()
                                     .flex_none()
                                     .w_full()
-                                    .h(height)
+                                    .map(|frame| match preview_size {
+                                        Some(size) => frame.aspect_ratio(
+                                            f32::from(size.width) / f32::from(size.height),
+                                        ),
+                                        None => frame.h(height),
+                                    })
                                     .items_center()
                                     .justify_center()
                                     .child(preview(paint.label, height)),
@@ -1060,7 +1072,13 @@ impl<T: Clone + PartialEq + 'static> RenderOnce for SegmentedControl<T> {
             .relative()
             .flex()
             .flex_row()
-            .flex_shrink_0()
+            .map(|track| {
+                if shrinkable {
+                    track.flex_shrink_1().min_w_0()
+                } else {
+                    track.flex_shrink_0()
+                }
+            })
             .gap(metrics.option_gap)
             .when(self.full_width, |track| {
                 let option_count = self.options.len() as f32;
@@ -1149,7 +1167,11 @@ impl<T: Clone + PartialEq + 'static> RenderOnce for SegmentedControl<T> {
         } else {
             // A row wrapper keeps the painted track intrinsic in block and column parents.
             // Focus, hit testing, and tooltip bounds stay on the track rather than the wrapper.
-            div().flex().child(control).into_any_element()
+            div()
+                .flex()
+                .when(shrinkable, |wrapper| wrapper.min_w_0())
+                .child(control)
+                .into_any_element()
         }
     }
 }
