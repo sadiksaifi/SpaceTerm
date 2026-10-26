@@ -9028,7 +9028,8 @@ fn two_routes_to_one_server_should_present_its_workspaces_once(cx: &mut TestAppC
     harness.present_direct_reaching("penguin", earlier, server, &workspaces, cx);
 
     assert_eq!(presented, ["Default", "Far", "Farther"]);
-    assert_eq!(harness.names(cx), ["Farther", "Default", "Far"]);
+    // The window's own Workspace isn't a server's, so it keeps its place.
+    assert_eq!(harness.names(cx), ["Default", "Farther", "Far"]);
 }
 
 /// A Workspace the person moves while its server hasn't confirmed creating it keeps that place

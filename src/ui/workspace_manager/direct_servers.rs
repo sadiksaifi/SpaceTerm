@@ -12,7 +12,7 @@ use gpui::{App, Context, SharedString, Window};
 use super::{ServerKey, ServerOrigin, WorkspaceManager};
 use crate::direct_connections::DirectRouteId;
 use crate::ui::ServerTarget;
-use crate::ui::shared_workspaces::{DirectServer, SharedPaneSessions};
+use crate::ui::shared_workspaces::{DirectServer, ServerIdentity, SharedPaneSessions};
 
 impl WorkspaceManager {
     /// Follows the desktop's direct registry for this window's life. A build without one follows
@@ -84,7 +84,11 @@ impl WorkspaceManager {
             }
         }
         for (direct, server) in presented {
-            if !self.direct_route_presented(&direct.route) {
+            // Another route already presents this server's Workspaces.
+            let duplicate = server
+                .server()
+                .is_some_and(|server| self.shared.presenting(server).is_some());
+            if !duplicate && !self.direct_route_presented(&direct.route) {
                 self.present_direct_server(direct, server, window, cx);
             }
         }
@@ -136,6 +140,17 @@ impl WorkspaceManager {
             });
         })
         .detach();
+    }
+
+    /// Whether an earlier binding presents the server the binding at `key` reaches, as when two
+    /// saved routes reach one server. Only the earlier one presents that server's Workspaces, so
+    /// each appears once. The saved routes stay as they are.
+    pub(super) fn duplicates_presented_server(&self, key: ServerKey) -> bool {
+        self.shared
+            .get(key)
+            .and_then(|shared| shared.server_identity())
+            .and_then(|server| self.shared.presenting(server))
+            .is_some_and(|first| first != key)
     }
 
     /// The direct route `route`'s presented binding, if any.

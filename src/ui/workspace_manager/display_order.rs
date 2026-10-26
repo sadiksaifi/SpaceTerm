@@ -218,7 +218,10 @@ impl WorkspaceManager {
     }
 
     /// Each presented Workspace a server has published, with its reference, in Workspace order.
+    /// A second route still presenting a Workspace its server's first route presents, until its
+    /// binding goes, leaves that copy without a reference, so the order names each Workspace once.
     fn presented_references(&self) -> Vec<(WorkspaceId, WorkspaceReference)> {
+        let mut seen = std::collections::BTreeSet::new();
         self.workspaces
             .iter()
             .filter_map(|workspace| {
@@ -226,7 +229,8 @@ impl WorkspaceManager {
                     .shared
                     .owning(workspace.id())?
                     .workspace_reference(workspace.id())?;
-                Some((workspace.id(), reference))
+                seen.insert(reference)
+                    .then_some((workspace.id(), reference))
             })
             .collect()
     }

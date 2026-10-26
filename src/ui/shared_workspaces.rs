@@ -18,9 +18,9 @@
 //! show, so inactive Workspaces stay current too. This client adds its own Git Settings and Pull
 //! Requests from its own GitHub CLI, and never reads git for a shared Workspace itself.
 //!
-pub(crate) use development::ArrangementUnavailable;
 #[cfg(test)]
 pub(crate) use development::testing;
+pub(crate) use development::{ArrangementUnavailable, ServerIdentity};
 pub(crate) use development::{
     DirectServer, POLL_INTERVAL, SharedAcceptance, SharedAttachmentFailure, SharedCloseApproval,
     SharedCloseIntent, SharedCloseReview, SharedCloseState, SharedCloseUnavailable,
