@@ -2479,3 +2479,60 @@ fn same_pairing_refresh_drop_preserves_concurrent_first_shared_pane_admission() 
         );
     }
 }
+
+#[test]
+fn a_tcp_close_before_tls_is_a_transport_failure() {
+    let fixture = Fixture::new();
+    fixture.enable();
+    let credential = DeviceCredential::generate().unwrap();
+    let paired = fixture.enroll(&credential);
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = format!("wss://{}/spaceterm", listener.local_addr().unwrap());
+    let peer = std::thread::spawn(move || {
+        let (socket, _) = listener.accept().unwrap();
+        // This peer closes before sending any TLS certificate or device admission proof.
+        drop(socket);
+    });
+    let started = Instant::now();
+    let result = DirectConnection::connect(&endpoint, &paired, &credential);
+    peer.join().unwrap();
+    if let Err(error) = &result
+        && *error != DirectError::Transport
+    {
+        eprintln!(
+            "DIAGNOSTIC direct-admission cycle=0 stage=tcp-close-before-tls elapsed_ms={} error={error:?}",
+            started.elapsed().as_millis()
+        );
+    }
+    assert!(
+        matches!(result, Err(DirectError::Transport)),
+        "a TCP close before TLS authentication must remain a transport failure"
+    );
+}
+
+#[test]
+fn invalid_tls_data_is_still_an_authentication_refusal() {
+    use std::io::{Read, Write};
+
+    let fixture = Fixture::new();
+    fixture.enable();
+    let credential = DeviceCredential::generate().unwrap();
+    let paired = fixture.enroll(&credential);
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = format!("wss://{}/spaceterm", listener.local_addr().unwrap());
+    let peer = std::thread::spawn(move || {
+        let (mut socket, _) = listener.accept().unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut hello = [0; 4096];
+        assert!(socket.read(&mut hello).unwrap() > 0);
+        // An invalid TLS content type must not turn into a retryable socket failure.
+        socket.write_all(&[0xff, 0x03, 0x03, 0, 0]).unwrap();
+        socket.shutdown(std::net::Shutdown::Write).unwrap();
+        let _ = std::io::copy(&mut socket, &mut std::io::sink());
+    });
+    let result = DirectConnection::connect(&endpoint, &paired, &credential);
+    peer.join().unwrap();
+    assert!(matches!(result, Err(DirectError::AuthenticationRefused)));
+}

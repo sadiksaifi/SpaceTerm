@@ -169,7 +169,11 @@ pub(super) fn connect(endpoint: &str, pin: &ServerPin) -> Result<Ws, DirectError
                 std::thread::sleep(Duration::from_millis(2))
             }
             Err(_) if mismatch.load(Ordering::Acquire) => return Err(DirectError::PinMismatch),
-            Err(_) => return Err(DirectError::AuthenticationRefused),
+            // Rustls wraps TLS validation failures in InvalidData; socket failures remain retryable.
+            Err(error) if error.kind() == std::io::ErrorKind::InvalidData => {
+                return Err(DirectError::AuthenticationRefused);
+            }
+            Err(_) => return Err(DirectError::Transport),
         }
     }
     let stream = Socket::Client(StreamOwned::new(connection, tcp));
