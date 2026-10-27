@@ -1,18 +1,26 @@
 //! Shared hierarchy ownership composed with the existing fenced Pane runtime.
 use super::*;
 use spaceterm_server::hierarchy::{
-    CloseInventory, ConfirmedControl, ConfirmedPane, Id, Inventory, State,
+    CloseInventory, ConfirmedControl, ConfirmedPane, Id, Inventory, Mutation, Outcome,
+    RetainedOutcome, State,
 };
 use std::collections::{BTreeMap, BTreeSet};
+use std::time::Instant;
 
 #[cfg(test)]
 #[path = "shared/close_control_tests.rs"]
 mod close_control_tests;
+mod journal;
 #[cfg(test)]
 #[path = "shared/session_end_tests.rs"]
 mod session_end_tests;
 mod worktrees;
+use journal::{Journal, Retention, Revision};
+use spaceterm_server::connection::sync::SyncWorker;
 pub(super) use worktrees::pinned_in_worktree;
+
+/// How soon timed work runs again while terminals, Git or directory reads, or writes are live.
+const SYNCHRONIZE_INTERVAL: Duration = Duration::from_millis(10);
 
 pub struct SharedWorkspaceHost {
     writes: worktrees::Writes,
@@ -22,11 +30,25 @@ pub struct SharedWorkspaceHost {
     panes: BTreeMap<Id, DevelopmentPaneHost>,
     /// Pane identities introduced in this server run, independent of their control grants.
     fresh_panes: BTreeSet<Id>,
-    store: Option<OrganizationStore>,
-    uncertain: bool,
+    /// Retains organization off the lock. Absent until [`PaneService::restore`].
+    journal: Option<Arc<Journal>>,
+    /// Runs journal writes nobody waits for, in submission order. Without it they run inline.
+    sync: Option<SyncWorker>,
+    /// Why the last synchronization failed. Requests are refused until one succeeds.
+    blocked: Option<Refusal>,
     organization_prepared: bool,
     attachment_generations: BTreeMap<(Id, Id), (u64, u64)>,
 }
+/// The settled answer to an edit, or the Worktree write it still waits for.
+enum Answer {
+    /// Final. Reply once `revision` is retained.
+    Outcome {
+        outcome: Box<RetainedOutcome>,
+        revision: Option<Revision>,
+    },
+    Pending,
+}
+
 impl SharedWorkspaceHost {
     pub fn local() -> Result<Self, ServerError> {
         Ok(Self::new(DevelopmentPaneHost::local()?))
@@ -42,6 +64,8 @@ impl SharedWorkspaceHost {
         let mut state = State::empty();
         state.begin_boot(prototype.boot);
         let repositories = super::repositories::ServerRepositories::new(prototype.boot);
+        // The worker thread ends with this host, after finishing every queued write.
+        let sync = SyncWorker::spawn().ok().map(|(sync, _)| sync);
         Self {
             prototype,
             writes: worktrees::Writes::new(),
@@ -49,8 +73,9 @@ impl SharedWorkspaceHost {
             state,
             panes: BTreeMap::new(),
             fresh_panes: BTreeSet::new(),
-            store: None,
-            uncertain: false,
+            journal: None,
+            sync,
+            blocked: None,
             organization_prepared: false,
             attachment_generations: BTreeMap::new(),
         }
@@ -71,9 +96,13 @@ impl SharedWorkspaceHost {
             next.worktree_settings = settings;
             next.begin_boot(self.prototype.boot);
         }
-        self.commit(next)
+        let revision = self.commit(next)?;
+        self.retained(revision)
     }
-    fn commit(&mut self, mut next: State) -> Result<(), Refusal> {
+    /// Makes `next` the state and orders its write. The caller decides who waits for the write:
+    /// [`Self::retained`] waits before acting on it, [`Self::retain_later`] lets the sync worker
+    /// write it. Nothing outside the state relies on it until it is retained.
+    fn commit(&mut self, mut next: State) -> Result<Option<Revision>, Refusal> {
         // Keep provenance through an uncertain write and same-run recovery. Uncommitted
         // identities cannot be selected; recovery prunes those absent from the saved state.
         self.fresh_panes.extend(
@@ -88,32 +117,75 @@ impl SharedWorkspaceHost {
         // Runtime facts authorize an in-memory comparison, never a later recovery read.
         next.inventory.close = None;
         next.inventory.repositories = None;
-        if let Some(store) = &self.store {
-            let envelope = next
-                .envelope(&self.prototype.directory)
-                .map_err(|_| Refusal::StorageUnavailable)?;
-            if store.write(Some(&envelope)).is_err() {
-                self.uncertain = true;
-                return Err(Refusal::StorageUnavailable);
-            }
-        }
+        let revision = match &self.journal {
+            Some(journal) => Some(
+                journal.submit(
+                    next.envelope(&self.prototype.directory)
+                        .map_err(|_| Refusal::StorageUnavailable)?,
+                ),
+            ),
+            None => None,
+        };
         self.state = next;
         self.fresh_panes.retain(|id| self.state.pane(*id).is_some());
         self.organization_prepared = true;
-        Ok(())
+        Ok(revision)
+    }
+    /// Returns once `revision` is retained. A failed write leaves the state uncertain until the
+    /// next request or tick reads it back.
+    fn retained(&self, revision: Option<Revision>) -> Result<(), Refusal> {
+        match (&self.journal, revision) {
+            (Some(journal), Some(revision)) => journal
+                .sync(revision)
+                .map_err(|_| Refusal::StorageUnavailable),
+            _ => Ok(()),
+        }
+    }
+    /// Writes `revision` on the sync worker. Nothing waits for it.
+    fn retain_later(&self, revision: Option<Revision>) {
+        let (Some(journal), Some(revision)) = (&self.journal, revision) else {
+            return;
+        };
+        let writer = Arc::clone(journal);
+        let queued = self.sync.as_ref().is_some_and(|sync| {
+            sync.submit(move || {
+                let _ = writer.sync(revision);
+            })
+            .is_ok()
+        });
+        if !queued {
+            let _ = journal.sync(revision);
+        }
+    }
+    /// The newest revision, which retains every outcome already in the state.
+    fn latest(&self) -> Option<Revision> {
+        self.journal.as_ref().map(|journal| journal.latest())
+    }
+    /// Whether every commit so far is retained, so durable deletions may end their processes.
+    fn settled(&self) -> bool {
+        self.journal
+            .as_ref()
+            .is_none_or(|journal| journal.settled())
     }
     fn recover(&mut self) -> Result<(), Refusal> {
-        if self.uncertain {
-            let record = self
-                .store
-                .as_ref()
-                .ok_or(Refusal::StorageUnavailable)?
-                .read()
-                .map_err(|_| Refusal::StorageUnavailable)?;
+        if let Some(journal) = &self.journal
+            && journal.uncertain()
+        {
+            let record = journal.recover().map_err(|_| Refusal::StorageUnavailable)?;
             self.restore_organization(record.as_ref());
-            self.uncertain = false;
         }
         Ok(())
+    }
+    /// Refuses work while retained state is uncertain or the last synchronization failed, for
+    /// example because a deleted Pane's process did not stop.
+    fn ready(&mut self) -> Result<(), Refusal> {
+        self.recover()?;
+        self.blocked.map_or(Ok(()), Err)
+    }
+    fn synchronized(&mut self) -> Result<(), Refusal> {
+        let result = self.synchronize();
+        self.blocked = result.err();
+        result
     }
     fn restore_organization(&mut self, record: Option<&Organization>) {
         self.state = record.map_or_else(State::empty, State::from_organization);
@@ -122,9 +194,15 @@ impl SharedWorkspaceHost {
         self.fresh_panes.retain(|id| self.state.pane(*id).is_some());
         self.organization_prepared = record.is_some();
     }
+    /// Applies runtime changes to the state and ends the processes durable deletions name. It
+    /// runs on the tick, never on a request's path.
     fn synchronize(&mut self) -> Result<(), Refusal> {
         self.recover()?;
-        if let Some(ends) = self.state.session_ends()
+        // Durable deletion is the cleanup intent. An uncertain commit is read back before any
+        // process is stopped, and an incomplete stop blocks replies and new work until resolved.
+        let durable = self.settled();
+        if durable
+            && let Some(ends) = self.state.session_ends()
             && ends.boot == self.prototype.boot
         {
             for original in &ends.sessions {
@@ -135,10 +213,11 @@ impl SharedWorkspaceHost {
                 }
             }
         }
-        // Durable deletion is the cleanup intent. An uncertain commit is read back before any
-        // process is stopped, and an incomplete stop blocks replies and new work until resolved.
         for (id, host) in &mut self.panes {
-            if self.state.pane(*id).is_none() && host.pane.as_ref().is_some_and(|p| !p.ended) {
+            if durable
+                && self.state.pane(*id).is_none()
+                && host.pane.as_ref().is_some_and(|p| !p.ended)
+            {
                 host.shutdown().map_err(|_| Refusal::CleanupUnresolved)?;
             }
         }
@@ -169,7 +248,8 @@ impl SharedWorkspaceHost {
         }
         self.repositories.update(&mut next);
         if next != self.state {
-            self.commit(next)?;
+            let revision = self.commit(next)?;
+            self.retain_later(revision);
         }
         // Presentation is ephemeral. Apply it after durable synchronization so title and
         // activity frames publish to every observer without rewriting Organization storage.
@@ -186,10 +266,14 @@ impl SharedWorkspaceHost {
                     .map(Box::new),
             );
         }
-        // Keep an exited runtime until its controller has observed its final screen.
+        // Keep an exited runtime until its controller has observed its final screen, and a
+        // deleted Pane's process until its deletion is retained and the process stopped.
         self.panes.retain(|id, h| {
-            self.state.pane(*id).is_some()
-                && (h.pane.is_some() || h.directory_unavailable || h.dormant.is_some())
+            if self.state.pane(*id).is_some() {
+                h.pane.is_some() || h.directory_unavailable || h.dormant.is_some()
+            } else {
+                h.pane.as_ref().is_some_and(|p| !p.ended)
+            }
         });
         self.attachment_generations.retain(|(_, workspace), _| {
             self.state
@@ -374,7 +458,8 @@ impl SharedWorkspaceHost {
             let mut next = self.state.clone();
             next.repair_directory(id, directory.path().to_owned())?;
             // Commit just this Pane's directory before launching. Uncertain writes start nothing.
-            self.commit(next)?;
+            let revision = self.commit(next)?;
+            self.retained(revision)?;
             self.pane_host(id)?
                 .organization
                 .as_mut()
@@ -385,12 +470,108 @@ impl SharedWorkspaceHost {
             .start_directory(device, connection, size, style, directory)
             .map(|lease| Reply::Attached { lease })
     }
-    fn handle(&mut self, device: Id, connection: Id, request: Request) -> Result<Reply, Refusal> {
-        if matches!(request, Request::Inventory) {
-            self.repositories.subscribe(connection);
-        }
+    /// Validates and commits one edit. The answer is final once its revision is retained, unless
+    /// a Worktree write must settle first.
+    fn mutate(&mut self, device: Id, sequence: u64, mutation: Mutation) -> Result<Answer, Refusal> {
         self.finish_worktrees(false)?;
-        self.synchronize()?;
+        // Replay is resolved before filesystem validation; a changed directory cannot turn an
+        // already committed pin into a different outcome.
+        if let Some(old) = self.state.outcome(device, sequence) {
+            return if old.mutation == mutation {
+                Ok(self.answer(old.clone()))
+            } else {
+                Err(Refusal::Stale)
+            };
+        }
+        if let Mutation::Worktree(operation) = mutation {
+            return self.begin_worktree(device, sequence, operation);
+        }
+        if !self.state.pending_worktrees().is_empty() {
+            return Ok(Answer::Pending);
+        }
+        let mut next = self.state.clone();
+        next.inventory = self.inventory();
+        let mut directory = Ok(self.prototype.directory.clone());
+        if let Mutation::SplitPane {
+            workspace,
+            tab,
+            source,
+            ..
+        } = &mutation
+            && let Some(workspace) = next
+                .inventory
+                .workspaces
+                .iter()
+                .find(|w| w.id == *workspace)
+            && let Some(root) = workspace
+                .tabs
+                .iter()
+                .find(|t| t.id == *tab)
+                .and_then(|t| t.worktree.as_deref())
+        {
+            directory = worktrees::starting_directory(workspace, Some(*source), root);
+        }
+        // A directory refusal finishes this journaled edit, so retry cannot admit it later.
+        next.apply(
+            device,
+            sequence,
+            mutation,
+            directory.as_deref().unwrap_or(&self.prototype.directory),
+            |path| directory.is_ok() && local_filesystem().validate_directory(path).is_ok(),
+        )?;
+        let outcome = next
+            .outcome(device, sequence)
+            .ok_or(Refusal::Failed)?
+            .clone();
+        Ok(Answer::Outcome {
+            outcome: Box::new(outcome),
+            revision: self.commit(next)?,
+        })
+    }
+    /// The recorded outcome of an Original Operation.
+    fn resolve(&mut self, device: Id, sequence: u64) -> Result<Answer, Refusal> {
+        self.finish_worktrees(false)?;
+        let outcome = self
+            .state
+            .outcome(device, sequence)
+            .ok_or(Refusal::Missing)?
+            .clone();
+        Ok(self.answer(outcome))
+    }
+    /// A recorded outcome is retained with the newest revision, or still waits for Git.
+    fn answer(&self, outcome: RetainedOutcome) -> Answer {
+        if outcome.outcome == Outcome::Pending {
+            Answer::Pending
+        } else {
+            Answer::Outcome {
+                outcome: Box::new(outcome),
+                revision: self.latest(),
+            }
+        }
+    }
+    /// Retires a delivered outcome. Nothing waits for the write: a lost acknowledgement leaves
+    /// the outcome recorded, and the client acknowledges it again after reconnecting.
+    fn acknowledge(&mut self, device: Id, sequence: u64) -> Result<(), Refusal> {
+        let mut next = self.state.clone();
+        next.acknowledge(device, sequence)?;
+        if next != self.state {
+            let revision = self.commit(next)?;
+            self.retain_later(revision);
+        }
+        Ok(())
+    }
+    /// The interim exchange waits for the revision under the lock.
+    fn reply(&self, answer: Answer) -> Result<Reply, Refusal> {
+        match answer {
+            Answer::Outcome { outcome, revision } => {
+                self.retained(revision)?;
+                Ok(Reply::Outcome(*outcome))
+            }
+            Answer::Pending => Ok(Reply::MutationPending),
+        }
+    }
+    fn handle(&mut self, device: Id, connection: Id, request: Request) -> Result<Reply, Refusal> {
+        self.ready()?;
         match request {
             Request::WorktreeRead(read) => Ok(Reply::WorktreeRead(
                 self.worktree_read(device, connection, read),
@@ -577,85 +758,25 @@ impl SharedWorkspaceHost {
                 workspace_policy: true,
                 presentation_changes: true,
             }),
-            Request::Inventory => Ok(Reply::Inventory {
-                inventory: self.inventory(),
-                next_sequence: self.state.next_sequence(device),
-            }),
+            Request::Inventory => {
+                self.repositories.subscribe(connection);
+                self.finish_worktrees(false)?;
+                self.synchronized()?;
+                Ok(Reply::Inventory {
+                    inventory: self.inventory(),
+                    next_sequence: self.state.next_sequence(device),
+                })
+            }
             Request::Mutate { sequence, mutation } => {
-                // Replay is resolved before filesystem validation; a changed directory cannot
-                // turn an already committed pin into a different outcome.
-                if let Some(old) = self.state.outcome(device, sequence) {
-                    return if old.mutation == mutation {
-                        if old.outcome == spaceterm_server::hierarchy::Outcome::Pending {
-                            Ok(Reply::MutationPending)
-                        } else {
-                            Ok(Reply::Outcome(old.clone()))
-                        }
-                    } else {
-                        Err(Refusal::Stale)
-                    };
-                }
-                if let spaceterm_server::hierarchy::Mutation::Worktree(operation) = mutation {
-                    return self.begin_worktree(device, sequence, operation);
-                }
-                if !self.state.pending_worktrees().is_empty() {
-                    return Ok(Reply::MutationPending);
-                }
-                let mut next = self.state.clone();
-                next.inventory = self.inventory();
-                let mut directory = Ok(self.prototype.directory.clone());
-                if let spaceterm_server::hierarchy::Mutation::SplitPane {
-                    workspace,
-                    tab,
-                    source,
-                    ..
-                } = &mutation
-                    && let Some(workspace) = next
-                        .inventory
-                        .workspaces
-                        .iter()
-                        .find(|w| w.id == *workspace)
-                    && let Some(root) = workspace
-                        .tabs
-                        .iter()
-                        .find(|t| t.id == *tab)
-                        .and_then(|t| t.worktree.as_deref())
-                {
-                    directory = worktrees::starting_directory(workspace, Some(*source), root);
-                }
-                // A directory refusal finishes this journaled edit, so retry cannot admit it later.
-                next.apply(
-                    device,
-                    sequence,
-                    mutation,
-                    directory.as_deref().unwrap_or(&self.prototype.directory),
-                    |path| directory.is_ok() && local_filesystem().validate_directory(path).is_ok(),
-                )?;
-                let outcome = next
-                    .outcome(device, sequence)
-                    .ok_or(Refusal::Failed)?
-                    .clone();
-                self.commit(next)?;
-                self.synchronize()?;
-                Ok(Reply::Outcome(outcome))
+                let answer = self.mutate(device, sequence, mutation)?;
+                self.reply(answer)
             }
-            Request::Resolve { sequence }
-                if self.state.outcome(device, sequence).is_some_and(|o| {
-                    o.outcome == spaceterm_server::hierarchy::Outcome::Pending
-                }) =>
-            {
-                Ok(Reply::MutationPending)
+            Request::Resolve { sequence } => {
+                let answer = self.resolve(device, sequence)?;
+                self.reply(answer)
             }
-            Request::Resolve { sequence } => Ok(Reply::Outcome(
-                self.state
-                    .outcome(device, sequence)
-                    .ok_or(Refusal::Missing)?
-                    .clone(),
-            )),
             Request::Acknowledge { sequence } => {
-                let mut next = self.state.clone();
-                next.acknowledge(device, sequence)?;
-                self.commit(next)?;
+                self.acknowledge(device, sequence)?;
                 Ok(Reply::Unchanged)
             }
             Request::SelectPane {
@@ -789,9 +910,7 @@ impl SharedWorkspaceHost {
                             Refusal::Missing
                         }
                     })?;
-                let reply = host.handle(device, connection, request)?;
-                self.synchronize()?;
-                Ok(reply)
+                host.handle(device, connection, request)
             }
         }
     }
@@ -809,22 +928,38 @@ impl SharedWorkspaceHost {
             .ok_or(Refusal::Missing)
     }
 }
-impl PaneService for SharedWorkspaceHost {
-    fn restore(&mut self, store: OrganizationStore) -> Result<(), ServerError> {
-        let record = store.read()?;
+impl SharedWorkspaceHost {
+    fn retain_in(&mut self, retention: Box<dyn Retention>) -> Result<(), ServerError> {
+        let record = retention.read()?;
         self.restore_organization(record.as_ref());
         // Existing organization predates seeding and must never be overwritten by a client.
         if self.state.worktree_settings.is_none() && record.is_some() {
             self.state.worktree_settings = Some(Default::default());
         }
-        self.store = Some(store);
+        self.journal = Some(Arc::new(Journal::new(retention)));
         self.prepare_initial_organization()
             .map_err(|_| ServerError::StorageUnavailable)
     }
-    fn tick(&mut self) {
+    /// Runs timed work and returns when it is next due, or `None` when nothing is live.
+    pub(super) fn tick_until(&mut self, now: Instant) -> Option<Instant> {
         let _ = self.finish_worktrees(false);
         self.prototype.directories.tick();
-        let _ = self.synchronize();
+        let _ = self.synchronized();
+        let live = self.blocked.is_some()
+            || !self.settled()
+            || self.writes.busy()
+            || self.prototype.directories.busy()
+            || self.repositories.busy()
+            || self.panes.values().any(|host| host.pane.is_some());
+        live.then_some(now + SYNCHRONIZE_INTERVAL)
+    }
+}
+impl PaneService for SharedWorkspaceHost {
+    fn restore(&mut self, store: OrganizationStore) -> Result<(), ServerError> {
+        self.retain_in(Box::new(store))
+    }
+    fn tick(&mut self) {
+        self.tick_until(Instant::now());
     }
     fn admitted(&mut self, client: Id, name: control::ClientName) {
         self.prototype.admitted(client, name);
@@ -871,7 +1006,8 @@ impl PaneService for SharedWorkspaceHost {
         }
         self.synchronize()
             .map_err(|_| ServerError::StorageUnavailable)?;
-        Ok(())
+        self.retained(self.latest())
+            .map_err(|_| ServerError::StorageUnavailable)
     }
 }
 
@@ -886,6 +1022,139 @@ mod tests {
             &serde_json::to_vec(&host.state.envelope(&host.prototype.directory).unwrap()).unwrap(),
         )
         .unwrap()
+    }
+
+    fn journaled() -> (SharedWorkspaceHost, Arc<journal::memory::Memory>) {
+        let memory = Arc::new(journal::memory::Memory::default());
+        let mut host = SharedWorkspaceHost::new(host());
+        host.retain_in(Box::new(journal::memory::Shared(Arc::clone(&memory))))
+            .unwrap();
+        (host, memory)
+    }
+
+    fn rename(host: &SharedWorkspaceHost, name: &str) -> Mutation {
+        let workspace = &host.state.inventory.workspaces[0];
+        Mutation::RenameWorkspace {
+            workspace: workspace.id,
+            version: workspace.name_version,
+            name: name.into(),
+        }
+    }
+
+    fn retained_outcome(memory: &journal::memory::Memory, device: Id, sequence: u64) -> bool {
+        State::from_organization(&memory.retained().unwrap())
+            .outcome(device, sequence)
+            .is_some()
+    }
+
+    #[test]
+    fn an_acknowledgement_replies_before_the_sync_worker_retains_it() {
+        let (mut host, memory) = journaled();
+        let device = [1; 32];
+        let mutation = rename(&host, "Edited");
+        assert!(matches!(
+            host.request(
+                device,
+                device,
+                Request::Mutate {
+                    sequence: 1,
+                    mutation
+                }
+            ),
+            Reply::Outcome(_)
+        ));
+        assert!(
+            retained_outcome(&memory, device, 1),
+            "an outcome is retained before its reply"
+        );
+        let release = memory.hold();
+        assert!(matches!(
+            host.request(device, device, Request::Acknowledge { sequence: 1 }),
+            Reply::Unchanged
+        ));
+        assert!(
+            retained_outcome(&memory, device, 1),
+            "the write is still held"
+        );
+        release.send(()).unwrap();
+        host.sync.as_ref().unwrap().flush().unwrap();
+        assert!(!retained_outcome(&memory, device, 1));
+        assert!(host.settled());
+        host.shutdown().unwrap();
+    }
+
+    #[test]
+    fn a_deleted_session_ends_only_after_its_deletion_is_retained() {
+        use spaceterm_server::hierarchy::Outcome;
+        let (mut host, _memory) = journaled();
+        let pane = shared_inventory(&mut host).workspaces[0].tabs[0].root_pane;
+        let Reply::Attached { lease } = host.request(
+            [1; 32],
+            [1; 32],
+            Request::SelectPane {
+                pane,
+                explicit: true,
+                size: size(),
+                style: None,
+            },
+        ) else {
+            panic!("explicit first use");
+        };
+        let confirmation = shared_inventory(&mut host).close.unwrap();
+        let Ok(Answer::Outcome { outcome, revision }) =
+            host.mutate([2; 32], 1, Mutation::EndAllSessions { confirmation })
+        else {
+            panic!("End All Sessions answers at once");
+        };
+        assert!(matches!(outcome.outcome, Outcome::Accepted { .. }));
+        host.tick();
+        assert!(
+            !matches!(
+                host.request([1; 32], [1; 32], Request::Poll { lease }),
+                Reply::Refused(_)
+            ),
+            "the session runs while its ending is not retained"
+        );
+        host.retained(revision).unwrap();
+        host.tick();
+        assert!(matches!(
+            host.request([1; 32], [1; 32], Request::Poll { lease }),
+            Reply::Refused(Refusal::Stale)
+        ));
+        host.shutdown().unwrap();
+    }
+
+    #[test]
+    fn a_failed_write_is_refused_and_read_back_before_the_original_operation_retries() {
+        use std::sync::atomic::Ordering;
+        let (mut host, memory) = journaled();
+        let device = [1; 32];
+        let original = shared_inventory(&mut host).workspaces[0].name.clone();
+        let mutation = rename(&host, "Lost");
+        memory.fail.store(true, Ordering::SeqCst);
+        assert!(matches!(
+            host.request(
+                device,
+                device,
+                Request::Mutate {
+                    sequence: 1,
+                    mutation: mutation.clone()
+                }
+            ),
+            Reply::Refused(Refusal::StorageUnavailable)
+        ));
+        assert!(matches!(
+            host.request([2; 32], [2; 32], Request::Inventory),
+            Reply::Refused(Refusal::StorageUnavailable)
+        ));
+        memory.fail.store(false, Ordering::SeqCst);
+        assert_eq!(shared_inventory(&mut host).workspaces[0].name, original);
+        assert!(matches!(
+            host.request(device, device, Request::Mutate { sequence: 1, mutation }),
+            Reply::Outcome(record) if matches!(record.outcome, spaceterm_server::hierarchy::Outcome::Accepted { .. })
+        ));
+        assert_eq!(shared_inventory(&mut host).workspaces[0].name, "Lost");
+        host.shutdown().unwrap();
     }
 
     #[test]

@@ -93,6 +93,10 @@ impl ServerRepositories {
         }
         self.next_read = Instant::now();
     }
+    /// Whether a subscriber's Git facts are read now or again later.
+    pub(super) fn busy(&self) -> bool {
+        !self.subscribers.is_empty() || self.worker.is_some()
+    }
     pub(super) fn snapshot(&self) -> Snapshot {
         self.snapshot.clone()
     }
