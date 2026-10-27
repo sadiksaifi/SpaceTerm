@@ -1,47 +1,20 @@
-use super::tests::{command, host, size};
+use super::tests::{await_screen, command, host, lines, size};
 use super::*;
 use spaceterm_server::hierarchy::{Axis, Mutation, Outcome};
-use std::time::Instant;
+use spaceterm_server::protocol::screen::ScreenUpdate;
 
-// Exercise the public request and actual server screen encoding across JSON decoding.
-fn exchange(host: &mut impl PaneService, device: u8, connection: u8, request: Request) -> Reply {
-    let request = serde_json::from_slice(&serde_json::to_vec(&request).unwrap()).unwrap();
-    let reply = host.request([device; 32], [connection; 32], request);
-    serde_json::from_slice(&serde_json::to_vec(&reply).unwrap()).unwrap()
+// Exercise the host commands and the server's actual captured screens.
+fn exchange(host: &mut impl HostCommands, device: u8, connection: u8, request: Request) -> Reply {
+    host.request([device; 32], [connection; 32], request)
 }
 
-fn screen(
-    host: &mut impl PaneService,
-    lease: Lease,
-    ready: impl Fn(&Screen) -> bool,
-) -> Box<Screen> {
-    let deadline = Instant::now() + Duration::from_secs(15);
-    loop {
-        match exchange(
-            host,
-            1,
-            lease.connection[0],
-            Request::PollChanges { lease, base: None },
-        ) {
-            Reply::Screen(screen) if ready(&screen) => return screen,
-            Reply::Screen(_) | Reply::ScreenChanges(_) | Reply::Unchanged => {}
-            reply => panic!("screen refused: {reply:?}"),
-        }
-        assert!(
-            Instant::now() < deadline,
-            "clear publication did not arrive"
-        );
-        std::thread::sleep(Duration::from_millis(5));
-    }
+fn text(update: &ScreenUpdate) -> String {
+    lines(update).join("\n")
 }
 
-fn text(screen: &Screen) -> String {
-    screen
-        .rows
-        .iter()
-        .map(|r| r.iter().map(|c| c.text.as_str()).collect::<String>())
-        .collect::<Vec<_>>()
-        .join("\n")
+/// The Scrollback rows the server retains above the screen.
+fn retained(update: &ScreenUpdate) -> u64 {
+    update.history.total - update.history.oldest
 }
 
 #[test]
@@ -111,14 +84,14 @@ fn clear_under_lease(preserve_prompt: bool) {
             Reply::Unchanged
         ));
     }
-    let first_before = screen(&mut host, first, |s| {
+    let first_before = await_screen(&mut host, [1; 32], first, |s| {
         text(s).lines().any(|r| r.trim_end() == "FIRST-prompt")
     });
-    let second_before = screen(&mut host, second, |s| {
+    let second_before = await_screen(&mut host, [1; 32], second, |s| {
         text(s).lines().any(|r| r.trim_end() == "SECOND-prompt")
     });
-    assert!(first_before.reading.as_ref().unwrap().total_rows > u64::from(size().rows));
-    assert!(second_before.reading.as_ref().unwrap().total_rows > u64::from(size().rows));
+    assert!(retained(&first_before) > 0);
+    assert!(retained(&second_before) > 0);
 
     let mut wrong_control = first;
     wrong_control.control = [99; 32];
@@ -143,11 +116,8 @@ fn clear_under_lease(preserve_prompt: bool) {
             Reply::Refused(Refusal::Stale)
         ));
     }
-    let untouched = screen(&mut host, first, |_| true);
-    assert_eq!(
-        untouched.reading.as_ref().unwrap().total_rows,
-        first_before.reading.as_ref().unwrap().total_rows
-    );
+    let untouched = await_screen(&mut host, [1; 32], first, |_| true);
+    assert_eq!(retained(&untouched), retained(&first_before));
     assert_eq!(text(&untouched), text(&first_before));
 
     let Reply::Attached { lease: resumed } = exchange(&mut host, 1, 3, select(tab.root_pane))
@@ -164,18 +134,7 @@ fn clear_under_lease(preserve_prompt: bool) {
         Reply::Refused(Refusal::Stale)
     ));
     if !preserve_prompt {
-        assert!(matches!(
-            exchange(
-                &mut host,
-                1,
-                3,
-                Request::PresentationDemand {
-                    lease: resumed,
-                    visible: false
-                }
-            ),
-            Reply::Unchanged
-        ));
+        host.view(&resumed, false, 60);
     }
     assert!(matches!(
         exchange(
@@ -187,36 +146,15 @@ fn clear_under_lease(preserve_prompt: bool) {
         Reply::Unchanged
     ));
     if !preserve_prompt {
-        assert!(matches!(
-            exchange(
-                &mut host,
-                1,
-                3,
-                Request::PollChanges {
-                    lease: resumed,
-                    base: None
-                }
-            ),
-            Reply::Unchanged
-        ));
-        assert!(matches!(
-            exchange(
-                &mut host,
-                1,
-                3,
-                Request::PresentationDemand {
-                    lease: resumed,
-                    visible: true
-                }
-            ),
-            Reply::Unchanged
-        ));
+        // A hidden Pane's Terminal Session publishes nothing, so the captured screen stays.
+        std::thread::sleep(Duration::from_millis(100));
+        let hidden = await_screen(&mut host, [1; 32], resumed, |_| true);
+        assert_eq!(text(&hidden), text(&first_before));
+        assert_eq!(retained(&hidden), retained(&first_before));
+        host.view(&resumed, true, 60);
     }
-    let cleared = screen(&mut host, resumed, |s| {
-        s.generation > first_before.generation
-            && s.reading
-                .as_ref()
-                .is_some_and(|r| r.total_rows == r.visible_rows)
+    let cleared = await_screen(&mut host, [1; 32], resumed, |s| {
+        s.generation > first_before.generation && retained(s) == 0
     });
     assert!(
         text(&cleared).contains("FIRST-prompt"),
@@ -231,11 +169,8 @@ fn clear_under_lease(preserve_prompt: bool) {
     } else {
         assert!(!text(&cleared).contains("FIRST-history"));
     }
-    let second_after = screen(&mut host, second, |_| true);
+    let second_after = await_screen(&mut host, [1; 32], second, |_| true);
     assert_eq!(text(&second_after), text(&second_before));
-    assert_eq!(
-        second_after.reading.as_ref().unwrap().total_rows,
-        second_before.reading.as_ref().unwrap().total_rows
-    );
+    assert_eq!(retained(&second_after), retained(&second_before));
     host.shutdown().unwrap();
 }

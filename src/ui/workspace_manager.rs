@@ -278,6 +278,8 @@ pub(crate) struct WorkspaceManager {
     /// it. It is kept by confirmation generation, and a Review hands it to the fresh confirmation,
     /// because each confirmation takes the keyboard before an approved close moves it.
     shared_close_keyboard: SharedCloseKeyboard,
+    /// Reads every server again once the window's modal closes, while a reading waits on it.
+    modal_reread: Option<gpui::Subscription>,
     sidebar_repositories: repository::SidebarRepositories,
     sidebar_worktrees: worktrees::SidebarWorktrees,
     shared_repositories: shared_repositories::SharedWorkspaceRepositories,
@@ -407,6 +409,7 @@ impl WorkspaceManager {
             close_empty_after_shared_removal: false,
             close_confirmation: CloseConfirmation::default(),
             shared_close_keyboard: SharedCloseKeyboard::default(),
+            modal_reread: None,
             sidebar_repositories: repository::SidebarRepositories::default(),
             sidebar_worktrees: worktrees::SidebarWorktrees::default(),
             shared_repositories: shared_repositories::SharedWorkspaceRepositories::default(),
@@ -2920,32 +2923,16 @@ impl WorkspaceManager {
                 cx.set_global(super::shared_workspaces::SharedWorkspaceHost(handle));
             }
         }
-        // The first reading happens at once, so the window presents Workspaces as soon as the
-        // server publishes them rather than one interval later.
-        let poll = cx.spawn_in(window, async move |manager, cx| {
-            loop {
-                if manager
-                    .update_in(cx, |manager, window, cx| {
-                        manager.sync_shared_workspaces(key, window, cx);
-                    })
-                    .is_err()
-                {
-                    break;
-                }
-                cx.background_executor()
-                    .timer(super::shared_workspaces::POLL_INTERVAL)
-                    .await;
-            }
-        });
-        // Reads the server's inventory as soon as its connection publishes a change. The periodic
-        // poll stays, so a missed or absent hint only delays a reading.
-        let wake = self
+        // Reads the server's inventory and this window's edits after each change either one
+        // hints, starting at once. Nothing reads on a timer: every change the window shows is
+        // hinted after it is visible, so a reading never misses one.
+        let reads = self
             .shared
             .get(key)
-            .and_then(super::shared_workspaces::SharedWorkspaces::subscribe)
-            .map(|wake| {
+            .map(super::shared_workspaces::SharedWorkspaces::subscribe)
+            .map(|changes| {
                 cx.spawn_in(window, async move |manager, cx| {
-                    while wake.recv().await.is_ok() {
+                    while changes.recv().await.is_ok() {
                         if manager
                             .update_in(cx, |manager, window, cx| {
                                 manager.sync_shared_workspaces(key, window, cx);
@@ -2957,7 +2944,9 @@ impl WorkspaceManager {
                     }
                 })
             });
-        self.shared.follow(key, poll, wake);
+        if let Some(reads) = reads {
+            self.shared.follow(key, reads);
+        }
         cx.notify();
         key
     }
@@ -3023,6 +3012,7 @@ impl WorkspaceManager {
             .map(|shared| shared.prepare_client_views());
         if !matches!(ready, Some(Ok(true))) {
             self.report_client_view_error(window, cx);
+            self.reread_after_modal(window, cx);
             return;
         }
         // Binding a provisional Pane may replace its focus handle during reconciliation. Read
@@ -3149,7 +3139,9 @@ impl WorkspaceManager {
                 crate::status_menu::show_in_dock(cx, false);
             }
             window.remove_window();
+            return;
         }
+        self.reread_after_modal(window, cx);
     }
 
     /// Presents the Terminal Metadata `inventory` publishes for every Pane of its server's
@@ -3212,6 +3204,21 @@ impl WorkspaceManager {
                 shared.save_arrangements(spaceterm_server::client_view::ClientView { workspaces });
             }
         }
+    }
+
+    /// A reading defers what an open modal would cover, and an error notice is itself a modal.
+    /// While one is open, every presented server is read again once it closes.
+    fn reread_after_modal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.modal_reread.is_some() || !spaceterm_ui::window_modal_is_open(window, cx) {
+            return;
+        }
+        self.modal_reread =
+            spaceterm_ui::when_window_modal_closes(window, cx, |manager, window, cx| {
+                manager.modal_reread = None;
+                for key in manager.shared.keys() {
+                    manager.sync_shared_workspaces(key, window, cx);
+                }
+            });
     }
 
     fn report_client_view_error(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -4974,7 +4981,8 @@ impl WorkspaceManager {
         let rows = self.sidebar_rows(cx);
         let remote_servers = self.remote_creation_servers(cx);
 
-        self.sidebar
+        let rows_changed = self
+            .sidebar
             .update(cx, |sidebar, cx| sidebar.set_rows(rows, remote_servers, cx));
         // The New Worktree Command is available only where it can act, so its menu item disables
         // elsewhere.
@@ -5020,7 +5028,13 @@ impl WorkspaceManager {
                     .child(stage),
             )
             .when(!recovery && sidebar_frame.reveal > 0.0, |root| {
-                root.child(self.sidebar.clone())
+                root.child(self.render_sidebar(
+                    sidebar_layout.width,
+                    sidebar_frame,
+                    rows_changed,
+                    window,
+                    cx,
+                ))
             })
             .when(!recovery, |root| {
                 root.child(
@@ -5050,6 +5064,42 @@ impl WorkspaceManager {
             .children(self.active_directory_recovery(cx))
             .children(super::application_commands::overlay(window, cx));
         ModalLayer::new(super::window_shell::render(content, window, cx)).transient(transients)
+    }
+}
+
+impl WorkspaceManager {
+    /// The sidebar below the top chrome, sliding in from the window's leading edge as it shows.
+    ///
+    /// It is a cached view, so a Pane update does not redraw it. It draws uncached while
+    /// assistive technology reads the window, because GPUI republishes no accessibility nodes
+    /// from a reused view. It also draws uncached in a frame that changed its rows, because GPUI
+    /// applies a notification issued while a frame renders only to the next frame.
+    fn render_sidebar(
+        &self,
+        width: Pixels,
+        frame: super::sidebar_motion::SidebarFrame,
+        rows_changed: bool,
+        window: &Window,
+        cx: &App,
+    ) -> impl IntoElement {
+        let appearance = super::appearance::chrome(cx);
+        let sidebar = if rows_changed || window.is_a11y_active() {
+            self.sidebar.clone().into_any_element()
+        } else {
+            gpui::AnyView::from(self.sidebar.clone())
+                .cached(gpui::StyleRefinement::default().size_full())
+                .into_any_element()
+        };
+        div()
+            .absolute()
+            .top(
+                super::workspace_frame::WorkspaceFrame::for_appearance(appearance, cx)
+                    .top_chrome_height(appearance.top_height()),
+            )
+            .bottom_0()
+            .left(frame.between(-width, gpui::px(0.0)))
+            .w(width)
+            .child(sidebar)
     }
 }
 

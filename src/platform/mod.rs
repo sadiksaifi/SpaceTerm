@@ -30,6 +30,8 @@ pub(crate) mod application_quit;
 #[cfg(feature = "desktop")]
 pub(crate) mod desktop_events;
 #[cfg(feature = "desktop")]
+pub(crate) mod display_refresh;
+#[cfg(feature = "desktop")]
 pub(crate) mod https_transport;
 #[cfg(feature = "desktop")]
 pub(crate) mod keyboard_layout;
@@ -59,8 +61,20 @@ pub(crate) mod microphone_access;
     )
 )]
 pub(crate) mod permission_access;
-#[cfg(feature = "desktop")]
+#[cfg(target_os = "macos")]
+pub(crate) mod kqueue_watch;
+/// `notify` serves the desktop, and a Linux server's Git facts watch.
+#[cfg(any(target_os = "linux", feature = "desktop"))]
 pub(crate) mod repository_watch;
+
+/// The watch sets a server's Git facts reader uses: kqueue on macOS, which needs no Apple
+/// framework, and inotify through `notify` on Linux.
+pub(crate) fn server_watch_sets() -> std::sync::Arc<dyn crate::repository_status::WatchSets> {
+    #[cfg(target_os = "macos")]
+    return std::sync::Arc::new(kqueue_watch::KqueueWatchSets);
+    #[cfg(target_os = "linux")]
+    std::sync::Arc::new(repository_watch::NotifyRepositoryWatcher::new())
+}
 #[cfg_attr(
     not(feature = "desktop"),
     allow(

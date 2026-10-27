@@ -145,6 +145,8 @@ pub(crate) use pointer_input::{
 };
 
 #[cfg(feature = "desktop")]
+pub(crate) mod changes;
+#[cfg(feature = "desktop")]
 pub(crate) mod server_graphics;
 #[cfg(feature = "desktop")]
 pub(crate) mod server_session;

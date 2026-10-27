@@ -1,5 +1,8 @@
 use super::*;
-use crate::runtime::server::tests::{await_text, command, focus, host, shared_inventory, size};
+use crate::runtime::server::tests::{
+    await_screen, await_text, command, focus, history_text, host, lines, screen, shared_inventory,
+    size,
+};
 use spaceterm_server::hierarchy::{Axis, Mutation, Outcome};
 
 fn select(host: &mut SharedWorkspaceHost, device: u8, pane: Id, explicit: bool) -> Reply {
@@ -15,12 +18,15 @@ fn select(host: &mut SharedWorkspaceHost, device: u8, pane: Id, explicit: bool) 
     )
 }
 
+/// Commits one edit, then ticks as the server does, which ends the work a retained edit deleted.
 fn mutate(host: &mut SharedWorkspaceHost, device: u8, sequence: u64, mutation: Mutation) -> Id {
-    match host.request(
+    let reply = host.request(
         [device; 32],
         [device; 32],
         Request::Mutate { sequence, mutation },
-    ) {
+    );
+    host.tick(Instant::now());
+    match reply {
         Reply::Outcome(result) => match result.outcome {
             Outcome::Accepted { target } => target,
             other => panic!("mutation refused: {other:?}"),
@@ -151,7 +157,7 @@ fn end_all_sessions_retains_directory_confirmed_between_admission_and_shutdown()
         fresh,
         "stty -echo; printf '\\nRESTART-DIRECTORY:'; pwd\n",
     );
-    await_text(&mut host, 1, fresh, "RESTART-DIRECTORY:/");
+    await_text(&mut host, fresh, "RESTART-DIRECTORY:/");
     host.shutdown().unwrap();
 }
 
@@ -198,7 +204,7 @@ fn ended_directory_recovery(confirmed: bool, choose: bool) {
                 restoration.display(),
             ),
         );
-        await_text(&mut host, 1, old, "RESTORATION-CONFIRMED");
+        await_text(&mut host, old, "RESTORATION-CONFIRMED");
     }
     // Automatic shell integration is disabled. This later directory has no owned marker.
     command(
@@ -210,7 +216,7 @@ fn ended_directory_recovery(confirmed: bool, choose: bool) {
             live.display(),
         ),
     );
-    await_text(&mut host, 1, old, "LIVE-DIRECTORY");
+    await_text(&mut host, old, "LIVE-DIRECTORY");
     let source = if confirmed { &restoration } else { &live };
     let before = git_facts(&mut host, source, |facts| facts.worktrees.is_some());
     let workspace = &before.workspaces[0];
@@ -303,7 +309,7 @@ fn ended_directory_recovery(confirmed: bool, choose: bool) {
             directory.display(),
         ),
     );
-    await_text(&mut host, 1, fresh, "RECOVERED-DIRECTORY");
+    await_text(&mut host, fresh, "RECOVERED-DIRECTORY");
     let after = shared_inventory(&mut host);
     assert_eq!(after.workspaces.len(), 1);
     let recovered = &after.workspaces[0];
@@ -635,7 +641,7 @@ fn end_all_sessions_drops_output_and_fences_old_input_effects_and_snapshots() {
         old,
         "stty -echo; printf '\\033[2J\\033[HOLD-SESSION-OUTPUT\\n'\n",
     );
-    await_text(&mut host, 1, old, "OLD-SESSION-OUTPUT");
+    await_text(&mut host, old, "OLD-SESSION-OUTPUT");
     focus(&mut host, old, 1, FocusTarget::Terminal);
     let Reply::Paste(PasteOutcome::ConfirmationRequired(approval)) = host.request(
         [1; 32],
@@ -652,12 +658,11 @@ fn end_all_sessions_drops_output_and_fences_old_input_effects_and_snapshots() {
     };
     end_all(&mut host, 2, 1);
     let replacement = start(&mut host, 1, pane);
+    assert!(matches!(
+        screen(&mut host, [1; 32], old),
+        Err(PaneEvent::SessionEnded)
+    ));
     let retired = [
-        Request::Poll { lease: old },
-        Request::PollChanges {
-            lease: old,
-            base: Some(1),
-        },
         Request::Focus {
             lease: old,
             generation: 1,
@@ -676,22 +681,12 @@ fn end_all_sessions_drops_output_and_fences_old_input_effects_and_snapshots() {
                 confirm: true,
             },
         },
-        Request::NativeEffects {
-            lease: old,
-            generation: 1,
-        },
         Request::CompleteClipboard {
             lease: old,
             generation: 1,
             id: 1,
             completion: pane::effects::Completion::Text("old".into()),
         },
-        Request::SelectionChunk {
-            lease: old,
-            generation: 1,
-            offset: 0,
-        },
-        Request::ReadingStatus { lease: old },
         Request::Resize {
             lease: old,
             size: size(),
@@ -708,40 +703,16 @@ fn end_all_sessions_drops_output_and_fences_old_input_effects_and_snapshots() {
             Reply::Refused(Refusal::Stale)
         ));
     }
-    // Search the entire fresh screen and Scrollback before any client input can clear it.
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    loop {
-        host.request(
-            [1; 32],
-            [1; 32],
-            Request::Read {
-                lease: replacement,
-                operation: pane::reading::Operation::Query {
-                    generation: 7,
-                    text: "OLD-SESSION-OUTPUT".into(),
-                },
-            },
-        );
-        if let Reply::Screen(screen) =
-            host.request([1; 32], [1; 32], Request::Poll { lease: replacement })
-            && let Some(find) = screen
-                .reading
-                .as_ref()
-                .and_then(|reading| reading.find.as_ref())
-            && find.generation == 7
-        {
-            assert_eq!(
-                find.total, 0,
-                "the ended Session cannot survive in screen or Scrollback"
-            );
-            break;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "fresh Find did not complete"
-        );
-        std::thread::sleep(Duration::from_millis(5));
-    }
+    // Read the entire fresh screen and Scrollback before any client input can clear it.
+    let update = await_screen(&mut host, [1; 32], replacement, |_| true);
+    let history = history_text(&mut host, [1; 32], replacement, update.history);
+    assert!(
+        !history
+            .iter()
+            .chain(lines(&update).iter())
+            .any(|line| line.contains("OLD-SESSION-OUTPUT")),
+        "the ended Session cannot survive in screen or Scrollback"
+    );
     host.shutdown().unwrap();
 }
 

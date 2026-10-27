@@ -184,6 +184,7 @@ impl DirectConnections {
                     due: Instant::now() + std::time::Duration::from_secs(5),
                     ..Retry::new(Interaction::Quiet)
                 },
+                health: None,
             },
         );
         prepared.settled.store(true, Ordering::Release);

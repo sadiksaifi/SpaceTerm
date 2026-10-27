@@ -55,10 +55,7 @@ fn inventory_observers_receive_unpainted_pane_metadata_without_claiming_control(
         host: &mut SharedWorkspaceHost,
         connection: u8,
     ) -> spaceterm_server::hierarchy::Inventory {
-        let request: Request =
-            serde_json::from_slice(&serde_json::to_vec(&Request::Inventory).unwrap()).unwrap();
-        let reply = host.request([2; 32], [connection; 32], request);
-        let reply: Reply = serde_json::from_slice(&serde_json::to_vec(&reply).unwrap()).unwrap();
+        let reply = host.request([2; 32], [connection; 32], Request::Inventory);
         let Reply::Inventory { inventory, .. } = reply else {
             panic!("observer inventory refused")
         };
@@ -133,17 +130,7 @@ fn inventory_observers_receive_unpainted_pane_metadata_without_claiming_control(
     ) else {
         panic!("owner selection refused")
     };
-    assert!(matches!(
-        host.request(
-            [1; 32],
-            [1; 32],
-            Request::PresentationDemand {
-                lease,
-                visible: false
-            }
-        ),
-        Reply::Unchanged
-    ));
+    host.view(&lease, false, 60);
     let idle = wait(&mut host, 20, "sh");
     let idle_metadata = idle.workspaces[0].tabs[0].panes[0]
         .presentation
@@ -156,18 +143,21 @@ fn inventory_observers_receive_unpainted_pane_metadata_without_claiming_control(
     );
     // Publish the source directory before the command starts so completion changes only metadata.
     // Neither client requests a Screen. Only the owner sends input; the observer reads Inventory.
+    // Typed commands stay ASCII, because macOS `/bin/sh` reads UTF-8 bytes as Meta keys without a
+    // UTF-8 locale. `printf` writes the titles' UTF-8 from octal escapes: `\342\234\263` is "✳",
+    // `\302\267` is "·", `\342\240\213` is "⠋" and `\342\240\231` is "⠙".
     command(
         &mut host,
         1,
         lease,
-        "stty -echo; printf '\\033]7;file://localhost/tmp/api\\007\\033]133;C;cmdline=cargo%%20test\\007\\033]2;✳ cargo test · api\\007\\033]9;4;1;42\\007'",
+        "stty -echo; printf '\\033]7;file://localhost/tmp/api\\007\\033]133;C;cmdline=cargo%%20test\\007\\033]2;\\342\\234\\263 cargo test \\302\\267 api\\007\\033]9;4;1;42\\007'",
     );
     wait(&mut host, 20, "✳ cargo test · api");
     command(
         &mut host,
         1,
         lease,
-        "printf '\\033]2;⠋ cargo test · api\\007'",
+        "printf '\\033]2;\\342\\240\\213 cargo test \\302\\267 api\\007'",
     );
     wait(&mut host, 20, "⠋ cargo test · api");
     // Observe each frame before advancing so a delayed PTY reader cannot merge their times.
@@ -176,7 +166,7 @@ fn inventory_observers_receive_unpainted_pane_metadata_without_claiming_control(
         &mut host,
         1,
         lease,
-        "printf '\\033]2;⠙ cargo test · api\\007'",
+        "printf '\\033]2;\\342\\240\\231 cargo test \\302\\267 api\\007'",
     );
     let first = wait(&mut host, 20, "⠙ cargo test · api");
     let snapshot = first.workspaces[0].tabs[0].panes[0]
@@ -296,14 +286,10 @@ fn inventory_observers_receive_unpainted_pane_metadata_without_claiming_control(
         ),
         "observing metadata must not replace the controller"
     );
-    // Hidden Panes still announce accessibility revisions without publishing screen rows.
-    let polled = host.request([1; 32], [1; 32], Request::Poll { lease });
+    // The controller still holds the unpainted Pane.
     assert!(
-        matches!(
-            polled,
-            Reply::Unchanged | Reply::AccessibilityRevision { .. }
-        ),
-        "the controller can poll the unpainted Pane without receiving a Screen: {polled:?}"
+        matches!(host.observe([1; 32], &lease), Observed::Live(_)),
+        "the controller can observe the unpainted Pane"
     );
     host.shutdown().unwrap();
 }
@@ -322,12 +308,12 @@ fn presentation_is_excluded_from_retained_organization_and_maximum_inventory_fit
     );
     let mut metadata = metadata::encode(&tracker.snapshot());
     state.present_presentation(organization.pane, Some(Box::new(metadata.clone())));
-    let retained = state.envelope("/tmp".as_ref()).unwrap();
-    assert!(
-        !serde_json::to_string(&retained)
-            .unwrap()
-            .contains("presentation")
-    );
+    let retained = serde_json::to_value(state.envelope("/tmp".as_ref()).unwrap()).unwrap();
+    let panes = &retained["shared"]["inventory"]["workspaces"][0]["tabs"][0]["panes"];
+    assert!(panes.as_array().unwrap().iter().all(|pane| {
+        pane.get("presentation")
+            .is_none_or(serde_json::Value::is_null)
+    }));
     metadata.title = "界".repeat(pane::metadata::MAX_TITLE_CHARS);
     metadata.shell_name = metadata.title.clone();
     metadata.directory = "界".repeat(pane::metadata::MAX_DIRECTORY_CHARS);
@@ -345,14 +331,22 @@ fn presentation_is_excluded_from_retained_organization_and_maximum_inventory_fit
     exemplar.presentation = Some(Box::new(metadata));
     inventory.workspaces[0].tabs[0].panes = vec![exemplar; MAX_PANES];
     assert!(
-        serde_json::to_vec(&Reply::Inventory {
-            inventory,
+        super::dispatch::wire_bytes(Reply::Inventory {
+            inventory: inventory.clone(),
             next_sequence: 1
         })
-        .unwrap()
-        .len()
-            < MAX_TERMINAL_FRAME
+        .is_some()
     );
+    let pushed = spaceterm_server::protocol::frame::encode_server(
+        &spaceterm_server::protocol::ServerMessage::Inventory(Box::new(
+            spaceterm_server::protocol::InventoryRevision {
+                inventory,
+                next_sequence: 1,
+            },
+        )),
+    )
+    .unwrap();
+    assert!(pushed.bytes() <= spaceterm_server::protocol::limits::MAX_INVENTORY_BYTES);
 }
 
 #[test]

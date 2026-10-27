@@ -182,9 +182,6 @@ impl ServerFacts {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Read {
-    Poll {
-        id: u64,
-    },
     Context {
         root: PathBuf,
     },
@@ -208,9 +205,6 @@ pub enum Read {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ReadReply {
-    Pending {
-        id: u64,
-    },
     Context {
         settings: Settings,
         home: PathBuf,
@@ -224,29 +218,27 @@ pub enum ReadReply {
     Removal(Removal),
 }
 
+/// One bounded read on `link`. Its reply arrives when the read settles; one that outlasts the
+/// limit is cancelled. Uncertain requests are never retried.
 #[cfg(feature = "client")]
-impl crate::pane::PaneConnection {
-    /// Poll one bounded read on this connection. Uncertain exchanges are never retried.
-    pub fn read_worktree(
-        &mut self,
-        mut read: Read,
-    ) -> Result<Result<ReadReply, Error>, crate::ServerError> {
-        let until = std::time::Instant::now() + std::time::Duration::from_secs(30);
-        loop {
-            match self.exchange(&crate::pane::Request::WorktreeRead(read))? {
-                crate::pane::Reply::WorktreeRead(Ok(ReadReply::Pending { id })) => {
-                    if std::time::Instant::now() >= until {
-                        return Ok(Err(Error::Unavailable));
-                    }
-                    read = Read::Poll { id };
-                    std::thread::sleep(std::time::Duration::from_millis(20));
-                }
-                crate::pane::Reply::WorktreeRead(result) => return Ok(result),
-                _ => return Err(crate::ServerError::Protocol),
-            }
+pub fn read_worktree(
+    link: &crate::connection::link::ServerLink,
+    read: Read,
+) -> Result<Result<ReadReply, Error>, crate::ServerError> {
+    let pending = link.request(crate::protocol::Operation::WorktreeRead(read))?;
+    match pending.wait_for(READ_LIMIT) {
+        Some(Ok(crate::protocol::ReplyBody::Worktree(result))) => Ok(result),
+        Some(Ok(_)) => Err(crate::ServerError::Protocol),
+        Some(Err(error)) => Err(error.into()),
+        None => {
+            pending.cancel();
+            Ok(Err(Error::Unavailable))
         }
     }
 }
+/// How long a Worktree read may run before the client abandons it.
+#[cfg(feature = "client")]
+const READ_LIMIT: std::time::Duration = std::time::Duration::from_secs(30);
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct AffectedTab {
     pub workspace: Id,

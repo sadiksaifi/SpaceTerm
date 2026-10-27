@@ -990,7 +990,7 @@ fn running_sessions(boot: u8, live: u8) -> spaceterm_server::hierarchy::Inventor
         revision: 1,
         workspaces: Vec::new(),
         close: Some(CloseInventory {
-            controls: None,
+            controls: Vec::new(),
             boot: [boot; 32],
             sessions,
         }),

@@ -5,7 +5,7 @@
 #[cfg(feature = "client")]
 #[expect(
     dead_code,
-    reason = "this exercise uses only the terminal command/output helpers"
+    reason = "this exercise uses only the claim, request and terminal helpers"
 )]
 mod support;
 
@@ -27,16 +27,17 @@ mod exercise {
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
+    use super::support::{self, Claimed, Ending, Pane};
     use serde_json::{Value, json};
+    use spaceterm_server::connection::link::ServerLink;
     use spaceterm_server::direct::{
         self, DeviceCredential, DirectConnection, DirectConnector, DirectError, Enrollment,
         Invitation, ListenerState, NetworkPolicy, PairedDevice,
     };
     use spaceterm_server::hierarchy::{CloseTarget, Id, Inventory, Mutation, Outcome};
     use spaceterm_server::pane::control::Controller;
-    use spaceterm_server::pane::{
-        Lease, PaneConnection, PaneSize, Reply, Request, Screen, directories,
-    };
+    use spaceterm_server::pane::{AttachmentClaim, Lease, PaneSize, directories};
+    use spaceterm_server::protocol::{Operation, PaneEvent, ReplyBody};
     use spaceterm_server::{ServerConnection, ServerError};
 
     type Result<T> = std::result::Result<T, &'static str>;
@@ -53,7 +54,7 @@ mod exercise {
         if condition { Ok(()) } else { Err(failure) }
     }
 
-    fn reply_classification(reply: &std::result::Result<Reply, ServerError>) -> &'static str {
+    fn reply_classification<T>(reply: &std::result::Result<T, ServerError>) -> &'static str {
         match reply {
             Ok(_) => "unexpected-reply",
             Err(ServerError::Protocol) => "protocol",
@@ -101,14 +102,8 @@ mod exercise {
         }
     }
 
-    fn inventory(connection: &mut PaneConnection) -> Result<(Inventory, u64)> {
-        match api(connection.exchange(&Request::Inventory))? {
-            Reply::Inventory {
-                inventory,
-                next_sequence,
-            } => Ok((inventory, next_sequence)),
-            _ => Err("inventory response refused"),
-        }
+    fn inventory(connection: &ServerLink) -> Result<(Inventory, u64)> {
+        support::inventory(connection).map_err(|_| "inventory response refused")
     }
 
     fn idle(inventory: &Inventory) -> Result<()> {
@@ -123,7 +118,7 @@ mod exercise {
 
     fn mutate(
         server: &ServerConnection,
-        connection: &mut PaneConnection,
+        connection: &ServerLink,
         mutation: Mutation,
     ) -> Result<Id> {
         let mut journal = api(server.shared_journal())?;
@@ -133,57 +128,48 @@ mod exercise {
         )?;
         let (_, sequence) = inventory(connection)?;
         api(journal.submit(sequence, mutation.clone()))?;
-        let mut reply = api(connection.exchange(&Request::Mutate {
-            sequence,
-            mutation: mutation.clone(),
-        }))?;
-        let deadline = Instant::now() + Duration::from_secs(15);
-        while matches!(reply, Reply::MutationPending) && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(40));
-            reply = api(connection.exchange(&Request::Resolve { sequence }))?;
-        }
-        let Reply::Outcome(outcome) = reply else {
-            return Err("test mutation remains unconfirmed");
-        };
+        let outcome = api(support::mutate(connection, sequence, mutation.clone()))?;
         require(
             outcome.sequence == sequence && outcome.mutation == mutation,
             "test mutation identity changed",
         )?;
-        api(journal.complete(outcome.clone()))?;
-        api(connection.exchange(&Request::Acknowledge { sequence }))?;
-        api(journal.retire())?;
+        api(journal.retire(outcome.clone()))?;
+        api(connection.acknowledge(sequence))?;
         match outcome.outcome {
             Outcome::Accepted { target } => Ok(target),
             _ => Err("test mutation refused"),
         }
     }
 
-    fn select(connection: &mut PaneConnection, pane: Id, explicit: bool) -> Result<Reply> {
-        api(connection.exchange(&Request::SelectPane {
+    fn select(connection: &ServerLink, pane: Id, explicit: bool) -> Result<Claimed> {
+        api(support::select(connection, pane, explicit, size()))
+    }
+
+    fn attached(claimed: Claimed) -> Result<Pane> {
+        claimed.attached().ok_or("expected an attached test Pane")
+    }
+
+    fn take_over(
+        connection: &ServerLink,
+        pane: Id,
+        target: spaceterm_server::pane::PaneTarget,
+    ) -> Result<Pane> {
+        attached(api(support::claim(
+            connection,
             pane,
-            explicit,
-            size: size(),
-            style: None,
-        }))
+            AttachmentClaim::TakeOver { target },
+            size(),
+        ))?)
     }
 
-    fn attached(reply: Reply) -> Result<Lease> {
-        match reply {
-            Reply::Attached { lease } => Ok(lease),
-            _ => Err("expected an attached test Pane"),
-        }
-    }
-
-    fn take(connection: &mut PaneConnection, pane: Id, named: &str) -> Result<Lease> {
-        let Reply::Takeover {
-            target,
-            controller:
-                Controller::Client {
-                    name,
-                    this_client: false,
-                },
-            ..
-        } = select(connection, pane, false)?
+    fn take(connection: &ServerLink, pane: Id, named: &str) -> Result<Pane> {
+        let Claimed::Takeover(takeover) = select(connection, pane, false)? else {
+            return Err("expected another Controlling Client");
+        };
+        let Controller::Client {
+            name,
+            this_client: false,
+        } = takeover.controller
         else {
             return Err("expected another Controlling Client");
         };
@@ -191,58 +177,30 @@ mod exercise {
             name.as_str().ends_with(&format!("({named})")),
             "Controlling Client name did not reconcile",
         )?;
-        attached(api(connection.exchange(&Request::TakeOver {
-            target,
-            size: size(),
-            style: None,
-        }))?)
+        take_over(connection, pane, takeover.target)
     }
 
-    fn reclaim_after_revocation(connection: &mut PaneConnection, pane: Id) -> Result<Lease> {
-        let Reply::Takeover {
-            target,
-            controller: Controller::Nobody,
-            session_ended: false,
-        } = select(connection, pane, false)?
-        else {
+    fn reclaim_after_revocation(connection: &ServerLink, pane: Id) -> Result<Pane> {
+        let Claimed::Takeover(takeover) = select(connection, pane, false)? else {
             return Err("revocation did not leave the running Pane without a controller");
         };
-        attached(api(connection.exchange(&Request::TakeOver {
-            target,
-            size: size(),
-            style: None,
-        }))?)
+        require(
+            takeover.controller == Controller::Nobody && !takeover.session_ended,
+            "revocation did not leave the running Pane without a controller",
+        )?;
+        take_over(connection, pane, takeover.target)
     }
 
-    fn command(connection: &mut PaneConnection, lease: Lease, text: &str) -> Result<()> {
-        api(super::support::command(connection, lease, text))
+    fn command(pane: &Pane, text: &str) -> Result<()> {
+        api(pane.command(text))
     }
 
-    fn output(connection: &mut PaneConnection, lease: Lease, marker: &str) -> Result<()> {
-        output_snapshot(connection, lease, marker).map(|_| ())
-    }
-
-    fn output_snapshot(
-        connection: &mut PaneConnection,
-        lease: Lease,
-        marker: &str,
-    ) -> Result<Box<Screen>> {
-        let until = Instant::now() + Duration::from_secs(10);
-        while Instant::now() < until {
-            if let Reply::Screen(screen) = api(connection.exchange(&Request::Poll { lease }))?
-                && screen.rows.iter().any(|row| {
-                    row.iter()
-                        .map(|cell| cell.text.as_str())
-                        .collect::<String>()
-                        .trim_end()
-                        == marker
-                })
-            {
-                return Ok(screen);
-            }
-            std::thread::sleep(Duration::from_millis(30));
-        }
-        Err("terminal output did not arrive")
+    fn output(pane: &Pane, marker: &str) -> Result<()> {
+        api(pane.await_screen(Duration::from_secs(10), |screen| {
+            support::has_row(screen, marker)
+        }))?
+        .map(drop)
+        .ok_or("terminal output did not arrive")
     }
 
     fn pipe_only(fd: i32) -> Result<()> {
@@ -461,8 +419,8 @@ mod exercise {
     }
 
     fn close_fixture_workspace(server: &ServerConnection, owned: &FixtureWorkspace) -> Result<()> {
-        let mut connection = api(server.connect_pane())?;
-        let current = inventory(&mut connection)?.0;
+        let connection = api(support::connect(server))?;
+        let current = inventory(&connection)?.0;
         require(
             current.close.as_ref().map(|close| close.boot) == Some(owned.boot),
             "cleanup refused replacement server boot",
@@ -492,7 +450,7 @@ mod exercise {
             .ok_or("cleanup confirmation unavailable")?;
         mutate(
             server,
-            &mut connection,
+            &connection,
             Mutation::Close {
                 target,
                 confirmation,
@@ -549,7 +507,7 @@ mod exercise {
                     api(self.owner.revoke_device(random()?, device.pairing))?;
                 }
             }
-            let mut connection = api(self.owner.connect_pane())?;
+            let connection = api(support::connect(&self.owner))?;
             if let Some(owned) = &self.workspace {
                 require(
                     !self
@@ -575,7 +533,7 @@ mod exercise {
                 api(self.owner.set_direct_policy(None, false))?;
             }
             require(
-                inventory(&mut connection)?.0.workspaces == self.baseline.workspaces,
+                inventory(&connection)?.0.workspaces == self.baseline.workspaces,
                 "baseline organization changed; it was preserved without rollback",
             )?;
             Ok(())
@@ -656,13 +614,13 @@ mod exercise {
             "two-host verification requires a reachable native host address",
         )?;
         let name = format!("direct541-owner-{}", &hex(&random()?)[..6]);
-        let owner = api(ServerConnection::for_development_client(&name, 1))?;
+        let owner = api(ServerConnection::for_development_client(&name, 2))?;
         require(
-            api(owner.refresh())?.protocol_major == 1,
-            "expected initial protocol major 1",
+            api(owner.refresh())?.protocol_major == 2,
+            "expected protocol major 2",
         )?;
-        let mut connection = api(owner.connect_pane())?;
-        let baseline = inventory(&mut connection)?.0;
+        let mut connection = api(support::connect(&owner))?;
+        let baseline = inventory(&connection)?.0;
         idle(&baseline)?;
         let initial = api(owner.direct_status())?;
         require(
@@ -705,14 +663,14 @@ mod exercise {
                 "explicit exposure did not bind the requested endpoint",
             )?;
             if restart {
-                idle(&inventory(&mut connection)?.0)?;
-                drop(connection);
+                idle(&inventory(&connection)?.0)?;
+                connection.close();
                 api(spaceterm_server::service::Service::for_identity(IDENTITY))?
                     .restart()
                     .map_err(|_| "explicit idle service restart failed")?;
                 let until = Instant::now() + Duration::from_secs(15);
                 connection = loop {
-                    match scope.owner.connect_pane() {
+                    match support::connect(&scope.owner) {
                         Ok(connection) => break connection,
                         Err(_) if Instant::now() < until => {
                             std::thread::sleep(Duration::from_millis(50))
@@ -724,7 +682,7 @@ mod exercise {
                     api(scope.owner.direct_status())? == status,
                     "restart did not retain exact network policy and server identity",
                 )?;
-                idle(&inventory(&mut connection)?.0)?;
+                idle(&inventory(&connection)?.0)?;
                 println!("PASS explicit idle restart retained exposure policy and server identity");
             }
             let mut peer = Peer::penguin()?;
@@ -734,7 +692,7 @@ mod exercise {
             )?;
             let paired = scope.enroll(&mut peer)?;
             println!(
-                "PASS two-host claim proofs, exact retry, substitution refusal, approval and protocol major 1"
+                "PASS two-host claim proofs, exact retry, substitution refusal, approval and protocol major 2"
             );
             let failed = peer.message(json!({"create_workspace": format!("Direct devices cleanup {}", &hex(&random()?)[..12]), "fail_before_handoff": true}))?;
             scope.workspace = Some(api(serde_json::from_value(
@@ -745,7 +703,7 @@ mod exercise {
                 "post-creation failure witness missing",
             )?;
             require(
-                inventory(&mut connection)?.0.workspaces == scope.baseline.workspaces,
+                inventory(&connection)?.0.workspaces == scope.baseline.workspaces,
                 "creation failure before identity handoff left fixture organization",
             )?;
             scope.workspace = None;
@@ -762,7 +720,7 @@ mod exercise {
             let workspace = owned.workspace;
             require(
                 owned.boot
-                    == inventory(&mut connection)?
+                    == inventory(&connection)?
                         .0
                         .close
                         .ok_or("current server boot missing")?
@@ -783,7 +741,7 @@ mod exercise {
                 "WSS-created Workspace directory changed during handoff",
             )?;
             owned.pane = Some(pane);
-            let current = inventory(&mut connection)?.0;
+            let current = inventory(&connection)?.0;
             let work = current
                 .workspaces
                 .iter()
@@ -800,27 +758,27 @@ mod exercise {
             println!(
                 "PASS WSS Workspace creation, directory browsing, physical matching and attachment"
             );
-            let first = take(&mut connection, pane, DEVICE_NAME)?;
+            let first = take(&connection, pane, DEVICE_NAME)?;
             println!("PASS account-local owner explicitly took over the WSS-created Pane");
             command(
-                &mut connection,
-                first,
+                &first,
                 "stty -echo; printf '\\033[2J\\033[HDIRECT-LOCAL\\n'",
             )?;
-            output(&mut connection, first, "DIRECT-LOCAL")?;
+            output(&first, "DIRECT-LOCAL")?;
             let started = Instant::now();
             let mut next_health = started;
             let mut heartbeats = 0_u64;
             let response = peer.message_while(
-                json!({"pane": pane, "owner": name, "session": first.session}),
+                json!({"pane": pane, "owner": name, "session": first.lease().session}),
                 || {
                     if Instant::now() < next_health {
                         return Ok(());
                     }
                     // Keep this exact connection alive while the peer reads retained history.
-                    // Capabilities observes the transport without acquiring Pane control.
-                    let reply = connection.exchange(&Request::Capabilities);
-                    if !matches!(reply, Ok(Reply::Capabilities { .. })) {
+                    // A request that changes nothing observes the transport without acquiring
+                    // Pane control.
+                    let reply = support::round_trip(&connection);
+                    if reply.is_err() {
                         eprintln!(
                             "WSS fixture failure: stage=owner-keepalive, class={}, elapsed_ms={}, heartbeats={heartbeats}",
                             reply_classification(&reply),
@@ -838,14 +796,12 @@ mod exercise {
                 "hidden presentation phase missing",
             )?;
             let observer_name = format!("p612-observer-{}", &hex(&random()?)[..6]);
-            let observer = api(ServerConnection::for_development_client(&observer_name, 1))?;
-            let mut observer = api(observer.connect_pane())?;
-            super::presentation::observe_hidden_inventory(&mut observer, pane).map_err(
-                |failure| {
-                    eprintln!("WSS inventory observer: {failure}");
-                    "independent inventory observer did not see hidden metadata"
-                },
-            )?;
+            let observer = api(ServerConnection::for_development_client(&observer_name, 2))?;
+            let observer = api(support::connect(&observer))?;
+            super::presentation::observe_hidden_inventory(&observer, pane).map_err(|failure| {
+                eprintln!("WSS inventory observer: {failure}");
+                "independent inventory observer did not see hidden metadata"
+            })?;
             let response = peer.message(json!({"presentation_observed": true}))?;
             println!(
                 "PASS delayed WSS consumer: Scrollback checked={}, copied rows={}, accessible rows={}, graphics supported={}, graphics bytes={}",
@@ -866,18 +822,23 @@ mod exercise {
                     .ok_or("graphics capability report missing")?
             );
             let remote: Lease = api(serde_json::from_value(response["lease"].clone()))?;
-            if remote.session != first.session {
+            if remote.session != first.lease().session {
                 eprintln!(
                     "WSS fixture failure: stage=takeover-session, class=session-changed, elapsed_ms={}, heartbeats={heartbeats}",
                     started.elapsed().as_millis(),
                 );
                 return Err("WSS takeover changed the Session");
             }
-            let stale = connection.exchange(&Request::Poll { lease: first });
-            if !matches!(stale, Err(ServerError::StaleControl)) {
+            // The server ends the original owner's channel with the Takeover.
+            let stale = first.ending();
+            if !matches!(stale, Ok(Ending::Pane(PaneEvent::Takeover(_)))) {
                 eprintln!(
                     "WSS fixture failure: stage=takeover-old-control, class={}, elapsed_ms={}, heartbeats={heartbeats}",
-                    reply_classification(&stale),
+                    match &stale {
+                        Ok(Ending::Pane(_)) => "other-channel-end",
+                        Ok(Ending::Link(_)) => "connection-ended",
+                        Err(_) => reply_classification(&stale),
+                    },
                     started.elapsed().as_millis(),
                 );
                 return Err("original owner connection did not refuse stale control");
@@ -886,15 +847,15 @@ mod exercise {
                 "PASS original owner connection refused stale control: elapsed_ms={}, heartbeats={heartbeats}",
                 started.elapsed().as_millis(),
             );
-            let returned = take(&mut connection, pane, DEVICE_NAME)?;
+            let returned = take(&connection, pane, DEVICE_NAME)?;
             require(
-                returned.session == first.session,
+                returned.lease().session == first.lease().session,
                 "local Take Over replaced the Session",
             )?;
             let response = peer.message(json!({"owner": name}))?;
             let remote: Lease = api(serde_json::from_value(response["lease"].clone()))?;
             require(
-                remote.session == first.session,
+                remote.session == first.lease().session,
                 "second WSS Take Over replaced the Session",
             )?;
             api(scope.owner.revoke_device(random()?, paired.pairing))?;
@@ -903,9 +864,9 @@ mod exercise {
                 response["revoked"] == true && response["self_confirmed"] == true,
                 "revoked device did not reject existing connections and fresh authentication",
             )?;
-            let returned = reclaim_after_revocation(&mut connection, pane)?;
+            let returned = reclaim_after_revocation(&connection, pane)?;
             require(
-                returned.session == first.session,
+                returned.lease().session == first.lease().session,
                 "revocation killed or replaced the Terminal Session",
             )?;
             println!(
@@ -921,7 +882,9 @@ mod exercise {
                 "last-device scope changed",
             )?;
             require(
-                peer.message(json!({"pane": pane, "owner": name, "session": first.session}))?["ready"]
+                peer.message(
+                    json!({"pane": pane, "owner": name, "session": first.lease().session}),
+                )?["ready"]
                     == true,
                 "last device did not acquire the same Session",
             )?;
@@ -933,17 +896,13 @@ mod exercise {
                 api(scope.owner.paired_devices())?.is_empty(),
                 "last-device revocation was not retained",
             )?;
-            let returned = reclaim_after_revocation(&mut connection, pane)?;
+            let returned = reclaim_after_revocation(&connection, pane)?;
             require(
-                returned.session == first.session,
+                returned.lease().session == first.lease().session,
                 "self-revocation killed or replaced the Terminal Session",
             )?;
-            command(
-                &mut connection,
-                returned,
-                "printf 'DIRECT-SURVIVED-UNPAIR\\n'",
-            )?;
-            output(&mut connection, returned, "DIRECT-SURVIVED-UNPAIR")?;
+            command(&returned, "printf 'DIRECT-SURVIVED-UNPAIR\\n'")?;
+            output(&returned, "DIRECT-SURVIVED-UNPAIR")?;
             peer.finish()?;
             println!(
                 "PASS last-device self-unpair, discarded-receipt exact retry and preserved Terminal Session"
@@ -1063,35 +1022,24 @@ mod exercise {
             connector.clone(),
         ))?;
         require(
-            api(server.refresh())?.protocol_major == 1,
-            "WSS did not negotiate initial major 1",
+            api(server.refresh())?.protocol_major == 2,
+            "WSS did not negotiate major 2",
         )?;
         send_json(output, json!({"paired": paired}))?;
         Ok((server, connector))
     }
 
+    /// One directory read. Its reply arrives when the read settles.
     fn directory_read(
-        connection: &mut PaneConnection,
+        connection: &ServerLink,
         operation: directories::Operation,
     ) -> Result<directories::Value> {
-        let id = u64::from_be_bytes(
-            random()?[..8]
-                .try_into()
-                .map_err(|_| "directory request identity unavailable")?,
-        );
-        let mut request = directories::Request::Begin { id, operation };
-        let deadline = Instant::now() + Duration::from_secs(15);
-        loop {
-            match api(connection.exchange(&Request::DirectoryRead(request)))? {
-                Reply::DirectoryRead(Ok(directories::Progress::Ready(value))) => return Ok(value),
-                Reply::DirectoryRead(Ok(directories::Progress::Pending))
-                    if Instant::now() < deadline =>
-                {
-                    std::thread::sleep(Duration::from_millis(25));
-                    request = directories::Request::Poll { id };
-                }
-                _ => return Err("WSS directory read did not complete"),
-            }
+        let pending = api(connection
+            .request(Operation::DirectoryRead(operation))
+            .map_err(ServerError::from))?;
+        match pending.wait_for(Duration::from_secs(15)) {
+            Some(Ok(ReplyBody::Directory(Ok(value)))) => Ok(value),
+            _ => Err("WSS directory read did not complete"),
         }
     }
 
@@ -1100,13 +1048,9 @@ mod exercise {
         name: String,
         handoff: impl FnOnce(&FixtureWorkspace) -> Result<()>,
     ) -> Result<Value> {
-        let mut connection = api(server.connect_pane())?;
-        require(
-            connection.supports_directory_matching(),
-            "WSS directory matching is unavailable",
-        )?;
+        let connection = api(support::connect(server))?;
         let directories::Value::Directory(home) =
-            directory_read(&mut connection, directories::Operation::Home)?
+            directory_read(&connection, directories::Operation::Home)?
         else {
             return Err("WSS home directory missing");
         };
@@ -1114,7 +1058,7 @@ mod exercise {
         require(
             matches!(
                 directory_read(
-                    &mut connection,
+                    &connection,
                     directories::Operation::List { path: home.clone() }
                 )?,
                 directories::Value::Listing { .. }
@@ -1125,7 +1069,7 @@ mod exercise {
         require(
             matches!(
                 directory_read(
-                    &mut connection,
+                    &connection,
                     directories::Operation::Validate {
                         path: alias.clone()
                     }
@@ -1137,7 +1081,7 @@ mod exercise {
         require(
             matches!(
                 directory_read(
-                    &mut connection,
+                    &connection,
                     directories::Operation::Match {
                         path: alias,
                         candidates: vec![home.clone()]
@@ -1147,14 +1091,14 @@ mod exercise {
             ),
             "WSS physical directory identity did not match",
         )?;
-        let boot = inventory(&mut connection)?
+        let boot = inventory(&connection)?
             .0
             .close
             .ok_or("fixture boot missing")?
             .boot;
         let workspace = mutate(
             server,
-            &mut connection,
+            &connection,
             Mutation::CreateWorkspace {
                 name: name.clone(),
                 directory: Some(home.clone()),
@@ -1176,7 +1120,7 @@ mod exercise {
                 .as_ref()
                 .ok_or("created Workspace ownership missing")?,
         )?;
-        let current = inventory(&mut connection)?.0;
+        let current = inventory(&connection)?.0;
         let work = current
             .workspaces
             .iter()
@@ -1259,20 +1203,17 @@ mod exercise {
         let pane: Id = api(serde_json::from_value(scope["pane"].clone()))?;
         let session: Id = api(serde_json::from_value(scope["session"].clone()))?;
         let owner = scope["owner"].as_str().ok_or("owner identity missing")?;
-        let mut connection = api(server.connect_pane())?;
-        let lease = take(&mut connection, pane, owner)?;
+        let connection = api(support::connect(&server))?;
+        let taken = take(&connection, pane, owner)?;
         require(
-            lease.session == session,
+            taken.lease().session == session,
             "WSS Take Over changed the Session",
         )?;
-        let report =
-            super::terminal_semantics::exercise(&mut connection, lease, super::support::command)
-                .map_err(|failure| {
-                    eprintln!("WSS fixture exercise failed: {failure}");
-                    "WSS semantic protocol exercise failed"
-                })?;
-        let witness = super::presentation::begin(&mut connection, lease, super::support::command)
-            .map_err(|failure| {
+        let report = super::terminal_semantics::exercise(&taken).map_err(|failure| {
+            eprintln!("WSS fixture exercise failed: {failure}");
+            "WSS semantic protocol exercise failed"
+        })?;
+        let witness = super::presentation::begin(&taken).map_err(|failure| {
             eprintln!("WSS presentation begin: {failure}");
             "WSS presentation exercise failed"
         })?;
@@ -1281,25 +1222,24 @@ mod exercise {
             receive_json(&mut input)?["presentation_observed"] == true,
             "owner did not observe hidden metadata",
         )?;
-        let previous = lease;
-        drop(connection);
-        let mut connection = api(server.connect_pane())?;
-        let lease = attached(select(&mut connection, pane, false)?)?;
+        let previous = taken.lease();
+        connection.close();
+        drop(taken);
+        let connection = api(support::connect(&server))?;
+        let resumed = attached(select(&connection, pane, false)?)?;
         require(
-            lease.session == session,
+            resumed.lease().session == session,
             "WSS reconnect lost the running Session",
         )?;
-        super::presentation::finish(&mut connection, lease, previous, witness).map_err(
-            |failure| {
-                eprintln!("WSS presentation finish: {failure}");
-                "WSS presentation reconnect or clear exercise failed"
-            },
-        )?;
-        command(&mut connection, lease, "printf 'DIRECT-RECONNECTED\\n'")?;
-        output(&mut connection, lease, "DIRECT-RECONNECTED")?;
+        super::presentation::finish(&resumed, previous, witness).map_err(|failure| {
+            eprintln!("WSS presentation finish: {failure}");
+            "WSS presentation reconnect or clear exercise failed"
+        })?;
+        command(&resumed, "printf 'DIRECT-RECONNECTED\\n'")?;
+        output(&resumed, "DIRECT-RECONNECTED")?;
         send_json(
             &mut output_pipe,
-            json!({"lease": lease, "reading_checked": true,
+            json!({"lease": resumed.lease(), "reading_checked": true,
             "copied_rows": report.copied_rows, "accessible_rows": report.accessible_rows,
             "graphics_supported": report.graphics_supported, "graphics_bytes": report.graphics_bytes}),
         )?;
@@ -1307,16 +1247,15 @@ mod exercise {
             receive_json(&mut input)?["owner"].as_str() == Some(owner),
             "owner continuation changed",
         )?;
-        let lease = take(&mut connection, pane, owner)?;
-        let mut second = api(server.connect_pane())?;
-        send_json(&mut output_pipe, json!({"lease": lease}))?;
+        let taken = take(&connection, pane, owner)?;
+        let second = api(support::connect(&server))?;
+        send_json(&mut output_pipe, json!({"lease": taken.lease()}))?;
         require(
             receive_json(&mut input)?["revoked"] == true,
             "revocation phase missing",
         )?;
         require(
-            connection.exchange(&Request::Inventory).is_err()
-                && second.exchange(&Request::Inventory).is_err(),
+            support::inventory(&connection).is_err() && support::inventory(&second).is_err(),
             "revocation retained an existing WSS connection",
         )?;
         require(
@@ -1338,6 +1277,7 @@ mod exercise {
                 && confirmation.target == other_pairing,
             "owner-revokes-first self-confirmation changed its binding",
         )?;
+        drop(taken);
         drop(connection);
         drop(second);
         drop(server);
@@ -1353,9 +1293,9 @@ mod exercise {
                 && api(serde_json::from_value::<Id>(scope["session"].clone()))? == session,
             "last-device fixture scope changed",
         )?;
-        let mut connection = api(server.connect_pane())?;
+        let connection = api(support::connect(&server))?;
         require(
-            take(&mut connection, pane, owner)?.session == session,
+            take(&connection, pane, owner)?.lease().session == session,
             "last device replaced the Session",
         )?;
         send_json(&mut output_pipe, json!({"ready": true}))?;

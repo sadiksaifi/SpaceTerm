@@ -1,0 +1,1285 @@
+//! Request dispatch, and the connection-facing service boundary of the Development host.
+use super::publish::{Observed, Publication};
+use super::*;
+use crate::terminal::session::SubscriptionNotifier;
+use spaceterm_server::connection::Wake;
+use spaceterm_server::connection::outbox::Outbox;
+use spaceterm_server::connection::service::{Dispatch, PaneService as ConnectionService, Peer};
+use spaceterm_server::protocol::{
+    self, Channel, Claim, ClaimReply, InputEvent, InputOutcome, Operation, PaneEvent, ReplyBody,
+    RequestId,
+};
+use std::collections::BTreeMap;
+
+impl DevelopmentPaneHost {
+    pub(super) fn handle(
+        &mut self,
+        device: [u8; 32],
+        connection: [u8; 32],
+        request: Request,
+    ) -> Result<Reply, Refusal> {
+        self.recover()?;
+        self.retain_directory()?;
+        match request {
+            Request::RepairDirectory {
+                target,
+                replacement,
+                size,
+                style,
+            } => {
+                return self.repair_directory(device, connection, target, replacement, size, style);
+            }
+            Request::StartRestored {
+                server,
+                pane,
+                size,
+                style,
+            } => {
+                if server != self.boot
+                    || self
+                        .organization
+                        .as_ref()
+                        .is_none_or(|org| org.pane != pane)
+                {
+                    return Err(Refusal::Stale);
+                }
+                if self.pane.is_some() {
+                    return self.select(device, connection, false, size, None, style);
+                }
+                return self.select(device, connection, true, size, None, style);
+            }
+            Request::Attach {
+                create,
+                size,
+                resume,
+                style,
+            } => {
+                // `Attach` resumes only its own lease and refuses another client's control.
+                if let (Some(pane), Some(old)) = (&self.pane, resume)
+                    && (old.server, old.session, old.control)
+                        != (pane.lease.server, pane.lease.session, pane.lease.control)
+                {
+                    return Err(Refusal::Stale);
+                }
+                let reply = self.select(
+                    device,
+                    connection,
+                    create,
+                    size,
+                    resume.map(Into::into),
+                    style,
+                )?;
+                return if matches!(reply, Reply::Takeover { .. }) {
+                    Err(Refusal::Controlled)
+                } else {
+                    Ok(reply)
+                };
+            }
+            Request::Select {
+                create,
+                size,
+                resume,
+                style,
+            } => {
+                return self.select(device, connection, create, size, resume, style);
+            }
+            Request::TakeOver {
+                target,
+                size,
+                style,
+            } => {
+                self.reconcile_selection()?;
+                let pane = self.pane.as_mut().ok_or(Refusal::Missing)?;
+                if PaneTarget::from(pane.lease) != target {
+                    return Err(Refusal::Stale);
+                }
+                return pane.claim(device, connection, size, style, true);
+            }
+            _ => {}
+        }
+        if matches!(request, Request::Shutdown) {
+            self.shutdown().map_err(|_| Refusal::CleanupUnresolved)?;
+            return Ok(Reply::Closed);
+        }
+        // The protocol bounds an Input message too. Check before decoding or dispatching any
+        // key, including malformed later events in a batch.
+        if let Request::Keys { keys, .. } = &request
+            && (keys.is_empty() || keys.len() > MAX_KEY_BATCH)
+        {
+            return Err(Refusal::Unsupported);
+        }
+        let pane = self.pane.as_mut().ok_or(Refusal::Missing)?;
+        let lease = match &request {
+            Request::Accessibility { lease, .. }
+            | Request::EndAccessibilityDemand { lease }
+            | Request::AccessibilitySelection { lease, .. }
+            | Request::GraphicsChunk { lease, .. } => lease,
+            Request::CompleteClipboard { lease, .. }
+            | Request::Focus { lease, .. }
+            | Request::Input { lease, .. }
+            | Request::Keys { lease, .. }
+            | Request::Key { lease, .. }
+            | Request::Resize { lease, .. }
+            | Request::ClearScreenAndScrollback { lease }
+            | Request::Close { lease }
+            | Request::Style { lease, .. }
+            | Request::Release { lease } => lease,
+            _ => return Err(Refusal::Unsupported),
+        };
+        if Some(device) != pane.device
+            || connection != pane.lease.connection
+            || *lease != pane.lease
+            || !pane.connected
+        {
+            return Err(Refusal::Stale);
+        }
+        pane.drain();
+        match request {
+            Request::EndAccessibilityDemand { .. } => {
+                pane.runtime.end_server_accessibility_demand();
+                Ok(Reply::Unchanged)
+            }
+            Request::Accessibility {
+                revision,
+                offset,
+                base,
+                ..
+            } => {
+                if pane.ended || pane.failed {
+                    return Err(Refusal::Missing);
+                }
+                if let Some(demand) = pane.runtime.accessibility_demand_sender() {
+                    demand.request();
+                }
+                Ok(Reply::Accessibility(
+                    pane.accessibility.chunk(revision, offset, base),
+                ))
+            }
+            Request::AccessibilitySelection {
+                focus_generation,
+                selection,
+                ..
+            } => {
+                if pane.ended || pane.failed {
+                    return Err(Refusal::Missing);
+                }
+                if focus_generation == 0 || focus_generation != pane.focus_generation {
+                    return Err(Refusal::Stale);
+                }
+                pane.require_terminal_focus()?;
+                let _completion = pane.runtime.set_server_accessibility_selection(
+                    selection
+                        .map(accessibility::decode_selection)
+                        .transpose()
+                        .map_err(|_| Refusal::Unsupported)?,
+                );
+                Ok(Reply::Unchanged)
+            }
+            Request::GraphicsChunk { image, offset, .. } => {
+                Ok(Reply::GraphicsChunk(pane.graphics_chunk(image, offset)))
+            }
+            Request::CompleteClipboard {
+                generation,
+                id,
+                completion,
+                ..
+            } => {
+                if generation != pane.focus_generation {
+                    return Err(Refusal::Stale);
+                }
+                pane.effects.complete(id, completion);
+                Ok(Reply::Unchanged)
+            }
+            Request::Key { key, .. } => {
+                if pane.focus_generation != 0 {
+                    return Err(Refusal::Unsupported);
+                }
+                if pane.ended || pane.failed {
+                    return Err(Refusal::Missing);
+                }
+                pane.runtime
+                    .key(decode_key(key).ok_or(Refusal::Unsupported)?);
+                Ok(Reply::Unchanged)
+            }
+            Request::Focus {
+                generation, target, ..
+            } => pane.focus(generation, target),
+            Request::Input {
+                generation, input, ..
+            } => {
+                let reply = pane.input(generation, input);
+                if matches!(reply, Err(Refusal::Failed)) {
+                    pane.invalidate_input();
+                }
+                reply
+            }
+            Request::Keys {
+                generation, keys, ..
+            } => {
+                let reply = pane.keys(generation, keys);
+                if matches!(reply, Err(Refusal::Failed)) {
+                    pane.invalidate_input();
+                }
+                reply
+            }
+            Request::Resize { size, .. } => {
+                size.validate().map_err(|_| Refusal::Unsupported)?;
+                if pane.ended || pane.failed {
+                    return Err(Refusal::Missing);
+                }
+                pane.runtime.resize(geometry(size));
+                pane.size = size;
+                Ok(Reply::Unchanged)
+            }
+            Request::ClearScreenAndScrollback { .. } => {
+                if pane.ended || pane.failed {
+                    return Err(Refusal::Missing);
+                }
+                pane.runtime.clear_screen_and_scrollback();
+                Ok(Reply::Unchanged)
+            }
+            Request::Style { style, .. } => {
+                pane.appearance_generation += 1;
+                pane.runtime.update_appearance(
+                    appearance(Some(style), pane.appearance_generation)
+                        .map_err(|_| Refusal::Failed)?,
+                );
+                Ok(Reply::Unchanged)
+            }
+            Request::Release { .. } => {
+                pane.invalidate_input();
+                pane.lease.control = nonce().map_err(|_| Refusal::Failed)?;
+                pane.device = None;
+                pane.connected = false;
+                Ok(Reply::Unchanged)
+            }
+            Request::Close { .. } => {
+                pane.runtime
+                    .shutdown_and_wait(Duration::from_secs(5))
+                    .map_err(|_| Refusal::CleanupUnresolved)?;
+                self.retain(None)?;
+                self.pane = None;
+                Ok(Reply::Closed)
+            }
+            _ => Err(Refusal::Unsupported),
+        }
+    }
+}
+impl HostCommands for DevelopmentPaneHost {
+    fn restore(&mut self, store: OrganizationStore) -> Result<(), ServerError> {
+        self.organization = store.read()?;
+        self.store = Some(store);
+        Ok(())
+    }
+    fn tick(&mut self, now: std::time::Instant) -> Option<std::time::Instant> {
+        self.directories.tick();
+        if self.recover().is_ok() && self.retain_directory().is_ok() {
+            let _ = self.retire_exited();
+        }
+        let pane = self.pane.is_some().then_some(now + TICK);
+        [pane, self.directories.due()].into_iter().flatten().min()
+    }
+    fn ticker(&mut self, wake: Arc<dyn spaceterm_server::connection::Wake>) {
+        self.directories.set_wake(wake);
+    }
+    fn read(
+        &mut self,
+        _device: [u8; 32],
+        connection: [u8; 32],
+        id: RequestId,
+        read: HostRead,
+    ) -> Option<Result<ReplyBody, Refusal>> {
+        if let Err(refusal) = self.recover().and_then(|()| self.retain_directory()) {
+            return Some(Err(refusal));
+        }
+        self.directories.read(connection, id, read)
+    }
+    fn cancel_read(&mut self, connection: [u8; 32], id: RequestId) {
+        self.directories.cancel((connection, id));
+    }
+    fn settled_reads(&mut self) -> Vec<SettledRead> {
+        self.directories.settled_reads()
+    }
+    fn admitted(&mut self, client: [u8; 32], name: control::ClientName) {
+        self.names
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .admit(client, name);
+    }
+    fn request(&mut self, device: [u8; 32], connection: [u8; 32], request: Request) -> Reply {
+        self.handle(device, connection, request)
+            .unwrap_or_else(Reply::Refused)
+    }
+    fn lease_live(&self, lease: &Lease) -> bool {
+        self.pane.as_ref().is_some_and(|pane| pane.lease == *lease)
+    }
+    fn unbound(&mut self, connection: [u8; 32], lease: &Lease) {
+        if let Some(pane) = &mut self.pane
+            && pane.lease == *lease
+            && pane.lease.connection == connection
+        {
+            pane.invalidate_input();
+            pane.connected = false;
+        }
+    }
+    fn set_notifier(&mut self, notifier: SubscriptionNotifier) {
+        self.notifier = Some(notifier);
+    }
+    fn observe(&mut self, device: [u8; 32], lease: &Lease) -> Observed {
+        DevelopmentPaneHost::observe(self, device, lease)
+    }
+    fn view(&mut self, lease: &Lease, visible: bool, max_hz: u8) {
+        DevelopmentPaneHost::view(self, lease, visible, max_hz);
+    }
+    fn scrollback_page(
+        &mut self,
+        device: [u8; 32],
+        connection: [u8; 32],
+        lease: &Lease,
+        read: ScrollbackRead,
+        reply: PageReply,
+    ) -> Result<(), Refusal> {
+        DevelopmentPaneHost::scrollback_page(self, device, connection, lease, read, reply)
+    }
+    fn input_written(&mut self, lease: &Lease, serial: u32) {
+        DevelopmentPaneHost::input_written(self, lease, serial);
+    }
+    fn restart_input(&mut self, lease: &Lease) {
+        DevelopmentPaneHost::restart_input(self, lease);
+    }
+    fn disconnected(&mut self, connection: [u8; 32]) {
+        self.directories.cancel_connection(connection);
+        if let Some(pane) = &mut self.pane
+            && pane.lease.connection == connection
+        {
+            pane.invalidate_input();
+            pane.connected = false;
+        }
+    }
+    fn revoked(&mut self, client: [u8; 32]) {
+        if let Some(dormant) = &mut self.dormant
+            && dormant.device == Some(client)
+        {
+            dormant.device = None;
+            dormant.attachment_generation = None;
+        }
+        if let Some(pane) = &mut self.pane
+            && pane.device == Some(client)
+        {
+            self.directories.cancel_connection(pane.lease.connection);
+            pane.invalidate_input();
+            pane.device = None;
+            pane.connected = false;
+            pane.attachment_generation = None;
+            pane.lease.control = [0; 32];
+        }
+    }
+    fn shutdown(&mut self) -> Result<(), ServerError> {
+        self.directories.stop();
+        // Persist final confirmed metadata before ending live work. Refuse uncertain shutdown.
+        self.recover()
+            .map_err(|_| ServerError::StorageUnavailable)?;
+        self.retain_directory()
+            .map_err(|_| ServerError::StorageUnavailable)?;
+        if let Some(pane) = &mut self.pane {
+            pane.invalidate_input();
+            pane.connected = false;
+            pane.runtime
+                .shutdown_and_wait(Duration::from_secs(5))
+                .map_err(|_| ServerError::CleanupUnresolved)?;
+        }
+        self.pane = None;
+        Ok(())
+    }
+}
+
+/// A host's in-process commands, one connection's lease at a time. [`Served`] maps the protocol
+/// onto them; tests drive them directly.
+pub trait HostCommands: Send {
+    fn restore(&mut self, _store: OrganizationStore) -> Result<(), ServerError> {
+        Ok(())
+    }
+    /// Runs timed work and returns when it is next due. `None` means no timed work is pending.
+    fn tick(&mut self, _now: std::time::Instant) -> Option<std::time::Instant> {
+        None
+    }
+    /// The host's wake, which makes it tick again; see `PaneService::ticker`.
+    fn ticker(&mut self, _wake: Arc<dyn spaceterm_server::connection::Wake>) {}
+    /// A Terminal Session rang the bell, so the next tick carries what it changed. A host may
+    /// pace what such ticks push.
+    fn rung(&mut self) {}
+    /// The host is stopping; refuse every deferred reply still owed. See `PaneService::stopping`.
+    fn stopping(&mut self) {}
+    /// Records the Client Name an admitted client supplied, before any of its requests.
+    fn admitted(&mut self, _client: [u8; 32], _name: control::ClientName) {}
+    /// A connection was admitted. A host that pushes Workspace Inventory keeps `outbox` until
+    /// [`Self::disconnected`].
+    fn connected(&mut self, _client: [u8; 32], _connection: [u8; 32], _outbox: &Outbox) {}
+    /// A shared Workspace edit, or with `None` the resolution of a recorded one, replied to after
+    /// the inventory revision that holds its outcome.
+    fn mutate(
+        &mut self,
+        _client: [u8; 32],
+        _connection: [u8; 32],
+        _id: RequestId,
+        _sequence: u64,
+        _mutation: Option<spaceterm_server::hierarchy::Mutation>,
+    ) -> Dispatch {
+        Dispatch::reply(Err(Refusal::Unsupported))
+    }
+    /// Retires a delivered edit outcome. Nothing replies.
+    fn acknowledge(&mut self, _client: [u8; 32], _sequence: u64) {}
+    /// Permanently releases this paired identity's live and dormant control grants.
+    fn revoked(&mut self, _client: [u8; 32]) {}
+    fn request(&mut self, device: [u8; 32], connection: [u8; 32], request: Request) -> Reply;
+    /// Starts read `id` of `connection`. Returns its reply when it settles at once. Otherwise the
+    /// read runs on another thread, which wakes the host when it settles, and the next
+    /// [`Self::settled_reads`] returns its reply.
+    fn read(
+        &mut self,
+        _device: [u8; 32],
+        _connection: [u8; 32],
+        _id: RequestId,
+        _read: HostRead,
+    ) -> Option<Result<ReplyBody, Refusal>> {
+        Some(Err(Refusal::Unsupported))
+    }
+    /// Stops read `id` of `connection`. It never settles. A directory creation that already
+    /// started keeps what it created.
+    fn cancel_read(&mut self, _connection: [u8; 32], _id: RequestId) {}
+    /// The replies of reads that settled since the last call.
+    fn settled_reads(&mut self) -> Vec<SettledRead> {
+        Vec::new()
+    }
+    /// Whether `lease` still names a Pane's Terminal Session, ended or not, under its current
+    /// control. A channel bound to a lease that is not live is closed.
+    fn lease_live(&self, _lease: &Lease) -> bool {
+        true
+    }
+    /// The connection's channel bound to `lease` is gone, as if the connection had ended for that
+    /// Pane: its input state resets and the next claim starts afresh.
+    fn unbound(&mut self, _connection: [u8; 32], _lease: &Lease) {}
+    /// Every Terminal Session started from now on calls `notifier` when it has something to
+    /// publish.
+    fn set_notifier(&mut self, _notifier: SubscriptionNotifier) {}
+    /// Drains the Pane `lease` controls for the channel bound to it, which `device` claimed.
+    fn observe(&mut self, device: [u8; 32], lease: &Lease) -> Observed;
+    /// Applies a client `View` to the Pane `lease` controls.
+    fn view(&mut self, lease: &Lease, visible: bool, max_hz: u8);
+    /// Marks the end of Input `serial`, so screens captured once its bytes reach the PTY carry it.
+    fn input_written(&mut self, lease: &Lease, serial: u32);
+    /// A channel was bound to `lease`, and its Input serials start at 1. Screens report no serial
+    /// of an earlier binding.
+    fn restart_input(&mut self, lease: &Lease);
+    /// Reads Scrollback rows of the Pane `lease` controls. `reply` runs exactly once, on the
+    /// Pane's terminal worker, unless this refuses the read.
+    fn scrollback_page(
+        &mut self,
+        _device: [u8; 32],
+        _connection: [u8; 32],
+        _lease: &Lease,
+        _read: ScrollbackRead,
+        _reply: PageReply,
+    ) -> Result<(), Refusal> {
+        Err(Refusal::Unsupported)
+    }
+    fn disconnected(&mut self, connection: [u8; 32]);
+    fn shutdown(&mut self) -> Result<(), ServerError>;
+}
+
+/// How soon a host's timed work runs again while it waits on another thread for a journal or Git
+/// write. A live terminal, and a read that settles, wake the host instead.
+pub(super) const TICK: Duration = Duration::from_millis(10);
+
+/// A host served over SpaceTerm Protocol connections. It binds each claimed channel to its lease,
+/// opens and closes the channel in the connection's outbox, turns input into host commands, and
+/// pushes each bound Pane's presentation when the host's wake or a client `View` calls for it.
+/// Scrollback pages are read on the Pane's terminal worker and replied from there.
+pub struct Served<H> {
+    host: H,
+    connections: BTreeMap<[u8; 32], Connection>,
+    /// Rung when a Terminal Session has something to publish, or a request may have ended
+    /// another channel's binding. Only a tick after a ring publishes.
+    bell: Arc<Bell>,
+    /// Reads whose replies wait for the host to settle them.
+    reads: Vec<PendingRead>,
+}
+
+/// Records a ring for the next tick and wakes the host to run it.
+#[derive(Default)]
+struct Bell {
+    rung: std::sync::atomic::AtomicBool,
+    wake: std::sync::OnceLock<Arc<dyn Wake>>,
+}
+
+impl Bell {
+    fn ring(&self) {
+        self.rung.store(true, std::sync::atomic::Ordering::Release);
+        if let Some(wake) = self.wake.get() {
+            wake.wake();
+        }
+    }
+
+    fn take(&self) -> bool {
+        self.rung.swap(false, std::sync::atomic::Ordering::AcqRel)
+    }
+}
+
+/// A read that runs on the host: a directory read, a directory creation or a Worktree read.
+pub enum HostRead {
+    Directory(pane::directories::Operation),
+    Creation(pane::directories::Creation),
+    Worktree(spaceterm_server::worktree::Read),
+}
+
+/// The reply to read `id` of `connection`, which settled after [`HostCommands::read`] returned.
+pub struct SettledRead {
+    pub connection: [u8; 32],
+    pub id: RequestId,
+    pub reply: ReplyBody,
+}
+
+/// A read whose reply waits for the host to settle it.
+#[derive(PartialEq, Eq)]
+struct PendingRead {
+    connection: [u8; 32],
+    id: RequestId,
+}
+
+struct Connection {
+    client: [u8; 32],
+    outbox: Outbox,
+    channels: BTreeMap<Channel, Bound>,
+}
+
+/// A channel bound to the lease its claim attached.
+struct Bound {
+    /// The Pane the claim named.
+    pane: [u8; 32],
+    lease: Lease,
+    paste: Option<PendingPaste>,
+    publication: Publication,
+}
+
+/// The chunks of one paste received so far. Nothing reaches the PTY before its last chunk.
+struct PendingPaste {
+    generation: u64,
+    text: String,
+    too_large: bool,
+    /// A chunk was discarded, so the whole paste is.
+    aborted: Option<Refusal>,
+}
+
+impl<H: HostCommands> Served<H> {
+    pub fn new(host: H) -> Self {
+        Self {
+            host,
+            connections: BTreeMap::new(),
+            reads: Vec::new(),
+            bell: Arc::default(),
+        }
+    }
+
+    /// Pushes what changed for one bound channel, and forgets the binding once it ended.
+    fn publish(&mut self, connection: [u8; 32], channel: Channel) {
+        let Some(bound) = self.connections.get(&connection) else {
+            return;
+        };
+        let client = bound.client;
+        let Some(lease) = bound.channels.get(&channel).map(|bound| bound.lease) else {
+            return;
+        };
+        let observed = self.host.observe(client, &lease);
+        let Some(connection) = self.connections.get_mut(&connection) else {
+            return;
+        };
+        if let Some(bound) = connection.channels.get_mut(&channel)
+            && !bound.publication.publish(observed)
+        {
+            connection.channels.remove(&channel);
+        }
+    }
+
+    /// Pushes what changed for every bound channel.
+    fn publish_all(&mut self) {
+        let bound: Vec<_> = self
+            .connections
+            .iter()
+            .flat_map(|(id, connection)| connection.channels.keys().map(|channel| (*id, *channel)))
+            .collect();
+        for (connection, channel) in bound {
+            self.publish(connection, channel);
+        }
+    }
+
+    /// Starts a read and replies when it settles.
+    fn read(&mut self, peer: &Peer, id: RequestId, read: HostRead) -> Dispatch {
+        match self.host.read(peer.client, peer.connection, id, read) {
+            Some(result) => Dispatch::Reply(Box::new(result)),
+            None => {
+                self.reads.push(PendingRead {
+                    connection: peer.connection,
+                    id,
+                });
+                Dispatch::Deferred
+            }
+        }
+    }
+
+    /// Replies to each read that settled. A read cancelled or disconnected meanwhile has no
+    /// reply left to send.
+    fn answer_reads(&mut self) {
+        for settled in self.host.settled_reads() {
+            let read = PendingRead {
+                connection: settled.connection,
+                id: settled.id,
+            };
+            let Some(index) = self.reads.iter().position(|pending| *pending == read) else {
+                continue;
+            };
+            self.reads.swap_remove(index);
+            if let Some(connection) = self.connections.get(&read.connection) {
+                // A closing connection no longer needs the reply.
+                let _ = connection
+                    .outbox
+                    .reply_or_refuse(read.id, Ok(settled.reply));
+            }
+        }
+    }
+
+    fn lease(&self, peer: &Peer, channel: Channel) -> Result<Lease, Refusal> {
+        self.connections
+            .get(&peer.connection)
+            .and_then(|connection| connection.channels.get(&channel))
+            .map(|bound| bound.lease)
+            .ok_or(Refusal::Stale)
+    }
+
+    fn command(&mut self, peer: &Peer, request: Request) -> Reply {
+        self.host.request(peer.client, peer.connection, request)
+    }
+
+    /// Runs a command on the channel's lease.
+    fn on_channel(
+        &mut self,
+        peer: &Peer,
+        channel: Channel,
+        request: impl FnOnce(Lease) -> Request,
+    ) -> Result<ReplyBody, Refusal> {
+        let lease = self.lease(peer, channel)?;
+        let result = body(self.command(peer, request(lease)));
+        // A lease the host no longer knows frees the channel.
+        if !self.host.lease_live(&lease) {
+            self.unbind(peer, channel);
+        }
+        result
+    }
+
+    /// Ends every channel whose lease the host no longer knows: a Session that ended, a closed
+    /// Pane, End All Sessions, or control another client took. Each receives its last event, so
+    /// timed work that retired a Pane never closes a channel silently.
+    fn sweep(&mut self) {
+        let dead: Vec<_> = self
+            .connections
+            .iter()
+            .flat_map(|(id, connection)| {
+                connection
+                    .channels
+                    .iter()
+                    .filter(|(_, bound)| !self.host.lease_live(&bound.lease))
+                    .map(move |(channel, _)| (*id, *channel))
+            })
+            .collect();
+        for (connection, channel) in dead {
+            self.publish(connection, channel);
+            // A host that still answers `Live` for a lease it no longer knows is not trusted.
+            if let Some(connection) = self.connections.get_mut(&connection)
+                && connection.channels.remove(&channel).is_some()
+            {
+                connection.outbox.close(channel);
+            }
+        }
+    }
+
+    /// Forgets the channel's binding and closes it in the outbox.
+    fn unbind(&mut self, peer: &Peer, channel: Channel) {
+        if let Some(connection) = self.connections.get_mut(&peer.connection) {
+            connection.channels.remove(&channel);
+            connection.outbox.close(channel);
+        }
+    }
+
+    fn claim(&mut self, peer: &Peer, claim: Claim) -> Result<ReplyBody, Refusal> {
+        let channel = claim.channel;
+        let pane = claim.pane;
+        // A new claim of a Pane this connection already holds replaces that binding. The host
+        // resets the Pane's input state, focus and transfers as a disconnect would, so recovery
+        // over the shared connection starts afresh.
+        if let Some(connection) = self.connections.get_mut(&peer.connection) {
+            let replaced: Vec<_> = connection
+                .channels
+                .iter()
+                .filter(|(_, bound)| bound.pane == pane)
+                .map(|(channel, bound)| (*channel, bound.lease))
+                .collect();
+            for (old, lease) in replaced {
+                connection.channels.remove(&old);
+                connection.outbox.close(old);
+                self.host.unbound(peer.connection, &lease);
+            }
+        }
+        let reply = self.command(
+            peer,
+            Request::ClaimPane {
+                attachment: claim.attachment,
+                pane: claim.pane,
+                claim: claim.claim,
+                size: claim.size,
+                style: claim.style,
+            },
+        );
+        let result = body(reply);
+        match &result {
+            Ok(ReplyBody::Claim(ClaimReply::Attached { lease })) => {
+                self.bind(peer, channel, pane, *lease)?;
+            }
+            // A claim that ends without binding leaves the channel closed.
+            _ => {
+                if let Some(connection) = self.connections.get(&peer.connection) {
+                    connection.outbox.close(channel);
+                }
+            }
+        }
+        result
+    }
+
+    /// Binds `channel` to the lease its claim attached and opens it in the connection's outbox.
+    /// A Pane is bound to at most one channel of a connection, so an older binding of the same
+    /// Terminal Session closes.
+    fn bind(
+        &mut self,
+        peer: &Peer,
+        channel: Channel,
+        pane: [u8; 32],
+        lease: Lease,
+    ) -> Result<(), Refusal> {
+        let Some(connection) = self.connections.get_mut(&peer.connection) else {
+            return Err(Refusal::Stale);
+        };
+        let replaced: Vec<_> = connection
+            .channels
+            .iter()
+            .filter(|(_, bound)| bound.lease.session == lease.session)
+            .map(|(channel, _)| *channel)
+            .collect();
+        for old in replaced {
+            connection.channels.remove(&old);
+            connection.outbox.close(old);
+        }
+        let publication =
+            Publication::bind(&connection.outbox, channel).map_err(|_| Refusal::Capacity)?;
+        connection.channels.insert(
+            channel,
+            Bound {
+                pane,
+                lease,
+                paste: None,
+                publication,
+            },
+        );
+        // The new channel numbers its Input from 1, before any Input of it reaches the session.
+        self.host.restart_input(&lease);
+        // The Terminal Session publishes nothing until the client's first `View` shows it.
+        self.host
+            .view(&lease, false, crate::terminal::session::DEFAULT_FRAME_RATE);
+        Ok(())
+    }
+
+    fn report(&self, peer: &Peer, channel: Channel, serial: u32, outcome: InputOutcome) {
+        if let Some(connection) = self.connections.get(&peer.connection) {
+            // A closing connection no longer needs the report.
+            let _ = connection
+                .outbox
+                .pane(channel, PaneEvent::Input { serial, outcome });
+        }
+    }
+
+    fn bound(&mut self, peer: &Peer, channel: Channel) -> Option<&mut Bound> {
+        self.connections
+            .get_mut(&peer.connection)?
+            .channels
+            .get_mut(&channel)
+    }
+
+    /// Applies one Input message's events in order and reports a discard or a settled paste. The
+    /// first refusal discards that event and every later one, and aborts a paste in progress.
+    fn input_message(&mut self, peer: &Peer, input: protocol::Input) {
+        let (channel, serial) = (input.channel, input.serial);
+        let outcome = self.apply(peer, input);
+        // A paste waiting for later chunks or for confirmation has written nothing yet, so its
+        // serial waits for the message that writes it. Even a discarded message may have applied
+        // the events before its refusal.
+        let waiting = matches!(
+            outcome,
+            Some(InputOutcome::Paste(PasteOutcome::ConfirmationRequired(_)))
+        ) || self
+            .bound(peer, channel)
+            .is_some_and(|bound| bound.paste.is_some());
+        if let Some(outcome) = outcome {
+            self.report(peer, channel, serial, outcome);
+        }
+        if !waiting && let Ok(lease) = self.lease(peer, channel) {
+            self.host.input_written(&lease, serial);
+        }
+    }
+
+    fn apply(&mut self, peer: &Peer, input: protocol::Input) -> Option<InputOutcome> {
+        let protocol::Input {
+            channel,
+            generation,
+            events,
+            ..
+        } = input;
+        let Ok(lease) = self.lease(peer, channel) else {
+            return Some(InputOutcome::Discarded(Refusal::Stale));
+        };
+        let mut events = events.into_iter().peekable();
+        let mut outcome = None;
+        while let Some(event) = events.next() {
+            if !matches!(event, InputEvent::Paste { .. })
+                && let Some(bound) = self.bound(peer, channel)
+                && let Some(paste) = &mut bound.paste
+            {
+                // A paste's chunks travel back to back. Anything between them means a chunk is
+                // missing.
+                paste.aborted.get_or_insert(Refusal::Stale);
+            }
+            let request = |input| Request::Input {
+                lease,
+                generation,
+                input,
+            };
+            let result = match event {
+                InputEvent::Focus(target) => body(self.command(
+                    peer,
+                    Request::Focus {
+                        lease,
+                        generation,
+                        target,
+                    },
+                )),
+                InputEvent::Key(key) => {
+                    let mut keys = vec![key];
+                    while let Some(InputEvent::Key(_)) = events.peek() {
+                        if let Some(InputEvent::Key(key)) = events.next() {
+                            keys.push(key);
+                        }
+                    }
+                    body(self.command(
+                        peer,
+                        Request::Keys {
+                            lease,
+                            generation,
+                            keys,
+                        },
+                    ))
+                }
+                InputEvent::Pointer(pointer) => {
+                    body(self.command(peer, request(InteractiveInput::Pointer(pointer))))
+                }
+                InputEvent::Wheel(wheel) => {
+                    body(self.command(peer, request(InteractiveInput::Wheel(wheel))))
+                }
+                InputEvent::CopyOrForward { modifiers } => {
+                    body(self.command(peer, request(InteractiveInput::CopyOrForward { modifiers })))
+                }
+                InputEvent::Resize(size) => {
+                    body(self.command(peer, Request::Resize { lease, size }))
+                }
+                InputEvent::ResolvePaste { id, confirm } => {
+                    match self.command(
+                        peer,
+                        request(InteractiveInput::ResolvePaste { id, confirm }),
+                    ) {
+                        Reply::Paste(settled) => {
+                            outcome = Some(InputOutcome::Paste(settled));
+                            Ok(ReplyBody::Done)
+                        }
+                        reply => body(reply),
+                    }
+                }
+                InputEvent::Paste { text, last } => {
+                    match self.paste(peer, channel, lease, generation, text, last) {
+                        Ok(Some(settled)) => {
+                            outcome = Some(settled);
+                            Ok(ReplyBody::Done)
+                        }
+                        Ok(None) => Ok(ReplyBody::Done),
+                        Err(refusal) => Err(refusal),
+                    }
+                }
+            };
+            if let Err(refusal) = result {
+                if let Some(bound) = self.bound(peer, channel)
+                    && let Some(paste) = &mut bound.paste
+                {
+                    paste.aborted.get_or_insert(refusal);
+                }
+                return Some(InputOutcome::Discarded(refusal));
+            }
+        }
+        outcome
+    }
+
+    /// Adds one paste chunk. The last chunk settles the whole paste: written, rejected as too
+    /// large, or discarded because an earlier chunk was.
+    fn paste(
+        &mut self,
+        peer: &Peer,
+        channel: Channel,
+        lease: Lease,
+        generation: u64,
+        text: String,
+        last: bool,
+    ) -> Result<Option<InputOutcome>, Refusal> {
+        let bound = self.bound(peer, channel).ok_or(Refusal::Stale)?;
+        let paste = bound.paste.get_or_insert_with(|| PendingPaste {
+            generation,
+            text: String::new(),
+            too_large: false,
+            aborted: None,
+        });
+        if paste.generation != generation {
+            paste.aborted.get_or_insert(Refusal::Stale);
+        }
+        if paste.text.len() + text.len() > protocol::limits::MAX_PASTE_BYTES {
+            paste.too_large = true;
+            paste.text = String::new();
+        } else if !paste.too_large {
+            paste.text.push_str(&text);
+        }
+        if !last {
+            return Ok(None);
+        }
+        let Some(paste) = bound.paste.take() else {
+            return Ok(None);
+        };
+        if let Some(refusal) = paste.aborted {
+            return Err(refusal);
+        }
+        if paste.too_large {
+            return Ok(Some(InputOutcome::Paste(PasteOutcome::Rejected(
+                pane::PasteRejection::TooLarge {
+                    limit: protocol::limits::MAX_PASTE_BYTES as u32,
+                },
+            ))));
+        }
+        match self.command(
+            peer,
+            Request::Input {
+                lease,
+                generation,
+                input: InteractiveInput::Paste { text: paste.text },
+            },
+        ) {
+            Reply::Paste(outcome) => Ok(Some(InputOutcome::Paste(outcome))),
+            Reply::Refused(refusal) => Err(refusal),
+            _ => Err(Refusal::Failed),
+        }
+    }
+}
+
+/// The bytes `reply` takes on the wire as a reply, or `None` when it
+/// exceeds the protocol's bounds.
+#[cfg(test)]
+pub(super) fn wire_bytes(reply: Reply) -> Option<usize> {
+    let message = protocol::ServerMessage::Reply(Box::new(protocol::Reply {
+        id: RequestId(1),
+        result: body(reply),
+    }));
+    protocol::frame::encode_server(&message)
+        .ok()
+        .map(|wire| wire.bytes())
+}
+
+/// The protocol reply to a host command.
+fn body(reply: Reply) -> Result<ReplyBody, Refusal> {
+    Ok(match reply {
+        Reply::Refused(refusal) => return Err(refusal),
+        Reply::Unchanged | Reply::Closed => ReplyBody::Done,
+        Reply::Attached { lease } => ReplyBody::Claim(ClaimReply::Attached { lease }),
+        Reply::Takeover {
+            session_ended,
+            target,
+            controller,
+        } => ReplyBody::Claim(ClaimReply::Takeover(protocol::Takeover {
+            session_ended,
+            target,
+            controller,
+        })),
+        Reply::Restored {
+            fresh,
+            session_ended,
+            recovery,
+            directory_unavailable,
+            server,
+            workspace,
+            tab,
+            pane,
+        } => ReplyBody::Claim(ClaimReply::Restored(Box::new(protocol::Restored {
+            fresh,
+            session_ended,
+            recovery,
+            directory_unavailable,
+            server,
+            workspace,
+            tab,
+            pane,
+        }))),
+        Reply::Outcome(outcome) => ReplyBody::Outcome(outcome),
+        Reply::GraphicsChunk(chunk) => ReplyBody::Graphics(chunk),
+        Reply::Accessibility(chunk) => ReplyBody::Accessibility(chunk),
+        Reply::MutationPending | Reply::Inventory { .. } => return Err(Refusal::Failed),
+        Reply::Paste(_) => return Err(Refusal::Failed),
+    })
+}
+
+impl<H: HostCommands> ConnectionService for Served<H> {
+    fn restore(&mut self, store: OrganizationStore) -> Result<(), ServerError> {
+        self.host.restore(store)
+    }
+    fn admitted(&mut self, peer: &Peer, name: control::ClientName, outbox: Outbox) {
+        self.host.admitted(peer.client, name);
+        self.host.connected(peer.client, peer.connection, &outbox);
+        self.connections.insert(
+            peer.connection,
+            Connection {
+                client: peer.client,
+                outbox,
+                channels: BTreeMap::new(),
+            },
+        );
+    }
+    fn revoked(&mut self, client: [u8; 32]) {
+        self.host.revoked(client);
+        self.bell.ring();
+    }
+    fn request(&mut self, peer: &Peer, id: RequestId, operation: Operation) -> Dispatch {
+        let dispatch = self.dispatch(peer, id, operation);
+        // A claim, close, release or edit may have ended another channel's binding.
+        self.bell.ring();
+        dispatch
+    }
+    fn input(&mut self, peer: &Peer, input: protocol::Input) {
+        self.input_message(peer, input);
+    }
+    /// The connection already applied `view` to the outbox. A revealed channel receives the
+    /// current screen again.
+    fn view(&mut self, peer: &Peer, view: protocol::View) {
+        let Some(bound) = self.bound(peer, view.channel) else {
+            return;
+        };
+        bound.publication.view(view.visible);
+        let lease = bound.lease;
+        self.host.view(&lease, view.visible, view.max_hz);
+        if view.visible {
+            self.publish(peer.connection, view.channel);
+        }
+    }
+    fn effect_done(&mut self, peer: &Peer, done: protocol::EffectDone) {
+        if let Ok(lease) = self.lease(peer, done.channel) {
+            self.command(
+                peer,
+                Request::CompleteClipboard {
+                    lease,
+                    generation: done.generation,
+                    id: done.effect,
+                    completion: done.completion,
+                },
+            );
+        }
+    }
+    fn acknowledge(&mut self, peer: &Peer, sequence: u64) {
+        self.host.acknowledge(peer.client, sequence);
+    }
+    /// Terminal Sessions ring the bell, which wakes the host to tick and publish.
+    fn ticker(&mut self, wake: Arc<dyn Wake>) {
+        let _ = self.bell.wake.set(Arc::clone(&wake));
+        let bell = Arc::clone(&self.bell);
+        self.host.set_notifier(Arc::new(move || bell.ring()));
+        self.host.ticker(wake);
+    }
+    /// Pushes what every bound Pane published when the bell rang, then runs the host's timed
+    /// work when it is due. A host deadline alone publishes nothing.
+    fn tick(&mut self, now: std::time::Instant) -> Option<std::time::Instant> {
+        // Publication ends each channel whose Pane is gone with its last event, and hands an
+        // ended shell's final screen over before the host's timed work retires its Pane.
+        if self.bell.take() {
+            self.publish_all();
+            self.host.rung();
+        }
+        let host = self.host.tick(now);
+        self.sweep();
+        self.answer_reads();
+        host
+    }
+    fn stopping(&mut self) {
+        for read in std::mem::take(&mut self.reads) {
+            if let Some(connection) = self.connections.get(&read.connection) {
+                let _ = connection.outbox.reply(read.id, Err(Refusal::Failed));
+            }
+        }
+        self.host.stopping();
+    }
+    /// The client abandoned a read. It replies `Stale` at once, and the host stops the read.
+    fn cancel(&mut self, peer: &Peer, id: RequestId) {
+        let read = PendingRead {
+            connection: peer.connection,
+            id,
+        };
+        let Some(index) = self.reads.iter().position(|pending| *pending == read) else {
+            return;
+        };
+        self.reads.swap_remove(index);
+        self.host.cancel_read(peer.connection, id);
+        if let Some(connection) = self.connections.get(&peer.connection) {
+            let _ = connection.outbox.reply(id, Err(Refusal::Stale));
+        }
+    }
+    fn disconnected(&mut self, peer: &Peer) {
+        self.reads.retain(|read| read.connection != peer.connection);
+        self.connections.remove(&peer.connection);
+        self.host.disconnected(peer.connection);
+    }
+    fn shutdown(&mut self) -> Result<(), ServerError> {
+        self.host.shutdown()
+    }
+}
+
+impl<H: HostCommands> Served<H> {
+    /// Answers one request.
+    fn dispatch(&mut self, peer: &Peer, id: RequestId, operation: Operation) -> Dispatch {
+        if let Operation::ScrollbackPage {
+            channel,
+            epoch,
+            start,
+            rows,
+        } = operation
+        {
+            let read = ScrollbackRead { epoch, start, rows };
+            return self.scrollback_page(peer, id, channel, read);
+        }
+        Dispatch::reply(match operation {
+            Operation::Claim(claim) => self.claim(peer, claim),
+            Operation::ReleaseAttachment { attachment } => {
+                body(self.command(peer, Request::ReleaseAttachment { attachment }))
+            }
+            Operation::Release { channel } => {
+                let result = self.on_channel(peer, channel, |lease| Request::Release { lease });
+                self.unbind(peer, channel);
+                result
+            }
+            Operation::Close { channel } => {
+                let result = self.on_channel(peer, channel, |lease| Request::Close { lease });
+                if result.is_ok() {
+                    self.unbind(peer, channel);
+                }
+                result
+            }
+            Operation::ClearScrollback { channel } => self.on_channel(peer, channel, |lease| {
+                Request::ClearScreenAndScrollback { lease }
+            }),
+            Operation::Style { channel, style } => {
+                self.on_channel(peer, channel, |lease| Request::Style { lease, style })
+            }
+            Operation::Mutate { sequence, mutation } => {
+                return self.host.mutate(
+                    peer.client,
+                    peer.connection,
+                    id,
+                    sequence,
+                    Some(mutation),
+                );
+            }
+            Operation::Resolve { sequence } => {
+                return self
+                    .host
+                    .mutate(peer.client, peer.connection, id, sequence, None);
+            }
+            Operation::Graphics {
+                channel,
+                image,
+                offset,
+            } => self.on_channel(peer, channel, |lease| Request::GraphicsChunk {
+                lease,
+                image,
+                offset: offset as usize,
+            }),
+            Operation::Accessibility {
+                channel,
+                revision,
+                offset,
+                base,
+            } => self.on_channel(peer, channel, |lease| Request::Accessibility {
+                lease,
+                revision,
+                offset: offset as usize,
+                base,
+            }),
+            Operation::AccessibilitySelection {
+                channel,
+                focus_generation,
+                selection,
+            } => self.on_channel(peer, channel, |lease| Request::AccessibilitySelection {
+                lease,
+                focus_generation,
+                selection,
+            }),
+            Operation::EndAccessibility { channel } => self.on_channel(peer, channel, |lease| {
+                Request::EndAccessibilityDemand { lease }
+            }),
+            Operation::DirectoryRead(operation) => {
+                return self.read(peer, id, HostRead::Directory(operation));
+            }
+            Operation::DirectoryCreate(creation) => {
+                return self.read(peer, id, HostRead::Creation(creation));
+            }
+            Operation::WorktreeRead(read) => {
+                return self.read(peer, id, HostRead::Worktree(read));
+            }
+            Operation::Shutdown => body(self.command(peer, Request::Shutdown)),
+            // Scrollback pages reply from the terminal worker. Direct-network administration never
+            // reaches the service.
+            Operation::ScrollbackPage { .. } | Operation::Direct(_) => Err(Refusal::Unsupported),
+        })
+    }
+
+    /// Reads a Scrollback page for the channel's controlling client. The reply comes from the
+    /// Pane's terminal worker once it read the rows, so no lock is held while it reads.
+    fn scrollback_page(
+        &mut self,
+        peer: &Peer,
+        id: RequestId,
+        channel: Channel,
+        read: ScrollbackRead,
+    ) -> Dispatch {
+        let (Ok(lease), Some(connection)) = (
+            self.lease(peer, channel),
+            self.connections.get(&peer.connection),
+        ) else {
+            return Dispatch::reply(Err(Refusal::Stale));
+        };
+        let outbox = connection.outbox.clone();
+        let reply = Box::new(move |result: Result<protocol::Page, Refusal>| {
+            // A connection that ended no longer owes the reply.
+            let _ = outbox.reply_or_refuse(id, result.map(ReplyBody::Page));
+        });
+        match self
+            .host
+            .scrollback_page(peer.client, peer.connection, &lease, read, reply)
+        {
+            Ok(()) => Dispatch::Deferred,
+            Err(refusal) => Dispatch::reply(Err(refusal)),
+        }
+    }
+}

@@ -1,8 +1,8 @@
 //! Shared owning-host Git fixtures and authenticated inventory checks.
 use spaceterm_server::{
     ServerConnection, ServerError,
+    connection::link::ServerLink,
     hierarchy::{CloseTarget, Id, Inventory, Mutation, Outcome},
-    pane::{PaneConnection, Reply, Request},
     repository::DirectoryFacts,
 };
 use std::{
@@ -11,11 +11,12 @@ use std::{
     process::Command,
     time::{Duration, Instant},
 };
-pub fn connect(server: &ServerConnection) -> Result<PaneConnection, Box<dyn Error>> {
+/// The handle's shared connection, once the server accepts it.
+pub fn connect(server: &ServerConnection) -> Result<ServerLink, Box<dyn Error>> {
     let until = Instant::now() + Duration::from_secs(8);
     loop {
-        match server.connect_shared_pane() {
-            Ok(connection) => return Ok(connection),
+        match server.link() {
+            Ok(link) => return Ok(link),
             Err(ServerError::NotRunning) if Instant::now() < until => {
                 std::thread::sleep(Duration::from_millis(50))
             }
@@ -23,33 +24,23 @@ pub fn connect(server: &ServerConnection) -> Result<PaneConnection, Box<dyn Erro
         }
     }
 }
-pub fn inventory(connection: &mut PaneConnection) -> Result<(Inventory, u64), Box<dyn Error>> {
-    let Reply::Inventory {
-        inventory,
-        next_sequence,
-    } = connection.exchange(&Request::Inventory)?
-    else {
-        return Err("inventory response".into());
-    };
-    Ok((inventory, next_sequence))
+pub fn inventory(link: &ServerLink) -> Result<(Inventory, u64), Box<dyn Error>> {
+    Ok(super::support::inventory(link)?)
 }
-pub fn mutate(connection: &mut PaneConnection, mutation: Mutation) -> Result<Id, Box<dyn Error>> {
-    let (_, sequence) = inventory(connection)?;
-    let Reply::Outcome(result) = connection.exchange(&Request::Mutate { sequence, mutation })?
-    else {
-        return Err("mutation response".into());
-    };
+pub fn mutate(link: &ServerLink, mutation: Mutation) -> Result<Id, Box<dyn Error>> {
+    let (_, sequence) = inventory(link)?;
+    let result = super::support::mutate(link, sequence, mutation)?;
     let Outcome::Accepted { target } = result.outcome else {
         return Err("mutation rejected".into());
     };
-    connection.exchange(&Request::Acknowledge { sequence })?;
+    link.acknowledge(sequence).map_err(ServerError::from)?;
     Ok(target)
 }
-pub fn close(connection: &mut PaneConnection, target: CloseTarget) -> Result<(), Box<dyn Error>> {
-    let current = inventory(connection)?.0;
+pub fn close(link: &ServerLink, target: CloseTarget) -> Result<(), Box<dyn Error>> {
+    let current = inventory(link)?.0;
     let confirmation = current.close_confirmation(target).ok_or("close target")?;
     mutate(
-        connection,
+        link,
         Mutation::Close {
             target,
             confirmation,
@@ -58,13 +49,13 @@ pub fn close(connection: &mut PaneConnection, target: CloseTarget) -> Result<(),
     Ok(())
 }
 pub fn await_facts(
-    connection: &mut PaneConnection,
+    link: &ServerLink,
     directory: &Path,
     predicate: impl Fn(&DirectoryFacts) -> bool,
 ) -> Result<Inventory, Box<dyn Error>> {
     let until = Instant::now() + Duration::from_secs(15);
     loop {
-        let (current, _) = inventory(connection)?;
+        let (current, _) = inventory(link)?;
         if current.repositories.as_ref().is_some_and(|s| {
             s.directories
                 .iter()

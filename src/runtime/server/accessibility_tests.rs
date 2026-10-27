@@ -209,7 +209,7 @@ fn server_accessibility_selection_requires_current_focus_and_live_cell_revisions
                 selection: Some(selection)
             }
         ),
-        Reply::Reading { accepted: true }
+        Reply::Unchanged
     ));
     loop {
         if snapshot(&mut host, lease, None).selection == Some(selection) {
@@ -267,8 +267,17 @@ fn server_accessibility_selection_requires_current_focus_and_live_cell_revisions
             selection: Some(stale),
         },
     );
-    let barrier = host.pane.as_ref().unwrap().runtime.reading_barrier();
-    barrier.recv_timeout(Duration::from_secs(10)).unwrap();
+    // The worker answers commands in order, so a page read's reply follows the selection.
+    let (barrier, passed) = std::sync::mpsc::channel();
+    host.pane.as_ref().unwrap().runtime.read_scrollback(
+        0,
+        0,
+        1,
+        crate::terminal::session::ScrollbackReply::new(move |_| {
+            let _ = barrier.send(());
+        }),
+    );
+    passed.recv_timeout(Duration::from_secs(10)).unwrap();
     assert!(snapshot(&mut host, lease, None).selection.is_none());
     host.shutdown().unwrap();
 

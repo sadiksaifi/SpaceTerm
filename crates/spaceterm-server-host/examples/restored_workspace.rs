@@ -1,11 +1,23 @@
 //! Real-host server restart exercise. Requires an idle Development server and account-local authority.
 #[path = "support/lifecycle.rs"]
 mod lifecycle;
+#[expect(
+    dead_code,
+    reason = "the restart exercise claims only the inventory's first Pane"
+)]
 mod support;
 use lifecycle::{Server, connect, require_idle, size};
-use spaceterm_server::{ServerConnection, ServerError, pane::*};
+use spaceterm_server::{
+    ServerConnection, ServerError, connection::link::ServerLink, pane::*, protocol::Operation,
+};
 use std::{error::Error, time::Duration};
-use support::{attach, await_output, command};
+use support::{Claimed, attach};
+
+/// Selects the inventory's first Pane. Without `create`, an empty inventory has no Pane.
+fn select(link: &ServerLink, create: bool) -> Result<Claimed, ServerError> {
+    let pane = support::first_pane(link, create)?;
+    support::select(link, pane, create, size())
+}
 
 fn main() -> Result<(), Box<dyn Error>> {
     #[cfg(target_os = "linux")]
@@ -15,113 +27,111 @@ fn main() -> Result<(), Box<dyn Error>> {
             .map_err(|_| "fault setup")?;
         return spaceterm_server::run_local_with_panes(
             "spaceterm-development",
-            spaceterm::runtime::SharedWorkspaceHost::local()?,
+            spaceterm_server::panes(|sync| {
+                Ok(spaceterm::runtime::Served::new(
+                    spaceterm::runtime::SharedWorkspaceHost::local(sync)?,
+                ))
+            }),
         )
         .map_err(Into::into);
     }
-    let major = std::env::args().nth(1).unwrap_or("1".into()).parse()?;
+    let major = std::env::args().nth(1).unwrap_or("2".into()).parse()?;
     let name = std::env::var("SPACETERM_DEVELOPMENT_CLIENT").unwrap_or("restore-smoke".into());
     let client = ServerConnection::for_development_client(&name, major)?;
     require_idle(&client)?;
     client.setup()?;
     let mut host = Server::start()?;
-    let mut setup = connect(&client)?;
-    match setup.exchange(&Request::Select {
-        create: false,
-        size: size(),
-        resume: None,
-        style: None,
-    }) {
-        Err(ServerError::SessionUnavailable) => {}
-        _ => return Err(
+    let setup = connect(&client)?;
+    // The server creates an initial Workspace at startup. A host whose only work is that one
+    // Workspace, with one Pane and no running Session, is empty.
+    let (inventory, _) = support::inventory(&setup)?;
+    let live = inventory
+        .close
+        .as_ref()
+        .is_some_and(|close| close.sessions.iter().any(|pane| pane.session.is_some()));
+    let initial = match inventory.workspaces.as_slice() {
+        [] => true,
+        [only] => only.tabs.len() == 1 && only.tabs[0].panes.len() == 1,
+        _ => false,
+    };
+    if live
+        || !initial
+        || !matches!(
+            select(&setup, false),
+            Err(ServerError::SessionUnavailable) | Ok(Claimed::Restored(_))
+        )
+    {
+        return Err(
             "Retained Development work exists; it was preserved. Use an empty Development host."
                 .into(),
-        ),
+        );
     }
-    setup.exchange(&Request::Shutdown)?;
+    support::done(&setup, Operation::Shutdown)?;
     drop(setup);
     host.0.wait()?;
     #[cfg(target_os = "linux")]
     let uncertain_ids = faults::exercise(&client)?;
     let mut host = Server::start()?;
-    let mut connection = connect(&client)?;
-    let original = attach(&mut connection, true)?;
-    command(
-        &mut connection,
-        original,
+    let connection = connect(&client)?;
+    let original = attach(&connection, true, size())?;
+    original.command(
         "stty -echo; cd /; printf '\\033]7;file://localhost/\\007\\033]133;A;spaceterm=%s\\007' \"$SPACETERM_PROMPT_OWNER\"; printf '\\033[2J\\033[HOLD-PROGRAM\\n'; sleep 60",
     )?;
-    await_output(&mut connection, original, "OLD-PROGRAM")?;
+    original.await_output("OLD-PROGRAM")?;
     // Allow the background directory publication to complete before forced termination.
     std::thread::sleep(Duration::from_millis(200));
     host.kill()?;
-    drop(connection);
+    connection.close();
+    let original = original.lease();
     let mut host = Server::start()?;
-    let mut connection = connect(&client)?;
-    let restored = connection.exchange(&Request::Select {
-        create: false,
-        size: size(),
-        resume: Some(original.into()),
-        style: None,
-    })?;
-    let Reply::Restored {
-        server,
-        workspace,
-        tab,
-        pane,
-        ..
-    } = restored
-    else {
+    let connection = connect(&client)?;
+    // A claim names a Pane, not a prior lease, so this passive selection stands in for resuming
+    // `original`. Only an explicit selection may start a shell.
+    let Claimed::Restored(restored) = select(&connection, false)? else {
         return Err("retained Pane missing".into());
     };
+    let (server, workspace, tab, pane) = (
+        restored.server,
+        restored.workspace,
+        restored.tab,
+        restored.pane,
+    );
     #[cfg(target_os = "linux")]
     assert_eq!((workspace, tab, pane), uncertain_ids);
     for _ in 0..3 {
         assert!(
-            matches!(connection.exchange(&Request::Select { create: false, size: size(), resume: None, style: None })?, Reply::Restored { workspace: w, tab: t, pane: p, .. } if (w,t,p) == (workspace,tab,pane))
+            matches!(select(&connection, false)?, Claimed::Restored(r) if (r.workspace, r.tab, r.pane) == (workspace, tab, pane))
         );
     }
-    let Reply::Attached { lease } = connection.exchange(&Request::StartRestored {
-        server,
-        pane,
-        size: size(),
-        style: None,
-    })?
+    let Claimed::Attached(fresh) =
+        support::claim(&connection, pane, AttachmentClaim::Start { server }, size())?
     else {
         return Err("fresh shell missing".into());
     };
+    let lease = fresh.lease();
     assert_ne!(original.server, lease.server);
     assert_ne!(original.session, lease.session);
-    command(
-        &mut connection,
-        lease,
-        "printf '\\033[2J\\033[HFRESH-SHELL\\n'; pwd; stty size",
-    )?;
-    let output = await_output(&mut connection, lease, "24 80")?;
+    fresh.command("printf '\\033[2J\\033[HFRESH-SHELL\\n'; pwd; stty size")?;
+    let output = fresh.await_output("24 80")?;
     assert!(output.lines().any(|line| line.trim() == "/"));
     assert!(!output.contains("OLD-PROGRAM"));
-    assert_eq!(
-        connection
-            .exchange(&Request::Poll { lease: original })
-            .err(),
-        // The shared host routes by server and Session identity. A prior boot's Session
-        // no longer exists, so it refuses the request before reaching Pane control.
-        Some(ServerError::SessionUnavailable)
-    );
-    connection.exchange(&Request::Shutdown)?;
+    // A request names a channel of its own connection, so the prior boot's lease can no longer
+    // be presented. The Session comparison above shows the restart replaced it.
+    support::done(&connection, Operation::Shutdown)?;
     host.0.wait()?;
+    drop(fresh);
     drop(connection);
     let mut host = Server::start()?;
-    let mut connection = connect(&client)?;
+    let connection = connect(&client)?;
     assert!(
-        matches!(connection.exchange(&Request::Select { create: false, size: size(), resume: None, style: None })?, Reply::Restored { workspace: w, tab: t, pane: p, .. } if (w,t,p) == (workspace,tab,pane))
+        matches!(select(&connection, false)?, Claimed::Restored(r) if (r.workspace, r.tab, r.pane) == (workspace, tab, pane))
     );
-    let final_lease = attach(&mut connection, true)?;
-    connection.exchange(&Request::Close { lease: final_lease })?;
-    connection.exchange(&Request::Shutdown)?;
+    let last = attach(&connection, true, size())?;
+    last.close()?;
+    support::done(&connection, Operation::Shutdown)?;
     host.0.wait()?;
     println!(
-        "Protocol {major}: kill/reopen and shutdown/reopen retained Workspace, Tab, Pane and client identity; reconnect stayed dormant; explicit first use started one fresh shell in the confirmed directory with measured dimensions; old leases were refused."
+        "Protocol {major}: kill/reopen and shutdown/reopen retained Workspace, Tab, Pane and client identity; reconnect stayed dormant; explicit first use started one fresh shell in the confirmed directory with measured dimensions; the prior boot's Session was replaced."
     );
     Ok(())
 }
@@ -198,40 +208,29 @@ mod faults {
                 .stderr(Stdio::null())
                 .spawn()?,
         );
-        let mut connection = connect(client)?;
-        let select = |create| Request::Select {
-            create,
-            size: size(),
-            resume: None,
-            style: None,
-        };
+        let connection = connect(client)?;
         for mode in [b"file".as_slice(), b"directory".as_slice()] {
             std::fs::write(&flag, mode)?;
             assert_eq!(
-                connection.exchange(&select(true)).err(),
+                select(&connection, true).err(),
                 Some(ServerError::StorageUnavailable)
             );
             assert_eq!(
-                connection.exchange(&select(true)).err(),
+                select(&connection, true).err(),
                 Some(ServerError::StorageUnavailable)
             );
             std::fs::remove_file(&flag)?;
             if mode == b"file" {
                 assert_eq!(
-                    connection.exchange(&select(false)).err(),
+                    select(&connection, false).err(),
                     Some(ServerError::SessionUnavailable)
                 );
             }
         }
-        let Reply::Restored {
-            workspace,
-            tab,
-            pane,
-            ..
-        } = connection.exchange(&select(false))?
-        else {
+        let Claimed::Restored(restored) = select(&connection, false)? else {
             return Err("uncertain publication was replaced or launched".into());
         };
+        let (workspace, tab, pane) = (restored.workspace, restored.tab, restored.pane);
         host.kill()?;
         std::fs::remove_dir(&root)?;
         println!(

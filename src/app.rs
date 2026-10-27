@@ -499,19 +499,16 @@ impl QuitSessions for DevelopmentQuitSessions {
     fn observe(
         &self,
     ) -> Result<spaceterm_server::hierarchy::CloseInventory, spaceterm_server::ServerError> {
-        use spaceterm_server::{
-            ServerConnection, ServerError,
-            pane::{Reply, Request},
-        };
+        use spaceterm_server::{ServerConnection, ServerError};
         let identity = crate::application_identity::ApplicationIdentity::current().directory_name();
         let server = ServerConnection::for_identity(identity)?;
-        let mut connection = server.connect_pane()?;
-        match connection.exchange(&Request::Inventory)? {
-            Reply::Inventory { inventory, .. } => inventory
-                .close
-                .ok_or(ServerError::MissingRequiredCapability),
-            _ => Err(ServerError::Protocol),
-        }
+        // The server pushes the inventory when it admits the link.
+        let (_, revision) = server.link()?.next_inventory(0)?;
+        revision
+            .inventory
+            .close
+            .clone()
+            .ok_or(ServerError::MissingRequiredCapability)
     }
 }
 
@@ -1736,7 +1733,7 @@ mod tests {
                     session: session.map(|id| [id; 32]),
                 })
                 .collect(),
-            controls: None,
+            controls: Vec::new(),
         }
     }
 

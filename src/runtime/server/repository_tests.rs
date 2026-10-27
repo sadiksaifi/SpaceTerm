@@ -103,7 +103,7 @@ fn repository_sources_follow_owning_prompts_while_osc7_keeps_live_directory_disp
             tree.display(),
         ),
     );
-    await_text(&mut host, 1, lease, "OSC7-LIVE");
+    await_text(&mut host, lease, "OSC7-LIVE");
     let current = git_facts(&mut host, &tree, |facts| {
         facts.repository.is_some() && facts.worktrees.is_some()
     });
@@ -147,9 +147,14 @@ fn repository_sources_follow_owning_prompts_while_osc7_keeps_live_directory_disp
             .presentation
             .is_none()
     );
-    let retained_json = String::from_utf8(serde_json::to_vec(&retained).unwrap()).unwrap();
-    assert!(!retained_json.contains("current_directory"));
-    assert!(!retained_json.contains("repository_directory"));
+    let retained_json = serde_json::to_value(&retained).unwrap();
+    let pane = &retained_json["shared"]["inventory"]["workspaces"][0]["tabs"][0]["panes"][0];
+    for live in ["current_directory", "repository_directory"] {
+        assert!(
+            pane.get(live).is_none_or(serde_json::Value::is_null),
+            "{live}"
+        );
+    }
     let restored = State::from_organization(
         &serde_json::from_slice(&serde_json::to_vec(&retained).unwrap()).unwrap(),
     );
@@ -172,7 +177,7 @@ fn repository_sources_follow_owning_prompts_while_osc7_keeps_live_directory_disp
         lease,
         "printf '\\033]133;A;spaceterm=%s\\007' \"$SPACETERM_PROMPT_OWNER\"; printf '\\033[2J\\033[HOWNED-DIRECTORY\\n'",
     );
-    await_text(&mut host, 1, lease, "OWNED-DIRECTORY");
+    await_text(&mut host, lease, "OWNED-DIRECTORY");
     assert_eq!(
         shared_inventory(&mut host).workspaces[0].tabs[0].panes[0]
             .confirmed_directory
@@ -199,7 +204,7 @@ fn repository_sources_follow_owning_prompts_while_osc7_keeps_live_directory_disp
                 git.0.display()
             ),
         );
-        await_text(&mut host, 1, lease, marker);
+        await_text(&mut host, lease, marker);
         let current = shared_inventory(&mut host);
         let workspace = &current.workspaces[0];
         assert_eq!(
@@ -225,7 +230,7 @@ fn repository_sources_follow_owning_prompts_while_osc7_keeps_live_directory_disp
         lease,
         "printf '\\033]7;file://localhost%s\\007\\033]133;A;spaceterm=%s\\007' \"$PWD\" \"$SPACETERM_PROMPT_OWNER\"; printf '\\033[2J\\033[HOWNER-MOVED\\n'",
     );
-    await_text(&mut host, 1, lease, "OWNER-MOVED");
+    await_text(&mut host, lease, "OWNER-MOVED");
     let moved = git_facts(&mut host, &git.0, |facts| facts.worktrees.is_some());
     let workspace = &moved.workspaces[0];
     assert_eq!(
@@ -301,8 +306,10 @@ fn assert_count_failure_keeps_facts(timeout: bool) {
     std::fs::write(git.0.join("tracked.txt"), "after!\n").unwrap();
     let current = git_facts(&mut host, &git.0, |facts| {
         facts.repository.as_ref().is_some_and(|repository| {
+            // A count that follows a finished one stays quiet until it ends or runs long.
             repository.head == RepositoryHead::Branch("feature".into())
                 && repository.counting.is_none()
+                && repository.changes.is_err()
         }) && facts.worktrees.as_ref().is_some_and(|list| {
             list.worktrees[0].head
                 == spaceterm_server::repository::WorktreeHead::Branch("feature".into())
@@ -362,6 +369,31 @@ fn shared_git_reads_publish_external_changes_to_two_clients_and_retain_worktree_
             repo.head == RepositoryHead::Branch("feature".into()) && repo.counting.is_none()
         }) && facts.worktrees.is_some()
     });
+    // Edits outside SpaceTerm change no git directory. Focusing a Pane in the repository reads
+    // it again.
+    let Reply::Attached { lease } = host.request(
+        [1; 32],
+        [1; 32],
+        Request::SelectPane {
+            pane: first.workspaces[0].tabs[0].root_pane,
+            explicit: true,
+            size: size(),
+            style: None,
+        },
+    ) else {
+        panic!("Root Pane did not start")
+    };
+    let focus = |host: &mut SharedWorkspaceHost| {
+        host.request(
+            [1; 32],
+            [1; 32],
+            Request::Focus {
+                lease,
+                generation: 1,
+                target: spaceterm_server::pane::FocusTarget::Terminal,
+            },
+        );
+    };
     let tab = &first.workspaces[0].tabs[0];
     assert_eq!(tab.worktree.as_ref(), Some(&tree));
     let Reply::Inventory {
@@ -404,6 +436,7 @@ fn shared_git_reads_publish_external_changes_to_two_clients_and_retain_worktree_
         Reply::Outcome(_)
     ));
     std::fs::write(tree.join("external"), "changed externally").unwrap();
+    focus(&mut host);
     let changed = git_facts(&mut host, &tree, |facts| {
         facts.repository.as_ref().is_some_and(|repo| {
             repo.changes
@@ -420,6 +453,7 @@ fn shared_git_reads_publish_external_changes_to_two_clients_and_retain_worktree_
         .id;
     // Missing directories remain saved membership and are never recreated by reconciliation.
     std::fs::remove_dir_all(&tree).unwrap();
+    focus(&mut host);
     let missing = git_facts(&mut host, &git.0, |facts| {
         facts.worktrees.as_ref().is_some_and(|list| {
             list.worktrees
@@ -643,7 +677,7 @@ fn non_root_tab_retains_its_repository_until_closed_after_both_shells_change_rep
                 destination.0.display()
             ),
         );
-        await_text(&mut host, 1, lease, marker);
+        await_text(&mut host, lease, marker);
         let moved = git_facts(&mut host, &destination.0, |facts| {
             facts.repository.as_ref().is_some_and(|repository| {
                 repository.root == destination.0
@@ -768,7 +802,7 @@ fn an_unpinned_root_tab_follows_entering_and_leaving_git_without_moving_other_ta
             outside.0.display()
         ),
     );
-    await_text(&mut host, 1, lease, "LEFT-REPOSITORY");
+    await_text(&mut host, lease, "LEFT-REPOSITORY");
     let left = git_facts(&mut host, &outside.0, |facts| {
         facts.failure.is_none() && facts.repository.is_none()
     });
@@ -809,7 +843,7 @@ fn an_unpinned_root_tab_follows_entering_and_leaving_git_without_moving_other_ta
             git.0.display()
         ),
     );
-    await_text(&mut host, 1, lease, "ENTERED-REPOSITORY");
+    await_text(&mut host, lease, "ENTERED-REPOSITORY");
     let entered = shared_inventory(&mut host);
     assert!(
         entered.workspaces[0]
@@ -994,24 +1028,20 @@ pub(super) fn review_removal(
             path: path.to_owned(),
         },
     ) {
-        Reply::WorktreeRead(Ok(spaceterm_server::worktree::ReadReply::Removal(review))) => review,
+        Ok(spaceterm_server::worktree::ReadReply::Removal(review)) => review,
         other => panic!("unexpected removal review: {other:?}"),
     }
 }
+/// Runs a Worktree read for the client `[1; 32]` and waits for its reply.
 pub(super) fn read_worktree(
     host: &mut SharedWorkspaceHost,
-    mut read: spaceterm_server::worktree::Read,
-) -> Reply {
-    let until = Instant::now() + Duration::from_secs(30);
-    loop {
-        match host.request([1; 32], [1; 32], Request::WorktreeRead(read)) {
-            Reply::WorktreeRead(Ok(spaceterm_server::worktree::ReadReply::Pending { id })) => {
-                assert!(Instant::now() < until, "server Git read did not finish");
-                read = spaceterm_server::worktree::Read::Poll { id };
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            reply => return reply,
-        }
+    read: spaceterm_server::worktree::Read,
+) -> Result<spaceterm_server::worktree::ReadReply, spaceterm_server::worktree::Error> {
+    static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
+    let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    match super::tests::read(host, [1; 32], id, HostRead::Worktree(read)) {
+        Ok(spaceterm_server::protocol::ReplyBody::Worktree(result)) => result,
+        other => panic!("unexpected Worktree read reply: {other:?}"),
     }
 }
 #[test]
@@ -1050,7 +1080,7 @@ fn removal_revalidates_other_workspace_sessions_and_closes_unattached_work_befor
         lease,
         "printf '\\nunattached-work\\n'; sleep 30\n",
     );
-    await_text(&mut host, 3, lease, "unattached-work");
+    await_text(&mut host, lease, "unattached-work");
     assert!(matches!(
         host.request(
             [3; 32],
@@ -1134,7 +1164,7 @@ fn replaced_worktree_and_main_worktree_are_preserved_after_confirmation() {
                 path: git.0.clone()
             }
         ),
-        Reply::WorktreeRead(Err(Error::Main))
+        Err(Error::Main)
     ));
     let review = review_removal(&mut host, &git.0, &tree);
     git.git(&["worktree", "remove", tree.to_str().unwrap()]);
@@ -1190,8 +1220,8 @@ fn worktree_location_refuses_an_unwritable_folder_without_changing_settings() {
         "a read-only ancestor on the owning server must reject the edit: {result:?}"
     );
     assert!(matches!(
-        host.request([1; 32], [1; 32], Request::WorktreeRead(Read::Settings)),
-        Reply::WorktreeRead(Ok(ReadReply::Settings(saved))) if saved == Settings::default()
+        read_worktree(&mut host, Read::Settings),
+        Ok(ReadReply::Settings(saved)) if saved == Settings::default()
     ));
     assert!(!folder.join("missing").exists());
     host.shutdown().unwrap();
@@ -1244,7 +1274,7 @@ fn worktree_location_draft_validation_returns_typed_errors_without_saving_or_cre
         assert!(
             matches!(
                 read_worktree(&mut host, Read::ValidateLocationTemplate { template: template.into() }),
-                Reply::WorktreeRead(Err(Error::Template(actual))) if actual == expected
+                Err(Error::Template(actual)) if actual == expected
             ),
             "incorrect validation for {template:?}"
         );
@@ -1257,12 +1287,12 @@ fn worktree_location_draft_validation_returns_typed_errors_without_saving_or_cre
                 template: format!("{}/{{repository}}/{{branch}}", folder.display()),
             }
         ),
-        Reply::WorktreeRead(Ok(ReadReply::LocationTemplate))
+        Ok(ReadReply::LocationTemplate)
     ));
     assert!(!folder.exists());
     assert!(matches!(
         read_worktree(&mut host, Read::Settings),
-        Reply::WorktreeRead(Ok(ReadReply::Settings(saved))) if saved == Settings::default()
+        Ok(ReadReply::Settings(saved)) if saved == Settings::default()
     ));
     host.shutdown().unwrap();
 }
@@ -1275,9 +1305,7 @@ fn worktree_location_concurrent_clients_reload_the_authoritative_value_after_a_c
     };
     let fixture = GitFixture::new();
     let mut host = SharedWorkspaceHost::new(host());
-    let Reply::WorktreeRead(Ok(ReadReply::Settings(original))) =
-        read_worktree(&mut host, Read::Settings)
-    else {
+    let Ok(ReadReply::Settings(original)) = read_worktree(&mut host, Read::Settings) else {
         panic!("initial settings unavailable")
     };
     let template = format!("{}/authoritative/{{branch}}", fixture.0.display());
@@ -1308,8 +1336,8 @@ fn worktree_location_concurrent_clients_reload_the_authoritative_value_after_a_c
     };
     assert_eq!(result.outcome, Outcome::WorktreeFailed(Error::Changed));
     assert!(matches!(
-        host.request([3; 32], [3; 32], Request::WorktreeRead(Read::Settings)),
-        Reply::WorktreeRead(Ok(ReadReply::Settings(saved))) if saved.template == template && saved.version == original.version + 1
+        read_worktree(&mut host, Read::Settings),
+        Ok(ReadReply::Settings(saved)) if saved.template == template && saved.version == original.version + 1
     ));
     host.shutdown().unwrap();
 }
@@ -1322,7 +1350,7 @@ fn server_facts_read_the_owning_hosts_metadata_without_a_workspace_or_git_contex
     let mut host = SharedWorkspaceHost::new(host());
     assert!(shared_inventory(&mut host).workspaces.is_empty());
     let reply = read_worktree(&mut host, Read::ServerFacts);
-    let Reply::WorktreeRead(Ok(ReadReply::ServerFacts(facts))) = reply else {
+    let Ok(ReadReply::ServerFacts(facts)) = reply else {
         panic!("owning-server facts unavailable without a Workspace: {reply:?}")
     };
     assert_eq!(facts.machine, expected_machine.hostname().unwrap());
@@ -1345,10 +1373,7 @@ fn git_settings_read_the_owning_servers_tools_without_a_workspace() {
     assert!(shared_inventory(&mut host).workspaces.is_empty());
     let reply = read_worktree(&mut host, Read::Git);
     assert!(
-        matches!(
-            reply,
-            Reply::WorktreeRead(Ok(ReadReply::Git(GitToolStatus::Ready(_))))
-        ),
+        matches!(reply, Ok(ReadReply::Git(GitToolStatus::Ready(_)))),
         "the fixture host's Git must be readable without a repository: {reply:?}"
     );
     assert!(shared_inventory(&mut host).workspaces.is_empty());
@@ -1363,8 +1388,8 @@ fn worktree_location_uses_server_defaults_and_validates_explicit_edits() {
     };
     let mut host = SharedWorkspaceHost::new(host());
     assert!(matches!(
-        host.request([1; 32], [1; 32], Request::WorktreeRead(Read::Settings)),
-        Reply::WorktreeRead(Ok(ReadReply::Settings(settings)))
+        read_worktree(&mut host, Read::Settings),
+        Ok(ReadReply::Settings(settings))
             if settings == spaceterm_server::worktree::Settings::default()
     ));
     assert_eq!(
@@ -1403,7 +1428,7 @@ fn worktree_location_uses_server_defaults_and_validates_explicit_edits() {
         Outcome::WorktreeFailed(Error::Changed)
     );
     assert!(
-        matches!(host.request([1;32],[1;32],Request::WorktreeRead(Read::Settings)),Reply::WorktreeRead(Ok(ReadReply::Settings(s))) if s.template=="~/second/{branch}" && s.version==1)
+        matches!(read_worktree(&mut host, Read::Settings),Ok(ReadReply::Settings(s)) if s.template=="~/second/{branch}" && s.version==1)
     );
     host.shutdown().unwrap();
 }
@@ -1464,7 +1489,7 @@ fn server_removal_protects_pins_in_unattached_workspaces_and_rechecks_missing_lo
                 path: tree.clone()
             }
         ),
-        Reply::WorktreeRead(Err(Error::Pinned))
+        Err(Error::Pinned)
     ));
     host.request(
         [1; 32],
@@ -1589,5 +1614,110 @@ fn created_worktrees_use_gits_physical_directory_in_saved_membership() {
         .find(|t| t.id == target)
         .unwrap();
     assert_eq!(tab.worktree.as_ref(), Some(&actual.join("created")));
+    host.shutdown().unwrap();
+}
+
+#[test]
+fn an_idle_server_with_a_visible_pane_and_a_repository_subscriber_wakes_and_sends_nothing() {
+    use spaceterm_server::connection::outbox::Outbox;
+    use spaceterm_server::protocol::{RawFrame, frame::Assembler};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let counter = |count: &Arc<AtomicUsize>| -> Arc<dyn Fn() + Send + Sync> {
+        let count = Arc::clone(count);
+        Arc::new(move || {
+            count.fetch_add(1, Ordering::SeqCst);
+        })
+    };
+    let sent = |outbox: &Outbox| {
+        let mut assembler = Assembler::default();
+        let mut messages = 0;
+        while let Some((frame, _)) = outbox.next_frame() {
+            if assembler
+                .server(RawFrame::parse(&frame).unwrap())
+                .unwrap()
+                .is_some()
+            {
+                messages += 1;
+            }
+        }
+        messages
+    };
+    let git = GitFixture::new();
+    let mut prototype = host();
+    prototype.directory = git.0.clone();
+    let mut host = SharedWorkspaceHost::new(prototype);
+    // The host's wake, and the bell its Terminal Sessions ring when they have news.
+    let wakes = Arc::new(AtomicUsize::new(0));
+    let rings = Arc::new(AtomicUsize::new(0));
+    let wake = {
+        let wakes = Arc::clone(&wakes);
+        move || {
+            wakes.fetch_add(1, Ordering::SeqCst);
+        }
+    };
+    HostCommands::ticker(&mut host, Arc::new(wake));
+    HostCommands::set_notifier(&mut host, counter(&rings));
+    host.prepare_initial_organization().unwrap();
+    let outbox = Outbox::new(Arc::new(|| {}));
+    HostCommands::connected(&mut host, [1; 32], [1; 32], &outbox);
+    let pane = shared_inventory(&mut host).workspaces[0].tabs[0].root_pane;
+    let Reply::Attached { lease } = host.request(
+        [1; 32],
+        [1; 32],
+        Request::SelectPane {
+            pane,
+            explicit: true,
+            size: size(),
+            style: None,
+        },
+    ) else {
+        panic!("Root Pane did not start")
+    };
+    HostCommands::view(&mut host, &lease, true, 60);
+    git_facts(&mut host, &git.0, |facts| {
+        facts.worktrees.is_some()
+            && facts.repository.as_ref().is_some_and(|repository| {
+                repository.counting.is_none() && repository.changes.is_ok()
+            })
+    });
+    // Let the shell print its prompt and the read that follows a new watch by 2 s finish,
+    // ticking whenever the host is woken, as the host's loop does.
+    let until = Instant::now() + Duration::from_secs(30);
+    loop {
+        let before = wakes.load(Ordering::SeqCst) + rings.load(Ordering::SeqCst);
+        HostCommands::tick(&mut host, Instant::now());
+        std::thread::sleep(Duration::from_secs(5));
+        if wakes.load(Ordering::SeqCst) + rings.load(Ordering::SeqCst) == before {
+            break;
+        }
+        assert!(Instant::now() < until, "the server never became idle");
+    }
+    sent(&outbox);
+    assert_eq!(
+        HostCommands::tick(&mut host, Instant::now()),
+        None,
+        "an idle server has no timed work"
+    );
+    sent(&outbox);
+    let (wakes_before, rings_before) = (wakes.load(Ordering::SeqCst), rings.load(Ordering::SeqCst));
+    std::thread::sleep(Duration::from_secs(3));
+    assert_eq!(
+        wakes.load(Ordering::SeqCst),
+        wakes_before,
+        "nothing woke the host"
+    );
+    assert_eq!(
+        rings.load(Ordering::SeqCst),
+        rings_before,
+        "no Terminal Session rang"
+    );
+    assert_eq!(sent(&outbox), 0, "nothing was pushed");
+    // Even a tick nobody asked for finds nothing to read, publish or schedule.
+    assert_eq!(HostCommands::tick(&mut host, Instant::now()), None);
+    assert_eq!(
+        sent(&outbox),
+        0,
+        "an unchanged repository publishes nothing"
+    );
     host.shutdown().unwrap();
 }

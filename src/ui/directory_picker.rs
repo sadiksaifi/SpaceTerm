@@ -1498,7 +1498,6 @@ mod tests {
     use super::server_source::{DirectoryConnection, DirectoryConnector};
     use super::*;
     use crate::domain::RemoteDirectory;
-    use spaceterm_server::pane::{Reply, Request as PaneRequest};
 
     #[test]
     fn remote_picker_wrapper_debug_should_redact_account_paths_and_rows() {
@@ -2733,8 +2732,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("projects/alpha")).unwrap();
         std::fs::create_dir_all(root.join("projects/beta")).unwrap();
-        let handler: Box<dyn FnMut(&PaneRequest) -> Reply + Send> =
-            Box::new(crate::runtime::directory_testing::directory_host());
+        let handler = crate::runtime::directory_testing::directory_host();
         let opened = Arc::new(AtomicUsize::new(0));
         let server: Arc<dyn DirectoryConnector> = Arc::new(LimitedChannels {
             server: InProcessServer(Arc::new(Mutex::new(handler))),
@@ -2831,8 +2829,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         let missing = root.join("new/nested");
-        let handler: Box<dyn FnMut(&PaneRequest) -> Reply + Send> =
-            Box::new(crate::runtime::directory_testing::directory_host());
+        let handler = crate::runtime::directory_testing::directory_host();
         let server: Arc<dyn DirectoryConnector> =
             Arc::new(InProcessServer(Arc::new(Mutex::new(handler))));
         cx.update(crate::ui::init).unwrap();
@@ -2975,24 +2972,54 @@ mod tests {
         fn creates_directories(&self) -> bool {
             self.inner.creates_directories()
         }
-        fn exchange(&mut self, request: &PaneRequest) -> Result<Reply, ()> {
+        fn begin(
+            &mut self,
+            id: u64,
+            operation: spaceterm_server::protocol::Operation,
+        ) -> Result<(), ()> {
+            self.open()?;
+            let creation = matches!(
+                operation,
+                spaceterm_server::protocol::Operation::DirectoryCreate(_)
+            );
+            if creation {
+                self.controls.creates.fetch_add(1, AtomicOrdering::SeqCst);
+            }
+            let begun = self.inner.begin(id, operation);
+            if creation && self.controls.lose_create_reply.load(AtomicOrdering::SeqCst) {
+                return Err(());
+            }
+            begun
+        }
+        fn settled(
+            &mut self,
+            id: u64,
+            timeout: Duration,
+        ) -> Result<
+            Option<
+                Result<
+                    spaceterm_server::pane::directories::Value,
+                    spaceterm_server::pane::directories::Error,
+                >,
+            >,
+            (),
+        > {
+            self.open()?;
+            self.inner.settled(id, timeout)
+        }
+        fn cancel(&mut self, id: u64) -> Result<(), ()> {
+            self.open()?;
+            self.inner.cancel(id)
+        }
+    }
+
+    impl ControlledConnection {
+        /// Fails once the route closed this connection.
+        fn open(&self) -> Result<(), ()> {
             if self.place < self.controls.closed_before.load(AtomicOrdering::SeqCst) {
                 return Err(());
             }
-            let begins_creation = matches!(
-                request,
-                PaneRequest::DirectoryCreate(
-                    spaceterm_server::pane::directories::CreationRequest::Begin { .. }
-                )
-            );
-            if begins_creation {
-                self.controls.creates.fetch_add(1, AtomicOrdering::SeqCst);
-            }
-            let reply = self.inner.exchange(request);
-            if begins_creation && self.controls.lose_create_reply.load(AtomicOrdering::SeqCst) {
-                return Err(());
-            }
-            reply
+            Ok(())
         }
     }
 
@@ -3020,8 +3047,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         let missing = root.join("new/nested");
-        let handler: Box<dyn FnMut(&PaneRequest) -> Reply + Send> =
-            Box::new(crate::runtime::directory_testing::directory_host());
+        let handler = crate::runtime::directory_testing::directory_host();
         let server: Arc<dyn DirectoryConnector> = Arc::new(ControlledRoute {
             server: InProcessServer(Arc::new(Mutex::new(handler))),
             controls: Arc::clone(controls),

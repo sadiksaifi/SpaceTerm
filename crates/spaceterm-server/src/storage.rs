@@ -241,6 +241,21 @@ impl Directory {
     }
     /// Validate and synchronize retained state before setup or authentication accepts it.
     pub fn read(&self) -> Result<Record, ServerError> {
+        let (record, file) = self.read_visible()?;
+        // A previous publication may have renamed successfully but failed to sync its directory.
+        // Visible bytes alone do not confirm durability, including after reopening the store.
+        file.sync_all()
+            .and_then(|()| self.0.sync_all())
+            .map_err(|_| ServerError::StorageUnavailable)?;
+        Ok(record)
+    }
+    /// Validates the visible record without confirming its durability. Only a caller that
+    /// replaces the whole record and then syncs it, as [`Self::write`] does, may skip the sync:
+    /// the replacement's own file and directory syncs make everything it carries forward durable.
+    pub(crate) fn read_unconfirmed(&self) -> Result<Record, ServerError> {
+        self.read_visible().map(|(record, _)| record)
+    }
+    fn read_visible(&self) -> Result<(Record, File), ServerError> {
         let file = self.file("identity.json", false)?;
         let mut bytes = Vec::new();
         (&file)
@@ -264,12 +279,7 @@ impl Directory {
         if let Some(value) = &record.organization {
             value.validate()?;
         }
-        // A previous publication may have renamed successfully but failed to sync its directory.
-        // Visible bytes alone do not confirm durability, including after reopening the store.
-        file.sync_all()
-            .and_then(|()| self.0.sync_all())
-            .map_err(|_| ServerError::StorageUnavailable)?;
-        Ok(record)
+        Ok((record, file))
     }
     pub fn read_or_create(&self) -> Result<Record, ServerError> {
         match self.read() {
@@ -525,6 +535,22 @@ mod tests {
         use crate::attachments::Attachments;
         use crate::hierarchy::{Axis, Inventory, Pane, Tab, Workspace};
         let fixture = Fixture::new();
+        // The lock's descriptor is close-on-exec, but a process another test forks holds a copy
+        // until it executes, and the copy keeps the lock. A reopen retries that contention
+        // briefly.
+        let reopen = |server: [u8; 32], client: [u8; 32]| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            loop {
+                match Attachments::open(fixture.open(), server, client) {
+                    Err(ServerError::StorageUnavailable)
+                        if std::time::Instant::now() < deadline =>
+                    {
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    result => return result,
+                }
+            }
+        };
         let inventory = Inventory {
             repositories: None,
             revision: 1,
@@ -568,7 +594,7 @@ mod tests {
             );
             permit.attachment()
         };
-        let choices = Attachments::open(fixture.open(), [8; 32], [9; 32]).unwrap();
+        let choices = reopen([8; 32], [9; 32]).unwrap();
         choices.reconcile(&inventory).unwrap();
         assert!(!choices.is_attached([1; 32]));
         assert_eq!(choices.pending(), vec![original]);
@@ -579,11 +605,11 @@ mod tests {
         assert!(choices.is_attached([1; 32]));
         drop(choices);
         assert!(matches!(
-            Attachments::open(fixture.open(), [7; 32], [9; 32]),
+            reopen([7; 32], [9; 32]),
             Err(ServerError::AuthenticationRefused)
         ));
         assert!(matches!(
-            Attachments::open(fixture.open(), [8; 32], [10; 32]),
+            reopen([8; 32], [10; 32]),
             Err(ServerError::AuthenticationRefused)
         ));
         assert_eq!(
@@ -596,7 +622,7 @@ mod tests {
         assert!(!fixture.0.join("settings.json").exists());
         fs::write(fixture.0.join("attachments.json"), b"incomplete document").unwrap();
         assert!(matches!(
-            Attachments::open(fixture.open(), [8; 32], [9; 32]),
+            reopen([8; 32], [9; 32]),
             Err(ServerError::UnsafeStorage)
         ));
         assert_eq!(
@@ -720,17 +746,18 @@ mod tests {
             outcome: Outcome::Conflict,
         };
         assert_eq!(
-            journal.complete(RetainedOutcome {
+            journal.retire(RetainedOutcome {
                 sequence: 5,
                 ..result.clone()
             }),
             Err(ServerError::Protocol)
         );
-        journal.complete(result.clone()).unwrap();
-        drop(journal);
-        let mut journal = ClientJournal::open(fixture.open(), [1; 32], [2; 32]).unwrap();
-        assert_eq!(journal.pending().unwrap().result.as_ref(), Some(&result));
-        journal.retire().unwrap();
+        assert_eq!(
+            journal.pending().unwrap().sequence,
+            4,
+            "a mismatch retires nothing"
+        );
+        journal.retire(result.clone()).unwrap();
         drop(journal);
         let journal = ClientJournal::open(fixture.open(), [1; 32], [2; 32]).unwrap();
         assert!(journal.pending().is_none());
@@ -900,6 +927,22 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn an_organization_publication_syncs_only_its_replacement() {
+        let fixture = Fixture::new();
+        let data = fixture.open();
+        {
+            let _lock = data.lock("setup.lock", false).unwrap();
+            data.read_or_create().unwrap();
+        }
+        let store = crate::organization::OrganizationStore(fixture.open());
+        let organization = crate::organization::Organization::first(fixture.0.clone()).unwrap();
+        let syncs = sync_failure::count(|| store.write(Some(&organization)).unwrap());
+        assert_eq!(syncs, 2, "the new file and the directory");
+        assert!(store.read().unwrap() == Some(organization));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn a_failed_pending_write_preserves_the_previous_organization() {
         let fixture = Fixture::new();
         let data = fixture.open();
@@ -931,6 +974,14 @@ mod tests {
         std::thread_local! {
             static DIRECTORY: Cell<Option<(u64, u64)>> = const { Cell::new(None) };
             static FILES: Cell<bool> = const { Cell::new(false) };
+            static SYNCS: Cell<usize> = const { Cell::new(0) };
+        }
+
+        /// The syncs `work` issues on this thread.
+        pub(super) fn count(work: impl FnOnce()) -> usize {
+            let before = SYNCS.get();
+            work();
+            SYNCS.get() - before
         }
 
         pub(super) struct Failure;
@@ -955,6 +1006,7 @@ mod tests {
 
         #[unsafe(export_name = "fsync")]
         extern "C" fn fsync_with_failure(fd: libc::c_int) -> libc::c_int {
+            let _ = SYNCS.try_with(|syncs| syncs.set(syncs.get() + 1));
             // SAFETY: stat is writable and retained throughout fstat.
             let mut metadata: libc::stat = unsafe { std::mem::zeroed() };
             // SAFETY: fstat accepts any descriptor, reporting invalid ones without dereferencing it.

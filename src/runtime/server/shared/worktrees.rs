@@ -155,6 +155,10 @@ impl Writes {
             operation: None,
         }
     }
+    /// Whether a Worktree write is being prepared or run.
+    pub(super) fn busy(&self) -> bool {
+        self.worker.is_some()
+    }
 }
 impl Drop for Writes {
     fn drop(&mut self) {
@@ -206,63 +210,97 @@ pub(in crate::runtime::server) fn pinned_in_worktree<'a>(
 }
 impl SharedWorkspaceHost {
     fn worktree_lock(&self) -> Result<Option<std::fs::File>, Refusal> {
-        self.store
+        self.journal
             .as_ref()
-            .map(OrganizationStore::worktree_lock)
+            .map(|journal| journal.worktree_lock())
             .transpose()
             .map_err(|_| Refusal::StorageUnavailable)
+    }
+    /// Commits a Worktree step and waits until it is retained. Git starts only after its record
+    /// is durable, so recovery after a crash finds every write that may have begun.
+    fn commit_retained(&mut self, next: State) -> Result<(), Refusal> {
+        let revision = self.commit(next)?;
+        self.retained(revision)
     }
     pub(super) fn cancel_worktree_reads(&mut self, connection: Id) {
         self.writes.reads.cancel_connection(connection);
     }
+    pub(super) fn cancel_worktree_read(&mut self, connection: Id, id: RequestId) {
+        self.writes.reads.cancel((connection, id));
+    }
+    /// When the earliest running Worktree read outlasts its deadline.
+    pub(super) fn worktree_reads_due(&self) -> Option<Instant> {
+        self.writes.reads.due()
+    }
+    /// Every Worktree read started from now on wakes `wake` when it settles.
+    pub(super) fn wake_worktree_reads(
+        &mut self,
+        wake: Arc<dyn spaceterm_server::connection::Wake>,
+    ) {
+        self.writes.reads.set_wake(wake);
+    }
     pub(super) fn stop_worktree_reads(&mut self) {
         self.writes.reads.stop();
     }
+    /// Answers `read` at once, or starts it as read `id` of `connection` and returns `None`.
     pub(super) fn worktree_read(
         &mut self,
         device: Id,
         connection: Id,
+        id: RequestId,
         read: Read,
-    ) -> Result<ReadReply, Error> {
-        self.writes.approvals.retain(|a| a.expires > Instant::now());
-        match read {
-            Read::Settings => Ok(ReadReply::Settings(
+    ) -> Result<Option<ReadReply>, Error> {
+        if let Read::Settings = read {
+            return Ok(Some(ReadReply::Settings(
                 self.state.worktree_settings.clone().unwrap_or_default(),
-            )),
-            Read::Poll { id } => {
-                let prepared = self.writes.reads.poll(connection, id)?;
-                if let Some(approval) = prepared.approval {
-                    self.writes.approvals.retain(|a| a.device != device);
-                    if self.writes.approvals.len() >= 32 {
-                        return Err(Error::Unavailable);
-                    }
-                    self.writes.approvals.push(approval);
-                }
-                Ok(prepared.reply)
-            }
-            read => {
-                if matches!(read, Read::CheckRemoval { .. })
-                    && !self.state.pending_worktrees().is_empty()
-                {
-                    return Err(Error::Unavailable);
-                }
-                let mut inventory = self.inventory();
-                inventory.repositories = None;
-                let settings = self.state.worktree_settings.clone().unwrap_or_default();
-                self.writes
-                    .reads
-                    .begin(connection, device, read, inventory, settings)
-            }
+            )));
         }
+        if matches!(read, Read::CheckRemoval { .. }) && !self.state.pending_worktrees().is_empty() {
+            return Err(Error::Unavailable);
+        }
+        let mut inventory = self.inventory();
+        inventory.repositories = None;
+        let settings = self.state.worktree_settings.clone().unwrap_or_default();
+        self.writes
+            .reads
+            .begin((connection, id), device, read, inventory, settings)?;
+        Ok(None)
+    }
+    /// The replies of Worktree reads that settled. A removal check that settled records its
+    /// approval first, so the removal it reviewed can follow its reply.
+    pub(super) fn settled_worktree_reads(&mut self) -> Vec<crate::runtime::server::SettledRead> {
+        self.writes.approvals.retain(|a| a.expires > Instant::now());
+        let settled = self.writes.reads.settled();
+        settled
+            .into_iter()
+            .map(|((connection, id), prepared)| {
+                let reply = prepared.and_then(|prepared| {
+                    if let Some(approval) = prepared.approval {
+                        let device = approval.device;
+                        self.writes.approvals.retain(|a| a.device != device);
+                        if self.writes.approvals.len() >= 32 {
+                            return Err(Error::Unavailable);
+                        }
+                        self.writes.approvals.push(approval);
+                    }
+                    Ok(prepared.reply)
+                });
+                crate::runtime::server::SettledRead {
+                    connection,
+                    id,
+                    reply: ReplyBody::Worktree(reply),
+                }
+            })
+            .collect()
     }
     pub(super) fn begin_worktree(
         &mut self,
         device: Id,
         sequence: u64,
         operation: Operation,
-    ) -> Result<Reply, Refusal> {
+    ) -> Result<Answer, Refusal> {
         if !self.state.pending_worktrees().is_empty() {
-            return Ok(Reply::MutationPending);
+            return Ok(Answer::Pending);
         }
         let lock = self.worktree_lock()?;
         let mut next = self.state.clone();
@@ -294,13 +332,16 @@ impl SharedWorkspaceHost {
                     Err(error) => Outcome::WorktreeFailed(error),
                 },
             )?;
-            self.commit(next)?;
-            return Ok(Reply::Outcome(
-                self.state
-                    .outcome(device, sequence)
-                    .ok_or(Refusal::Missing)?
-                    .clone(),
-            ));
+            let revision = self.commit(next)?;
+            return Ok(Answer::Outcome {
+                outcome: Box::new(
+                    self.state
+                        .outcome(device, sequence)
+                        .ok_or(Refusal::Missing)?
+                        .clone(),
+                ),
+                revision,
+            });
         }
         let approval = match &operation {
             Operation::Remove { confirmation, .. } => self
@@ -313,7 +354,7 @@ impl SharedWorkspaceHost {
         };
         let mut inventory = self.inventory();
         inventory.repositories = None;
-        self.commit(next)?;
+        self.commit_retained(next)?;
         self.writes.operation = Some((device, sequence));
         self.writes.worker = Some(
             std::thread::Builder::new()
@@ -323,7 +364,7 @@ impl SharedWorkspaceHost {
                 })
                 .map_err(|_| Refusal::Capacity)?,
         );
-        Ok(Reply::MutationPending)
+        Ok(Answer::Pending)
     }
     fn start_prepared(
         &mut self,
@@ -353,7 +394,7 @@ impl SharedWorkspaceHost {
                     Err(_) => Outcome::WorktreeFailed(Error::Unavailable),
                 };
                 next.finish_worktree(device, sequence, outcome)?;
-                self.commit(next)?;
+                self.commit_retained(next)?;
                 self.writes.operation = None;
             }
             preparing::Prepared::Write(write) => {
@@ -388,7 +429,7 @@ impl SharedWorkspaceHost {
                     return self.settle_worktree(device, sequence, Err(error));
                 }
                 // Durable closure precedes ending reviewed Sessions and starting the Git write.
-                self.commit(next)?;
+                self.commit_retained(next)?;
                 self.synchronize()?;
                 self.writes.worker = Some(
                     std::thread::Builder::new()
@@ -471,7 +512,7 @@ impl SharedWorkspaceHost {
             }
         };
         next.finish_worktree(device, sequence, outcome)?;
-        self.commit(next)?;
+        self.commit_retained(next)?;
         self.writes.operation = None;
         self.repositories.refresh();
         Ok(())
@@ -490,7 +531,7 @@ mod tests {
     use super::*;
     use crate::runtime::server::{
         repository_tests::{GitFixture, finish_write, git_facts, review_removal},
-        tests::{create_shared, host, shared_inventory, size},
+        tests::{create_shared, host, screen, shared_inventory, size},
     };
 
     mod close_fallback {
@@ -575,7 +616,6 @@ mod tests {
         );
         crate::runtime::server::tests::await_text(
             &mut host,
-            2,
             lease,
             &format!("SPLIT-CWD:{}", tree.display()),
         );
@@ -659,12 +699,7 @@ mod tests {
             lease,
             "printf '\\nSOURCE-CWD:%s\\n' \"$PWD\"\n",
         );
-        await_text(
-            &mut host,
-            2,
-            lease,
-            &format!("SOURCE-CWD:{}", tree.display()),
-        );
+        await_text(&mut host, lease, &format!("SOURCE-CWD:{}", tree.display()));
         let target = CloseTarget::Worktree { workspace, tab };
         let confirmation = shared_inventory(&mut host)
             .close_confirmation(target)
@@ -673,6 +708,7 @@ mod tests {
         assert!(
             matches!(host.request([3; 32], [3; 32], Request::Mutate { sequence: 1, mutation: Mutation::Close { target, confirmation } }), Reply::Outcome(record) if record.outcome == Outcome::Accepted { target: workspace })
         );
+        host.tick(Instant::now());
         assert_eq!(
             host.state.inventory.workspaces[0]
                 .tabs
@@ -764,7 +800,6 @@ mod tests {
                 );
                 crate::runtime::server::tests::await_text(
                     &mut host,
-                    2,
                     lease,
                     &format!("TAB-CWD:{}", expected.display()),
                 );
@@ -906,10 +941,7 @@ mod tests {
             Outcome::WorktreeFailed(Error::Changed)
         );
         assert!(tree.exists());
-        assert!(matches!(
-            host.request([1; 32], [2; 32], Request::Poll { lease }),
-            Reply::Screen(_) | Reply::Unchanged
-        ));
+        assert!(screen(&mut host, [1; 32], lease).is_ok());
         assert!(
             matches!(host.request([3; 32], [3; 32], Request::Mutate { sequence: 1, mutation: other }), Reply::Outcome(record) if matches!(record.outcome, Outcome::Accepted { .. }))
         );
@@ -938,10 +970,12 @@ mod tests {
             panic!("start unrelated Terminal Session");
         };
         let started = Instant::now();
-        let reply = host.request(
+        let id = RequestId(1);
+        let reply = host.read(
             [1; 32],
             [1; 32],
-            Request::WorktreeRead(Read::CheckRemoval {
+            id,
+            crate::runtime::server::HostRead::Worktree(Read::CheckRemoval {
                 root: git.0.clone(),
                 path: tree,
             }),
@@ -950,13 +984,9 @@ mod tests {
             started.elapsed() < Duration::from_secs(1),
             "a Git read held the terminal request lock"
         );
-        let Reply::WorktreeRead(Ok(ReadReply::Pending { id })) = reply else {
-            panic!("read must be asynchronous");
-        };
-        assert!(matches!(
-            host.request([3; 32], [3; 32], Request::WorktreeRead(Read::Poll { id })),
-            Reply::WorktreeRead(Err(Error::Unavailable))
-        ));
+        assert!(reply.is_none(), "read must be asynchronous");
+        // Another connection's cancellation never reaches this read.
+        host.cancel_read([3; 32], id);
         let until = Instant::now() + Duration::from_secs(4);
         while !gate.0.join("started").exists() {
             assert!(
@@ -966,8 +996,8 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         assert!(matches!(
-            host.request([1; 32], [2; 32], Request::Capabilities),
-            Reply::Capabilities { .. }
+            host.request([1; 32], [2; 32], Request::Inventory),
+            Reply::Inventory { .. }
         ));
         command(
             &mut host,
@@ -975,16 +1005,13 @@ mod tests {
             lease,
             "printf '\\nother-terminal-responsive\\n'\n",
         );
-        await_text(&mut host, 2, lease, "other-terminal-responsive");
+        await_text(&mut host, lease, "other-terminal-responsive");
         drop(gate);
         assert!(matches!(
-            crate::runtime::server::repository_tests::read_worktree(&mut host, Read::Poll { id }),
-            Reply::WorktreeRead(Ok(ReadReply::Removal(_)))
+            crate::runtime::server::tests::await_read(&mut host, [1; 32], id),
+            ReplyBody::Worktree(Ok(ReadReply::Removal(_)))
         ));
-        assert!(matches!(
-            host.request([1; 32], [1; 32], Request::WorktreeRead(Read::Poll { id })),
-            Reply::WorktreeRead(Err(Error::Unavailable))
-        ));
+        assert!(host.settled_reads().is_empty());
         host.shutdown().unwrap();
     }
 
@@ -1061,8 +1088,8 @@ mod tests {
         restored.state = State::from_organization(&serde_json::from_slice(&bytes).unwrap());
         restored.state.begin_boot(restored.prototype.boot);
         assert!(matches!(
-            restored.request([1; 32], [1; 32], Request::Capabilities),
-            Reply::Capabilities { .. }
+            restored.request([1; 32], [1; 32], Request::Inventory),
+            Reply::Inventory { .. }
         ));
         assert!(
             matches!(restored.request([1; 32], [1; 32], Request::Mutate {

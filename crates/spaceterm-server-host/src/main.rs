@@ -248,14 +248,22 @@ fn run() -> Result<ExitCode, cli::Error> {
             check::resources()?;
             spaceterm_server::service::run(
                 IDENTITY,
-                spaceterm::runtime::SharedWorkspaceHost::account_service()?,
+                spaceterm_server::panes(|sync| {
+                    Ok(spaceterm::runtime::Served::new(
+                        spaceterm::runtime::SharedWorkspaceHost::account_service(sync)?,
+                    ))
+                }),
             )?;
         }
         Request::DevelopmentServe => {
             use std::io::Write;
             check::resources()?;
             spaceterm_server::run_owned_development(
-                spaceterm::runtime::SharedWorkspaceHost::local()?,
+                spaceterm_server::panes(|sync| {
+                    Ok(spaceterm::runtime::Served::new(
+                        spaceterm::runtime::SharedWorkspaceHost::local(sync)?,
+                    ))
+                }),
                 std::io::stdin(),
                 || {
                     let mut output = std::io::stdout().lock();
@@ -270,7 +278,11 @@ fn run() -> Result<ExitCode, cli::Error> {
             check::resources()?;
             spaceterm_server::run_local_with_panes(
                 IDENTITY,
-                spaceterm::runtime::SharedWorkspaceHost::local()?,
+                spaceterm_server::panes(|sync| {
+                    Ok(spaceterm::runtime::Served::new(
+                        spaceterm::runtime::SharedWorkspaceHost::local(sync)?,
+                    ))
+                }),
             )?;
         }
         Request::Install(installation) => {

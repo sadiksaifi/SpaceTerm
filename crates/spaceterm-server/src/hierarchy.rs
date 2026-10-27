@@ -13,12 +13,12 @@ const MAX_OUTCOMES: usize = 32;
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Inventory {
     /// Live owning-server Git facts. Excluded from retained Organization.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub repositories: Option<crate::repository::Snapshot>,
     pub revision: u64,
     pub workspaces: Vec<Workspace>,
     /// Live facts accompany publication only; retained organization never supplies authority.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub close: Option<CloseInventory>,
 }
 
@@ -63,9 +63,8 @@ pub struct ConfirmedControl {
 pub struct CloseInventory {
     pub boot: Id,
     pub sessions: Vec<ConfirmedPane>,
-    /// Missing on older peers, which cannot fence confirmation-free closes.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub controls: Option<Vec<ConfirmedControl>>,
+    /// Each Pane's control grant, which fences confirmation-free closes.
+    pub controls: Vec<ConfirmedControl>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -75,7 +74,6 @@ pub struct CloseConfirmation {
     pub removes_tab: bool,
     pub removes_workspace: bool,
     /// Only a confirmation-free own close binds control in addition to exact membership.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub own_controls: Option<Vec<ConfirmedControl>>,
 }
 
@@ -186,10 +184,10 @@ pub struct Tab {
     #[serde(default)]
     pub worktree_membership_fixed: bool,
     /// Saved membership, retained even when Git no longer lists the directory.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub worktree: Option<PathBuf>,
     /// Main Worktree discovery locator for this membership, revalidated after each boot.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub worktree_repository: Option<PathBuf>,
     pub id: Id,
     pub root_pane: Id,
@@ -202,13 +200,11 @@ pub struct Pane {
     pub axis: Axis,
     pub starting_directory: PathBuf,
     /// Live terminal directory presentation. Never retained as restoration authority.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub current_directory: Option<PathBuf>,
     /// Protected Repository Source Directory from the owning Terminal Session, never retained.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub repository_directory: Option<PathBuf>,
     /// Current presentation for every authorized client, independent of Pane control or visibility.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub presentation: Option<Box<crate::pane::metadata::Snapshot>>,
     pub confirmed_directory: Option<PathBuf>,
     /// The creator reserves control even before measured first use starts a shell.
@@ -275,11 +271,7 @@ impl Mutation {
     pub fn is_bounded(&self) -> bool {
         match self {
             Self::EndAllSessions { confirmation } => {
-                confirmation.sessions.len() <= MAX_PANES
-                    && confirmation
-                        .controls
-                        .as_ref()
-                        .is_none_or(|c| c.len() <= MAX_PANES)
+                confirmation.sessions.len() <= MAX_PANES && confirmation.controls.len() <= MAX_PANES
             }
             Self::Worktree(operation) => operation.is_bounded(),
             Self::Close { confirmation, .. } => {
@@ -620,25 +612,26 @@ impl State {
         Ok(outcome)
     }
     pub fn acknowledge(&mut self, device: Id, sequence: u64) -> Result<(), Refusal> {
-        if self
-            .outcome(device, sequence)
-            .is_some_and(|o| o.outcome == Outcome::Pending)
+        // Acknowledgements are cumulative, because nothing confirms that one arrived: a later
+        // one, or the last one repeated after a reconnect, retires every earlier outcome. An
+        // outcome this server never recorded needs no retiring.
+        let Some(d) = self.devices.iter_mut().find(|d| d.device == device) else {
+            return Ok(());
+        };
+        let settled = d
+            .pending
+            .iter()
+            .take_while(|o| o.sequence <= sequence)
+            .count();
+        if d.pending[..settled]
+            .iter()
+            .any(|o| o.outcome == Outcome::Pending)
         {
             return Err(Refusal::Stale);
         }
-        let d = self
-            .devices
-            .iter_mut()
-            .find(|d| d.device == device)
-            .ok_or(Refusal::Missing)?;
-        if sequence <= d.retired {
-            return Ok(());
+        if let Some(last) = d.pending.drain(..settled).next_back() {
+            d.retired = d.retired.max(last.sequence);
         }
-        if d.pending.first().is_none_or(|o| o.sequence != sequence) {
-            return Err(Refusal::Stale);
-        }
-        d.pending.remove(0);
-        d.retired = sequence;
         Ok(())
     }
     fn edit(
@@ -659,8 +652,8 @@ impl State {
                 let Some(live) = &self.inventory.close else {
                     return Ok(Outcome::StaleConfirmation);
                 };
-                // Control changes do not broaden an explicit End All Sessions approval.
-                // Older clients omit controls; both forms still compare the exact Sessions.
+                // Control changes do not broaden an explicit End All Sessions approval, so only
+                // the exact Sessions are compared.
                 if live.boot != confirmation.boot || live.sessions != confirmation.sessions {
                     return Ok(Outcome::StaleConfirmation);
                 }
@@ -683,11 +676,7 @@ impl State {
                     return Ok(Outcome::StaleConfirmation);
                 }
                 if let Some(reviewed) = &confirmation.own_controls {
-                    let current = self
-                        .inventory
-                        .close
-                        .as_ref()
-                        .and_then(|live| live.controls.as_ref());
+                    let current = self.inventory.close.as_ref().map(|live| &live.controls);
                     if reviewed.len() != confirmation.panes.len()
                         || confirmation.panes.iter().any(|pane| {
                             reviewed
@@ -1133,10 +1122,7 @@ impl State {
             let ids: std::collections::BTreeSet<_> = ends.sessions.iter().map(|p| p.id).collect();
             if Some(ends.boot) != self.creator_boot
                 || ends.sessions.len() > MAX_PANES
-                || ends
-                    .controls
-                    .as_ref()
-                    .is_some_and(|controls| controls.len() > MAX_PANES)
+                || ends.controls.len() > MAX_PANES
                 || ids.len() != ends.sessions.len()
                 || ends
                     .sessions
@@ -1253,7 +1239,6 @@ fn valid_path(path: &Path) -> bool {
 pub struct ClientOperation {
     pub sequence: u64,
     pub mutation: Mutation,
-    pub result: Option<RetainedOutcome>,
 }
 #[cfg(feature = "client")]
 #[derive(Default, Serialize, Deserialize)]
@@ -1315,28 +1300,17 @@ impl ClientJournal {
         if self.record.pending.is_some() {
             return Err(ServerError::Unsupported);
         }
-        self.record.pending = Some(ClientOperation {
-            sequence,
-            mutation,
-            result: None,
-        });
+        self.record.pending = Some(ClientOperation { sequence, mutation });
         self.save()
     }
-    pub fn complete(&mut self, result: RetainedOutcome) -> Result<(), ServerError> {
-        let pending = self.record.pending.as_mut().ok_or(ServerError::Protocol)?;
+    /// Retires the pending operation with its validated outcome in one write. Acknowledge the
+    /// outcome to the server only after this succeeds; [`Self::last`] keeps it to acknowledge
+    /// again after a reconnect.
+    pub fn retire(&mut self, result: RetainedOutcome) -> Result<(), ServerError> {
+        let pending = self.record.pending.as_ref().ok_or(ServerError::Protocol)?;
         if pending.sequence != result.sequence || pending.mutation != result.mutation {
             return Err(ServerError::Protocol);
         }
-        pending.result = Some(result);
-        self.save()
-    }
-    pub fn retire(&mut self) -> Result<(), ServerError> {
-        let result = self
-            .record
-            .pending
-            .as_ref()
-            .and_then(|p| p.result.clone())
-            .ok_or(ServerError::Protocol)?;
         self.record.last = Some(result);
         self.record.pending = None;
         self.save()
@@ -1379,7 +1353,7 @@ mod tests {
                 id: pane,
                 session: control.session,
             }],
-            controls: Some(vec![control.clone()]),
+            controls: vec![control.clone()],
         });
         let target = CloseTarget::Tab { workspace, tab };
         let explicit = original.inventory.close_confirmation(target).unwrap();
@@ -1462,18 +1436,6 @@ mod tests {
     }
 
     #[test]
-    fn close_control_fields_read_old_wire_forms_and_omit_absent_fences() {
-        let old = serde_json::json!({ "boot": vec![9u8; 32], "sessions": [] });
-        let inventory: CloseInventory = serde_json::from_value(old.clone()).unwrap();
-        assert!(inventory.controls.is_none());
-        assert_eq!(serde_json::to_value(inventory).unwrap(), old);
-        let old = serde_json::json!({ "boot": vec![9u8; 32], "panes": [], "removes_tab": true, "removes_workspace": false });
-        let confirmation: CloseConfirmation = serde_json::from_value(old.clone()).unwrap();
-        assert!(confirmation.own_controls.is_none());
-        assert_eq!(serde_json::to_value(confirmation).unwrap(), old);
-    }
-
-    #[test]
     fn end_all_sessions_retains_exact_originals_across_acknowledgement_recovery_and_boots() {
         let mut state = State::empty();
         state.begin_boot([9; 32]);
@@ -1491,7 +1453,7 @@ mod tests {
             .unwrap();
         let pane = state.inventory.workspaces[0].tabs[0].root_pane;
         let original = CloseInventory {
-            controls: None,
+            controls: Vec::new(),
             boot: [9; 32],
             sessions: vec![ConfirmedPane {
                 id: pane,
@@ -1607,7 +1569,7 @@ mod tests {
             )
             .unwrap();
         state.inventory.close = Some(CloseInventory {
-            controls: None,
+            controls: Vec::new(),
             boot: [9; 32],
             sessions: state
                 .inventory
@@ -1691,7 +1653,7 @@ mod tests {
             .unwrap();
         state.remove_pane(outside_pane);
         state.inventory.close = Some(CloseInventory {
-            controls: None,
+            controls: Vec::new(),
             boot: [9; 32],
             sessions: state
                 .inventory
@@ -2054,7 +2016,7 @@ mod tests {
         let survivor = state.inventory.workspaces[0].tabs[1].id;
         let pane = state.inventory.workspaces[0].tabs[0].root_pane;
         state.inventory.close = Some(CloseInventory {
-            controls: None,
+            controls: Vec::new(),
             boot: [9; 32],
             sessions: vec![ConfirmedPane {
                 id: pane,
@@ -2165,6 +2127,64 @@ mod tests {
                 .is_err()
         );
         assert_eq!(state.inventory.workspaces.len(), 1);
+    }
+
+    #[test]
+    fn a_repeated_acknowledgement_retires_nothing_else() {
+        let mut state = State::empty();
+        assert_eq!(
+            state.acknowledge([1; 32], 4),
+            Ok(()),
+            "nothing recorded yet"
+        );
+        let create = |name: &str| Mutation::CreateWorkspace {
+            name: name.into(),
+            directory: None,
+        };
+        state
+            .apply([1; 32], 1, create("First"), "/tmp".as_ref(), |_| true)
+            .unwrap();
+        state.acknowledge([1; 32], 1).unwrap();
+        state
+            .apply([1; 32], 2, create("Second"), "/tmp".as_ref(), |_| true)
+            .unwrap();
+        let before = state.clone();
+        assert_eq!(state.acknowledge([1; 32], 1), Ok(()));
+        assert!(state == before, "the newer outcome stays recorded");
+        assert!(state.outcome([1; 32], 2).is_some());
+    }
+
+    #[test]
+    fn a_lost_acknowledgement_never_stops_later_edits() {
+        let mut state = State::empty();
+        let create = |sequence: u64| Mutation::CreateWorkspace {
+            name: format!("Build {sequence}"),
+            directory: None,
+        };
+        state
+            .apply([1; 32], 1, create(1), "/tmp".as_ref(), |_| true)
+            .unwrap();
+        // The acknowledgement of edit 1 never arrives. Another client keeps one outcome open.
+        state
+            .apply([2; 32], 1, create(1), "/tmp".as_ref(), |_| true)
+            .unwrap();
+        for sequence in 2..=(MAX_OUTCOMES as u64 + 8) {
+            state
+                .apply([1; 32], sequence, create(sequence), "/tmp".as_ref(), |_| {
+                    true
+                })
+                .unwrap();
+            state.acknowledge([1; 32], sequence).unwrap();
+            assert!(
+                state.outcome([1; 32], 1).is_none(),
+                "a later acknowledgement retires it"
+            );
+        }
+        assert!(
+            state.outcome([2; 32], 1).is_some(),
+            "only the acknowledging client's"
+        );
+        assert_eq!(state.next_sequence([1; 32]), MAX_OUTCOMES as u64 + 9);
     }
 
     #[test]

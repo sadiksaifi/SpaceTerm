@@ -1,26 +1,16 @@
-use super::tests::{attach, command, host, size};
+use super::tests::{attach, await_screen, command, host, size};
 use super::*;
 use pane::graphics::{CHUNK_BYTES, Error, ImageKey};
+use spaceterm_server::protocol::screen::ScreenUpdate;
 use std::time::Instant;
 
-fn image_screen(host: &mut DevelopmentPaneHost, lease: Lease) -> Box<Screen> {
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        match host.request([1; 32], lease.connection, Request::Poll { lease }) {
-            Reply::Screen(screen)
-                if screen
-                    .graphics
-                    .as_ref()
-                    .is_some_and(|g| g.as_ref().is_ok_and(|g| !g.images.is_empty())) =>
-            {
-                return screen;
-            }
-            Reply::Screen(_) | Reply::Unchanged => {}
-            other => panic!("graphics screen refused: {other:?}"),
-        }
-        assert!(Instant::now() < deadline, "graphics screen did not arrive");
-        std::thread::sleep(Duration::from_millis(5));
-    }
+fn image_screen(host: &mut DevelopmentPaneHost, lease: Lease) -> ScreenUpdate {
+    await_screen(host, [1; 32], lease, |update| {
+        update
+            .graphics
+            .as_ref()
+            .is_some_and(|g| g.as_ref().is_ok_and(|g| !g.images.is_empty()))
+    })
 }
 fn chunk(host: &mut DevelopmentPaneHost, lease: Lease, image: ImageKey, offset: usize) -> Reply {
     host.request(
@@ -46,8 +36,8 @@ fn retained_graphics_use_measured_pixels_and_fence_takeover_reconnect_and_replac
         "stty -echo; printf '\\033[2J\\033[H\\033_Ga=T,t=d,f=32,i=7,p=3,s=1,v=1,c=2,r=1,C=1;AQIDBA==\\033\\\\'",
     );
     let first = image_screen(&mut host, lease);
+    assert_eq!(first.geometry.unwrap().cell_pixels, Some((8, 18)));
     let graphics = first.graphics.unwrap().unwrap();
-    assert_eq!(first.cell_pixels, Some((8, 18)));
     assert_eq!(graphics.placements[0].destination_width, 16);
     let key = graphics.images[0].key;
     assert!(
@@ -164,12 +154,7 @@ fn graphics_transfers_are_pulled_in_bounded_chunks_without_retaining_a_transfer_
         panic!("missing final chunk")
     };
     assert_eq!(last.bytes, vec![0; 393216 - CHUNK_BYTES]);
-    assert!(
-        serde_json::to_vec(&Reply::GraphicsChunk(Ok(first)))
-            .unwrap()
-            .len()
-            < pane::MAX_TERMINAL_FRAME
-    );
+    assert!(super::dispatch::wire_bytes(Reply::GraphicsChunk(Ok(first))).is_some());
     host.shutdown().unwrap();
 }
 
@@ -207,17 +192,17 @@ fn existing_visual_fixtures_keep_pixels_and_placements_through_the_server_adapte
         for step in 0..3 {
             let local_frame = local.snapshot().unwrap().unwrap();
             let server_frame = server.snapshot().unwrap().unwrap();
-            let mut wire: Screen =
-                serde_json::from_slice(&serde_json::to_vec(&encode_screen(&server_frame)).unwrap())
-                    .unwrap();
+            let mut wire = super::tests::keyframe(&server_frame);
             assert_eq!(
-                wire.cell_pixels,
+                wire.geometry.unwrap().cell_pixels,
                 Some((
                     if step == 2 { 17 } else { 13 },
                     if step == 2 { 31 } else { 27 }
                 ))
             );
-            client.update(wire.graphics.take(), wire.alternate).unwrap();
+            client
+                .update(wire.graphics.take(), wire.modes.unwrap().alternate_screen)
+                .unwrap();
             while client
                 .poll(
                     Lease {
@@ -342,13 +327,13 @@ fn running_multichunk_animation_and_another_image_both_display_while_the_server_
     let mut generations = std::collections::HashSet::new();
     let mut advanced_before_request = false;
     let mut stale_first_request = false;
+    let mut presented = None;
     while Instant::now() < deadline && (completed < 3 || !static_visible) {
-        let reply = host.request([1; 32], lease.connection, Request::Poll { lease });
-        assert!(
-            !matches!(reply, Reply::Refused(_)),
-            "animation runtime refused its poll: {reply:?}"
-        );
-        if let Reply::Screen(mut screen) = reply {
+        let screen = super::tests::screen(&mut host, [1; 32], lease)
+            .unwrap_or_else(|event| panic!("the animation's channel ended with {event:?}"));
+        // A client receives each screen once.
+        if let Some(mut screen) = screen.filter(|screen| presented != Some(screen.generation)) {
+            presented = Some(screen.generation);
             if let Some(Ok(manifest)) = &screen.graphics {
                 generations.extend(
                     manifest
@@ -358,9 +343,8 @@ fn running_multichunk_animation_and_another_image_both_display_while_the_server_
                         .map(|image| image.key),
                 );
             }
-            graphics
-                .update(screen.graphics.take(), screen.alternate)
-                .unwrap();
+            let alternate = screen.modes.unwrap().alternate_screen;
+            graphics.update(screen.graphics.take(), alternate).unwrap();
         }
         let mut requested_offset = None;
         let painted = graphics
@@ -377,8 +361,7 @@ fn running_multichunk_animation_and_another_image_both_display_while_the_server_
                     // The first chunk can race a newer animation manifest before the server
                     // pins its source. Witness that real transition instead of relying on load.
                     loop {
-                        if let Reply::Screen(screen) =
-                            host.request([1; 32], lease.connection, Request::Poll { lease })
+                        if let Ok(Some(screen)) = super::tests::screen(&mut host, [1; 32], lease)
                             && screen.graphics.as_ref().is_some_and(|manifest| {
                                 manifest.as_ref().is_ok_and(|manifest| {
                                     manifest.images.iter().any(|current| {

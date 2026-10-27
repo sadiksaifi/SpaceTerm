@@ -1,5 +1,6 @@
 //! Acquire Pane control and start only explicitly requested retained shells.
 use super::*;
+use spaceterm_server::connection::link::{LinkEvent, LinkSink};
 
 #[cfg(test)]
 mod process_tests;
@@ -23,8 +24,114 @@ pub(super) struct Granted {
     pub appearance: Option<crate::appearance::AppearanceGeneration>,
 }
 
+/// Wakes a claim waiting at the Restored or Takeover screen when the server's answer can change
+/// without this client acting: a pushed Workspace Inventory that changes this Pane's live control
+/// facts, a detached Workspace, or the end of the link. A person's Start, selection, repair or
+/// Take Over wakes the claim directly, so the claim never asks the server again on a timer.
+pub(super) struct ControlWatch {
+    state: Arc<DevelopmentPaneState>,
+    pane: spaceterm_server::hierarchy::Id,
+    /// This Pane's control facts in the last inventory delivered.
+    seen: Mutex<Option<ControlFacts>>,
+    /// Held while the watch lives; the attachments keep a weak reference.
+    detached: Arc<dyn Fn() + Send + Sync>,
+}
+
+/// What a Workspace Inventory says about who may claim one Pane: the server's boot, its live
+/// Terminal Session and its control grant. A Pane the inventory no longer lists has neither.
+#[derive(Clone, PartialEq, Eq)]
+struct ControlFacts {
+    boot: spaceterm_server::hierarchy::Id,
+    pane: Option<spaceterm_server::hierarchy::ConfirmedPane>,
+    control: Option<spaceterm_server::hierarchy::ConfirmedControl>,
+}
+
+impl ControlFacts {
+    fn of(
+        inventory: &spaceterm_server::hierarchy::Inventory,
+        pane: spaceterm_server::hierarchy::Id,
+    ) -> Option<Self> {
+        let close = inventory.close.as_ref()?;
+        Some(Self {
+            boot: close.boot,
+            pane: close.sessions.iter().find(|p| p.id == pane).cloned(),
+            control: close
+                .controls
+                .iter()
+                .find(|control| control.pane == pane)
+                .cloned(),
+        })
+    }
+}
+
+impl ControlWatch {
+    pub(super) fn new(
+        state: Arc<DevelopmentPaneState>,
+        pane: spaceterm_server::hierarchy::Id,
+    ) -> Arc<Self> {
+        let detached: Arc<dyn Fn() + Send + Sync> = {
+            let state = Arc::clone(&state);
+            Arc::new(move || state.wake.notify())
+        };
+        Arc::new(Self {
+            state,
+            pane,
+            seen: Mutex::new(None),
+            detached,
+        })
+    }
+
+    /// Follows the shared link of `server` and the Workspace attachment of `permit`, as long as
+    /// the returned watch lives.
+    pub(super) fn start(
+        server: &ServerConnection,
+        state: Arc<DevelopmentPaneState>,
+        pane: spaceterm_server::hierarchy::Id,
+        permit: Option<&spaceterm_server::attachments::AttachmentPermit>,
+    ) -> Arc<Self> {
+        let watch = Self::new(state, pane);
+        server.subscribe(Arc::downgrade(&watch) as std::sync::Weak<dyn LinkSink>);
+        if let Some(permit) = permit {
+            permit.watch(Arc::downgrade(&watch.detached));
+        }
+        watch
+    }
+}
+
+impl LinkSink for ControlWatch {
+    fn deliver(&self, event: LinkEvent) {
+        let changed = match event {
+            LinkEvent::Inventory(revision) => {
+                let facts = ControlFacts::of(&revision.inventory, self.pane);
+                let mut seen = self.seen.lock().unwrap_or_else(|e| e.into_inner());
+                (*seen != facts) && {
+                    *seen = facts;
+                    true
+                }
+            }
+            // The next request learns how the link ended.
+            LinkEvent::Health(_) => true,
+        };
+        if changed {
+            self.state.wake.notify();
+        }
+    }
+}
+
 /// Runs in the presenter's send turn, so replacement cannot overtake recovery bookkeeping.
 pub(super) fn exchange(
+    state: &DevelopmentPaneState,
+    pane_id: spaceterm_server::hierarchy::Id,
+    request: &Request,
+    exchange: impl FnOnce(&Request) -> Result<Reply, ServerError>,
+) -> Result<Reply, ServerError> {
+    let result = bookkept(state, pane_id, request, exchange);
+    // A start's confirmation and directory progress may have moved.
+    state.changed();
+    result
+}
+
+fn bookkept(
     state: &DevelopmentPaneState,
     pane_id: spaceterm_server::hierarchy::Id,
     request: &Request,
@@ -245,10 +352,9 @@ impl ClaimWorker<'_> {
                         result => result?,
                     };
                 } else {
-                    // Take Over, Start and selection wake this check early.
-                    state
-                        .wake
-                        .wait_until(std::time::Instant::now() + Duration::from_millis(100));
+                    // Start, selection, repair and dismissal wake this wait, and so does
+                    // anything `ControlWatch` sees that can change the server's answer.
+                    state.wake.wait(None);
                     let size = *size.lock().unwrap_or_else(|e| e.into_inner());
                     grant_size = size;
                     grant_appearance = None;
@@ -298,10 +404,9 @@ impl ClaimWorker<'_> {
                         style: Some(encode_style(&update)),
                     })?;
                 } else {
-                    // Take Over, Start and selection wake this check early.
-                    state
-                        .wake
-                        .wait_until(std::time::Instant::now() + Duration::from_millis(100));
+                    // Take Over, selection and dismissal wake this wait, and so does anything
+                    // `ControlWatch` sees that can change the server's answer.
+                    state.wake.wait(None);
                     let size = *size.lock().unwrap_or_else(|e| e.into_inner());
                     grant_size = size;
                     grant_appearance = None;
@@ -381,7 +486,8 @@ mod tests {
 
     #[test]
     fn fifteen_hidden_creation_grants_release_startup_without_a_screen() {
-        use spaceterm_server::{hierarchy::Mutation, pane::PaneService as _};
+        use crate::runtime::HostCommands as _;
+        use spaceterm_server::hierarchy::Mutation;
 
         let mut host = crate::runtime::directory_testing::terminal_host();
         host.prepare_initial_organization().unwrap();
@@ -441,37 +547,17 @@ mod tests {
             )
             .unwrap()
             .unwrap();
-            assert!(matches!(
-                host.request(
-                    [1; 32],
-                    [1; 32],
-                    Request::PresentationDemand {
-                        lease: grant.lease,
-                        visible: false
-                    }
-                ),
-                Reply::Unchanged
-            ));
-            let poll = host.request(
-                [1; 32],
-                [1; 32],
-                Request::PollChanges {
-                    lease: grant.lease,
-                    base: None,
-                },
-            );
+            crate::runtime::HostCommands::view(&mut host, &grant.lease, false, 60);
             observations.push((
                 state.startup_pending(),
                 state.status(),
                 state.interactive_input(),
-                matches!(poll, Reply::Screen(_) | Reply::ScreenChanges(_)),
             ));
         }
         // Stop every fixture PTY before any assertion can fail.
         host.shutdown().unwrap();
         assert_eq!(observations.len(), 15);
-        for (pending, status, input, screen) in observations {
-            assert!(!screen, "hidden lifecycle polls supply no screen");
+        for (pending, status, input) in observations {
             assert_eq!(status, DevelopmentPaneStatus::Connecting);
             assert_eq!(input, crate::terminal::InteractiveInput::Pending);
             assert!(
@@ -483,8 +569,8 @@ mod tests {
 
     #[test]
     fn never_visited_hidden_pane_prepares_current_rows_without_visible_cadence() {
+        use crate::runtime::HostCommands as _;
         use crate::terminal::geometry::{BackingScale, CellGridSize, LogicalCellSize};
-        use spaceterm_server::pane::PaneService as _;
 
         let mut host = crate::runtime::directory_testing::terminal_host();
         host.prepare_initial_organization().unwrap();
@@ -558,50 +644,26 @@ mod tests {
         }
         handle.set_preparation_demand(true);
         let start = std::time::Instant::now();
-        let mut cadence = schedule::Cadence::new(start, false);
+        let mut demand = super::inbox::Demand::new(false, 60);
         // Read the same demand inputs that the production presentation worker uses.
-        cadence.set_preparation(state.preparation.load(Ordering::Acquire));
+        demand.set_preparation(state.preparation.load(Ordering::Acquire));
         let mut prepared = false;
-        let mut decoder = pane::presentation::ScreenDecoder::default();
         while start.elapsed() < Duration::from_secs(3) {
-            if let Some(visible) = cadence.take_demand() {
-                assert!(matches!(
-                    host.request(
-                        [1; 32],
-                        [1; 32],
-                        Request::PresentationDemand { lease, visible }
-                    ),
-                    Reply::Unchanged
-                ));
+            if let Some((visible, max_hz)) = demand.take_view() {
+                crate::runtime::HostCommands::view(&mut host, &lease, visible, max_hz);
             }
-            let now = std::time::Instant::now();
-            if cadence.poll_due(now) {
-                let reply = host.request(
-                    [1; 32],
-                    [1; 32],
-                    Request::PollChanges {
-                        lease,
-                        base: decoder.baseline(),
-                    },
-                );
-                if let Reply::Screen(screen) = decoder.apply(reply).unwrap() {
-                    prepared = screen.rows.iter().any(|row| {
-                        row.iter()
-                            .map(|cell| cell.text.as_str())
-                            .collect::<String>()
-                            .trim_end()
-                            == "HIDDEN-PREPARED"
-                    });
-                    if prepared {
-                        break;
-                    }
-                }
+            prepared =
+                crate::terminal::server_session::screen_decoder::observed_lines(&mut host, lease)
+                    .iter()
+                    .any(|row| row.trim_end() == "HIDDEN-PREPARED");
+            if prepared {
+                break;
             }
             std::thread::sleep(Duration::from_millis(5));
         }
         handle.set_preparation_demand(false);
-        cadence.set_preparation(state.preparation.load(Ordering::Acquire));
-        let withdrawn = cadence.take_demand();
+        demand.set_preparation(state.preparation.load(Ordering::Acquire));
+        let withdrawn = demand.take_view();
         host.shutdown().unwrap();
         assert!(
             prepared,
@@ -609,11 +671,10 @@ mod tests {
         );
         assert!(!state.presentable.load(Ordering::Acquire));
         assert!(
-            !cadence.visible(),
-            "preparation must not enable graphics fetching or visible cadence"
+            !demand.visible(),
+            "preparation must not enable graphics fetching"
         );
-        assert_eq!(withdrawn, Some(false));
-        assert!(cadence.deadline() >= start + Duration::from_millis(250));
+        assert_eq!(withdrawn, Some((false, 60)));
         assert_eq!(
             state.interactive_input(),
             crate::terminal::InteractiveInput::Pending
@@ -622,8 +683,9 @@ mod tests {
 
     #[test]
     fn fresh_panes_never_present_server_restarted_before_first_use() {
+        use crate::runtime::HostCommands as _;
         use crate::ui::server_pane::ServerPaneView;
-        use spaceterm_server::{hierarchy::Mutation, pane::PaneService as _};
+        use spaceterm_server::hierarchy::Mutation;
 
         for delayed in [false, true] {
             for revoked in [false, true] {
@@ -850,7 +912,7 @@ mod tests {
             Request::SelectPane {
                 explicit: false, ..
             } => {
-                // Select once to enter Restored, then request a start on its passive poll.
+                // Select once to enter Restored, then request a start on its next selection check.
                 state.start_restored();
                 Ok(restored(1))
             }
@@ -1215,6 +1277,115 @@ mod tests {
         );
         assert_eq!(result.err(), Some(ServerError::AuthenticationRefused));
         assert!(!sent, "identity refusal must happen before wire dispatch");
+    }
+
+    #[test]
+    fn a_waiting_claim_asks_again_only_when_its_pane_control_facts_change() {
+        use spaceterm_server::connection::link::Health;
+        use spaceterm_server::hierarchy::{
+            CloseInventory, ConfirmedControl, ConfirmedPane, Inventory,
+        };
+        use spaceterm_server::protocol::InventoryRevision;
+        use std::sync::atomic::AtomicUsize;
+        use std::time::{Duration, Instant};
+
+        let pane = [2; 32];
+        let session = [3; 32];
+        // Organization revisions change without moving this Pane's control.
+        let revision = |owner: u8, epoch: u64, revision: u64| {
+            let inventory = Inventory {
+                repositories: None,
+                revision,
+                workspaces: Vec::new(),
+                close: Some(CloseInventory {
+                    boot: [1; 32],
+                    sessions: vec![ConfirmedPane {
+                        id: pane,
+                        session: Some(session),
+                    }],
+                    controls: vec![ConfirmedControl {
+                        pane,
+                        session: Some(session),
+                        owner: [owner; 32],
+                        epoch,
+                    }],
+                }),
+            };
+            LinkEvent::Inventory(Arc::new(InventoryRevision {
+                inventory,
+                next_sequence: 1,
+            }))
+        };
+        let state = Arc::new(DevelopmentPaneState::new());
+        let watch = ControlWatch::new(Arc::clone(&state), pane);
+        // The first revision the watch sees is new to it.
+        watch.deliver(revision(9, 1, 1));
+        let selections = AtomicUsize::new(0);
+        let released = AtomicBool::new(false);
+        let settled = |count: usize| {
+            let until = Instant::now() + Duration::from_secs(5);
+            while selections.load(Ordering::SeqCst) < count {
+                assert!(Instant::now() < until, "the claim did not ask again");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            // Long enough for several of the old 100 ms checks.
+            std::thread::sleep(Duration::from_millis(400));
+            selections.load(Ordering::SeqCst)
+        };
+        std::thread::scope(|scope| {
+            let claim = scope.spawn(|| {
+                run_claim(&state, |request| {
+                    assert!(matches!(
+                        request,
+                        Request::SelectPane {
+                            explicit: false,
+                            ..
+                        }
+                    ));
+                    selections.fetch_add(1, Ordering::SeqCst);
+                    Ok(if released.load(Ordering::SeqCst) {
+                        Reply::Attached {
+                            lease: Lease {
+                                server: [1; 32],
+                                session,
+                                control: [4; 32],
+                                connection: [5; 32],
+                            },
+                        }
+                    } else {
+                        Reply::Takeover {
+                            target: pane::PaneTarget {
+                                server: [1; 32],
+                                session,
+                            },
+                            controller: pane::control::Controller::Client {
+                                name: "Studio".into(),
+                                this_client: false,
+                            },
+                            session_ended: false,
+                        }
+                    })
+                })
+            });
+            // Entering the Takeover Screen may look once more; then nothing asks while idle.
+            let idle = settled(1);
+            assert!(idle <= 2, "{idle} selections while nothing changed");
+            assert_eq!(settled(idle), idle);
+            watch.deliver(revision(9, 1, 2));
+            assert_eq!(
+                settled(idle),
+                idle,
+                "an inventory that leaves this Pane's control unchanged asks nothing"
+            );
+            watch.deliver(LinkEvent::Health(Health::Live));
+            let after_health = settled(idle + 1);
+            assert_eq!(after_health, idle + 1, "a link event asks once");
+            released.store(true, Ordering::SeqCst);
+            watch.deliver(revision(1, 2, 3));
+            let granted = claim.join().unwrap().unwrap().unwrap();
+            assert_eq!(granted.lease.session, session);
+            assert_eq!(selections.load(Ordering::SeqCst), after_health + 1);
+        });
     }
 
     #[test]

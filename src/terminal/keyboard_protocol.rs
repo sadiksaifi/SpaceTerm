@@ -33,8 +33,23 @@ impl KeyboardProtocolEncoder {
             .as_deref()
             .is_some_and(|text| text.chars().any(char::is_control))
         {
-            return Err(TerminalFailure::emulator("validate-key-text")
-                .with_reason(FailureReason::InvalidInput));
+            // Text input made of control characters is typed as the keys that produce them, so
+            // the active keyboard protocol encodes them. A physical key carries its own meaning,
+            // so platform control text on it is dropped.
+            let keys = if input.is_text_input() || input.is_input_method_commit() {
+                input.typed_keys().map_err(|_| {
+                    TerminalFailure::emulator("validate-key-text")
+                        .with_reason(FailureReason::InvalidInput)
+                })?
+            } else {
+                let mut key = input.clone();
+                key.text = None;
+                vec![key]
+            };
+            for key in &keys {
+                self.encode(terminal, key, bytes)?;
+            }
+            return Ok(());
         }
 
         // Ctrl+[ is xterm's Escape in legacy encoding. Keep the layout text so Ghostty can

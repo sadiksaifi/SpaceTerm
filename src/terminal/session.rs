@@ -3,12 +3,16 @@ use super::native_services::PastePayload;
 use crate::terminal::key::InputModifiers;
 pub(crate) mod clipboard;
 mod input;
-mod server_reading;
+mod scrollback;
+pub(crate) use scrollback::ScrollbackReply;
+mod publication;
+pub(crate) use publication::DEFAULT_FRAME_RATE;
 mod subscriptions;
 pub use clipboard::ClipboardCompletion;
 pub use clipboard::{ClientEffectGrant, ClientEffectRequest, ClipboardRequest};
 use clipboard::{ClipboardAuthority, WorkerClipboard};
 use input::PtyInput;
+pub(crate) use subscriptions::SubscriptionNotifier;
 pub use subscriptions::TerminalSubscription;
 use subscriptions::{TerminalEventPublisher, WorkerEventLifetime};
 mod schedules;
@@ -708,42 +712,6 @@ impl TerminalRuntime {
             let _ = commands.send(Command::CopyOrForward(modifiers, reply));
         }
     }
-    pub(crate) fn reading_pointer(&self, input: PointerInput) -> mpsc::Receiver<bool> {
-        let (reply, completion) = mpsc::sync_channel(1);
-        if let Some(commands) = &self.commands {
-            let _ = commands.send(Command::ReadingPointer(input, reply));
-        }
-        completion
-    }
-    pub(crate) fn reading_wheel(&self, input: WheelInput) -> mpsc::Receiver<bool> {
-        let (reply, completion) = mpsc::sync_channel(1);
-        if let Some(commands) = &self.commands {
-            let _ = commands.send(Command::ReadingWheel(input, reply));
-        }
-        completion
-    }
-    pub(crate) fn reading_barrier(&self) -> mpsc::Receiver<()> {
-        let (tx, rx) = mpsc::sync_channel(1);
-        if let Some(commands) = &self.commands {
-            let _ = commands.send(Command::ReadingBarrier(tx));
-        }
-        rx
-    }
-    pub(crate) fn reset_reading(&self) {
-        if let Some(commands) = &self.commands {
-            let _ = commands.send(Command::ResetReading);
-        }
-    }
-    pub(crate) fn prepare_server_selection(
-        &self,
-        generation: u64,
-    ) -> mpsc::Receiver<server_reading::PreparedSelection> {
-        let (tx, rx) = mpsc::sync_channel(1);
-        if let Some(commands) = &self.commands {
-            let _ = commands.send(Command::PrepareServerSelection(generation, tx));
-        }
-        rx
-    }
     /// Applies a server client's accessible Selection endpoints on the worker.
     ///
     /// The receiver yields `true` only when the Selection changed; stale endpoints, mismatched
@@ -799,10 +767,43 @@ impl TerminalRuntime {
     pub(crate) fn client_effect_focus(&self, focused: Option<bool>) {
         self.clipboard_authority.client_focus(focused);
     }
+    /// Sets the frame rate the presenting client declared, in hertz. Publication coalesces
+    /// continued output to at most one screen per frame at this rate.
+    pub(crate) fn set_frame_rate(&self, hz: u8) {
+        if let Some(commands) = &self.commands {
+            let _ = commands.send(Command::SetFrameRate(hz));
+        }
+    }
+
+    /// Marks the end of client Input `serial`: call it after the runtime calls that apply that
+    /// Input. Screens captured once its bytes reach the PTY carry it as `input_serial`.
+    pub(crate) fn note_input_serial(&self, serial: u32) {
+        if let Some(commands) = &self.commands {
+            let _ = commands.send(Command::InputSerial(serial));
+        }
+    }
+
+    /// A new client claim numbers its Input from 1 again, so screens report no serial of an
+    /// earlier claim. Call it before any Input of the new claim.
+    pub(crate) fn restart_input_serials(&self) {
+        if let Some(commands) = &self.commands {
+            let _ = commands.send(Command::RestartInputSerials);
+        }
+    }
+
     /// Opens one presentation subscription, replacing the previous subscription.
     /// Dropping its receivers leaves this runtime and its PTY alive.
     pub fn subscribe(&self) -> TerminalSubscription {
-        let (events, event_sender) = self.event_publisher.subscribe();
+        self.subscribe_notifying(None)
+    }
+
+    /// Opens a subscription like [`Self::subscribe`] that calls `notifier` whenever it has
+    /// something to receive, so its owner waits for that instead of polling.
+    pub(crate) fn subscribe_notifying(
+        &self,
+        notifier: Option<SubscriptionNotifier>,
+    ) -> TerminalSubscription {
+        let (events, event_sender) = self.event_publisher.subscribe(notifier);
         self.clipboard_authority.observe_subscription(event_sender);
         let (accessibility_sender, accessibility) = async_channel::bounded(1);
         let (clipboard_sender, clipboard) = async_channel::bounded(1);
@@ -1187,11 +1188,7 @@ struct ReaderEventBatch {
 }
 
 enum Command {
-    ReadingPointer(PointerInput, mpsc::SyncSender<bool>),
-    ReadingWheel(WheelInput, mpsc::SyncSender<bool>),
-    ResetReading,
-    ReadingBarrier(mpsc::SyncSender<()>),
-    PrepareServerSelection(u64, mpsc::SyncSender<server_reading::PreparedSelection>),
+    ReadScrollback(scrollback::ScrollbackRead),
     ServerAccessibilitySelection(Option<AccessibilitySelectionRefs>, mpsc::SyncSender<bool>),
     EndAccessibilityDemand(Instant),
     RouteClientEffects,
@@ -1249,12 +1246,20 @@ enum Command {
     AccessibilityDemand,
     AccessibilityContinue,
     PublishAccessibility,
+    /// A hidden Terminal Session reports metadata that changed while it was paced.
+    PublishMetadata,
     SelectionAutoscrollTick,
     PublishPendingScreen,
     MetadataStatusTick,
     GraphicsAnimationTick,
     GraphicsBudgetAvailable,
     SetPresentable(bool),
+    /// The presenting client's frame rate, in hertz.
+    SetFrameRate(u8),
+    /// Every byte of client Input `serial` has been enqueued for the PTY.
+    InputSerial(u32),
+    /// A new client claim numbers its Input from 1 again.
+    RestartInputSerials,
     AppearanceChanged,
     ReaderReady(Option<u64>),
     CompressScrollback,
@@ -1275,16 +1280,12 @@ impl Command {
         matches!(
             self,
             Self::Pointer(..)
-                | Self::ReadingPointer(..)
-                | Self::ReadingWheel(..)
                 | Self::ApplicationPointer(..)
                 | Self::PointerAndCopySelection(..)
                 | Self::Wheel(..)
                 | Self::ScrollTo(..)
                 | Self::SelectionCopy(Some(_), _)
-                | Self::PrepareServerSelection(..)
                 | Self::ServerAccessibilitySelection(..)
-                | Self::ReadingBarrier(_)
                 | Self::AccessibilitySelection(..)
                 | Self::AccessibilityContinue
                 | Self::PublishAccessibility
@@ -1295,11 +1296,7 @@ impl Command {
 impl fmt::Debug for Command {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let name = match self {
-            Self::ReadingPointer(..) => "ReadingPointer",
-            Self::ReadingWheel(..) => "ReadingWheel",
-            Self::ResetReading => "ResetReading",
-            Self::ReadingBarrier(_) => "ReadingBarrier",
-            Self::PrepareServerSelection(..) => "PrepareServerSelection",
+            Self::ReadScrollback(..) => "ReadScrollback",
             Self::ServerAccessibilitySelection(..) => "ServerAccessibilitySelection",
             Self::EndAccessibilityDemand(..) => "EndAccessibilityDemand",
             Self::RouteClientEffects => "RouteClientEffects",
@@ -1327,12 +1324,16 @@ impl fmt::Debug for Command {
             Self::AccessibilityDemand => "AccessibilityDemand",
             Self::AccessibilityContinue => "AccessibilityContinue",
             Self::PublishAccessibility => "PublishAccessibility",
+            Self::PublishMetadata => "PublishMetadata",
             Self::SelectionAutoscrollTick => "SelectionAutoscrollTick",
             Self::PublishPendingScreen => "PublishPendingScreen",
             Self::MetadataStatusTick => "MetadataStatusTick",
             Self::GraphicsAnimationTick => "GraphicsAnimationTick",
             Self::GraphicsBudgetAvailable => "GraphicsBudgetAvailable",
             Self::SetPresentable(..) => "SetPresentable",
+            Self::SetFrameRate(..) => "SetFrameRate",
+            Self::InputSerial(..) => "InputSerial",
+            Self::RestartInputSerials => "RestartInputSerials",
             Self::AppearanceChanged => "AppearanceChanged",
             Self::ReaderReady(_) => "ReaderReady",
             Self::CompressScrollback => "CompressScrollback",
@@ -1354,7 +1355,8 @@ struct TerminalWorker {
     native_pty: NativePtyOwner,
     input: PtyInput,
     emulator: TerminalEmulator,
-    server_reading: Option<server_reading::ServerReading>,
+    /// The worker presents a SpaceTerm Server Pane: clients present and read its screens.
+    served: bool,
     commands: CommandReceiver<Command>,
     reader_events: mpsc::Receiver<NativePtyOutput>,
     events: TerminalEventPublisher,
@@ -1551,7 +1553,7 @@ impl TerminalWorker {
             native_pty,
             input: PtyInput::default(),
             emulator,
-            server_reading: None,
+            served: false,
             commands,
             reader_events: reader_event_rx,
             events,
@@ -1738,7 +1740,7 @@ impl TerminalWorker {
     }
 
     fn order_presentation_barrier(&mut self, command: Command) -> Command {
-        if self.server_reading.is_some()
+        if self.served
             && !self.schedules.is_presentable()
             && matches!(
                 &command,
@@ -1767,53 +1769,7 @@ impl TerminalWorker {
 
     fn process_command(&mut self, command: Command) -> bool {
         match command {
-            Command::ReadingPointer(input, reply) => match self.emulator.reading_pointer(input) {
-                Ok(action) => {
-                    let applied = action.is_some();
-                    let success = action.is_none_or(|action| self.apply_emulator_action(action))
-                        && self.refresh_selection_autoscroll();
-                    let _ = reply.send(applied && success);
-                    success
-                }
-                Err(error) => {
-                    self.send_runtime_failure(error);
-                    false
-                }
-            },
-            Command::ReadingWheel(input, reply) => match self.emulator.reading_wheel(input) {
-                Ok(action) => {
-                    let applied = action.is_some();
-                    let success = action.is_none_or(|action| self.apply_emulator_action(action));
-                    let _ = reply.send(applied && success);
-                    success
-                }
-                Err(error) => {
-                    self.send_runtime_failure(error);
-                    false
-                }
-            },
-            Command::ReadingBarrier(reply) => {
-                let _ = reply.send(());
-                true
-            }
-            Command::ResetReading => match self.emulator.reset_reading() {
-                Ok(action) => self.apply_emulator_action(action),
-                Err(error) => {
-                    self.send_runtime_failure(error);
-                    false
-                }
-            },
-            Command::PrepareServerSelection(generation, reply) => {
-                let selection = if self.emulator.synchronized_output_deadline().is_some() {
-                    Ok(None)
-                } else {
-                    self.server_reading
-                        .as_ref()
-                        .map_or(Ok(None), |reading| reading.prepared(generation))
-                };
-                let _ = reply.send(selection);
-                true
-            }
+            Command::ReadScrollback(read) => self.read_scrollback(read),
             Command::ServerAccessibilitySelection(selection, reply) => {
                 match self.emulator.set_accessibility_selection_refs(selection) {
                     Ok(changed) => {
@@ -1835,8 +1791,7 @@ impl TerminalWorker {
             }
             Command::RouteClientEffects => {
                 self.emulator.enable_client_clipboard();
-                self.emulator.enable_server_reading();
-                self.server_reading = Some(server_reading::ServerReading::default());
+                self.served = true;
                 self.schedules
                     .set_server_presentable(self.schedules.is_presentable(), Instant::now());
                 true
@@ -2084,6 +2039,7 @@ impl TerminalWorker {
             }
             Command::AccessibilityContinue => self.publish_accessibility(false),
             Command::PublishAccessibility => self.publish_accessibility(true),
+            Command::PublishMetadata => self.publish_metadata_changed(),
             Command::SelectionAutoscrollTick => {
                 if self.emulator.synchronized_output_deadline().is_some() {
                     return self.refresh_selection_autoscroll();
@@ -2111,7 +2067,7 @@ impl TerminalWorker {
             }
             Command::SetPresentable(presentable) => {
                 let now = Instant::now();
-                if self.server_reading.is_some() {
+                if self.served {
                     self.schedules.set_server_presentable(presentable, now);
                 } else {
                     self.schedules.set_presentable(presentable, now);
@@ -2126,6 +2082,19 @@ impl TerminalWorker {
                 } else {
                     true
                 }
+            }
+            Command::SetFrameRate(hz) => {
+                self.schedules.set_frame_rate(hz);
+                true
+            }
+            Command::InputSerial(serial) => {
+                self.input.note_serial(serial);
+                true
+            }
+            Command::RestartInputSerials => {
+                self.input.restart_serials();
+                self.emulator.set_input_serial(0);
+                true
             }
             Command::AppearanceChanged => {
                 let Some(update) = self.schedules.take_terminal_appearance() else {
@@ -2406,9 +2375,11 @@ impl TerminalWorker {
                     if !self.flush_ordered_terminal_replies(&mut focus_reports) {
                         return false;
                     }
-                    self.clipboard
-                        .begin(operation, epoch)
-                        .is_none_or(|bytes| self.write_pty(&bytes))
+                    let denied = self.clipboard.begin(operation, epoch);
+                    if self.clipboard.pending() {
+                        self.events.notify();
+                    }
+                    denied.is_none_or(|bytes| self.write_pty(&bytes))
                 }
                 Osc52Effect::Rejected(_) => true,
             };
@@ -2438,7 +2409,7 @@ impl TerminalWorker {
         }
 
         if received_output {
-            if self.server_reading.is_some() {
+            if self.served {
                 self.schedules.note_hidden_server_content_changed();
             }
             let metadata = self.emulator.metadata();
@@ -2565,6 +2536,14 @@ impl TerminalWorker {
         }
         match self.emulator.key(input) {
             Ok(action) => self.apply_terminal_input_action(action),
+            // A key that cannot be encoded is discarded. It says nothing about the Terminal
+            // Session, which keeps running.
+            Err(failure)
+                if failure.reason()
+                    == Some(crate::terminal::failure::FailureReason::InvalidInput) =>
+            {
+                true
+            }
             Err(message) => {
                 self.send_runtime_failure(message);
                 false
@@ -2674,7 +2653,7 @@ impl TerminalWorker {
     }
 
     fn publish_visible_screen_change(&mut self) -> bool {
-        if self.server_reading.is_some() {
+        if self.served {
             self.schedules.note_hidden_server_content_changed();
         }
         self.schedules.request_presentation();
@@ -2715,7 +2694,7 @@ impl TerminalWorker {
     fn publish_screen(&mut self) -> bool {
         self.metadata_state.publish(self.emulator.metadata());
         if self.events.is_closed() {
-            if self.server_reading.is_some() {
+            if self.served {
                 self.schedules.set_server_presentable(false, Instant::now());
             } else {
                 self.schedules.set_presentable(false, Instant::now());
@@ -2728,10 +2707,8 @@ impl TerminalWorker {
 
     fn publish_screen_snapshot(&mut self) -> bool {
         self.metadata_state.publish(self.emulator.metadata());
-        if let Some(reading) = &mut self.server_reading {
-            reading.update(&mut self.emulator);
-        }
         let semantic_content_changed = self.emulator.accessibility_content_changed();
+        self.emulator.set_input_serial(self.input.written_serial());
         let snapshot = self.emulator.snapshot();
         self.schedules
             .update_graphics_animation(self.emulator.graphics_animation_deadline());
@@ -2757,7 +2734,7 @@ impl TerminalWorker {
                     .is_ok()
                     || self.events.is_closed();
                 if result {
-                    let now = Instant::now();
+                    let now = self.schedules.now();
                     self.schedules.metadata_presented();
                     self.schedules.mark_presented(now);
                     if self.accessibility.is_closed() {
@@ -2786,11 +2763,11 @@ impl TerminalWorker {
     }
 
     fn request_presentation(&mut self) -> bool {
-        self.request_presentation_at(Instant::now())
+        self.request_presentation_at(self.schedules.now())
     }
 
     fn request_pty_presentation(&mut self) -> bool {
-        let now = Instant::now();
+        let now = self.schedules.now();
         self.schedules.request_pty_presentation(now);
         if self.schedules.presentation_due(now) {
             self.publish_screen()
@@ -2800,7 +2777,8 @@ impl TerminalWorker {
     }
 
     fn publish_metadata_changed(&mut self) -> bool {
-        let Some(wakeup) = self.schedules.take_metadata_presentation() else {
+        let now = self.schedules.now();
+        let Some(wakeup) = self.schedules.take_metadata_presentation(now) else {
             return true;
         };
         match self
@@ -2870,6 +2848,7 @@ impl TerminalWorker {
             // Accessibility is an independent best-effort presentation lane. Losing its
             // receiver must not stop shell IO or lifecycle delivery on the event lane.
             let _ = self.accessibility.force_send(accessibility);
+            self.events.notify();
         }
         true
     }

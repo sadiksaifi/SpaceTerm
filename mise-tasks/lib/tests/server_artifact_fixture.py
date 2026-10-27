@@ -33,7 +33,7 @@ def prepare(
     ).stdout.strip()
     expected = {
         "schema": 1,
-        "protocol_major": 1,
+        "protocol_major": 2,
         "capabilities": ["workspace_policy"],
         "identity": "spaceterm" if release_tag else "spaceterm-preflight",
         "target": "aarch64-apple-darwin"

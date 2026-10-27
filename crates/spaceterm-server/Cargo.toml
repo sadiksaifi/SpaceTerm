@@ -7,6 +7,8 @@ autobins = false
 [features]
 default = []
 client = []
+# Lets another crate's tests serve a client handle in process.
+test-support = ["client"]
 
 [dependencies]
 base64 = "=0.22.1"
@@ -16,6 +18,7 @@ libc = "=0.2.189"
 ring = "=0.17.14"
 serde = { version = "1.0", features = ["derive", "rc"] }
 serde_json = "1.0"
+postcard = { version = "=1.1.3", default-features = false, features = ["alloc"] }
 socket2 = "=0.6.5"
 rustls = { version = "=0.23.45", default-features = false, features = ["ring", "std", "tls12"] }
 tungstenite = { version = "=0.30.0", default-features = false, features = ["handshake"] }

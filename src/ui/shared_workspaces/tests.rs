@@ -87,7 +87,7 @@ fn inventory(revision: u64, tabs: Vec<Tab>) -> Inventory {
         repositories: None,
         revision,
         close: Some(CloseInventory {
-            controls: None,
+            controls: Vec::new(),
             boot: BOOT,
             sessions,
         }),
@@ -195,8 +195,6 @@ fn pane_count(harness: &SharedHarness, cx: &mut VisualTestContext) -> usize {
 
 /// Lets every Pane read its connection and paints the frame that follows.
 fn settle(_: &SharedHarness, cx: &mut VisualTestContext) {
-    cx.executor()
-        .advance_clock(crate::ui::shared_workspaces::POLL_INTERVAL * 3);
     cx.run_until_parked();
     cx.update(|window, _| window.refresh());
     cx.run_until_parked();
@@ -644,6 +642,28 @@ fn a_takeover_screen_should_replace_the_pane_and_offer_take_over(cx: &mut TestAp
         harness.panes.pane(ROOT_PANE).take_overs(),
         1,
         "Take Over should ask the server once"
+    );
+}
+
+/// Each change to a Pane's connection hints the Tab, which shows it without a timer, including a
+/// change that follows the Tab's previous reading.
+#[gpui::test]
+fn each_pane_change_should_show_without_a_timer(cx: &mut TestAppContext) {
+    let (harness, cx) = shared_tab_manager(cx);
+    let pane = harness.panes.pane(ROOT_PANE);
+
+    pane.set(DevelopmentPaneStatus::Takeover);
+    settle(&harness, cx);
+    assert!(
+        cx.debug_bounds("shared-pane-takeover-1").is_some(),
+        "the first change shows"
+    );
+
+    pane.reconnect();
+    settle(&harness, cx);
+    assert!(
+        cx.debug_bounds("shared-pane-takeover-1").is_none(),
+        "a change after the Tab's reading shows too"
     );
 }
 
@@ -2260,6 +2280,34 @@ mod draft {
                 _ => None,
             })
             .expect("the inline editor should have submitted its draft")
+    }
+
+    #[gpui::test]
+    fn republishing_the_same_rows_should_not_redraw_the_sidebar(cx: &mut TestAppContext) {
+        let (sidebar, _events, cx) = sidebar(cx);
+        publish(&sidebar, row("Build", 0), cx);
+        let notifications = std::rc::Rc::new(std::cell::Cell::new(0));
+        cx.update(|_, cx| {
+            let notifications = notifications.clone();
+            cx.observe(&sidebar, move |_, _| {
+                notifications.set(notifications.get() + 1)
+            })
+            .detach();
+        });
+        let set = |row: WorkspaceRowViewModel, cx: &mut VisualTestContext| {
+            cx.update(|_, cx| {
+                sidebar.update(cx, |sidebar, cx| {
+                    sidebar.set_rows(vec![row], Vec::new(), cx)
+                })
+            })
+        };
+
+        assert!(!set(row("Build", 0), cx));
+        cx.run_until_parked();
+        assert_eq!(notifications.get(), 0);
+        assert!(set(row("Theirs", 1), cx));
+        cx.run_until_parked();
+        assert_eq!(notifications.get(), 1);
     }
 
     #[gpui::test]

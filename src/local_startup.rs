@@ -95,7 +95,7 @@ impl Candidate {
             &self.paths.archive,
             &self.paths.signature,
             &self.digest,
-            1,
+            spaceterm_server::protocol::MAJOR,
             &["workspace_policy"],
         )
     }
@@ -143,7 +143,7 @@ pub fn discover_candidate() -> Result<Candidate, CandidateError> {
                 &paths.archive,
                 &paths.signature,
                 digest,
-                1,
+                spaceterm_server::protocol::MAJOR,
                 &["workspace_policy"],
             )
         })

@@ -392,6 +392,22 @@ pub(crate) trait RepositoryWatcher: Send + Sync + 'static {
     ) -> Result<Box<dyn RepositoryWatch>, RepositoryWatchError>;
 }
 
+/// Called with the paths a watch set saw change. An empty list means the paths are unknown, as
+/// after a watch error.
+pub(crate) type ChangedPaths = Box<dyn Fn(&[PathBuf]) + Send + Sync>;
+
+/// One watcher, and one event thread, for every directory its owner follows. Dropping it stops
+/// every watch.
+pub(crate) trait WatchSet: Send {
+    fn watch(&mut self, directory: &WatchDirectory) -> Result<(), RepositoryWatchError>;
+    fn unwatch(&mut self, path: &Path);
+}
+
+/// Starts watch sets. A server follows every repository its subscribers see through one set.
+pub(crate) trait WatchSets: Send + Sync + 'static {
+    fn start(&self, changed: ChangedPaths) -> Result<Box<dyn WatchSet>, RepositoryWatchError>;
+}
+
 pub(crate) use spaceterm_server::repository::{
     ChangeEntry, ChangeKind, ChangeSummary, ChangeTotal, Divergence, FsmonitorPolicy,
     GitHubRepository, GitToolStatus, MAXIMUM_CHANGE_ENTRIES, OperationStep, RepositoryHead,

@@ -1025,83 +1025,104 @@ impl TerminalPaintBatch {
                 bounds: grid_bounds,
             }),
             |window| {
+                // Each pass paints in one GPUI layer, so the scene orders its primitives by pass
+                // instead of searching the bounds of every cell for overlaps. Within a layer GPUI
+                // draws by primitive kind, so a pass never mixes kinds whose order matters.
                 self.graphics
                     .paint_layer(GraphicsLayer::BelowBackground, window)
                     .map_err(|_| PaintBatchFailure::RendererResources)?;
-                for row in &self.rows {
-                    for (_, background) in row.backgrounds_in_paint_order() {
-                        record_quad_paint(
-                            #[cfg(test)]
-                            counter,
-                        );
-                        self.corners.paint(background, window);
+                window.paint_layer(grid_bounds, |window| {
+                    for row in &self.rows {
+                        for (_, background) in row.backgrounds_in_paint_order() {
+                            record_quad_paint(
+                                #[cfg(test)]
+                                counter,
+                            );
+                            self.corners.paint(background, window);
+                        }
                     }
-                }
+                });
                 self.graphics
                     .paint_layer(GraphicsLayer::BelowText, window)
                     .map_err(|_| PaintBatchFailure::RendererResources)?;
-                for (row_index, row) in self.rows.iter().enumerate() {
-                    paint_prepared_decorations(
-                        &row.stable.under_text_decorations,
-                        self.blink_phase_visible,
-                        window,
-                        #[cfg(test)]
-                        counter,
-                    );
-                    paint_prepared_decorations(
-                        &row.hyperlink_hover_decorations,
-                        self.blink_phase_visible,
-                        window,
-                        #[cfg(test)]
-                        counter,
-                    );
-                    let cursor_paint = cursor_text_paint(self.cursor_text_overlay, row_index);
-                    match cursor_paint {
-                        CursorTextPaint::Unchanged => paint_prepared_decorations(
-                            &row.stable.symbols,
+                window.paint_layer(grid_bounds, |window| {
+                    for row in &self.rows {
+                        paint_prepared_decorations(
+                            &row.stable.under_text_decorations,
                             self.blink_phase_visible,
                             window,
                             #[cfg(test)]
                             counter,
-                        ),
-                        CursorTextPaint::Exclude(bounds)
-                        | CursorTextPaint::Recolor { bounds, .. } => {
-                            paint_prepared_symbols_excluding_region(
+                        );
+                        paint_prepared_decorations(
+                            &row.hyperlink_hover_decorations,
+                            self.blink_phase_visible,
+                            window,
+                            #[cfg(test)]
+                            counter,
+                        );
+                    }
+                });
+                // Symbols are quads and text is sprites, so the symbols of every row paint
+                // before any glyph, as they do within a row.
+                window.paint_layer(grid_bounds, |window| {
+                    for (row_index, row) in self.rows.iter().enumerate() {
+                        let cursor_paint = cursor_text_paint(self.cursor_text_overlay, row_index);
+                        match cursor_paint {
+                            CursorTextPaint::Unchanged => paint_prepared_decorations(
                                 &row.stable.symbols,
                                 self.blink_phase_visible,
-                                bounds,
                                 window,
                                 #[cfg(test)]
                                 counter,
-                            );
-                            if let CursorTextPaint::Recolor { bounds, .. } = cursor_paint {
-                                window.with_content_mask(Some(ContentMask { bounds }), |window| {
-                                    paint_prepared_decorations(
-                                        &row.cursor_symbols,
-                                        self.blink_phase_visible,
-                                        window,
-                                        #[cfg(test)]
-                                        counter,
+                            ),
+                            CursorTextPaint::Exclude(bounds)
+                            | CursorTextPaint::Recolor { bounds, .. } => {
+                                paint_prepared_symbols_excluding_region(
+                                    &row.stable.symbols,
+                                    self.blink_phase_visible,
+                                    bounds,
+                                    window,
+                                    #[cfg(test)]
+                                    counter,
+                                );
+                                if let CursorTextPaint::Recolor { bounds, .. } = cursor_paint {
+                                    window.with_content_mask(
+                                        Some(ContentMask { bounds }),
+                                        |window| {
+                                            paint_prepared_decorations(
+                                                &row.cursor_symbols,
+                                                self.blink_phase_visible,
+                                                window,
+                                                #[cfg(test)]
+                                                counter,
+                                            );
+                                        },
                                     );
-                                });
+                                }
                             }
                         }
+                        paint_prepared_row_text(
+                            row,
+                            self.line_height,
+                            self.blink_phase_visible,
+                            cursor_paint,
+                            window,
+                        )?;
                     }
-                    paint_prepared_row_text(
-                        row,
-                        self.line_height,
-                        self.blink_phase_visible,
-                        cursor_paint,
-                        window,
-                    )?;
-                    paint_prepared_decorations(
-                        &row.stable.over_text_decorations,
-                        self.blink_phase_visible,
-                        window,
-                        #[cfg(test)]
-                        counter,
-                    );
-                }
+                    Ok(())
+                })?;
+                window.paint_layer(grid_bounds, |window| {
+                    for row in &self.rows {
+                        paint_prepared_decorations(
+                            &row.stable.over_text_decorations,
+                            self.blink_phase_visible,
+                            window,
+                            #[cfg(test)]
+                            counter,
+                        );
+                    }
+                });
                 self.graphics
                     .paint_layer(GraphicsLayer::AboveText, window)
                     .map_err(|_| PaintBatchFailure::RendererResources)?;
@@ -5167,6 +5188,145 @@ mod tests {
                 .all(|glyph| !glyph.visible_bounds.intersects(&cursor)),
             "neighboring emoji pixels must be excluded from the cursor"
         );
+    }
+
+    #[test]
+    fn backgrounds_lie_under_text_and_a_strikethrough_over_it_where_they_overlap() {
+        // Glyphs reach well above their cells, so text of the second row overlaps the first.
+        let mut cx = test_app_with_raster_bounds(Bounds::new(
+            point(gpui::DevicePixels(-2), gpui::DevicePixels(-40)),
+            size(gpui::DevicePixels(20), gpui::DevicePixels(48)),
+        ));
+        let cx = cx.add_empty_window();
+        let background = Color::rgb(0x22_44_88);
+        let accent = Color::rgb(0xaa_66_00);
+        let text = Color::rgb(0x00_cc_44);
+        let decorated = |character: &str| {
+            let mut cell = cell(character);
+            cell.background_source = TerminalColor::Rgb(background);
+            cell.foreground_source = TerminalColor::Rgb(text);
+            cell.underline = crate::terminal::TerminalUnderlineSnapshot::Double;
+            cell.underline_source = TerminalColor::Rgb(accent);
+            cell.strikethrough = true;
+            cell
+        };
+        let rows = Arc::<[RowSnapshot]>::from([
+            Arc::from([decorated("a"), decorated("b")]),
+            Arc::from([decorated("c"), decorated("d")]),
+        ]);
+        let capture = PaintCapture::default();
+        cx.draw(
+            point(px(0.0), px(0.0)),
+            size(px(80.0), px(28.0)),
+            move |window, _| PaintBatches {
+                batches: vec![prepared_batch(&rows, window)],
+            },
+        );
+        capture_frame(cx, &capture);
+        let glyphs = capture.glyphs.borrow();
+        let quads = capture.quads.borrow();
+        // At one draw order GPUI draws quads before sprites, so a quad is under a glyph at an
+        // equal order.
+        let visible = |quad: &gpui::Quad| quad.bounds.intersect(&quad.content_mask.bounds);
+        let quads_of = |color: Color| {
+            let color: Hsla = gpui_color(color).into();
+            quads
+                .iter()
+                .filter(move |quad| quad.background == color.into())
+                .collect::<Vec<_>>()
+        };
+        let overlaps = |quad: &gpui::Quad, glyph: &PaintedGlyph| {
+            visible(quad).intersects(&glyph.visible_bounds)
+        };
+        let mut checked = (0, 0, 0);
+        for glyph in glyphs.iter() {
+            for quad in quads_of(background) {
+                if overlaps(quad, glyph) {
+                    assert!(
+                        quad.order <= glyph.order,
+                        "a background must lie under text"
+                    );
+                    checked.0 += 1;
+                }
+            }
+            for quad in quads_of(accent) {
+                if overlaps(quad, glyph) {
+                    assert!(
+                        quad.order <= glyph.order,
+                        "an underline must lie under text"
+                    );
+                    checked.1 += 1;
+                }
+            }
+            for quad in quads_of(text) {
+                if overlaps(quad, glyph) {
+                    assert!(
+                        quad.order > glyph.order,
+                        "a strikethrough must lie over text"
+                    );
+                    checked.2 += 1;
+                }
+            }
+        }
+        assert!(
+            checked.0 > 0 && checked.1 > 0 && checked.2 > 0,
+            "the fixture must overlap every pass: {checked:?}"
+        );
+    }
+
+    /// One frame of `rows` at the origin, as the grid prepares it.
+    fn prepared_batch(rows: &Arc<[RowSnapshot]>, window: &mut Window) -> TerminalPaintBatch {
+        let cell_width = px(8.375);
+        let line_height = px(14.0);
+        let grid_bounds = Bounds::new(point(px(0.0), px(0.0)), size(px(80.0), px(28.0)));
+        let mut cache = TerminalGridCache::new();
+        let inputs = cache.prepare(
+            rows,
+            &colors(),
+            &test_terminal_fonts(&"Menlo".into()),
+            &Arc::from([]),
+            TerminalGridMetrics {
+                cell_width,
+                line_height,
+                scale_factor: window.scale_factor(),
+            },
+        );
+        let stable_rows = cache.prepare_visible_geometry(
+            &inputs,
+            rows.len(),
+            PreparedGridLayout {
+                grid_bounds,
+                font_size: px(18.0),
+                cell_width,
+                line_height,
+                scale_factor: window.scale_factor(),
+                decoration_metrics: decoration_metrics(
+                    px(12.0),
+                    px(10.0),
+                    px(4.0),
+                    px(7.0),
+                    line_height,
+                    window.scale_factor(),
+                ),
+            },
+            window,
+        );
+        TerminalPaintBatch {
+            surface: None,
+            padding_backgrounds: Vec::new(),
+            corners: BottomCorners::default(),
+            grid_bounds,
+            line_height,
+            rows: stable_rows
+                .iter()
+                .cloned()
+                .map(PreparedFrameRow::new)
+                .collect(),
+            cursor_text_overlay: None,
+            graphics: GraphicsPaintPlan::default(),
+            blink_phase_visible: true,
+            quad_paint_calls: None,
+        }
     }
 
     #[test]

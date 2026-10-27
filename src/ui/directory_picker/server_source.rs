@@ -1,7 +1,8 @@
 //! Reads paths through the authenticated owning server; never validates them on this client.
 use super::*;
 use crate::server_connection::ServerConnection;
-use spaceterm_server::pane::{Reply, Request as PaneRequest, directories::*};
+use spaceterm_server::pane::directories::*;
+use spaceterm_server::protocol;
 use std::{
     path::PathBuf,
     sync::{
@@ -22,7 +23,13 @@ pub(crate) trait DirectoryConnection: Send {
     fn matches_directories(&self) -> bool {
         false
     }
-    fn exchange(&mut self, request: &PaneRequest) -> Result<Reply, ()>;
+    /// Starts `operation`, a directory read or creation, as operation `id`. Its reply arrives
+    /// when the server settles it.
+    fn begin(&mut self, id: u64, operation: protocol::Operation) -> Result<(), ()>;
+    /// Waits at most `timeout` for operation `id` to settle. `None` means it still runs.
+    fn settled(&mut self, id: u64, timeout: Duration) -> Result<Option<Result<Value, Error>>, ()>;
+    /// Abandons operation `id`.
+    fn cancel(&mut self, id: u64) -> Result<(), ()>;
 }
 
 /// Opens a connection to the owning server's directory channel.
@@ -30,24 +37,54 @@ pub(crate) trait DirectoryConnector: Send + Sync {
     fn connect(&self) -> Result<Box<dyn DirectoryConnection>, ()>;
 }
 
-impl DirectoryConnection for spaceterm_server::pane::PaneConnection {
+/// A picker's own connection. Each operation is one request whose reply arrives when the server
+/// settles it.
+struct LinkDirectories {
+    link: spaceterm_server::connection::link::ServerLink,
+    reads: std::collections::HashMap<u64, spaceterm_server::connection::link::PendingReply>,
+}
+
+impl DirectoryConnection for LinkDirectories {
+    // Protocol major 2 servers read, create and match directories.
     fn reads_directories(&self) -> bool {
-        self.supports_directory_recovery()
+        true
     }
     fn creates_directories(&self) -> bool {
-        self.supports_directory_creation()
+        true
     }
     fn matches_directories(&self) -> bool {
-        self.supports_directory_matching()
+        true
     }
-    fn exchange(&mut self, request: &PaneRequest) -> Result<Reply, ()> {
-        Self::exchange(self, request).map_err(|_| ())
+    fn begin(&mut self, id: u64, operation: protocol::Operation) -> Result<(), ()> {
+        let pending = self.link.request(operation).map_err(|_| ())?;
+        self.reads.insert(id, pending);
+        Ok(())
+    }
+    fn settled(&mut self, id: u64, timeout: Duration) -> Result<Option<Result<Value, Error>>, ()> {
+        let Some(reply) = self.reads.get(&id).ok_or(())?.wait_for(timeout) else {
+            return Ok(None);
+        };
+        self.reads.remove(&id);
+        match reply {
+            Ok(protocol::ReplyBody::Directory(result)) => Ok(Some(result)),
+            _ => Err(()),
+        }
+    }
+    fn cancel(&mut self, id: u64) -> Result<(), ()> {
+        if let Some(pending) = self.reads.remove(&id) {
+            pending.cancel();
+        }
+        Ok(())
     }
 }
 
 impl DirectoryConnector for ServerConnection {
+    /// Each picker opens its own connection, so the server cancels its reads when it closes.
     fn connect(&self) -> Result<Box<dyn DirectoryConnection>, ()> {
-        Ok(Box::new(self.connect_pane().map_err(|_| ())?))
+        Ok(Box::new(LinkDirectories {
+            link: ServerConnection::connect(self, Arc::new(|_| {})).map_err(|_| ())?,
+            reads: std::collections::HashMap::new(),
+        }))
     }
 }
 
@@ -426,8 +463,8 @@ enum Exchange {
     Answered(DirectorySourceError),
 }
 
-/// Begins `job` on the server as operation `id` and polls it until it settles, cancelling it
-/// when the picker no longer waits or it outlasts its deadline.
+/// Begins `job` on the server as operation `id` and waits until it settles, cancelling it when the
+/// picker no longer waits or it outlasts its deadline.
 fn exchange(
     connection: &mut dyn DirectoryConnection,
     job: Job,
@@ -447,45 +484,28 @@ fn exchange(
     if matches!(job, Job::Read(Operation::Match { .. })) && !connection.matches_directories() {
         return Ok(Value::Match { index: None });
     }
-    let begin = match job {
-        Job::Read(operation) => PaneRequest::DirectoryRead(Request::Begin { id, operation }),
-        Job::Create(path) => PaneRequest::DirectoryCreate(CreationRequest::Begin { id, path }),
+    let operation = match job {
+        Job::Read(operation) => protocol::Operation::DirectoryRead(operation),
+        Job::Create(path) => protocol::Operation::DirectoryCreate(Creation { path }),
     };
-    let poll = || {
-        if creating {
-            PaneRequest::DirectoryCreate(CreationRequest::Poll { id })
-        } else {
-            PaneRequest::DirectoryRead(Request::Poll { id })
-        }
-    };
-    let cancel = || {
-        if creating {
-            PaneRequest::DirectoryCreate(CreationRequest::Cancel { id })
-        } else {
-            PaneRequest::DirectoryRead(Request::Cancel { id })
-        }
-    };
-    let mut reply = connection.exchange(&begin).map_err(|()| Exchange::Lost)?;
+    connection
+        .begin(id, operation)
+        .map_err(|()| Exchange::Lost)?;
     let deadline = Instant::now() + Duration::from_secs(8);
     loop {
         if cancelled.load(Ordering::Acquire) || Instant::now() >= deadline {
-            connection
-                .exchange(&cancel())
-                .map_err(|()| Exchange::Lost)?;
+            connection.cancel(id).map_err(|()| Exchange::Lost)?;
             return Err(Exchange::Answered(DirectorySourceError::Other));
         }
-        match reply {
-            Reply::DirectoryRead(Ok(Progress::Ready(value)))
-            | Reply::DirectoryCreate(Ok(Progress::Ready(value))) => return Ok(value),
-            Reply::DirectoryRead(Ok(Progress::Pending))
-            | Reply::DirectoryCreate(Ok(Progress::Pending)) => {}
-            Reply::DirectoryRead(Err(error)) | Reply::DirectoryCreate(Err(error)) => {
-                return Err(Exchange::Answered(source_error(error)));
-            }
-            _ => return Err(Exchange::Answered(DirectorySourceError::Other)),
+        // The picker abandons an operation by setting a flag, so the wait wakes to look at it.
+        match connection
+            .settled(id, Duration::from_millis(20))
+            .map_err(|()| Exchange::Lost)?
+        {
+            Some(Ok(value)) => return Ok(value),
+            Some(Err(error)) => return Err(Exchange::Answered(source_error(error))),
+            None => {}
         }
-        std::thread::sleep(Duration::from_millis(20));
-        reply = connection.exchange(&poll()).map_err(|()| Exchange::Lost)?;
     }
 }
 impl DirectorySource for ServerDirectorySource {
@@ -607,11 +627,14 @@ fn source_error(error: Error) -> DirectorySourceError {
 #[cfg(test)]
 pub(crate) mod testing {
     use super::{DirectoryConnection, DirectoryConnector, ServerDirectories};
-    use spaceterm_server::pane::{Reply, Request as PaneRequest};
+    use crate::runtime::directory_testing::DirectoryHost;
+    use spaceterm_server::pane::directories::{Error, Value};
+    use spaceterm_server::protocol::Operation;
     use std::rc::Rc;
     use std::sync::{Arc, Mutex};
+    use std::time::Duration;
 
-    pub(crate) type ServerHandler = Arc<Mutex<Box<dyn FnMut(&PaneRequest) -> Reply + Send>>>;
+    pub(crate) type ServerHandler = Arc<Mutex<DirectoryHost>>;
 
     pub(crate) struct InProcessServer(pub(crate) ServerHandler);
 
@@ -624,21 +647,12 @@ pub(crate) mod testing {
 
     impl DirectoryConnector for InProcessServer {
         fn connect(&self) -> Result<Box<dyn DirectoryConnection>, ()> {
-            let reply = (self.0.lock().unwrap())(&PaneRequest::Capabilities);
-            let Reply::Capabilities {
-                directory_recovery,
-                directory_creation,
-                directory_matching,
-                ..
-            } = reply
-            else {
-                return Err(());
-            };
+            // Protocol major 2 servers read, create and match directories.
             Ok(Box::new(InProcessConnection {
                 server: Arc::clone(&self.0),
-                reads: directory_recovery,
-                creates: directory_creation,
-                matches: directory_matching,
+                reads: true,
+                creates: true,
+                matches: true,
             }))
         }
     }
@@ -653,8 +667,19 @@ pub(crate) mod testing {
         fn matches_directories(&self) -> bool {
             self.matches
         }
-        fn exchange(&mut self, request: &PaneRequest) -> Result<Reply, ()> {
-            Ok((self.server.lock().unwrap())(request))
+        fn begin(&mut self, id: u64, operation: Operation) -> Result<(), ()> {
+            self.server.lock().unwrap().begin(id, operation)
+        }
+        fn settled(
+            &mut self,
+            id: u64,
+            timeout: Duration,
+        ) -> Result<Option<Result<Value, Error>>, ()> {
+            self.server.lock().unwrap().settled(id, timeout)
+        }
+        fn cancel(&mut self, id: u64) -> Result<(), ()> {
+            self.server.lock().unwrap().cancel(id);
+            Ok(())
         }
     }
 
@@ -662,9 +687,9 @@ pub(crate) mod testing {
     /// this computer's filesystem.
     #[cfg(feature = "native-tests")]
     pub(crate) fn in_process() -> ServerDirectories {
-        let handler: Box<dyn FnMut(&PaneRequest) -> Reply + Send> =
-            Box::new(crate::runtime::directory_testing::directory_host());
-        let server = Arc::new(InProcessServer(Arc::new(Mutex::new(handler))));
+        let server = Arc::new(InProcessServer(Arc::new(Mutex::new(
+            crate::runtime::directory_testing::directory_host(),
+        ))));
         Rc::new(move |_| Arc::clone(&server) as Arc<dyn DirectoryConnector>)
     }
 
@@ -694,7 +719,13 @@ pub(crate) mod testing {
             fn creates_directories(&self) -> bool {
                 false
             }
-            fn exchange(&mut self, _: &PaneRequest) -> Result<Reply, ()> {
+            fn begin(&mut self, _: u64, _: Operation) -> Result<(), ()> {
+                Err(())
+            }
+            fn settled(&mut self, _: u64, _: Duration) -> Result<Option<Result<Value, Error>>, ()> {
+                Err(())
+            }
+            fn cancel(&mut self, _: u64) -> Result<(), ()> {
                 Err(())
             }
         }

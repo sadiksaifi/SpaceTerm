@@ -30,6 +30,7 @@ impl Recovery {
         self.healthy_since = None;
     }
 
+    /// Starts, or keeps, the healthy period of a live connection.
     pub fn connected(&mut self, now: Instant) {
         let since = *self.healthy_since.get_or_insert(now);
         if now.saturating_duration_since(since) >= HEALTHY_CONNECTION {
@@ -41,8 +42,16 @@ impl Recovery {
     /// Returns the retained cause and whether another automatic connection is allowed.
     /// Ordinary transport outages keep their existing recovery behavior. A protocol failure
     /// or unconfirmed shell start bounds the entire episode, including later transport errors.
-    pub fn failed(&mut self, error: ServerError) -> (ServerError, bool) {
-        self.healthy_since = None;
+    /// A connection that stayed healthy for [`HEALTHY_CONNECTION`] before failing at `now`
+    /// renews recovery first, so an idle Pane whose worker never turned is judged by time.
+    pub fn failed(&mut self, error: ServerError, now: Instant) -> (ServerError, bool) {
+        if self
+            .healthy_since
+            .take()
+            .is_some_and(|since| now.saturating_duration_since(since) >= HEALTHY_CONNECTION)
+        {
+            self.retry();
+        }
         if self.cause.is_none() {
             self.cause = self.start.as_ref().and_then(|start| start.cause);
             if error == ServerError::Protocol {
@@ -121,12 +130,46 @@ mod tests {
         let mut recovery = Recovery::default();
         let now = Instant::now();
         for _ in 0..3 {
-            assert!(recovery.failed(ServerError::Protocol).1);
+            assert!(recovery.failed(ServerError::Protocol, now).1);
             recovery.connected(now);
         }
-        assert!(!recovery.failed(ServerError::Protocol).1);
+        assert!(!recovery.failed(ServerError::Protocol, now).1);
         recovery.connected(now);
         recovery.connected(now + Duration::from_secs(5));
-        assert!(recovery.failed(ServerError::Protocol).1);
+        assert!(recovery.failed(ServerError::Protocol, now).1);
+    }
+
+    /// An idle Pane's worker marks its connection healthy once, when it attaches, and never
+    /// again. Each drop after more than 5 s of health still allows another reconnection.
+    #[test]
+    fn an_idle_connection_that_stayed_healthy_renews_recovery_when_it_fails() {
+        let mut recovery = Recovery::default();
+        let mut now = Instant::now();
+        for drop in 0..10 {
+            recovery.connected(now);
+            now += Duration::from_secs(6);
+            assert!(
+                recovery.failed(ServerError::Protocol, now).1,
+                "drop {drop} after a healthy connection was refused"
+            );
+            now += Duration::from_secs(1);
+        }
+    }
+
+    #[test]
+    fn a_connection_that_fails_within_5_seconds_does_not_renew_recovery() {
+        let mut recovery = Recovery::default();
+        let mut now = Instant::now();
+        for _ in 0..3 {
+            recovery.connected(now);
+            now += Duration::from_secs(4);
+            assert!(recovery.failed(ServerError::Protocol, now).1);
+        }
+        recovery.connected(now);
+        assert!(
+            !recovery
+                .failed(ServerError::Protocol, now + Duration::from_secs(4))
+                .1
+        );
     }
 }

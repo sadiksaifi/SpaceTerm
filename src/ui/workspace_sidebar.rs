@@ -165,7 +165,7 @@ struct WorkspaceRenameState {
     return_to_sidebar: bool,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub(super) struct WorkspaceRowViewModel {
     pub(super) workspace_id: WorkspaceId,
     pub(super) name: SharedString,
@@ -356,6 +356,8 @@ pub(super) struct WorkspaceSidebar {
 
 impl WorkspaceSidebar {
     pub(super) fn new(visible: bool, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        // The Workspace Manager draws the sidebar as a cached view.
+        super::cached_view::redraw_on_presentation_change(cx);
         let scrollbar = cx.new(|_| {
             OverlayScrollbar::<f32>::new("workspace-scrollbar").accessibility_name("Workspace list")
         });
@@ -800,12 +802,18 @@ fn workspace_row_status_paint(
 
 impl WorkspaceSidebar {
     /// Presents `rows` as one list in the order given, whichever servers own their Workspaces.
+    /// Shows these rows. Returns whether they changed.
     pub(super) fn set_rows(
         &mut self,
         rows: Vec<WorkspaceRowViewModel>,
         remote_servers: Vec<RemoteCreationServer>,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
+        // The Workspace Manager sets the rows on every render, so only a change redraws the
+        // sidebar.
+        if self.rows == rows && self.remote_servers == remote_servers {
+            return false;
+        }
         self.rows = rows;
         self.remote_servers = remote_servers;
         if self
@@ -815,6 +823,7 @@ impl WorkspaceSidebar {
             self.cursor = None;
         }
         cx.notify();
+        true
     }
     fn collapsed_top_chrome_width(&self, window: &Window, cx: &App) -> Pixels {
         let active = self.rows.iter().find(|row| row.active);

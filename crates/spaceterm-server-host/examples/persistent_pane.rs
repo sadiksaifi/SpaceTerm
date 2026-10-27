@@ -7,7 +7,7 @@
 mod repository;
 #[expect(
     dead_code,
-    reason = "this exercise uses shared Pane selection instead of legacy attach"
+    reason = "this exercise selects shared Panes and never uses `support::attach`"
 )]
 mod support;
 #[path = "support/terminal_semantics.rs"]
@@ -22,9 +22,10 @@ use spaceterm_server::{
     ServerConnection, ServerError,
     hierarchy::{CloseTarget, Mutation, Outcome},
     pane::*,
+    protocol::{Channel, Operation},
 };
 use std::{error::Error, time::Duration};
-use support::{await_output, command};
+use support::Claimed;
 use terminal_semantics::{Failure, stage};
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -34,9 +35,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     {
         return Err(ServerError::NotInstalled.into());
     }
-    let server = ServerConnection::for_development_client("persistent-pane-native", 1)?;
-    let mut first = server.connect_shared_pane()?;
-    let baseline = repository::inventory(&mut first)?.0;
+    let server = ServerConnection::for_development_client("persistent-pane-native", 2)?;
+    let first = repository::connect(&server)?;
+    let baseline = repository::inventory(&first)?.0;
     let shutdown = std::env::args().any(|argument| argument == "--shutdown");
     if shutdown
         && baseline
@@ -48,7 +49,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     let created = worktree_fixture::journaled_mutation(
         &server,
-        &mut first,
+        &first,
         Mutation::CreateWorkspace {
             name: "IPC native semantics".into(),
             directory: None,
@@ -59,7 +60,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         return Err("fixture Workspace creation refused".into());
     };
     let exercise = (|| -> Result<_, Failure> {
-        let current = stage("ipc-fixture-inventory", repository::inventory(&mut first))?.0;
+        let current = stage("ipc-fixture-inventory", repository::inventory(&first))?.0;
         let pane = current
             .workspaces
             .iter()
@@ -67,51 +68,45 @@ fn main() -> Result<(), Box<dyn Error>> {
             .and_then(|work| work.tabs.first())
             .ok_or("fixture Pane missing")?
             .root_pane;
-        let select = Request::SelectPane {
-            pane,
-            explicit: true,
-            style: None,
-            size: PaneSize {
-                columns: 80,
-                rows: 24,
-                cell_width: 8,
-                cell_height: 18,
-            },
+        let size = PaneSize {
+            columns: 80,
+            rows: 24,
+            cell_width: 8,
+            cell_height: 18,
         };
-        let Reply::Attached { lease: original } =
-            stage("ipc-select-fixture-pane", first.exchange(&select))?
+        let Claimed::Attached(started) = stage(
+            "ipc-select-fixture-pane",
+            support::select(&first, pane, true, size),
+        )?
         else {
             return Err("fixture Pane did not start".into());
         };
+        let original = started.lease();
         stage(
             "ipc-reconnect-command",
-            command(
-                &mut first,
-                original,
+            started.command(
                 "stty -echo; printf '\\033[2J\\033[HSTARTED\\n'; sleep 2; printf 'CONTINUED\\n'; printf 'PID=%s\\n' \"$$\"",
             ),
         )?;
-        stage(
-            "ipc-started-witness",
-            await_output(&mut first, original, "STARTED"),
-        )?;
-        drop(first);
+        stage("ipc-started-witness", started.await_output("STARTED"))?;
+        first.close();
+        drop(started);
         std::thread::sleep(Duration::from_secs(3));
-        let mut second = stage("ipc-reconnect-transport", server.connect_shared_pane())?;
-        let Reply::Attached { lease: resumed } =
-            stage("ipc-resume-fixture-pane", second.exchange(&select))?
+        let second = stage("ipc-reconnect-transport", repository::connect(&server))?;
+        let Claimed::Attached(resumed) = stage(
+            "ipc-resume-fixture-pane",
+            support::select(&second, pane, true, size),
+        )?
         else {
             return Err("fixture Pane did not resume".into());
         };
+        let lease = resumed.lease();
         if (original.server, original.session, original.control)
-            != (resumed.server, resumed.session, resumed.control)
+            != (lease.server, lease.session, lease.control)
         {
             return Err("reconnect changed the running fixture Session".into());
         }
-        let output = stage(
-            "ipc-continued-witness",
-            await_output(&mut second, resumed, "CONTINUED"),
-        )?;
+        let output = stage("ipc-continued-witness", resumed.await_output("CONTINUED"))?;
         let pid: i32 = output
             .lines()
             .find_map(|line| line.trim().strip_prefix("PID="))
@@ -121,21 +116,21 @@ fn main() -> Result<(), Box<dyn Error>> {
         if pid <= 1 {
             return Err("fixture shell identity invalid".into());
         }
+        // Requests name a channel, not a lease, and a channel exists only on its own connection.
+        // The original channel ended with its connection, so a channel the new connection never
+        // bound stands in for it. Channels start at 1, so `u32::MAX` was never bound.
         if !matches!(
-            second.exchange(&Request::Resize {
-                lease: original,
-                size: PaneSize {
-                    columns: 90,
-                    rows: 25,
-                    cell_width: 8,
-                    cell_height: 18
+            support::request(
+                &second,
+                Operation::ClearScrollback {
+                    channel: Channel(u32::MAX),
                 },
-            }),
+            ),
             Err(ServerError::StaleControl)
         ) {
-            return Err("stale fixture resize was accepted".into());
+            return Err("stale fixture channel was accepted".into());
         }
-        let report = terminal_semantics::exercise(&mut second, resumed, command)?;
+        let report = terminal_semantics::exercise(&resumed)?;
         Ok((second, pid, report))
     })();
     if let Err(failure) = &exercise {
@@ -145,15 +140,15 @@ fn main() -> Result<(), Box<dyn Error>> {
     if server.shared_journal()?.pending().is_some() {
         return Err("fixture cleanup waits for original-operation recovery".into());
     }
-    let mut cleanup = server.connect_shared_pane()?;
-    let current = repository::inventory(&mut cleanup)?.0;
+    let cleanup = repository::connect(&server)?;
+    let current = repository::inventory(&cleanup)?.0;
     let target = CloseTarget::Workspace { workspace };
     let confirmation = current
         .close_confirmation(target)
         .ok_or("fixture close target missing")?;
     let closed = worktree_fixture::journaled_mutation(
         &server,
-        &mut cleanup,
+        &cleanup,
         Mutation::Close {
             target,
             confirmation,
@@ -163,7 +158,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     if !matches!(closed.outcome, Outcome::Accepted { .. }) {
         return Err("fixture close refused".into());
     }
-    let after = repository::inventory(&mut cleanup)?.0;
+    let after = repository::inventory(&cleanup)?.0;
     if !baseline
         .workspaces
         .iter()
@@ -179,18 +174,19 @@ fn main() -> Result<(), Box<dyn Error>> {
     {
         return Err("baseline terminal work changed during the fixture".into());
     }
-    let (mut second, pid, report) = exercise?;
+    let (second, pid, report) = exercise?;
     // SAFETY: signal zero observes only the fixture shell; it never signals a process.
     if unsafe { libc::kill(pid, 0) } != -1
         || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
     {
         return Err("fixture close did not reap its shell".into());
     }
-    if shutdown && !matches!(second.exchange(&Request::Shutdown)?, Reply::Closed) {
-        return Err("explicit fixture shutdown failed".into());
+    if shutdown {
+        support::done(&second, Operation::Shutdown)
+            .map_err(|_| "explicit fixture shutdown failed")?;
     }
     println!(
-        "PASS IPC reconnect, stale resize refusal, Copy rows={}, accessible rows={}, graphics supported={}, graphics bytes={}, fixture cleanup; baseline work retained",
+        "PASS IPC reconnect, stale channel refusal, Copy rows={}, accessible rows={}, graphics supported={}, graphics bytes={}, fixture cleanup; baseline work retained",
         report.copied_rows,
         report.accessible_rows,
         report.graphics_supported,

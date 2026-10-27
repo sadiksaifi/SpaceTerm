@@ -13,17 +13,15 @@ fn rapid_idle_tab_closes_park_the_final_workspace_and_restore_the_refused_tab(
             (SHARED_CLOSE_SECOND_TAB, &[(SHARED_CLOSE_SECOND_PANE, None)]),
         ],
     );
-    inventory.close.as_mut().unwrap().controls = Some(
-        [SHARED_CLOSE_ROOT_PANE, SHARED_CLOSE_SECOND_PANE]
-            .into_iter()
-            .map(|pane| ConfirmedControl {
-                pane,
-                session: None,
-                owner: [1; 32],
-                epoch: 1,
-            })
-            .collect(),
-    );
+    inventory.close.as_mut().unwrap().controls = [SHARED_CLOSE_ROOT_PANE, SHARED_CLOSE_SECOND_PANE]
+        .into_iter()
+        .map(|pane| ConfirmedControl {
+            pane,
+            session: None,
+            owner: [1; 32],
+            epoch: 1,
+        })
+        .collect();
     harness.publish(inventory.clone(), cx);
     harness.panes.pane(SHARED_CLOSE_SECOND_PANE).reconnect();
     settle_shared_panes(cx);
@@ -80,8 +78,6 @@ fn rapid_idle_tab_closes_park_the_final_workspace_and_restore_the_refused_tab(
         .as_mut()
         .unwrap()
         .controls
-        .as_mut()
-        .unwrap()
         .retain(|control| control.pane == SHARED_CLOSE_SECOND_PANE);
     harness.publish(inventory, cx);
     assert_eq!(cx.windows().len(), 1);
@@ -196,7 +192,7 @@ fn disconnect_drops_a_parked_remote_presentation_without_closing_other_servers(
     let (remote, edits) = harness.present_direct("penguin", [9; 32], &[("Far", 1)], cx);
     let mut inventory = server_inventory(900, &[("Far", 1)]);
     inventory.close = Some(spaceterm_server::hierarchy::CloseInventory {
-        controls: None,
+        controls: Vec::new(),
         boot: [1; 32],
         sessions: vec![spaceterm_server::hierarchy::ConfirmedPane {
             id: [101; 32],
@@ -658,7 +654,7 @@ fn closing_an_idle_own_tab_submits_without_repetitive_confirmation(cx: &mut Test
         owner: [1; 32],
         epoch: 7,
     };
-    inventory.close.as_mut().unwrap().controls = Some(vec![control.clone()]);
+    inventory.close.as_mut().unwrap().controls = vec![control.clone()];
     harness.publish(inventory, cx);
     harness.panes.pane(SHARED_CLOSE_SECOND_PANE).reconnect();
     settle_shared_panes(cx);
@@ -987,12 +983,12 @@ fn directly_closing_a_tab_opens_the_replacement_dormant_pane_once(cx: &mut TestA
             (SHARED_CLOSE_SECOND_TAB, &[(SHARED_CLOSE_SECOND_PANE, None)]),
         ],
     );
-    idle.close.as_mut().unwrap().controls = Some(vec![ConfirmedControl {
+    idle.close.as_mut().unwrap().controls = vec![ConfirmedControl {
         pane: SHARED_CLOSE_ROOT_PANE,
         session: None,
         owner: [1; 32],
         epoch: 1,
-    }]);
+    }];
     harness.publish(idle, cx);
     let replacement = harness.panes.pane(SHARED_CLOSE_SECOND_PANE);
     replacement.set(DevelopmentPaneStatus::Restored);
@@ -1031,7 +1027,7 @@ fn a_changed_control_grant_refuses_the_original_direct_close_without_renewing_it
         owner: [1; 32],
         epoch: 1,
     };
-    idle.close.as_mut().unwrap().controls = Some(vec![grant.clone()]);
+    idle.close.as_mut().unwrap().controls = vec![grant.clone()];
     harness.publish(idle.clone(), cx);
     cx.dispatch_action(crate::ui::CloseTab);
     redraw(cx);
@@ -1040,7 +1036,7 @@ fn a_changed_control_grant_refuses_the_original_direct_close_without_renewing_it
         matches!(&original[..], [Mutation::Close { confirmation, .. }]
         if confirmation.own_controls.as_deref() == Some(&[grant]))
     );
-    idle.close.as_mut().unwrap().controls.as_mut().unwrap()[0].epoch = 2;
+    idle.close.as_mut().unwrap().controls[0].epoch = 2;
     // The server rejects admission against the changed grant even with unchanged membership
     // and Session facts. The client restores the exact target and waits for explicit Review.
     harness.edits.answer(Outcome::StaleConfirmation);

@@ -17,6 +17,8 @@ use std::ops::Range;
 pub(super) struct RetainedSemantics {
     rows: TerminalAccessibilityState,
     last: Option<Applied>,
+    /// This client's scrolled view and Selection, which the published model follows.
+    view: super::scrollback::AccessibilityView,
 }
 
 #[derive(Clone)]
@@ -78,7 +80,47 @@ impl RetainedSemantics {
         };
         let model = self.rows.apply(update, generation);
         self.last = Some(applied);
-        Ok(model)
+        if self.view == Default::default() {
+            return Ok(model);
+        }
+        Ok(self.rebind(generation))
+    }
+
+    /// Follows this client's view. Returns whether it changed.
+    pub(super) fn set_view(&mut self, view: super::scrollback::AccessibilityView) -> bool {
+        std::mem::replace(&mut self.view, view) != view
+    }
+
+    /// The visible lines and Selection of `applied` as this client presents them: moved up by
+    /// how far the view is scrolled back, with this client's Selection in place of the server's
+    /// while it has one.
+    fn project(&self, applied: &Applied) -> (Range<usize>, Option<AccessibilitySelectionRefs>) {
+        let visible = applied.visible_lines.clone();
+        let shift = usize::try_from(self.view.scrolled)
+            .unwrap_or(usize::MAX)
+            .min(visible.start);
+        let shown = visible.start - shift..visible.end - shift;
+        let Some((start, end)) = self.view.selection else {
+            return (shown, applied.selection);
+        };
+        // Line 0 of the selection is the first row of the screen.
+        let cell = |(line, column): (i64, u16)| {
+            let line = usize::try_from(i64::try_from(visible.start).ok()? + line).ok()?;
+            let row = self.rows.latest()?.row(line)?;
+            Some(AccessibilityCellRef {
+                row: row.id,
+                row_revision: row.revision,
+                column,
+            })
+        };
+        let selection = cell(start)
+            .zip(cell(end))
+            .map(|(start, end)| AccessibilitySelectionRefs {
+                start,
+                end,
+                rectangle: false,
+            });
+        (shown, selection)
     }
 
     /// Binds the retained document to a newer presentation, so the Pane never drops semantics
@@ -88,6 +130,7 @@ impl RetainedSemantics {
         generation: PresentationGeneration,
     ) -> Option<Arc<TerminalAccessibilityModel>> {
         let applied = self.last.clone()?;
+        let (visible_lines, selection) = self.project(&applied);
         self.rows.apply(
             AccessibilityUpdate {
                 revision: applied.revision,
@@ -96,9 +139,9 @@ impl RetainedSemantics {
                 complete: true,
                 more: false,
                 topology: None,
-                visible_lines: applied.visible_lines,
+                visible_lines,
                 cursor: applied.cursor,
-                selection: applied.selection,
+                selection,
                 changed_rows: Vec::new(),
             },
             generation,
@@ -142,7 +185,8 @@ impl Fetcher {
         }
     }
 
-    /// Whether the next chunk of a partial transfer can follow without an output check.
+    /// Whether the next chunk of a partial transfer follows on the worker's next turn, without
+    /// waiting for a wake.
     pub(super) fn can_continue(&self) -> bool {
         self.continues
     }
@@ -737,6 +781,73 @@ mod tests {
             .unwrap();
         assert_eq!(rows(&changed), [(0, "changed".into())]);
         assert_eq!(server.bases(), [None, Some(1), Some(1)]);
+    }
+
+    #[test]
+    fn the_published_model_follows_a_scrolled_view_and_the_local_selection() {
+        let state = demanded();
+        let mut fetcher = Fetcher::new(lease());
+        // Two history lines above a two-line screen.
+        let mut document = snapshot(
+            1,
+            &[0, 1, 2, 3],
+            vec![
+                row(0, 1, "old0"),
+                row(1, 1, "old1"),
+                row(2, 1, "scr0"),
+                row(3, 1, "scr1"),
+            ],
+        );
+        document.visible_lines = 2..4;
+        let mut server = Server::new(document);
+        let first = fetcher
+            .poll(
+                &state,
+                PresentationGeneration::default(),
+                &mut server.exchange(),
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.visible_lines(), 2..4);
+        // Scrolled back one row, with the Selection from "old1" column 1 to "scr0" column 2.
+        state
+            .accessibility
+            .lock()
+            .unwrap()
+            .set_view(super::super::scrollback::AccessibilityView {
+                scrolled: 1,
+                selection: Some(((-1, 1), (0, 2))),
+            });
+        let next = PresentationGeneration::default().next();
+        let scrolled = fetcher.rebind(&state, next).unwrap();
+        assert_eq!(
+            scrolled.visible_lines(),
+            1..3,
+            "VoiceOver reads the rows shown"
+        );
+        let selection = scrolled.selection_refs().unwrap();
+        assert_eq!(
+            (
+                selection.start.row.page_row,
+                selection.start.column,
+                selection.end.row.page_row,
+                selection.end.column
+            ),
+            (1, 1, 2, 2),
+            "the mouse Selection reaches the accessible Selection"
+        );
+        // Scrolled further than the document reaches, the view stops at its first line.
+        state
+            .accessibility
+            .lock()
+            .unwrap()
+            .set_view(super::super::scrollback::AccessibilityView {
+                scrolled: 9,
+                selection: None,
+            });
+        let top = fetcher.rebind(&state, next.next()).unwrap();
+        assert_eq!(top.visible_lines(), 0..2);
+        assert!(top.selection_refs().is_none());
     }
 
     #[test]

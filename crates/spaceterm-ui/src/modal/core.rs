@@ -2148,8 +2148,10 @@ fn finish_owner_settlement(owner: &Entity<ModalWindowOwner>, cx: &mut App) {
         pump_effect_batch(owner, DeferredEffectBatch::new(promotion, false), cx);
     }
 
-    let (window_id, suspension) = owner.update(cx, |state, _| {
+    let (window_id, suspension) = owner.update(cx, |state, cx| {
         state.finish_settlement();
+        // Observers waiting for the window's modal to close hear it only once settlement ends.
+        cx.notify();
         (state.window_id, state.finish_transient_coordination())
     });
     if let Some(suspension) = suspension {
@@ -2926,6 +2928,28 @@ pub(super) fn request_action_from_renderer(
         effects
     });
     settle_owner(&owner, effects, cx);
+}
+
+pub(super) fn when_window_modal_closes<V: 'static>(
+    window: &mut Window,
+    cx: &mut Context<V>,
+    mut closed: impl FnMut(&mut V, &mut Window, &mut Context<V>) + 'static,
+) -> Option<Subscription> {
+    let owner = cx
+        .try_global::<ModalCoordinator>()?
+        .owners
+        .get(&window.window_handle().window_id())?
+        .upgrade()?;
+    Some(
+        cx.observe_in(&owner, window, move |view, owner, window, cx| {
+            let open = owner.read_with(cx, |state, _| {
+                state.active.is_some() || state.settlement == SettlementState::Settling
+            });
+            if !open {
+                closed(view, window, cx);
+            }
+        }),
+    )
 }
 
 pub(super) fn window_modal_is_open(window: &Window, cx: &App) -> bool {

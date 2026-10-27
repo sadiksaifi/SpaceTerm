@@ -741,6 +741,8 @@ impl TerminalPane {
             },
         )
         .detach();
+        // A Tab draws the Pane as a cached view.
+        super::cached_view::redraw_on_presentation_change(cx);
         cx.on_focus(&focus_handle, window, |pane, window, cx| {
             cx.emit(TerminalPaneEvent::FocusRequested);
             pane.refresh_surface(window, cx);
@@ -1318,6 +1320,10 @@ impl TerminalPane {
             return;
         }
         let effects = self.attention.clear();
+        if self.attention_visual {
+            // The visual bell border is in the Pane's frame.
+            cx.notify();
+        }
         self.attention_visual = false;
         self.attention_generation = self.attention_generation.wrapping_add(1);
         self._attention_task.take();
@@ -1413,8 +1419,40 @@ impl TerminalPane {
         self.terminal_session.current_directory.clone()
     }
 
+    /// How many times the grid and its retained cursor have painted.
+    #[cfg(test)]
+    pub(crate) fn grid_paint_counts(&self) -> (usize, usize) {
+        self.grid_presentation.paint_counts()
+    }
+
     pub(crate) fn surface_background(&self) -> Color {
         self.surface_background
+    }
+
+    /// Whether a pending recovery keeps the last valid Screen on display.
+    fn recovery_holds_presentation(&self) -> bool {
+        self.pending_recovery.is_some_and(|pending| {
+            matches!(
+                pending.action,
+                RecoveryAction::Presentation | RecoveryAction::RendererResources
+            ) && self.recovery_retry_requested != Some(pending)
+        })
+    }
+
+    /// Takes the surface color from the Screen and appearance as they arrive, so the Chrome that
+    /// shares the surface draws it in the same frame as the Pane.
+    fn sync_surface_background(&mut self, cx: &mut Context<Self>) {
+        let screen = if self.recovery_holds_presentation() {
+            &self.last_valid_screen
+        } else {
+            &self.screen
+        };
+        let background =
+            ScreenSnapshot::projected_for_renderer(screen, &self.appearance.terminal).background;
+        if self.surface_background != background {
+            self.surface_background = background;
+            cx.emit(TerminalPaneEvent::SurfaceBackgroundChanged);
+        }
     }
 
     pub(crate) fn caption(&self) -> PaneCaptionFacts {
@@ -1667,6 +1705,7 @@ impl TerminalPane {
         self.screen_session_epoch = self.terminal_session.session_epoch;
         self.last_valid_screen = Arc::clone(&cleared);
         self.last_valid_screen_session_epoch = self.terminal_session.session_epoch;
+        self.sync_surface_background(cx);
         self.accessibility = Arc::new(TerminalAccessibilityModel::from_screen(&cleared));
         self.accessibility_floor = Some((self.terminal_session.session_epoch, cleared.generation));
         self.pending_accessibility = None;
@@ -1727,10 +1766,26 @@ impl TerminalPane {
         }
 
         self.reset_blink_phase();
-        if !demanded {
-            return;
+        if demanded {
+            self.start_blink_timer(cx);
         }
+    }
 
+    /// Restarts the blink cycle from its visible phase after accepted input. Only a hidden
+    /// cursor needs a frame; a visible one keeps its pixels, so the echo is the next frame.
+    fn restart_blink_after_input(&mut self, cx: &mut Context<Self>) {
+        let hidden = !self.blink_phase_visible;
+        let blinking = self._blink_task.is_some();
+        self.reset_blink_phase();
+        if blinking {
+            self.start_blink_timer(cx);
+        }
+        if hidden {
+            cx.notify();
+        }
+    }
+
+    fn start_blink_timer(&mut self, cx: &mut Context<Self>) {
         let generation = self.blink_generation;
         self._blink_task = Some(cx.spawn(async move |this, cx| {
             loop {
@@ -2437,6 +2492,7 @@ impl TerminalPane {
                 let caption_changed =
                     !self.server_backed() && self.accept_metadata(Arc::clone(&screen.metadata));
                 self.screen = screen;
+                self.sync_surface_background(cx);
                 self.readiness.dirty(cx.entity_id());
                 self.screen_session_epoch = self.terminal_session.session_epoch;
                 const OPERATION: &str = "receive-terminal-graphics";
@@ -2856,8 +2912,7 @@ impl TerminalPane {
                 self.clear_attention(cx);
             }
             if resets_cursor_blink && self.screen.cursor.visible && self.screen.cursor.blinking {
-                self.reset_blink_phase();
-                cx.notify();
+                self.restart_blink_after_input(cx);
             }
         }
         true
@@ -2984,6 +3039,7 @@ impl TerminalPane {
                 ));
             }
         }
+        self.sync_surface_background(cx);
         self.readiness.dirty(cx.entity_id());
         cx.notify();
     }
@@ -4406,7 +4462,7 @@ impl TerminalPane {
             .as_ref()
             .filter(|snapshot| snapshot.generation == self.find_generation);
         let query_too_large = self.server_backed()
-            && input.read(cx).value().len() > spaceterm_server::pane::reading::MAX_QUERY_BYTES;
+            && input.read(cx).value().len() > crate::terminal::find::MAX_QUERY_BYTES;
         let result_label = if query_too_large {
             "Query exceeds 4,096 bytes".to_owned()
         } else if input.read(cx).value().is_empty() {
@@ -4943,12 +4999,7 @@ impl Render for TerminalPane {
             self.evict_presentation_resources(cx);
             return div().size_full().into_any_element();
         }
-        let recovery_holds_presentation = self.pending_recovery.is_some_and(|pending| {
-            matches!(
-                pending.action,
-                RecoveryAction::Presentation | RecoveryAction::RendererResources
-            ) && self.recovery_retry_requested != Some(pending)
-        });
+        let recovery_holds_presentation = self.recovery_holds_presentation();
         let mut display_screen = if recovery_holds_presentation {
             Arc::clone(&self.last_valid_screen)
         } else {
@@ -5009,6 +5060,8 @@ impl Render for TerminalPane {
         };
         let projected_display_screen =
             ScreenSnapshot::projected_for_renderer(&display_screen, &self.appearance.terminal);
+        // Screens and appearance set the surface as they arrive. A frame that falls back to an
+        // earlier Screen, which only rendering decides, corrects it here.
         if self.surface_background != projected_display_screen.background {
             self.surface_background = projected_display_screen.background;
             cx.emit(TerminalPaneEvent::SurfaceBackgroundChanged);

@@ -212,7 +212,7 @@ fn launch_harness_with(
     )
 }
 
-/// Reads the scripted server's inventory, as the window's poll does.
+/// Reads the scripted server's inventory, as the window does when its connection publishes one.
 fn sync(harness: &LaunchHarness, cx: &mut VisualTestContext) {
     cx.update(|window, cx| {
         harness.manager.update(cx, |manager, cx| {
@@ -1492,8 +1492,6 @@ fn stopped_in_session_as(
     let (harness, cx) = ready_harness(cx);
     harness.launch.answer(ready());
     harness.panes.pane(PANE).set(status);
-    cx.executor()
-        .advance_clock(crate::ui::shared_workspaces::POLL_INTERVAL * 3);
     cx.run_until_parked();
     cx.update(|window, _| window.refresh());
     cx.run_until_parked();
@@ -1709,7 +1707,7 @@ fn with_hidden_tab(
         }],
     });
     inventory.close = Some(CloseInventory {
-        controls: None,
+        controls: Vec::new(),
         boot: BOOT,
         sessions: vec![
             ConfirmedPane {
@@ -1940,7 +1938,7 @@ fn with_root_progress(revision: u64, metadata_revision: u64, percent: u8) -> Inv
     presentation.progress = spaceterm_server::pane::metadata::Progress::Normal(percent);
     inventory.workspaces[0].tabs[0].panes[0].presentation = Some(Box::new(presentation));
     inventory.close = Some(CloseInventory {
-        controls: None,
+        controls: Vec::new(),
         boot: BOOT,
         sessions: vec![ConfirmedPane {
             id: PANE,
@@ -1977,8 +1975,6 @@ fn a_pane_another_client_controls_keeps_showing_its_sessions_progress(cx: &mut T
         .panes
         .pane(PANE)
         .set(DevelopmentPaneStatus::Takeover);
-    cx.executor()
-        .advance_clock(crate::ui::shared_workspaces::POLL_INTERVAL * 3);
     cx.run_until_parked();
     harness.edits.set_inventory(with_root_progress(3, 4, 60));
     sync(&harness, cx);
