@@ -30,7 +30,7 @@ pub struct SharedWorkspaceHost {
     panes: BTreeMap<Id, DevelopmentPaneHost>,
     /// Pane identities introduced in this server run, independent of their control grants.
     fresh_panes: BTreeSet<Id>,
-    /// Retains organization off the lock. Absent until [`PaneService::restore`].
+    /// Retains organization off the lock. Absent until [`HostCommands::restore`].
     journal: Option<Arc<Journal>>,
     /// Runs journal writes nobody waits for, in submission order. Without it they run inline.
     sync: Option<SyncWorker>,
@@ -741,23 +741,6 @@ impl SharedWorkspaceHost {
                 }
                 Ok(Reply::Unchanged)
             }
-            Request::Capabilities => Ok(Reply::Capabilities {
-                development_pane: true,
-                pane_takeover: true,
-                interactive_input: true,
-                key_input_batches: true,
-                native_effects: true,
-                reading: true,
-                graphics: true,
-                accessibility: true,
-                directory_recovery: true,
-                directory_creation: true,
-                directory_matching: true,
-                worktree_writes: true,
-                end_all_sessions: true,
-                workspace_policy: true,
-                presentation_changes: true,
-            }),
             Request::Inventory => {
                 self.repositories.subscribe(connection);
                 self.finish_worktrees(false)?;
@@ -954,12 +937,12 @@ impl SharedWorkspaceHost {
         live.then_some(now + SYNCHRONIZE_INTERVAL)
     }
 }
-impl PaneService for SharedWorkspaceHost {
+impl HostCommands for SharedWorkspaceHost {
     fn restore(&mut self, store: OrganizationStore) -> Result<(), ServerError> {
         self.retain_in(Box::new(store))
     }
-    fn tick(&mut self) {
-        self.tick_until(Instant::now());
+    fn tick(&mut self, now: Instant) -> Option<Instant> {
+        self.tick_until(now)
     }
     fn admitted(&mut self, client: Id, name: control::ClientName) {
         self.prototype.admitted(client, name);
@@ -1107,7 +1090,7 @@ mod tests {
             panic!("End All Sessions answers at once");
         };
         assert!(matches!(outcome.outcome, Outcome::Accepted { .. }));
-        host.tick();
+        host.tick(Instant::now());
         assert!(
             !matches!(
                 host.request([1; 32], [1; 32], Request::Poll { lease }),
@@ -1116,7 +1099,7 @@ mod tests {
             "the session runs while its ending is not retained"
         );
         host.retained(revision).unwrap();
-        host.tick();
+        host.tick(Instant::now());
         assert!(matches!(
             host.request([1; 32], [1; 32], Request::Poll { lease }),
             Reply::Refused(Refusal::Stale)

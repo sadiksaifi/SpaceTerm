@@ -22,7 +22,7 @@ fn mutate(host: &mut SharedWorkspaceHost, device: u8, sequence: u64, mutation: M
         [device; 32],
         Request::Mutate { sequence, mutation },
     );
-    host.tick();
+    host.tick(Instant::now());
     match reply {
         Reply::Outcome(result) => match result.outcome {
             Outcome::Accepted { target } => target,

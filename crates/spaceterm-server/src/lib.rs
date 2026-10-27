@@ -18,7 +18,6 @@ pub mod service;
 #[cfg(feature = "client")]
 mod startup;
 mod storage;
-mod transport;
 pub mod workspace_order;
 pub mod worktree;
 
@@ -108,24 +107,38 @@ pub fn run_local(identity: &str) -> Result<(), ServerError> {
     host::serve(&paths)
 }
 
-pub fn run_local_with_panes(
-    identity: &str,
-    panes: impl pane::PaneService + 'static,
-) -> Result<(), ServerError> {
+/// Builds the service once the host has its one [`connection::sync::SyncWorker`], which the
+/// service shares for its disk syncs.
+pub type PaneFactory = Box<
+    dyn FnOnce(
+        connection::sync::SyncWorker,
+    ) -> Result<Box<dyn connection::service::PaneService>, ServerError>,
+>;
+
+/// A [`PaneFactory`] for `build`.
+pub fn panes<P: connection::service::PaneService + 'static>(
+    build: impl FnOnce(connection::sync::SyncWorker) -> Result<P, ServerError> + 'static,
+) -> PaneFactory {
+    Box::new(move |sync| {
+        build(sync).map(|panes| Box::new(panes) as Box<dyn connection::service::PaneService>)
+    })
+}
+
+pub fn run_local_with_panes(identity: &str, panes: PaneFactory) -> Result<(), ServerError> {
     host::install_shutdown_signals()?;
-    host::serve_with_panes(&host::Paths::for_identity(identity)?, Some(Box::new(panes)))
+    host::serve_with_panes(&host::Paths::for_identity(identity)?, Some(panes))
 }
 
 /// Run a source Development Server whose supervisor pipe owns its lifetime.
 /// This never provisions an artifact, registers a service, or changes Stop intent.
 pub fn run_owned_development(
-    panes: impl pane::PaneService + 'static,
+    panes: PaneFactory,
     owner: impl std::io::Read + Send + 'static,
     ready: impl FnOnce() -> Result<(), ServerError>,
 ) -> Result<(), ServerError> {
     host::serve_owned(
         &host::Paths::for_identity("spaceterm-development")?,
-        Box::new(panes),
+        panes,
         owner,
         ready,
     )

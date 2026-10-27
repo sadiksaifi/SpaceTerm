@@ -83,4 +83,4 @@ pub fn local_filesystem() -> LocalFilesystemAuthority {
 mod server;
 #[cfg(all(test, feature = "desktop"))]
 pub(crate) use server::testing as directory_testing;
-pub use server::{DevelopmentPaneHost, SharedWorkspaceHost};
+pub use server::{DevelopmentPaneHost, HostCommands, Served, SharedWorkspaceHost};

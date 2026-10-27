@@ -1105,7 +1105,10 @@ fn validate_discovery(discovery: &AccountDiscovery) -> Result<(), SetupFailure> 
         return Err(SetupFailure::Refused(RefusalKind::ServerChanged));
     }
     platform(&discovery.target)?;
-    if !discovery.protocol_majors.contains(&1) {
+    if !discovery
+        .protocol_majors
+        .contains(&spaceterm_server::protocol::MAJOR)
+    {
         return Err(SetupFailure::Incompatible(IncompatibilityKind::Protocol));
     }
     if !discovery

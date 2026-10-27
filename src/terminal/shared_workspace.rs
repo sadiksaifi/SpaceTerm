@@ -2,8 +2,12 @@
 use crate::server_connection::{ServerConnection, ServerError};
 use crate::terminal::server_session::PaneControls;
 use spaceterm_server::{
+    connection::link::ServerLink,
     hierarchy::{ClientJournal, Inventory, Mutation, RetainedOutcome},
-    pane::{PaneConnection, Reply, Request},
+    protocol::{
+        Operation, ReplyBody,
+        interim::{Interim, InterimReply},
+    },
 };
 use std::sync::{
     Arc, Mutex,
@@ -11,12 +15,6 @@ use std::sync::{
     mpsc,
 };
 use std::time::Duration;
-
-/// How long the interim exchange waits before asking again about an edit that waits for a
-/// Worktree write. Deleted when the server defers `Mutate` replies until the outcome settles.
-const PENDING_RETRY: Duration = Duration::from_millis(100);
-/// How often the interim exchange reads the inventory. Deleted when the server pushes it.
-const INVENTORY_POLL: Duration = Duration::from_millis(150);
 
 #[derive(Clone)]
 pub(crate) struct SharedWorkspaceSnapshot {
@@ -169,14 +167,17 @@ impl SharedWorkspaceClient {
         })
     }
 }
+fn request(link: &ServerLink, operation: Operation) -> Result<ReplyBody, ServerError> {
+    Ok(link.request(operation)?.wait()?)
+}
 fn inventory(
-    connection: &mut PaneConnection,
+    connection: &ServerLink,
     controls: &PaneControls,
 ) -> Result<(Inventory, u64), ServerError> {
-    let Reply::Inventory {
+    let ReplyBody::Interim(InterimReply::Inventory {
         inventory,
         next_sequence,
-    } = connection.exchange(&Request::Inventory)?
+    }) = request(connection, Operation::Interim(Interim::Inventory))?
     else {
         return Err(ServerError::Protocol);
     };
@@ -188,28 +189,8 @@ struct FinishedOperation {
     reconciled: Option<(Inventory, u64)>,
 }
 
-/// Dispatches an Original Operation with its original identity and returns its settled outcome.
-/// The server replays an outcome it already recorded, so dispatching again after a lost reply
-/// never repeats the edit, and an operation the server never received is applied once.
-fn dispatch(
-    connection: &mut PaneConnection,
-    sequence: u64,
-    mutation: &Mutation,
-) -> Result<RetainedOutcome, ServerError> {
-    loop {
-        match connection.exchange(&Request::Mutate {
-            sequence,
-            mutation: mutation.clone(),
-        })? {
-            Reply::Outcome(outcome) => return Ok(outcome),
-            Reply::MutationPending => std::thread::sleep(PENDING_RETRY),
-            _ => return Err(ServerError::Protocol),
-        }
-    }
-}
-
 fn finish(
-    connection: &mut PaneConnection,
+    connection: &ServerLink,
     journal: &mut ClientJournal,
     controls: &PaneControls,
     state: &PublishedSnapshot,
@@ -224,9 +205,33 @@ fn finish(
     let result = if let Some(result) = pending.result {
         result
     } else {
-        let outcome = dispatch(connection, pending.sequence, &pending.mutation)?;
-        // The outcome is in the revision before its reply. Reconcile that membership before
-        // retiring the operation identity.
+        let resolved = loop {
+            let reply = match request(
+                connection,
+                Operation::Resolve {
+                    sequence: pending.sequence,
+                },
+            ) {
+                Ok(reply) => reply,
+                Err(ServerError::SessionUnavailable) => request(
+                    connection,
+                    Operation::Mutate {
+                        sequence: pending.sequence,
+                        mutation: pending.mutation.clone(),
+                    },
+                )?,
+                Err(error) => return Err(error),
+            };
+            if matches!(reply, ReplyBody::Interim(InterimReply::MutationPending)) {
+                std::thread::sleep(Duration::from_millis(100));
+                continue;
+            }
+            break reply;
+        };
+        let ReplyBody::Outcome(outcome) = resolved else {
+            return Err(ServerError::Protocol);
+        };
+        // Reconcile the accepted membership before retiring the operation identity.
         reconciled = Some(inventory(connection, controls)?);
         journal.complete(outcome.clone())?;
         outcome
@@ -244,9 +249,7 @@ fn finish(
         }
         snapshot.outcome = Some(result.clone());
     });
-    connection.exchange(&Request::Acknowledge {
-        sequence: pending.sequence,
-    })?;
+    connection.acknowledge(pending.sequence)?;
     journal.retire()?;
     Ok(FinishedOperation {
         outcome: Some(result),
@@ -264,21 +267,15 @@ fn run(
     while alive.load(Ordering::Acquire) {
         let result = (|| {
             // Validate the transport before opening this client's retained writers.
-            let mut connection = server.connect_shared_pane()?;
+            let connection = server.link()?;
             let attachments = server.attachments()?;
             let mut journal = server.shared_journal()?;
             // Authoritative reconciliation always precedes a retry of a previously submitted edit.
-            let (initial, mut sequence) = inventory(&mut connection, &controls)?;
-            // The server forgets an outcome only once acknowledged, and nothing confirms that the
-            // last acknowledgement arrived. Repeating it is harmless.
-            if let Some(last) = journal.last() {
-                connection.exchange(&Request::Acknowledge {
-                    sequence: last.sequence,
-                })?;
-            }
+            let (initial, mut sequence) = inventory(&connection, &controls)?;
             state.publish(|s| {
-                s.worktree_writes = connection.worktree_writes();
-                s.end_all_sessions = connection.supports_end_all_sessions();
+                // Protocol major 2 servers write Worktrees and end all Sessions.
+                s.worktree_writes = true;
+                s.end_all_sessions = true;
                 s.inventory = Some(initial);
                 s.pending = journal.pending().is_some();
                 s.pending_operation = journal.pending().map(|p| p.mutation.clone());
@@ -294,8 +291,8 @@ fn run(
                     active = None;
                 }
             });
-            let finished = finish(&mut connection, &mut journal, &controls, &state)?;
-            attachments.release_pending(&mut connection)?;
+            let finished = finish(&connection, &mut journal, &controls, &state)?;
+            attachments.release_pending(&connection)?;
             state.publish(|s| {
                 if let Some((current, next_sequence)) = finished.reconciled {
                     s.inventory = Some(current);
@@ -312,12 +309,12 @@ fn run(
                 if !alive.load(Ordering::Acquire) {
                     return Ok(());
                 }
-                attachments.release_pending(&mut connection)?;
-                match commands.recv_timeout(INVENTORY_POLL) {
+                attachments.release_pending(&connection)?;
+                match commands.recv_timeout(Duration::from_millis(150)) {
                     Ok(mutation) => {
                         active = Some((sequence, mutation.clone()));
                         journal.submit(sequence, mutation)?;
-                        let finished = finish(&mut connection, &mut journal, &controls, &state)?;
+                        let finished = finish(&connection, &mut journal, &controls, &state)?;
                         let (current, next_sequence) =
                             finished.reconciled.ok_or(ServerError::Protocol)?;
                         sequence = next_sequence;
@@ -331,7 +328,7 @@ fn run(
                     }
                     Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(()),
                     Err(mpsc::RecvTimeoutError::Timeout) => {
-                        let (current, next_sequence) = inventory(&mut connection, &controls)?;
+                        let (current, next_sequence) = inventory(&connection, &controls)?;
                         sequence = next_sequence;
                         state.publish(|s| s.inventory = Some(current));
                     }

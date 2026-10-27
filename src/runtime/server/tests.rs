@@ -43,7 +43,7 @@ fn unavailable_account_environment_allows_pane_close_and_server_shutdown() {
 }
 
 pub(super) fn native_command(
-    host: &mut impl PaneService,
+    host: &mut impl HostCommands,
     lease: Lease,
     generation: u64,
     text: &str,
@@ -66,7 +66,7 @@ pub(super) fn native_command(
 }
 
 pub(super) fn focus(
-    host: &mut impl PaneService,
+    host: &mut impl HostCommands,
     lease: Lease,
     generation: u64,
     target: FocusTarget,
@@ -86,7 +86,7 @@ pub(super) fn focus(
 }
 
 pub(super) fn input(
-    host: &mut impl PaneService,
+    host: &mut impl HostCommands,
     lease: Lease,
     generation: u64,
     input: InteractiveInput,
@@ -195,7 +195,7 @@ fn shared_kill_ends_another_controllers_work_and_replays_without_touching_surviv
         );
     }
     // The tick after the retained deletion ends its work.
-    host.tick();
+    host.tick(Instant::now());
     assert!(matches!(
         host.request([1; 32], [1; 32], Request::Poll { lease }),
         Reply::Refused(Refusal::Missing)
@@ -698,7 +698,7 @@ pub(super) fn attach(host: &mut DevelopmentPaneHost, connection: u8, create: boo
 }
 
 pub(super) fn command(
-    host: &mut impl PaneService,
+    host: &mut impl HostCommands,
     connection: u8,
     lease: Lease,
     text: &str,
@@ -742,7 +742,7 @@ pub(super) fn command(
     )
 }
 
-pub(super) fn await_text(host: &mut impl PaneService, connection: u8, lease: Lease, text: &str) {
+pub(super) fn await_text(host: &mut impl HostCommands, connection: u8, lease: Lease, text: &str) {
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut diagnostic = String::new();
     loop {

@@ -33,6 +33,7 @@ pub(crate) mod testing {
 #[cfg(test)]
 mod directory_tests;
 mod dispatch;
+pub use dispatch::{HostCommands, Served};
 #[cfg(test)]
 #[path = "server/effect_tests.rs"]
 mod effect_tests;
@@ -41,6 +42,8 @@ use self::effects::NativeEffects;
 mod graphics;
 #[cfg(test)]
 mod graphics_tests;
+#[cfg(test)]
+mod input_tests;
 mod metadata;
 #[cfg(test)]
 mod metadata_tests;

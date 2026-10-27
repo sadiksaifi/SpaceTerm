@@ -41,12 +41,7 @@ fn server_screen_with_a_long_hyperlink_remains_within_the_transport_limit() {
     let encoded = encode_screen(&screen);
     assert_eq!(encoded.hyperlinks.len(), 1);
     let reply = Reply::Screen(Box::new(encoded));
-    let bytes = serde_json::to_vec(&reply).unwrap();
-    assert!(
-        bytes.len() < pane::MAX_TERMINAL_FRAME,
-        "screen frame has {} bytes",
-        bytes.len()
-    );
+    assert!(super::dispatch::wire_bytes(reply).is_some());
 }
 
 #[test]
@@ -82,12 +77,7 @@ fn server_screen_with_many_distinct_links_retains_text_with_bounded_metadata() {
             .is_none()
     );
     assert_eq!(encoded.rows[0][0].text, "f");
-    assert!(
-        serde_json::to_vec(&Reply::Screen(Box::new(encoded)))
-            .unwrap()
-            .len()
-            < pane::MAX_TERMINAL_FRAME
-    );
+    assert!(super::dispatch::wire_bytes(Reply::Screen(Box::new(encoded))).is_some());
 }
 
 #[test]

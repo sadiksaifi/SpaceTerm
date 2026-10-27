@@ -1,16 +1,22 @@
 //! One bounded presentation exercise for the existing IPC and WSS fixtures.
 //! The producer writes metadata without cell output while hidden and exits on request.
+use super::support::{self, Pane, has_row, text_key};
 use super::terminal_semantics::{Failure, stage};
-use spaceterm::runtime::PhysicalKey;
 use spaceterm_server::{
     ServerError,
+    connection::link::ServerLink,
     hierarchy::{Id, Inventory},
     pane::{
-        InteractiveInput, Key, Lease, PaneConnection, Reply, Request, Screen,
+        FocusTarget, Lease, Screen,
         metadata::{
             CommandState, DirectoryProvenance, Freshness, Progress, Snapshot, TitleGlyph,
             TitleProvenance,
         },
+        reading,
+    },
+    protocol::{
+        Channel, Operation, ReplyBody,
+        interim::{Interim, InterimReply},
     },
 };
 use std::time::{Duration, Instant};
@@ -51,16 +57,10 @@ pub struct Witness {
 }
 
 /// A separate admitted client observes the Pane without selecting or painting it.
-pub fn observe_hidden_inventory(connection: &mut PaneConnection, pane: Id) -> Result<()> {
+pub fn observe_hidden_inventory(link: &ServerLink, pane: Id) -> Result<()> {
     let until = Instant::now() + WAIT;
     loop {
-        let Reply::Inventory { inventory, .. } = stage(
-            "observer-inventory",
-            connection.exchange(&Request::Inventory),
-        )?
-        else {
-            return Err("observer inventory reply missing".into());
-        };
+        let (inventory, _) = stage("observer-inventory", support::inventory(link))?;
         if presentation(&inventory, pane)?.is_some_and(|snapshot| {
             snapshot.title == HIDDEN_TITLE
                 && snapshot.directory == "/"
@@ -100,38 +100,16 @@ fn pause(until: Instant) -> Result<()> {
     Ok(())
 }
 
-fn send(connection: &mut PaneConnection, lease: Lease, text: &str) -> Result<()> {
-    stage(
-        "presentation-input",
-        connection.exchange(&Request::Input {
-            lease,
-            generation: 1,
-            input: InteractiveInput::Key(Key {
-                physical: PhysicalKey::Unidentified as u32,
-                action: 0,
-                logical: "text-input".into(),
-                text: Some(text.into()),
-                unshifted: None,
-                modifiers: 0,
-                consumed: 0,
-                option_as_alt: false,
-            }),
-        }),
-    )?;
+fn send(pane: &Pane, text: &str) -> Result<()> {
+    stage("presentation-input", pane.key(1, text_key(text)))?;
     Ok(())
 }
 
-fn screen(
-    connection: &mut PaneConnection,
-    lease: Lease,
-    predicate: impl Fn(&Screen) -> bool,
-) -> Result<Box<Screen>> {
+fn screen(pane: &Pane, predicate: impl Fn(&Screen) -> bool) -> Result<Box<Screen>> {
     let until = Instant::now() + WAIT;
     loop {
-        if let Reply::Screen(screen) = stage(
-            "presentation-screen",
-            connection.exchange(&Request::Poll { lease }),
-        )? && predicate(&screen)
+        if let Some(screen) = stage("presentation-screen", pane.screen())?
+            && predicate(&screen)
         {
             return Ok(screen);
         }
@@ -139,43 +117,24 @@ fn screen(
     }
 }
 
-fn has_row(screen: &Screen, marker: &str) -> bool {
-    screen.rows.iter().any(|row| {
-        row.iter()
-            .map(|cell| cell.text.as_str())
-            .collect::<String>()
-            .trim_end()
-            == marker
-    })
-}
-
 fn metadata(
-    connection: &mut PaneConnection,
-    lease: Lease,
+    pane: &Pane,
     hidden: bool,
     predicate: impl Fn(&Snapshot) -> bool,
 ) -> Result<Box<Snapshot>> {
+    let lease = pane.lease();
     let until = Instant::now() + WAIT;
     loop {
         if hidden {
             require(
                 matches!(
-                    stage(
-                        "hidden-screen-demand",
-                        connection.exchange(&Request::Poll { lease })
-                    )?,
-                    Reply::Unchanged
+                    stage("hidden-screen-demand", pane.poll())?,
+                    InterimReply::Unchanged
                 ),
                 "hidden Pane published a Screen",
             )?;
         }
-        let Reply::Inventory { inventory, .. } = stage(
-            "presentation-inventory",
-            connection.exchange(&Request::Inventory),
-        )?
-        else {
-            return Err("presentation inventory reply missing".into());
-        };
+        let (inventory, _) = stage("presentation-inventory", support::inventory(pane.link()))?;
         let pane = inventory
             .close
             .as_ref()
@@ -198,16 +157,12 @@ fn metadata(
 }
 
 /// Starts a producer only in a fixture-owned Pane. Leaves it hidden for reconnect.
-pub fn begin(
-    connection: &mut PaneConnection,
-    lease: Lease,
-    command: impl Fn(&mut PaneConnection, Lease, &str) -> std::result::Result<(), ServerError>,
-) -> Result<Witness> {
+pub fn begin(pane: &Pane) -> Result<Witness> {
     let program = stage("presentation-script", serde_json::to_string(PRODUCER))?;
     let script = format!("python3 -c 'exec({})'", program.replace('\'', "'\\''"));
-    stage("presentation-producer", command(connection, lease, &script))?;
-    screen(connection, lease, |screen| has_row(screen, READY))?;
-    let initial = metadata(connection, lease, false, |snapshot| {
+    stage("presentation-producer", pane.command(&script))?;
+    screen(pane, |screen| has_row(screen, READY))?;
+    let initial = metadata(pane, false, |snapshot| {
         snapshot.title == TITLE
             && snapshot.directory == "/tmp"
             && snapshot.progress == Progress::Normal(42)
@@ -236,13 +191,13 @@ pub fn begin(
     )?;
     stage(
         "hide-presentation",
-        connection.exchange(&Request::PresentationDemand {
-            lease,
+        pane.interim(Interim::PresentationDemand {
+            channel: pane.channel(),
             visible: false,
         }),
     )?;
-    send(connection, lease, "h")?;
-    let changed = metadata(connection, lease, true, |snapshot| {
+    send(pane, "h")?;
+    let changed = metadata(pane, true, |snapshot| {
         snapshot.title == HIDDEN_TITLE
             && snapshot.directory == "/"
             && snapshot.progress == Progress::Normal(73)
@@ -251,17 +206,13 @@ pub fn begin(
 }
 
 /// Completes the same producer after actual transport reconnection and lease renewal.
-pub fn finish(
-    connection: &mut PaneConnection,
-    lease: Lease,
-    previous: Lease,
-    witness: Witness,
-) -> Result<()> {
+pub fn finish(pane: &Pane, previous: Lease, witness: Witness) -> Result<()> {
+    let lease = pane.lease();
     require(
         lease.session == previous.session && lease.connection != previous.connection,
         "reconnect did not retain the Session with a fresh connection",
     )?;
-    let resumed = metadata(connection, lease, false, |snapshot| {
+    let resumed = metadata(pane, false, |snapshot| {
         snapshot.title == witness.metadata.title
             && snapshot.directory == witness.metadata.directory
             && snapshot.progress == witness.metadata.progress
@@ -274,92 +225,69 @@ pub fn finish(
     )?;
     stage(
         "show-presentation",
-        connection.exchange(&Request::PresentationDemand {
-            lease,
+        pane.interim(Interim::PresentationDemand {
+            channel: pane.channel(),
             visible: true,
         }),
     )?;
-    let before = screen(connection, lease, |screen| {
+    let before = screen(pane, |screen| {
         has_row(screen, READY)
             && screen
                 .reading
                 .as_ref()
                 .is_some_and(|reading| reading.total_rows > reading.visible_rows)
     })?;
-    // Reject each exact fence independently, as well as the disconnected lease.
-    let mut wrong = vec![(previous, ServerError::StaleControl)];
-    for field in 0..4 {
-        let mut stale = lease;
-        match field {
-            0 => stale.server[0] ^= 1,
-            1 => stale.session[0] ^= 1,
-            2 => stale.control[0] ^= 1,
-            _ => stale.connection[0] ^= 1,
-        }
-        let refusal = if field < 2 {
-            ServerError::SessionUnavailable
-        } else {
-            ServerError::StaleControl
-        };
-        wrong.push((stale, refusal));
-    }
-    for (stale, refusal) in wrong {
-        require(
-            matches!(
-                connection.exchange(&Request::ClearScreenAndScrollback { lease: stale }),
-                Err(error) if error == refusal
-            ),
-            "wrong lease admitted clear",
-        )?;
-    }
-    // Stale clears must have preserved the actual retained history.
+    // Requests name a channel, not a lease, so a client can no longer present a lease with a
+    // changed fence. The disconnected lease's channel ended with its connection; a channel this
+    // connection never bound stands in for it. Channels start at 1, so `u32::MAX` was never bound.
+    require(
+        matches!(
+            pane.request(Operation::ClearScrollback {
+                channel: Channel(u32::MAX),
+            }),
+            Err(ServerError::StaleControl)
+        ),
+        "unbound channel admitted clear",
+    )?;
+    // The stale clear must have preserved the actual retained history.
     stage(
         "history-top",
-        connection.exchange(&Request::Read {
-            lease,
-            operation: spaceterm_server::pane::reading::Operation::Scroll(
-                spaceterm_server::pane::reading::Scroll::Top,
-            ),
+        pane.interim(Interim::Read {
+            channel: pane.channel(),
+            operation: reading::Operation::Scroll(reading::Scroll::Top),
         }),
     )?;
-    screen(connection, lease, |screen| has_row(screen, HISTORY))?;
+    screen(pane, |screen| has_row(screen, HISTORY))?;
     require(
         matches!(
             stage(
                 "clear-admission",
-                connection.exchange(&Request::ClearScreenAndScrollback { lease })
+                pane.request(Operation::ClearScrollback {
+                    channel: pane.channel(),
+                })
             )?,
-            Reply::Unchanged
+            ReplyBody::Done
         ),
         "clear admission reply changed",
     )?;
-    screen(connection, lease, |screen| {
+    screen(pane, |screen| {
         screen.generation != before.generation
             && screen.reading.as_ref().is_some_and(|reading| {
                 reading.total_rows == reading.visible_rows && reading.offset_rows == 0
             })
-            && !screen.rows.iter().any(|row| {
-                row.iter()
-                    .map(|cell| cell.text.as_str())
-                    .collect::<String>()
-                    .contains("ST-PRESENTATION")
-            })
+            && !support::rows(screen)
+                .iter()
+                .any(|row| row.contains("ST-PRESENTATION"))
             && !has_row(screen, READY)
     })?;
     stage(
         "presentation-exit-focus",
-        connection.exchange(&Request::Focus {
-            lease,
-            generation: 1,
-            target: spaceterm_server::pane::FocusTarget::Terminal,
-        }),
+        pane.focus(1, FocusTarget::Terminal),
     )?;
-    send(connection, lease, "x")?;
-    screen(connection, lease, |screen| {
-        has_row(screen, "ST-PRESENTATION-EXIT")
-    })?;
+    send(pane, "x")?;
+    screen(pane, |screen| has_row(screen, "ST-PRESENTATION-EXIT"))?;
     eprintln!(
-        "PASS metadata-only hidden Pane, OSC title/directory/progress, origin facts, reconnect, exact lease refusals, screen and history clear"
+        "PASS metadata-only hidden Pane, OSC title/directory/progress, origin facts, reconnect, unbound channel refusal, screen and history clear"
     );
     Ok(())
 }

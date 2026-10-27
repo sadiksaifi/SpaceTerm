@@ -7,19 +7,26 @@ fn metadata_write_failure_preserves_the_live_connection_and_its_exact_authority(
     fixture.enable();
     let credential = DeviceCredential::generate().unwrap();
     let paired = fixture.enroll(&credential);
-    let (stream, _remote) = UnixStream::pair().unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let _client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+    let (tcp, _) = listener.accept().unwrap();
+    let outbox = crate::connection::outbox::Outbox::new(Arc::new(|| {}));
     let mut state = fixture.state.lock().unwrap();
     let generation = state.generation;
-    let peer = state.register(&paired, &stream, generation).unwrap();
+    state
+        .register(&paired, generation, [5; 32], outbox.clone(), &tcp)
+        .unwrap();
     let record = fixture.paths.data.join("direct.json");
     let original = fixture.paths.data.join("retained-direct.json");
     std::fs::rename(&record, &original).unwrap();
     // Renaming a regular file onto this directory fails at the real storage boundary.
     std::fs::create_dir(&record).unwrap();
-    assert_eq!(state.note_connection(&peer), Ok(()));
+    assert_eq!(state.note_connection(&paired), Ok(()));
     assert!(!state.uncertain);
     assert_eq!(state.generation, generation);
-    assert_eq!(state.authorized_peer(&peer), Ok(()));
+    assert_eq!(state.authorized(&paired), Ok(()));
+    assert_eq!(state.connections.len(), 1);
+    assert!(!outbox.is_closing());
     assert!(
         state.record.devices[0]
             .info

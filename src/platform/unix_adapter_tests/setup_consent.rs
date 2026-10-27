@@ -736,7 +736,7 @@ fn discovery(running: bool) -> AccountDiscovery {
         enabled: true,
         running,
         stopped: !running,
-        protocol_majors: vec![1],
+        protocol_majors: vec![spaceterm_server::protocol::MAJOR],
         capabilities: vec!["workspace_policy".into()],
         target: "x86_64-unknown-linux-gnu".into(),
         version: "1.0.0".into(),

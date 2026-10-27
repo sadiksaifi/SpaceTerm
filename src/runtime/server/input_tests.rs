@@ -1,0 +1,157 @@
+//! Terminal input through the protocol, on a real headless PTY.
+use super::dispatch::Served;
+use super::tests::{create_shared, host, shared_inventory, size};
+use super::*;
+use spaceterm_server::attachments::Attachment;
+use spaceterm_server::connection::outbox::Outbox;
+use spaceterm_server::connection::service::{Dispatch, PaneService as _, Peer};
+use spaceterm_server::protocol::{
+    self, Channel, ClaimReply, InputEvent, InputOutcome, Operation, PaneEvent, ReplyBody,
+    RequestId, ServerMessage,
+    frame::Assembler,
+    interim::{Interim, InterimReply},
+};
+use std::time::{Duration, Instant};
+
+const PEER: Peer = Peer {
+    client: [1; 32],
+    connection: [1; 32],
+    pairing: None,
+};
+const CHANNEL: Channel = Channel(1);
+
+fn reply(served: &mut Served<SharedWorkspaceHost>, operation: Operation) -> ReplyBody {
+    match served.request(&PEER, RequestId(1), operation) {
+        Dispatch::Reply(result) => (*result).expect("the operation succeeds"),
+        _ => panic!("the operation replies at once"),
+    }
+}
+
+fn text(text: &str) -> InputEvent {
+    let InteractiveInput::Key(key) = super::tests::text_key(text, false) else {
+        unreachable!()
+    };
+    InputEvent::Key(key)
+}
+
+fn send(served: &mut Served<SharedWorkspaceHost>, serial: u32, events: Vec<InputEvent>) {
+    served.input(
+        &PEER,
+        protocol::Input {
+            channel: CHANNEL,
+            serial,
+            generation: 1,
+            events,
+        },
+    );
+}
+
+/// The Input outcomes the server reported, by serial.
+fn reported(outbox: &Outbox) -> Vec<(u32, InputOutcome)> {
+    let mut assembler = Assembler::default();
+    let mut outcomes = Vec::new();
+    while let Some((frame, _)) = outbox.next_frame() {
+        let frame = protocol::RawFrame::parse(&frame).unwrap();
+        if let Some(ServerMessage::Pane(message)) = assembler.server(frame).unwrap()
+            && let PaneEvent::Input { serial, outcome } = message.event
+        {
+            outcomes.push((serial, outcome));
+        }
+    }
+    outcomes
+}
+
+/// Polls until a row of the screen equals `line`. `rows` keeps the last screen, because a poll
+/// answers `Unchanged` until the screen changes again.
+fn await_line(served: &mut Served<SharedWorkspaceHost>, rows: &mut Vec<String>, line: &str) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let ReplyBody::Interim(InterimReply::Screen(screen)) = reply(
+            served,
+            Operation::Interim(Interim::Poll { channel: CHANNEL }),
+        ) {
+            *rows = screen
+                .rows
+                .iter()
+                .map(|row| row.iter().map(|cell| cell.text.as_str()).collect())
+                .collect();
+        }
+        if rows.iter().any(|row| row.trim_end() == line) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "expected {line:?}; screen: {rows:?}"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// Text input made of control characters reaches the PTY as the keys that type them, and text
+/// with a control character no key produces is refused while the Terminal Session keeps running.
+#[test]
+fn control_characters_in_text_input_reach_the_pty_and_unknown_ones_are_refused() {
+    let mut shared = SharedWorkspaceHost::new(host());
+    let workspace = create_shared(&mut shared, 1);
+    let inventory = shared_inventory(&mut shared);
+    let pane = inventory
+        .workspaces
+        .iter()
+        .find(|candidate| candidate.id == workspace)
+        .and_then(|workspace| workspace.tabs.first())
+        .and_then(|tab| tab.panes.first())
+        .unwrap()
+        .id;
+    let mut served = Served::new(shared);
+    let outbox = Outbox::new(Arc::new(|| {}));
+    served.admitted(&PEER, "Test".into(), outbox.clone());
+    let claim = reply(
+        &mut served,
+        Operation::Claim(protocol::Claim {
+            channel: CHANNEL,
+            attachment: Attachment {
+                workspace,
+                generation: 1,
+            },
+            pane,
+            claim: AttachmentClaim::Select { explicit: true },
+            size: size(),
+            style: None,
+        }),
+    );
+    assert!(matches!(
+        claim,
+        ReplyBody::Claim(ClaimReply::Attached { .. })
+    ));
+    send(
+        &mut served,
+        1,
+        vec![InputEvent::Focus(FocusTarget::Terminal)],
+    );
+    let mut rows = Vec::new();
+    // One message with printable text, a carriage return and more text: both lines run.
+    send(
+        &mut served,
+        2,
+        vec![
+            text("printf 'CR-%s\\n' one\rprintf 'CR-%s\\n' two"),
+            text("\r"),
+        ],
+    );
+    await_line(&mut served, &mut rows, "CR-one");
+    await_line(&mut served, &mut rows, "CR-two");
+    // FS (0x1c) has no key. The message is refused as a whole and nothing reaches the PTY.
+    send(
+        &mut served,
+        3,
+        vec![text("printf 'FS-%s\\n' typed\u{1c}\r")],
+    );
+    send(&mut served, 4, vec![text("printf 'CR-%s\\n' three\r")]);
+    await_line(&mut served, &mut rows, "CR-three");
+    assert_eq!(
+        reported(&outbox),
+        [(3, InputOutcome::Discarded(Refusal::Unsupported))],
+        "only the refused message is reported"
+    );
+    served.shutdown().unwrap();
+}

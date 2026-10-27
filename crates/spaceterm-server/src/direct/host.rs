@@ -1,7 +1,9 @@
 use super::*;
+use crate::connection::Wake;
+use crate::connection::registry::{PairedConnections, Sever};
 use std::{
     net::{TcpListener, TcpStream},
-    os::{fd::AsRawFd, unix::net::UnixStream},
+    os::fd::{AsRawFd, RawFd},
     sync::{Arc, Mutex},
 };
 
@@ -19,16 +21,14 @@ fn bind_listener(address: std::net::SocketAddr) -> std::io::Result<TcpListener> 
     Ok(socket.into())
 }
 pub(crate) type Shared = Arc<Mutex<State>>;
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct Peer<'a> {
-    pub(crate) device: &'a PairedDevice,
-    pub(crate) connection: [u8; 32],
-}
-struct Registered {
-    pairing: PairingId,
-    connection: [u8; 32],
-    generation: [u8; 32],
-    stream: UnixStream,
+
+/// Severs a paired connection by shutting its TCP read side. Its I/O thread then writes the queued
+/// goodbye and closes.
+struct ReadSide(TcpStream);
+impl Sever for ReadSide {
+    fn sever(&self) {
+        let _ = self.0.shutdown(std::net::Shutdown::Read);
+    }
 }
 struct PendingInvitation {
     id: ClaimId,
@@ -49,11 +49,13 @@ pub(crate) struct State {
     listener_state: ListenerState,
     invitations: Vec<PendingInvitation>,
     claims: Vec<PendingClaim>,
-    connections: Vec<Registered>,
+    connections: PairedConnections,
     uncertain: bool,
     generation: [u8; 32],
     released: std::collections::BTreeSet<[u8; 32]>,
     network: Arc<dyn network::Adapter>,
+    /// Wakes the host's accept loop when the listener changes.
+    wake: Option<Arc<dyn Wake>>,
 }
 impl State {
     pub(crate) fn open(paths: &crate::host::Paths) -> Result<Shared, DirectError> {
@@ -74,16 +76,30 @@ impl State {
             listener_state: ListenerState::Off,
             invitations: Vec::new(),
             claims: Vec::new(),
-            connections: Vec::new(),
+            connections: PairedConnections::default(),
             uncertain: false,
             generation: crypto::random()?,
             released: Default::default(),
             network,
+            wake: None,
         };
         state.listen();
         Ok(Arc::new(Mutex::new(state)))
     }
+    pub(crate) fn set_wake(&mut self, wake: Arc<dyn Wake>) {
+        self.wake = Some(wake);
+    }
+    /// The listener the host's accept loop waits on.
+    pub(crate) fn listener_fd(&self) -> Option<RawFd> {
+        self.listener.as_ref().map(AsRawFd::as_raw_fd)
+    }
+    fn listener_changed(&self) {
+        if let Some(wake) = &self.wake {
+            wake.wake();
+        }
+    }
     fn listen(&mut self) {
+        self.listener_changed();
         self.listener = None;
         self.listener_state = match self.record.policy.as_ref().filter(|_| self.record.enabled) {
             None => ListenerState::Off,
@@ -112,10 +128,9 @@ impl State {
         if let Err(error) = self.store.save(&next) {
             self.uncertain = true;
             // A renamed but unsynced revocation must never leave ordinary authority usable.
-            for registered in &self.connections {
-                let _ = registered.stream.shutdown(std::net::Shutdown::Both);
-            }
+            self.connections.end_all();
             self.listener = None;
+            self.listener_changed();
             self.listener_state = ListenerState::Failed(error);
             return Err(error);
         }
@@ -123,19 +138,6 @@ impl State {
         Ok(())
     }
     pub(crate) fn accept(&mut self) -> Option<(TcpStream, [u8; 32])> {
-        self.connections.retain(|registered| {
-            let mut byte = [0];
-            // A disconnected private bridge answers EOF; WouldBlock is a live idle bridge.
-            // SAFETY: recv only observes this retained socket into one writable byte.
-            unsafe {
-                libc::recv(
-                    registered.stream.as_raw_fd(),
-                    byte.as_mut_ptr().cast(),
-                    1,
-                    libc::MSG_PEEK | libc::MSG_DONTWAIT,
-                ) != 0
-            }
-        });
         self.listener
             .as_ref()?
             .accept()
@@ -167,48 +169,38 @@ impl State {
         }
         Ok(())
     }
-    pub(crate) fn authorized_peer(&mut self, peer: &Peer<'_>) -> Result<(), DirectError> {
-        self.authorized(peer.device)?;
-        if !self.connections.iter().any(|registered| {
-            registered.connection == peer.connection
-                && registered.pairing == peer.device.pairing
-                && registered.generation == self.generation
-        }) {
-            return Err(DirectError::Disabled);
-        }
-        Ok(())
-    }
-    pub(crate) fn register<'a>(
+    /// Registers a paired connection of listener `generation`, so revocation reaches it. The
+    /// authorization check and the registration share this lock with every revocation.
+    pub(crate) fn register(
         &mut self,
-        paired: &'a PairedDevice,
-        stream: &UnixStream,
+        paired: &PairedDevice,
         generation: [u8; 32],
-    ) -> Result<Peer<'a>, DirectError> {
+        connection: [u8; 32],
+        outbox: crate::connection::outbox::Outbox,
+        tcp: &TcpStream,
+    ) -> Result<(), DirectError> {
         self.authorized(paired)?;
         if generation != self.generation {
             return Err(DirectError::Disabled);
         }
-        if self.connections.len() >= 64 {
-            return Err(DirectError::Capacity);
-        }
-        let clone = stream.try_clone().map_err(|_| DirectError::Transport)?;
-        clone
-            .set_nonblocking(true)
-            .map_err(|_| DirectError::Transport)?;
-        let connection = crypto::random()?;
-        self.connections.push(Registered {
-            pairing: paired.pairing,
-            connection,
-            generation,
-            stream: clone,
-        });
-        Ok(Peer {
-            device: paired,
-            connection,
-        })
+        let read_side = tcp.try_clone().map_err(|_| DirectError::Transport)?;
+        self.connections
+            .register(
+                connection,
+                crate::connection::service::Pairing {
+                    pairing: paired.pairing,
+                    generation,
+                },
+                outbox,
+                Box::new(ReadSide(read_side)),
+            )
+            .map_err(|_| DirectError::Capacity)
     }
-    fn note_connection(&mut self, peer: &Peer<'_>) -> Result<(), DirectError> {
-        self.authorized_peer(peer)?;
+    pub(crate) fn unregister(&mut self, connection: [u8; 32]) {
+        self.connections.unregister(connection);
+    }
+    fn note_connection(&mut self, paired: &PairedDevice) -> Result<(), DirectError> {
+        self.authorized(paired)?;
         let Some(now) = wire::now()
             .ok()
             .filter(|time| *time <= storage::MAX_CONNECTION_TIME)
@@ -219,7 +211,7 @@ impl State {
             .record
             .devices
             .iter_mut()
-            .find(|device| device.info.pairing == peer.device.pairing)
+            .find(|device| device.info.pairing == paired.pairing)
             .ok_or(DirectError::AuthenticationRefused)?;
         if device
             .info
@@ -275,7 +267,7 @@ impl State {
     }
     pub(crate) fn manage(
         &mut self,
-        actor: Option<&Peer<'_>>,
+        actor: Option<PairingId>,
         request: Management,
     ) -> Result<(ManagementReply, Option<[u8; 32]>), DirectError> {
         // Only authenticated owning-account IPC grants administration authority.
@@ -291,8 +283,8 @@ impl State {
         {
             return Err(DirectError::AuthenticationRefused);
         }
-        if let (Some(peer), Management::Revoke { target, .. }) = (actor, &request)
-            && peer.device.pairing != *target
+        if let (Some(actor), Management::Revoke { target, .. }) = (actor, &request)
+            && actor != *target
         {
             return Err(DirectError::AuthenticationRefused);
         }
@@ -467,10 +459,7 @@ impl State {
                     self.commit(next)?;
                     if changed_policy {
                         self.generation = generation;
-                        for registered in &self.connections {
-                            let _ = registered.stream.shutdown(std::net::Shutdown::Both);
-                        }
-                        self.connections.clear();
+                        self.connections.retire_generation(generation);
                         self.invitations.clear();
                         for pending in &mut self.claims {
                             if pending.decision.is_none() {
@@ -533,10 +522,7 @@ impl State {
                 self.commit(next)?;
                 self.generation = generation;
                 // Network administration arrives only over IPC. Retire all WSS authority.
-                for registered in &self.connections {
-                    let _ = registered.stream.shutdown(std::net::Shutdown::Both);
-                }
-                self.connections.clear();
+                self.connections.retire_generation(generation);
                 self.invitations.clear();
                 for pending in &mut self.claims {
                     if pending.decision.is_none() {
@@ -669,8 +655,7 @@ impl State {
                     .collect(),
             ),
             Management::Revoke { operation, target } => {
-                let (receipt, client) =
-                    self.revoke(actor.map(|peer| peer.device.pairing), operation, target)?;
+                let (receipt, client) = self.revoke(actor, operation, target)?;
                 return Ok((ManagementReply::Revoked(receipt), Some(client)));
             }
         };
@@ -821,15 +806,7 @@ impl State {
             self.commit(next)?;
             receipt
         };
-        for registered in self
-            .connections
-            .iter()
-            .filter(|registered| registered.pairing == target)
-        {
-            let _ = registered.stream.shutdown(std::net::Shutdown::Both);
-        }
-        self.connections
-            .retain(|registered| registered.pairing != target);
+        self.connections.revoke(target);
         Ok((receipt, client))
     }
     pub(super) fn challenge(&self) -> Result<wire::Challenge, DirectError> {
@@ -855,6 +832,22 @@ impl State {
             server_name,
             proof,
         })
+    }
+    /// Authenticates one pairing exchange, and names the client whose grants a revocation or
+    /// cancellation in it retired.
+    pub(super) fn authenticate_and_resolve(
+        &mut self,
+        challenge: &wire::Challenge,
+        authentication: &wire::Authentication,
+    ) -> (Result<wire::Answer, DirectError>, Option<[u8; 32]>) {
+        let answer = self.authenticate(challenge, authentication);
+        let retired = match &answer {
+            Ok(wire::Answer::Revoked(receipt) | wire::Answer::Cancelled(Some(receipt))) => {
+                self.revocation_client(receipt.target)
+            }
+            _ => None,
+        };
+        (answer, retired)
     }
     pub(super) fn authenticate(
         &mut self,
@@ -1069,10 +1062,8 @@ impl State {
     pub(crate) fn stop(&mut self) {
         self.listener = None;
         self.listener_state = ListenerState::Off;
-        for registered in &self.connections {
-            let _ = registered.stream.shutdown(std::net::Shutdown::Both);
-        }
-        self.connections.clear();
+        self.listener_changed();
+        self.connections.end_all();
         self.invitations.clear();
         self.claims.clear();
     }
@@ -1090,11 +1081,15 @@ impl State {
     }
 }
 
+/// Serves one accepted TCP connection: the pinned WSS handshake, one pairing exchange, and for a
+/// paired device admission and then the protocol connection over a [`crate::connection::wss::WssCarrier`].
 pub(crate) fn serve(
     tcp: TcpStream,
     generation: [u8; 32],
     state: Shared,
-    environment: crate::host::Environment,
+    environment: &crate::host::Environment,
+    waker: crate::connection::io::Waker,
+    wake: Arc<dyn Wake>,
 ) -> Result<(), ServerError> {
     let (certificate, key) = {
         let state = state.lock().unwrap_or_else(|e| e.into_inner());
@@ -1116,20 +1111,19 @@ pub(crate) fn serve(
         _ => None,
     };
     let answer = {
-        // The same lock fences both original requests and revocation, including cancellation.
-        let mut panes = environment.panes.lock().unwrap_or_else(|e| e.into_inner());
-        let mut state = state.lock().unwrap_or_else(|e| e.into_inner());
-        let answer = state.authenticate(&challenge, &authentication);
-        let receipt = match &answer {
-            Ok(wire::Answer::Revoked(receipt) | wire::Answer::Cancelled(Some(receipt))) => {
-                Some(receipt)
-            }
-            _ => None,
-        };
-        if let Some(client) = receipt.and_then(|r| state.revocation_client(r.target))
-            && let Some(panes) = panes.as_mut()
-        {
-            panes.revoked(client);
+        // Revocation ends registered connections inside the direct-network lock, before the
+        // service learns of it. The locks are taken in the same order as everywhere else.
+        let answer = state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .authenticate_and_resolve(&challenge, &authentication);
+        let (answer, retired) = answer;
+        if let Some(client) = retired {
+            environment
+                .panes
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .revoked(client);
         }
         answer
     };
@@ -1139,23 +1133,44 @@ pub(crate) fn serve(
         return Ok(());
     }
     let paired = paired.ok_or(ServerError::AuthenticationRefused)?;
-    let mut bridge = wss::Bridge::start(ws)?;
-    let peer = {
-        let _panes = environment.panes.lock().unwrap_or_else(|e| e.into_inner());
-        state.lock().unwrap_or_else(|e| e.into_inner()).register(
-            &paired,
-            bridge.stream(),
-            generation,
-        )?
-    };
-    let (_, client, name) = crate::protocol::admit_direct_server(&mut bridge, &paired)?;
+    let (_, client, name) = crate::protocol::admit_direct_server(&mut ws, &paired)?;
+    let connection = crate::protocol::random()?;
+    let outbox = crate::connection::outbox::Outbox::new(Arc::clone(&wake));
+    state.lock().unwrap_or_else(|e| e.into_inner()).register(
+        &paired,
+        generation,
+        connection,
+        outbox.clone(),
+        ws.get_ref().tcp(),
+    )?;
+    let served = (|| {
+        state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .note_connection(&paired)?;
+        let peer = crate::connection::service::Peer {
+            client,
+            connection,
+            pairing: Some(crate::connection::service::Pairing {
+                pairing: paired.pairing,
+                generation,
+            }),
+        };
+        crate::host::serve_admitted(
+            Box::new(crate::connection::wss::WssCarrier::new(ws)),
+            peer,
+            name,
+            outbox,
+            waker,
+            environment,
+        );
+        Ok::<_, ServerError>(())
+    })();
     state
         .lock()
-        .unwrap_or_else(|error| error.into_inner())
-        .note_connection(&peer)?;
-    crate::host::serve_admitted(&mut bridge, client, name, Some(peer), &environment)?;
-    bridge.finish_reply()?;
-    Ok(())
+        .unwrap_or_else(|e| e.into_inner())
+        .unregister(connection);
+    served
 }
 
 #[cfg(test)]
@@ -1346,8 +1361,11 @@ mod tests {
         // A failed atomic save leaves its durable outcome uncertain. Its next authority
         // check reloads the document and rotates exposure before registering a stream.
         state.uncertain = true;
-        let (stream, _peer) = UnixStream::pair().unwrap();
-        let registered = state.register(&paired, &stream, generation);
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let _client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (tcp, _) = listener.accept().unwrap();
+        let outbox = crate::connection::outbox::Outbox::new(Arc::new(|| {}));
+        let registered = state.register(&paired, generation, [5; 32], outbox, &tcp);
         let empty = state.connections.is_empty();
         drop(state);
         assert_eq!(registered, Err(DirectError::Disabled));

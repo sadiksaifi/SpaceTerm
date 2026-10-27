@@ -14,6 +14,7 @@ pub mod screen;
 #[cfg(test)]
 mod tests;
 
+pub use admission::MAJOR;
 pub(crate) use admission::*;
 pub use frame::{DecodeError, Kind, RawFrame, WireMessage};
 pub use message::{
@@ -23,9 +24,3 @@ pub use message::{
 };
 pub use operation::{Claim, ClaimReply, Operation, ReplyBody, Restored, Takeover};
 pub use screen::{Page, ScreenUpdate};
-
-/// The protocol major of the pushed, multiplexed exchange in this module.
-///
-/// Admission still selects `MAJOR` (1) for the request-and-poll exchange. The transport cutover
-/// sets `MAJOR` to this value and deletes this constant.
-pub const PUSH_MAJOR: u16 = 2;

@@ -98,6 +98,12 @@ pub trait PaneService: Send {
 /// The host's direct-network administration, answering `Operation::Direct`. It runs on the sync
 /// worker, without the `PaneService` lock. It must not hold the direct-network lock while it takes
 /// the `PaneService` lock, for example to call [`PaneService::revoked`].
+///
+/// A revocation ends the affected connections through
+/// [`super::registry::PairedConnections::revoke`] or `retire_generation` before it calls
+/// [`PaneService::revoked`]. The goodbye those queue makes
+/// [`super::server::AdmittedConnection::dispatch`] drop every later message under the
+/// `PaneService` lock, so no request or input of a revoked device runs after `revoked`.
 pub trait DirectManagement: Send + Sync {
     fn manage(&self, peer: &Peer, request: Management) -> Result<ManagementReply, DirectError>;
 }
