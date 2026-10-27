@@ -344,7 +344,6 @@ fn every_operation_round_trips() {
             channel,
             visible: true,
         }),
-        Operation::Interim(Interim::Inventory),
         Operation::Interim(Interim::Read {
             channel,
             operation: pane::reading::Operation::Query {
@@ -574,11 +573,6 @@ fn every_server_message_round_trips() {
             "spaceterm://pair/x".into(),
         ))),
         ReplyBody::Direct(Err(crate::direct::DirectError::Revoked)),
-        ReplyBody::Interim(InterimReply::Inventory {
-            inventory: inventory(),
-            next_sequence: 3,
-        }),
-        ReplyBody::Interim(InterimReply::MutationPending),
         ReplyBody::Interim(InterimReply::NativeEffects {
             request: Some(pane::effects::Request {
                 id: 1,

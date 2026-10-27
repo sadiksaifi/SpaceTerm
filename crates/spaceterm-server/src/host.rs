@@ -323,6 +323,9 @@ impl PaneService for HostService {
     fn cancel(&mut self, peer: &Peer, id: RequestId) {
         self.inner.cancel(peer, id)
     }
+    fn ticker(&mut self, wake: Arc<dyn Wake>) {
+        self.inner.ticker(wake)
+    }
     fn tick(&mut self, now: Instant) -> Option<Instant> {
         self.inner.tick(now)
     }
@@ -453,6 +456,7 @@ fn serve_runtime_ready(
         &paths.data,
         false,
     )?))?;
+    panes.ticker(Arc::clone(&stop.wake));
     let socket = paths.socket();
     if let Some(identity) = runtime.socket_identity(c"s")? {
         runtime.verify_path(&paths.runtime)?;
@@ -1374,6 +1378,16 @@ mod startup_tests {
         );
     }
 
+    /// A request the test service answers at once.
+    fn round_trip() -> Operation {
+        Operation::ReleaseAttachment {
+            attachment: crate::attachments::Attachment {
+                workspace: [2; 32],
+                generation: 1,
+            },
+        }
+    }
+
     #[test]
     #[ignore = "runs only as a child of the shared transport admission test"]
     fn shared_transport_child() {
@@ -1391,12 +1405,6 @@ mod startup_tests {
             Some(crate::panes(|_| {
                 Ok(Answering(|operation| {
                     Dispatch::reply(Ok(match operation {
-                        Operation::Interim(Interim::Inventory) => {
-                            ReplyBody::Interim(InterimReply::Inventory {
-                                inventory: crate::hierarchy::State::empty().inventory,
-                                next_sequence: 1,
-                            })
-                        }
                         Operation::Claim(claim) => {
                             ReplyBody::Claim(ClaimReply::Restored(Box::new(Restored {
                                 fresh: false,
@@ -1435,9 +1443,8 @@ mod startup_tests {
     #[test]
     fn a_client_that_stops_reading_bulk_replies_does_not_stall_another_client() {
         use crate::protocol::{
-            Channel, ClientMessage, ReplyBody, Request, RequestId,
-            frame::encode_client,
-            interim::{Interim, InterimReply},
+            Channel, ClientMessage, ReplyBody, Request, RequestId, frame::encode_client,
+            interim::Interim,
         };
         use std::io::Write;
         for graphics in [false, true] {
@@ -1482,14 +1489,8 @@ mod startup_tests {
             let current = admitted_link(&fixture, &fixture.device);
             let started = Instant::now();
             for _ in 0..16 {
-                let reply = current
-                    .request(Operation::Interim(Interim::Inventory))
-                    .unwrap()
-                    .wait();
-                assert!(matches!(
-                    reply,
-                    Ok(ReplyBody::Interim(InterimReply::Inventory { .. }))
-                ));
+                let reply = current.request(round_trip()).unwrap().wait();
+                assert!(matches!(reply, Ok(ReplyBody::Done)));
             }
             assert!(
                 started.elapsed() < Duration::from_secs(2),
@@ -1501,10 +1502,7 @@ mod startup_tests {
     #[test]
     fn two_desktops_claim_every_supported_pane_over_one_connection_each() {
         use crate::pane::{AttachmentClaim, PaneSize};
-        use crate::protocol::{
-            ClaimReply, ReplyBody,
-            interim::{Interim, InterimReply},
-        };
+        use crate::protocol::{ClaimReply, ReplyBody};
         let fixture = Fixture::new();
         let other = protocol::random().unwrap();
         let _child = fixture.start_test("host::startup_tests::shared_transport_child", false);
@@ -1512,10 +1510,8 @@ mod startup_tests {
         for device in [fixture.device, other] {
             let link = admitted_link(&fixture, &device);
             assert!(matches!(
-                link.request(Operation::Interim(Interim::Inventory))
-                    .unwrap()
-                    .wait(),
-                Ok(ReplyBody::Interim(InterimReply::Inventory { .. }))
+                link.request(round_trip()).unwrap().wait(),
+                Ok(ReplyBody::Done)
             ));
             for pane in 0..crate::hierarchy::MAX_PANES {
                 let channel = link.open_channel(Arc::new(|_| {})).unwrap();
@@ -1549,10 +1545,8 @@ mod startup_tests {
         let management = admitted_link(&fixture, &fixture.device);
         for link in &links {
             assert!(matches!(
-                link.request(Operation::Interim(Interim::Inventory))
-                    .unwrap()
-                    .wait(),
-                Ok(ReplyBody::Interim(InterimReply::Inventory { .. }))
+                link.request(round_trip()).unwrap().wait(),
+                Ok(ReplyBody::Done)
             ));
         }
         assert!(matches!(
@@ -1566,7 +1560,6 @@ mod startup_tests {
         use crate::protocol::{
             ClientMessage, Fatal, RawFrame, ReplyBody, Request, RequestId, ServerMessage,
             frame::{Assembler, FrameReader, encode_client},
-            interim::Interim,
         };
         use std::io::{Read, Write};
         let fixture = Fixture::new();
@@ -1582,7 +1575,7 @@ mod startup_tests {
         .unwrap();
         let frame = encode_client(&ClientMessage::Request(Box::new(Request {
             id: RequestId(1),
-            operation: Operation::Interim(Interim::Inventory),
+            operation: round_trip(),
         })))
         .unwrap()
         .frames

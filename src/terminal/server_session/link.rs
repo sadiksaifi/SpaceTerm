@@ -913,7 +913,6 @@ impl PaneLink {
                 generation,
                 offset: offset as u64,
             }),
-            Request::Inventory => interim(Interim::Inventory),
             Request::Focus {
                 lease,
                 generation,
@@ -1049,9 +1048,8 @@ impl PaneLink {
             Request::Mutate { sequence, mutation } => {
                 interim_reply(self.request(Operation::Mutate { sequence, mutation })?)
             }
-            Request::Resolve { sequence } => {
-                interim_reply(self.request(Operation::Resolve { sequence })?)
-            }
+            // The shared Workspace client reads pushed inventory and resolves by dispatching.
+            Request::Inventory | Request::Resolve { .. } => Err(ServerError::Unsupported),
             Request::Acknowledge { sequence } => {
                 self.link.acknowledge(sequence)?;
                 Ok(Reply::Unchanged)
@@ -1142,14 +1140,6 @@ fn interim_reply(body: ReplyBody) -> Result<Reply, ServerError> {
                 request,
                 hidden_input,
             },
-            InterimReply::Inventory {
-                inventory,
-                next_sequence,
-            } => Reply::Inventory {
-                inventory,
-                next_sequence,
-            },
-            InterimReply::MutationPending => Reply::MutationPending,
             InterimReply::Reading { accepted } => Reply::Reading { accepted },
             InterimReply::ReadingReady {
                 generation,

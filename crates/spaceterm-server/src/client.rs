@@ -83,7 +83,7 @@ impl LinkSink for Fanout {
         match event {
             LinkEvent::Inventory(revision) => {
                 for sink in subscribers {
-                    sink.deliver(LinkEvent::Inventory(revision.clone()));
+                    sink.deliver(LinkEvent::Inventory(Arc::clone(&revision)));
                 }
             }
             LinkEvent::Health(health) => {

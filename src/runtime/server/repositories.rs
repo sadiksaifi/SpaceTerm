@@ -93,9 +93,16 @@ impl ServerRepositories {
         }
         self.next_read = Instant::now();
     }
-    /// Whether a subscriber's Git facts are read now or again later.
-    pub(super) fn busy(&self) -> bool {
-        !self.subscribers.is_empty() || self.worker.is_some()
+    /// When the next update has work: a running read's results, or the next refresh for a
+    /// subscriber. `None` without subscribers or a read.
+    pub(super) fn due(&self, now: Instant) -> Option<Instant> {
+        if self.worker.is_some() {
+            Some(now + POLL)
+        } else if self.subscribers.is_empty() {
+            None
+        } else {
+            Some(self.next_read.max(now))
+        }
     }
     pub(super) fn snapshot(&self) -> Snapshot {
         self.snapshot.clone()

@@ -37,13 +37,16 @@ pub enum Operation {
         channel: Channel,
         style: PresentationStyle,
     },
-    /// A shared Workspace edit. Its reply carries the validated outcome after the inventory
-    /// revision that contains it.
+    /// A shared Workspace edit, or its Original Operation dispatched again with the same
+    /// identity. The server replays an outcome it already recorded. The reply carries the
+    /// validated outcome after the inventory revision that contains it, once that revision is
+    /// retained, and waits for a Worktree write the outcome depends on.
     Mutate {
         sequence: u64,
         mutation: crate::hierarchy::Mutation,
     },
-    /// Settles an Unconfirmed Outcome of the same Original Operation.
+    /// The recorded outcome of an Original Operation, without dispatching it. The reply waits
+    /// like `Mutate`'s, and refuses `Missing` when the server recorded no such operation.
     Resolve {
         sequence: u64,
     },

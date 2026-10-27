@@ -10,17 +10,18 @@ use std::time::Instant;
 #[cfg(test)]
 #[path = "shared/close_control_tests.rs"]
 mod close_control_tests;
+mod edits;
 mod journal;
 #[cfg(test)]
 #[path = "shared/session_end_tests.rs"]
 mod session_end_tests;
 mod worktrees;
 use journal::{Journal, Retention, Revision};
+use spaceterm_server::connection::outbox::Outbox;
+use spaceterm_server::connection::service::Dispatch;
 use spaceterm_server::connection::sync::SyncWorker;
+use spaceterm_server::protocol::RequestId;
 pub(super) use worktrees::pinned_in_worktree;
-
-/// How soon timed work runs again while terminals, Git or directory reads, or writes are live.
-const SYNCHRONIZE_INTERVAL: Duration = Duration::from_millis(10);
 
 pub struct SharedWorkspaceHost {
     writes: worktrees::Writes,
@@ -32,8 +33,18 @@ pub struct SharedWorkspaceHost {
     fresh_panes: BTreeSet<Id>,
     /// Retains organization off the lock. Absent until [`HostCommands::restore`].
     journal: Option<Arc<Journal>>,
-    /// Runs journal writes nobody waits for, in submission order. Without it they run inline.
-    sync: Option<SyncWorker>,
+    /// The server's one sync worker. It writes the journal and sends deferred replies, in
+    /// submission order.
+    sync: SyncWorker,
+    /// Every admitted connection, which receives each inventory revision.
+    subscribers: BTreeMap<Id, edits::Subscriber>,
+    /// The inventory last pushed, so an unchanged one is not pushed again.
+    published: Option<Inventory>,
+    /// Edits whose replies wait for a Worktree write to settle.
+    waiting: Vec<edits::Waiting>,
+    /// The host's wake, and the deadline the host last received from a tick.
+    ticker: Option<Arc<dyn spaceterm_server::connection::Wake>>,
+    armed: Option<Instant>,
     /// Why the last synchronization failed. Requests are refused until one succeeds.
     blocked: Option<Refusal>,
     organization_prepared: bool,
@@ -50,22 +61,28 @@ enum Answer {
 }
 
 impl SharedWorkspaceHost {
-    pub fn local() -> Result<Self, ServerError> {
-        Ok(Self::new(DevelopmentPaneHost::local()?))
+    /// `sync` is the server's one sync worker, shared with its connections.
+    pub fn local(sync: SyncWorker) -> Result<Self, ServerError> {
+        Ok(Self::with_sync(DevelopmentPaneHost::local()?, sync))
     }
 
     /// Compose an account service whose new terminals follow the current login agent.
-    pub fn account_service() -> Result<Self, ServerError> {
-        Ok(Self::new(DevelopmentPaneHost::local_with_pty_factory(
-            crate::platform::service_pty_factory(),
-        )?))
+    pub fn account_service(sync: SyncWorker) -> Result<Self, ServerError> {
+        Ok(Self::with_sync(
+            DevelopmentPaneHost::local_with_pty_factory(crate::platform::service_pty_factory())?,
+            sync,
+        ))
     }
+    /// A host with a sync worker of its own.
+    #[cfg(test)]
     pub(super) fn new(prototype: DevelopmentPaneHost) -> Self {
+        let (sync, _) = SyncWorker::spawn().expect("sync worker");
+        Self::with_sync(prototype, sync)
+    }
+    fn with_sync(prototype: DevelopmentPaneHost, sync: SyncWorker) -> Self {
         let mut state = State::empty();
         state.begin_boot(prototype.boot);
         let repositories = super::repositories::ServerRepositories::new(prototype.boot);
-        // The worker thread ends with this host, after finishing every queued write.
-        let sync = SyncWorker::spawn().ok().map(|(sync, _)| sync);
         Self {
             prototype,
             writes: worktrees::Writes::new(),
@@ -75,6 +92,11 @@ impl SharedWorkspaceHost {
             fresh_panes: BTreeSet::new(),
             journal: None,
             sync,
+            subscribers: BTreeMap::new(),
+            published: None,
+            waiting: Vec::new(),
+            ticker: None,
+            armed: None,
             blocked: None,
             organization_prepared: false,
             attachment_generations: BTreeMap::new(),
@@ -147,13 +169,13 @@ impl SharedWorkspaceHost {
             return;
         };
         let writer = Arc::clone(journal);
-        let queued = self.sync.as_ref().is_some_and(|sync| {
-            sync.submit(move || {
+        if self
+            .sync
+            .submit(move || {
                 let _ = writer.sync(revision);
             })
-            .is_ok()
-        });
-        if !queued {
+            .is_err()
+        {
             let _ = journal.sync(revision);
         }
     }
@@ -551,7 +573,7 @@ impl SharedWorkspaceHost {
     }
     /// Retires a delivered outcome. Nothing waits for the write: a lost acknowledgement leaves
     /// the outcome recorded, and the client acknowledges it again after reconnecting.
-    fn acknowledge(&mut self, device: Id, sequence: u64) -> Result<(), Refusal> {
+    fn retire_outcome(&mut self, device: Id, sequence: u64) -> Result<(), Refusal> {
         let mut next = self.state.clone();
         next.acknowledge(device, sequence)?;
         if next != self.state {
@@ -560,7 +582,7 @@ impl SharedWorkspaceHost {
         }
         Ok(())
     }
-    /// The interim exchange waits for the revision under the lock.
+    /// An in-process edit waits for its revision under the lock.
     fn reply(&self, answer: Answer) -> Result<Reply, Refusal> {
         match answer {
             Answer::Outcome { outcome, revision } => {
@@ -759,7 +781,7 @@ impl SharedWorkspaceHost {
                 self.reply(answer)
             }
             Request::Acknowledge { sequence } => {
-                self.acknowledge(device, sequence)?;
+                self.retire_outcome(device, sequence)?;
                 Ok(Reply::Unchanged)
             }
             Request::SelectPane {
@@ -923,18 +945,39 @@ impl SharedWorkspaceHost {
         self.prepare_initial_organization()
             .map_err(|_| ServerError::StorageUnavailable)
     }
-    /// Runs timed work and returns when it is next due, or `None` when nothing is live.
+    /// Runs timed work, pushes the inventory it changed, and returns when work is next due.
+    /// `None` means nothing waits: no write, Git or directory work, Git facts or live terminal.
     pub(super) fn tick_until(&mut self, now: Instant) -> Option<Instant> {
         let _ = self.finish_worktrees(false);
         self.prototype.directories.tick();
         let _ = self.synchronized();
-        let live = self.blocked.is_some()
+        self.answer_waiting();
+        self.publish();
+        self.armed = self.due(now);
+        self.armed
+    }
+    /// When timed work is next due, without running it.
+    fn due(&self, now: Instant) -> Option<Instant> {
+        let waiting = self.blocked.is_some()
             || !self.settled()
             || self.writes.busy()
+            || !self.waiting.is_empty()
             || self.prototype.directories.busy()
-            || self.repositories.busy()
             || self.panes.values().any(|host| host.pane.is_some());
-        live.then_some(now + SYNCHRONIZE_INTERVAL)
+        let soon = waiting.then_some(now + super::dispatch::TICK);
+        [soon, self.repositories.due(now)].into_iter().flatten().min()
+    }
+    /// Wakes the host when a message started timed work due before the deadline it waits for.
+    fn rearm(&mut self) {
+        let Some(due) = self.due(Instant::now()) else {
+            return;
+        };
+        if self.armed.is_none_or(|armed| due < armed) {
+            self.armed = Some(due);
+            if let Some(ticker) = &self.ticker {
+                ticker.wake();
+            }
+        }
     }
 }
 impl HostCommands for SharedWorkspaceHost {
@@ -944,14 +987,59 @@ impl HostCommands for SharedWorkspaceHost {
     fn tick(&mut self, now: Instant) -> Option<Instant> {
         self.tick_until(now)
     }
+    fn ticker(&mut self, wake: Arc<dyn spaceterm_server::connection::Wake>) {
+        self.ticker = Some(wake);
+    }
     fn admitted(&mut self, client: Id, name: control::ClientName) {
         self.prototype.admitted(client, name);
     }
+    fn connected(&mut self, client: Id, connection: Id, outbox: &Outbox) {
+        self.subscribe(client, connection, outbox.clone());
+        self.rearm();
+    }
+    fn mutate(
+        &mut self,
+        client: Id,
+        connection: Id,
+        id: RequestId,
+        sequence: u64,
+        mutation: Option<Mutation>,
+    ) -> Dispatch {
+        let dispatch = self.edit(client, connection, id, sequence, mutation);
+        self.rearm();
+        dispatch
+    }
+    fn acknowledge(&mut self, client: Id, sequence: u64) {
+        self.acknowledged(client, sequence);
+        self.rearm();
+    }
     fn request(&mut self, device: Id, connection: Id, request: Request) -> Reply {
-        self.handle(device, connection, request)
-            .unwrap_or_else(Reply::Refused)
+        // Claims and releases move control and start or end sessions. Terminal work on a lease
+        // changes no inventory; the tick pushes what it changes in a Pane's metadata.
+        let control = matches!(
+            request,
+            Request::ClaimPane { .. }
+                | Request::SelectPane { .. }
+                | Request::TakeOver { .. }
+                | Request::StartRestored { .. }
+                | Request::RepairDirectory { .. }
+                | Request::ReleaseAttachment { .. }
+                | Request::Release { .. }
+                | Request::Close { .. }
+                | Request::Attach { .. }
+                | Request::Select { .. }
+        );
+        let reply = self
+            .handle(device, connection, request)
+            .unwrap_or_else(Reply::Refused);
+        if control {
+            self.publish();
+        }
+        self.rearm();
+        reply
     }
     fn disconnected(&mut self, connection: Id) {
+        self.unsubscribe(connection);
         self.cancel_worktree_reads(connection);
         self.prototype.directories.cancel_connection(connection);
         self.repositories.disconnected(connection);
@@ -975,6 +1063,7 @@ impl HostCommands for SharedWorkspaceHost {
         }
         self.attachment_generations
             .retain(|(owner, _), _| *owner != client);
+        self.publish();
     }
     fn shutdown(&mut self) -> Result<(), ServerError> {
         self.stop_worktree_reads();
@@ -1060,9 +1149,66 @@ mod tests {
             "the write is still held"
         );
         release.send(()).unwrap();
-        host.sync.as_ref().unwrap().flush().unwrap();
+        host.sync.flush().unwrap();
         assert!(!retained_outcome(&memory, device, 1));
         assert!(host.settled());
+        host.shutdown().unwrap();
+    }
+
+    fn drain(outbox: &Outbox) -> Vec<spaceterm_server::protocol::ServerMessage> {
+        use spaceterm_server::protocol::{RawFrame, frame::Assembler};
+        let mut assembler = Assembler::default();
+        let mut messages = Vec::new();
+        while let Some((frame, _)) = outbox.next_frame() {
+            if let Some(message) = assembler.server(RawFrame::parse(&frame).unwrap()).unwrap() {
+                messages.push(message);
+            }
+        }
+        messages
+    }
+
+    #[test]
+    fn an_edit_replies_after_its_revision_is_pushed_and_retained() {
+        use spaceterm_server::protocol::{ReplyBody, ServerMessage};
+        let (mut host, memory) = journaled();
+        let device = [1; 32];
+        let outbox = Outbox::new(Arc::new(|| {}));
+        HostCommands::connected(&mut host, device, device, &outbox);
+        assert!(matches!(
+            drain(&outbox).as_slice(),
+            [ServerMessage::Inventory(revision)] if revision.next_sequence == 1
+        ));
+        let id = RequestId(1);
+        outbox.begin(id).unwrap();
+        let release = memory.hold();
+        let mutation = rename(&host, "Edited");
+        let Dispatch::After(work) =
+            HostCommands::mutate(&mut host, device, device, id, 1, Some(mutation))
+        else {
+            panic!("an edit replies after its write");
+        };
+        // What the connection does with `After` work, under the lock.
+        host.sync.reply(&outbox, id, work).unwrap();
+        assert!(
+            matches!(
+                drain(&outbox).as_slice(),
+                [ServerMessage::Inventory(revision)]
+                    if revision.inventory.workspaces[0].name == "Edited"
+                        && revision.next_sequence == 2
+            ),
+            "the revision is pushed while its write is held, and the reply waits"
+        );
+        release.send(()).unwrap();
+        host.sync.flush().unwrap();
+        assert!(matches!(
+            drain(&outbox).as_slice(),
+            [ServerMessage::Reply(reply)] if matches!(reply.result, Ok(ReplyBody::Outcome(_)))
+        ));
+        assert!(retained_outcome(&memory, device, 1));
+        HostCommands::acknowledge(&mut host, device, 1);
+        host.sync.flush().unwrap();
+        assert!(!retained_outcome(&memory, device, 1));
+        assert!(drain(&outbox).is_empty(), "an acknowledgement has no reply");
         host.shutdown().unwrap();
     }
 

@@ -730,17 +730,18 @@ mod tests {
             outcome: Outcome::Conflict,
         };
         assert_eq!(
-            journal.complete(RetainedOutcome {
+            journal.retire(RetainedOutcome {
                 sequence: 5,
                 ..result.clone()
             }),
             Err(ServerError::Protocol)
         );
-        journal.complete(result.clone()).unwrap();
-        drop(journal);
-        let mut journal = ClientJournal::open(fixture.open(), [1; 32], [2; 32]).unwrap();
-        assert_eq!(journal.pending().unwrap().result.as_ref(), Some(&result));
-        journal.retire().unwrap();
+        assert_eq!(
+            journal.pending().unwrap().sequence,
+            4,
+            "a mismatch retires nothing"
+        );
+        journal.retire(result.clone()).unwrap();
         drop(journal);
         let journal = ClientJournal::open(fixture.open(), [1; 32], [2; 32]).unwrap();
         assert!(journal.pending().is_none());

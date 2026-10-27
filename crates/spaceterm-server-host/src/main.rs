@@ -248,9 +248,9 @@ fn run() -> Result<ExitCode, cli::Error> {
             check::resources()?;
             spaceterm_server::service::run(
                 IDENTITY,
-                spaceterm_server::panes(|_| {
+                spaceterm_server::panes(|sync| {
                     Ok(spaceterm::runtime::Served::new(
-                        spaceterm::runtime::SharedWorkspaceHost::account_service()?,
+                        spaceterm::runtime::SharedWorkspaceHost::account_service(sync)?,
                     ))
                 }),
             )?;
@@ -259,9 +259,9 @@ fn run() -> Result<ExitCode, cli::Error> {
             use std::io::Write;
             check::resources()?;
             spaceterm_server::run_owned_development(
-                spaceterm_server::panes(|_| {
+                spaceterm_server::panes(|sync| {
                     Ok(spaceterm::runtime::Served::new(
-                        spaceterm::runtime::SharedWorkspaceHost::local()?,
+                        spaceterm::runtime::SharedWorkspaceHost::local(sync)?,
                     ))
                 }),
                 std::io::stdin(),
@@ -278,9 +278,9 @@ fn run() -> Result<ExitCode, cli::Error> {
             check::resources()?;
             spaceterm_server::run_local_with_panes(
                 IDENTITY,
-                spaceterm_server::panes(|_| {
+                spaceterm_server::panes(|sync| {
                     Ok(spaceterm::runtime::Served::new(
-                        spaceterm::runtime::SharedWorkspaceHost::local()?,
+                        spaceterm::runtime::SharedWorkspaceHost::local(sync)?,
                     ))
                 }),
             )?;

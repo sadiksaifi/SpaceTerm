@@ -35,17 +35,18 @@ fn reconcile_fixture_originals(c: &ServerLink) -> Result<(), Box<dyn Error>> {
         return Err("fixture has too many retained operation sequences".into());
     }
     for sequence in 1..next {
-        match support::resolve(c, sequence) {
-            Ok(_) => {
-                let outcome = finish(c, sequence)?;
+        match finish(c, sequence) {
+            Ok(outcome) => {
                 if outcome.outcome == Outcome::Pending {
                     return Err("fixture original did not settle".into());
                 }
                 eprintln!("Worktree smoke: retiring original operation {sequence}");
                 c.acknowledge(sequence)?;
             }
-            Err(spaceterm_server::ServerError::SessionUnavailable) => (),
-            Err(error) => return Err(error.into()),
+            Err(error)
+                if error.downcast_ref::<spaceterm_server::ServerError>()
+                    == Some(&spaceterm_server::ServerError::SessionUnavailable) => {}
+            Err(error) => return Err(error),
         }
     }
     Ok(())
@@ -126,7 +127,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     };
     eprintln!("Worktree smoke: submit create and lose reply");
     let sequence = inventory(&first)?.1;
-    support::mutate(&first, sequence, Mutation::Worktree(operation.clone()))?;
+    support::submit(&first, sequence, Mutation::Worktree(operation.clone()))?;
     // Lose the reply without cancelling the server's started write.
     first.close();
     let first = connect(&a)?;
@@ -134,7 +135,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     assert!(matches!(created.outcome, Outcome::Accepted { .. }));
     assert!(path.is_dir());
     assert!(
-        matches!(support::mutate(&first, sequence, Mutation::Worktree(operation))?, Some(o) if o == created)
+        matches!(support::mutate(&first, sequence, Mutation::Worktree(operation))?, o if o == created)
     );
     first.acknowledge(sequence)?;
     await_facts(&second, &fixture.0, |f| {
@@ -205,7 +206,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             base: BranchName::Local("main".into()),
         },
     });
-    support::mutate(&first, sequence, mutation.clone())?;
+    let _reply = support::submit(&first, sequence, mutation.clone())?;
     let until = Instant::now() + Duration::from_secs(10);
     while !started.exists() {
         if Instant::now() > until {
@@ -266,7 +267,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     eprintln!(
         "Worktree smoke: forced original reconciled (listed before fixture cleanup: {listed})"
     );
-    assert!(matches!(support::mutate(&first, sequence, mutation)?, Some(o) if o == recovered));
+    assert!(matches!(support::mutate(&first, sequence, mutation)?, o if o == recovered));
     assert!(!path.exists());
     first.acknowledge(sequence)?;
     eprintln!("Worktree smoke: stop during write");
@@ -284,7 +285,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             base: BranchName::Local("main".into()),
         },
     });
-    support::mutate(&first, sequence, mutation.clone())?;
+    let _reply = support::submit(&first, sequence, mutation.clone())?;
     let until = Instant::now() + Duration::from_secs(10);
     while !started.exists() {
         if Instant::now() > until {
@@ -314,7 +315,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         "--force",
         stopped_path.to_str().ok_or("path")?,
     ])?;
-    assert!(matches!(support::mutate(&first, sequence, mutation)?, Some(o) if o == stopped));
+    assert!(matches!(support::mutate(&first, sequence, mutation)?, o if o == stopped));
     assert!(!stopped_path.exists());
     first.acknowledge(sequence)?;
     close(&first, CloseTarget::Workspace { workspace })?;

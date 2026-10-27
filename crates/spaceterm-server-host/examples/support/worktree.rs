@@ -6,30 +6,15 @@ use spaceterm_server::{
     hierarchy::{Mutation, RetainedOutcome},
     worktree::{Operation, Read, ReadReply, read_worktree},
 };
-use std::{
-    error::Error,
-    path::Path,
-    time::{Duration, Instant},
-};
+use std::{error::Error, path::Path};
 
+/// The settled outcome of the edit `sequence`. The server replies once the write settles.
 pub fn finish(link: &ServerLink, sequence: u64) -> Result<RetainedOutcome, Box<dyn Error>> {
-    let until = Instant::now() + Duration::from_secs(25);
-    loop {
-        if let Some(outcome) = super::support::resolve(link, sequence)? {
-            return Ok(outcome);
-        }
-        if Instant::now() > until {
-            return Err("write did not settle".into());
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    Ok(super::support::resolve(link, sequence)?)
 }
 pub fn write(link: &ServerLink, operation: Operation) -> Result<RetainedOutcome, Box<dyn Error>> {
     let sequence = inventory(link)?.1;
-    let outcome = match super::support::mutate(link, sequence, Mutation::Worktree(operation))? {
-        Some(outcome) => outcome,
-        None => finish(link, sequence)?,
-    };
+    let outcome = super::support::mutate(link, sequence, Mutation::Worktree(operation))?;
     link.acknowledge(sequence).map_err(ServerError::from)?;
     Ok(outcome)
 }
@@ -67,15 +52,11 @@ pub fn journaled_mutation(
     }
     let sequence = inventory(link)?.1;
     journal.submit(sequence, mutation.clone())?;
-    let result = match super::support::mutate(link, sequence, mutation.clone())? {
-        Some(outcome) => outcome,
-        None => finish(link, sequence)?,
-    };
+    let result = super::support::mutate(link, sequence, mutation.clone())?;
     if result.sequence != sequence || result.mutation != mutation {
         return Err("fixture original identity changed".into());
     }
-    journal.complete(result.clone())?;
+    journal.retire(result.clone())?;
     link.acknowledge(sequence).map_err(ServerError::from)?;
-    journal.retire()?;
     Ok(result)
 }

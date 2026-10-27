@@ -60,21 +60,12 @@ mod exercise {
         }
         let (_, sequence) = inventory(link)?;
         journal.submit(sequence, mutation.clone())?;
-        let mut outcome = support::mutate(link, sequence, mutation.clone())?;
-        let deadline = Instant::now() + Duration::from_secs(15);
-        while outcome.is_none() && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(50));
-            outcome = support::resolve(link, sequence)?;
-        }
-        let Some(outcome) = outcome else {
-            return Err("fixture operation remains unresolved".into());
-        };
+        let outcome = support::mutate(link, sequence, mutation.clone())?;
         if outcome.sequence != sequence || outcome.mutation != mutation {
             return Err("fixture operation identity changed".into());
         }
-        journal.complete(outcome.clone())?;
+        journal.retire(outcome.clone())?;
         link.acknowledge(sequence)?;
-        journal.retire()?;
         match outcome.outcome {
             Outcome::Accepted { target } => Ok(target),
             _ => Err("fixture mutation refused".into()),

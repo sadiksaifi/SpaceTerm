@@ -61,15 +61,11 @@ pub fn interim(link: &ServerLink, operation: Interim) -> Result<InterimReply> {
     }
 }
 
-/// The Workspace inventory and the sequence of the next Workspace edit.
+/// The newest pushed Workspace inventory and the sequence of the next Workspace edit. The server
+/// pushes one when it admits the link, and each one before the reply to the edit it holds.
 pub fn inventory(link: &ServerLink) -> Result<(Inventory, u64)> {
-    match interim(link, Interim::Inventory)? {
-        InterimReply::Inventory {
-            inventory,
-            next_sequence,
-        } => Ok((inventory, next_sequence)),
-        _ => Err(ServerError::Protocol),
-    }
+    let (_, revision) = link.next_inventory(0)?;
+    Ok((revision.inventory.clone(), revision.next_sequence))
 }
 
 /// An operation that changes nothing: it releases an attachment of a Workspace that never
@@ -88,24 +84,29 @@ pub fn round_trip(link: &ServerLink) -> Result<()> {
     done(link, no_op())
 }
 
-/// Submits a Workspace edit. `None` means its outcome is still pending; `resolve` settles it.
-pub fn mutate(
-    link: &ServerLink,
-    sequence: u64,
-    mutation: Mutation,
-) -> Result<Option<RetainedOutcome>> {
+/// Dispatches a Workspace edit, or its Original Operation again after a lost reply. The reply
+/// waits for any Worktree write the outcome depends on.
+pub fn mutate(link: &ServerLink, sequence: u64, mutation: Mutation) -> Result<RetainedOutcome> {
     outcome(request(link, Operation::Mutate { sequence, mutation })?)
 }
 
-/// The retained outcome of the edit `sequence`, or `None` while it is pending.
-pub fn resolve(link: &ServerLink, sequence: u64) -> Result<Option<RetainedOutcome>> {
+/// Dispatches a Workspace edit without waiting for its reply, as a client that loses it.
+pub fn submit(
+    link: &ServerLink,
+    sequence: u64,
+    mutation: Mutation,
+) -> Result<spaceterm_server::connection::link::PendingReply> {
+    Ok(link.request(Operation::Mutate { sequence, mutation })?)
+}
+
+/// The recorded outcome of the edit `sequence`, once it settles.
+pub fn resolve(link: &ServerLink, sequence: u64) -> Result<RetainedOutcome> {
     outcome(request(link, Operation::Resolve { sequence })?)
 }
 
-fn outcome(body: ReplyBody) -> Result<Option<RetainedOutcome>> {
+fn outcome(body: ReplyBody) -> Result<RetainedOutcome> {
     match body {
-        ReplyBody::Outcome(outcome) => Ok(Some(outcome)),
-        ReplyBody::Interim(InterimReply::MutationPending) => Ok(None),
+        ReplyBody::Outcome(outcome) => Ok(outcome),
         _ => Err(ServerError::Protocol),
     }
 }
@@ -147,15 +148,7 @@ pub fn first_pane(link: &ServerLink, create: bool) -> Result<Id> {
         name: "Workspace".into(),
         directory: None,
     };
-    let mut outcome = mutate(link, sequence, mutation)?;
-    let deadline = Instant::now() + WAIT;
-    while outcome.is_none() && Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(20));
-        outcome = resolve(link, sequence)?;
-    }
-    if outcome.is_none() {
-        return Err(ServerError::Protocol);
-    }
+    mutate(link, sequence, mutation)?;
     link.acknowledge(sequence)?;
     first(&self::inventory(link)?.0).ok_or(ServerError::SessionUnavailable)
 }

@@ -351,7 +351,7 @@ impl HostCommands for DevelopmentPaneHost {
         if self.recover().is_ok() && self.retain_directory().is_ok() {
             let _ = self.retire_exited();
         }
-        Some(now + TICK)
+        (self.pane.is_some() || self.directories.busy()).then_some(now + TICK)
     }
     fn admitted(&mut self, client: [u8; 32], name: control::ClientName) {
         self.names
@@ -419,8 +419,27 @@ pub trait HostCommands: Send {
     fn tick(&mut self, _now: std::time::Instant) -> Option<std::time::Instant> {
         None
     }
+    /// The host's wake, which makes it tick again; see `PaneService::ticker`.
+    fn ticker(&mut self, _wake: Arc<dyn spaceterm_server::connection::Wake>) {}
     /// Records the Client Name an admitted client supplied, before any of its requests.
     fn admitted(&mut self, _client: [u8; 32], _name: control::ClientName) {}
+    /// A connection was admitted. A host that pushes Workspace Inventory keeps `outbox` until
+    /// [`Self::disconnected`].
+    fn connected(&mut self, _client: [u8; 32], _connection: [u8; 32], _outbox: &Outbox) {}
+    /// A shared Workspace edit, or with `None` the resolution of a recorded one, replied to after
+    /// the inventory revision that holds its outcome.
+    fn mutate(
+        &mut self,
+        _client: [u8; 32],
+        _connection: [u8; 32],
+        _id: RequestId,
+        _sequence: u64,
+        _mutation: Option<spaceterm_server::hierarchy::Mutation>,
+    ) -> Dispatch {
+        Dispatch::reply(Err(Refusal::Unsupported))
+    }
+    /// Retires a delivered edit outcome. Nothing replies.
+    fn acknowledge(&mut self, _client: [u8; 32], _sequence: u64) {}
     /// Permanently releases this paired identity's live and dormant control grants.
     fn revoked(&mut self, _client: [u8; 32]) {}
     fn request(&mut self, device: [u8; 32], connection: [u8; 32], request: Request) -> Reply;
@@ -428,7 +447,8 @@ pub trait HostCommands: Send {
     fn shutdown(&mut self) -> Result<(), ServerError>;
 }
 
-/// How often a host's timed work runs until it reports its own deadlines.
+/// How soon a host's timed work runs again while it waits on another thread: a journal or Git
+/// write, a directory read, or a live terminal whose metadata and exit the tick observes.
 pub(super) const TICK: Duration = Duration::from_millis(10);
 
 /// A host served over SpaceTerm Protocol connections. It binds each claimed channel to its lease,
@@ -800,14 +820,7 @@ fn body(reply: Reply, interim: bool) -> Result<ReplyBody, Refusal> {
             ReplyBody::Directory(progress)
         }
         Reply::WorktreeRead(result) => ReplyBody::Worktree(result),
-        Reply::MutationPending => ReplyBody::Interim(InterimReply::MutationPending),
-        Reply::Inventory {
-            inventory,
-            next_sequence,
-        } => ReplyBody::Interim(InterimReply::Inventory {
-            inventory,
-            next_sequence,
-        }),
+        Reply::MutationPending | Reply::Inventory { .. } => return Err(Refusal::Failed),
         Reply::Screen(screen) => ReplyBody::Interim(InterimReply::Screen(screen)),
         Reply::ScreenChanges(changes) => ReplyBody::Interim(InterimReply::ScreenChanges(changes)),
         Reply::Ended => ReplyBody::Interim(InterimReply::Ended),
@@ -853,6 +866,7 @@ impl<H: HostCommands> ConnectionService for Served<H> {
     }
     fn admitted(&mut self, peer: &Peer, name: control::ClientName, outbox: Outbox) {
         self.host.admitted(peer.client, name);
+        self.host.connected(peer.client, peer.connection, &outbox);
         self.connections.insert(
             peer.connection,
             Connection {
@@ -864,7 +878,7 @@ impl<H: HostCommands> ConnectionService for Served<H> {
     fn revoked(&mut self, client: [u8; 32]) {
         self.host.revoked(client);
     }
-    fn request(&mut self, peer: &Peer, _id: RequestId, operation: Operation) -> Dispatch {
+    fn request(&mut self, peer: &Peer, id: RequestId, operation: Operation) -> Dispatch {
         Dispatch::reply(match operation {
             Operation::Claim(claim) => self.claim(peer, claim),
             Operation::ReleaseAttachment { attachment } => body(
@@ -893,12 +907,19 @@ impl<H: HostCommands> ConnectionService for Served<H> {
             Operation::Style { channel, style } => self.on_channel(peer, channel, false, |lease| {
                 Request::Style { lease, style }
             }),
-            Operation::Mutate { sequence, mutation } => body(
-                self.command(peer, Request::Mutate { sequence, mutation }),
-                false,
-            ),
+            Operation::Mutate { sequence, mutation } => {
+                return self.host.mutate(
+                    peer.client,
+                    peer.connection,
+                    id,
+                    sequence,
+                    Some(mutation),
+                );
+            }
             Operation::Resolve { sequence } => {
-                body(self.command(peer, Request::Resolve { sequence }), false)
+                return self
+                    .host
+                    .mutate(peer.client, peer.connection, id, sequence, None);
             }
             Operation::Graphics {
                 channel,
@@ -972,7 +993,10 @@ impl<H: HostCommands> ConnectionService for Served<H> {
         }
     }
     fn acknowledge(&mut self, peer: &Peer, sequence: u64) {
-        self.command(peer, Request::Acknowledge { sequence });
+        self.host.acknowledge(peer.client, sequence);
+    }
+    fn ticker(&mut self, wake: Arc<dyn spaceterm_server::connection::Wake>) {
+        self.host.ticker(wake);
     }
     fn tick(&mut self, now: std::time::Instant) -> Option<std::time::Instant> {
         self.host.tick(now)
@@ -1011,7 +1035,6 @@ impl<H: HostCommands> Served<H> {
                     visible,
                 })
             }
-            Interim::Inventory => body(self.command(peer, Request::Inventory), true),
             Interim::Read { channel, operation } => self.on_channel(peer, channel, true, |lease| {
                 Request::Read { lease, operation }
             }),

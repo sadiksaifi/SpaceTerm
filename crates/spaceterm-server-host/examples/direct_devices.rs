@@ -128,22 +128,13 @@ mod exercise {
         )?;
         let (_, sequence) = inventory(connection)?;
         api(journal.submit(sequence, mutation.clone()))?;
-        let mut outcome = api(support::mutate(connection, sequence, mutation.clone()))?;
-        let deadline = Instant::now() + Duration::from_secs(15);
-        while outcome.is_none() && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(40));
-            outcome = api(support::resolve(connection, sequence))?;
-        }
-        let Some(outcome) = outcome else {
-            return Err("test mutation remains unconfirmed");
-        };
+        let outcome = api(support::mutate(connection, sequence, mutation.clone()))?;
         require(
             outcome.sequence == sequence && outcome.mutation == mutation,
             "test mutation identity changed",
         )?;
-        api(journal.complete(outcome.clone()))?;
+        api(journal.retire(outcome.clone()))?;
         api(connection.acknowledge(sequence))?;
-        api(journal.retire())?;
         match outcome.outcome {
             Outcome::Accepted { target } => Ok(target),
             _ => Err("test mutation refused"),
