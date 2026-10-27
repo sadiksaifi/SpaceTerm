@@ -22,6 +22,9 @@ struct Sessions {
     unbound: Vec<Lease>,
     /// Input serials the host was told reached the PTY.
     written: Vec<u32>,
+    /// How often the host ran its timed work and how often a Pane was observed for publishing.
+    ticks: u32,
+    observed: u32,
 }
 
 /// Attaches every claim to a new Session. The test ends Sessions by removing them.
@@ -70,7 +73,13 @@ impl HostCommands for Host {
     fn unbound(&mut self, _: [u8; 32], lease: &Lease) {
         self.0.lock().unwrap().unbound.push(*lease);
     }
+    fn tick(&mut self, now: std::time::Instant) -> Option<std::time::Instant> {
+        self.0.lock().unwrap().ticks += 1;
+        // A far deadline, as a host that has nothing due soon reports.
+        Some(now + Duration::from_secs(2))
+    }
     fn observe(&mut self, _: [u8; 32], lease: &Lease) -> Observed {
+        self.0.lock().unwrap().observed += 1;
         if self.lease_live(lease) {
             Observed::Live(Observation {
                 screen: None,
@@ -183,4 +192,26 @@ fn an_input_serial_is_written_only_once_its_bytes_reach_the_session() {
     send(4, vec![protocol::InputEvent::Resize(super::tests::size())]);
 
     assert_eq!(sessions.lock().unwrap().written, [2, 4]);
+}
+
+/// A host's own wake, such as an edit waiting on a Worktree, runs its timed work at once, even
+/// before the deadline it reported. Only the session bell publishes.
+#[test]
+fn every_tick_runs_the_hosts_timed_work_and_only_the_bell_publishes() {
+    let (mut served, sessions, _outbox) = served();
+    claim(&mut served, 1, 1);
+    let now = std::time::Instant::now();
+    // The claim rang the bell, so this tick publishes the new channel.
+    served.tick(now);
+    {
+        let mut sessions = sessions.lock().unwrap();
+        assert_eq!((sessions.ticks, sessions.observed > 0), (1, true));
+        sessions.observed = 0;
+    }
+    // Two wakes well before the host's 2 s deadline, with no ring in between.
+    served.tick(now + Duration::from_millis(1));
+    served.tick(now + Duration::from_millis(2));
+    let sessions = sessions.lock().unwrap();
+    assert_eq!(sessions.ticks, 3, "every wake runs the host's timed work");
+    assert_eq!(sessions.observed, 0, "a wake without a ring publishes nothing");
 }

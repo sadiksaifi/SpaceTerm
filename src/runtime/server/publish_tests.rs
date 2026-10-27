@@ -21,7 +21,6 @@ fn capture(generation: u64, text: &str, input_serial: u32) -> ScreenCapture {
         .expect("a snapshot is captured")
         .expect("new output makes a snapshot");
     ScreenCapture {
-        history: screen_encoder::HistoryTracker::default().observe(&screen),
         screen,
         generation,
         accessibility_revision: 0,

@@ -154,7 +154,6 @@ impl DevelopmentPaneHost {
             subscription,
             screen: None,
             graphics_transfer: None,
-            history: screen_encoder::HistoryTracker::default(),
             presentable: true,
             ended: false,
             failed: false,
@@ -167,7 +166,6 @@ impl DevelopmentPaneHost {
             screen_generation: 0,
             size,
             effects: NativeEffects::default(),
-            reading: reading::Reading::default(),
             accessibility: accessibility::Accessibility::default(),
         });
         self.dormant = None;
@@ -346,7 +344,6 @@ impl OwnedPane {
         self.graphics_transfer = None;
         self.accessibility.disconnect();
         self.runtime.end_server_accessibility_demand();
-        self.reading.invalidate();
         self.runtime.client_effect_focus(None);
         self.effects.clear();
         self.focus = FocusTarget::Unfocused;
@@ -676,9 +673,6 @@ impl OwnedPane {
         if transfer {
             self.attachment_generation = None;
             self.accessibility.reset();
-            self.reading.reset(&self.runtime);
-            self.screen = None;
-            self.reading.invalidate();
         }
         if transfer || connection != self.lease.connection || !self.connected {
             self.invalidate_input();
@@ -700,9 +694,6 @@ impl OwnedPane {
         Ok(Reply::Attached { lease: self.lease })
     }
     pub(super) fn drain(&mut self) {
-        if self.reading.reset_pending() {
-            return;
-        }
         self.effects.drain_clipboard(&self.subscription.clipboard);
         for request in self.subscription.take_client_effects() {
             self.effects.push(request);
@@ -725,7 +716,6 @@ impl OwnedPane {
                         self.graphics_transfer = None;
                     }
                     self.advance_screen_generation(&screen);
-                    self.reading.observe(self.screen_generation, &screen);
                     self.screen = Some(screen);
                 }
                 TerminalSessionEvent::ClientEffect(_) => {}
@@ -752,9 +742,6 @@ impl OwnedPane {
         }
         while let Ok(model) = self.subscription.accessibility.try_recv() {
             self.accessibility.update(model);
-        }
-        if let Some(screen) = &self.screen {
-            self.reading.update(&self.runtime, screen);
         }
     }
 }

@@ -193,7 +193,6 @@ impl OwnedPane {
         let screen = self.screen.as_ref()?;
         Some(ScreenCapture {
             screen: Arc::clone(screen),
-            history: self.history.observe(screen),
             generation: self.screen_generation,
             accessibility_revision: self.accessibility.revision(),
         })

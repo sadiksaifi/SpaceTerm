@@ -10,6 +10,7 @@ use super::server_graphics as graphics;
 mod link;
 mod reading;
 mod recovery;
+mod scrollback;
 mod screen;
 mod screen_decoder;
 #[cfg(test)]
@@ -81,7 +82,7 @@ pub(crate) struct DevelopmentPaneState {
     interaction: Mutex<Interaction>,
     effect_authority: Arc<ClipboardAuthority>,
     hidden_input: AtomicBool,
-    reading: Mutex<reading::ReadingState>,
+    reading: Mutex<reading::Reading>,
     accessibility: Mutex<accessibility::RetainedSemantics>,
     accessibility_demand: AtomicBool,
     client_effects: Mutex<std::collections::VecDeque<ClientEffectRequest>>,
@@ -521,7 +522,6 @@ impl DevelopmentServerSessionFactory {
 
 enum Input {
     ClearScreenAndScrollback,
-    Read(pane::reading::Operation),
     Key(KeyInput),
     Commit(String, async_channel::Sender<InputMethodOutcome>),
     CopyOrForward(InputModifiers),
@@ -543,7 +543,7 @@ enum Input {
 impl Input {
     fn eligible(&self, target: pane::FocusTarget) -> bool {
         match self {
-            Self::Read(_) | Self::ClearScreenAndScrollback => true,
+            Self::ClearScreenAndScrollback => true,
             Self::Commit(..) => matches!(
                 target,
                 pane::FocusTarget::Terminal | pane::FocusTarget::FocusedPane
@@ -591,7 +591,6 @@ struct ScreenMapping {
     epoch: u64,
     local: PresentationGeneration,
     wire: u64,
-    selection: u64,
     size: PaneSize,
     mouse_tracking: bool,
     alternate: bool,
@@ -787,11 +786,7 @@ impl TerminalSessionHandle for PresentationHandle {
         if self.state.presentable.swap(presentable, Ordering::AcqRel) != presentable {
             if !presentable {
                 // A hidden view continues no drag; the server cancels its own on hidden demand.
-                self.state
-                    .reading
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .abandon_gesture();
+                self.cancel_gesture();
             }
             self.state.wake.notify();
         }
@@ -809,22 +804,14 @@ impl TerminalSessionHandle for PresentationHandle {
         &self,
         modifiers: InputModifiers,
     ) -> Result<Option<super::SelectionCopy>, super::SelectionCopyError> {
-        if let Some(copy) = self.prepared_selection(None) {
-            return Ok(Some(copy));
+        if self.selection_present() {
+            return Ok(self.copy());
         }
-        let selection_present = self
-            .state
-            .reading
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .selection_present;
-        if !selection_present {
-            self.send(Input::CopyOrForward(modifiers));
-        }
+        self.send(Input::CopyOrForward(modifiers));
         Ok(None)
     }
     fn selection_copy_ready(&self) -> bool {
-        self.prepared_selection(None).is_some()
+        self.take_deferred_copy().is_some()
     }
     fn key(&self, k: KeyInput) {
         if k.validate().is_err()
@@ -834,6 +821,9 @@ impl TerminalSessionHandle for PresentationHandle {
             || k.logical_key.len() > 128
         {
             return;
+        }
+        if !k.is_modifier_key() && matches!(k.action, KeyAction::Press | KeyAction::Repeat) {
+            self.typed();
         }
         self.send(Input::Key(k));
     }
@@ -845,6 +835,7 @@ impl TerminalSessionHandle for PresentationHandle {
             return Err(InputMethodRefusal::TooLarge);
         }
         let (reply, receiver) = async_channel::bounded(1);
+        self.typed();
         if submit_input(
             &self.state,
             &self.input,
@@ -949,148 +940,26 @@ impl TerminalSessionHandle for PresentationHandle {
         self.send(Input::ClearScreenAndScrollback);
     }
     fn pointer(&self, input: PointerInput) {
-        use super::pointer_input::{PointerButton, PointerPhase, ShiftSelectionPolicy};
-        let continuation = input.phase == PointerPhase::Release
-            || (input.phase == PointerPhase::Motion && input.button.is_some());
-        let Some((mapping, x, y)) =
-            self.pointer_position(input.generation, input.position, continuation)
-        else {
-            return;
-        };
-
-        let width = f32::from(mapping.size.columns) * f32::from(mapping.size.cell_width);
-        let height = f32::from(mapping.size.rows) * f32::from(mapping.size.cell_height);
-        let mut pointer = pane::Pointer {
-            screen_generation: mapping.wire,
-            phase: match input.phase {
-                PointerPhase::Press => pane::PointerPhase::Press,
-                PointerPhase::Motion => pane::PointerPhase::Motion,
-                PointerPhase::Release => pane::PointerPhase::Release,
-            },
-            button: input.button.map(|button| match button {
-                PointerButton::Left => pane::PointerButton::Left,
-                PointerButton::Middle => pane::PointerButton::Middle,
-                PointerButton::Right => pane::PointerButton::Right,
-            }),
-            x,
-            y,
-            modifiers: encode_modifiers(input.modifiers),
-            shift_selection: input.shift_selection
-                == ShiftSelectionPolicy::OverrideApplicationMouse,
-        };
-        let application = {
-            let mut interaction = self
-                .state
-                .interaction
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            if input.phase == PointerPhase::Press {
-                interaction.application_pointer_active =
-                    mapping.mouse_tracking && !(pointer.shift_selection && input.modifiers.shift);
-            }
-            let application = interaction.application_pointer_active;
-            if input.phase == PointerPhase::Release {
-                interaction.application_pointer_active = false;
-            }
-            application
-                || input.phase == PointerPhase::Motion
-                    && input.button.is_none()
-                    && mapping.mouse_tracking
-        };
-        if !application {
-            pointer.x = pointer.x.clamp(-width, 2.0 * width);
-            pointer.y = pointer.y.clamp(-height, 2.0 * height);
-            self.read(pane::reading::Operation::Pointer(pointer));
-        } else {
-            pointer.x = pointer.x.clamp(0.0, width - 1.0);
-            pointer.y = pointer.y.clamp(0.0, height - 1.0);
-            self.send(Input::Pointer(mapping.epoch, pointer));
-        }
+        self.route_pointer(input);
     }
     fn pointer_and_copy_selection(
         &self,
         input: PointerInput,
     ) -> Result<Option<super::selection::SelectionCopy>, SelectionCopyError> {
-        self.pointer(input);
-        self.request_pointer_copy();
-        Ok(None)
+        Ok(self.route_pointer(input))
     }
     fn wheel(&self, input: WheelInput) {
-        use super::pointer_input::{ShiftSelectionPolicy, WheelPhase};
-        let Some((mapping, x, y)) = self.pointer_position(input.generation, input.position, false)
-        else {
-            return;
-        };
-
-        let x = x.clamp(
-            0.0,
-            f32::from(mapping.size.columns) * f32::from(mapping.size.cell_width) - 1.0,
-        );
-        let y = y.clamp(
-            0.0,
-            f32::from(mapping.size.rows) * f32::from(mapping.size.cell_height) - 1.0,
-        );
-        let wheel = pane::Wheel {
-            screen_generation: mapping.wire,
-            horizontal_steps: input.horizontal_steps,
-            vertical_steps: input.vertical_steps,
-            phase: match input.phase {
-                WheelPhase::GestureStarted => pane::WheelPhase::GestureStarted,
-                WheelPhase::GestureChanged => pane::WheelPhase::GestureChanged,
-                WheelPhase::GestureEnded => pane::WheelPhase::GestureEnded,
-                WheelPhase::GestureCancelled => pane::WheelPhase::GestureCancelled,
-                WheelPhase::MomentumStarted => pane::WheelPhase::MomentumStarted,
-                WheelPhase::MomentumChanged => pane::WheelPhase::MomentumChanged,
-                WheelPhase::MomentumEnded => pane::WheelPhase::MomentumEnded,
-                WheelPhase::MomentumCancelled => pane::WheelPhase::MomentumCancelled,
-            },
-            x,
-            y,
-            modifiers: encode_modifiers(input.modifiers),
-            shift_selection: input.shift_selection
-                == ShiftSelectionPolicy::OverrideApplicationMouse,
-        };
-        let scrollback = !mapping.mouse_tracking
-            && !(mapping.alternate && mapping.alternate_scroll)
-            || mapping.mouse_tracking && wheel.shift_selection && input.modifiers.shift;
-        // A large native delta becomes several bounded operations, never a refused one.
-        for wheel in reading::split_wheel(wheel) {
-            if scrollback {
-                self.read(pane::reading::Operation::Wheel(wheel));
-            } else {
-                self.send(Input::Wheel(mapping.epoch, wheel));
-            }
-        }
+        self.route_wheel(input);
     }
-    fn scroll_to(&self, offset: u64, generation: PresentationGeneration) {
-        let mapping = self
-            .state
-            .interaction
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .screen;
-        if let Some(mapping) = mapping.filter(|m| m.local == generation) {
-            self.read(pane::reading::Operation::ScrollTo {
-                offset,
-                screen: mapping.wire,
-            });
-        }
+    fn scroll_to(&self, offset: u64, _generation: PresentationGeneration) {
+        self.read(|scrollback| scrollback.scroll_to(offset));
     }
     fn scroll_scrollback(&self, movement: ScrollbackMovement) {
-        use pane::reading::Scroll;
-        self.read(pane::reading::Operation::Scroll(match movement {
-            ScrollbackMovement::PageUp => Scroll::PageUp,
-            ScrollbackMovement::PageDown => Scroll::PageDown,
-            ScrollbackMovement::Top => Scroll::Top,
-            ScrollbackMovement::Bottom => Scroll::Bottom,
-        }));
+        self.read(|scrollback| scrollback.scroll(movement));
     }
     fn set_find_query(&self, generation: super::FindQueryGeneration, text: String) {
-        if text.len() <= pane::reading::MAX_QUERY_BYTES {
-            self.read(pane::reading::Operation::Query {
-                generation: generation.value(),
-                text,
-            });
+        if text.len() <= super::find::MAX_QUERY_BYTES {
+            self.read(|scrollback| scrollback.set_find_query(generation, text));
         } else {
             // Retire the previous search while the field presents this generation's limit.
             self.end_find(generation);
@@ -1101,15 +970,10 @@ impl TerminalSessionHandle for PresentationHandle {
         generation: super::FindQueryGeneration,
         direction: super::FindDirection,
     ) {
-        self.read(pane::reading::Operation::Navigate {
-            generation: generation.value(),
-            backwards: direction == super::FindDirection::Previous,
-        });
+        self.read(|scrollback| scrollback.navigate_find(generation, direction));
     }
     fn end_find(&self, generation: super::FindQueryGeneration) {
-        self.read(pane::reading::Operation::EndFind {
-            generation: generation.value(),
-        });
+        self.read(|scrollback| scrollback.end_find(generation));
     }
     fn request_paste(
         &self,
@@ -1124,6 +988,7 @@ impl TerminalSessionHandle for PresentationHandle {
             )));
             return rx;
         }
+        self.typed();
         self.send(Input::Paste(payload.text().to_owned(), tx));
         rx
     }
@@ -1160,16 +1025,18 @@ impl TerminalSessionHandle for PresentationHandle {
         rx
     }
     fn copy_selection(&self) -> Result<Option<super::SelectionCopy>, SelectionCopyError> {
-        Ok(self.prepared_selection(None))
+        Ok(self.copy())
     }
     fn take_prepared_pointer_copy(&self) -> Option<super::SelectionCopy> {
-        self.take_pointer_copy()
+        self.take_deferred_copy()
     }
+    /// The Selection is this client's own and keeps its rows while output arrives, so the copy
+    /// of an earlier presentation is the current Selection's.
     fn copy_selection_at(
         &self,
-        generation: PresentationGeneration,
+        _generation: PresentationGeneration,
     ) -> Result<Option<super::SelectionCopy>, SelectionCopyError> {
-        Ok(self.prepared_selection(Some(generation)))
+        Ok(self.copy())
     }
     fn update_appearance(&self, update: TerminalAppearanceUpdate) {
         let style = encode_style(&update);

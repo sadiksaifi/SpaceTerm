@@ -4,6 +4,10 @@ use libghostty_vt::screen::{CellWide, Screen, TrackedGridRef};
 use libghostty_vt::terminal::{Point, PointCoordinate, PointSpace, ScrollViewport};
 use libghostty_vt::{Error, Terminal};
 
+/// The longest Terminal Find query.
+#[cfg(feature = "desktop")]
+pub(crate) const MAX_QUERY_BYTES: usize = 4096;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FindDirection {
     Next,
@@ -14,12 +18,6 @@ pub enum FindDirection {
 pub struct FindQueryGeneration(u64);
 
 impl FindQueryGeneration {
-    pub(crate) const fn value(self) -> u64 {
-        self.0
-    }
-    pub(crate) const fn from_value(value: u64) -> Self {
-        Self(value)
-    }
     pub fn next(self) -> Self {
         Self(self.0.saturating_add(1))
     }

@@ -1,6 +1,6 @@
 //! Encoder behavior that does not need the client decoder: sizes, scroll detection, baselines,
 //! table bounds and Scrollback epochs.
-use super::screen_encoder::{HistoryTracker, ScreenCapture, ScreenEncoder, encode_page};
+use super::screen_encoder::{ScreenCapture, ScreenEncoder, encode_page};
 use super::*;
 use crate::terminal::emulator::TerminalEmulator;
 use crate::terminal::geometry::{BackingScale, CellGridSize, LogicalCellSize, TerminalGeometry};
@@ -19,7 +19,6 @@ fn geometry(columns: u16, rows: u16) -> TerminalGeometry {
 /// One emulator presented through one encoder, acknowledging every frame.
 struct Channel1 {
     emulator: TerminalEmulator,
-    history: HistoryTracker,
     encoder: ScreenEncoder,
     screen: Option<Arc<ScreenSnapshot>>,
     generation: u64,
@@ -31,7 +30,6 @@ impl Channel1 {
     fn new(columns: u16, rows: u16) -> Self {
         Self {
             emulator: TerminalEmulator::new(geometry(columns, rows)).unwrap(),
-            history: HistoryTracker::default(),
             encoder: ScreenEncoder::default(),
             screen: None,
             generation: 0,
@@ -47,7 +45,6 @@ impl Channel1 {
         }
         let screen = Arc::clone(self.screen.as_ref().unwrap());
         ScreenCapture {
-            history: self.history.observe(&screen),
             screen,
             generation: self.generation,
             accessibility_revision: 0,
@@ -204,7 +201,7 @@ fn an_unchanged_capture_sends_nothing_and_keeps_the_baseline() {
     let replaced = channel.encoder.encode(&capture, 9, Some(7)).unwrap();
     assert_eq!(replaced.rows.len(), 4);
     assert!(replaced.geometry.is_some() && replaced.colors.is_some());
-    assert!(replaced.modes.is_some() && replaced.reading.is_some());
+    assert!(replaced.modes.is_some());
     // The previous baseline is gone, so frame 1 is unknown now.
     let unknown = channel.encoder.encode(&capture, 10, Some(1)).unwrap();
     assert_eq!(unknown.rows.len(), 4);
@@ -317,20 +314,19 @@ fn styles_beyond_a_full_table_travel_inline_without_resending_the_screen() {
 }
 
 #[test]
-fn the_history_epoch_changes_when_the_scrollback_shrinks_or_reflows() {
+fn frames_carry_the_emulators_history_positions() {
     let mut channel = Channel1::new(20, 4);
-    let first = channel.capture().history;
     for _ in 0..10 {
         channel.emulator.feed(b"line\r\n");
     }
-    let grown = channel.capture().history;
-    assert_eq!(grown.epoch, first.epoch);
-    assert!(grown.total > first.total);
-    channel.emulator.feed(b"\x1b[3J");
-    let cleared = channel.capture().history;
-    assert!(cleared.epoch > grown.epoch);
-    channel.emulator.resize(geometry(30, 4)).unwrap();
-    assert!(channel.capture().history.epoch > cleared.epoch);
+    let capture = channel.capture();
+    let (update, _) = channel.present().unwrap();
+    let history = capture.screen.history;
+    assert_eq!(
+        (update.history.epoch, update.history.oldest, update.history.total),
+        (history.epoch, history.oldest, history.total)
+    );
+    assert_eq!(update.history.total, 7);
 }
 
 #[test]

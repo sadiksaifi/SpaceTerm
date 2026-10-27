@@ -1,9 +1,6 @@
 //! Client requests and their reply bodies.
 //!
 //! Operations reuse the payload types of the request-and-poll exchange where postcard encodes them.
-//! Operations that the push protocol replaces live in [`super::interim::Interim`] until their
-//! replacement merges.
-use super::interim::{Interim, InterimReply};
 use super::message::{Channel, check};
 use super::screen::Page;
 use super::{Fatal, limits};
@@ -50,8 +47,10 @@ pub enum Operation {
     Resolve {
         sequence: u64,
     },
-    /// Reads `rows` Scrollback rows from `start`, counted from the oldest retained row of
-    /// history `epoch`.
+    /// Reads `rows` Scrollback rows from position `start` of history `epoch` (see
+    /// [`super::screen::History`]). The page leaves out rows the server already discarded, so it
+    /// may start later. An ended epoch, or history hidden by the alternate screen, is refused as
+    /// `Refusal::Stale`.
     ScrollbackPage {
         channel: Channel,
         epoch: u64,
@@ -88,8 +87,6 @@ pub enum Operation {
     Direct(crate::direct::Management),
     /// Stops the server. Account-local connections only.
     Shutdown,
-    /// A request-and-poll operation awaiting its push replacement.
-    Interim(Interim),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -115,7 +112,6 @@ pub enum ReplyBody {
     Directory(Result<directories::Value, directories::Error>),
     Worktree(Result<crate::worktree::ReadReply, crate::worktree::Error>),
     Direct(Result<crate::direct::ManagementReply, crate::direct::DirectError>),
-    Interim(InterimReply),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -180,7 +176,7 @@ impl ReplyBody {
         matches!(
             self,
             Self::Page(_) | Self::Graphics(_) | Self::Accessibility(_)
-        ) || matches!(self, Self::Interim(reply) if reply.bulk())
+        )
     }
 
     pub fn validate(&self) -> Result<(), Fatal> {

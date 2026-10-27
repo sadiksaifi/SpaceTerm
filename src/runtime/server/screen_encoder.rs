@@ -17,40 +17,9 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 #[derive(Clone)]
 pub struct ScreenCapture {
     pub(crate) screen: Arc<ScreenSnapshot>,
-    pub(crate) history: History,
     /// Fences pointer and wheel coordinates.
     pub(crate) generation: u64,
     pub(crate) accessibility_revision: u64,
-}
-
-/// Numbers the identity of one Terminal Session's Scrollback.
-///
-/// The epoch changes when the Scrollback shrinks, when the columns change (the engine reflows
-/// it), and when the active screen changes.
-#[derive(Default)]
-pub(crate) struct HistoryTracker {
-    epoch: u64,
-    last: Option<(u64, u16, ActiveScreenSnapshot)>,
-}
-
-impl HistoryTracker {
-    pub(crate) fn observe(&mut self, screen: &ScreenSnapshot) -> History {
-        let total = screen
-            .scrollbar
-            .total_rows
-            .saturating_sub(screen.scrollbar.visible_rows);
-        let current = (total, screen.size.cols, screen.active_screen);
-        if self.last.is_none_or(|(last, columns, active)| {
-            total < last || columns != current.1 || active != current.2
-        }) {
-            self.epoch += 1;
-        }
-        self.last = Some(current);
-        History {
-            epoch: self.epoch,
-            total,
-        }
-    }
 }
 
 /// One channel's encoder. It holds the last frame it emitted and the style and link tables the
@@ -70,7 +39,6 @@ struct Baseline {
     modes: Modes,
     colors: Colors,
     graphics: GraphicsSnapshot,
-    reading: pane::reading::Snapshot,
     generation: u64,
     accessibility_revision: u64,
 }
@@ -213,10 +181,13 @@ impl ScreenEncoder {
         let (styles, links) = self.tables.take_definitions();
         let modes = modes(screen);
         let colors = colors(screen);
-        let reading = reading(screen);
         let update = ScreenUpdate {
             cursor: cursor(screen),
-            history: capture.history,
+            history: History {
+                epoch: screen.history.epoch,
+                oldest: screen.history.oldest,
+                total: screen.history.total,
+            },
             geometry: previous
                 .is_none_or(|previous| previous.geometry != geometry)
                 .then_some(geometry),
@@ -235,9 +206,6 @@ impl ScreenEncoder {
                 .then(|| super::graphics::encode(&screen.graphics)),
             accessibility_revision: capture.accessibility_revision,
             generation: capture.generation,
-            reading: previous
-                .is_none_or(|previous| previous.reading != reading)
-                .then_some(reading),
         };
         if let Some(previous) = previous
             && update.rows.is_empty()
@@ -248,7 +216,6 @@ impl ScreenEncoder {
             && update.modes.is_none()
             && update.colors.is_none()
             && update.graphics.is_none()
-            && update.reading.is_none()
             && update.cursor == previous.cursor
             && update.history == previous.history
             && update.generation == previous.generation
@@ -272,7 +239,6 @@ impl Baseline {
             modes: modes(screen),
             colors: colors(screen),
             graphics: screen.graphics.clone(),
-            reading: reading(screen),
             generation: update.generation,
             accessibility_revision: update.accessibility_revision,
         }
@@ -280,13 +246,6 @@ impl Baseline {
 }
 
 /// Encodes Scrollback rows with page-local tables, so a page never depends on frame order.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "Scrollback pages are encoded with it when scrollback merges"
-    )
-)]
 pub(crate) fn encode_page<'a>(
     epoch: u64,
     start: u64,
@@ -668,25 +627,5 @@ fn cursor(screen: &ScreenSnapshot) -> Cursor {
             CursorShapeSnapshot::Underline => 2,
             CursorShapeSnapshot::BlockHollow => 3,
         },
-    }
-}
-
-fn reading(screen: &ScreenSnapshot) -> pane::reading::Snapshot {
-    pane::reading::Snapshot {
-        total_rows: screen.scrollbar.total_rows,
-        offset_rows: screen.scrollbar.offset_rows,
-        visible_rows: screen.scrollbar.visible_rows,
-        selection_present: screen.selection_present,
-        selection_revision: screen.selection_revision,
-        find: screen.find.as_ref().map(|find| pane::reading::Find {
-            generation: find.generation.value(),
-            total: find.total_matches,
-            current: find.current_match,
-            spans: find
-                .visible_spans
-                .iter()
-                .map(|span| (span.row, span.start_column, span.end_column, span.current))
-                .collect(),
-        }),
     }
 }

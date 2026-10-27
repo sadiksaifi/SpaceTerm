@@ -58,10 +58,6 @@ impl<'a> ScreenReceiver<'a> {
             epoch,
             local: *generation,
             wire: decoded.generation,
-            selection: decoded
-                .reading
-                .as_ref()
-                .map_or(0, |reading| reading.selection_revision),
             size: PaneSize {
                 columns: decoded.geometry.columns,
                 rows: decoded.geometry.rows,
@@ -131,7 +127,6 @@ fn invisible(update: &ScreenUpdate, shown: Option<Shown>) -> bool {
         && update.modes.is_none()
         && update.colors.is_none()
         && update.graphics.is_none()
-        && update.reading.is_none()
 }
 
 impl super::inbox::Apply for Frames<'_, '_> {

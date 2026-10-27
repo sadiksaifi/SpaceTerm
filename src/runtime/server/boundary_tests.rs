@@ -126,7 +126,7 @@ fn the_maximum_grid_with_maximal_cells_and_metadata_fits_one_terminal_frame() {
         })
         .collect();
     screen.find = Some(Arc::new(crate::terminal::TerminalFindSnapshot {
-        generation: crate::terminal::FindQueryGeneration::from_value(u64::MAX),
+        generation: crate::terminal::FindQueryGeneration::test(u64::MAX),
         total_matches: 131072,
         current_match: Some(131072),
         visible_spans: (0..256)
@@ -142,10 +142,6 @@ fn the_maximum_grid_with_maximal_cells_and_metadata_fits_one_terminal_frame() {
     }));
     let capture = screen_encoder::ScreenCapture {
         screen: Arc::new(screen),
-        history: spaceterm_server::protocol::screen::History {
-            epoch: u64::MAX,
-            total: u64::MAX,
-        },
         generation: u64::MAX,
         accessibility_revision: u64::MAX,
     };

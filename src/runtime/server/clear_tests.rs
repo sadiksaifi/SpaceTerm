@@ -12,6 +12,11 @@ fn text(update: &ScreenUpdate) -> String {
     lines(update).join("\n")
 }
 
+/// The Scrollback rows the server retains above the screen.
+fn retained(update: &ScreenUpdate) -> u64 {
+    update.history.total - update.history.oldest
+}
+
 #[test]
 fn clear_screen_and_scrollback_targets_one_pane_and_fences_control_and_connection() {
     clear_under_lease(false);
@@ -85,8 +90,8 @@ fn clear_under_lease(preserve_prompt: bool) {
     let second_before = await_screen(&mut host, [1; 32], second, |s| {
         text(s).lines().any(|r| r.trim_end() == "SECOND-prompt")
     });
-    assert!(first_before.reading.as_ref().unwrap().total_rows > u64::from(size().rows));
-    assert!(second_before.reading.as_ref().unwrap().total_rows > u64::from(size().rows));
+    assert!(retained(&first_before) > 0);
+    assert!(retained(&second_before) > 0);
 
     let mut wrong_control = first;
     wrong_control.control = [99; 32];
@@ -113,8 +118,8 @@ fn clear_under_lease(preserve_prompt: bool) {
     }
     let untouched = await_screen(&mut host, [1; 32], first, |_| true);
     assert_eq!(
-        untouched.reading.as_ref().unwrap().total_rows,
-        first_before.reading.as_ref().unwrap().total_rows
+        retained(&untouched),
+        retained(&first_before)
     );
     assert_eq!(text(&untouched), text(&first_before));
 
@@ -149,16 +154,14 @@ fn clear_under_lease(preserve_prompt: bool) {
         let hidden = await_screen(&mut host, [1; 32], resumed, |_| true);
         assert_eq!(text(&hidden), text(&first_before));
         assert_eq!(
-            hidden.reading.as_ref().unwrap().total_rows,
-            first_before.reading.as_ref().unwrap().total_rows
+            retained(&hidden),
+            retained(&first_before)
         );
         host.view(&resumed, true, 60);
     }
     let cleared = await_screen(&mut host, [1; 32], resumed, |s| {
         s.generation > first_before.generation
-            && s.reading
-                .as_ref()
-                .is_some_and(|r| r.total_rows == r.visible_rows)
+            && retained(s) == 0
     });
     assert!(
         text(&cleared).contains("FIRST-prompt"),
@@ -176,8 +179,8 @@ fn clear_under_lease(preserve_prompt: bool) {
     let second_after = await_screen(&mut host, [1; 32], second, |_| true);
     assert_eq!(text(&second_after), text(&second_before));
     assert_eq!(
-        second_after.reading.as_ref().unwrap().total_rows,
-        second_before.reading.as_ref().unwrap().total_rows
+        retained(&second_after),
+        retained(&second_before)
     );
     host.shutdown().unwrap();
 }
