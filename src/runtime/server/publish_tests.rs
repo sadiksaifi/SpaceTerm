@@ -102,8 +102,12 @@ impl Rows {
     }
 }
 
+/// A bound channel the client shows.
 fn bound(outbox: &Outbox) -> Publication {
-    Publication::bind(outbox, CHANNEL).unwrap()
+    let mut publication = Publication::bind(outbox, CHANNEL).unwrap();
+    outbox.view(CHANNEL, true);
+    publication.view(true);
+    publication
 }
 
 #[test]
@@ -402,6 +406,14 @@ mod bell {
 
     impl Fixture {
         fn new() -> Self {
+            let mut fixture = Self::hidden();
+            fixture.input(1, vec![InputEvent::Focus(FocusTarget::Terminal)]);
+            fixture.show();
+            fixture
+        }
+
+        /// A Pane the first client claimed and has not shown yet.
+        fn hidden() -> Self {
             let mut shared = SharedWorkspaceHost::new(host());
             let workspace = create_shared(&mut shared, 1);
             let pane = shared_inventory(&mut shared)
@@ -432,8 +444,20 @@ mod bell {
             };
             let claim = fixture.claim(&FIRST, AttachmentClaim::Select { explicit: true });
             assert!(matches!(claim, ClaimReply::Attached { .. }));
-            fixture.input(1, vec![InputEvent::Focus(FocusTarget::Terminal)]);
             fixture
+        }
+
+        /// Shows the first client's channel, as its first `View` does.
+        fn show(&mut self) {
+            self.outbox.view(CHANNEL, true);
+            self.served.view(
+                &FIRST,
+                protocol::View {
+                    channel: CHANNEL,
+                    visible: true,
+                    max_hz: 60,
+                },
+            );
         }
 
         fn claim(&mut self, peer: &Peer, claim: AttachmentClaim) -> ClaimReply {
@@ -578,5 +602,17 @@ mod bell {
         );
         assert!(matches!(taken, ClaimReply::Attached { .. }));
         fixture.await_event(|event| matches!(event, PaneEvent::Takeover(_)));
+    }
+
+    /// A Pane claimed while hidden receives no screen until its client shows it.
+    #[test]
+    fn a_claimed_pane_receives_no_screen_until_it_is_shown() {
+        let mut fixture = Fixture::hidden();
+        std::thread::sleep(Duration::from_millis(200));
+        fixture.served.tick(Instant::now());
+        assert!(frames(&drain(&fixture.outbox)).is_empty());
+
+        fixture.show();
+        assert_eq!(frames(&drain(&fixture.outbox)).len(), 1);
     }
 }

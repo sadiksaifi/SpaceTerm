@@ -155,6 +155,16 @@ fn control_characters_in_text_input_reach_the_pty_and_unknown_ones_are_refused()
         claim,
         ReplyBody::Claim(ClaimReply::Attached { .. })
     ));
+    // A channel starts hidden; showing it pushes the current screen.
+    outbox.view(CHANNEL, true);
+    served.view(
+        &PEER,
+        protocol::View {
+            channel: CHANNEL,
+            visible: true,
+            max_hz: 60,
+        },
+    );
     send(
         &mut served,
         1,

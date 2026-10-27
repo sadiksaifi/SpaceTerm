@@ -67,13 +67,15 @@ pub(super) struct Publication {
 }
 
 impl Publication {
-    /// Opens `channel` on `outbox` for an attached claim. It starts visible and owes a keyframe.
+    /// Opens `channel` on `outbox` for an attached claim. It starts hidden and owes a keyframe,
+    /// so a Pane claimed while hidden receives no screen; the client's first `View` shows it.
     pub(super) fn bind(outbox: &Outbox, channel: Channel) -> Result<Self, OutboxError> {
         outbox.open(channel)?;
+        outbox.view(channel, false);
         Ok(Self {
             outbox: outbox.clone(),
             channel,
-            visible: true,
+            visible: false,
             encoder: Arc::default(),
             presented: None,
             hidden_input: None,

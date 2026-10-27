@@ -756,9 +756,6 @@ impl<H: HostCommands> Served<H> {
         match &result {
             Ok(ReplyBody::Claim(ClaimReply::Attached { lease })) => {
                 self.bind(peer, channel, pane, *lease)?;
-                // The Terminal Session publishes only what changes; the channel needs the
-                // current screen now.
-                self.publish(peer.connection, channel);
             }
             // A claim that ends without binding leaves the channel closed.
             _ => {
@@ -804,6 +801,9 @@ impl<H: HostCommands> Served<H> {
                 publication,
             },
         );
+        // The Terminal Session publishes nothing until the client's first `View` shows it.
+        self.host
+            .view(&lease, false, crate::terminal::session::DEFAULT_FRAME_RATE);
         Ok(())
     }
 
