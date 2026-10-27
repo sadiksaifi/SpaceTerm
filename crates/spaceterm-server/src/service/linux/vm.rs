@@ -6,11 +6,14 @@ use crate::{
     hierarchy::{Id, Inventory, Mutation, Outcome},
     pane::{AttachmentClaim, FocusTarget, Key, PaneSize},
     protocol::{
-        ClaimReply, InputEvent, Operation, ReplyBody,
+        ClaimReply, Frame, InputEvent, Operation, ReplyBody,
         interim::{Interim, InterimReply},
     },
 };
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    mpsc::{self, Receiver},
+};
 
 #[derive(Serialize, Deserialize)]
 struct Witness {
@@ -32,14 +35,15 @@ fn inventory(link: &ServerLink) -> (Inventory, u64) {
     };
     (inventory, next_sequence)
 }
-/// Claims `pane` on a new channel under attachment generation 1 of its Workspace. The fixture
-/// releases no attachment, so the server holds no newer generation.
+/// Claims `pane` on a new channel under attachment generation 1 of its Workspace, and returns
+/// the frames the server pushes on it. The fixture releases no attachment, so the server holds no
+/// newer generation.
 fn claim(
     link: &ServerLink,
     pane: Id,
     claim: AttachmentClaim,
     size: PaneSize,
-) -> (ChannelHandle, ClaimReply) {
+) -> (ChannelHandle, ClaimReply, Receiver<Box<Frame>>) {
     let workspace = inventory(link)
         .0
         .workspaces
@@ -52,7 +56,14 @@ fn claim(
         })
         .expect("fixture Pane missing")
         .id;
-    let channel = link.open_channel(Arc::new(|_: ChannelEvent| {})).unwrap();
+    let (sender, frames) = mpsc::channel();
+    let channel = link
+        .open_channel(Arc::new(move |event: ChannelEvent| {
+            if let ChannelEvent::Frame(frame) = event {
+                let _ = sender.send(frame);
+            }
+        }))
+        .unwrap();
     let attachment = Attachment {
         workspace,
         generation: 1,
@@ -65,7 +76,7 @@ fn claim(
     let ReplyBody::Claim(reply) = reply else {
         panic!("claim reply unavailable");
     };
-    (channel, reply)
+    (channel, reply, frames)
 }
 fn command(channel: &ChannelHandle, text: &str) {
     let key = |physical, logical: &str, text: Option<&str>| Key {
@@ -90,31 +101,36 @@ fn command(channel: &ChannelHandle, text: &str) {
         )
         .unwrap();
 }
-fn await_marker(link: &ServerLink, channel: &ChannelHandle, marker: &str) {
+/// Applies pushed frames to the rows' text, acknowledging each, until a row reads `marker`.
+fn await_marker(channel: &ChannelHandle, frames: &Receiver<Box<Frame>>, marker: &str) {
     let deadline = Instant::now() + Duration::from_secs(15);
+    let mut grid = None;
+    let mut rows: Vec<String> = Vec::new();
     loop {
-        if let ReplyBody::Interim(InterimReply::Screen(screen)) = request(
-            link,
-            Operation::Interim(Interim::Poll {
-                channel: channel.channel(),
-            }),
-        ) {
-            let found = screen.rows.iter().any(|row| {
-                row.iter()
-                    .map(|cell| cell.text.as_str())
-                    .collect::<String>()
-                    .trim_end()
-                    == marker
-            });
-            if found {
-                return;
-            }
+        let wait = deadline.saturating_duration_since(Instant::now());
+        let frame = frames
+            .recv_timeout(wait)
+            .expect("fixture command did not complete");
+        let update = &frame.update;
+        // A keyframe and a new grid size start from blank rows.
+        if let Some(geometry) = update.geometry
+            && (frame.base.is_none() || grid != Some((geometry.columns, geometry.rows)))
+        {
+            grid = Some((geometry.columns, geometry.rows));
+            rows = vec![String::new(); usize::from(geometry.rows)];
         }
-        assert!(
-            Instant::now() < deadline,
-            "fixture command did not complete"
-        );
-        std::thread::sleep(Duration::from_millis(50));
+        if let Some(shift) = update.shift {
+            shift
+                .apply(&mut rows, String::new)
+                .expect("frame shift outside the screen");
+        }
+        for row in &update.rows {
+            rows[usize::from(row.index)] = row.runs.iter().map(|run| run.text.as_str()).collect();
+        }
+        channel.acknowledge(frame.frame).unwrap();
+        if rows.iter().any(|row| row.trim_end() == marker) {
+            return;
+        }
     }
 }
 #[test]
@@ -195,7 +211,7 @@ fn installed_service_preserves_sessions_and_restores_dormant_organization() {
             .unwrap()
             .tabs[0]
             .root_pane;
-        let (channel, ClaimReply::Attached { lease }) = claim(
+        let (channel, ClaimReply::Attached { lease }, frames) = claim(
             &link,
             pane,
             AttachmentClaim::Select { explicit: true },
@@ -207,7 +223,7 @@ fn installed_service_preserves_sessions_and_restores_dormant_organization() {
             &channel,
             "stty -echo; printf '\\033[2J\\033[HVM-BEGIN\\n'; sleep 7; printf '\\nVM-CONTINUED\\n'; touch /home/stvm/artifacts/server-command-continued",
         );
-        await_marker(&link, &channel, "VM-BEGIN");
+        await_marker(&channel, &frames, "VM-BEGIN");
         let witness = Witness {
             pane,
             server: lease.server,
@@ -226,7 +242,7 @@ fn installed_service_preserves_sessions_and_restores_dormant_organization() {
         let select = AttachmentClaim::Select {
             explicit: phase == "resume",
         };
-        let (mut channel, mut reply) = claim(&link, witness.pane, select, size);
+        let (mut channel, mut reply, mut frames) = claim(&link, witness.pane, select, size);
         if phase == "resume"
             && let ClaimReply::Takeover(takeover) = &reply
         {
@@ -237,7 +253,7 @@ fn installed_service_preserves_sessions_and_restores_dormant_organization() {
             );
             // A claim that did not attach leaves its channel unbound. Each claim needs a channel.
             channel.detach();
-            (channel, reply) = claim(
+            (channel, reply, frames) = claim(
                 &link,
                 witness.pane,
                 AttachmentClaim::TakeOver { target },
@@ -262,7 +278,7 @@ fn installed_service_preserves_sessions_and_restores_dormant_organization() {
                 (witness.server, witness.session),
                 "running Session was replaced"
             );
-            await_marker(&link, &channel, "VM-CONTINUED");
+            await_marker(&channel, &frames, "VM-CONTINUED");
             channel.detach();
             assert!(Path::new("/home/stvm/artifacts/server-command-continued").is_file());
             println!(

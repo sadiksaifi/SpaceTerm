@@ -1,7 +1,7 @@
-use super::tests::{attach, command, host, lines};
+use super::tests::{attach, await_screen, command, host, lines};
 use super::*;
 use pane::reading::{Operation, SELECTION_CHUNK_BYTES, Scroll};
-use spaceterm_server::protocol::interim::ScreenFrame;
+use spaceterm_server::protocol::screen::ScreenUpdate;
 use std::time::Instant;
 
 // Real PTY output and selection formatting share CPU with the parallel portable suite.
@@ -31,25 +31,21 @@ fn read(host: &mut DevelopmentPaneHost, lease: Lease, operation: Operation) {
 fn screen(
     host: &mut DevelopmentPaneHost,
     lease: Lease,
-    matches: impl Fn(&ScreenFrame) -> bool,
-) -> Box<ScreenFrame> {
+    matches: impl Fn(&ScreenUpdate) -> bool,
+) -> ScreenUpdate {
     let deadline = Instant::now() + COMPLETION_TIMEOUT;
     let mut last_progress = None;
     loop {
-        match host.request([1; 32], lease.connection, Request::Poll { lease }) {
-            Reply::Screen(screen) if matches(&screen) => return screen,
-            Reply::Screen(screen) => {
+        match super::tests::screen(host, [1; 32], lease) {
+            Ok(Some(update)) if matches(&update) => return update,
+            Ok(Some(update)) => {
                 last_progress = Some((
-                    screen.update.generation,
-                    screen
-                        .update
-                        .reading
-                        .as_ref()
-                        .map(|reading| reading.total_rows),
+                    update.generation,
+                    update.reading.as_ref().map(|reading| reading.total_rows),
                 ));
             }
-            Reply::Unchanged => {}
-            reply => panic!("screen refused: {reply:?}"),
+            Ok(None) => {}
+            Err(event) => panic!("the channel ended with {event:?}"),
         }
         assert!(
             Instant::now() < deadline,
@@ -98,7 +94,7 @@ fn old_scrollback_find_and_multichunk_copy_use_the_retained_terminal_content() {
         ),
     );
     screen(&mut host, lease, |s| {
-        s.update.reading.as_ref().unwrap().total_rows >= 2000
+        s.reading.as_ref().unwrap().total_rows >= 2000
     });
     read(
         &mut host,
@@ -109,15 +105,14 @@ fn old_scrollback_find_and_multichunk_copy_use_the_retained_terminal_content() {
         },
     );
     let found = screen(&mut host, lease, |s| {
-        s.update
-            .reading
+        s.reading
             .as_ref()
             .unwrap()
             .find
             .as_ref()
             .is_some_and(|f| f.generation == 7 && f.total == 1)
     });
-    assert!(found.update.reading.as_ref().unwrap().offset_rows > 0);
+    assert!(found.reading.as_ref().unwrap().offset_rows > 0);
     read(
         &mut host,
         lease,
@@ -127,8 +122,7 @@ fn old_scrollback_find_and_multichunk_copy_use_the_retained_terminal_content() {
         },
     );
     let found = screen(&mut host, lease, |s| {
-        s.update
-            .reading
+        s.reading
             .as_ref()
             .unwrap()
             .find
@@ -140,41 +134,41 @@ fn old_scrollback_find_and_multichunk_copy_use_the_retained_terminal_content() {
             .iter()
             .any(|r| { r.contains("retained-0000") })
     );
-    let top = if found.update.reading.as_ref().unwrap().offset_rows == 0 {
+    let top = if found.reading.as_ref().unwrap().offset_rows == 0 {
         found
     } else {
         read(&mut host, lease, Operation::Scroll(Scroll::Top));
         screen(&mut host, lease, |s| {
-            s.update.reading.as_ref().unwrap().offset_rows == 0
+            s.reading.as_ref().unwrap().offset_rows == 0
         })
     };
     pointer(
         &mut host,
         lease,
-        top.update.generation,
+        top.generation,
         pane::PointerPhase::Press,
         1.0,
     );
     // Reading acknowledgements fence worker admission, not formatting on the dispatch thread.
     read(&mut host, lease, Operation::Scroll(Scroll::Bottom));
     let bottom = screen(&mut host, lease, |s| {
-        let r = s.update.reading.as_ref().unwrap();
+        let r = s.reading.as_ref().unwrap();
         r.offset_rows + r.visible_rows == r.total_rows
     });
     pointer(
         &mut host,
         lease,
-        bottom.update.generation,
+        bottom.generation,
         pane::PointerPhase::Motion,
         400.0,
     );
     let selected = screen(&mut host, lease, |s| {
-        s.update.reading.as_ref().unwrap().selection_present
+        s.reading.as_ref().unwrap().selection_present
     });
     pointer(
         &mut host,
         lease,
-        selected.update.generation,
+        selected.generation,
         pane::PointerPhase::Release,
         400.0,
     );
@@ -196,7 +190,7 @@ fn old_scrollback_find_and_multichunk_copy_use_the_retained_terminal_content() {
         );
         std::thread::sleep(Duration::from_millis(5));
     };
-    let initial_rows = selected.update.reading.as_ref().unwrap().total_rows;
+    let initial_rows = selected.reading.as_ref().unwrap().total_rows;
     let mut bytes = Vec::new();
     let mut chunks = 0;
     let mut output_started = false;
@@ -209,17 +203,15 @@ fn old_scrollback_find_and_multichunk_copy_use_the_retained_terminal_content() {
             std::fs::write(&gate, []).unwrap();
             output_started = true;
             Some(screen(&mut host, lease, |s| {
-                s.update.reading.as_ref().unwrap().total_rows > initial_rows
+                s.reading.as_ref().unwrap().total_rows > initial_rows
             }))
-        } else if let Reply::Screen(s) =
-            host.request([1; 32], lease.connection, Request::Poll { lease })
-        {
-            Some(s)
         } else {
-            None
+            super::tests::screen(&mut host, [1; 32], lease)
+                .ok()
+                .flatten()
         };
         if let Some(s) = update {
-            let reading = s.update.reading.as_ref().unwrap();
+            let reading = s.reading.as_ref().unwrap();
             output_during_transfer |= !bytes.is_empty() && reading.total_rows > initial_rows;
             let current = reading.selection_revision;
             if generation != current {
@@ -297,19 +289,11 @@ fn old_scrollback_find_and_multichunk_copy_use_the_retained_terminal_content() {
         ),
         Reply::Refused(Refusal::Stale)
     ));
-    let deadline = Instant::now() + COMPLETION_TIMEOUT;
-    loop {
-        if let Reply::Screen(screen) =
-            host.request([2; 32], other.connection, Request::Poll { lease: other })
-        {
-            let reading = screen.update.reading.unwrap();
-            assert!(!reading.selection_present);
-            assert!(reading.find.is_none());
-            break;
-        }
-        assert!(Instant::now() < deadline);
-        std::thread::sleep(Duration::from_millis(5));
-    }
+    let reading = await_screen(&mut host, [2; 32], other, |_| true)
+        .reading
+        .unwrap();
+    assert!(!reading.selection_present);
+    assert!(reading.find.is_none());
     host.shutdown().unwrap();
 }
 
@@ -328,7 +312,7 @@ fn copy_shortcuts_use_the_authoritative_keyboard_mode_and_focus_fence() {
             lease,
             "set +m; stty raw -echo; printf '\\033[2J\\033[HREADY\\r\\n'; dd bs=1 count=1 >/dev/null 2>/dev/null; printf '\\033[>11uENHANCED\\r\\n'; dd bs=1 count=16 2>/dev/null | od -An -tx1 | tr -d ' \\n'; printf '\\r\\n'",
         );
-        await_text(&mut host, 1, lease, "READY");
+        await_text(&mut host, lease, "READY");
         // Finish the command's Enter gesture before enabling keyboard release reports.
         focus(&mut host, lease, 1, FocusTarget::Terminal);
         focus(&mut host, lease, 2, FocusTarget::FocusedPane);
@@ -354,7 +338,7 @@ fn copy_shortcuts_use_the_authoritative_keyboard_mode_and_focus_fence() {
             ),
             Reply::Unchanged
         ));
-        await_text(&mut host, 1, lease, "ENHANCED");
+        await_text(&mut host, lease, "ENHANCED");
         focus(&mut host, lease, 4, FocusTarget::FocusedPane);
         let request = |generation| Request::Input {
             lease,
@@ -374,7 +358,7 @@ fn copy_shortcuts_use_the_authoritative_keyboard_mode_and_focus_fence() {
             host.request([1; 32], lease.connection, request(5)),
             Reply::Unchanged
         ));
-        await_text(&mut host, 1, lease, expected);
+        await_text(&mut host, lease, expected);
         host.shutdown().unwrap();
     }
 }
@@ -399,7 +383,7 @@ fn reading_completion_refuses_orphan_motion_resize_and_retired_leases() {
     let observed = screen(&mut host, lease, |_| true);
     let operation = |phase| {
         Operation::Pointer(pane::Pointer {
-            screen_generation: observed.update.generation,
+            screen_generation: observed.generation,
             phase,
             button: Some(pane::PointerButton::Left),
             x: 1.0,
@@ -417,7 +401,7 @@ fn reading_completion_refuses_orphan_motion_resize_and_retired_leases() {
         Reply::Unchanged
     ));
     screen(&mut host, lease, |screen| {
-        screen.update.geometry.unwrap().columns == size.columns
+        screen.geometry.unwrap().columns == size.columns
     });
     read(&mut host, lease, operation(pane::PointerPhase::Press));
     assert!(matches!(complete(&mut host, lease), Err(Refusal::Stale)));

@@ -1,7 +1,8 @@
-//! Applies server screen frames to desktop snapshots and encodes the presentation style.
+//! Applies pushed screen frames to desktop snapshots and encodes the presentation style.
 use super::screen_decoder::{ScreenDecoder, UpdateError};
 use super::*;
-use spaceterm_server::protocol::interim::ScreenFrame;
+use spaceterm_server::protocol::Frame;
+use spaceterm_server::protocol::screen::{Cursor, History, ScreenUpdate};
 
 /// Receives one lease's server screens for the desktop presentation.
 pub(super) struct ScreenReceiver<'a> {
@@ -22,36 +23,27 @@ impl<'a> ScreenReceiver<'a> {
         }
     }
 
-    /// The last applied frame, which the next poll names as its base.
-    pub(super) fn baseline(&self) -> Option<u64> {
-        self.decoder.frame()
-    }
-
-    /// A changed demand restarts from a keyframe.
-    pub(super) fn restart(&mut self) {
-        self.decoder.reset();
-    }
-
-    /// Applies a polled frame with its graphics, and maps it to the server's generation and
-    /// size. Returns the screen, its mapping and its accessibility revision, or `None` when the
-    /// frame does not apply to this receiver's frame; the next poll then asks for a keyframe.
+    /// Applies a frame with its graphics, and maps it to the server's generation and size.
+    /// Returns the screen, its mapping and its accessibility revision. A frame whose base this
+    /// receiver does not hold breaks the channel's credit rule.
     pub(super) fn receive(
         &mut self,
-        frame: ScreenFrame,
+        frame: Frame,
         epoch: u64,
         generation: &mut PresentationGeneration,
         active_size: PaneSize,
         graphics: &mut graphics::Graphics,
         appearance: &Mutex<TerminalAppearanceUpdate>,
-    ) -> Result<Option<(Arc<ScreenSnapshot>, ScreenMapping, u64)>, ServerError> {
+    ) -> Result<(Arc<ScreenSnapshot>, ScreenMapping, u64), ServerError> {
         let decoded =
             match self
                 .decoder
                 .apply(frame.frame, frame.base, frame.update, self.local_files)
             {
                 Ok(decoded) => decoded,
-                Err(UpdateError::UnknownBase) => return Ok(None),
-                Err(UpdateError::Malformed) => return Err(ServerError::Protocol),
+                Err(UpdateError::UnknownBase | UpdateError::Malformed) => {
+                    return Err(ServerError::Protocol);
+                }
             };
         let graphics_error = graphics
             .update(decoded.graphics.clone(), decoded.modes.alternate_screen)
@@ -95,11 +87,77 @@ impl<'a> ScreenReceiver<'a> {
                 super::super::metadata::TerminalMetadataContext::Remote(metadata.clone());
         }
         screen.graphics = graphics.snapshot();
-        Ok(Some((
-            Arc::new(screen),
-            mapping,
-            decoded.accessibility_revision,
-        )))
+        Ok((Arc::new(screen), mapping, decoded.accessibility_revision))
+    }
+}
+
+/// Applies a Pane worker's pushed frames to its screen, for [`super::inbox::Inbox::drain`].
+pub(super) struct Frames<'a, 'b> {
+    pub(super) screens: &'a mut ScreenReceiver<'b>,
+    pub(super) epoch: u64,
+    pub(super) generation: &'a mut PresentationGeneration,
+    pub(super) active_size: PaneSize,
+    pub(super) graphics: &'a mut graphics::Graphics,
+    pub(super) appearance: &'a Mutex<TerminalAppearanceUpdate>,
+    pub(super) semantic: &'a mut super::accessibility::Fetcher,
+    /// What the view shows of the last visible frame.
+    pub(super) shown: &'a mut Option<Shown>,
+}
+
+/// The parts of a frame the view shows besides its rows, modes and graphics.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) struct Shown {
+    cursor: Cursor,
+    history: History,
+    generation: u64,
+}
+
+impl Shown {
+    fn of(update: &ScreenUpdate) -> Self {
+        Self {
+            cursor: update.cursor,
+            history: update.history,
+            generation: update.generation,
+        }
+    }
+}
+
+/// Whether `update` changes nothing the view shows, such as only the accessibility revision.
+fn invisible(update: &ScreenUpdate, shown: Option<Shown>) -> bool {
+    shown == Some(Shown::of(update))
+        && update.rows.is_empty()
+        && update.shift.is_none()
+        && update.geometry.is_none()
+        && update.modes.is_none()
+        && update.colors.is_none()
+        && update.graphics.is_none()
+        && update.reading.is_none()
+}
+
+impl super::inbox::Apply for Frames<'_, '_> {
+    type Screen = (Arc<ScreenSnapshot>, ScreenMapping);
+    type Error = ServerError;
+
+    fn apply(&mut self, frame: Frame) -> Result<Option<Self::Screen>, ServerError> {
+        let invisible = frame.base.is_some() && invisible(&frame.update, *self.shown);
+        let shown = Shown::of(&frame.update);
+        let previous = *self.generation;
+        let (screen, mapping, revision) = self.screens.receive(
+            frame,
+            self.epoch,
+            self.generation,
+            self.active_size,
+            self.graphics,
+            self.appearance,
+        )?;
+        self.semantic.note_revision(revision);
+        if invisible {
+            // The view keeps its screen, so pointer coordinates keep its generation.
+            *self.generation = previous;
+            return Ok(None);
+        }
+        *self.shown = Some(shown);
+        Ok(Some((screen, mapping)))
     }
 }
 

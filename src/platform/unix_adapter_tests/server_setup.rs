@@ -48,12 +48,12 @@ fn terminal_fixture_command(
     command: &str,
     stage: &'static str,
     witness: &'static str,
-) -> Result<Box<spaceterm_server::protocol::interim::ScreenFrame>, terminal_semantics::Failure> {
+) -> Result<support::Screen, terminal_semantics::Failure> {
     let status = format!("ST-FIXTURE-{stage}-EXIT=");
     let command = format!("{command}; printf '\\n{status}%d\\n' \"$?\"");
     terminal_semantics::stage(stage, pane.command(&command))?;
     let output = terminal_semantics::screen(pane, |screen| {
-        support::rows(screen).iter().any(|line| {
+        screen.rows.iter().any(|line| {
             line.trim_end() == witness
                 || line
                     .trim_end()
@@ -62,7 +62,7 @@ fn terminal_fixture_command(
         })
     })
     .map_err(|failure| failure.at(stage))?;
-    let lines = support::rows(&output);
+    let lines = &output.rows;
     if lines.iter().any(|line| line.trim_end() == witness) {
         return Ok(output);
     }
@@ -203,7 +203,7 @@ fn native_server_owned_work(
             "wss-root-identity",
             "ST-ROOT-READY",
         )?;
-        let lines = support::rows(&output);
+        let lines = &output.rows;
         let root = lines
             .iter()
             .find_map(|line| line.trim_end().strip_prefix("ST-FIXTURE-ROOT="))

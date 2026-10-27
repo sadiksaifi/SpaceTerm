@@ -34,6 +34,8 @@ pub(crate) mod testing {
 mod directory_tests;
 mod dispatch;
 pub use dispatch::{HostCommands, Served};
+pub use publish::{Observation, Observed};
+pub use screen_encoder::ScreenCapture;
 #[cfg(test)]
 #[path = "server/effect_tests.rs"]
 mod effect_tests;
@@ -89,6 +91,8 @@ pub struct DevelopmentPaneHost {
     directories: directories::DirectoryOperations,
     /// Shared by every Pane of one server, so each names its Controlling Client the same way.
     names: Arc<std::sync::Mutex<control::ClientNames>>,
+    /// Rings the host's wake when a Terminal Session has something to publish.
+    notifier: Option<crate::terminal::session::SubscriptionNotifier>,
 }
 #[derive(Clone, Copy)]
 struct DormantPane {
@@ -108,10 +112,7 @@ struct OwnedPane {
     screen: Option<Arc<ScreenSnapshot>>,
     graphics_transfer: Option<(ActiveScreenSnapshot, Arc<crate::terminal::ImageSnapshot>)>,
     /// The snapshot a keyframe poll last returned.
-    sent: Option<PresentationGeneration>,
-    screen_encoder: screen_encoder::ScreenEncoder,
     /// The last frame number a poll returned.
-    frame: u64,
     history: screen_encoder::HistoryTracker,
     presentable: bool,
     ended: bool,
@@ -127,7 +128,6 @@ struct OwnedPane {
     effects: NativeEffects,
     reading: reading::Reading,
     accessibility: accessibility::Accessibility,
-    publication: publish::Publication,
 }
 fn nonce() -> Result<[u8; 32], ServerError> {
     let mut bytes = [0; 32];
@@ -152,6 +152,7 @@ impl DevelopmentPaneHost {
             dormant: None,
             directories: directories::DirectoryOperations::default(),
             names: Arc::default(),
+            notifier: None,
         })
     }
     /// Native composition for the explicitly launched local Development host.
@@ -186,6 +187,7 @@ impl DevelopmentPaneHost {
             dormant: None,
             directories: directories::DirectoryOperations::default(),
             names: Arc::default(),
+            notifier: None,
         })
     }
 }

@@ -1,5 +1,5 @@
 //! Production emulator, server protocol and PTY dimension boundaries.
-use super::tests::{await_text, command, host, size};
+use super::tests::{await_screen, await_text, command, frame_bytes, host, lines, size};
 use super::*;
 
 #[test]
@@ -38,23 +38,15 @@ fn large_grid_dimensions_reach_the_emulator_screen_and_pty_together() {
             ),
             Reply::Unchanged
         ));
-        await_text(&mut host, 1, lease, &format!("{rows} {columns}"));
+        await_text(&mut host, lease, &format!("{rows} {columns}"));
         command(&mut host, 1, lease, "printf 'GRID-DONE\\n'");
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
-        loop {
-            if let Reply::Screen(screen) = host.request([1; 32], [1; 32], Request::Poll { lease }) {
-                let geometry = screen.update.geometry.unwrap();
-                assert_eq!((geometry.columns, geometry.rows), (columns, rows));
-                screen.update.validate().unwrap();
-                assert!(super::dispatch::wire_bytes(Reply::Screen(screen)).is_some());
-                break;
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "large screen did not arrive"
-            );
-            std::thread::sleep(Duration::from_millis(5));
-        }
+        let update = await_screen(&mut host, [1; 32], lease, |update| {
+            lines(update).iter().any(|line| line.contains("GRID-DONE"))
+        });
+        let geometry = update.geometry.unwrap();
+        assert_eq!((geometry.columns, geometry.rows), (columns, rows));
+        update.validate().unwrap();
+        assert!(frame_bytes(update).is_some());
     }
     host.shutdown().unwrap();
 }
@@ -167,13 +159,8 @@ fn the_maximum_grid_with_maximal_cells_and_metadata_fits_one_terminal_frame() {
         spaceterm_server::protocol::limits::MAX_LINKS
     );
     assert!(matches!(&update.graphics, Some(Ok(_))));
-    let screen = spaceterm_server::protocol::interim::ScreenFrame {
-        frame: u64::MAX,
-        base: Some(u64::MAX - 1),
-        update,
-    };
     assert!(
-        super::dispatch::wire_bytes(Reply::Screen(Box::new(screen))).is_some(),
-        "a full screen fits one protocol reply"
+        frame_bytes(update).is_some(),
+        "a full screen fits one protocol frame"
     );
 }

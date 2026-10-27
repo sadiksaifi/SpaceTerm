@@ -8,10 +8,10 @@ use spaceterm_server::{
     ServerConnection, ServerError,
     connection::link::ServerLink,
     pane::{control::Controller, *},
-    protocol::{Operation, Takeover, interim::Interim},
+    protocol::{Operation, PaneEvent, Takeover},
 };
 use std::error::Error;
-use support::{Claimed, attach};
+use support::{Claimed, Ending, attach};
 
 fn size(columns: u16) -> PaneSize {
     PaneSize {
@@ -85,11 +85,16 @@ fn main() -> Result<(), Box<dyn Error>> {
     };
     assert_eq!(original.lease().session, transferred.lease().session);
     assert_ne!(original.lease().control, transferred.lease().control);
-    // The former controller's channel still names its old lease, which the server now refuses.
-    // Resize is input, so the server reports its refusal as a discard.
-    assert_eq!(original.poll().err(), Some(ServerError::StaleControl));
-    let resize = original.resize(size(70))?;
-    assert_eq!(original.discarded(resize)?, Refusal::Stale);
+    // The server ends the former controller's channel with the Takeover, so the channel takes no
+    // more input, and the server refuses requests that name it.
+    assert!(matches!(
+        original.ending()?,
+        Ending::Pane(PaneEvent::Takeover(_))
+    ));
+    assert_eq!(
+        original.resize(size(70)).err(),
+        Some(ServerError::StaleControl)
+    );
     assert_eq!(
         original
             .request(Operation::Close {
@@ -122,7 +127,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     assert_eq!(lease.session, reclaimed.lease().session);
     assert!(matches!(select(&b)?, Claimed::Takeover(_)));
     assert_eq!(
-        support::interim(&b, Interim::Poll { channel }).err(),
+        support::request(&b, Operation::ClearScrollback { channel }).err(),
         Some(ServerError::StaleControl)
     );
     reclaimed.close()?;

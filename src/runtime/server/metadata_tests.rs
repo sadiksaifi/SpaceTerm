@@ -133,17 +133,7 @@ fn inventory_observers_receive_unpainted_pane_metadata_without_claiming_control(
     ) else {
         panic!("owner selection refused")
     };
-    assert!(matches!(
-        host.request(
-            [1; 32],
-            [1; 32],
-            Request::PresentationDemand {
-                lease,
-                visible: false
-            }
-        ),
-        Reply::Unchanged
-    ));
+    host.view(&lease, false, 60);
     let idle = wait(&mut host, 20, "sh");
     let idle_metadata = idle.workspaces[0].tabs[0].panes[0]
         .presentation
@@ -296,14 +286,10 @@ fn inventory_observers_receive_unpainted_pane_metadata_without_claiming_control(
         ),
         "observing metadata must not replace the controller"
     );
-    // Hidden Panes still announce accessibility revisions without publishing screen rows.
-    let polled = host.request([1; 32], [1; 32], Request::Poll { lease });
+    // The controller still holds the unpainted Pane.
     assert!(
-        matches!(
-            polled,
-            Reply::Unchanged | Reply::AccessibilityRevision { .. }
-        ),
-        "the controller can poll the unpainted Pane without receiving a Screen: {polled:?}"
+        matches!(host.observe([1; 32], &lease), Observed::Live(_)),
+        "the controller can observe the unpainted Pane"
     );
     host.shutdown().unwrap();
 }

@@ -1,5 +1,6 @@
-use super::tests::{host, size};
+use super::tests::{host, screen, size};
 use super::*;
+use spaceterm_server::protocol::PaneEvent;
 
 #[test]
 fn explicit_directory_creation_is_recursive_idempotent_and_does_not_edit_workspaces() {
@@ -85,8 +86,8 @@ fn directory_recovery_poll_retires_a_worker_directory_failure_before_any_tick() 
         .runtime
         .shutdown_and_wait(Duration::from_secs(5));
     assert!(matches!(
-        host.request([1; 32], [1; 32], Request::Poll { lease }),
-        Reply::Refused(Refusal::DirectoryUnavailable)
+        screen(&mut host, [1; 32], lease),
+        Err(PaneEvent::DirectoryUnavailable)
     ));
     assert!(
         cleanup.is_ok(),

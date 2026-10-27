@@ -401,6 +401,12 @@ impl ServerConnection {
         *saved = Some(link.clone());
         Ok(link)
     }
+    /// Makes `link`, already admitted, this handle's shared connection while it stays live. Tests
+    /// use it to serve a handle in process, without a socket.
+    #[doc(hidden)]
+    pub fn adopt(&self, link: ServerLink) {
+        *self.shared.link.lock().unwrap_or_else(|e| e.into_inner()) = Some(link);
+    }
     /// Delivers the shared link's pushed inventory and health to `sink` while it lives, across
     /// reconnects.
     pub fn subscribe(&self, sink: Weak<dyn LinkSink>) {

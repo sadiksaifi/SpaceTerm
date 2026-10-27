@@ -1,5 +1,6 @@
 //! Channel bindings of `Served` over a host whose Sessions the test ends.
 use super::dispatch::{HostCommands, Served};
+use super::publish::{Observation, Observed};
 use super::*;
 use spaceterm_server::attachments::Attachment;
 use spaceterm_server::connection::outbox::Outbox;
@@ -49,6 +50,23 @@ impl HostCommands for Host {
     fn unbound(&mut self, _: [u8; 32], lease: &Lease) {
         self.0.lock().unwrap().unbound.push(*lease);
     }
+    fn observe(&mut self, _: [u8; 32], lease: &Lease) -> Observed {
+        if self.lease_live(lease) {
+            Observed::Live(Observation {
+                screen: None,
+                effects: Vec::new(),
+                hidden_input: false,
+                accessibility: None,
+            })
+        } else {
+            Observed::Gone {
+                last: None,
+                event: protocol::PaneEvent::Ended,
+            }
+        }
+    }
+    fn view(&mut self, _: &Lease, _: bool, _: u8) {}
+    fn input_written(&mut self, _: &Lease, _: u32) {}
     fn disconnected(&mut self, _: [u8; 32]) {}
     fn shutdown(&mut self) -> Result<(), ServerError> {
         Ok(())

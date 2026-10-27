@@ -223,7 +223,7 @@ impl Outbox {
     }
 
     /// Queues a Pane event that leaves the channel open. Use [`Outbox::end`] for `Ended`,
-    /// `SessionEnded`, `Failed` and `Takeover`.
+    /// `SessionEnded`, `Failed`, `DirectoryUnavailable` and `Takeover`.
     pub fn pane(&self, channel: Channel, event: PaneEvent) -> Result<(), OutboxError> {
         let frames = encode(&ServerMessage::Pane(PaneMessage { channel, event }))?;
         self.with(|state| state.push_l1(Entry::Message(frames)))
@@ -316,7 +316,7 @@ impl Outbox {
         state.closed.push(channel);
     }
 
-    /// Ends `channel` from the server side with `Ended`, `SessionEnded`, `Failed` or `Takeover`.
+    /// Ends `channel` from the server side with a last event (`PaneEvent::last`).
     /// A pending final state is written first, after the in-flight frame's acknowledgement if one
     /// is in flight; then `event`; then the channel is forgotten. Later presentations are ignored.
     pub fn end(&self, channel: Channel, event: PaneEvent) -> Result<(), OutboxError> {

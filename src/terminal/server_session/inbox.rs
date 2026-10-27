@@ -8,7 +8,47 @@
 use spaceterm_server::connection::link::{ChannelEvent, ChannelSink};
 use spaceterm_server::protocol::{Frame, PaneEvent};
 use std::collections::VecDeque;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, Instant};
+
+/// Rechecks reading work the server is still applying, such as an operation's presentation
+/// barrier or a selection being prepared. A quarter of a 60 Hz frame bounds each wait without
+/// turning the worker into a busy loop.
+pub(super) const READING_RECHECK: Duration = Duration::from_millis(4);
+
+/// Wakes a Pane worker. A notification before the wait is never lost.
+#[derive(Default)]
+pub(super) struct Wake {
+    pending: Mutex<bool>,
+    ready: Condvar,
+}
+
+impl Wake {
+    pub(super) fn notify(&self) {
+        *self.pending.lock().unwrap_or_else(|e| e.into_inner()) = true;
+        self.ready.notify_all();
+    }
+
+    /// Returns on the first notification since the previous wait, or at `deadline`.
+    pub(super) fn wait(&self, deadline: Option<Instant>) {
+        let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+        while !*pending {
+            pending = match deadline {
+                None => self.ready.wait(pending).unwrap_or_else(|e| e.into_inner()),
+                Some(deadline) => {
+                    let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                        return;
+                    };
+                    self.ready
+                        .wait_timeout(pending, remaining)
+                        .unwrap_or_else(|e| e.into_inner())
+                        .0
+                }
+            };
+        }
+        *pending = false;
+    }
+}
 
 /// Pane events the worker has not drained yet. Frames take one slot each and arrive one at a
 /// time under the channel's credit; more than this means the server floods the channel.
@@ -32,6 +72,12 @@ struct Queue {
 /// The channel broke a bound the client relies on. The worker ends the claim.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct Overflow;
+
+impl From<Overflow> for crate::server_connection::ServerError {
+    fn from(_: Overflow) -> Self {
+        Self::Protocol
+    }
+}
 
 impl Inbox {
     pub(super) fn new(notify: Notify) -> Arc<Self> {
@@ -65,6 +111,8 @@ impl Inbox {
         let mut changed = None;
         for event in self.take()? {
             match event {
+                // The worker learns of the link's end from its own link.
+                ChannelEvent::Closed(_) => {}
                 ChannelEvent::Frame(frame) => {
                     let number = frame.frame;
                     if let Some(screen) = applier.apply(*frame)? {
@@ -76,13 +124,7 @@ impl Inbox {
                     if let Some(screen) = changed.take() {
                         deliver(Delivery::Screen(screen));
                     }
-                    let last = matches!(
-                        event,
-                        PaneEvent::Ended
-                            | PaneEvent::SessionEnded
-                            | PaneEvent::Failed
-                            | PaneEvent::Takeover(_)
-                    );
+                    let last = event.last();
                     deliver(Delivery::Pane(event));
                     if last {
                         return Ok(Flow::Ended);
@@ -162,8 +204,8 @@ impl Demand {
         self.preparation = prepare;
     }
 
-    pub(super) fn set_frame_rate(&mut self, max_hz: u8) {
-        self.max_hz = max_hz;
+    pub(super) fn visible(&self) -> bool {
+        self.visible
     }
 
     /// The `View` the server has not been told yet, as `(visible, max_hz)`.
@@ -226,6 +268,37 @@ mod tests {
             |delivery| delivered.push(delivery),
         );
         (flow, acknowledged, delivered)
+    }
+
+    #[test]
+    fn a_notification_before_the_wait_ends_it_immediately_and_only_once() {
+        let wake = Wake::default();
+        wake.notify();
+        let started = Instant::now();
+        wake.wait(Some(started + Duration::from_secs(5)));
+        assert!(started.elapsed() < Duration::from_secs(1));
+        let started = Instant::now();
+        wake.wait(Some(started + Duration::from_millis(20)));
+        assert!(
+            started.elapsed() >= Duration::from_millis(20),
+            "a consumed notification must not end a later wait"
+        );
+    }
+
+    #[test]
+    fn a_worker_waiting_without_a_deadline_wakes_for_a_notification() {
+        let wake = Arc::new(Wake::default());
+        let waiter = {
+            let wake = Arc::clone(&wake);
+            std::thread::spawn(move || {
+                let started = Instant::now();
+                wake.wait(None);
+                started.elapsed()
+            })
+        };
+        std::thread::sleep(Duration::from_millis(10));
+        wake.notify();
+        assert!(waiter.join().unwrap() < Duration::from_secs(5));
     }
 
     #[test]
@@ -301,10 +374,8 @@ mod tests {
         demand.set_visible(true);
         assert_eq!(demand.take_view(), None);
 
-        demand.set_frame_rate(120);
-        assert_eq!(demand.take_view(), Some((true, 120)));
         demand.set_preparation(false);
         demand.set_visible(false);
-        assert_eq!(demand.take_view(), Some((false, 120)));
+        assert_eq!(demand.take_view(), Some((false, 60)));
     }
 }

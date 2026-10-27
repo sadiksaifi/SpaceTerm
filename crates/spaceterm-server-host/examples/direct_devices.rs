@@ -27,7 +27,7 @@ mod exercise {
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
-    use super::support::{self, Claimed, Pane};
+    use super::support::{self, Claimed, Ending, Pane};
     use serde_json::{Value, json};
     use spaceterm_server::connection::link::ServerLink;
     use spaceterm_server::direct::{
@@ -37,8 +37,7 @@ mod exercise {
     use spaceterm_server::hierarchy::{CloseTarget, Id, Inventory, Mutation, Outcome};
     use spaceterm_server::pane::control::Controller;
     use spaceterm_server::pane::{AttachmentClaim, Lease, PaneSize, directories};
-    use spaceterm_server::protocol::interim::ScreenFrame;
-    use spaceterm_server::protocol::{Operation, ReplyBody};
+    use spaceterm_server::protocol::{Operation, PaneEvent, ReplyBody};
     use spaceterm_server::{ServerConnection, ServerError};
 
     type Result<T> = std::result::Result<T, &'static str>;
@@ -206,20 +205,11 @@ mod exercise {
     }
 
     fn output(pane: &Pane, marker: &str) -> Result<()> {
-        output_snapshot(pane, marker).map(|_| ())
-    }
-
-    fn output_snapshot(pane: &Pane, marker: &str) -> Result<Box<ScreenFrame>> {
-        let until = Instant::now() + Duration::from_secs(10);
-        while Instant::now() < until {
-            if let Some(screen) = api(pane.screen())?
-                && support::has_row(&screen, marker)
-            {
-                return Ok(screen);
-            }
-            std::thread::sleep(Duration::from_millis(30));
-        }
-        Err("terminal output did not arrive")
+        api(pane.await_screen(Duration::from_secs(10), |screen| {
+            support::has_row(screen, marker)
+        }))?
+        .map(drop)
+        .ok_or("terminal output did not arrive")
     }
 
     fn pipe_only(fd: i32) -> Result<()> {
@@ -848,11 +838,16 @@ mod exercise {
                 );
                 return Err("WSS takeover changed the Session");
             }
-            let stale = first.poll();
-            if !matches!(stale, Err(ServerError::StaleControl)) {
+            // The server ends the original owner's channel with the Takeover.
+            let stale = first.ending();
+            if !matches!(stale, Ok(Ending::Pane(PaneEvent::Takeover(_)))) {
                 eprintln!(
                     "WSS fixture failure: stage=takeover-old-control, class={}, elapsed_ms={}, heartbeats={heartbeats}",
-                    reply_classification(&stale),
+                    match &stale {
+                        Ok(Ending::Pane(_)) => "other-channel-end",
+                        Ok(Ending::Link(_)) => "connection-ended",
+                        Err(_) => reply_classification(&stale),
+                    },
                     started.elapsed().as_millis(),
                 );
                 return Err("original owner connection did not refuse stale control");

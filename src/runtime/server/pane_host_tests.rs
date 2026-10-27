@@ -1,9 +1,9 @@
 use super::tests::{
-    attach, await_text, command, create_shared, focus, host, input, lines, native_command,
-    shared_inventory, size, text_key,
+    attach, await_screen, await_text, command, create_shared, effects, focus, host, input, lines,
+    native_command, screen, shared_inventory, size, text_key,
 };
 use super::*;
-use spaceterm_server::protocol::interim::ScreenFrame;
+use spaceterm_server::protocol::{PaneEvent, screen::ScreenUpdate};
 use std::time::{Duration, Instant};
 
 #[test]
@@ -12,35 +12,10 @@ fn native_clipboard_requests_reach_only_the_current_controller() {
     let lease = attach(&mut host, 1, true);
     focus(&mut host, lease, 1, FocusTarget::Terminal);
     native_command(&mut host, lease, 1, "printf '\\033]52;c;aGVsbG8=\\007'");
-    let deadline = Instant::now() + Duration::from_secs(3);
-    loop {
-        let reply = host.request(
-            [1; 32],
-            lease.connection,
-            Request::NativeEffects {
-                lease,
-                generation: 1,
-            },
-        );
-        match reply {
-            Reply::NativeEffects {
-                request: Some(request),
-                ..
-            } => {
-                assert!(
-                    matches!(request.effect, pane::effects::Effect::ClipboardWrite { text, .. } if text == "hello")
-                );
-                break;
-            }
-            Reply::NativeEffects { request: None, .. } => {}
-            other => panic!("native effects unavailable: {other:?}"),
-        }
-        assert!(
-            Instant::now() < deadline,
-            "clipboard request did not arrive"
-        );
-        std::thread::sleep(Duration::from_millis(5));
-    }
+    let [request] = effects(&mut host, lease, 1).try_into().unwrap();
+    assert!(
+        matches!(request.effect, pane::effects::Effect::ClipboardWrite { text, .. } if text == "hello")
+    );
     host.shutdown().unwrap();
 }
 
@@ -131,20 +106,7 @@ fn capture(host: &mut DevelopmentPaneHost, lease: Lease, bytes: usize, modes: &s
             "set +m; stty raw -echo; printf '{modes}\\033[2J\\033[HREADY\\r\\n'; dd bs=1 count={bytes} 2>/dev/null | od -v -An -tx1 | tr -d ' \\n'; printf '\\r\\n'"
         ),
     );
-    await_text(host, 1, lease, "READY");
-}
-
-fn next_screen(host: &mut DevelopmentPaneHost, lease: Lease) -> Box<ScreenFrame> {
-    let deadline = Instant::now() + Duration::from_secs(3);
-    loop {
-        if let Reply::Screen(screen) =
-            host.request([1; 32], lease.connection, Request::Poll { lease })
-        {
-            return screen;
-        }
-        assert!(Instant::now() < deadline, "screen did not arrive");
-        std::thread::sleep(Duration::from_millis(5));
-    }
+    await_text(host, lease, "READY");
 }
 
 fn batch_key(text: &str, ime: bool) -> Key {
@@ -233,7 +195,7 @@ fn key_batches_reject_invalid_bounds_keys_and_authority_without_a_prefix() {
     ));
     // The first 33 actual PTY bytes must be exactly these accepted events. Any prefix
     // from an earlier refused request makes this independent byte witness impossible.
-    await_text(&mut host, 1, lease, &format!("{}5a", "41".repeat(32)));
+    await_text(&mut host, lease, &format!("{}5a", "41".repeat(32)));
     host.shutdown().unwrap();
 }
 
@@ -262,7 +224,6 @@ fn key_batches_preserve_kitty_press_repeat_release_order_at_the_pty() {
     // Kitty flag 11 reports every key, including repeat (2) and release (3).
     await_text(
         &mut host,
-        1,
         lease,
         "1b5b3937751b5b39373b313a32751b5b39373b313a3375",
     );
@@ -288,7 +249,7 @@ fn key_batches_prevalidate_focused_pane_ime_eligibility_before_any_commit() {
         key_batch(&mut host, lease, 1, vec![batch_key("界", true)]),
         Reply::Unchanged
     ));
-    await_text(&mut host, 1, lease, "e7958c");
+    await_text(&mut host, lease, "e7958c");
     host.shutdown().unwrap();
 }
 
@@ -321,7 +282,7 @@ fn focus_edges_and_focused_pane_ime_are_observable_at_the_pty() {
         input(&mut host, lease, 4, text_key("K", false)),
         Reply::Unchanged
     ));
-    await_text(&mut host, 1, lease, "1b5b4f1b5b491b5b4fe7958c1b5b494b");
+    await_text(&mut host, lease, "1b5b4f1b5b491b5b4fe7958c1b5b494b");
     host.shutdown().unwrap();
 }
 
@@ -412,27 +373,16 @@ fn paste_confirmation_preserves_exact_modal_authority_and_focus_loss_cancels_it(
         ),
         Reply::Paste(PasteOutcome::Stale)
     ));
-    await_text(&mut host, 1, lease, "6f6b610d62");
+    await_text(&mut host, lease, "6f6b610d62");
     host.shutdown().unwrap();
 }
 
-fn screen_with_marker(
-    host: &mut DevelopmentPaneHost,
-    lease: Lease,
-    marker: &str,
-) -> Box<ScreenFrame> {
-    let deadline = Instant::now() + Duration::from_secs(3);
-    loop {
-        if let Reply::Screen(screen) = host.request([1; 32], [1; 32], Request::Poll { lease })
-            && lines(&screen)
-                .iter()
-                .any(|row| row.trim_end().starts_with(marker))
-        {
-            return screen;
-        }
-        assert!(Instant::now() < deadline, "missing PTY marker {marker}");
-        std::thread::sleep(Duration::from_millis(5));
-    }
+fn screen_with_marker(host: &mut DevelopmentPaneHost, lease: Lease, marker: &str) -> ScreenUpdate {
+    await_screen(host, [1; 32], lease, |update| {
+        lines(update)
+            .iter()
+            .any(|row| row.trim_end().starts_with(marker))
+    })
 }
 
 #[test]
@@ -448,7 +398,7 @@ fn redraw_between_pointer_press_and_release_does_not_swallow_the_next_click() {
     let original = screen_with_marker(&mut host, lease, "READY");
     focus(&mut host, lease, 1, FocusTarget::Terminal);
     let press = Pointer {
-        screen_generation: original.update.generation,
+        screen_generation: original.generation,
         phase: pane::PointerPhase::Press,
         button: Some(pane::PointerButton::Left),
         x: 4.0,
@@ -461,7 +411,7 @@ fn redraw_between_pointer_press_and_release_does_not_swallow_the_next_click() {
         Reply::Unchanged
     ));
     let changed = screen_with_marker(&mut host, lease, "CHANGED");
-    assert_ne!(changed.update.generation, original.update.generation);
+    assert_ne!(changed.generation, original.generation);
     // An accepted application gesture continues across output in the same geometry.
     assert!(matches!(
         input(
@@ -492,7 +442,7 @@ fn redraw_between_pointer_press_and_release_does_not_swallow_the_next_click() {
         Reply::Unchanged
     ));
     let fresh = Pointer {
-        screen_generation: changed.update.generation,
+        screen_generation: changed.generation,
         x: 12.0,
         y: 23.0,
         ..press
@@ -546,7 +496,7 @@ fn geometry_change_balances_pointer_release_and_publishes_without_program_output
     let original = screen_with_marker(&mut host, lease, "READY");
     focus(&mut host, lease, 1, FocusTarget::Terminal);
     let press = Pointer {
-        screen_generation: original.update.generation,
+        screen_generation: original.generation,
         phase: pane::PointerPhase::Press,
         button: Some(pane::PointerButton::Left),
         x: 4.0,
@@ -569,9 +519,11 @@ fn geometry_change_balances_pointer_release_and_publishes_without_program_output
         ),
         Reply::Unchanged
     ));
-    let resized = next_screen(&mut host, lease);
-    assert!(resized.update.generation > original.update.generation);
-    let geometry = resized.update.geometry.unwrap();
+    let resized = await_screen(&mut host, [1; 32], lease, |update| {
+        update.generation > original.generation
+    });
+    assert!(resized.generation > original.generation);
+    let geometry = resized.geometry.unwrap();
     assert_eq!((geometry.columns, geometry.rows), (80, 24));
     // A discarded gesture cannot be resumed by its delayed release or a stale press.
     input(
@@ -587,7 +539,7 @@ fn geometry_change_balances_pointer_release_and_publishes_without_program_output
     );
     input(&mut host, lease, 1, InteractiveInput::Pointer(press));
     let fresh = Pointer {
-        screen_generation: resized.update.generation,
+        screen_generation: resized.generation,
         x: 12.0,
         y: 23.0,
         ..press
@@ -619,7 +571,7 @@ fn application_pointer_and_wheel_encode_at_the_pty_and_stale_screens_are_dropped
     let lease = attach(&mut host, 1, true);
     capture(&mut host, lease, 28, "\\033[?1000h\\033[?1006h");
     focus(&mut host, lease, 1, FocusTarget::Terminal);
-    // Poll again after a deliberate resize to obtain a fresh authoritative mapping.
+    // Observe again after a deliberate resize to obtain a fresh authoritative mapping.
     host.request(
         [1; 32],
         [1; 32],
@@ -631,10 +583,14 @@ fn application_pointer_and_wheel_encode_at_the_pty_and_stale_screens_are_dropped
             },
         },
     );
-    let screen = next_screen(&mut host, lease);
-    assert!(screen.update.modes.unwrap().mouse_tracking);
+    let screen = await_screen(&mut host, [1; 32], lease, |update| {
+        update
+            .geometry
+            .is_some_and(|geometry| geometry.columns == 81)
+    });
+    assert!(screen.modes.unwrap().mouse_tracking);
     let pointer = Pointer {
-        screen_generation: screen.update.generation,
+        screen_generation: screen.generation,
         phase: pane::PointerPhase::Press,
         button: Some(pane::PointerButton::Left),
         x: 4.0,
@@ -664,7 +620,7 @@ fn application_pointer_and_wheel_encode_at_the_pty_and_stale_screens_are_dropped
             lease,
             1,
             InteractiveInput::Pointer(Pointer {
-                screen_generation: screen.update.generation,
+                screen_generation: screen.generation,
                 phase: pane::PointerPhase::Release,
                 ..pointer
             })
@@ -677,7 +633,7 @@ fn application_pointer_and_wheel_encode_at_the_pty_and_stale_screens_are_dropped
             lease,
             1,
             InteractiveInput::Wheel(Wheel {
-                screen_generation: screen.update.generation,
+                screen_generation: screen.generation,
                 horizontal_steps: 0,
                 vertical_steps: 1,
                 phase: pane::WheelPhase::GestureChanged,
@@ -691,7 +647,6 @@ fn application_pointer_and_wheel_encode_at_the_pty_and_stale_screens_are_dropped
     ));
     await_text(
         &mut host,
-        1,
         lease,
         "1b5b3c303b313b314d1b5b3c303b313b316d1b5b3c36343b313b314d",
     );
@@ -758,7 +713,6 @@ fn bracketed_paste_reuses_bounds_normalization_and_control_sanitization() {
     }
     await_text(
         &mut host,
-        1,
         lease,
         "1b5b3230307e610a621b5b3230317e1b5b3230307e6120621b5b3230317e",
     );
@@ -885,17 +839,9 @@ fn reconnect_takeover_and_wrong_device_invalidate_paste_and_input_authority() {
         Reply::Unchanged
     ));
     // The new device has exactly the same running PTY, with no cancelled payload bytes.
-    let deadline = Instant::now() + Duration::from_secs(3);
-    loop {
-        if let Reply::Screen(screen) =
-            host.request([2; 32], [3; 32], Request::Poll { lease: successor })
-            && lines(&screen).iter().any(|row| row.trim_end() == "6f6b")
-        {
-            break;
-        }
-        assert!(Instant::now() < deadline, "successor PTY witness missing");
-        std::thread::sleep(Duration::from_millis(5));
-    }
+    await_screen(&mut host, [2; 32], successor, |update| {
+        lines(update).iter().any(|row| row.trim_end() == "6f6b")
+    });
     host.shutdown().unwrap();
 }
 
@@ -952,7 +898,7 @@ fn malformed_interactive_values_never_reach_the_pty() {
         ));
     }
     input(&mut host, lease, 1, text_key("ok", false));
-    await_text(&mut host, 1, lease, "6f6b");
+    await_text(&mut host, lease, "6f6b");
     host.shutdown().unwrap();
 }
 
@@ -999,7 +945,7 @@ fn application_input_never_starts_selection_or_scrolls_server_history() {
             }),
         );
         input(&mut host, lease, 1, text_key("ok", false));
-        await_text(&mut host, 1, lease, "6f6b");
+        await_text(&mut host, lease, "6f6b");
         let screen = host.pane.as_ref().unwrap().screen.as_ref().unwrap();
         assert!(!screen.selection_present);
         assert_eq!(
@@ -1091,43 +1037,21 @@ fn shared_interactive_input_uses_controlling_size_and_terminal_visible_appearanc
             option_as_alt: false,
         }),
     );
-    let deadline = Instant::now() + Duration::from_secs(3);
-    loop {
-        if let Reply::Screen(screen) = host.request([1; 32], [1; 32], Request::Poll { lease })
-            && lines(&screen)
-                .iter()
-                .any(|row| row.trim_end() == "QUERY-READY")
-        {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "appearance query reader was not ready"
-        );
-        std::thread::sleep(Duration::from_millis(5));
-    }
+    await_text(&mut host, lease, "QUERY-READY");
     input(&mut host, lease, 1, text_key(" ", false));
-    let deadline = Instant::now() + Duration::from_secs(3);
-    loop {
-        if let Reply::Screen(screen) = host.request([1; 32], [1; 32], Request::Poll { lease }) {
-            let rows = lines(&screen);
-            if rows
-                .iter()
-                .any(|row| row.trim_end() == "APPEARANCE:1b5b3f3939373b326e")
-            {
-                let geometry = screen.update.geometry.unwrap();
-                assert_eq!((geometry.columns, geometry.rows), (91, 31));
-                assert_eq!(screen.update.colors.as_ref().unwrap().background, [240; 3]);
-                assert!(rows.iter().any(|row| row.trim_end() == "SIZE:31 91"));
-                break;
-            }
-        }
-        assert!(
-            Instant::now() < deadline,
-            "controlling appearance query response missing"
-        );
-        std::thread::sleep(Duration::from_millis(5));
-    }
+    let screen = await_screen(&mut host, [1; 32], lease, |update| {
+        lines(update)
+            .iter()
+            .any(|row| row.trim_end() == "APPEARANCE:1b5b3f3939373b326e")
+    });
+    let geometry = screen.geometry.unwrap();
+    assert_eq!((geometry.columns, geometry.rows), (91, 31));
+    assert_eq!(screen.colors.as_ref().unwrap().background, [240; 3]);
+    assert!(
+        lines(&screen)
+            .iter()
+            .any(|row| row.trim_end() == "SIZE:31 91")
+    );
     host.shutdown().unwrap();
 }
 
@@ -1231,7 +1155,7 @@ fn only_owning_shell_directory_confirmation_changes_restoration() {
         lease,
         "stty -echo; printf '\\033]7;file://localhost/\\007\\033]133;A;spaceterm=%s\\007' \"$SPACETERM_PROMPT_OWNER\"; printf '\\033[2J\\033[HCONFIRMED\\n'",
     );
-    await_text(&mut host, 1, lease, "CONFIRMED");
+    await_text(&mut host, lease, "CONFIRMED");
     host.tick(std::time::Instant::now());
     assert_eq!(
         host.organization
@@ -1247,7 +1171,7 @@ fn only_owning_shell_directory_confirmation_changes_restoration() {
         lease,
         "printf '\\033]7;file://localhost/tmp\\007\\033]133;A;spaceterm=foreign\\007'; printf 'NESTED\\n'",
     );
-    await_text(&mut host, 1, lease, "NESTED");
+    await_text(&mut host, lease, "NESTED");
     host.tick(std::time::Instant::now());
     assert_eq!(
         host.organization
@@ -1270,7 +1194,7 @@ fn takeover_preserves_work_and_rejects_former_controller_operations() {
         original,
         "stty -echo; printf '\\033[2J\\033[HSTARTED\\n'; sleep 1; printf 'CONTINUED\\n'\n",
     );
-    await_text(&mut host, 2, original, "STARTED");
+    await_text(&mut host, original, "STARTED");
     host.disconnected([2; 32]);
     let Reply::Takeover { target, .. } = select(&mut host, 9, 9) else {
         panic!("selection must not replace a disconnected controller");
@@ -1291,8 +1215,11 @@ fn takeover_preserves_work_and_rejects_former_controller_operations() {
     };
     assert_eq!(original.session, transferred.session);
     assert_ne!(original.control, transferred.control);
+    assert!(matches!(
+        screen(&mut host, [1; 32], original),
+        Err(PaneEvent::Takeover(_))
+    ));
     for request in [
-        Request::Poll { lease: original },
         Request::Resize {
             lease: original,
             size: size(),
@@ -1335,7 +1262,7 @@ fn takeover_preserves_work_and_rejects_former_controller_operations() {
         panic!("take back");
     };
     assert_eq!(original.session, returned.session);
-    await_text(&mut host, 3, returned, "CONTINUED");
+    await_text(&mut host, returned, "CONTINUED");
     host.shutdown().unwrap();
 }
 
@@ -1418,8 +1345,8 @@ fn detached_attachment_fences_lost_claim_replies_and_late_release_preserves_reat
     ));
     assert!(
         matches!(
-            host.request([1; 32], [6; 32], Request::Poll { lease: split_lease }),
-            Reply::Refused(Refusal::Stale)
+            screen(&mut host, [1; 32], split_lease),
+            Err(PaneEvent::Takeover(_))
         ),
         "detach releases every original Pane grant"
     );
@@ -1448,10 +1375,7 @@ fn detached_attachment_fences_lost_claim_replies_and_late_release_preserves_reat
         ),
         Reply::Unchanged
     ));
-    assert!(matches!(
-        host.request([1; 32], [4; 32], Request::Poll { lease: current }),
-        Reply::Screen(_) | Reply::Unchanged
-    ));
+    assert!(screen(&mut host, [1; 32], current).is_ok());
     let Reply::Attached { lease: other } = host.request(
         [9; 32],
         [9; 32],
@@ -1468,10 +1392,7 @@ fn detached_attachment_fences_lost_claim_replies_and_late_release_preserves_reat
         [5; 32],
         Request::ReleaseAttachment { attachment: later },
     );
-    assert!(matches!(
-        host.request([9; 32], [9; 32], Request::Poll { lease: other }),
-        Reply::Screen(_) | Reply::Unchanged
-    ));
+    assert!(screen(&mut host, [9; 32], other).is_ok());
     assert_eq!(shared_inventory(&mut host).workspaces.len(), 1);
     host.shutdown().unwrap();
 }
@@ -1483,8 +1404,8 @@ fn revoking_a_device_releases_control_without_ending_its_terminal_session() {
     let original = attach(&mut host, 2, true);
     host.revoked([1; 32]);
     assert!(matches!(
-        host.request([1; 32], [2; 32], Request::Poll { lease: original }),
-        Reply::Refused(Refusal::Stale)
+        screen(&mut host, [1; 32], original),
+        Err(PaneEvent::Takeover(_))
     ));
     let Reply::Attached { lease: later } = select(&mut host, 9, 9) else {
         panic!("revocation must leave the Pane unclaimed");
@@ -1492,10 +1413,7 @@ fn revoking_a_device_releases_control_without_ending_its_terminal_session() {
     assert_eq!(later.session, original.session);
     assert_ne!(later.control, original.control);
     host.revoked([1; 32]);
-    assert!(matches!(
-        host.request([9; 32], [9; 32], Request::Poll { lease: later }),
-        Reply::Screen(_) | Reply::Unchanged
-    ));
+    assert!(screen(&mut host, [9; 32], later).is_ok());
     host.shutdown().unwrap();
 }
 
@@ -1549,8 +1467,8 @@ fn released_control_has_one_selection_winner_and_never_resumes_old_grants() {
     let mut host = host.lock().unwrap();
     assert!(matches!(select(&mut host, 1, 3), Reply::Takeover { .. }));
     assert!(matches!(
-        host.request([1; 32], [2; 32], Request::Poll { lease: original }),
-        Reply::Refused(Refusal::Stale)
+        screen(&mut *host, [1; 32], original),
+        Err(PaneEvent::Takeover(_))
     ));
     host.shutdown().unwrap();
 }
@@ -1565,7 +1483,7 @@ fn reconnect_keeps_running_work_and_fences_the_old_connection() {
         first,
         "stty -echo; printf '\\033[2J\\033[HSTARTED\\n'; sleep 1; printf 'CONTINUED\\n'\n",
     );
-    await_text(&mut host, 2, first, "STARTED");
+    await_text(&mut host, first, "STARTED");
     host.disconnected([2; 32]);
     std::thread::sleep(Duration::from_millis(1100));
     let second = attach(&mut host, 3, false);
@@ -1587,7 +1505,7 @@ fn reconnect_keeps_running_work_and_fences_the_old_connection() {
         ),
         Reply::Refused(Refusal::Controlled)
     ));
-    await_text(&mut host, 3, second, "CONTINUED");
+    await_text(&mut host, second, "CONTINUED");
     host.shutdown().unwrap();
 }
 
@@ -1681,7 +1599,7 @@ fn reconnect_and_stale_generations_cannot_start_or_mutate_a_replacement() {
         live,
         "stty -echo; printf '\\033[2J\\033[HLIVE\\n'; stty size\n",
     );
-    await_text(&mut host, 2, live, "24 80");
+    await_text(&mut host, live, "24 80");
     host.shutdown().unwrap();
 }
 
@@ -1695,7 +1613,7 @@ fn a_waiting_client_observes_exit_without_the_controller_polling() {
         lease,
         "stty -echo; printf '\\033[2J\\033[HEXITING\\n'; sleep 0.2; exit\n",
     );
-    await_text(&mut host, 2, lease, "EXITING");
+    await_text(&mut host, lease, "EXITING");
     host.disconnected([2; 32]);
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
@@ -1743,10 +1661,7 @@ fn ordinary_exit_allows_a_later_explicit_launch_but_never_a_reconnect() {
     command(&mut host, 2, old, "exit\n");
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        if matches!(
-            host.request([1; 32], [2; 32], Request::Poll { lease: old }),
-            Reply::Ended
-        ) {
+        if matches!(screen(&mut host, [1; 32], old), Err(PaneEvent::Ended)) {
             break;
         }
         assert!(Instant::now() < deadline, "shell exit did not arrive");
@@ -1773,6 +1688,6 @@ fn ordinary_exit_allows_a_later_explicit_launch_but_never_a_reconnect() {
         fresh,
         "stty -echo; printf '\\033[2J\\033[HNEW-SHELL\\n'\n",
     );
-    await_text(&mut host, 3, fresh, "NEW-SHELL");
+    await_text(&mut host, fresh, "NEW-SHELL");
     host.shutdown().unwrap();
 }

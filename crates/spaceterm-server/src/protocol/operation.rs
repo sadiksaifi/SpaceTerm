@@ -178,7 +178,6 @@ impl ReplyBody {
     pub fn validate(&self) -> Result<(), Fatal> {
         match self {
             Self::Page(page) => page.validate(),
-            Self::Interim(reply) => reply.validate(),
             _ => Ok(()),
         }
     }

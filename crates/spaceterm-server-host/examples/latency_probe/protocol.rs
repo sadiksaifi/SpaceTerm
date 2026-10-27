@@ -12,12 +12,13 @@ use spaceterm_server::pane::{AttachmentClaim, FocusTarget, Key, PaneSize, Refusa
 use spaceterm_server::protocol::interim::{Interim, InterimReply};
 use spaceterm_server::protocol::screen::CursorPosition;
 use spaceterm_server::protocol::{
-    ClaimReply, InputEvent, InputOutcome, Operation, PaneEvent, ReplyBody,
+    ClaimReply, Frame, InputEvent, InputOutcome, Operation, PaneEvent, ReplyBody,
 };
 use spaceterm_server::{ServerConnection, ServerError};
 use std::cell::RefCell;
+use std::collections::VecDeque;
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 /// A failed probe stage and the typed classification of its cause.
@@ -213,18 +214,62 @@ pub enum Route {
 
 /// A probe Workspace whose Pane runs `cat` on a raw terminal, so each typed key echoes once.
 ///
-/// Screens are polled until the server pushes frames. The probe keeps only the last frame it saw,
-/// which `PollChanges` names as its base, and the cursor that the echo moves.
+/// The server pushes frames, one at a time until the probe acknowledges each. The probe reads
+/// only a frame's input serial, cursor and replaced rows, so it keeps no screen to apply a frame
+/// to.
 pub struct EchoPane {
     server: ServerConnection,
     link: ServerLink,
     boot: Id,
     workspace: Id,
     channel: Option<ChannelHandle>,
-    /// The first input the server discarded. The connection's I/O thread records it.
-    discarded: Arc<Mutex<Option<Refusal>>>,
-    frame: Option<u64>,
+    pushed: Arc<Pushed>,
+    /// The serial of the last Input message the probe sent.
+    sent: u32,
+    /// The cursor as of the last frame the probe applied.
     cursor: Option<CursorPosition>,
+}
+
+/// What the server pushed on the probe's channel. The connection's I/O thread records it.
+#[derive(Default)]
+struct Pushed {
+    state: Mutex<Received>,
+    ready: Condvar,
+}
+
+#[derive(Default)]
+struct Received {
+    /// Frames the probe has not applied yet. The server sends the next only after the probe
+    /// acknowledges this one.
+    frames: VecDeque<Box<Frame>>,
+    /// The first input the server discarded.
+    discarded: Option<Refusal>,
+    /// Whether the channel or its connection ended.
+    ended: bool,
+}
+
+impl Pushed {
+    fn lock(&self) -> MutexGuard<'_, Received> {
+        self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn deliver(&self, event: ChannelEvent) {
+        let mut received = self.lock();
+        match event {
+            ChannelEvent::Frame(frame) => received.frames.push_back(frame),
+            ChannelEvent::Pane(PaneEvent::Input {
+                outcome: InputOutcome::Discarded(refusal),
+                ..
+            }) => {
+                received.discarded.get_or_insert(refusal);
+            }
+            ChannelEvent::Pane(event) if event.last() => received.ended = true,
+            ChannelEvent::Closed(_) => received.ended = true,
+            ChannelEvent::Pane(_) => return,
+        }
+        drop(received);
+        self.ready.notify_all();
+    }
 }
 
 const READY: &str = "PROBE-READY";
@@ -292,8 +337,8 @@ impl EchoPane {
             boot,
             workspace,
             channel: None,
-            discarded: Arc::default(),
-            frame: None,
+            pushed: Arc::default(),
+            sent: 0,
             cursor: None,
         };
         // Close the Workspace if the Pane never becomes ready.
@@ -324,21 +369,11 @@ impl EchoPane {
             cell_width: 8,
             cell_height: 18,
         };
-        let discarded = Arc::clone(&self.discarded);
+        let pushed = Arc::clone(&self.pushed);
         let channel = at(
             "attach",
-            self.link.open_channel(Arc::new(move |event: ChannelEvent| {
-                if let ChannelEvent::Pane(PaneEvent::Input {
-                    outcome: InputOutcome::Discarded(refusal),
-                    ..
-                }) = event
-                {
-                    discarded
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .get_or_insert(refusal);
-                }
-            })),
+            self.link
+                .open_channel(Arc::new(move |event: ChannelEvent| pushed.deliver(event))),
         )?;
         let attachment = Attachment {
             workspace,
@@ -355,11 +390,7 @@ impl EchoPane {
             "focus",
             channel.input(GENERATION, vec![InputEvent::Focus(FocusTarget::Terminal)]),
         )?;
-        let demand = Interim::PresentationDemand {
-            channel: channel.channel(),
-            visible: true,
-        };
-        interim(&self.link, "visible", demand)?;
+        at("visible", channel.view(true, 120))?;
         // The printf output differs from the typed command, so only the program prints READY.
         std::thread::sleep(Duration::from_millis(1500));
         self.input(vec![
@@ -369,29 +400,22 @@ impl EchoPane {
             InputEvent::Key(enter_key()),
         ])?;
         let deadline = Instant::now() + Duration::from_secs(20);
-        loop {
-            let poll = Interim::Poll {
-                channel: self.channel()?.channel(),
-            };
-            if let InterimReply::Screen(screen) = interim(&self.link, "ready", poll)?
-                && screen.update.rows.iter().any(|row| {
-                    row.runs
-                        .iter()
-                        .map(|run| run.text.as_str())
-                        .collect::<String>()
-                        .contains(READY)
-                })
-            {
-                break;
-            }
-            if Instant::now() > deadline {
+        let mut ready = false;
+        while !ready {
+            let Some(frame) = self.next_frame("ready", deadline)? else {
                 return fail("the probe Pane did not start cat");
-            }
-            std::thread::sleep(Duration::from_millis(20));
+            };
+            ready = frame.update.rows.iter().any(|row| {
+                row.runs
+                    .iter()
+                    .map(|run| run.text.as_str())
+                    .collect::<String>()
+                    .contains(READY)
+            });
         }
+        // Let the shell settle, then take the frames it pushed meanwhile.
         std::thread::sleep(Duration::from_millis(300));
-        self.frame = None;
-        self.poll("screen")?;
+        while self.next_frame("screen", Instant::now())?.is_some() {}
         Ok(())
     }
 
@@ -403,43 +427,45 @@ impl EchoPane {
 
     /// Fails when the server discarded earlier input.
     fn reported(&self) -> Result<()> {
-        match *self.discarded.lock().unwrap_or_else(|e| e.into_inner()) {
-            Some(refusal) => Err(Failure {
-                stage: "input",
-                cause: Some(format!("{refusal:?}")),
-            }),
-            None => Ok(()),
-        }
+        discarded(&self.pushed.lock())
     }
 
     /// Sends one Input message under focus generation 1 and returns its serial. Input has no
     /// reply; the server reports only a discard.
     fn input(&mut self, events: Vec<InputEvent>) -> Result<u32> {
         self.reported()?;
-        at("input", self.channel()?.input(GENERATION, events))
+        let serial = at("input", self.channel()?.input(GENERATION, events))?;
+        self.sent = serial;
+        Ok(serial)
     }
 
-    /// Polls the screen's changes since the last screen the probe saw, and returns whether the
-    /// cursor moved.
-    fn poll(&mut self, stage: &'static str) -> Result<bool> {
-        self.reported()?;
-        let poll = Interim::PollChanges {
-            channel: self.channel()?.channel(),
-            base: self.frame,
-        };
-        let screen = match interim(&self.link, stage, poll)? {
-            InterimReply::Screen(screen) => *screen,
-            InterimReply::Unchanged | InterimReply::AccessibilityRevision { .. } => {
-                return Ok(false);
+    /// Waits until `deadline` for the next pushed frame, acknowledges it and records its cursor.
+    /// `None` means no frame arrived in time.
+    fn next_frame(&mut self, stage: &'static str, deadline: Instant) -> Result<Option<Box<Frame>>> {
+        let frame = {
+            let mut received = self.pushed.lock();
+            loop {
+                if let Some(frame) = received.frames.pop_front() {
+                    break frame;
+                }
+                discarded(&received)?;
+                if received.ended {
+                    return fail("the probe Pane ended");
+                }
+                let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                    return Ok(None);
+                };
+                received = self
+                    .pushed
+                    .ready
+                    .wait_timeout(received, remaining)
+                    .unwrap_or_else(|e| e.into_inner())
+                    .0;
             }
-            _ => return fail(stage),
         };
-        // The probe reads only the cursor, so every update applies whatever its base.
-        self.frame = Some(screen.frame);
-        let cursor = screen.update.cursor.position;
-        let moved = cursor != self.cursor;
-        self.cursor = cursor;
-        Ok(moved)
+        at(stage, self.channel()?.acknowledge(frame.frame))?;
+        self.cursor = frame.update.cursor.position;
+        Ok(Some(frame))
     }
 
     /// One request that changes nothing. It releases an attachment of a Workspace that never
@@ -462,14 +488,18 @@ impl EchoPane {
         self.input(vec![InputEvent::Key(text_key(&character.to_string()))])
     }
 
-    /// Returns once the client has seen the cursor move.
+    /// Returns once a pushed frame shows the echo of the last key: its input serial covers that
+    /// key, and its cursor moved.
     pub fn await_echo(&mut self, deadline: Instant) -> Result<()> {
-        while Instant::now() < deadline {
-            if self.poll("poll")? {
+        let before = self.cursor;
+        loop {
+            let Some(frame) = self.next_frame("echo", deadline)? else {
+                return fail("echo timed out");
+            };
+            if frame.input >= self.sent && self.cursor != before {
                 return Ok(());
             }
         }
-        fail("echo timed out")
     }
 
     /// Sends Return, which moves the raw cursor back to the first column of the same line.
@@ -511,6 +541,17 @@ impl EchoPane {
             Outcome::Accepted { .. } => Ok(()),
             _ => fail("probe Workspace close refused"),
         }
+    }
+}
+
+/// Fails when the server discarded earlier input.
+fn discarded(received: &Received) -> Result<()> {
+    match received.discarded {
+        Some(refusal) => Err(Failure {
+            stage: "input",
+            cause: Some(format!("{refusal:?}")),
+        }),
+        None => Ok(()),
     }
 }
 

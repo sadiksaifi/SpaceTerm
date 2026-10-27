@@ -1,11 +1,11 @@
 //! One fixture-only terminal exercise shared by the native IPC and WSS checks.
-use super::support::{Pane, has_row, no_op, rows, text_key};
+use super::support::{Pane, Screen, has_row, no_op, text_key};
 use spaceterm_server::{
     ServerError,
     pane::{FocusTarget, accessibility, graphics, reading},
     protocol::{
         Operation, ReplyBody,
-        interim::{Interim, InterimReply, ScreenFrame},
+        interim::{Interim, InterimReply},
     },
 };
 use std::time::{Duration, Instant};
@@ -243,23 +243,16 @@ fn pause(until: Instant) -> Result<()> {
     std::thread::sleep(Duration::from_millis(20));
     Ok(())
 }
-pub fn screen(pane: &Pane, matches: impl Fn(&ScreenFrame) -> bool) -> Result<Box<ScreenFrame>> {
+pub fn screen(pane: &Pane, matches: impl Fn(&Screen) -> bool) -> Result<Screen> {
     screen_at("fixture-output", pane, matches)
 }
 fn screen_at(
     label: &'static str,
     pane: &Pane,
-    matches: impl Fn(&ScreenFrame) -> bool,
-) -> Result<Box<ScreenFrame>> {
-    let until = Instant::now() + DEADLINE;
-    loop {
-        if let Some(screen) = stage(label, pane.screen())?
-            && matches(&screen)
-        {
-            return Ok(screen);
-        }
-        pause(until).map_err(|failure| failure.at(label))?;
-    }
+    matches: impl Fn(&Screen) -> bool,
+) -> Result<Screen> {
+    stage(label, pane.await_screen(DEADLINE, matches))?
+        .ok_or_else(|| Failure::from("terminal exercise deadline elapsed").at(label))
 }
 fn read(pane: &Pane, operation: reading::Operation) -> Result<()> {
     let until = Instant::now() + DEADLINE;
@@ -348,8 +341,6 @@ fn copy(pane: &Pane) -> Result<String> {
     let mut total = None;
     let mut chunks = 0;
     loop {
-        // Poll drains the worker's completed copy preparation before requesting a chunk.
-        stage("screen-poll", pane.poll())?;
         match stage(
             "selection-chunk",
             pane.interim(Interim::SelectionChunk {
@@ -403,14 +394,12 @@ pub fn exercise(pane: &Pane) -> Result<Report> {
         .map_err(|failure| failure.at("bulk-output"))?;
     require(
         complete
-            .update
             .reading
             .as_ref()
             .is_some_and(|s| s.total_rows >= ROWS as u64),
         "bulk Scrollback did not retain its rows",
     )?;
     let manifest = complete
-        .update
         .graphics
         .as_ref()
         .and_then(|s| s.as_ref().ok())
@@ -458,8 +447,7 @@ pub fn exercise(pane: &Pane) -> Result<Report> {
         },
     )?;
     screen_at("find-results", pane, |s| {
-        s.update
-            .reading
+        s.reading
             .as_ref()
             .and_then(|s| s.find.as_ref())
             .is_some_and(|f| f.generation == 1 && f.total == ROWS)
@@ -472,8 +460,7 @@ pub fn exercise(pane: &Pane) -> Result<Report> {
         },
     )?;
     let found = screen_at("find-first-navigation", pane, |s| {
-        s.update
-            .reading
+        s.reading
             .as_ref()
             .and_then(|s| s.find.as_ref())
             .is_some_and(|f| {
@@ -485,7 +472,6 @@ pub fn exercise(pane: &Pane) -> Result<Report> {
             })
     })?;
     let first = found
-        .update
         .reading
         .as_ref()
         .and_then(|s| s.find.as_ref())
@@ -499,23 +485,17 @@ pub fn exercise(pane: &Pane) -> Result<Report> {
         },
     )?;
     screen_at("find-next-navigation", pane, |s| {
-        s.update
-            .reading
+        s.reading
             .as_ref()
             .and_then(|s| s.find.as_ref())
             .is_some_and(|f| f.total == ROWS && f.current == Some(first % ROWS + 1))
     })?;
     read(pane, reading::Operation::EndFind { generation: 1 })?;
     read(pane, reading::Operation::Scroll(reading::Scroll::Top))?;
-    screen_at("scroll-top", pane, |s| {
-        rows(s)
-            .iter()
-            .any(|row| row.trim_end() == "ST-NATIVE-00000")
-    })?;
+    screen_at("scroll-top", pane, |s| has_row(s, "ST-NATIVE-00000"))?;
     read(pane, reading::Operation::Scroll(reading::Scroll::Bottom))?;
     screen_at("scroll-bottom", pane, |s| {
-        s.update
-            .reading
+        s.reading
             .as_ref()
             .is_some_and(|r| r.offset_rows + r.visible_rows == r.total_rows)
     })?;

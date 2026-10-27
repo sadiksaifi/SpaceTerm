@@ -4,6 +4,7 @@ use crate::terminal::key::InputModifiers;
 pub(crate) mod clipboard;
 mod input;
 mod publication;
+pub(crate) use publication::DEFAULT_FRAME_RATE;
 mod server_reading;
 mod subscriptions;
 pub use clipboard::ClipboardCompletion;
@@ -803,10 +804,6 @@ impl TerminalRuntime {
     }
     /// Sets the frame rate the presenting client declared, in hertz. Publication coalesces
     /// continued output to at most one screen per frame at this rate.
-    #[cfg_attr(
-        not(test),
-        allow(dead_code, reason = "the push cutover wires it into the PaneService")
-    )]
     pub(crate) fn set_frame_rate(&self, hz: u8) {
         if let Some(commands) = &self.commands {
             let _ = commands.send(Command::SetFrameRate(hz));
@@ -815,10 +812,6 @@ impl TerminalRuntime {
 
     /// Marks the end of client Input `serial`: call it after the runtime calls that apply that
     /// Input. Screens captured once its bytes reach the PTY carry it as `input_serial`.
-    #[cfg_attr(
-        not(test),
-        allow(dead_code, reason = "the push cutover wires it into the PaneService")
-    )]
     pub(crate) fn note_input_serial(&self, serial: u32) {
         if let Some(commands) = &self.commands {
             let _ = commands.send(Command::InputSerial(serial));

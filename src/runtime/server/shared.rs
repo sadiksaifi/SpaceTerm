@@ -3,6 +3,7 @@ use super::*;
 use spaceterm_server::hierarchy::{
     CloseInventory, ConfirmedControl, ConfirmedPane, Id, Inventory, State,
 };
+use spaceterm_server::protocol::PaneEvent;
 use std::collections::{BTreeMap, BTreeSet};
 
 #[cfg(test)]
@@ -270,6 +271,7 @@ impl SharedWorkspaceHost {
                 dormant: None,
                 directories: super::directories::DirectoryOperations::default(),
                 names: Arc::clone(&self.prototype.names),
+                notifier: self.prototype.notifier.clone(),
             };
             self.panes.insert(id, host);
         }
@@ -727,10 +729,6 @@ impl SharedWorkspaceHost {
                     | Request::Read { lease, .. }
                     | Request::GraphicsChunk { lease, .. }
                     | Request::SelectionChunk { lease, .. }
-                    | Request::Poll { lease }
-                    | Request::PollChanges { lease, .. }
-                    | Request::PresentationDemand { lease, .. }
-                    | Request::NativeEffects { lease, .. }
                     | Request::CompleteClipboard { lease, .. }
                     | Request::Focus { lease, .. }
                     | Request::Input { lease, .. }
@@ -743,14 +741,6 @@ impl SharedWorkspaceHost {
                     | Request::Close { lease } => (*lease).into(),
                     _ => return Err(Refusal::Unsupported),
                 };
-                if matches!(request, Request::Poll { .. } | Request::PollChanges { .. })
-                    && self
-                        .panes
-                        .values()
-                        .any(|host| host.failed_directory_session == Some(target))
-                {
-                    return Err(Refusal::DirectoryUnavailable);
-                }
                 let host = self
                     .panes
                     .values_mut()
@@ -820,6 +810,55 @@ impl HostCommands for SharedWorkspaceHost {
     fn lease_live(&self, lease: &Lease) -> bool {
         self.panes.values().any(|host| host.lease_live(lease))
     }
+    fn set_notifier(&mut self, notifier: crate::terminal::session::SubscriptionNotifier) {
+        for host in self.panes.values_mut() {
+            host.notifier = Some(Arc::clone(&notifier));
+        }
+        self.prototype.notifier = Some(notifier);
+    }
+    fn observe(&mut self, device: Id, lease: &Lease) -> super::publish::Observed {
+        let target = PaneTarget::from(*lease);
+        let Some(host) = self.panes.values_mut().find(|host| {
+            host.pane
+                .as_ref()
+                .is_some_and(|pane| PaneTarget::from(pane.lease) == target)
+        }) else {
+            // A Pane removed, closed or ended by End All Sessions no longer has this lease.
+            let event = if self
+                .panes
+                .values()
+                .any(|host| host.failed_directory_session == Some(target))
+            {
+                PaneEvent::DirectoryUnavailable
+            } else if self.state.session_ends().is_some_and(|ends| {
+                ends.boot == target.server
+                    && ends
+                        .sessions
+                        .iter()
+                        .any(|pane| pane.session == Some(target.session))
+            }) {
+                PaneEvent::SessionEnded
+            } else {
+                PaneEvent::Ended
+            };
+            return super::publish::Observed::Gone { last: None, event };
+        };
+        let observed = host.observe(device, lease);
+        if matches!(observed, super::publish::Observed::Gone { .. }) {
+            let _ = self.synchronize();
+        }
+        observed
+    }
+    fn view(&mut self, lease: &Lease, visible: bool, max_hz: u8) {
+        for host in self.panes.values_mut() {
+            host.view(lease, visible, max_hz);
+        }
+    }
+    fn input_written(&mut self, lease: &Lease, serial: u32) {
+        for host in self.panes.values_mut() {
+            host.input_written(lease, serial);
+        }
+    }
     fn unbound(&mut self, connection: Id, lease: &Lease) {
         for host in self.panes.values_mut() {
             host.unbound(connection, lease);
@@ -869,7 +908,7 @@ impl HostCommands for SharedWorkspaceHost {
 
 #[cfg(test)]
 mod tests {
-    use super::super::tests::{host, shared_inventory, size};
+    use super::super::tests::{host, screen, shared_inventory, size};
     use super::*;
     use spaceterm_server::attachments::Attachment;
 
@@ -966,8 +1005,8 @@ mod tests {
         } if name.as_str() == "Studio")
         );
         assert!(matches!(
-            host.request([1; 32], [1; 32], Request::Poll { lease }),
-            Reply::Refused(Refusal::Stale)
+            screen(&mut host, [1; 32], lease),
+            Err(PaneEvent::SessionEnded)
         ));
         let Reply::Attached { lease: replacement } = host.request([1; 32], [3; 32], select(true))
         else {
@@ -1117,10 +1156,7 @@ mod tests {
             panic!("unclaimed Pane remains available");
         };
         host.revoked([2; 32]);
-        assert!(matches!(
-            host.request([1; 32], [1; 32], Request::Poll { lease }),
-            Reply::Screen(_) | Reply::Unchanged
-        ));
+        assert!(screen(&mut host, [1; 32], lease).is_ok());
         host.shutdown().unwrap();
     }
 

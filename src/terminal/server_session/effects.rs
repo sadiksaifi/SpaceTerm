@@ -6,20 +6,26 @@ use pane::effects::{ClipboardTarget, Completion, Effect};
 pub(super) struct ClientEffects {
     clipboard: async_channel::Sender<ClipboardRequest>,
     completed: mpsc::Receiver<(u64, ClipboardCompletion)>,
-    complete: mpsc::SyncSender<(u64, ClipboardCompletion)>,
+    relay: crate::terminal::session::clipboard::ClipboardRelay,
     pending: Option<(u64, u64, u64)>,
     hidden_input: Option<(u64, bool)>,
 }
 
 impl ClientEffects {
-    pub(super) fn new() -> (Self, async_channel::Receiver<ClipboardRequest>) {
+    /// `notify` wakes the Pane worker when the desktop completes a relayed clipboard request.
+    pub(super) fn new(
+        notify: Arc<dyn Fn() + Send + Sync>,
+    ) -> (Self, async_channel::Receiver<ClipboardRequest>) {
         let (clipboard, requests) = async_channel::bounded(1);
         let (complete, completed) = mpsc::sync_channel(1);
         (
             Self {
                 clipboard,
-                complete,
                 completed,
+                relay: Arc::new(move |id, completion| {
+                    let _ = complete.try_send((id, completion));
+                    notify();
+                }),
                 pending: None,
                 hidden_input: None,
             },
@@ -27,18 +33,17 @@ impl ClientEffects {
         )
     }
 
-    pub(super) fn poll(
+    /// Sends the completion of a relayed clipboard request raised under the focus generation
+    /// the server still holds.
+    pub(super) fn complete(
         &mut self,
         state: &DevelopmentPaneState,
         lease: Lease,
-        generation: u64,
-        events: &async_channel::Sender<TerminalSessionEvent>,
         exchange: &mut impl FnMut(&Request) -> Result<Reply, ServerError>,
     ) -> Result<(), ServerError> {
         while let Ok((id, completion)) = self.completed.try_recv() {
-            if let Some((pending, old_generation, epoch)) = self.pending
+            if let Some((pending, generation, epoch)) = self.pending
                 && pending == id
-                && old_generation == generation
                 && state.effect_authority.native_permits(epoch)
             {
                 self.pending = None;
@@ -55,15 +60,16 @@ impl ClientEffects {
                 })?)?;
             }
         }
-        let local_epoch = state.effect_authority.output_epoch();
-        let started = std::time::Instant::now();
-        let Reply::NativeEffects {
-            request,
-            hidden_input,
-        } = exchange(&Request::NativeEffects { lease, generation })?
-        else {
-            return Err(ServerError::Protocol);
-        };
+        Ok(())
+    }
+
+    /// Publishes a pushed hidden-input state once per epoch and value.
+    pub(super) fn hidden_input(
+        &mut self,
+        state: &DevelopmentPaneState,
+        events: &async_channel::Sender<TerminalSessionEvent>,
+        hidden_input: bool,
+    ) -> Result<(), ServerError> {
         state.hidden_input.store(hidden_input, Ordering::Release);
         let hidden_state = (state.epoch.load(Ordering::Acquire), hidden_input);
         if self.hidden_input != Some(hidden_state) {
@@ -72,9 +78,21 @@ impl ClientEffects {
                 .map_err(|_| ServerError::NotRunning)?;
             self.hidden_input = Some(hidden_state);
         }
-        let Some(request) = request else {
-            return Ok(());
-        };
+        Ok(())
+    }
+
+    /// Hands a pushed native effect request to the desktop, if it was raised under the focus
+    /// generation the server acknowledged and the client still holds, and local authority
+    /// still permits it.
+    pub(super) fn request(
+        &mut self,
+        state: &DevelopmentPaneState,
+        acknowledged: Option<u64>,
+        events: &async_channel::Sender<TerminalSessionEvent>,
+        request: pane::effects::Request,
+    ) -> Result<(), ServerError> {
+        let started = std::time::Instant::now();
+        let local_epoch = state.effect_authority.output_epoch();
         let current_generation = state
             .interaction
             .lock()
@@ -85,8 +103,9 @@ impl ClientEffects {
         else {
             return Ok(());
         };
-        if current_generation != generation
-            || request.generation != generation
+        let generation = request.generation;
+        if acknowledged != Some(generation)
+            || current_generation != generation
             || request.remaining_ms == 0
             || request.remaining_ms > 1000
         {
@@ -139,7 +158,7 @@ impl ClientEffects {
                 Arc::clone(&state.effect_authority),
                 epoch,
                 remaining,
-                self.complete.clone(),
+                Arc::clone(&self.relay),
             );
             let _ = self.clipboard.try_send(request);
         }
@@ -163,7 +182,7 @@ mod tests {
     use crate::terminal::native_services::{clipboard::ClipboardPreferences, testing::adapters};
 
     #[test]
-    fn native_poll_after_a_local_focus_change_keeps_the_acknowledged_generation() {
+    fn a_request_from_before_a_local_focus_change_is_dropped() {
         let mut adapter = Adapter::new();
         let state = &adapter.handle.state;
         let mut acknowledged = 0;
@@ -178,20 +197,23 @@ mod tests {
             .unwrap();
         adapter.handle.interactive_focus(false, false);
         adapter.handle.interactive_focus(true, true);
-        let (mut effects, requests) = ClientEffects::new();
+        let (mut effects, requests) = ClientEffects::new(Arc::new(|| {}));
         let (events, _receiver) = async_channel::bounded(8);
-        effects.poll(state, adapter.active.lease, acknowledged, &events, &mut |request| {
-            assert!(matches!(request, Request::NativeEffects { generation, .. } if *generation == acknowledged), "poll used unacknowledged focus: {request:?}");
-            Ok(Reply::NativeEffects {
-                hidden_input: false,
-                request: Some(pane::effects::Request {
+        effects
+            .request(
+                state,
+                Some(acknowledged),
+                &events,
+                pane::effects::Request {
                     id: 1,
                     generation: acknowledged,
                     remaining_ms: 1000,
-                    effect: Effect::ClipboardRead { target: ClipboardTarget::Standard },
-                }),
-            })
-        }).unwrap();
+                    effect: Effect::ClipboardRead {
+                        target: ClipboardTarget::Standard,
+                    },
+                },
+            )
+            .unwrap();
         assert!(requests.try_recv().is_err());
         assert!(adapter.handle.take_client_effects().is_empty());
     }
@@ -199,31 +221,21 @@ mod tests {
     #[test]
     fn native_requests_survive_a_full_presentation_queue_and_are_drained_once() {
         let adapter = Adapter::new();
-        let (mut effects, _requests) = ClientEffects::new();
+        let (mut effects, _requests) = ClientEffects::new(Arc::new(|| {}));
         let (events, receiver) = async_channel::bounded(1);
-        let generation = adapter
-            .handle
-            .state
-            .interaction
-            .lock()
-            .unwrap()
-            .focus_generation;
+        let state = &adapter.handle.state;
+        let generation = state.interaction.lock().unwrap().focus_generation;
+        effects.hidden_input(state, &events, false).unwrap();
         effects
-            .poll(
-                &adapter.handle.state,
-                adapter.active.lease,
-                generation,
+            .request(
+                state,
+                Some(generation),
                 &events,
-                &mut |_| {
-                    Ok(Reply::NativeEffects {
-                        hidden_input: false,
-                        request: Some(pane::effects::Request {
-                            id: 1,
-                            generation,
-                            remaining_ms: 1000,
-                            effect: Effect::Bell,
-                        }),
-                    })
+                pane::effects::Request {
+                    id: 1,
+                    generation,
+                    remaining_ms: 1000,
+                    effect: Effect::Bell,
                 },
             )
             .unwrap();
@@ -245,27 +257,25 @@ mod tests {
     ) {
         for revoke in 0..4 {
             let adapter = Adapter::new();
-            let (mut effects, requests) = ClientEffects::new();
+            let (mut effects, requests) = ClientEffects::new(Arc::new(|| {}));
             let (events, _receiver) = async_channel::bounded(8);
             let state = &adapter.handle.state;
-            let lease = adapter.active.lease;
             let generation = state.interaction.lock().unwrap().focus_generation;
             effects
-                .poll(state, lease, generation, &events, &mut |request| {
-                    assert!(matches!(request, Request::NativeEffects { .. }));
-                    Ok(Reply::NativeEffects {
-                        hidden_input: false,
-                        request: Some(pane::effects::Request {
-                            id: 1,
-                            generation,
-                            remaining_ms: 1000,
-                            effect: Effect::ClipboardWrite {
-                                target: ClipboardTarget::Standard,
-                                text: "native fixture".into(),
-                            },
-                        }),
-                    })
-                })
+                .request(
+                    state,
+                    Some(generation),
+                    &events,
+                    pane::effects::Request {
+                        id: 1,
+                        generation,
+                        remaining_ms: 1000,
+                        effect: Effect::ClipboardWrite {
+                            target: ClipboardTarget::Standard,
+                            text: "native fixture".into(),
+                        },
+                    },
+                )
                 .unwrap();
             let request = requests.try_recv().unwrap();
             if revoke == 1 {
@@ -303,37 +313,27 @@ mod tests {
     }
 
     #[test]
-    fn a_reply_crossing_local_focus_loss_never_reaches_the_native_effect_queue() {
+    fn a_request_crossing_local_focus_loss_never_reaches_the_native_effect_queue() {
         let adapter = Adapter::new();
-        let (mut effects, requests) = ClientEffects::new();
+        let (mut effects, requests) = ClientEffects::new(Arc::new(|| {}));
         let (events, _receiver) = async_channel::bounded(8);
-        let generation = adapter
-            .handle
-            .state
-            .interaction
-            .lock()
-            .unwrap()
-            .focus_generation;
+        let state = &adapter.handle.state;
+        let generation = state.interaction.lock().unwrap().focus_generation;
+        adapter.handle.interactive_focus(false, false);
+        adapter.handle.interactive_focus(true, true);
+        effects.hidden_input(state, &events, true).unwrap();
         effects
-            .poll(
-                &adapter.handle.state,
-                adapter.active.lease,
-                generation,
+            .request(
+                state,
+                Some(generation),
                 &events,
-                &mut |_| {
-                    adapter.handle.interactive_focus(false, false);
-                    adapter.handle.interactive_focus(true, true);
-                    Ok(Reply::NativeEffects {
-                        hidden_input: true,
-                        request: Some(pane::effects::Request {
-                            id: 1,
-                            generation,
-                            remaining_ms: 1000,
-                            effect: Effect::ClipboardRead {
-                                target: ClipboardTarget::Standard,
-                            },
-                        }),
-                    })
+                pane::effects::Request {
+                    id: 1,
+                    generation,
+                    remaining_ms: 1000,
+                    effect: Effect::ClipboardRead {
+                        target: ClipboardTarget::Standard,
+                    },
                 },
             )
             .unwrap();

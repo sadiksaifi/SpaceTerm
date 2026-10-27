@@ -125,11 +125,9 @@ fn prove_shell_started(host: &mut crate::runtime::SharedWorkspaceHost, lease: Le
     }
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        if let Reply::Screen(screen) =
-            host.request([1; 32], lease.connection, Request::Poll { lease })
-            && crate::terminal::server_session::screen_decoder::keyframe_lines(&screen)
-                .iter()
-                .any(|row| row.trim_end() == "ST-START-SUCCEEDED")
+        if crate::terminal::server_session::screen_decoder::observed_lines(host, lease)
+            .iter()
+            .any(|row| row.trim_end() == "ST-START-SUCCEEDED")
         {
             return;
         }
