@@ -1,5 +1,6 @@
 """Shared code for the bench:latency tasks: percentiles, the route guard and the pixel probe."""
 
+import fcntl
 import hashlib
 import ipaddress
 import json
@@ -9,14 +10,14 @@ import socket
 import statistics
 import subprocess
 import sys
-import time
 from contextlib import contextmanager
 from pathlib import Path
 
 from spaceterm_tasks import ROOT, TaskError
 
-# Tasks that inject input or capture the screen hold this lock, so two probes never share a screen.
-SCREEN_LOCK = Path("/tmp/spaceterm-screen.lock")
+# Tasks that inject input or capture the screen hold an flock on this file, so two probes never
+# share a screen. The kernel releases it when the holder exits, even after a crash.
+SCREEN_LOCK = Path("/tmp/spaceterm-screen.flock")
 # Window owner names of the apps the pixel tasks can measure.
 APPS = {
     "preflight": "SpaceTerm Preflight",
@@ -161,6 +162,8 @@ def check_route(args, host=None):
     """Run the route guard when the task's arguments ask for it."""
     host = host or getattr(args, "route_host", None)
     if args.interface:
+        if sys.platform != "darwin":
+            raise TaskError("--interface needs macOS; the route guard reads macOS route and lsof")
         if not host:
             raise TaskError("--interface needs a remote host to check")
         guard_route(host, args.interface)
@@ -169,20 +172,16 @@ def check_route(args, host=None):
 @contextmanager
 def screen_lock():
     """Hold the screen and keyboard lock while a probe injects input or captures the screen."""
-    waiting = False
-    while True:
-        try:
-            SCREEN_LOCK.mkdir()
-            break
-        except FileExistsError:
-            if not waiting:
-                print("waiting for another probe to release the screen", file=sys.stderr)
-                waiting = True
-            time.sleep(5)
+    descriptor = os.open(SCREEN_LOCK, os.O_RDWR | os.O_CREAT, 0o600)
     try:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            print("waiting for another probe to release the screen", file=sys.stderr)
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
         yield
     finally:
-        SCREEN_LOCK.rmdir()
+        os.close(descriptor)
 
 
 def pixel_probe():
@@ -203,8 +202,11 @@ def pixel_probe():
     return executable
 
 
-def measure_pixels(app, mode, samples, workload=None):
-    """Run the pixel probe under the screen lock and return its results."""
+def measure_pixels(app, mode, samples, workload=None, continuous=False):
+    """Run the pixel probe under the screen lock and return its results.
+
+    With `continuous`, the workload must keep drawing through its measured phase.
+    """
     executable = pixel_probe()
     check = subprocess.run([executable, "check"], check=False)
     if check.returncode:
@@ -212,6 +214,8 @@ def measure_pixels(app, mode, samples, workload=None):
     command = [executable, "measure", "--app", APPS[app], "--mode", mode, "--samples", str(samples)]
     if workload:
         command += ["--workload", workload]
+    if continuous:
+        command.append("--continuous")
     print(f"measuring {APPS[app]}; leave the keyboard, mouse and screen alone", file=sys.stderr)
     with screen_lock():
         probe = subprocess.run(command, stdout=subprocess.PIPE, text=True, check=False)

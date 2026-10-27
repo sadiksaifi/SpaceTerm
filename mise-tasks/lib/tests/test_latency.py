@@ -1,10 +1,14 @@
 """Check the bench:latency reporter and route guard parsing."""
 
+import argparse
+import fcntl
+import os
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
-from spaceterm_tasks import latency
+from spaceterm_tasks import TaskError, latency
 
 ROUTE = """   route to: 192.168.1.206
 destination: 192.168.1.206
@@ -55,6 +59,34 @@ class RouteGuardParsingTests(unittest.TestCase):
 
     def test_counts_each_connection_once(self):
         self.assertEqual(latency.parse_local_addresses(LSOF), ["192.168.1.36", "fe80::1"])
+
+
+class RouteGuardPlatformTests(unittest.TestCase):
+    def test_refuses_an_interface_outside_macos(self):
+        args = argparse.Namespace(interface="eth0", route_host="192.168.1.206")
+        with mock.patch.object(latency.sys, "platform", "linux"):
+            with self.assertRaisesRegex(TaskError, "needs macOS"):
+                latency.check_route(args)
+
+    def test_skips_the_guard_without_an_interface(self):
+        with mock.patch.object(latency, "guard_route") as guard:
+            latency.check_route(argparse.Namespace(interface=None, route_host="host"))
+        guard.assert_not_called()
+
+
+class ScreenLockTests(unittest.TestCase):
+    def test_excludes_other_holders_until_released(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "screen.flock"
+            with mock.patch.object(latency, "SCREEN_LOCK", path):
+                other = os.open(path, os.O_RDWR | os.O_CREAT)
+                try:
+                    with latency.screen_lock():
+                        with self.assertRaises(BlockingIOError):
+                            fcntl.flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    fcntl.flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                finally:
+                    os.close(other)
 
 
 class ShellDirectoryTests(unittest.TestCase):
