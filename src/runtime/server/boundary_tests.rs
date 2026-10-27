@@ -152,10 +152,8 @@ fn the_maximum_grid_with_maximal_cells_and_metadata_fits_one_terminal_frame() {
             .flat_map(|row| (0..512).map(move |col| (row, col, col + 1, true)))
             .collect(),
     });
-    let bytes = serde_json::to_vec(&Reply::Screen(Box::new(encoded))).unwrap();
     assert!(
-        bytes.len() < pane::MAX_TERMINAL_FRAME,
-        "full frame has {} bytes",
-        bytes.len()
+        super::dispatch::wire_bytes(Reply::Screen(Box::new(encoded))).is_some(),
+        "a full screen fits one protocol reply"
     );
 }

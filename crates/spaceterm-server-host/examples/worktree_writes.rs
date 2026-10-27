@@ -1,10 +1,15 @@
-//! Authenticated Git writes, stale confirmations, original-operation recovery and Stop on the initial major.
+//! Authenticated Git writes, stale confirmations, original-operation recovery and Stop on protocol major 2.
 #[path = "support/lifecycle.rs"]
 #[expect(dead_code, reason = "This exercise uses shared hierarchy connections.")]
 mod lifecycle;
 #[path = "support/repository.rs"]
 mod repository;
 use repository::*;
+#[expect(
+    dead_code,
+    reason = "Worktree writes use only requests on the shared connection."
+)]
+mod support;
 #[path = "support/worktree.rs"]
 #[expect(
     dead_code,
@@ -13,8 +18,9 @@ use repository::*;
 mod worktree_fixture;
 use spaceterm_server::{
     ServerConnection,
+    connection::link::ServerLink,
     hierarchy::{CloseTarget, Mutation, Outcome},
-    pane::{PaneConnection, Reply, Request},
+    protocol,
     worktree::{Branch, BranchName, Error as WorktreeError, Operation},
 };
 use std::{
@@ -23,31 +29,30 @@ use std::{
     time::{Duration, Instant},
 };
 use worktree_fixture::{finish, review, write};
-fn reconcile_fixture_originals(c: &mut PaneConnection) -> Result<(), Box<dyn Error>> {
+fn reconcile_fixture_originals(c: &ServerLink) -> Result<(), Box<dyn Error>> {
     let next = inventory(c)?.1;
     if next > 1024 {
         return Err("fixture has too many retained operation sequences".into());
     }
     for sequence in 1..next {
-        match c.exchange(&Request::Resolve { sequence }) {
-            Ok(Reply::Outcome(_)) | Ok(Reply::MutationPending) => {
+        match support::resolve(c, sequence) {
+            Ok(_) => {
                 let outcome = finish(c, sequence)?;
                 if outcome.outcome == Outcome::Pending {
                     return Err("fixture original did not settle".into());
                 }
                 eprintln!("Worktree smoke: retiring original operation {sequence}");
-                c.exchange(&Request::Acknowledge { sequence })?;
+                c.acknowledge(sequence)?;
             }
             Err(spaceterm_server::ServerError::SessionUnavailable) => (),
             Err(error) => return Err(error.into()),
-            _ => return Err("fixture original response".into()),
         }
     }
     Ok(())
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let major = std::env::args().nth(1).unwrap_or("1".into()).parse()?;
+    let major = std::env::args().nth(1).unwrap_or("2".into()).parse()?;
     let a = ServerConnection::for_development_client("worktree-writes-a", major)?;
     let b = ServerConnection::for_development_client("worktree-writes-b", major)?;
     eprintln!("Worktree smoke: idle guard");
@@ -59,13 +64,13 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut server = lifecycle::Server::start()?;
     eprintln!("Worktree smoke: create fixture repository");
     let fixture = Repository::new()?;
-    let mut first = connect(&a)?;
-    let mut second = connect(&b)?;
-    reconcile_fixture_originals(&mut first)?;
-    reconcile_fixture_originals(&mut second)?;
+    let first = connect(&a)?;
+    let second = connect(&b)?;
+    reconcile_fixture_originals(&first)?;
+    reconcile_fixture_originals(&second)?;
     // A failed earlier fixture can retain a dormant Workspace after its temporary repository drops.
     // Remove only this exercise's missing fixture Workspaces, and refuse to end any live Session.
-    let abandoned = inventory(&mut first)?.0;
+    let abandoned = inventory(&first)?.0;
     for workspace in &abandoned.workspaces {
         if workspace.name == "Worktree writes smoke"
             && workspace.pinned_directory.as_ref().is_some_and(|path| {
@@ -85,7 +90,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 return Err("abandoned fixture has live work; refusing cleanup".into());
             }
             close(
-                &mut first,
+                &first,
                 CloseTarget::Workspace {
                     workspace: workspace.id,
                 },
@@ -93,17 +98,16 @@ fn main() -> Result<(), Box<dyn Error>> {
             eprintln!("Worktree smoke: removed a dormant abandoned fixture Workspace");
         }
     }
-    assert!(first.worktree_writes());
     eprintln!("Worktree smoke: create fixture Workspace");
     let workspace = mutate(
-        &mut first,
+        &first,
         Mutation::CreateWorkspace {
             name: "Worktree writes smoke".into(),
             directory: None,
         },
     )?;
     mutate(
-        &mut first,
+        &first,
         Mutation::PinWorkspace {
             workspace,
             version: 0,
@@ -121,43 +125,40 @@ fn main() -> Result<(), Box<dyn Error>> {
         },
     };
     eprintln!("Worktree smoke: submit create and lose reply");
-    let sequence = inventory(&mut first)?.1;
-    first.exchange(&Request::Mutate {
-        sequence,
-        mutation: Mutation::Worktree(operation.clone()),
-    })?;
+    let sequence = inventory(&first)?.1;
+    support::mutate(&first, sequence, Mutation::Worktree(operation.clone()))?;
     // Lose the reply without cancelling the server's started write.
-    drop(first);
-    let mut first = connect(&a)?;
-    let created = finish(&mut first, sequence)?;
+    first.close();
+    let first = connect(&a)?;
+    let created = finish(&first, sequence)?;
     assert!(matches!(created.outcome, Outcome::Accepted { .. }));
     assert!(path.is_dir());
     assert!(
-        matches!(first.exchange(&Request::Mutate {sequence,mutation:Mutation::Worktree(operation)})?,Reply::Outcome(o) if o==created)
+        matches!(support::mutate(&first, sequence, Mutation::Worktree(operation))?, Some(o) if o == created)
     );
-    first.exchange(&Request::Acknowledge { sequence })?;
-    await_facts(&mut second, &fixture.0, |f| {
+    first.acknowledge(sequence)?;
+    await_facts(&second, &fixture.0, |f| {
         f.worktrees
             .as_ref()
             .is_some_and(|l| l.worktrees.iter().any(|r| r.root == path))
     })?;
     eprintln!("Worktree smoke: review removal");
-    let removal = review(&mut first, &fixture.0, &path)?;
+    let removal = review(&first, &fixture.0, &path)?;
     eprintln!("Worktree smoke: external removal");
     fixture.git(&["worktree", "remove", path.to_str().ok_or("path")?])?;
     fixture.git(&["worktree", "add", path.to_str().ok_or("path")?, "created"])?;
     assert_eq!(
-        write(&mut first, removal)?.outcome,
+        write(&first, removal)?.outcome,
         Outcome::WorktreeFailed(WorktreeError::Changed)
     );
     assert!(path.is_dir());
-    let removal = review(&mut first, &fixture.0, &path)?;
+    let removal = review(&first, &fixture.0, &path)?;
     assert!(matches!(
-        write(&mut first, removal)?.outcome,
+        write(&first, removal)?.outcome,
         Outcome::Accepted { .. }
     ));
     assert!(!path.exists());
-    await_facts(&mut second, &fixture.0, |f| {
+    await_facts(&second, &fixture.0, |f| {
         f.worktrees
             .as_ref()
             .is_some_and(|l| l.worktrees.iter().all(|r| r.root != path))
@@ -194,7 +195,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         quote(&release)
     );
     fixture.git(&["config", "filter.wait.smudge", &filter])?;
-    let sequence = inventory(&mut first)?.1;
+    let sequence = inventory(&first)?.1;
     let mutation = Mutation::Worktree(Operation::Create {
         workspace,
         root: fixture.0.clone(),
@@ -204,10 +205,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             base: BranchName::Local("main".into()),
         },
     });
-    first.exchange(&Request::Mutate {
-        sequence,
-        mutation: mutation.clone(),
-    })?;
+    support::mutate(&first, sequence, mutation.clone())?;
     let until = Instant::now() + Duration::from_secs(10);
     while !started.exists() {
         if Instant::now() > until {
@@ -216,28 +214,32 @@ fn main() -> Result<(), Box<dyn Error>> {
         std::thread::sleep(Duration::from_millis(20));
     }
     server.kill()?;
-    drop(first);
-    drop(second);
+    first.close();
+    second.close();
     let mut restarted = lifecycle::Server::start()?;
     // Recovery stays fenced while the original Git child still holds the inherited write lock.
+    // Admission does not reach the host, so the fence refuses the first request.
     std::thread::sleep(Duration::from_millis(200));
-    assert!(a.connect_pane().is_err());
+    assert!(
+        support::connect(&a)
+            .and_then(|link| support::inventory(&link))
+            .is_err()
+    );
     std::fs::write(&release, "")?;
     let until = Instant::now() + Duration::from_secs(10);
-    let mut first = loop {
-        match connect(&a) {
+    let first = loop {
+        match connect(&a).and_then(|link| inventory(&link).map(|_| link)) {
             Ok(c) => break c,
             Err(_) if Instant::now() < until => std::thread::sleep(Duration::from_millis(20)),
             Err(e) => return Err(e),
         }
     };
-    let recovered = finish(&mut first, sequence)?;
+    let recovered = finish(&first, sequence)?;
     assert_eq!(
         recovered.outcome,
         Outcome::WorktreeFailed(WorktreeError::Interrupted)
     );
-    let recovered_inventory =
-        await_facts(&mut first, &fixture.0, |facts| facts.worktrees.is_some())?;
+    let recovered_inventory = await_facts(&first, &fixture.0, |facts| facts.worktrees.is_some())?;
     let listed = recovered_inventory
         .repositories
         .as_ref()
@@ -264,17 +266,15 @@ fn main() -> Result<(), Box<dyn Error>> {
     eprintln!(
         "Worktree smoke: forced original reconciled (listed before fixture cleanup: {listed})"
     );
-    assert!(
-        matches!(first.exchange(&Request::Mutate {sequence,mutation})?,Reply::Outcome(o) if o==recovered)
-    );
+    assert!(matches!(support::mutate(&first, sequence, mutation)?, Some(o) if o == recovered));
     assert!(!path.exists());
-    first.exchange(&Request::Acknowledge { sequence })?;
+    first.acknowledge(sequence)?;
     eprintln!("Worktree smoke: stop during write");
     // Stop must wait for a Git write whose account filter is still running.
     std::fs::remove_file(&started)?;
     std::fs::remove_file(&release)?;
     let stopped_path = fixture.0.join("stopped");
-    let sequence = inventory(&mut first)?.1;
+    let sequence = inventory(&first)?.1;
     let mutation = Mutation::Worktree(Operation::Create {
         workspace,
         root: fixture.0.clone(),
@@ -284,10 +284,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             base: BranchName::Local("main".into()),
         },
     });
-    first.exchange(&Request::Mutate {
-        sequence,
-        mutation: mutation.clone(),
-    })?;
+    support::mutate(&first, sequence, mutation.clone())?;
     let until = Instant::now() + Duration::from_secs(10);
     while !started.exists() {
         if Instant::now() > until {
@@ -300,16 +297,16 @@ fn main() -> Result<(), Box<dyn Error>> {
         std::thread::sleep(Duration::from_millis(200));
         std::fs::write(release_path, "")
     });
-    first.exchange(&Request::Shutdown)?;
+    support::done(&first, protocol::Operation::Shutdown)?;
     release_worker
         .join()
         .map_err(|_| "filter release failed")??;
     restarted.0.wait()?;
     assert_eq!(std::fs::read(stopped_path.join("payload"))?, b"payload\n");
-    drop(first);
+    first.close();
     let mut restarted = lifecycle::Server::start()?;
-    let mut first = connect(&a)?;
-    let stopped = finish(&mut first, sequence)?;
+    let first = connect(&a)?;
+    let stopped = finish(&first, sequence)?;
     assert!(matches!(stopped.outcome, Outcome::Accepted { .. }));
     fixture.git(&[
         "worktree",
@@ -317,13 +314,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         "--force",
         stopped_path.to_str().ok_or("path")?,
     ])?;
-    assert!(
-        matches!(first.exchange(&Request::Mutate {sequence,mutation})?,Reply::Outcome(o) if o==stopped)
-    );
+    assert!(matches!(support::mutate(&first, sequence, mutation)?, Some(o) if o == stopped));
     assert!(!stopped_path.exists());
-    first.exchange(&Request::Acknowledge { sequence })?;
-    close(&mut first, CloseTarget::Workspace { workspace })?;
-    first.exchange(&Request::Shutdown)?;
+    first.acknowledge(sequence)?;
+    close(&first, CloseTarget::Workspace { workspace })?;
+    support::done(&first, protocol::Operation::Shutdown)?;
     restarted.0.wait()?;
     println!(
         "Worktree creation/removal, two-client Git reconciliation, replacement refusal, lost replies, forced interruption, Stop during a started write and original-operation replay passed on protocol {major}."

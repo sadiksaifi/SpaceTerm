@@ -1,72 +1,26 @@
-//! One bounded socket owner adapts WSS to the existing poll-driven byte transport.
+//! The paired WSS socket: the pinned TLS and WebSocket handshakes, the authentication messages
+//! of pairing, and admission. Every wait is on socket readiness under an absolute deadline. After
+//! admission the socket becomes a [`crate::connection::wss::WssCarrier`].
 use super::*;
+use crate::connection::io::wait_fd;
+pub(crate) use crate::connection::wss::Ws;
+use crate::connection::wss::{TlsSocket, websocket_config, would_block};
 use rustls::{
-    ClientConfig, ClientConnection, ServerConfig, ServerConnection, StreamOwned,
+    ClientConfig, ClientConnection, ServerConfig, ServerConnection,
     pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName, UnixTime},
 };
 use std::{
-    io::{Read, Write},
     net::TcpStream,
-    os::{
-        fd::{AsRawFd, RawFd},
-        unix::net::UnixStream,
-    },
+    os::fd::AsRawFd,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
     time::{Duration, Instant},
 };
-use tungstenite::{Message, WebSocket, protocol::WebSocketConfig};
+use tungstenite::Message;
 
-const CHUNK: usize = 64 * 1024;
 const HANDSHAKE_LIMIT: Duration = Duration::from_secs(5);
-const STALL_LIMIT: Duration = Duration::from_secs(10);
-
-pub(super) enum Socket {
-    Client(StreamOwned<ClientConnection, TcpStream>),
-    Server(StreamOwned<ServerConnection, TcpStream>),
-}
-impl Socket {
-    fn tcp(&self) -> &TcpStream {
-        match self {
-            Self::Client(s) => &s.sock,
-            Self::Server(s) => &s.sock,
-        }
-    }
-}
-impl Read for Socket {
-    fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
-        match self {
-            Self::Client(s) => s.read(bytes),
-            Self::Server(s) => s.read(bytes),
-        }
-    }
-}
-impl Write for Socket {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        match self {
-            Self::Client(s) => s.write(bytes),
-            Self::Server(s) => s.write(bytes),
-        }
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        match self {
-            Self::Client(s) => s.flush(),
-            Self::Server(s) => s.flush(),
-        }
-    }
-}
-pub(super) type Ws = WebSocket<Socket>;
-
-fn websocket_config() -> WebSocketConfig {
-    WebSocketConfig::default()
-        .read_buffer_size(16 * 1024)
-        .write_buffer_size(0)
-        .max_write_buffer_size(2 * CHUNK)
-        .max_message_size(Some(CHUNK))
-        .max_frame_size(Some(CHUNK))
-}
 
 #[derive(Debug)]
 struct Pinned {
@@ -124,6 +78,27 @@ impl rustls::client::danger::ServerCertVerifier for Pinned {
 pub(super) fn validate_endpoint(endpoint: &str) -> Result<Endpoint, DirectError> {
     Endpoint::from_url(endpoint)
 }
+
+/// Waits for the socket under `deadline`: writable while TLS holds unsent bytes, else readable.
+fn ready(socket: &mut TlsSocket, deadline: Instant) -> Result<(), DirectError> {
+    let write = match std::io::Write::flush(socket) {
+        Ok(()) => false,
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => true,
+        Err(_) => return Err(DirectError::Transport),
+    };
+    if wait_fd(socket.tcp().as_raw_fd(), write, deadline) {
+        Ok(())
+    } else {
+        Err(DirectError::Transport)
+    }
+}
+
+fn prepare(tcp: &TcpStream) -> Result<(), DirectError> {
+    tcp.set_nonblocking(true)
+        .map_err(|_| DirectError::Transport)?;
+    crate::connection::wss::tune(tcp).map_err(|_| DirectError::Transport)
+}
+
 pub(super) fn connect(endpoint: &str, pin: &ServerPin) -> Result<Ws, DirectError> {
     let address = validate_endpoint(endpoint)?;
     let deadline = Instant::now() + HANDSHAKE_LIMIT;
@@ -140,8 +115,7 @@ pub(super) fn connect(endpoint: &str, pin: &ServerPin) -> Result<Ws, DirectError
         }
     }
     let tcp = connected.ok_or(DirectError::Transport)?;
-    tcp.set_nonblocking(true)
-        .map_err(|_| DirectError::Transport)?;
+    prepare(&tcp)?;
     let mismatch = Arc::new(AtomicBool::new(false));
     let config =
         ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
@@ -155,35 +129,25 @@ pub(super) fn connect(endpoint: &str, pin: &ServerPin) -> Result<Ws, DirectError
             .with_no_client_auth();
     let name =
         ServerName::try_from("spaceterm.invalid").map_err(|_| DirectError::InvalidAddress)?;
-    let mut connection =
+    let connection =
         ClientConnection::new(Arc::new(config), name).map_err(|_| DirectError::Transport)?;
-    connection.set_buffer_limit(Some(2 * CHUNK));
-    let mut tcp = tcp;
-    while connection.is_handshaking() {
-        if Instant::now() >= deadline {
-            return Err(DirectError::Transport);
+    let mut socket = TlsSocket::new(rustls::Connection::Client(connection), tcp);
+    match socket.handshake(deadline) {
+        Ok(()) => {}
+        Err(_) if mismatch.load(Ordering::Acquire) => return Err(DirectError::PinMismatch),
+        // TLS validation failures arrive as InvalidData; socket failures remain retryable.
+        Err(error) if error.kind() == std::io::ErrorKind::InvalidData => {
+            return Err(DirectError::AuthenticationRefused);
         }
-        match connection.complete_io(&mut tcp) {
-            Ok(_) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                std::thread::sleep(Duration::from_millis(2))
-            }
-            Err(_) if mismatch.load(Ordering::Acquire) => return Err(DirectError::PinMismatch),
-            // Rustls wraps TLS validation failures in InvalidData; socket failures remain retryable.
-            Err(error) if error.kind() == std::io::ErrorKind::InvalidData => {
-                return Err(DirectError::AuthenticationRefused);
-            }
-            Err(_) => return Err(DirectError::Transport),
-        }
+        Err(_) => return Err(DirectError::Transport),
     }
-    let stream = Socket::Client(StreamOwned::new(connection, tcp));
     let mut handshake =
-        tungstenite::client::client_with_config(endpoint, stream, Some(websocket_config()));
+        tungstenite::client::client_with_config(endpoint, socket, Some(websocket_config()));
     loop {
         match handshake {
             Ok((ws, _)) => return Ok(ws),
-            Err(tungstenite::HandshakeError::Interrupted(pending)) if Instant::now() < deadline => {
-                std::thread::sleep(Duration::from_millis(2));
+            Err(tungstenite::HandshakeError::Interrupted(mut pending)) => {
+                ready(pending.get_mut().get_mut(), deadline)?;
                 handshake = pending.handshake();
             }
             Err(_) => return Err(DirectError::Transport),
@@ -191,8 +155,7 @@ pub(super) fn connect(endpoint: &str, pin: &ServerPin) -> Result<Ws, DirectError
     }
 }
 pub(super) fn accept(tcp: TcpStream, certificate: &[u8], key: &[u8]) -> Result<Ws, DirectError> {
-    tcp.set_nonblocking(true)
-        .map_err(|_| DirectError::Transport)?;
+    prepare(&tcp)?;
     let deadline = Instant::now() + HANDSHAKE_LIMIT;
     let config =
         ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
@@ -204,22 +167,70 @@ pub(super) fn accept(tcp: TcpStream, certificate: &[u8], key: &[u8]) -> Result<W
                 PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key.to_vec())),
             )
             .map_err(|_| DirectError::StorageUnavailable)?;
-    let mut connection =
-        ServerConnection::new(Arc::new(config)).map_err(|_| DirectError::Transport)?;
-    connection.set_buffer_limit(Some(2 * CHUNK));
-    let stream = Socket::Server(StreamOwned::new(connection, tcp));
-    let mut handshake = tungstenite::accept_with_config(stream, Some(websocket_config()));
+    let connection = ServerConnection::new(Arc::new(config)).map_err(|_| DirectError::Transport)?;
+    let mut socket = TlsSocket::new(rustls::Connection::Server(connection), tcp);
+    socket
+        .handshake(deadline)
+        .map_err(|_| DirectError::Transport)?;
+    let mut handshake = tungstenite::accept_with_config(socket, Some(websocket_config()));
     loop {
         match handshake {
             Ok(ws) => return Ok(ws),
-            Err(tungstenite::HandshakeError::Interrupted(pending)) if Instant::now() < deadline => {
-                std::thread::sleep(Duration::from_millis(2));
+            Err(tungstenite::HandshakeError::Interrupted(mut pending)) => {
+                ready(pending.get_mut().get_mut(), deadline)?;
                 handshake = pending.handshake();
             }
             Err(_) => return Err(DirectError::Transport),
         }
     }
 }
+
+/// Writes one binary message before `deadline`.
+fn send_bytes(ws: &mut Ws, bytes: Vec<u8>, deadline: Instant) -> Result<(), DirectError> {
+    match ws.write(Message::Binary(bytes.into())) {
+        Ok(()) => {}
+        Err(error) if would_block(&error) => {}
+        Err(_) => return Err(DirectError::Transport),
+    }
+    loop {
+        match ws.flush() {
+            Ok(()) => return Ok(()),
+            Err(error) if would_block(&error) => {
+                if !wait_fd(ws.get_ref().tcp().as_raw_fd(), true, deadline) {
+                    return Err(DirectError::Transport);
+                }
+            }
+            Err(_) => return Err(DirectError::Transport),
+        }
+    }
+}
+
+/// Reads the next binary message of at most `max` bytes before `deadline`.
+fn receive_bytes(ws: &mut Ws, max: usize, deadline: Instant) -> Result<Vec<u8>, DirectError> {
+    loop {
+        match ws.read() {
+            Ok(Message::Binary(bytes)) if bytes.len() <= max => return Ok(bytes.to_vec()),
+            Ok(Message::Ping(_) | Message::Pong(_)) => {}
+            Err(error) if would_block(&error) => {
+                if !ready_to_read(ws, deadline) {
+                    return Err(DirectError::Transport);
+                }
+            }
+            Err(_) => return Err(DirectError::Transport),
+            _ => return Err(DirectError::InvalidRequest),
+        }
+    }
+}
+
+/// Waits to read, first writing any pong or TLS bytes still queued.
+fn ready_to_read(ws: &mut Ws, deadline: Instant) -> bool {
+    let write = match ws.flush() {
+        Ok(()) => false,
+        Err(error) => would_block(&error),
+    };
+    wait_fd(ws.get_ref().tcp().as_raw_fd(), write, deadline)
+}
+
 pub(super) fn send(ws: &mut Ws, value: &impl Serialize) -> Result<(), DirectError> {
     let bytes = zeroize::Zeroizing::new(
         serde_json::to_vec(value).map_err(|_| DirectError::InvalidRequest)?,
@@ -227,231 +238,43 @@ pub(super) fn send(ws: &mut Ws, value: &impl Serialize) -> Result<(), DirectErro
     if bytes.len() > wire::MAX_AUTH_FRAME {
         return Err(DirectError::Capacity);
     }
-    match ws.write(Message::Binary(bytes.to_vec().into())) {
-        Ok(()) => {}
-        Err(error) if retryable(&error) => {}
-        Err(_) => return Err(DirectError::Transport),
-    }
-    let deadline = Instant::now() + HANDSHAKE_LIMIT;
-    loop {
-        match ws.flush() {
-            Ok(()) => return Ok(()),
-            Err(error) if retryable(&error) && Instant::now() < deadline => {
-                std::thread::sleep(Duration::from_millis(2))
-            }
-            Err(_) => return Err(DirectError::Transport),
-        }
-    }
+    send_bytes(ws, bytes.to_vec(), Instant::now() + HANDSHAKE_LIMIT)
 }
 pub(super) fn receive<T: serde::de::DeserializeOwned>(ws: &mut Ws) -> Result<T, DirectError> {
-    let deadline = Instant::now() + HANDSHAKE_LIMIT;
-    loop {
-        if Instant::now() >= deadline {
-            return Err(DirectError::Transport);
-        }
-        match ws.read() {
-            Ok(Message::Binary(bytes)) if bytes.len() <= wire::MAX_AUTH_FRAME => {
-                return serde_json::from_slice(&bytes).map_err(|_| DirectError::InvalidRequest);
-            }
-            Ok(Message::Ping(_) | Message::Pong(_)) => match ws.flush() {
-                Ok(()) => {}
-                Err(error) if retryable(&error) => {}
-                Err(_) => return Err(DirectError::Transport),
-            },
-            Err(error) if retryable(&error) => std::thread::sleep(Duration::from_millis(2)),
-            Err(_) => return Err(DirectError::Transport),
-            _ => return Err(DirectError::InvalidRequest),
-        }
-    }
+    let bytes = zeroize::Zeroizing::new(receive_bytes(
+        ws,
+        wire::MAX_AUTH_FRAME,
+        Instant::now() + HANDSHAKE_LIMIT,
+    )?);
+    serde_json::from_slice(&bytes).map_err(|_| DirectError::InvalidRequest)
 }
 
-pub(super) struct Bridge {
-    stream: UnixStream,
-    socket: TcpStream,
-    stop: Arc<AtomicBool>,
-    draining: Arc<AtomicBool>,
-    worker: Option<std::thread::JoinHandle<Result<(), DirectError>>>,
-}
-impl Bridge {
-    pub(super) fn start(mut ws: Ws) -> Result<Self, DirectError> {
-        let (stream, mut bridge) = UnixStream::pair().map_err(|_| DirectError::Transport)?;
-        bridge
-            .set_nonblocking(true)
-            .map_err(|_| DirectError::Transport)?;
-        ws.get_ref()
-            .tcp()
-            .set_nonblocking(true)
-            .map_err(|_| DirectError::Transport)?;
-        let socket = ws
-            .get_ref()
-            .tcp()
-            .try_clone()
-            .map_err(|_| DirectError::Transport)?;
-        let stop = Arc::new(AtomicBool::new(false));
-        let cancelled = Arc::clone(&stop);
-        let draining = Arc::new(AtomicBool::new(false));
-        let finish = Arc::clone(&draining);
-        let worker = std::thread::spawn(move || {
-            let result = pump(&mut ws, &mut bridge, &cancelled, &finish);
-            let _ = bridge.shutdown(std::net::Shutdown::Both);
-            let _ = ws.get_ref().tcp().shutdown(std::net::Shutdown::Both);
-            result
-        });
-        Ok(Self {
-            stream,
-            socket,
-            stop,
-            draining,
-            worker: Some(worker),
-        })
+/// Admission over WSS: the same length-prefixed bytes as account IPC, one frame per message. A
+/// frame split across messages, as a peer of an older major may send it, is joined.
+impl crate::protocol::Preamble for Ws {
+    fn send(&mut self, frame: &[u8], deadline: Instant) -> Result<(), ServerError> {
+        send_bytes(self, crate::protocol::prefixed(frame), deadline)
+            .map_err(|_| ServerError::Protocol)
     }
-    pub(crate) fn stream(&self) -> &UnixStream {
-        &self.stream
-    }
-    /// Retires an exchange after its final reply. EOF reaches the pump only after
-    /// all queued reply bytes, and the pump flushes each WSS message before EOF.
-    pub(super) fn finish_reply(&mut self) -> Result<(), DirectError> {
-        self.draining.store(true, Ordering::Release);
-        self.stream
-            .shutdown(std::net::Shutdown::Write)
-            .map_err(|_| DirectError::Transport)?;
-        self.worker
-            .take()
-            .ok_or(DirectError::Transport)?
-            .join()
-            .map_err(|_| DirectError::Transport)?
-    }
-}
-impl Drop for Bridge {
-    fn drop(&mut self) {
-        self.stop.store(true, Ordering::Release);
-        let _ = self.stream.shutdown(std::net::Shutdown::Both);
-        let _ = self.socket.shutdown(std::net::Shutdown::Both);
-        if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
-        }
-    }
-}
-impl Read for Bridge {
-    fn read(&mut self, b: &mut [u8]) -> std::io::Result<usize> {
-        self.stream.read(b)
-    }
-}
-impl Write for Bridge {
-    fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
-        self.stream.write(b)
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        self.stream.flush()
-    }
-}
-impl crate::transport::Transport for Bridge {
-    fn read_fd(&self) -> RawFd {
-        self.stream.as_raw_fd()
-    }
-    fn write_fd(&self) -> RawFd {
-        self.stream.as_raw_fd()
-    }
-}
-fn retryable(error: &tungstenite::Error) -> bool {
-    matches!(error, tungstenite::Error::Io(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted))
-}
-fn pump(
-    ws: &mut Ws,
-    bridge: &mut UnixStream,
-    stop: &AtomicBool,
-    draining: &AtomicBool,
-) -> Result<(), DirectError> {
-    let mut incoming = Vec::new();
-    let mut offset = 0;
-    let mut outgoing = false;
-    let mut send_stalled = None;
-    let mut receive_stalled = None;
-    let mut buffer = vec![0; CHUNK];
-    let mut drain_started = None;
-    while !stop.load(Ordering::Acquire) {
-        let finishing = draining.load(Ordering::Acquire);
-        if finishing && drain_started.get_or_insert_with(Instant::now).elapsed() > STALL_LIMIT {
-            return Err(DirectError::Transport);
-        }
-        let mut progress = false;
-        if outgoing {
-            match ws.flush() {
-                Ok(()) => {
-                    outgoing = false;
-                    send_stalled = None;
-                    progress = true;
+
+    fn receive(&mut self, max: usize, deadline: Instant) -> Result<Vec<u8>, ServerError> {
+        let mut bytes = Vec::new();
+        loop {
+            if let Some(prefix) = bytes.get(..4) {
+                let size =
+                    u32::from_be_bytes([prefix[0], prefix[1], prefix[2], prefix[3]]) as usize;
+                if size > max {
+                    return Err(ServerError::Protocol);
                 }
-                Err(e) if retryable(&e) => {}
-                Err(_) => return Err(DirectError::Transport),
+                match (bytes.len() - 4).cmp(&size) {
+                    std::cmp::Ordering::Equal => return Ok(bytes.split_off(4)),
+                    std::cmp::Ordering::Greater => return Err(ServerError::Protocol),
+                    std::cmp::Ordering::Less => {}
+                }
             }
-        } else {
-            match bridge.read(&mut buffer) {
-                Ok(0) => return Ok(()),
-                Ok(count) => {
-                    match ws.write(Message::Binary(buffer[..count].to_vec().into())) {
-                        Ok(()) => {}
-                        Err(e) if retryable(&e) => {} // tungstenite retained this message.
-                        Err(_) => return Err(DirectError::Transport),
-                    }
-                    outgoing = true;
-                    send_stalled = Some(Instant::now());
-                    progress = true;
-                }
-                Err(e)
-                    if matches!(
-                        e.kind(),
-                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
-                    ) => {}
-                Err(_) => return Err(DirectError::Transport),
-            }
-        }
-        if finishing {
-            // Only the final queued reply remains eligible. New input, including
-            // pings, cannot keep the retired exchange alive or starve its EOF.
-        } else if offset < incoming.len() {
-            match bridge.write(&incoming[offset..]) {
-                Ok(0) => return Err(DirectError::Transport),
-                Ok(count) => {
-                    offset += count;
-                    progress = true;
-                }
-                Err(e)
-                    if matches!(
-                        e.kind(),
-                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
-                    ) => {}
-                Err(_) => return Err(DirectError::Transport),
-            }
-        } else {
-            incoming.clear();
-            offset = 0;
-            receive_stalled = None;
-            match ws.read() {
-                Ok(Message::Binary(bytes)) => {
-                    incoming = bytes.to_vec();
-                    receive_stalled = Some(Instant::now());
-                    progress = true;
-                }
-                Ok(Message::Ping(_) | Message::Pong(_)) => {
-                    outgoing = true;
-                    send_stalled.get_or_insert_with(Instant::now);
-                    progress = true;
-                }
-                Ok(Message::Close(_)) => return Ok(()),
-                Ok(_) => return Err(DirectError::InvalidRequest),
-                Err(e) if retryable(&e) => {}
-                Err(_) => return Err(DirectError::Transport),
-            }
-        }
-        if send_stalled.is_some_and(|at: Instant| at.elapsed() > STALL_LIMIT)
-            || (!finishing && receive_stalled.is_some_and(|at: Instant| at.elapsed() > STALL_LIMIT))
-        {
-            return Err(DirectError::Transport);
-        }
-        if !progress {
-            std::thread::sleep(Duration::from_millis(2));
+            let message = receive_bytes(self, max + 4 - bytes.len(), deadline)
+                .map_err(|_| ServerError::Protocol)?;
+            bytes.extend_from_slice(&message);
         }
     }
-    Ok(())
 }

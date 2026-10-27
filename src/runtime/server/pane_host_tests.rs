@@ -153,7 +153,7 @@ fn batch_key(text: &str, ime: bool) -> Key {
     key
 }
 
-fn key_batch(host: &mut impl PaneService, lease: Lease, generation: u64, keys: Vec<Key>) -> Reply {
+fn key_batch(host: &mut impl HostCommands, lease: Lease, generation: u64, keys: Vec<Key>) -> Reply {
     host.request(
         [1; 32],
         lease.connection,
@@ -177,7 +177,7 @@ fn key_batches_reject_invalid_bounds_keys_and_authority_without_a_prefix() {
     let mut overlong = key.clone();
     overlong.text = Some("a".repeat(4097));
     let mut overframe = key.clone();
-    overframe.text = Some("a".repeat(MAX_TERMINAL_FRAME));
+    overframe.text = Some("a".repeat(spaceterm_server::protocol::limits::MAX_INPUT_BYTES + 1));
     for keys in [
         vec![],
         vec![key.clone(); MAX_KEY_BATCH + 1],
@@ -1186,7 +1186,7 @@ fn a_restored_pane_waits_for_explicit_first_use_and_starts_only_once() {
         assert!(matches!(host.request([1; 32], [1; 32], Request::Select {
             create: false, size: size(), resume, style: None,
         }), Reply::Restored { pane, .. } if pane == pane_id));
-        host.tick();
+        host.tick(std::time::Instant::now());
         assert!(host.pane.is_none());
     }
     let request = Request::StartRestored {
@@ -1239,7 +1239,7 @@ fn ordinary_exit_retires_organization_without_a_connected_client() {
     host.disconnected([1; 32]);
     let until = Instant::now() + Duration::from_secs(3);
     while host.organization.is_some() && Instant::now() < until {
-        host.tick();
+        host.tick(std::time::Instant::now());
         std::thread::sleep(Duration::from_millis(10));
     }
     assert!(
@@ -1259,7 +1259,7 @@ fn only_owning_shell_directory_confirmation_changes_restoration() {
         "stty -echo; printf '\\033]7;file://localhost/\\007\\033]133;A;spaceterm=%s\\007' \"$SPACETERM_PROMPT_OWNER\"; printf '\\033[2J\\033[HCONFIRMED\\n'",
     );
     await_text(&mut host, 1, lease, "CONFIRMED");
-    host.tick();
+    host.tick(std::time::Instant::now());
     assert_eq!(
         host.organization
             .as_ref()
@@ -1275,7 +1275,7 @@ fn only_owning_shell_directory_confirmation_changes_restoration() {
         "printf '\\033]7;file://localhost/tmp\\007\\033]133;A;spaceterm=foreign\\007'; printf 'NESTED\\n'",
     );
     await_text(&mut host, 1, lease, "NESTED");
-    host.tick();
+    host.tick(std::time::Instant::now());
     assert_eq!(
         host.organization
             .as_ref()

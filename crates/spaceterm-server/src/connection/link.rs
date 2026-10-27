@@ -56,6 +56,33 @@ pub enum RequestError {
     Link(LinkError),
 }
 
+impl From<LinkError> for crate::ServerError {
+    fn from(error: LinkError) -> Self {
+        match error {
+            LinkError::Goodbye(Fatal::Stopping) => Self::NotRunning,
+            LinkError::Goodbye(Fatal::Revoked) => Self::AuthenticationRefused,
+            LinkError::Goodbye(Fatal::Incompatible) => Self::IncompatibleProtocol,
+            LinkError::Busy | LinkError::Goodbye(Fatal::Capacity) => Self::Capacity,
+            LinkError::Unclaimed => Self::StaleControl,
+            LinkError::OutOfBounds => Self::Unsupported,
+            LinkError::Closed
+            | LinkError::Unresponsive
+            | LinkError::Stalled
+            | LinkError::Violation
+            | LinkError::Goodbye(_) => Self::Protocol,
+        }
+    }
+}
+
+impl From<RequestError> for crate::ServerError {
+    fn from(error: RequestError) -> Self {
+        match error {
+            RequestError::Refused(refusal) => refusal.into(),
+            RequestError::Link(error) => error.into(),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Health {
     Live,
@@ -74,6 +101,8 @@ pub enum ChannelEvent {
     /// `Ended`, `SessionEnded`, `Failed` and `Takeover` are the channel's last event. Every frame
     /// before them is still applied and acknowledged.
     Pane(PaneEvent),
+    /// The link ended. Final; the owner reconnects with a new link under ADR 0045.
+    Closed(LinkError),
 }
 
 pub trait LinkSink: Send + Sync {
@@ -117,6 +146,23 @@ struct Shared {
     state: Mutex<State>,
     wake: Arc<dyn Wake>,
     events: Arc<dyn LinkSink>,
+}
+
+impl Drop for Shared {
+    /// The last handle is gone: the I/O thread wakes, finds no link and closes the carrier.
+    fn drop(&mut self) {
+        self.wake.wake();
+    }
+}
+
+/// The I/O thread's reference. It keeps no link alive, so dropping every [`ServerLink`] ends the
+/// connection.
+pub(crate) struct WeakLink(std::sync::Weak<Shared>);
+
+impl WeakLink {
+    pub(crate) fn upgrade(&self) -> Option<ServerLink> {
+        self.0.upgrade().map(|shared| ServerLink { shared })
+    }
 }
 
 struct State {
@@ -173,6 +219,10 @@ impl ServerLink {
 
     fn lock(&self) -> std::sync::MutexGuard<'_, State> {
         self.shared.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    pub(crate) fn downgrade(&self) -> WeakLink {
+        WeakLink(Arc::downgrade(&self.shared))
     }
 
     fn wake(&self) {
@@ -322,13 +372,17 @@ impl ServerLink {
                 Some(sink) => sink.deliver(ChannelEvent::Frame(frame)),
                 // Nobody holds the channel any more. Acknowledging keeps its credit from stalling
                 // the connection until the server processes the `Release`.
-                None => self.send(
-                    &ClientMessage::FrameAck(FrameAck {
-                        channel: frame.channel,
-                        frame: frame.frame,
-                    }),
-                    true,
-                )?,
+                // A full L0 drops this acknowledgement; the server frees the credit when it
+                // processes the `Release`. Either way the link stays usable.
+                None => {
+                    let _ = self.send(
+                        &ClientMessage::FrameAck(FrameAck {
+                            channel: frame.channel,
+                            frame: frame.frame,
+                        }),
+                        true,
+                    );
+                }
             },
             ServerMessage::Pane(pane) => {
                 let last = matches!(
@@ -345,8 +399,9 @@ impl ServerLink {
             ServerMessage::Inventory(revision) => {
                 self.shared.events.deliver(LinkEvent::Inventory(revision));
             }
+            // A full L0 drops the pong. The traffic that filled it renews the server's liveness.
             ServerMessage::Ping(Ping { nonce }) => {
-                self.send(&ClientMessage::Pong(Pong { nonce }), true)?;
+                let _ = self.send(&ClientMessage::Pong(Pong { nonce }), true);
             }
             ServerMessage::Pong(_) => {}
             ServerMessage::Goodbye(fatal) => {
@@ -376,8 +431,10 @@ impl ServerLink {
         match check {
             Check::Live { next } => Some(next),
             Check::Ping { nonce, next } => {
-                self.send(&ClientMessage::Ping(Ping { nonce }), true).ok()?;
-                Some(next)
+                match self.send(&ClientMessage::Ping(Ping { nonce }), true) {
+                    Ok(()) | Err(LinkError::Busy) => Some(next),
+                    Err(_) => None,
+                }
             }
             Check::Dead(death) => {
                 self.fail(match death {
@@ -392,7 +449,7 @@ impl ServerLink {
     /// I/O thread: ends the link after a carrier failure. Pending requests fail with `error`;
     /// their operations may or may not have run, and nothing is replayed.
     pub fn fail(&self, error: LinkError) {
-        let waiters = {
+        let (waiters, channels) = {
             let mut state = self.lock();
             if state.closed.is_some() {
                 return;
@@ -401,10 +458,22 @@ impl ServerLink {
             state.l0.clear();
             state.l1.clear();
             state.releases.clear();
-            std::mem::take(&mut state.requests)
+            let channels: Vec<_> = state
+                .channels
+                .values_mut()
+                .filter(|channel| !channel.ended)
+                .map(|channel| {
+                    channel.ended = true;
+                    Arc::clone(&channel.sink)
+                })
+                .collect();
+            (std::mem::take(&mut state.requests), channels)
         };
         for waiter in waiters.into_values() {
             waiter.complete(Err(RequestError::Link(error)));
+        }
+        for sink in channels {
+            sink.deliver(ChannelEvent::Closed(error));
         }
         self.shared
             .events
@@ -734,6 +803,17 @@ impl ChannelHandle {
 
     pub fn request(&self, operation: Operation) -> Result<PendingReply, LinkError> {
         self.link.request(operation)
+    }
+}
+
+impl ChannelHandle {
+    /// Forgets the channel here without releasing its Pane, so the claim's control remains, as
+    /// for a dismissed presentation. The server keeps the binding until a later claim of the same
+    /// Pane on this connection replaces it or the connection ends. Frames that still arrive are
+    /// acknowledged by the link.
+    pub fn detach(self) {
+        // Dropping finds no channel to release.
+        self.link.lock().channels.remove(&self.channel);
     }
 }
 

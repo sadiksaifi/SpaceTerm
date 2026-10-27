@@ -40,6 +40,8 @@ IDENTITIES = ("spaceterm", "spaceterm-preflight", "spaceterm-development")
 MAX_ARCHIVE = 256 * 1024 * 1024
 MAX_EXPANDED = 512 * 1024 * 1024
 MAX_MEMBERS = 128
+# The SpaceTerm Protocol major that `crates/spaceterm-server-host/build.rs` stamps into server builds.
+PROTOCOL_MAJOR = 2
 BUILD_KEYS = {"schema", "identity", "target", "commit", "version", "protocol_major", "capabilities"}
 
 
@@ -737,7 +739,7 @@ def stage_desktop_artifact(archive, signature, destination, expected=None, *, id
 def compatible_candidate(info, identity, *, target=None):
     if info["identity"] != identity or info["target"] != (target or host_target()):
         raise TaskError("the server candidate has a different identity or target")
-    if info["protocol_major"] != 1:
+    if info["protocol_major"] != PROTOCOL_MAJOR:
         raise TaskError("the server candidate has an incompatible protocol major")
     if "workspace_policy" not in info["capabilities"]:
         raise TaskError("the server candidate is missing a required capability")

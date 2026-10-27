@@ -11,13 +11,6 @@ fn explicit_directory_creation_is_recursive_idempotent_and_does_not_edit_workspa
     std::fs::create_dir(&root).unwrap();
     let path = root.join("parent/child");
     let mut host = SharedWorkspaceHost::new(host());
-    assert!(matches!(
-        host.request([1; 32], [2; 32], Request::Capabilities),
-        Reply::Capabilities {
-            directory_creation: true,
-            ..
-        }
-    ));
     let before = host.request([1; 32], [2; 32], Request::Inventory);
     for id in [1, 2] {
         assert!(matches!(
@@ -193,7 +186,7 @@ fn retry_revalidates_the_original_and_passive_reconnect_never_starts_it() {
             ),
             Reply::Restored { .. }
         ));
-        host.tick();
+        host.tick(std::time::Instant::now());
         assert!(host.pane.is_none());
     }
     let Reply::Attached { lease } = host.request([1; 32], [3; 32], retry.clone()) else {

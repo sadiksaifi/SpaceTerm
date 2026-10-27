@@ -832,5 +832,10 @@ pub(crate) fn decode_key(key: Key) -> Option<KeyInput> {
         },
     };
     input.validate().ok()?;
+    // Text input made of control characters reaches the PTY as the keys that type it. Text with
+    // a control character no key produces is refused here, before the Terminal Session sees it.
+    if input.is_text_input() || input.is_input_method_commit() {
+        input.typed_keys().ok()?;
+    }
     Some(input)
 }

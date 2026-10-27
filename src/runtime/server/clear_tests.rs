@@ -4,14 +4,14 @@ use spaceterm_server::hierarchy::{Axis, Mutation, Outcome};
 use std::time::Instant;
 
 // Exercise the public request and actual server screen encoding across JSON decoding.
-fn exchange(host: &mut impl PaneService, device: u8, connection: u8, request: Request) -> Reply {
+fn exchange(host: &mut impl HostCommands, device: u8, connection: u8, request: Request) -> Reply {
     let request = serde_json::from_slice(&serde_json::to_vec(&request).unwrap()).unwrap();
     let reply = host.request([device; 32], [connection; 32], request);
     serde_json::from_slice(&serde_json::to_vec(&reply).unwrap()).unwrap()
 }
 
 fn screen(
-    host: &mut impl PaneService,
+    host: &mut impl HostCommands,
     lease: Lease,
     ready: impl Fn(&Screen) -> bool,
 ) -> Box<Screen> {

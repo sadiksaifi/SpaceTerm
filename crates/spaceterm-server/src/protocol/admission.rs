@@ -1,16 +1,18 @@
-//! Bounded account-local admission and length-prefixed JSON exchanges.
+//! Bounded admission: the Hello/Offer preamble every protocol major reads the same way, as
+//! length-prefixed JSON. An incompatible peer therefore always receives a typed incompatibility.
+//! After admission both peers switch to the postcard framing in [`super::frame`].
 //! Peer-account authority comes from the socket. IDs are nonsecret fences, never credentials.
 use crate::pane::control::ClientName;
-use crate::transport::Transport;
 use crate::{AuthenticatedStatus, ServerError};
 use ring::rand::{SecureRandom, SystemRandom};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
-#[cfg(test)]
-use std::io::Write;
+use std::io::{Read, Write};
+use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
 use std::time::{Duration, Instant};
 
-pub(crate) const MAJOR: u16 = 1;
+/// The protocol major of the pushed, multiplexed exchange.
+pub const MAJOR: u16 = 2;
 const MAX_FRAME: usize = 8192;
 const CONNECTION_LIMIT: Duration = Duration::from_secs(5);
 
@@ -39,129 +41,102 @@ pub(crate) fn random() -> Result<[u8; 32], ServerError> {
     Ok(bytes)
 }
 
-pub(crate) struct Wire<'a> {
-    stream: &'a mut dyn Transport,
-    deadline: Instant,
-    max_frame: usize,
+/// The transport of one admission: whole length-prefixed frames, each before a deadline. Account
+/// IPC writes them back to back; paired WSS carries the same bytes in binary messages.
+pub(crate) trait Preamble {
+    fn send(&mut self, frame: &[u8], deadline: Instant) -> Result<(), ServerError>;
+    /// One frame of at most `max` bytes, without its length prefix.
+    fn receive(&mut self, max: usize, deadline: Instant) -> Result<Vec<u8>, ServerError>;
 }
-impl<'a> Wire<'a> {
-    pub(crate) fn new(stream: &'a mut dyn Transport) -> Result<Self, ServerError> {
-        crate::transport::nonblocking(stream.read_fd())?;
-        crate::transport::nonblocking(stream.write_fd())?;
-        Ok(Self {
-            stream,
-            deadline: Instant::now() + CONNECTION_LIMIT,
-            max_frame: MAX_FRAME,
-        })
-    }
-    pub(crate) fn terminal(stream: &'a mut dyn Transport) -> Result<Self, ServerError> {
-        let mut wire = Self::new(stream)?;
-        wire.max_frame = crate::pane::MAX_TERMINAL_FRAME;
-        wire.deadline = Instant::now() + Duration::from_secs(10);
-        Ok(wire)
-    }
-    fn ready(&self, events: libc::c_short) -> Result<(), ServerError> {
-        loop {
-            let remaining = self
-                .deadline
-                .checked_duration_since(Instant::now())
-                .filter(|v| !v.is_zero())
-                .ok_or(ServerError::Protocol)?;
-            let mut fd = libc::pollfd {
-                fd: if events == libc::POLLIN {
-                    self.stream.read_fd()
-                } else {
-                    self.stream.write_fd()
-                },
-                events,
-                revents: 0,
-            };
-            // SAFETY: poll receives one writable descriptor entry retained for the call.
-            let result = unsafe {
-                libc::poll(
-                    &mut fd,
-                    1,
-                    (remaining.as_millis() + 1).min(i32::MAX as u128) as i32,
-                )
-            };
-            if result > 0 {
-                return Ok(());
-            }
-            if result == 0 {
-                return Err(ServerError::Protocol);
-            }
-            if std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted {
-                return Err(ServerError::Protocol);
-            }
-        }
-    }
-    fn read_exact(&mut self, mut bytes: &mut [u8]) -> Result<(), ServerError> {
-        while !bytes.is_empty() {
-            self.ready(libc::POLLIN)?;
-            let count = match self.stream.read(bytes) {
-                Ok(count) => count,
-                Err(error)
-                    if matches!(
-                        error.kind(),
-                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
-                    ) =>
-                {
-                    continue;
+
+/// Prefixes `bytes` with their length, the admission framing on every transport.
+pub(crate) fn prefixed(bytes: &[u8]) -> Vec<u8> {
+    let mut frame = Vec::with_capacity(4 + bytes.len());
+    frame.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+    frame.extend_from_slice(bytes);
+    frame
+}
+
+impl Preamble for UnixStream {
+    fn send(&mut self, frame: &[u8], deadline: Instant) -> Result<(), ServerError> {
+        self.set_nonblocking(true)
+            .map_err(|_| ServerError::Protocol)?;
+        let frame = prefixed(frame);
+        let mut rest = frame.as_slice();
+        while !rest.is_empty() {
+            match self.write(rest) {
+                Ok(0) => return Err(ServerError::Protocol),
+                Ok(count) => rest = &rest[count..],
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    if !crate::connection::io::wait_fd(self.as_raw_fd(), true, deadline) {
+                        return Err(ServerError::Protocol);
+                    }
                 }
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
                 Err(_) => return Err(ServerError::Protocol),
-            };
-            if count == 0 {
-                return Err(ServerError::Protocol);
             }
-            bytes = &mut bytes[count..];
         }
         Ok(())
     }
-    pub(crate) fn read<T: DeserializeOwned>(&mut self) -> Result<T, ServerError> {
-        serde_json::from_slice(&self.read_frame()?).map_err(|_| ServerError::Protocol)
-    }
-    pub(crate) fn read_frame(&mut self) -> Result<Vec<u8>, ServerError> {
+
+    fn receive(&mut self, max: usize, deadline: Instant) -> Result<Vec<u8>, ServerError> {
+        self.set_nonblocking(true)
+            .map_err(|_| ServerError::Protocol)?;
         let mut size = [0; 4];
-        self.read_exact(&mut size)?;
+        read_exact(self, &mut size, deadline)?;
         let size = u32::from_be_bytes(size) as usize;
-        if size > self.max_frame {
+        if size > max {
             return Err(ServerError::Protocol);
         }
         let mut bytes = vec![0; size];
-        self.read_exact(&mut bytes)?;
+        read_exact(self, &mut bytes, deadline)?;
         Ok(bytes)
+    }
+}
+
+fn read_exact(
+    stream: &mut UnixStream,
+    mut bytes: &mut [u8],
+    deadline: Instant,
+) -> Result<(), ServerError> {
+    while !bytes.is_empty() {
+        match stream.read(bytes) {
+            Ok(0) => return Err(ServerError::Protocol),
+            Ok(count) => bytes = &mut bytes[count..],
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                if !crate::connection::io::wait_fd(stream.as_raw_fd(), false, deadline) {
+                    return Err(ServerError::Protocol);
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => return Err(ServerError::Protocol),
+        }
+    }
+    Ok(())
+}
+
+/// JSON admission messages under one absolute deadline.
+pub(crate) struct Wire<'a> {
+    stream: &'a mut dyn Preamble,
+    deadline: Instant,
+}
+impl<'a> Wire<'a> {
+    pub(crate) fn new(stream: &'a mut dyn Preamble) -> Self {
+        Self {
+            stream,
+            deadline: Instant::now() + CONNECTION_LIMIT,
+        }
+    }
+    pub(crate) fn read<T: DeserializeOwned>(&mut self) -> Result<T, ServerError> {
+        let bytes = self.stream.receive(MAX_FRAME, self.deadline)?;
+        serde_json::from_slice(&bytes).map_err(|_| ServerError::Protocol)
     }
     pub(crate) fn write(&mut self, value: &impl Serialize) -> Result<(), ServerError> {
         let bytes = serde_json::to_vec(value).map_err(|_| ServerError::Protocol)?;
-        self.write_frame(&bytes)
-    }
-    pub(crate) fn write_frame(&mut self, bytes: &[u8]) -> Result<(), ServerError> {
-        if bytes.len() > self.max_frame {
+        if bytes.len() > MAX_FRAME {
             return Err(ServerError::Protocol);
         }
-        let prefix = (bytes.len() as u32).to_be_bytes();
-        for mut rest in [prefix.as_slice(), bytes] {
-            while !rest.is_empty() {
-                self.ready(libc::POLLOUT)?;
-                let count = match self.stream.write(rest) {
-                    Ok(count) => count,
-                    Err(error)
-                        if matches!(
-                            error.kind(),
-                            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
-                        ) =>
-                    {
-                        continue;
-                    }
-                    Err(_) => return Err(ServerError::Protocol),
-                };
-                if count == 0 {
-                    return Err(ServerError::Protocol);
-                }
-                rest = &rest[count..];
-            }
-        }
-        Ok(())
+        self.stream.send(&bytes, self.deadline)
     }
 }
 
@@ -178,7 +153,7 @@ pub(crate) fn admit_server(
 
 /// Only the WSS host calls this after pinned-server and enrolled-device proof validation.
 pub(crate) fn admit_direct_server(
-    stream: &mut dyn Transport,
+    stream: &mut dyn Preamble,
     paired: &crate::direct::PairedDevice,
 ) -> Result<(AuthenticatedStatus, [u8; 32], ClientName), ServerError> {
     admit_server_transport(
@@ -190,12 +165,12 @@ pub(crate) fn admit_direct_server(
 }
 
 fn admit_server_transport(
-    stream: &mut dyn Transport,
+    stream: &mut dyn Preamble,
     server: &[u8; 32],
     build: &str,
     expected_client: Option<[u8; 32]>,
 ) -> Result<(AuthenticatedStatus, [u8; 32], ClientName), ServerError> {
-    let mut wire = Wire::new(stream)?;
+    let mut wire = Wire::new(stream);
     let hello: Hello = wire.read()?;
     if hello.build != build
         || hello.server != *server
@@ -246,13 +221,13 @@ pub(crate) fn admit_client(
 }
 
 pub(crate) fn admit_transport(
-    stream: &mut dyn Transport,
+    stream: &mut dyn Preamble,
     (client, name): (&[u8; 32], &ClientName),
     server: &[u8; 32],
     build: &str,
     versions: &[u16],
 ) -> Result<AuthenticatedStatus, ServerError> {
-    let mut wire = Wire::new(stream)?;
+    let mut wire = Wire::new(stream);
     wire.write(&Hello {
         versions: versions.to_vec(),
         build: build.to_owned(),
@@ -281,9 +256,9 @@ mod tests {
     use super::*;
     #[test]
     fn account_admission_preserves_nonsecret_client_identity_and_refuses_incompatible_majors() {
-        for versions in [vec![1], vec![2], vec![3, 1]] {
+        for versions in [vec![2], vec![1], vec![3, 2]] {
             let (mut client, mut server) = UnixStream::pair().unwrap();
-            let accepted = versions.contains(&1);
+            let accepted = versions.contains(&MAJOR);
             let thread = std::thread::spawn(move || {
                 admit_server(&mut server, &[7; 32], "spaceterm-development")
             });
@@ -296,7 +271,7 @@ mod tests {
             );
             let server_result = thread.join().unwrap();
             if accepted {
-                assert_eq!(result.unwrap().protocol_major, 1);
+                assert_eq!(result.unwrap().protocol_major, MAJOR);
                 let (_, client, name) = server_result.unwrap();
                 assert_eq!((client, name.as_str()), ([9; 32], "Build Mac"));
             } else {
@@ -318,7 +293,7 @@ mod tests {
                     (&[9; 32], &"Build Mac".into()),
                     &id,
                     build,
-                    &[1]
+                    &[MAJOR]
                 )
                 .is_err()
             );
@@ -333,10 +308,10 @@ mod tests {
         for (build, server_id) in [("spaceterm", [7; 32]), ("spaceterm-development", [8; 32])] {
             let (mut client, mut server) = UnixStream::pair().unwrap();
             let thread = std::thread::spawn(move || {
-                let mut wire = Wire::new(&mut server).unwrap();
+                let mut wire = Wire::new(&mut server);
                 let _: Hello = wire.read().unwrap();
                 wire.write(&Offer {
-                    selected: 1,
+                    selected: MAJOR,
                     build: build.into(),
                     server: server_id,
                 })
@@ -348,7 +323,7 @@ mod tests {
                     (&[9; 32], &"Build Mac".into()),
                     &[7; 32],
                     "spaceterm-development",
-                    &[1]
+                    &[MAJOR]
                 ),
                 Err(ServerError::AuthenticationRefused)
             );
@@ -367,7 +342,7 @@ mod tests {
     #[test]
     fn stalled_connections_obey_an_absolute_deadline() {
         let (_client, mut server) = UnixStream::pair().unwrap();
-        let mut wire = Wire::new(&mut server).unwrap();
+        let mut wire = Wire::new(&mut server);
         wire.deadline = Instant::now() + Duration::from_millis(10);
         assert!(matches!(wire.read::<Hello>(), Err(ServerError::Protocol)));
     }

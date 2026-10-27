@@ -833,10 +833,7 @@ pub(crate) fn check_runtime(paths: &Paths, supervised: bool) -> Result<(), Serve
 
 /// Run only the approved artifact. An interrupted same-boot run remains unresolved cleanup.
 /// Reboot proves the previous boot's processes ended; ordinary client launches grant no recovery.
-pub fn run(
-    identity: &str,
-    panes: impl crate::pane::PaneService + 'static,
-) -> Result<(), ServerError> {
+pub fn run(identity: &str, panes: crate::PaneFactory) -> Result<(), ServerError> {
     let service = Service::for_identity(identity)?;
     let (data, _) = service.read()?.ok_or(ServerError::NotInstalled)?;
     let intent = data.lock("service-intent.lock", false)?;
@@ -866,7 +863,7 @@ pub fn run(
     state.run = Some(run.clone());
     data.write_json(c"service.json", &state)?;
     drop(intent);
-    match crate::host::serve_runtime(&service.paths, Some(Box::new(panes)), true) {
+    match crate::host::serve_runtime(&service.paths, Some(panes), true) {
         Ok(()) | Err(ServerError::Stopped) => {}
         Err(error) => return Err(error),
     }
@@ -1591,31 +1588,35 @@ mod tests {
         };
 
         struct TestPanes;
-        impl pane::PaneService for TestPanes {
-            fn request(&mut self, _: [u8; 32], _: [u8; 32], request: pane::Request) -> pane::Reply {
-                match request {
-                    pane::Request::Shutdown => pane::Reply::Closed,
-                    pane::Request::Capabilities => pane::Reply::Capabilities {
-                        development_pane: true,
-                        pane_takeover: false,
-                        interactive_input: false,
-                        key_input_batches: false,
-                        native_effects: false,
-                        reading: false,
-                        graphics: false,
-                        accessibility: false,
-                        directory_recovery: false,
-                        directory_creation: false,
-                        directory_matching: false,
-                        worktree_writes: false,
-                        end_all_sessions: false,
-                        workspace_policy: true,
-                        presentation_changes: false,
-                    },
-                    _ => pane::Reply::Refused(pane::Refusal::Unsupported),
-                }
+        impl crate::connection::service::PaneService for TestPanes {
+            fn admitted(
+                &mut self,
+                _: &crate::connection::service::Peer,
+                _: pane::control::ClientName,
+                _: crate::connection::outbox::Outbox,
+            ) {
             }
-            fn disconnected(&mut self, _: [u8; 32]) {}
+            fn request(
+                &mut self,
+                _: &crate::connection::service::Peer,
+                _: protocol::RequestId,
+                operation: protocol::Operation,
+            ) -> crate::connection::service::Dispatch {
+                crate::connection::service::Dispatch::reply(match operation {
+                    protocol::Operation::Shutdown => Ok(protocol::ReplyBody::Done),
+                    _ => Err(pane::Refusal::Unsupported),
+                })
+            }
+            fn input(&mut self, _: &crate::connection::service::Peer, _: protocol::Input) {}
+            fn view(&mut self, _: &crate::connection::service::Peer, _: protocol::View) {}
+            fn effect_done(
+                &mut self,
+                _: &crate::connection::service::Peer,
+                _: protocol::EffectDone,
+            ) {
+            }
+            fn acknowledge(&mut self, _: &crate::connection::service::Peer, _: u64) {}
+            fn disconnected(&mut self, _: &crate::connection::service::Peer) {}
             fn shutdown(&mut self) -> Result<(), ServerError> {
                 Ok(())
             }
@@ -1667,7 +1668,7 @@ mod tests {
                 let paths = self.paths.clone();
                 *self.host.lock().unwrap() = Some(std::thread::spawn(move || {
                     std::thread::sleep(delay);
-                    crate::host::serve_runtime(&paths, Some(Box::new(TestPanes)), true)
+                    crate::host::serve_runtime(&paths, Some(crate::panes(|_| Ok(TestPanes))), true)
                 }));
             }
             fn close_host(&self) -> Result<(), ServerError> {
@@ -1693,9 +1694,11 @@ mod tests {
                         &self.paths.identity,
                         &[protocol::MAJOR],
                     )?;
-                    let mut wire = protocol::Wire::terminal(&mut stream)?;
-                    wire.write(&pane::Request::Shutdown)?;
-                    assert!(matches!(wire.read::<pane::Reply>()?, pane::Reply::Closed));
+                    let link = crate::host::link(stream, Arc::new(|_| {}))?;
+                    assert!(matches!(
+                        link.request(protocol::Operation::Shutdown)?.wait(),
+                        Ok(protocol::ReplyBody::Done)
+                    ));
                 }
                 host.join().unwrap()
             }
@@ -1774,7 +1777,7 @@ mod tests {
         fn ready(outcome: StartupOutcome) -> crate::ServerConnection {
             match outcome {
                 StartupOutcome::Ready { server, status } => {
-                    assert_eq!(status.protocol_major, 1);
+                    assert_eq!(status.protocol_major, protocol::MAJOR);
                     server
                 }
                 _ => panic!("launch did not connect"),
@@ -1951,7 +1954,7 @@ mod tests {
                         });
                         let (attached, attach_result) = std::sync::mpsc::sync_channel(1);
                         let attach = std::thread::spawn(move || {
-                            attached.send(server.connect_pane()).unwrap();
+                            attached.send(server.connect(Arc::new(|_| {}))).unwrap();
                         });
                         let early_refresh = refresh_result.recv_timeout(Duration::from_millis(80));
                         let early_attach = attach_result.recv_timeout(Duration::from_millis(80));
@@ -2020,7 +2023,10 @@ mod tests {
                         assert!(stop.join().unwrap().unwrap().stopped);
                         assert!(pending, "Stop must serialize after the admitted Restart");
                         assert_eq!(server.refresh(), Err(ServerError::Stopped));
-                        assert!(matches!(server.connect_pane(), Err(ServerError::Stopped)));
+                        assert!(matches!(
+                            server.connect(Arc::new(|_| {})),
+                            Err(ServerError::Stopped)
+                        ));
                     });
                     assert!(service.restart().unwrap().running);
                     observe.join().unwrap();
@@ -2067,7 +2073,8 @@ mod tests {
                                 .unwrap();
                             let refresh_server = server.clone();
                             let refresh = std::thread::spawn(move || refresh_server.refresh());
-                            let attach = std::thread::spawn(move || server.connect_pane());
+                            let attach =
+                                std::thread::spawn(move || server.connect(Arc::new(|_| {})));
                             // Both requests overlap the published Stop inside the control operation.
                             std::thread::sleep(Duration::from_millis(80));
                             resume_disable.send(()).unwrap();
@@ -2445,7 +2452,7 @@ mod tests {
             .unwrap();
             *supervisor.host.lock().unwrap() = Some(std::thread::spawn(move || {
                 let (mut stream, _) = listener.accept().unwrap();
-                let mut wire = protocol::Wire::terminal(&mut stream)?;
+                let mut wire = protocol::Wire::new(&mut stream);
                 let hello: serde_json::Value = wire.read()?;
                 wire.write(&serde_json::json!({"selected":0, "build":hello["build"], "server":hello["server"]}))
             }));
