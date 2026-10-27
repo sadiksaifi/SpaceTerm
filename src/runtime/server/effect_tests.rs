@@ -3,19 +3,32 @@ use super::*;
 use pane::effects::{Completion, Effect};
 use std::time::Instant;
 
+/// One output check that also takes the native effect for `generation`.
+fn check(host: &mut impl PaneService, device: u8, lease: Lease, generation: u64) -> Reply {
+    host.request(
+        [device; 32],
+        lease.connection,
+        Request::PollChanges {
+            lease,
+            base: None,
+            effects: Some(generation),
+            reading: false,
+        },
+    )
+}
+
 fn next(host: &mut impl PaneService, lease: Lease, generation: u64) -> pane::effects::Request {
     let deadline = Instant::now() + Duration::from_secs(3);
     loop {
-        match host.request(
-            [1; 32],
-            lease.connection,
-            Request::NativeEffects { lease, generation },
-        ) {
-            Reply::NativeEffects {
-                request: Some(request),
-                ..
-            } => return request,
-            Reply::NativeEffects { request: None, .. } => {}
+        match check(host, 1, lease, generation) {
+            Reply::Cycle(cycle) => match cycle.effects {
+                Some(pane::effects::Poll {
+                    request: Some(request),
+                    ..
+                }) => return request,
+                Some(pane::effects::Poll { request: None, .. }) => {}
+                None => panic!("output check omitted the requested effects"),
+            },
             reply => panic!("native request refused: {reply:?}"),
         }
         assert!(Instant::now() < deadline, "native request missing");
@@ -177,26 +190,39 @@ fn stale_native_events_and_absent_clients_never_acquire_a_later_grant() {
     focus(&mut host, lease, 2, FocusTarget::Unfocused);
     focus(&mut host, lease, 3, FocusTarget::Terminal);
     assert!(matches!(
-        host.request(
-            [1; 32],
-            lease.connection,
-            Request::NativeEffects {
-                lease,
-                generation: 3
-            }
-        ),
-        Reply::NativeEffects { request: None, .. }
+        check(&mut host, 1, lease, 3),
+        Reply::Cycle(cycle) if matches!(cycle.effects, Some(pane::effects::Poll { request: None, .. }))
     ));
     assert!(matches!(
-        host.request(
-            [2; 32],
-            lease.connection,
-            Request::NativeEffects {
-                lease,
-                generation: 3
-            }
-        ),
+        check(&mut host, 2, lease, 3),
         Reply::Refused(Refusal::Stale)
     ));
+    host.shutdown().unwrap();
+}
+
+#[test]
+fn an_output_check_naming_a_stale_focus_generation_takes_nothing() {
+    let mut host = host();
+    let lease = attach(&mut host, 1, true);
+    focus(&mut host, lease, 1, FocusTarget::Unfocused);
+    focus(&mut host, lease, 2, FocusTarget::Terminal);
+    // A started shell answers the next command well within the clipboard request's lifetime.
+    native_command(&mut host, lease, 2, "printf 'SHELL-READY\\r\\n'");
+    await_text(&mut host, 1, lease, "SHELL-READY");
+    native_command(&mut host, lease, 2, "printf '\\033]52;c;d29ybGQ=\\007'");
+    // The write holds later output until it completes, so no marker can witness its arrival.
+    // Checks naming other generations span most of its one-second lifetime instead.
+    for _ in 0..40 {
+        for stale in [0, 1, 3] {
+            assert!(matches!(
+                check(&mut host, 1, lease, stale),
+                Reply::Refused(Refusal::Stale)
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let request = next(&mut host, lease, 2);
+    assert_eq!(request.generation, 2);
+    assert!(matches!(request.effect, Effect::ClipboardWrite { text, .. } if text == "world"));
     host.shutdown().unwrap();
 }

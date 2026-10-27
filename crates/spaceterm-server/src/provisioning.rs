@@ -154,8 +154,7 @@ fn manage(identity: &str, request: Management) -> Result<ManagementReply, Server
         &[protocol::MAJOR],
     )?;
     let mut wire = protocol::Wire::terminal(&mut stream)?;
-    wire.write(&crate::pane::Request::Direct(request))?;
-    match wire.read()? {
+    match wire.call(0, &crate::pane::Request::Direct(request))? {
         crate::pane::Reply::Direct(reply) => reply.map_err(Into::into),
         _ => Err(ServerError::Protocol),
     }

@@ -231,17 +231,10 @@ pub enum Request {
         lease: Lease,
         operation: reading::Operation,
     },
-    ReadingStatus {
-        lease: Lease,
-    },
     SelectionChunk {
         lease: Lease,
         generation: u64,
         offset: usize,
-    },
-    NativeEffects {
-        lease: Lease,
-        generation: u64,
     },
     CompleteClipboard {
         lease: Lease,
@@ -261,6 +254,8 @@ pub enum Request {
     },
     /// Ordered key events accepted under one exact lease and focus generation.
     /// A lost reply never permits replay. Acceptance does not imply PTY execution.
+    /// `Unchanged` accepts the batch. `Screen` or `ScreenChanges` accepts it and carries the
+    /// Pane's next publication, encoded exactly as the next `PollChanges` would have.
     Keys {
         lease: Lease,
         generation: u64,
@@ -325,9 +320,14 @@ pub enum Request {
     Poll {
         lease: Lease,
     },
+    /// One output check, answered by `Reply::Cycle`. `effects` names the acknowledged focus
+    /// generation whose native effects the check also takes. `reading` asks whether the
+    /// accepted reading operation has completed.
     PollChanges {
         lease: Lease,
         base: Option<u64>,
+        effects: Option<u64>,
+        reading: bool,
     },
     PresentationDemand {
         lease: Lease,
@@ -370,11 +370,6 @@ pub enum Reply {
     Reading {
         accepted: bool,
     },
-    ReadingReady {
-        generation: u64,
-        selection_revision: u64,
-        selection_present: bool,
-    },
     SelectionChunk {
         generation: u64,
         offset: usize,
@@ -382,10 +377,6 @@ pub enum Reply {
         bytes: Vec<u8>,
     },
     SelectionPending,
-    NativeEffects {
-        request: Option<effects::Request>,
-        hidden_input: bool,
-    },
     Paste(PasteOutcome),
     Inventory {
         inventory: crate::hierarchy::Inventory,
@@ -451,6 +442,7 @@ pub enum Reply {
     },
     Screen(Box<Screen>),
     ScreenChanges(Box<presentation::RowChanges>),
+    Cycle(Box<presentation::Cycle>),
     Unchanged,
     Ended,
     Closed,
@@ -485,21 +477,36 @@ impl From<Refusal> for ServerError {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Color {
+    #[default]
     Default,
     Palette(u8),
     Rgb([u8; 3]),
 }
+impl Color {
+    fn is_default(&self) -> bool {
+        *self == Self::Default
+    }
+}
+fn is_zero<T: Default + PartialEq>(value: &T) -> bool {
+    *value == T::default()
+}
+/// Fields with their default value are omitted, so a plain cell carries only its text.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Cell {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hyperlink: Option<u16>,
     pub text: String,
+    #[serde(default, skip_serializing_if = "Color::is_default")]
     pub foreground: Color,
+    #[serde(default, skip_serializing_if = "Color::is_default")]
     pub background: Color,
+    #[serde(default, skip_serializing_if = "Color::is_default")]
     pub underline_color: Color,
+    #[serde(default, skip_serializing_if = "is_zero")]
     pub flags: u16,
+    #[serde(default, skip_serializing_if = "is_zero")]
     pub underline: u8,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -555,8 +562,36 @@ pub trait PaneService: Send {
     /// Permanently releases this paired identity's live and dormant control grants.
     fn revoked(&mut self, _client: [u8; 32]) {}
     fn request(&mut self, device: [u8; 32], connection: [u8; 32], request: Request) -> Reply;
+    /// Applies a request in arrival order. A `Later` reply waits without the host's service
+    /// lock while the connection keeps reading, then `finish` completes it under that lock.
+    fn handle(&mut self, device: [u8; 32], connection: [u8; 32], request: Request) -> Handled {
+        Handled::Now(self.request(device, connection, request))
+    }
+    /// Completes a `Handled::Later` reply after its wait, under the host's service lock.
+    fn finish(&mut self, _device: [u8; 32], _connection: [u8; 32], _finish: u64) -> Reply {
+        Reply::Refused(Refusal::Unsupported)
+    }
     fn disconnected(&mut self, connection: [u8; 32]);
     fn shutdown(&mut self) -> Result<(), ServerError>;
+}
+/// A reply completed after the service lock is released.
+pub trait PendingReply: Send {
+    /// Blocks without any service lock until the Pane publishes or `deadline` passes.
+    fn wait(&mut self, deadline: std::time::Instant);
+}
+#[allow(
+    clippy::large_enum_variant,
+    reason = "moved once per request, like the Reply that `request` already returns by value"
+)]
+pub enum Handled {
+    Now(Reply),
+    /// The host drops this reply, and its connection, if the connection ends or loses
+    /// authority first. The client then fences the request as unconfirmed.
+    Later {
+        pending: Box<dyn PendingReply>,
+        deadline: std::time::Instant,
+        finish: u64,
+    },
 }
 
 #[cfg(feature = "client")]
@@ -575,9 +610,8 @@ pub struct ExchangeTiming {
 struct PaneTransport {
     measurement_id: u64,
     measurement_sequence: std::sync::atomic::AtomicU64,
-    admission: transport::Admission,
+    exchanges: transport::Exchanges,
     presentation_changes: bool,
-    stream: std::sync::Mutex<Option<Box<dyn crate::transport::Transport>>>,
     takeover: bool,
     interactive_input: bool,
     key_input_batches: bool,
@@ -603,11 +637,7 @@ impl SharedPaneConnection {
     ) -> Result<PaneConnection, ServerError> {
         let mut saved = self.0.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(transport) = saved.upgrade()
-            && transport
-                .stream
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .is_some()
+            && !transport.exchanges.fenced()
         {
             return Ok(PaneConnection {
                 transport,
@@ -634,8 +664,7 @@ impl PaneConnection {
         mut stream: impl crate::transport::Transport + 'static,
     ) -> Result<Self, ServerError> {
         let mut wire = crate::protocol::Wire::terminal(&mut stream)?;
-        wire.write(&Request::Capabilities)?;
-        match wire.read()? {
+        match wire.call(0, &Request::Capabilities)? {
             Reply::Capabilities {
                 development_pane: true,
                 pane_takeover,
@@ -706,9 +735,8 @@ impl PaneConnection {
             transport: std::sync::Arc::new(PaneTransport {
                 measurement_id: crate::measurement::scope(),
                 measurement_sequence: std::sync::atomic::AtomicU64::new(0),
-                admission: transport::Admission::default(),
+                exchanges: transport::Exchanges::new(Box::new(stream)),
                 presentation_changes: false,
-                stream: std::sync::Mutex::new(Some(Box::new(stream))),
                 takeover,
                 interactive_input: false,
                 key_input_batches: false,
@@ -767,7 +795,7 @@ impl PaneConnection {
             operation,
         });
         let queued = std::time::Instant::now();
-        let _turn = self.transport.admission.enter()?;
+        let turn = self.transport.exchanges.admit()?;
         let admitted = std::time::Instant::now();
         let sequence = if connection == 0 {
             0
@@ -782,22 +810,16 @@ impl PaneConnection {
             sequence,
             operation,
         });
-        let mut stream = self
-            .transport
-            .stream
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
         let result = (|| {
-            let mut wire = crate::protocol::Wire::terminal(
-                stream.as_deref_mut().ok_or(ServerError::NotRunning)?,
-            )?;
-            wire.write(request)?;
+            // The writer is released here; other callers' requests overlap this reply.
+            let pending = turn.write(request)?;
             measurement::record(Event::RequestWritten {
                 connection,
                 sequence,
                 operation,
             });
-            let reply: Reply = wire.read()?;
+            let reply: Reply =
+                serde_json::from_slice(&pending.reply()?).map_err(|_| ServerError::Protocol)?;
             measurement::record(Event::ReplyRead {
                 connection,
                 sequence,
@@ -821,10 +843,11 @@ impl PaneConnection {
             }
             Ok(reply)
         })();
-        // An uncertain exchange fences every subscriber of this transport. A new
-        // connection gets a fresh host identity; no request is replayed here.
-        if result.is_err() {
-            *stream = None;
+        // An uncertain exchange fences every subscriber of this transport, including every
+        // outstanding request. A new connection gets a fresh host identity; no request is
+        // replayed here.
+        if let Err(error) = result {
+            self.transport.exchanges.fence(error);
         }
         self.last_exchange = Some(ExchangeTiming {
             queue_wait: admitted.duration_since(queued),
@@ -851,15 +874,13 @@ mod transport_tests {
             let (client, mut server) = UnixStream::pair().unwrap();
             let peer = std::thread::spawn(move || {
                 let mut wire = crate::protocol::Wire::terminal(&mut server).unwrap();
-                assert!(matches!(
-                    wire.read::<Request>().unwrap(),
-                    Request::Capabilities
-                ));
+                let (id, request) = wire.receive::<Request>().unwrap();
+                assert!(matches!(request, Request::Capabilities));
                 let mut reply = serde_json::json!({ "Capabilities": { "development_pane": true } });
                 if let Some(capability) = capability {
                     reply["Capabilities"]["workspace_policy"] = capability.into();
                 }
-                wire.write(&reply).unwrap();
+                wire.send(id, &reply).unwrap();
             });
             assert!(matches!(
                 PaneConnection::negotiate(client),
@@ -874,13 +895,14 @@ mod transport_tests {
         let (client, mut server) = UnixStream::pair().unwrap();
         let peer = std::thread::spawn(move || {
             let mut wire = crate::protocol::Wire::terminal(&mut server).unwrap();
-            assert!(matches!(
-                wire.read::<Request>().unwrap(),
-                Request::Capabilities
-            ));
-            wire.write(&serde_json::json!({
-                "Capabilities": { "development_pane": true, "workspace_policy": true }
-            }))
+            let (id, request) = wire.receive::<Request>().unwrap();
+            assert!(matches!(request, Request::Capabilities));
+            wire.send(
+                id,
+                &serde_json::json!({
+                    "Capabilities": { "development_pane": true, "workspace_policy": true }
+                }),
+            )
             .unwrap();
         });
         let connection = PaneConnection::negotiate(client).unwrap();
@@ -900,10 +922,8 @@ mod transport_tests {
             let (client, mut server) = UnixStream::pair().unwrap();
             let peer = std::thread::spawn(move || {
                 let mut wire = crate::protocol::Wire::terminal(&mut server).unwrap();
-                assert!(matches!(
-                    wire.read::<Request>().unwrap(),
-                    Request::Capabilities
-                ));
+                let (id, request) = wire.receive::<Request>().unwrap();
+                assert!(matches!(request, Request::Capabilities));
                 let mut reply = serde_json::json!({
                     "Capabilities": { "development_pane": true, "workspace_policy": true,
                         "interactive_input": true }
@@ -911,7 +931,7 @@ mod transport_tests {
                 if let Some(supported) = supported {
                     reply["Capabilities"]["key_input_batches"] = supported.into();
                 }
-                wire.write(&reply).unwrap();
+                wire.send(id, &reply).unwrap();
             });
             let connection = PaneConnection::negotiate(client).unwrap();
             assert_eq!(
@@ -928,17 +948,15 @@ mod transport_tests {
             let (client, mut server) = UnixStream::pair().unwrap();
             let peer = std::thread::spawn(move || {
                 let mut wire = crate::protocol::Wire::terminal(&mut server).unwrap();
-                assert!(matches!(
-                    wire.read::<Request>().unwrap(),
-                    Request::Capabilities
-                ));
+                let (id, request) = wire.receive::<Request>().unwrap();
+                assert!(matches!(request, Request::Capabilities));
                 let mut reply = serde_json::json!({
                     "Capabilities": { "development_pane": true, "workspace_policy": true }
                 });
                 if let Some(supported) = supported {
                     reply["Capabilities"]["directory_matching"] = supported.into();
                 }
-                wire.write(&reply).unwrap();
+                wire.send(id, &reply).unwrap();
             });
             let connection = PaneConnection::negotiate(client).unwrap();
             assert_eq!(
@@ -955,17 +973,18 @@ mod transport_tests {
             let (client, mut server) = UnixStream::pair().unwrap();
             let peer = std::thread::spawn(move || {
                 let mut wire = crate::protocol::Wire::terminal(&mut server).unwrap();
-                assert!(matches!(
-                    wire.read::<Request>().unwrap(),
-                    Request::Capabilities
-                ));
-                wire.write(&serde_json::json!({
-                    "Capabilities": {
-                        "development_pane": true,
-                        "workspace_policy": true,
-                        "directory_creation": supported
-                    }
-                }))
+                let (id, request) = wire.receive::<Request>().unwrap();
+                assert!(matches!(request, Request::Capabilities));
+                wire.send(
+                    id,
+                    &serde_json::json!({
+                        "Capabilities": {
+                            "development_pane": true,
+                            "workspace_policy": true,
+                            "directory_creation": supported
+                        }
+                    }),
+                )
                 .unwrap();
             });
             assert_eq!(
@@ -983,11 +1002,9 @@ mod transport_tests {
         let (client, mut server) = UnixStream::pair().unwrap();
         let peer = std::thread::spawn(move || {
             let mut wire = crate::protocol::Wire::terminal(&mut server).unwrap();
-            assert!(matches!(
-                wire.read::<Request>().unwrap(),
-                Request::Capabilities
-            ));
-            wire.write(&serde_json::json!({
+            let (id, request) = wire.receive::<Request>().unwrap();
+            assert!(matches!(request, Request::Capabilities));
+            wire.send(id, &serde_json::json!({
                 "Capabilities": { "development_pane": true, "workspace_policy": true, "end_all_sessions": true }
             })).unwrap();
         });
@@ -997,6 +1014,99 @@ mod transport_tests {
                 .supports_end_all_sessions()
         );
         peer.join().unwrap();
+    }
+
+    const CALLERS: u8 = 4;
+
+    fn indexed(index: u8) -> Lease {
+        Lease {
+            server: [index; 32],
+            session: [index; 32],
+            control: [index; 32],
+            connection: [index; 32],
+        }
+    }
+
+    // Each caller polls with its own lease on one shared transport.
+    fn concurrent_polls(
+        shared: &SharedPaneConnection,
+    ) -> Vec<std::thread::JoinHandle<(Lease, Result<Reply, ServerError>)>> {
+        (0..CALLERS)
+            .map(|index| {
+                let mut connection = shared
+                    .connect(|| panic!("callers must share one transport"))
+                    .unwrap();
+                std::thread::spawn(move || {
+                    let lease = indexed(index);
+                    (lease, connection.exchange(&Request::Poll { lease }))
+                })
+            })
+            .collect()
+    }
+
+    #[test]
+    fn pipelined_exchanges_overlap_and_return_replies_by_request_id() {
+        let shared = SharedPaneConnection::default();
+        let (client, mut server) = UnixStream::pair().unwrap();
+        let _owner = shared
+            .connect(|| Ok(PaneConnection::new(client, false)))
+            .unwrap();
+        let peer = std::thread::spawn(move || {
+            let mut wire = crate::protocol::Wire::terminal(&mut server).unwrap();
+            // Every request arrives before any reply, so no round trip waits for another.
+            let mut requests = Vec::new();
+            for _ in 0..CALLERS {
+                let (id, request) = wire.receive::<Request>().unwrap();
+                let Request::Poll { lease } = request else {
+                    panic!("unexpected request");
+                };
+                requests.push((id, lease));
+            }
+            // Reverse order is what a late first reply produces.
+            for (id, lease) in requests.into_iter().rev() {
+                wire.send(id, &Reply::Attached { lease }).unwrap();
+            }
+        });
+        for caller in concurrent_polls(&shared) {
+            let (lease, reply) = caller.join().unwrap();
+            assert!(matches!(reply, Ok(Reply::Attached { lease: replied }) if replied == lease));
+        }
+        peer.join().unwrap();
+    }
+
+    #[test]
+    fn losing_the_connection_fences_every_outstanding_exchange() {
+        let shared = SharedPaneConnection::default();
+        let (client, mut server) = UnixStream::pair().unwrap();
+        let mut owner = shared
+            .connect(|| Ok(PaneConnection::new(client, false)))
+            .unwrap();
+        let peer = std::thread::spawn(move || {
+            let mut wire = crate::protocol::Wire::terminal(&mut server).unwrap();
+            for _ in 0..CALLERS {
+                wire.receive::<Request>().unwrap();
+            }
+            // Every request is outstanding when the connection ends.
+        });
+        for caller in concurrent_polls(&shared) {
+            // Each request may have been applied, so each fails as unconfirmed.
+            let (_, reply) = caller.join().unwrap();
+            assert!(matches!(reply, Err(ServerError::Protocol)));
+        }
+        peer.join().unwrap();
+        assert!(matches!(
+            owner.exchange(&Request::Inventory),
+            Err(ServerError::NotRunning)
+        ));
+        let (client, _server) = UnixStream::pair().unwrap();
+        let mut reconnected = false;
+        shared
+            .connect(|| {
+                reconnected = true;
+                Ok(PaneConnection::new(client, false))
+            })
+            .unwrap();
+        assert!(reconnected);
     }
 
     #[test]
@@ -1011,10 +1121,8 @@ mod transport_tests {
             .unwrap();
         let peer = std::thread::spawn(move || {
             let mut wire = crate::protocol::Wire::terminal(&mut server).unwrap();
-            assert!(matches!(
-                wire.read::<Request>().unwrap(),
-                Request::Inventory
-            ));
+            let (_, request) = wire.receive::<Request>().unwrap();
+            assert!(matches!(request, Request::Inventory));
             // A lost reply leaves the operation uncertain. The transport never retries it.
         });
         assert!(inventory.exchange(&Request::Inventory).is_err());
@@ -1030,11 +1138,9 @@ mod transport_tests {
             .unwrap();
         let peer = std::thread::spawn(move || {
             let mut wire = crate::protocol::Wire::terminal(&mut server).unwrap();
-            assert!(matches!(
-                wire.read::<Request>().unwrap(),
-                Request::Capabilities
-            ));
-            wire.write(&Reply::Unchanged).unwrap();
+            let (id, request) = wire.receive::<Request>().unwrap();
+            assert!(matches!(request, Request::Capabilities));
+            wire.send(id, &Reply::Unchanged).unwrap();
         });
         assert!(matches!(
             replacement.exchange(&Request::Capabilities).unwrap(),

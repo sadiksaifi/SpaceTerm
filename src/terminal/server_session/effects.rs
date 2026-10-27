@@ -3,6 +3,14 @@ use super::*;
 use crate::terminal::osc52::{Osc52Operation, Osc52Target, Osc52Terminator};
 use pane::effects::{ClipboardTarget, Completion, Effect};
 
+/// What a Pane worker knew locally when it sent an output check that takes native effects.
+#[derive(Clone, Copy)]
+pub(super) struct Begun {
+    generation: u64,
+    local_epoch: Option<u64>,
+    started: std::time::Instant,
+}
+
 pub(super) struct ClientEffects {
     clipboard: async_channel::Sender<ClipboardRequest>,
     completed: mpsc::Receiver<(u64, ClipboardCompletion)>,
@@ -27,12 +35,13 @@ impl ClientEffects {
         )
     }
 
-    pub(super) fn poll(
+    /// Sends completed clipboard requests. They precede the output check that may take the
+    /// next request, so the server's single clipboard slot is free for it.
+    pub(super) fn complete(
         &mut self,
         state: &DevelopmentPaneState,
         lease: Lease,
         generation: u64,
-        events: &async_channel::Sender<TerminalSessionEvent>,
         exchange: &mut impl FnMut(&Request) -> Result<Reply, ServerError>,
     ) -> Result<(), ServerError> {
         while let Ok((id, completion)) = self.completed.try_recv() {
@@ -55,15 +64,36 @@ impl ClientEffects {
                 })?)?;
             }
         }
-        let local_epoch = state.effect_authority.output_epoch();
-        let started = std::time::Instant::now();
-        let Reply::NativeEffects {
+        Ok(())
+    }
+
+    /// Local facts captured before the output check that takes effects for `generation`.
+    pub(super) fn begin(state: &DevelopmentPaneState, generation: u64) -> Begun {
+        Begun {
+            generation,
+            local_epoch: state.effect_authority.output_epoch(),
+            started: std::time::Instant::now(),
+        }
+    }
+
+    /// Applies the native effect an output check took, against the local authority and focus
+    /// generation captured before that check.
+    pub(super) fn apply(
+        &mut self,
+        state: &DevelopmentPaneState,
+        begun: Begun,
+        polled: pane::effects::Poll,
+        events: &async_channel::Sender<TerminalSessionEvent>,
+    ) -> Result<(), ServerError> {
+        let Begun {
+            generation,
+            local_epoch,
+            started,
+        } = begun;
+        let pane::effects::Poll {
             request,
             hidden_input,
-        } = exchange(&Request::NativeEffects { lease, generation })?
-        else {
-            return Err(ServerError::Protocol);
-        };
+        } = polled;
         state.hidden_input.store(hidden_input, Ordering::Release);
         let hidden_state = (state.epoch.load(Ordering::Acquire), hidden_input);
         if self.hidden_input != Some(hidden_state) {
@@ -180,18 +210,25 @@ mod tests {
         adapter.handle.interactive_focus(true, true);
         let (mut effects, requests) = ClientEffects::new();
         let (events, _receiver) = async_channel::bounded(8);
-        effects.poll(state, adapter.active.lease, acknowledged, &events, &mut |request| {
-            assert!(matches!(request, Request::NativeEffects { generation, .. } if *generation == acknowledged), "poll used unacknowledged focus: {request:?}");
-            Ok(Reply::NativeEffects {
-                hidden_input: false,
-                request: Some(pane::effects::Request {
-                    id: 1,
-                    generation: acknowledged,
-                    remaining_ms: 1000,
-                    effect: Effect::ClipboardRead { target: ClipboardTarget::Standard },
-                }),
-            })
-        }).unwrap();
+        let begun = ClientEffects::begin(state, acknowledged);
+        effects
+            .apply(
+                state,
+                begun,
+                pane::effects::Poll {
+                    hidden_input: false,
+                    request: Some(pane::effects::Request {
+                        id: 1,
+                        generation: acknowledged,
+                        remaining_ms: 1000,
+                        effect: Effect::ClipboardRead {
+                            target: ClipboardTarget::Standard,
+                        },
+                    }),
+                },
+                &events,
+            )
+            .unwrap();
         assert!(requests.try_recv().is_err());
         assert!(adapter.handle.take_client_effects().is_empty());
     }
@@ -208,23 +245,21 @@ mod tests {
             .lock()
             .unwrap()
             .focus_generation;
+        let state = &adapter.handle.state;
         effects
-            .poll(
-                &adapter.handle.state,
-                adapter.active.lease,
-                generation,
-                &events,
-                &mut |_| {
-                    Ok(Reply::NativeEffects {
-                        hidden_input: false,
-                        request: Some(pane::effects::Request {
-                            id: 1,
-                            generation,
-                            remaining_ms: 1000,
-                            effect: Effect::Bell,
-                        }),
-                    })
+            .apply(
+                state,
+                ClientEffects::begin(state, generation),
+                pane::effects::Poll {
+                    hidden_input: false,
+                    request: Some(pane::effects::Request {
+                        id: 1,
+                        generation,
+                        remaining_ms: 1000,
+                        effect: Effect::Bell,
+                    }),
                 },
+                &events,
             )
             .unwrap();
         // Hidden-input publication filled the sole presentation slot before the native wakeup.
@@ -248,12 +283,12 @@ mod tests {
             let (mut effects, requests) = ClientEffects::new();
             let (events, _receiver) = async_channel::bounded(8);
             let state = &adapter.handle.state;
-            let lease = adapter.active.lease;
             let generation = state.interaction.lock().unwrap().focus_generation;
             effects
-                .poll(state, lease, generation, &events, &mut |request| {
-                    assert!(matches!(request, Request::NativeEffects { .. }));
-                    Ok(Reply::NativeEffects {
+                .apply(
+                    state,
+                    ClientEffects::begin(state, generation),
+                    pane::effects::Poll {
                         hidden_input: false,
                         request: Some(pane::effects::Request {
                             id: 1,
@@ -264,8 +299,9 @@ mod tests {
                                 text: "native fixture".into(),
                             },
                         }),
-                    })
-                })
+                    },
+                    &events,
+                )
                 .unwrap();
             let request = requests.try_recv().unwrap();
             if revoke == 1 {
@@ -314,27 +350,26 @@ mod tests {
             .lock()
             .unwrap()
             .focus_generation;
+        let begun = ClientEffects::begin(&adapter.handle.state, generation);
+        // Local focus changes while the output check is in flight.
+        adapter.handle.interactive_focus(false, false);
+        adapter.handle.interactive_focus(true, true);
         effects
-            .poll(
+            .apply(
                 &adapter.handle.state,
-                adapter.active.lease,
-                generation,
-                &events,
-                &mut |_| {
-                    adapter.handle.interactive_focus(false, false);
-                    adapter.handle.interactive_focus(true, true);
-                    Ok(Reply::NativeEffects {
-                        hidden_input: true,
-                        request: Some(pane::effects::Request {
-                            id: 1,
-                            generation,
-                            remaining_ms: 1000,
-                            effect: Effect::ClipboardRead {
-                                target: ClipboardTarget::Standard,
-                            },
-                        }),
-                    })
+                begun,
+                pane::effects::Poll {
+                    hidden_input: true,
+                    request: Some(pane::effects::Request {
+                        id: 1,
+                        generation,
+                        remaining_ms: 1000,
+                        effect: Effect::ClipboardRead {
+                            target: ClipboardTarget::Standard,
+                        },
+                    }),
                 },
+                &events,
             )
             .unwrap();
         assert!(requests.try_recv().is_err());

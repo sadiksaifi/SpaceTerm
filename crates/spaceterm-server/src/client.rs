@@ -442,8 +442,7 @@ impl ServerConnection {
             .connect_admitted()
             .map_err(crate::direct::DirectError::from)?;
         let mut wire = protocol::Wire::terminal(connection.as_mut())?;
-        wire.write(&crate::pane::Request::Direct(request))?;
-        match wire.read()? {
+        match wire.call(0, &crate::pane::Request::Direct(request))? {
             crate::pane::Reply::Direct(reply) => reply,
             _ => Err(crate::direct::DirectError::InvalidRequest),
         }
@@ -569,17 +568,15 @@ mod tests {
                 let (mut stream, _) = listener.accept().unwrap();
                 protocol::admit_server(&mut stream, &pin, &paths.identity).unwrap();
                 let mut wire = protocol::Wire::terminal(&mut stream).unwrap();
-                assert!(matches!(
-                    wire.read::<Request>().unwrap(),
-                    Request::Capabilities
-                ));
+                let (id, request) = wire.receive::<Request>().unwrap();
+                assert!(matches!(request, Request::Capabilities));
                 let mut reply = serde_json::json!({"Capabilities":{"development_pane":true}});
                 if let Some(supported) = workspace_policy {
                     reply["Capabilities"]["workspace_policy"] = supported.into();
                 }
-                wire.write(&reply).unwrap();
+                wire.send(id, &reply).unwrap();
                 assert!(
-                    wire.read::<Request>().is_err(),
+                    wire.receive::<Request>().is_err(),
                     "status must send no operation"
                 );
             });
@@ -674,9 +671,9 @@ mod tests {
             assert_eq!(observed.enabled, initial.enabled);
             assert_eq!(observed.policy, initial.policy);
             let mut wire = protocol::Wire::terminal(&mut other).unwrap();
-            wire.write(&crate::pane::Request::Direct(Management::Status))
+            wire.send(0, &crate::pane::Request::Direct(Management::Status))
                 .unwrap();
-            assert!(matches!(wire.read::<crate::pane::Reply>().unwrap(),
+            assert!(matches!(wire.receive::<crate::pane::Reply>().unwrap().1,
                 crate::pane::Reply::Direct(Ok(ManagementReply::Status(status)))
                 if status.enabled == initial.enabled && status.policy == initial.policy));
             drop(other);

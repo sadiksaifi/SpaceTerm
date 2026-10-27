@@ -1,6 +1,6 @@
 use super::tests::{attach, command, host};
 use super::*;
-use pane::reading::{Operation, SELECTION_CHUNK_BYTES, Scroll};
+use pane::reading::{Operation, SELECTION_CHUNK_BYTES, Scroll, Status};
 use std::time::Instant;
 
 // Real PTY output and selection formatting share CPU with the parallel portable suite.
@@ -25,6 +25,27 @@ fn read(host: &mut DevelopmentPaneHost, lease: Lease, operation: Operation) {
         assert!(Instant::now() < deadline);
         std::thread::sleep(Duration::from_millis(5));
     }
+}
+/// One output check that also asks whether the accepted reading operation has completed.
+fn check(host: &mut DevelopmentPaneHost, lease: Lease) -> Box<pane::presentation::Cycle> {
+    match host.request(
+        [1; 32],
+        lease.connection,
+        Request::PollChanges {
+            lease,
+            base: None,
+            effects: None,
+            reading: true,
+        },
+    ) {
+        Reply::Cycle(cycle) => cycle,
+        reply => panic!("output check refused: {reply:?}"),
+    }
+}
+fn status(host: &mut DevelopmentPaneHost, lease: Lease) -> Status {
+    check(host, lease)
+        .reading
+        .expect("output check omitted the reading status")
 }
 #[track_caller]
 fn screen(
@@ -175,14 +196,14 @@ fn old_scrollback_find_and_multichunk_copy_use_the_retained_terminal_content() {
     // Fence the release on the existing worker barrier before preparing the copy.
     let deadline = Instant::now() + COMPLETION_TIMEOUT;
     let mut generation = loop {
-        match host.request([1; 32], lease.connection, Request::ReadingStatus { lease }) {
-            Reply::ReadingReady {
+        match status(&mut host, lease) {
+            Status::Ready {
                 selection_revision,
                 selection_present: true,
                 ..
             } => break selection_revision,
-            Reply::SelectionPending => {}
-            reply => panic!("selection release refused: {reply:?}"),
+            Status::Pending => {}
+            reading => panic!("selection release refused: {reading:?}"),
         }
         assert!(
             Instant::now() < deadline,
@@ -378,11 +399,10 @@ fn reading_completion_refuses_orphan_motion_resize_and_retired_leases() {
     fn complete(host: &mut DevelopmentPaneHost, lease: Lease) -> Result<(), Refusal> {
         let deadline = Instant::now() + COMPLETION_TIMEOUT;
         loop {
-            match host.request([1; 32], lease.connection, Request::ReadingStatus { lease }) {
-                Reply::ReadingReady { .. } => return Ok(()),
-                Reply::Refused(refusal) => return Err(refusal),
-                Reply::SelectionPending => {}
-                other => panic!("unexpected completion: {other:?}"),
+            match status(host, lease) {
+                Status::Ready { .. } => return Ok(()),
+                Status::Refused => return Err(Refusal::Stale),
+                Status::Pending => {}
             }
             assert!(Instant::now() < deadline);
             std::thread::sleep(Duration::from_millis(5));
@@ -461,5 +481,37 @@ fn reading_completion_refuses_orphan_motion_resize_and_retired_leases() {
         ),
         Reply::Refused(Refusal::Stale)
     ));
+    host.shutdown().unwrap();
+}
+
+#[test]
+fn one_output_check_carries_a_completed_scroll_and_the_screen_that_includes_it() {
+    let mut host = host();
+    let lease = attach(&mut host, 1, true);
+    command(
+        &mut host,
+        1,
+        lease,
+        "stty -echo; i=0; while [ $i -lt 200 ]; do printf 'row-%04d\\n' $i; i=$((i+1)); done; printf 'SCROLL-READY\\n'",
+    );
+    super::tests::await_text(&mut host, 1, lease, "SCROLL-READY");
+    read(&mut host, lease, Operation::Scroll(Scroll::PageUp));
+    let deadline = Instant::now() + COMPLETION_TIMEOUT;
+    let (generation, output) = loop {
+        let cycle = check(&mut host, lease);
+        match cycle.reading {
+            Some(Status::Ready { generation, .. }) => break (generation, cycle.output),
+            Some(Status::Pending) => {}
+            reading => panic!("scroll refused: {reading:?}"),
+        }
+        assert!(Instant::now() < deadline, "scroll did not complete");
+        std::thread::sleep(Duration::from_millis(5));
+    };
+    let Reply::Screen(screen) = output else {
+        panic!("the completed scroll's screen was not in the same check: {output:?}")
+    };
+    assert_eq!(screen.generation, generation);
+    let reading = screen.reading.as_ref().unwrap();
+    assert!(reading.offset_rows + reading.visible_rows < reading.total_rows);
     host.shutdown().unwrap();
 }

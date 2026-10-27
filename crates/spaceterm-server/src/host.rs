@@ -1,4 +1,4 @@
-use crate::{ServerError, protocol, storage::Directory};
+use crate::{ServerError, pane::Handled, protocol, storage::Directory};
 use spaceterm_directories::ServerDirectories;
 use std::{
     ffi::CStr,
@@ -421,136 +421,163 @@ pub(crate) fn serve_admitted(
     }
     let measurement_connection = crate::measurement::scope();
     let mut measurement_sequence = 0;
-    let result = (|| {
-        loop {
-            if environment
-                .stopping
-                .load(std::sync::atomic::Ordering::Acquire)
-                || STOP.load(std::sync::atomic::Ordering::Acquire)
-            {
-                break;
-            }
-            let mut wire = protocol::Wire::terminal(stream)?;
-            let request: crate::pane::Request = wire.read()?;
-            let operation = crate::measurement::Operation::of(&request);
-            if measurement_connection != 0 {
-                measurement_sequence += 1;
-            }
-            let measured = |event| crate::measurement::record(event);
-            measured(crate::measurement::Event::ServerRequestRead {
-                connection: measurement_connection,
-                sequence: measurement_sequence,
-                operation,
-            });
-            let shutdown = matches!(request, crate::pane::Request::Shutdown);
-            let (reply, stopped) = {
-                let mut panes = environment.panes.lock().unwrap_or_else(|e| e.into_inner());
-                measured(crate::measurement::Event::ServerAdmitted {
+    let duplex = protocol::Duplex::new(stream);
+    let ending = std::sync::atomic::AtomicBool::new(false);
+    let deferred = std::sync::atomic::AtomicUsize::new(0);
+    let serving = Serving {
+        client,
+        connection,
+        paired,
+        environment,
+        duplex: &duplex,
+        ending: &ending,
+        measurement_connection,
+    };
+    // Scoped deferral threads finish within their deadlines before disconnect cleanup.
+    let result = std::thread::scope(|scope| {
+        let result = (|| {
+            loop {
+                if serving.stopping() {
+                    break;
+                }
+                let (id, request): (u64, crate::pane::Request) = duplex.receive()?;
+                let operation = crate::measurement::Operation::of(&request);
+                if measurement_connection != 0 {
+                    measurement_sequence += 1;
+                }
+                let sequence = measurement_sequence;
+                let exchange = Exchange {
+                    id,
+                    sequence,
+                    operation,
+                };
+                serving.measured(crate::measurement::Event::ServerRequestRead {
                     connection: measurement_connection,
-                    sequence: measurement_sequence,
+                    sequence,
                     operation,
                 });
-                if environment
-                    .stopping
-                    .load(std::sync::atomic::Ordering::Acquire)
-                    || STOP.load(std::sync::atomic::Ordering::Acquire)
-                {
-                    return Err(ServerError::NotRunning);
-                }
-                if let Some(paired) = paired {
-                    environment
-                        .direct
-                        .as_ref()
-                        .ok_or(ServerError::AuthenticationRefused)?
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .authorized_peer(&paired)?;
-                }
-                let account_administration = shutdown
-                    || matches!(
-                        &request,
-                        crate::pane::Request::Mutate {
-                            mutation: crate::hierarchy::Mutation::EndAllSessions { .. },
-                            ..
-                        }
-                    );
-                let mut reply = if account_administration && paired.is_some() {
-                    // A paired device cannot administer the owning account or end all its Sessions.
-                    crate::pane::Reply::Refused(crate::pane::Refusal::Unsupported)
-                } else if let crate::pane::Request::Direct(request) = request {
-                    let reply = match &environment.direct {
-                        Some(state) => state
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .manage(paired.as_ref(), request),
-                        None => Err(crate::direct::DirectError::StorageUnavailable),
-                    };
-                    crate::pane::Reply::Direct(reply.map(|(reply, retired)| {
-                        if let (Some(client), Some(panes)) = (retired, panes.as_mut()) {
-                            panes.revoked(client);
-                        }
-                        reply
-                    }))
-                } else {
-                    if shutdown {
-                        crate::service::retain_stop(&environment.paths)?;
-                    }
-                    match panes.as_mut() {
-                        Some(panes) => panes.request(client, connection, request),
-                        None if matches!(request, crate::pane::Request::Capabilities) => {
-                            crate::pane::Reply::Capabilities {
-                                development_pane: false,
-                                pane_takeover: false,
-                                interactive_input: false,
-                                key_input_batches: false,
-                                native_effects: false,
-                                reading: false,
-                                graphics: false,
-                                accessibility: false,
-                                directory_recovery: true,
-                                directory_creation: false,
-                                directory_matching: false,
-                                worktree_writes: false,
-                                end_all_sessions: false,
-                                workspace_policy: false,
-                                presentation_changes: false,
+                let shutdown = matches!(request, crate::pane::Request::Shutdown);
+                let (handled, stopped) = {
+                    let mut panes = environment.panes.lock().unwrap_or_else(|e| e.into_inner());
+                    serving.measured(crate::measurement::Event::ServerAdmitted {
+                        connection: measurement_connection,
+                        sequence,
+                        operation,
+                    });
+                    serving.authorized()?;
+                    let account_administration = shutdown
+                        || matches!(
+                            &request,
+                            crate::pane::Request::Mutate {
+                                mutation: crate::hierarchy::Mutation::EndAllSessions { .. },
+                                ..
                             }
+                        );
+                    let handled = if account_administration && paired.is_some() {
+                        // A paired device cannot administer the owning account or end all its Sessions.
+                        Handled::Now(crate::pane::Reply::Refused(
+                            crate::pane::Refusal::Unsupported,
+                        ))
+                    } else if let crate::pane::Request::Direct(request) = request {
+                        let reply = match &environment.direct {
+                            Some(state) => state
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .manage(paired.as_ref(), request),
+                            None => Err(crate::direct::DirectError::StorageUnavailable),
+                        };
+                        Handled::Now(crate::pane::Reply::Direct(reply.map(|(reply, retired)| {
+                            if let (Some(client), Some(panes)) = (retired, panes.as_mut()) {
+                                panes.revoked(client);
+                            }
+                            reply
+                        })))
+                    } else {
+                        if shutdown {
+                            crate::service::retain_stop(&environment.paths)?;
                         }
-                        None => crate::pane::Reply::Refused(crate::pane::Refusal::Unsupported),
+                        match panes.as_mut() {
+                            Some(panes) => match panes.handle(client, connection, request) {
+                                // Past the bound, the reply completes as if its deadline passed,
+                                // so the read loop never waits for a deferral slot.
+                                Handled::Later { finish, .. }
+                                    if deferred.load(std::sync::atomic::Ordering::Acquire)
+                                        >= MAX_DEFERRED =>
+                                {
+                                    Handled::Now(panes.finish(client, connection, finish))
+                                }
+                                handled => handled,
+                            },
+                            None if matches!(request, crate::pane::Request::Capabilities) => {
+                                Handled::Now(crate::pane::Reply::Capabilities {
+                                    development_pane: false,
+                                    pane_takeover: false,
+                                    interactive_input: false,
+                                    key_input_batches: false,
+                                    native_effects: false,
+                                    reading: false,
+                                    graphics: false,
+                                    accessibility: false,
+                                    directory_recovery: true,
+                                    directory_creation: false,
+                                    directory_matching: false,
+                                    worktree_writes: false,
+                                    end_all_sessions: false,
+                                    workspace_policy: false,
+                                    presentation_changes: false,
+                                })
+                            }
+                            None => Handled::Now(crate::pane::Reply::Refused(
+                                crate::pane::Refusal::Unsupported,
+                            )),
+                        }
+                    };
+                    let stopped =
+                        shutdown && matches!(handled, Handled::Now(crate::pane::Reply::Closed));
+                    if stopped {
+                        environment
+                            .stopping
+                            .store(true, std::sync::atomic::Ordering::Release);
                     }
+                    (handled, stopped)
                 };
-                if paired.is_some()
-                    && let crate::pane::Reply::Capabilities {
-                        end_all_sessions, ..
-                    } = &mut reply
-                {
-                    *end_all_sessions = false;
+                match handled {
+                    Handled::Now(reply) => serving.reply(exchange, reply)?,
+                    Handled::Later {
+                        pending,
+                        deadline,
+                        finish,
+                    } => {
+                        deferred.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                        let deferral = Deferral {
+                            exchange,
+                            pending,
+                            deadline,
+                            finish,
+                        };
+                        let serving = &serving;
+                        let deferred = &deferred;
+                        let spawned = std::thread::Builder::new().spawn_scoped(scope, move || {
+                            serving.complete(deferral);
+                            deferred.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+                        });
+                        if spawned.is_err() {
+                            // The closure, and with it the pending reply, was dropped unrun.
+                            deferred.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+                            return Err(ServerError::Protocol);
+                        }
+                    }
                 }
-                let stopped = shutdown && matches!(reply, crate::pane::Reply::Closed);
                 if stopped {
-                    environment
-                        .stopping
-                        .store(true, std::sync::atomic::Ordering::Release);
+                    break;
                 }
-                (reply, stopped)
-            };
-            measured(crate::measurement::Event::ServerCompleted {
-                connection: measurement_connection,
-                sequence: measurement_sequence,
-                operation,
-            });
-            wire.write(&reply)?;
-            measured(crate::measurement::Event::ServerReplyWritten {
-                connection: measurement_connection,
-                sequence: measurement_sequence,
-                operation,
-            });
-            if stopped {
-                break;
             }
-        }
-        Ok(())
-    })();
+            Ok(())
+        })();
+        // Outstanding deferred replies are dropped; the client fences them as unconfirmed.
+        ending.store(true, std::sync::atomic::Ordering::Release);
+        result
+    });
     if let Some(panes) = environment
         .panes
         .lock()
@@ -560,6 +587,114 @@ pub(crate) fn serve_admitted(
         panes.disconnected(connection);
     }
     result
+}
+
+/// Each deferred reply holds one thread for at most one publish wait. A desktop types into
+/// one focused Pane at a time, so this bound is far above legitimate use. Past it, a reply
+/// completes immediately with the outcome of an expired wait instead of queueing.
+const MAX_DEFERRED: usize = 16;
+
+#[derive(Clone, Copy)]
+struct Exchange {
+    id: u64,
+    sequence: u64,
+    operation: crate::measurement::Operation,
+}
+struct Deferral {
+    exchange: Exchange,
+    pending: Box<dyn crate::pane::PendingReply>,
+    deadline: std::time::Instant,
+    finish: u64,
+}
+/// One admitted connection. Requests apply in arrival order under the service lock; replies,
+/// including deferred ones, leave through one serialized writer.
+struct Serving<'a, T> {
+    client: [u8; 32],
+    connection: [u8; 32],
+    paired: Option<crate::direct::host::Peer<'a>>,
+    environment: &'a Environment,
+    duplex: &'a protocol::Duplex<T>,
+    ending: &'a std::sync::atomic::AtomicBool,
+    measurement_connection: u64,
+}
+impl<T: crate::transport::Transport> Serving<'_, T> {
+    fn measured(&self, event: crate::measurement::Event) {
+        crate::measurement::record(event);
+    }
+    fn stopping(&self) -> bool {
+        self.environment
+            .stopping
+            .load(std::sync::atomic::Ordering::Acquire)
+            || STOP.load(std::sync::atomic::Ordering::Acquire)
+    }
+    /// Runs under the service lock before any request or deferred reply is applied.
+    fn authorized(&self) -> Result<(), ServerError> {
+        if self.stopping() {
+            return Err(ServerError::NotRunning);
+        }
+        if let Some(paired) = &self.paired {
+            self.environment
+                .direct
+                .as_ref()
+                .ok_or(ServerError::AuthenticationRefused)?
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .authorized_peer(paired)?;
+        }
+        Ok(())
+    }
+    fn reply(&self, exchange: Exchange, mut reply: crate::pane::Reply) -> Result<(), ServerError> {
+        if self.paired.is_some()
+            && let crate::pane::Reply::Capabilities {
+                end_all_sessions, ..
+            } = &mut reply
+        {
+            *end_all_sessions = false;
+        }
+        self.measured(crate::measurement::Event::ServerCompleted {
+            connection: self.measurement_connection,
+            sequence: exchange.sequence,
+            operation: exchange.operation,
+        });
+        self.duplex.send(exchange.id, &reply)?;
+        self.measured(crate::measurement::Event::ServerReplyWritten {
+            connection: self.measurement_connection,
+            sequence: exchange.sequence,
+            operation: exchange.operation,
+        });
+        Ok(())
+    }
+    /// Waits without the service lock, then finishes under it after the request path's checks.
+    /// A reply that cannot be delivered ends the connection, so no client waits on it. Once the
+    /// connection is ending, its owner closes it after any final reply drains.
+    fn complete(&self, mut deferral: Deferral) {
+        deferral.pending.wait(deferral.deadline);
+        let reply = {
+            let mut panes = self
+                .environment
+                .panes
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if self.ending.load(std::sync::atomic::Ordering::Acquire) || self.authorized().is_err()
+            {
+                None
+            } else {
+                panes
+                    .as_mut()
+                    .map(|panes| panes.finish(self.client, self.connection, deferral.finish))
+            }
+        };
+        drop(deferral.pending);
+        let delivered = match reply {
+            Some(reply) if !self.ending.load(std::sync::atomic::Ordering::Acquire) => {
+                self.reply(deferral.exchange, reply).is_ok()
+            }
+            _ => false,
+        };
+        if !delivered && !self.ending.load(std::sync::atomic::Ordering::Acquire) {
+            self.duplex.close();
+        }
+    }
 }
 
 fn finish_connections(connections: Vec<(std::thread::JoinHandle<()>, UnixStream)>) {
@@ -606,6 +741,87 @@ mod tests {
             .unwrap();
         assert!(matches!(received, crate::pane::Reply::Closed));
         drop(idle_client);
+    }
+
+    #[test]
+    fn a_deferred_reply_never_delays_a_later_reply_on_its_connection() {
+        use crate::pane::{Lease, PaneService, PendingReply, Reply, Request};
+        use std::sync::{Arc, Mutex, mpsc};
+        struct Published(mpsc::Receiver<()>);
+        impl PendingReply for Published {
+            fn wait(&mut self, deadline: std::time::Instant) {
+                let _ = self
+                    .0
+                    .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()));
+            }
+        }
+        struct Service(Option<mpsc::Receiver<()>>);
+        impl PaneService for Service {
+            fn request(&mut self, _: [u8; 32], _: [u8; 32], _: Request) -> Reply {
+                Reply::Unchanged
+            }
+            fn handle(
+                &mut self,
+                device: [u8; 32],
+                connection: [u8; 32],
+                request: Request,
+            ) -> Handled {
+                match (request, self.0.take()) {
+                    (Request::Poll { .. }, Some(published)) => Handled::Later {
+                        pending: Box::new(Published(published)),
+                        // A watchdog only; the test publishes long before it.
+                        deadline: std::time::Instant::now() + std::time::Duration::from_secs(10),
+                        finish: 7,
+                    },
+                    (request, _) => Handled::Now(self.request(device, connection, request)),
+                }
+            }
+            fn finish(&mut self, _: [u8; 32], _: [u8; 32], finish: u64) -> Reply {
+                assert_eq!(finish, 7);
+                Reply::Ended
+            }
+            fn disconnected(&mut self, _: [u8; 32]) {}
+            fn shutdown(&mut self) -> Result<(), ServerError> {
+                Ok(())
+            }
+        }
+        let (publish, published) = mpsc::channel();
+        let root = std::env::temp_dir().join("spaceterm-deferred-reply-unused");
+        let environment = Environment {
+            panes: Arc::new(Mutex::new(Some(Box::new(Service(Some(published)))))),
+            direct: None,
+            paths: Paths {
+                identity: "spaceterm-development".into(),
+                data: root.join("d"),
+                runtime: root.join("r"),
+            },
+            stopping: Arc::default(),
+        };
+        let (mut client, mut server) = UnixStream::pair().unwrap();
+        let worker = std::thread::spawn(move || {
+            serve_admitted(&mut server, [9; 32], "Test".into(), None, &environment)
+        });
+        let mut wire = protocol::Wire::terminal(&mut client).unwrap();
+        let lease = Lease {
+            server: [1; 32],
+            session: [2; 32],
+            control: [3; 32],
+            connection: [4; 32],
+        };
+        wire.send(1, &Request::Poll { lease }).unwrap();
+        wire.send(2, &Request::Inventory).unwrap();
+        // The later request completes while the earlier one still waits for its publication.
+        assert!(matches!(
+            wire.receive::<Reply>().unwrap(),
+            (2, Reply::Unchanged)
+        ));
+        publish.send(()).unwrap();
+        assert!(matches!(
+            wire.receive::<Reply>().unwrap(),
+            (1, Reply::Ended)
+        ));
+        drop(client);
+        assert_eq!(worker.join().unwrap(), Err(ServerError::Protocol));
     }
 
     #[test]
@@ -1148,22 +1364,25 @@ mod startup_tests {
             for index in 0..16 {
                 protocol::Wire::terminal(&mut slow)
                     .unwrap()
-                    .write(&if graphics {
-                        Request::GraphicsChunk {
-                            lease,
-                            image: crate::pane::graphics::ImageKey {
-                                image_id: 1,
+                    .send(
+                        index as u64,
+                        &if graphics {
+                            Request::GraphicsChunk {
+                                lease,
+                                image: crate::pane::graphics::ImageKey {
+                                    image_id: 1,
+                                    generation: 1,
+                                },
+                                offset: index * crate::pane::graphics::CHUNK_BYTES,
+                            }
+                        } else {
+                            Request::SelectionChunk {
+                                lease,
                                 generation: 1,
-                            },
-                            offset: index * crate::pane::graphics::CHUNK_BYTES,
-                        }
-                    } else {
-                        Request::SelectionChunk {
-                            lease,
-                            generation: 1,
-                            offset: index * crate::pane::reading::SELECTION_CHUNK_BYTES,
-                        }
-                    })
+                                offset: index * crate::pane::reading::SELECTION_CHUNK_BYTES,
+                            }
+                        },
+                    )
                     .unwrap();
             }
             let mut stream = UnixStream::connect(fixture.paths.socket()).unwrap();
@@ -1296,17 +1515,22 @@ mod startup_tests {
             &[1],
         )
         .unwrap();
-        let body = serde_json::to_vec(&Request::Attach {
-            create: true,
-            size: PaneSize {
-                columns: 80,
-                rows: 24,
-                cell_width: 8,
-                cell_height: 18,
+        // A terminal frame body is its request ID followed by the request.
+        let mut body = 0_u64.to_be_bytes().to_vec();
+        serde_json::to_writer(
+            &mut body,
+            &Request::Attach {
+                create: true,
+                size: PaneSize {
+                    columns: 80,
+                    rows: 24,
+                    cell_width: 8,
+                    cell_height: 18,
+                },
+                resume: None,
+                style: None,
             },
-            resume: None,
-            style: None,
-        })
+        )
         .unwrap();
         pending
             .write_all(&(body.len() as u32).to_be_bytes())
@@ -1323,8 +1547,10 @@ mod startup_tests {
         )
         .unwrap();
         let mut wire = protocol::Wire::terminal(&mut shutdown).unwrap();
-        wire.write(&Request::Shutdown).unwrap();
-        assert!(matches!(wire.read::<Reply>().unwrap(), Reply::Closed));
+        assert!(matches!(
+            wire.call::<Reply>(0, &Request::Shutdown).unwrap(),
+            Reply::Closed
+        ));
         let deadline = Instant::now() + Duration::from_secs(3);
         while !fixture.root.join("stopped").exists() {
             assert!(Instant::now() < deadline, "server did not finish shutdown");
@@ -1334,7 +1560,7 @@ mod startup_tests {
         assert!(
             protocol::Wire::terminal(&mut pending)
                 .unwrap()
-                .read::<Reply>()
+                .receive::<Reply>()
                 .is_err()
         );
         loop {

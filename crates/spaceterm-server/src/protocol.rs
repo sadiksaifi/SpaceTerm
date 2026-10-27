@@ -7,7 +7,8 @@ use ring::rand::{SecureRandom, SystemRandom};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 #[cfg(test)]
 use std::io::Write;
-use std::os::unix::net::UnixStream;
+use std::os::{fd::RawFd, unix::net::UnixStream};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 pub(crate) const MAJOR: u16 = 1;
@@ -132,36 +133,174 @@ impl<'a> Wire<'a> {
         Ok(bytes)
     }
     pub(crate) fn write(&mut self, value: &impl Serialize) -> Result<(), ServerError> {
-        let bytes = serde_json::to_vec(value).map_err(|_| ServerError::Protocol)?;
-        self.write_frame(&bytes)
+        self.write_value(&[], value)
     }
+    /// Writes raw bytes as one untagged frame; only byte-level transport tests need this.
+    #[cfg(test)]
     pub(crate) fn write_frame(&mut self, bytes: &[u8]) -> Result<(), ServerError> {
         if bytes.len() > self.max_frame {
             return Err(ServerError::Protocol);
         }
-        let prefix = (bytes.len() as u32).to_be_bytes();
-        for mut rest in [prefix.as_slice(), bytes] {
-            while !rest.is_empty() {
-                self.ready(libc::POLLOUT)?;
-                let count = match self.stream.write(rest) {
-                    Ok(count) => count,
-                    Err(error)
-                        if matches!(
-                            error.kind(),
-                            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
-                        ) =>
-                    {
-                        continue;
-                    }
-                    Err(_) => return Err(ServerError::Protocol),
-                };
-                if count == 0 {
-                    return Err(ServerError::Protocol);
+        let mut frame = Vec::with_capacity(4 + bytes.len());
+        frame.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+        frame.extend_from_slice(bytes);
+        self.write_all(&frame)
+    }
+    /// Writes one terminal frame. Its request ID correlates the reply on a pipelined connection.
+    pub(crate) fn send(&mut self, id: u64, value: &impl Serialize) -> Result<(), ServerError> {
+        self.write_value(&id.to_be_bytes(), value)
+    }
+    /// Reads one terminal frame with its request ID, leaving the body for its owner to decode.
+    pub(crate) fn receive_frame(&mut self) -> Result<(u64, Vec<u8>), ServerError> {
+        let mut header = [0; 12];
+        self.read_exact(&mut header)?;
+        let (size, id) = header.split_at(4);
+        let size = (u32::from_be_bytes(size.try_into().map_err(|_| ServerError::Protocol)?)
+            as usize)
+            .checked_sub(id.len())
+            .filter(|size| *size <= self.max_frame)
+            .ok_or(ServerError::Protocol)?;
+        let id = u64::from_be_bytes(id.try_into().map_err(|_| ServerError::Protocol)?);
+        let mut bytes = vec![0; size];
+        self.read_exact(&mut bytes)?;
+        Ok((id, bytes))
+    }
+    pub(crate) fn receive<T: DeserializeOwned>(&mut self) -> Result<(u64, T), ServerError> {
+        let (id, bytes) = self.receive_frame()?;
+        Ok((
+            id,
+            serde_json::from_slice(&bytes).map_err(|_| ServerError::Protocol)?,
+        ))
+    }
+    /// One unshared exchange on a connection with no other request outstanding.
+    pub(crate) fn call<T: DeserializeOwned>(
+        &mut self,
+        id: u64,
+        request: &impl Serialize,
+    ) -> Result<T, ServerError> {
+        self.send(id, request)?;
+        match self.receive()? {
+            (replied, reply) if replied == id => Ok(reply),
+            _ => Err(ServerError::Protocol),
+        }
+    }
+    /// Serializes after a reserved header, so the frame leaves in one write without a copy.
+    /// A small frame then crosses WSS as one message and never waits for Nagle buffering.
+    fn write_value(&mut self, tag: &[u8], value: &impl Serialize) -> Result<(), ServerError> {
+        let header = 4 + tag.len();
+        let mut frame = vec![0; header];
+        serde_json::to_writer(&mut frame, value).map_err(|_| ServerError::Protocol)?;
+        if frame.len() - header > self.max_frame {
+            return Err(ServerError::Protocol);
+        }
+        let size = u32::try_from(frame.len() - 4).map_err(|_| ServerError::Protocol)?;
+        frame[..4].copy_from_slice(&size.to_be_bytes());
+        frame[4..header].copy_from_slice(tag);
+        self.write_all(&frame)
+    }
+    fn write_all(&mut self, mut rest: &[u8]) -> Result<(), ServerError> {
+        while !rest.is_empty() {
+            self.ready(libc::POLLOUT)?;
+            let count = match self.stream.write(rest) {
+                Ok(count) => count,
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                    ) =>
+                {
+                    continue;
                 }
-                rest = &rest[count..];
+                Err(_) => return Err(ServerError::Protocol),
+            };
+            if count == 0 {
+                return Err(ServerError::Protocol);
             }
+            rest = &rest[count..];
         }
         Ok(())
+    }
+}
+
+impl<T: Transport + ?Sized> Transport for &mut T {
+    fn read_fd(&self) -> RawFd {
+        (**self).read_fd()
+    }
+    fn write_fd(&self) -> RawFd {
+        (**self).write_fd()
+    }
+}
+
+/// One framed reader and one framed writer share a transport. Each side waits for readiness
+/// without the I/O lock, so a reply still arriving never delays a request, or the reverse.
+pub(crate) struct Duplex<T> {
+    io: Mutex<T>,
+    read_fd: RawFd,
+    write_fd: RawFd,
+    reading: Mutex<()>,
+    writing: Mutex<()>,
+}
+struct Side<'a, T>(&'a Duplex<T>);
+impl<T: Transport> Duplex<T> {
+    pub(crate) fn new(stream: T) -> Self {
+        Self {
+            read_fd: stream.read_fd(),
+            write_fd: stream.write_fd(),
+            io: Mutex::new(stream),
+            reading: Mutex::new(()),
+            writing: Mutex::new(()),
+        }
+    }
+    pub(crate) fn send(&self, id: u64, value: &impl Serialize) -> Result<(), ServerError> {
+        let _writing = self.writing.lock().unwrap_or_else(|e| e.into_inner());
+        Wire::terminal(&mut Side(self))?.send(id, value)
+    }
+    #[cfg_attr(
+        not(feature = "client"),
+        allow(dead_code, reason = "clients route reply frames by request ID")
+    )]
+    pub(crate) fn receive_frame(&self) -> Result<(u64, Vec<u8>), ServerError> {
+        let _reading = self.reading.lock().unwrap_or_else(|e| e.into_inner());
+        Wire::terminal(&mut Side(self))?.receive_frame()
+    }
+    pub(crate) fn receive<R: DeserializeOwned>(&self) -> Result<(u64, R), ServerError> {
+        let _reading = self.reading.lock().unwrap_or_else(|e| e.into_inner());
+        Wire::terminal(&mut Side(self))?.receive()
+    }
+    /// Ends both directions for every waiting side and the peer. Descriptors stay open
+    /// until the owner drops, so no waiting side can observe a reused descriptor.
+    pub(crate) fn close(&self) {
+        for fd in [self.read_fd, self.write_fd] {
+            // SAFETY: shutdown only changes the state of a descriptor this duplex keeps open.
+            unsafe { libc::shutdown(fd, libc::SHUT_RDWR) };
+        }
+    }
+}
+impl<T: Transport> std::io::Read for Side<'_, T> {
+    fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+        std::io::Read::read(
+            &mut *self.0.io.lock().unwrap_or_else(|e| e.into_inner()),
+            bytes,
+        )
+    }
+}
+impl<T: Transport> std::io::Write for Side<'_, T> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        std::io::Write::write(
+            &mut *self.0.io.lock().unwrap_or_else(|e| e.into_inner()),
+            bytes,
+        )
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        std::io::Write::flush(&mut *self.0.io.lock().unwrap_or_else(|e| e.into_inner()))
+    }
+}
+impl<T: Transport> Transport for Side<'_, T> {
+    fn read_fd(&self) -> RawFd {
+        self.0.read_fd
+    }
+    fn write_fd(&self) -> RawFd {
+        self.0.write_fd
     }
 }
 
@@ -363,6 +502,44 @@ mod tests {
             admit_server(&mut server, &[7; 32], "spaceterm-development"),
             Err(ServerError::Protocol)
         );
+    }
+    #[test]
+    fn a_small_frame_leaves_in_one_write() {
+        // One write lets the WSS bridge forward the frame as one message and TLS record.
+        struct Counted(UnixStream, usize);
+        impl std::io::Read for Counted {
+            fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+                std::io::Read::read(&mut self.0, bytes)
+            }
+        }
+        impl Write for Counted {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.1 += 1;
+                self.0.write(bytes)
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                self.0.flush()
+            }
+        }
+        impl Transport for Counted {
+            fn read_fd(&self) -> RawFd {
+                self.0.read_fd()
+            }
+            fn write_fd(&self) -> RawFd {
+                self.0.write_fd()
+            }
+        }
+        let (client, mut server) = UnixStream::pair().unwrap();
+        let mut client = Counted(client, 0);
+        Wire::terminal(&mut client)
+            .unwrap()
+            .write(&crate::pane::Request::Inventory)
+            .unwrap();
+        assert_eq!(client.1, 1);
+        assert!(matches!(
+            Wire::terminal(&mut server).unwrap().read().unwrap(),
+            crate::pane::Request::Inventory
+        ));
     }
     #[test]
     fn stalled_connections_obey_an_absolute_deadline() {

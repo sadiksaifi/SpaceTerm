@@ -258,13 +258,22 @@ fn await_effect(
 ) -> Result<effects::Request, Box<dyn Error>> {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
-        match c.exchange(&Request::NativeEffects { lease, generation })? {
-            Reply::NativeEffects {
+        let Reply::Cycle(cycle) = c.exchange(&Request::PollChanges {
+            lease,
+            base: None,
+            effects: Some(generation),
+            reading: false,
+        })?
+        else {
+            return Err("native effects missing".into());
+        };
+        match cycle.effects {
+            Some(effects::Poll {
                 request: Some(request),
                 ..
-            } => return Ok(request),
-            Reply::NativeEffects { request: None, .. } => {}
-            _ => return Err("native effects missing".into()),
+            }) => return Ok(request),
+            Some(effects::Poll { request: None, .. }) => {}
+            None => return Err("native effects missing".into()),
         }
         if Instant::now() >= deadline {
             return Err("native effect timed out".into());

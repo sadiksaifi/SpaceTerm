@@ -657,6 +657,8 @@ fn end_all_sessions_drops_output_and_fences_old_input_effects_and_snapshots() {
         Request::PollChanges {
             lease: old,
             base: Some(1),
+            effects: Some(1),
+            reading: true,
         },
         Request::Focus {
             lease: old,
@@ -676,10 +678,6 @@ fn end_all_sessions_drops_output_and_fences_old_input_effects_and_snapshots() {
                 confirm: true,
             },
         },
-        Request::NativeEffects {
-            lease: old,
-            generation: 1,
-        },
         Request::CompleteClipboard {
             lease: old,
             generation: 1,
@@ -691,7 +689,6 @@ fn end_all_sessions_drops_output_and_fences_old_input_effects_and_snapshots() {
             generation: 1,
             offset: 0,
         },
-        Request::ReadingStatus { lease: old },
         Request::Resize {
             lease: old,
             size: size(),

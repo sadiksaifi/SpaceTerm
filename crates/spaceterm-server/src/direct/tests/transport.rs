@@ -280,7 +280,7 @@ fn mixed_workload(screens: usize, keys: usize, inventories: usize, emit: bool) {
         let mut bulk_at_input = Vec::with_capacity(keys);
         for _ in 0..screens + keys + inventories {
             let mut wire = checked(Wire::terminal(&mut server), "open mixed server exchange");
-            let request: Request = checked(wire.read(), "read mixed request");
+            let (id, request): (u64, Request) = checked(wire.receive(), "read mixed request");
             let (operation, reply) = match request {
                 Request::Poll { lease: target } => {
                     assert!(target == lease(), "mixed screen lease changed");
@@ -317,7 +317,7 @@ fn mixed_workload(screens: usize, keys: usize, inventories: usize, emit: bool) {
                 _ => panic!("unexpected mixed request"),
             };
             let started = Instant::now();
-            checked(wire.write(&reply), "write mixed reply");
+            checked(wire.send(id, &reply), "write mixed reply");
             writes.push((operation, started.elapsed()));
         }
         let expected: Vec<_> = (0..keys)
@@ -449,6 +449,85 @@ fn shared_wss_stream_preserves_ordered_inputs_while_large_replies_complete() {
 }
 
 #[test]
+fn a_small_request_crosses_the_shared_wss_stream_while_a_large_reply_is_outstanding() {
+    const ROUNDS: usize = 8;
+    let (client, mut server) = bridge_pair();
+    let (outstanding, large_reply_outstanding) = mpsc::sync_channel(ROUNDS);
+    let peer = thread::spawn(move || {
+        for round in 0..ROUNDS {
+            let mut wire = checked(Wire::terminal(&mut server), "open outstanding exchange");
+            let (poll, request): (u64, Request) =
+                checked(wire.receive(), "read outstanding screen request");
+            assert!(
+                matches!(request, Request::Poll { .. }),
+                "screen request changed"
+            );
+            checked(outstanding.send(()), "announce outstanding screen");
+            // Under one-call-at-a-time admission this read waits until the watchdog.
+            let (key, request): (u64, Request) =
+                checked(wire.receive(), "read input behind outstanding screen");
+            assert!(
+                matches!(request, Request::Keys { .. }),
+                "input request changed"
+            );
+            checked(
+                wire.send(poll, &Reply::Screen(Box::new(screen(round as u64 + 1)))),
+                "write outstanding screen",
+            );
+            checked(wire.send(key, &Reply::Unchanged), "write input reply");
+        }
+        checked(server.finish_reply(), "drain outstanding final reply");
+    });
+    let shared = SharedPaneConnection::default();
+    let mut bulk = checked(
+        shared.connect(|| Ok(PaneConnection::new(client, false))),
+        "open outstanding shared transport",
+    );
+    let mut input = checked(
+        shared.connect(|| panic!("input opened another transport")),
+        "share outstanding input transport",
+    );
+    let bulk = thread::spawn(move || {
+        for round in 0..ROUNDS {
+            let reply = checked(
+                bulk.exchange(&Request::Poll { lease: lease() }),
+                "outstanding screen exchange",
+            );
+            assert!(
+                matches!(reply, Reply::Screen(actual) if actual.generation == round as u64 + 1),
+                "outstanding screen reply changed"
+            );
+        }
+    });
+    for index in 0..ROUNDS {
+        checked(
+            large_reply_outstanding.recv_timeout(WATCHDOG),
+            "wait for outstanding screen",
+        );
+        let reply = checked(
+            input.exchange(&Request::Keys {
+                lease: lease(),
+                generation: 1,
+                keys: vec![pane::Key {
+                    physical: 0,
+                    action: 0,
+                    logical: "text-input".into(),
+                    text: Some(format!("k{index:04}")),
+                    unshifted: None,
+                    modifiers: 0,
+                    consumed: 0,
+                    option_as_alt: false,
+                }],
+            }),
+            "input behind outstanding screen",
+        );
+        assert!(matches!(reply, Reply::Unchanged), "input was not accepted");
+    }
+    checked(bulk.join(), "join outstanding screen worker");
+    checked(peer.join(), "join outstanding server worker");
+}
+
+#[test]
 #[ignore = "supporting latency samples require a parent-owned isolated pipeline"]
 fn measure_production_wss_small_frames_and_shared_large_replies() {
     const WARMUP: usize = 16;
@@ -519,6 +598,65 @@ fn split_wss_round_trips_meet_isolated_release_latency_budget() {
     assert!(
         p95 < BUDGET,
         "isolated Release split-frame p95 must stay below the budget: samples={} p95_us={} budget_us={}",
+        samples.len(),
+        p95.as_micros(),
+        BUDGET.as_micros()
+    );
+}
+
+#[test]
+#[ignore = "requires an isolated pipeline on the native host and --release"]
+fn large_wss_replies_cross_the_bridge_within_isolated_release_budget() {
+    const WARMUP: usize = 4;
+    const SAMPLES: usize = 32;
+    const REPLY_BYTES: usize = 1024 * 1024;
+    // A 1 MiB reply is about one 160x48 full screen. The former bridge moved at most 8 KiB per
+    // 2 ms idle sleep on macOS, about 3.6 MiB/s or 280 ms per reply. Two loopback TLS bridges
+    // move it in a few milliseconds; the budget stays below one 30 ms visible poll interval.
+    const BUDGET: Duration = Duration::from_millis(25);
+
+    let (mut client, mut server) = bridge_pair();
+    let reply: Vec<u8> = (0..REPLY_BYTES).map(|i| (i % 251) as u8).collect();
+    let expected = reply.clone();
+    let peer = thread::spawn(move || {
+        for _ in 0..WARMUP + SAMPLES {
+            let mut wire = checked(Wire::terminal(&mut server), "open large server frame");
+            let request = checked(wire.read_frame(), "read large request");
+            assert!(request == [17, 97, 239], "large request changed");
+            checked(wire.write_frame(&reply), "write large reply");
+        }
+        checked(server.finish_reply(), "drain large final reply");
+    });
+    let mut samples = Vec::with_capacity(SAMPLES);
+    for index in 0..WARMUP + SAMPLES {
+        let started = Instant::now();
+        let mut wire = checked(Wire::terminal(&mut client), "open large client frame");
+        checked(wire.write_frame(&[17, 97, 239]), "write large request");
+        let bytes = checked(wire.read_frame(), "read large reply");
+        let duration = started.elapsed();
+        assert!(bytes == expected, "large reply bytes changed");
+        if index >= WARMUP {
+            samples.push(duration);
+        }
+    }
+    checked(peer.join(), "join large reply peer");
+    for (index, duration) in samples.iter().enumerate() {
+        eprintln!(
+            "DIAGNOSTIC wss-large-budget sample={index} round_trip_us={}",
+            duration.as_micros()
+        );
+    }
+    samples.sort_unstable();
+    let p95 = samples[(samples.len() * 95).div_ceil(100) - 1];
+    eprintln!(
+        "DIAGNOSTIC wss-large-budget samples={} reply_bytes={REPLY_BYTES} p95_us={} budget_us={}",
+        samples.len(),
+        p95.as_micros(),
+        BUDGET.as_micros()
+    );
+    assert!(
+        p95 < BUDGET,
+        "isolated Release 1 MiB reply p95 must stay below the budget: samples={} p95_us={} budget_us={}",
         samples.len(),
         p95.as_micros(),
         BUDGET.as_micros()

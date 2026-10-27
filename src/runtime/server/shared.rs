@@ -385,7 +385,7 @@ impl SharedWorkspaceHost {
             .start_directory(device, connection, size, style, directory)
             .map(|lease| Reply::Attached { lease })
     }
-    fn handle(&mut self, device: Id, connection: Id, request: Request) -> Result<Reply, Refusal> {
+    fn dispatch(&mut self, device: Id, connection: Id, request: Request) -> Result<Reply, Refusal> {
         if matches!(request, Request::Inventory) {
             self.repositories.subscribe(connection);
         }
@@ -476,7 +476,7 @@ impl SharedWorkspaceHost {
                             if PaneTarget::from(pane.lease) != target {
                                 return Err(Refusal::Stale);
                             }
-                            host.handle(
+                            host.dispatch(
                                 device,
                                 connection,
                                 Request::TakeOver {
@@ -705,7 +705,7 @@ impl SharedWorkspaceHost {
                 style,
             } => {
                 let id = self.legacy_pane(create)?;
-                self.pane_host(id)?.handle(
+                self.pane_host(id)?.dispatch(
                     device,
                     connection,
                     Request::Attach {
@@ -723,7 +723,7 @@ impl SharedWorkspaceHost {
                 style,
             } => {
                 let id = self.legacy_pane(create)?;
-                self.pane_host(id)?.handle(
+                self.pane_host(id)?.dispatch(
                     device,
                     connection,
                     Request::Select {
@@ -740,14 +740,12 @@ impl SharedWorkspaceHost {
                     Request::Accessibility { lease, .. }
                     | Request::EndAccessibilityDemand { lease }
                     | Request::AccessibilitySelection { lease, .. }
-                    | Request::ReadingStatus { lease }
                     | Request::Read { lease, .. }
                     | Request::GraphicsChunk { lease, .. }
                     | Request::SelectionChunk { lease, .. }
                     | Request::Poll { lease }
                     | Request::PollChanges { lease, .. }
                     | Request::PresentationDemand { lease, .. }
-                    | Request::NativeEffects { lease, .. }
                     | Request::CompleteClipboard { lease, .. }
                     | Request::Focus { lease, .. }
                     | Request::Input { lease, .. }
@@ -789,7 +787,7 @@ impl SharedWorkspaceHost {
                             Refusal::Missing
                         }
                     })?;
-                let reply = host.handle(device, connection, request)?;
+                let reply = host.dispatch(device, connection, request)?;
                 self.synchronize()?;
                 Ok(reply)
             }
@@ -830,8 +828,34 @@ impl PaneService for SharedWorkspaceHost {
         self.prototype.admitted(client, name);
     }
     fn request(&mut self, device: Id, connection: Id, request: Request) -> Reply {
-        self.handle(device, connection, request)
+        self.dispatch(device, connection, request)
             .unwrap_or_else(Reply::Refused)
+    }
+    fn handle(&mut self, device: Id, connection: Id, request: Request) -> Handled {
+        let keys = match &request {
+            Request::Keys {
+                lease, generation, ..
+            } => Some((*lease, *generation)),
+            _ => None,
+        };
+        let reply = self.request(device, connection, request);
+        let Some((lease, generation)) = keys.filter(|_| matches!(reply, Reply::Unchanged)) else {
+            return Handled::Now(reply);
+        };
+        match self
+            .panes
+            .values_mut()
+            .find(|host| host.pane.as_ref().is_some_and(|pane| pane.lease == lease))
+        {
+            Some(host) => host.await_echo(device, lease, generation),
+            None => Handled::Now(reply),
+        }
+    }
+    fn finish(&mut self, device: Id, connection: Id, finish: u64) -> Reply {
+        self.panes
+            .values_mut()
+            .find_map(|host| host.finish_echo(device, connection, finish))
+            .unwrap_or(Reply::Unchanged)
     }
     fn disconnected(&mut self, connection: Id) {
         self.cancel_worktree_reads(connection);

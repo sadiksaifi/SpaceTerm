@@ -20,8 +20,13 @@ use std::{
 use tungstenite::{Message, WebSocket, protocol::WebSocketConfig};
 
 const CHUNK: usize = 64 * 1024;
+// Both bridge ends hold two chunks, so one WSS message never waits on a reader's small
+// default buffer. macOS defaults local stream sockets to 8 KiB.
+const BRIDGE_BUFFER: usize = 2 * CHUNK;
 const HANDSHAKE_LIMIT: Duration = Duration::from_secs(5);
 const STALL_LIMIT: Duration = Duration::from_secs(10);
+// Readiness or bridge shutdown ends an idle wait. The bound only paces stop and stall checks.
+const IDLE_WAIT: Duration = Duration::from_millis(100);
 
 pub(super) enum Socket {
     Client(StreamOwned<ClientConnection, TcpStream>),
@@ -32,6 +37,13 @@ impl Socket {
         match self {
             Self::Client(s) => &s.sock,
             Self::Server(s) => &s.sock,
+        }
+    }
+    /// Rustls finishes pending records before it reads, so pending output gates input too.
+    fn wants_write(&self) -> bool {
+        match self {
+            Self::Client(s) => s.conn.wants_write(),
+            Self::Server(s) => s.conn.wants_write(),
         }
     }
 }
@@ -277,6 +289,12 @@ pub(super) struct Bridge {
 impl Bridge {
     pub(super) fn start(mut ws: Ws) -> Result<Self, DirectError> {
         let (stream, mut bridge) = UnixStream::pair().map_err(|_| DirectError::Transport)?;
+        for end in [&stream, &bridge] {
+            let end = socket2::SockRef::from(end);
+            end.set_send_buffer_size(BRIDGE_BUFFER)
+                .and_then(|()| end.set_recv_buffer_size(BRIDGE_BUFFER))
+                .map_err(|_| DirectError::Transport)?;
+        }
         bridge
             .set_nonblocking(true)
             .map_err(|_| DirectError::Transport)?;
@@ -358,6 +376,28 @@ impl crate::transport::Transport for Bridge {
 fn retryable(error: &tungstenite::Error) -> bool {
     matches!(error, tungstenite::Error::Io(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted))
 }
+fn blocked(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+    )
+}
+/// Waits until one descriptor is ready for an event that blocked this iteration, a peer
+/// shuts it down, or the idle bound passes.
+fn wait(ready: &mut [libc::pollfd]) -> Result<(), DirectError> {
+    // SAFETY: poll receives writable entries for live descriptors retained for the call.
+    let result = unsafe {
+        libc::poll(
+            ready.as_mut_ptr(),
+            ready.len() as libc::nfds_t,
+            IDLE_WAIT.as_millis() as libc::c_int,
+        )
+    };
+    if result < 0 && std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted {
+        return Err(DirectError::Transport);
+    }
+    Ok(())
+}
 fn pump(
     ws: &mut Ws,
     bridge: &mut UnixStream,
@@ -371,13 +411,16 @@ fn pump(
     let mut receive_stalled = None;
     let mut buffer = vec![0; CHUNK];
     let mut drain_started = None;
-    let mut idle_sleeps = 0;
+    // Counts idle poll waits that ended before the next progress.
+    let mut idle_waits = 0;
     while !stop.load(Ordering::Acquire) {
         let finishing = draining.load(Ordering::Acquire);
         if finishing && drain_started.get_or_insert_with(Instant::now).elapsed() > STALL_LIMIT {
             return Err(DirectError::Transport);
         }
         let mut progress = false;
+        let mut bridge_events = 0;
+        let mut socket_readable = false;
         if outgoing {
             match ws.flush() {
                 Ok(()) => {
@@ -405,11 +448,7 @@ fn pump(
                     send_stalled = Some(Instant::now());
                     progress = true;
                 }
-                Err(e)
-                    if matches!(
-                        e.kind(),
-                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
-                    ) => {}
+                Err(e) if blocked(&e) => bridge_events |= libc::POLLIN,
                 Err(_) => return Err(DirectError::Transport),
             }
         }
@@ -426,11 +465,7 @@ fn pump(
                     offset += count;
                     progress = true;
                 }
-                Err(e)
-                    if matches!(
-                        e.kind(),
-                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
-                    ) => {}
+                Err(e) if blocked(&e) => bridge_events |= libc::POLLOUT,
                 Err(_) => return Err(DirectError::Transport),
             }
         } else {
@@ -453,7 +488,9 @@ fn pump(
                 }
                 Ok(Message::Close(_)) => return Ok(()),
                 Ok(_) => return Err(DirectError::InvalidRequest),
-                Err(e) if retryable(&e) => {}
+                // Tungstenite and rustls report WouldBlock only after their buffered input
+                // is exhausted, so socket readiness is the next possible progress.
+                Err(e) if retryable(&e) => socket_readable = true,
                 Err(_) => return Err(DirectError::Transport),
             }
         }
@@ -462,13 +499,40 @@ fn pump(
         {
             return Err(DirectError::Transport);
         }
-        if !progress {
-            std::thread::sleep(Duration::from_millis(2));
-            idle_sleeps += 1;
-        } else if idle_sleeps > 0 {
-            crate::measurement::record(crate::measurement::Event::BridgeWoke { idle_sleeps });
-            idle_sleeps = 0;
+        if progress {
+            if idle_waits > 0 {
+                crate::measurement::record(crate::measurement::Event::BridgeWoke { idle_waits });
+                idle_waits = 0;
+            }
+            continue;
         }
+        if !outgoing && ws.get_ref().wants_write() {
+            // A read can leave TLS output, such as a pong, pending. Flush it like a message.
+            outgoing = true;
+            send_stalled.get_or_insert_with(Instant::now);
+            continue;
+        }
+        // Pending TLS output blocks reads as well, so a blocked flush waits only for space.
+        let socket_events = if outgoing {
+            libc::POLLOUT
+        } else if socket_readable {
+            libc::POLLIN
+        } else {
+            0
+        };
+        // Only descriptors with blocked work join the wait; poll ignores negative entries. A
+        // hangup on any other descriptor cannot advance this iteration and would end every wait.
+        let entry = |fd: RawFd, events| libc::pollfd {
+            fd: if events == 0 { -1 } else { fd },
+            events,
+            revents: 0,
+        };
+        let mut ready = [
+            entry(bridge.as_raw_fd(), bridge_events),
+            entry(ws.get_ref().tcp().as_raw_fd(), socket_events),
+        ];
+        wait(&mut ready)?;
+        idle_waits += 1;
     }
     Ok(())
 }

@@ -54,6 +54,13 @@ pub struct Request {
     pub effect: Effect,
 }
 
+/// The native effect one output check took for the focus generation it named.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Poll {
+    pub request: Option<Request>,
+    pub hidden_input: bool,
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub enum Completion {
     Denied,

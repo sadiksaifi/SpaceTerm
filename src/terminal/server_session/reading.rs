@@ -1,6 +1,6 @@
 //! Keeps transport work off native Copy and Services callbacks.
 use super::*;
-use pane::reading::{MAX_SELECTION_BYTES, Operation, SELECTION_CHUNK_BYTES};
+use pane::reading::{MAX_SELECTION_BYTES, Operation, SELECTION_CHUNK_BYTES, Status};
 use std::collections::VecDeque;
 
 /// One queued reading operation and the identity its answer settles.
@@ -229,11 +229,11 @@ pub(super) fn split_wheel(mut wheel: pane::Wheel) -> Vec<pane::Wheel> {
 pub(super) enum Next {
     /// Nothing until the next output check.
     Idle,
-    /// The server is still applying reading work; recheck before the next output check.
+    /// The server is still applying reading work; check output again soon.
     Recheck,
     /// More ready work follows at once.
     Continue,
-    /// Reading completed against a newer screen; check output now.
+    /// Check output now: the server accepted reading work, or completed it against a newer screen.
     Refresh,
 }
 
@@ -282,63 +282,71 @@ impl Reader {
         self.total = None;
     }
 
-    /// Advances reading by at most one exchange of each kind and says when to continue.
+    /// Whether an accepted operation awaits its completion, which the next output check asks.
+    pub(super) fn awaiting(&self) -> bool {
+        self.awaiting_read
+    }
+
+    /// Applies the completion status an output check carried, after that check's screen.
+    pub(super) fn settle(&mut self, state: &DevelopmentPaneState, status: Status) -> Next {
+        match status {
+            Status::Pending => Next::Recheck,
+            // The worker refused the admitted operation. It is not retried.
+            Status::Refused => {
+                self.awaiting_read = false;
+                if std::mem::take(&mut self.awaiting_gesture) {
+                    state
+                        .reading
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .abandon_gesture();
+                }
+                Next::Continue
+            }
+            Status::Ready {
+                generation,
+                selection_revision,
+                selection_present,
+            } => {
+                let Some(mapping) = self
+                    .latest
+                    .filter(|mapping| mapping.selection == selection_revision)
+                else {
+                    // Its barrier names a screen this worker has not received yet.
+                    return Next::Refresh;
+                };
+                self.awaiting_read = false;
+                self.awaiting_gesture = false;
+                let revision = {
+                    let mut reading = state.reading.lock().unwrap_or_else(|e| e.into_inner());
+                    reading.selection_present = selection_present;
+                    reading.revision
+                };
+                self.target = selection_present.then_some((mapping, revision));
+                self.bytes.clear();
+                self.total = None;
+                // The completed operation's screen follows without awaiting an output check.
+                if generation != mapping.wire {
+                    Next::Refresh
+                } else {
+                    Next::Idle
+                }
+            }
+        }
+    }
+
+    /// Advances reading by at most one exchange of each kind and says when to continue. While
+    /// an accepted operation awaits completion, nothing else is sent.
     pub(super) fn poll(
         &mut self,
         state: &DevelopmentPaneState,
         lease: Lease,
         exchange: &mut impl FnMut(&Request) -> Result<Reply, ServerError>,
     ) -> Result<Next, ServerError> {
-        let mut next = Next::Idle;
         if self.awaiting_read {
-            match exchange(&Request::ReadingStatus { lease }) {
-                Ok(Reply::SelectionPending) => return Ok(Next::Recheck),
-                // The worker refused the admitted operation. It is not retried.
-                Err(ServerError::StaleControl) => {
-                    self.awaiting_read = false;
-                    if std::mem::take(&mut self.awaiting_gesture) {
-                        state
-                            .reading
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .abandon_gesture();
-                    }
-                    return Ok(Next::Continue);
-                }
-                Err(error) => return Err(error),
-                Ok(reply) => match reply {
-                    Reply::ReadingReady {
-                        generation,
-                        selection_revision,
-                        selection_present,
-                    } => {
-                        let Some(mapping) = self
-                            .latest
-                            .filter(|mapping| mapping.selection == selection_revision)
-                        else {
-                            // Its barrier names a screen this worker has not received yet.
-                            return Ok(Next::Refresh);
-                        };
-                        self.awaiting_read = false;
-                        self.awaiting_gesture = false;
-                        let revision = {
-                            let mut reading =
-                                state.reading.lock().unwrap_or_else(|e| e.into_inner());
-                            reading.selection_present = selection_present;
-                            reading.revision
-                        };
-                        self.target = selection_present.then_some((mapping, revision));
-                        self.bytes.clear();
-                        self.total = None;
-                        // The completed operation's screen follows without awaiting an output check.
-                        if generation != mapping.wire {
-                            next = Next::Refresh;
-                        }
-                    }
-                    _ => return Err(ServerError::Protocol),
-                },
-            }
+            return Ok(Next::Recheck);
         }
+        let next = Next::Idle;
         let operation = state
             .reading
             .lock()
@@ -371,7 +379,8 @@ impl Reader {
                     self.total = None;
                     self.awaiting_read = true;
                     self.awaiting_gesture = gesture;
-                    return Ok(next.max(Next::Continue));
+                    // The next output check asks for its completion.
+                    return Ok(next.max(Next::Refresh));
                 }
                 Err(ServerError::StaleControl) => {
                     self.target = None;
@@ -541,9 +550,30 @@ impl PresentationHandle {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::super::tests::Adapter;
     use super::*;
+
+    /// One worker turn as the worker composes it: an awaited operation's completion arrives
+    /// with the output check, then reading continues.
+    pub(in super::super) fn turn(
+        reader: &mut Reader,
+        state: &DevelopmentPaneState,
+        lease: Lease,
+        status: impl FnOnce() -> Status,
+        exchange: &mut impl FnMut(&Request) -> Result<Reply, ServerError>,
+    ) -> Result<Next, ServerError> {
+        let settled = reader.awaiting().then(|| reader.settle(state, status()));
+        let next = reader.poll(state, lease, exchange)?;
+        Ok(settled.map_or(next, |settled| settled.max(next)))
+    }
+    fn ready(generation: u64, selection_revision: u64, selection_present: bool) -> Status {
+        Status::Ready {
+            generation,
+            selection_revision,
+            selection_present,
+        }
+    }
 
     fn mapping(adapter: &Adapter) -> ScreenMapping {
         ScreenMapping {
@@ -789,31 +819,26 @@ mod tests {
             }));
         adapter.handle.request_pointer_copy();
         for _ in 0..16 {
-            reader
-                .poll(
-                    &adapter.handle.state,
-                    adapter.active.lease,
-                    &mut |request| match request {
-                        Request::Read { .. } => Ok(Reply::Reading { accepted: true }),
-                        Request::ReadingStatus { .. } => Ok(Reply::ReadingReady {
-                            generation: mapping.wire,
-                            selection_revision: mapping.selection,
-                            selection_present: true,
-                        }),
-                        Request::SelectionChunk {
-                            generation, offset, ..
-                        } => Ok(Reply::SelectionChunk {
-                            generation: *generation,
-                            offset: *offset,
-                            total: bytes.len(),
-                            bytes: bytes
-                                [*offset..(*offset + SELECTION_CHUNK_BYTES).min(bytes.len())]
-                                .to_vec(),
-                        }),
-                        _ => Ok(Reply::Unchanged),
-                    },
-                )
-                .unwrap();
+            turn(
+                &mut reader,
+                &adapter.handle.state,
+                adapter.active.lease,
+                || ready(mapping.wire, mapping.selection, true),
+                &mut |request| match request {
+                    Request::Read { .. } => Ok(Reply::Reading { accepted: true }),
+                    Request::SelectionChunk {
+                        generation, offset, ..
+                    } => Ok(Reply::SelectionChunk {
+                        generation: *generation,
+                        offset: *offset,
+                        total: bytes.len(),
+                        bytes: bytes[*offset..(*offset + SELECTION_CHUNK_BYTES).min(bytes.len())]
+                            .to_vec(),
+                    }),
+                    _ => Ok(Reply::Unchanged),
+                },
+            )
+            .unwrap();
         }
         assert!(
             adapter.handle.take_prepared_pointer_copy().is_some(),
@@ -863,8 +888,19 @@ mod tests {
             reader.screen(state, mapping(&adapter), false);
             let mut delivered = vec![];
             let poll = |reader: &mut Reader, delivered: &mut Vec<Operation>| {
-                reader
-                    .poll(state, adapter.active.lease, &mut |request| match request {
+                let first = delivered.len() == 1;
+                turn(
+                    reader,
+                    state,
+                    adapter.active.lease,
+                    || {
+                        if refused_after_admission && first {
+                            Status::Refused
+                        } else {
+                            ready(17, 17, false)
+                        }
+                    },
+                    &mut |request| match request {
                         Request::Read { operation, .. } => {
                             delivered.push(operation.clone());
                             let press = matches!(operation, Operation::Pointer(p) if matches!(p.phase, Press));
@@ -874,17 +910,10 @@ mod tests {
                                 Ok(Reply::Reading { accepted: true })
                             }
                         }
-                        Request::ReadingStatus { .. } if refused_after_admission && delivered.len() == 1 => {
-                            Err(ServerError::StaleControl)
-                        }
-                        Request::ReadingStatus { .. } => Ok(Reply::ReadingReady {
-                            generation: 17,
-                            selection_revision: 17,
-                            selection_present: false,
-                        }),
                         _ => panic!("unexpected reading request"),
-                    })
-                    .unwrap()
+                    },
+                )
+                .unwrap()
             };
             for _ in 0..4 {
                 poll(&mut reader, &mut delivered);
@@ -926,11 +955,8 @@ mod tests {
         for operation in [pointer(Release, 1.0), pointer(Press, 9.0)] {
             state.reading.lock().unwrap().enqueue(operation);
         }
-        reader
-            .poll(state, adapter.active.lease, &mut |_| {
-                Err(ServerError::StaleControl)
-            })
-            .unwrap();
+        // The output check reports that the worker refused the first Press.
+        assert_eq!(reader.settle(state, Status::Refused), Next::Continue);
         for operation in [pointer(Motion, 10.0), pointer(Release, 10.0)] {
             state.reading.lock().unwrap().enqueue(operation);
         }
@@ -1124,26 +1150,27 @@ mod tests {
         let (mut barrier_checks, mut applied) = (0, 0);
         let mut turns = vec![];
         while !state.reading.lock().unwrap().queue.is_empty() || reader.awaiting_read {
-            let next = reader
-                .poll(state, adapter.active.lease, &mut |request| match request {
-                    Request::Read { .. } => Ok(Reply::Reading { accepted: true }),
-                    // The terminal worker presents the scrolled view at its second check.
-                    Request::ReadingStatus { .. } => {
-                        barrier_checks += 1;
-                        if barrier_checks % 2 == 1 {
-                            Ok(Reply::SelectionPending)
-                        } else {
-                            applied += 1;
-                            Ok(Reply::ReadingReady {
-                                generation: current.wire + 1,
-                                selection_revision: current.selection,
-                                selection_present: false,
-                            })
-                        }
+            let wire = current.wire;
+            let next = turn(
+                &mut reader,
+                state,
+                adapter.active.lease,
+                // The terminal worker presents the scrolled view at its second check.
+                || {
+                    barrier_checks += 1;
+                    if barrier_checks % 2 == 1 {
+                        Status::Pending
+                    } else {
+                        applied += 1;
+                        ready(wire + 1, 17, false)
                     }
+                },
+                &mut |request| match request {
+                    Request::Read { .. } => Ok(Reply::Reading { accepted: true }),
                     _ => panic!("unexpected reading request"),
-                })
-                .unwrap();
+                },
+            )
+            .unwrap();
             if next == Next::Refresh {
                 current.wire += 1;
                 current.local = PresentationGeneration::test(current.wire);
@@ -1162,9 +1189,11 @@ mod tests {
             128,
             "each barrier wait is one bounded recheck"
         );
+        // The first acceptance checks output at once; so does each completion, which also
+        // carries the next acceptance.
         assert_eq!(
             turns.iter().filter(|next| **next == Next::Refresh).count(),
-            128,
+            129,
             "each applied operation's screen is fetched at once"
         );
     }
@@ -1182,20 +1211,20 @@ mod tests {
             if state.reading.lock().unwrap().queue.is_empty() && !reader.awaiting_read {
                 return delivered;
             }
-            reader
-                .poll(state, adapter.active.lease, &mut |request| match request {
+            turn(
+                reader,
+                state,
+                adapter.active.lease,
+                || ready(17, 17, false),
+                &mut |request| match request {
                     Request::Read { operation, .. } => {
                         delivered.push(operation.clone());
                         answer(operation)
                     }
-                    Request::ReadingStatus { .. } => Ok(Reply::ReadingReady {
-                        generation: 17,
-                        selection_revision: 17,
-                        selection_present: false,
-                    }),
                     _ => panic!("unexpected reading request"),
-                })
-                .unwrap();
+                },
+            )
+            .unwrap();
         }
         panic!("reading must settle");
     }

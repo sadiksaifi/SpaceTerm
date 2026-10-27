@@ -458,13 +458,15 @@ mod tests {
                 Request::PollChanges {
                     lease: grant.lease,
                     base: None,
+                    effects: None,
+                    reading: false,
                 },
             );
             observations.push((
                 state.startup_pending(),
                 state.status(),
                 state.interactive_input(),
-                matches!(poll, Reply::Screen(_) | Reply::ScreenChanges(_)),
+                matches!(&poll, Reply::Cycle(cycle) if matches!(cycle.output, Reply::Screen(_) | Reply::ScreenChanges(_))),
             ));
         }
         // Stop every fixture PTY before any assertion can fail.
@@ -582,9 +584,14 @@ mod tests {
                     Request::PollChanges {
                         lease,
                         base: decoder.baseline(),
+                        effects: None,
+                        reading: false,
                     },
                 );
-                if let Reply::Screen(screen) = decoder.apply(reply).unwrap() {
+                let Reply::Cycle(cycle) = reply else {
+                    panic!("output check refused: {reply:?}")
+                };
+                if let Reply::Screen(screen) = decoder.apply(cycle.output).unwrap() {
                     prepared = screen.rows.iter().any(|row| {
                         row.iter()
                             .map(|cell| cell.text.as_str())

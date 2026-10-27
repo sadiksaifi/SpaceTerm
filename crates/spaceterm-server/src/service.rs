@@ -1694,8 +1694,10 @@ mod tests {
                         &[protocol::MAJOR],
                     )?;
                     let mut wire = protocol::Wire::terminal(&mut stream)?;
-                    wire.write(&pane::Request::Shutdown)?;
-                    assert!(matches!(wire.read::<pane::Reply>()?, pane::Reply::Closed));
+                    assert!(matches!(
+                        wire.call::<pane::Reply>(0, &pane::Request::Shutdown)?,
+                        pane::Reply::Closed
+                    ));
                 }
                 host.join().unwrap()
             }

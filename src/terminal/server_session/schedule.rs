@@ -10,8 +10,8 @@ const VISIBLE_POLL: Duration = Duration::from_millis(30);
 /// A hidden Pane checks only for lifecycle and control changes.
 const HIDDEN_POLL: Duration = Duration::from_millis(250);
 /// Rechecks reading work the server is still applying, such as an operation's presentation
-/// barrier or a selection being prepared. A quarter of a 60 Hz frame bounds each wait
-/// without turning the worker into a busy loop.
+/// barrier or a selection being prepared, with an early output check. A quarter of a 60 Hz
+/// frame bounds each wait without turning the worker into a busy loop.
 const READING_RECHECK: Duration = Duration::from_millis(4);
 
 /// Wakes a Pane worker. A notification before the wait is never lost.
@@ -24,6 +24,12 @@ impl Wake {
     pub(super) fn notify(&self) {
         *self.pending.lock().unwrap_or_else(|e| e.into_inner()) = true;
         self.ready.notify_all();
+    }
+
+    /// Whether a notification arrived since the previous wait. It stays pending for the next
+    /// wait, which then returns at once.
+    pub(super) fn notified(&self) -> bool {
+        *self.pending.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Returns at the deadline or on the first notification since the previous wait.
@@ -109,9 +115,9 @@ impl Cadence {
         self.next_poll
     }
 
-    /// The wait while the server is still applying reading work.
-    pub(super) fn recheck_deadline(&self, now: Instant) -> Instant {
-        self.next_poll.min(now + READING_RECHECK)
+    /// Brings the next output check forward while the server is still applying reading work.
+    pub(super) fn recheck(&mut self, now: Instant) {
+        self.next_poll = self.next_poll.min(now + READING_RECHECK);
     }
 }
 
@@ -148,6 +154,18 @@ mod tests {
         std::thread::sleep(Duration::from_millis(10));
         wake.notify();
         assert!(waiter.join().unwrap() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn pending_reading_brings_the_output_check_forward_without_delaying_it() {
+        let start = Instant::now();
+        let mut cadence = Cadence::new(start, true);
+        assert!(cadence.poll_due(start));
+        cadence.recheck(start);
+        assert_eq!(cadence.deadline(), start + READING_RECHECK);
+        assert!(cadence.poll_due(start + READING_RECHECK));
+        cadence.recheck(start + VISIBLE_POLL);
+        assert_eq!(cadence.deadline(), start + READING_RECHECK + VISIBLE_POLL);
     }
 
     #[test]

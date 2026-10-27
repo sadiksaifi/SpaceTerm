@@ -16,6 +16,9 @@ mod boundary_tests;
 #[cfg(test)]
 mod clear_tests;
 mod directories;
+mod echo;
+#[cfg(test)]
+mod echo_tests;
 #[cfg(all(test, feature = "desktop"))]
 pub(crate) mod testing {
     use super::*;
@@ -101,6 +104,15 @@ struct OwnedPane {
     effects: NativeEffects,
     reading: reading::Reading,
     accessibility: accessibility::Accessibility,
+    /// The one accepted key batch whose reply may still carry the next publication.
+    echo: Option<echo::Echo>,
+}
+/// What one output check asks for beyond its presentation.
+#[derive(Clone, Copy)]
+struct OutputCheck {
+    base: Option<u64>,
+    effects: Option<u64>,
+    reading: bool,
 }
 fn nonce() -> Result<[u8; 32], ServerError> {
     let mut bytes = [0; 32];
@@ -329,6 +341,7 @@ impl DevelopmentPaneHost {
             effects: NativeEffects::default(),
             reading: reading::Reading::default(),
             accessibility: accessibility::Accessibility::default(),
+            echo: None,
         });
         self.dormant = None;
         Ok(lease)
@@ -418,14 +431,26 @@ impl DevelopmentPaneHost {
         self.start_directory(device, connection, size, style, directory)
             .map(|lease| Reply::Attached { lease })
     }
-    fn handle(
+    fn dispatch(
         &mut self,
         device: [u8; 32],
         connection: [u8; 32],
         request: Request,
     ) -> Result<Reply, Refusal> {
-        let (request, changes) = match request {
-            Request::PollChanges { lease, base } => (Request::Poll { lease }, Some(base)),
+        let (request, cycle) = match request {
+            Request::PollChanges {
+                lease,
+                base,
+                effects,
+                reading,
+            } => (
+                Request::Poll { lease },
+                Some(OutputCheck {
+                    base,
+                    effects,
+                    reading,
+                }),
+            ),
             request => (request, None),
         };
         if matches!(request, Request::Capabilities) {
@@ -562,12 +587,10 @@ impl DevelopmentPaneHost {
             | Request::EndAccessibilityDemand { lease }
             | Request::AccessibilitySelection { lease, .. }
             | Request::Read { lease, .. }
-            | Request::ReadingStatus { lease }
             | Request::GraphicsChunk { lease, .. }
             | Request::SelectionChunk { lease, .. } => lease,
             Request::Poll { lease }
             | Request::PresentationDemand { lease, .. }
-            | Request::NativeEffects { lease, .. }
             | Request::CompleteClipboard { lease, .. }
             | Request::Focus { lease, .. }
             | Request::Input { lease, .. }
@@ -599,6 +622,7 @@ impl DevelopmentPaneHost {
                     pane.runtime.set_presentable(visible);
                     pane.screen_encoder = pane::presentation::ScreenEncoder::default();
                     pane.sent = None;
+                    pane.echo = None;
                     if !visible {
                         pane.runtime.end_server_accessibility_demand();
                     }
@@ -650,7 +674,6 @@ impl DevelopmentPaneHost {
                 Ok(Reply::GraphicsChunk(pane.graphics_chunk(image, offset)))
             }
             Request::Read { operation, .. } => pane.read(operation),
-            Request::ReadingStatus { .. } => pane.reading_status(),
             Request::SelectionChunk {
                 generation, offset, ..
             } => {
@@ -662,15 +685,6 @@ impl DevelopmentPaneHost {
                     return Err(Refusal::Stale);
                 }
                 pane.reading.chunk(generation, offset)
-            }
-            Request::NativeEffects { generation, .. } => {
-                if generation == 0 || generation != pane.focus_generation {
-                    return Err(Refusal::Stale);
-                }
-                Ok(Reply::NativeEffects {
-                    request: pane.effects.next(generation),
-                    hidden_input: pane.subscription.hidden_input(),
-                })
             }
             Request::CompleteClipboard {
                 generation,
@@ -685,47 +699,45 @@ impl DevelopmentPaneHost {
                 Ok(Reply::Unchanged)
             }
             Request::Poll { .. } => {
-                if let Some(screen) = &pane.screen
-                    && pane.presentable
-                    && match changes {
-                        Some(base) => {
-                            base != Some(pane.screen_generation)
-                                || base != pane.screen_encoder.baseline()
-                        }
-                        None => pane.sent != Some(screen.generation),
-                    }
+                // The native effect fence refuses the whole check before it takes or encodes
+                // anything, exactly as a separate effect request was refused.
+                if let Some(OutputCheck {
+                    effects: Some(generation),
+                    ..
+                }) = cycle
+                    && (generation == 0 || generation != pane.focus_generation)
                 {
-                    pane.sent = Some(screen.generation);
-                    let mut screen = encode_screen(screen);
-                    spaceterm_server::measurement::record(
-                        spaceterm_server::measurement::Event::ScreenEncoded {
-                            generation: pane.screen_generation,
-                        },
-                    );
-                    screen.generation = pane.screen_generation;
-                    screen.accessibility_revision = pane
-                        .accessibility
-                        .take_changed_revision()
-                        .unwrap_or(pane.accessibility.revision());
-                    return Ok(match changes {
-                        Some(base) => pane.screen_encoder.encode(screen, base),
-                        None => Reply::Screen(Box::new(screen)),
-                    });
+                    return Err(Refusal::Stale);
                 }
-                if pane.failed {
-                    return Err(Refusal::Failed);
-                }
-                if pane.ended {
-                    self.retire_exited()?;
-                    self.pane = None;
-                    Ok(Reply::Ended)
-                } else {
-                    if let Some(revision) = pane.accessibility.take_changed_revision() {
-                        Ok(Reply::AccessibilityRevision { revision })
-                    } else {
-                        Ok(Reply::Unchanged)
+                // Observing a completed barrier drains again, so the screen below includes it.
+                let reading = cycle
+                    .filter(|check| check.reading)
+                    .map(|_| pane.reading_status());
+                let output = match pane.present(cycle.map(|check| check.base)) {
+                    Some(output) => output,
+                    None if pane.failed => return Err(Refusal::Failed),
+                    None if pane.ended => {
+                        self.retire_exited()?;
+                        self.pane = None;
+                        return Ok(Reply::Ended);
                     }
-                }
+                    None => match pane.accessibility.take_changed_revision() {
+                        Some(revision) => Reply::AccessibilityRevision { revision },
+                        None => Reply::Unchanged,
+                    },
+                };
+                let Some(check) = cycle else {
+                    return Ok(output);
+                };
+                let effects = check.effects.map(|generation| pane::effects::Poll {
+                    request: pane.effects.next(generation),
+                    hidden_input: pane.subscription.hidden_input(),
+                });
+                Ok(Reply::Cycle(Box::new(pane::presentation::Cycle {
+                    output,
+                    effects,
+                    reading,
+                })))
             }
             Request::Key { key, .. } => {
                 if pane.focus_generation != 0 {
@@ -901,8 +913,27 @@ impl PaneService for DevelopmentPaneHost {
             .admit(client, name);
     }
     fn request(&mut self, device: [u8; 32], connection: [u8; 32], request: Request) -> Reply {
-        self.handle(device, connection, request)
+        self.dispatch(device, connection, request)
             .unwrap_or_else(Reply::Refused)
+    }
+    fn handle(&mut self, device: [u8; 32], connection: [u8; 32], request: Request) -> Handled {
+        let keys = match &request {
+            Request::Keys {
+                lease, generation, ..
+            } => Some((*lease, *generation)),
+            _ => None,
+        };
+        let reply = self.request(device, connection, request);
+        match keys {
+            Some((lease, generation)) if matches!(reply, Reply::Unchanged) => {
+                self.await_echo(device, lease, generation)
+            }
+            _ => Handled::Now(reply),
+        }
+    }
+    fn finish(&mut self, device: [u8; 32], connection: [u8; 32], finish: u64) -> Reply {
+        self.finish_echo(device, connection, finish)
+            .unwrap_or(Reply::Unchanged)
     }
     fn disconnected(&mut self, connection: [u8; 32]) {
         self.directories.cancel_connection(connection);
@@ -950,10 +981,42 @@ impl PaneService for DevelopmentPaneHost {
     }
 }
 impl OwnedPane {
+    /// The current screen when this client lacks it. `changes` carries the client's row-change
+    /// base; without it the client receives a complete screen it has not been sent. A hidden
+    /// Pane presents nothing. Key echo and output checks share this one encoder.
+    fn present(&mut self, changes: Option<Option<u64>>) -> Option<Reply> {
+        let screen = Arc::clone(self.screen.as_ref().filter(|_| self.presentable)?);
+        let due = match changes {
+            Some(base) => {
+                base != Some(self.screen_generation) || base != self.screen_encoder.baseline()
+            }
+            None => self.sent != Some(screen.generation),
+        };
+        if !due {
+            return None;
+        }
+        self.sent = Some(screen.generation);
+        let mut encoded = encode_screen(&screen);
+        spaceterm_server::measurement::record(
+            spaceterm_server::measurement::Event::ScreenEncoded {
+                generation: self.screen_generation,
+            },
+        );
+        encoded.generation = self.screen_generation;
+        encoded.accessibility_revision = self
+            .accessibility
+            .take_changed_revision()
+            .unwrap_or(self.accessibility.revision());
+        Some(match changes {
+            Some(base) => self.screen_encoder.encode(encoded, base),
+            None => Reply::Screen(Box::new(encoded)),
+        })
+    }
     fn invalidate_input(&mut self) {
         self.presentable = false;
         self.runtime.set_presentable(false);
         self.screen_encoder = pane::presentation::ScreenEncoder::default();
+        self.echo = None;
         self.graphics_transfer = None;
         self.accessibility.disconnect();
         self.runtime.end_server_accessibility_demand();
@@ -1288,6 +1351,7 @@ impl OwnedPane {
         self.runtime.set_presentable(true);
         self.sent = None;
         self.screen_encoder = pane::presentation::ScreenEncoder::default();
+        self.echo = None;
         self.runtime.resize(geometry(size));
         self.size = size;
         if let Some(appearance) = appearance {
@@ -1725,6 +1789,25 @@ mod tests {
         );
     }
 
+    /// An output check that asks for nothing beyond its presentation.
+    pub(super) fn poll_changes(lease: Lease, base: Option<u64>) -> Request {
+        Request::PollChanges {
+            lease,
+            base,
+            effects: None,
+            reading: false,
+        }
+    }
+    /// The presentation an output check answered, or its refusal or end.
+    pub(super) fn presentation(reply: Reply) -> Reply {
+        match reply {
+            Reply::Cycle(cycle) => {
+                assert!(cycle.effects.is_none() && cycle.reading.is_none());
+                cycle.output
+            }
+            reply => reply,
+        }
+    }
     pub(super) fn native_command(
         host: &mut impl PaneService,
         lease: Lease,
@@ -1760,11 +1843,8 @@ mod tests {
         );
         await_text(&mut host, 1, lease, "BASELINE-READY");
         let mut decoder = pane::presentation::ScreenDecoder::default();
-        let reset = host.request(
-            [1; 32],
-            lease.connection,
-            Request::PollChanges { lease, base: None },
-        );
+        let reset =
+            presentation(host.request([1; 32], lease.connection, poll_changes(lease, None)));
         assert!(matches!(&reset, Reply::Screen(_)));
         decoder.apply(reset).unwrap();
         command(
@@ -1774,24 +1854,17 @@ mod tests {
             "printf '\\033[H\\033[2KCHANGED-ROW\\r\\n'",
         );
         await_text(&mut host, 1, lease, "CHANGED-ROW");
-        let reply = host.request(
+        let reply = presentation(host.request(
             [1; 32],
             lease.connection,
-            Request::PollChanges {
-                lease,
-                base: decoder.baseline(),
-            },
-        );
+            poll_changes(lease, decoder.baseline()),
+        ));
         assert!(
             matches!(&reply, Reply::ScreenChanges(changes) if !changes.indices.is_empty() && changes.indices.len() < 24)
         );
         decoder.apply(reply).unwrap();
         assert!(matches!(
-            host.request(
-                [1; 32],
-                lease.connection,
-                Request::PollChanges { lease, base: None }
-            ),
+            presentation(host.request([1; 32], lease.connection, poll_changes(lease, None))),
             Reply::Screen(_)
         ));
         let Reply::Attached { lease: replacement } = host.request(
@@ -1807,25 +1880,19 @@ mod tests {
             panic!("reattachment failed")
         };
         assert!(matches!(
-            host.request(
+            presentation(host.request(
                 [1; 32],
                 lease.connection,
-                Request::PollChanges {
-                    lease,
-                    base: decoder.baseline()
-                }
-            ),
+                poll_changes(lease, decoder.baseline())
+            )),
             Reply::Refused(Refusal::Stale)
         ));
         assert!(matches!(
-            host.request(
+            presentation(host.request(
                 [1; 32],
                 replacement.connection,
-                Request::PollChanges {
-                    lease: replacement,
-                    base: None
-                }
-            ),
+                poll_changes(replacement, None)
+            )),
             Reply::Screen(_)
         ));
         host.shutdown().unwrap();
@@ -1855,11 +1922,7 @@ mod tests {
         ));
         for _ in 0..10 {
             assert!(!matches!(
-                host.request(
-                    [1; 32],
-                    lease.connection,
-                    Request::PollChanges { lease, base: None }
-                ),
+                presentation(host.request([1; 32], lease.connection, poll_changes(lease, None))),
                 Reply::Screen(_) | Reply::ScreenChanges(_)
             ));
         }
@@ -1881,11 +1944,7 @@ mod tests {
             Reply::Unchanged
         ));
         assert!(matches!(
-            host.request(
-                [1; 32],
-                lease.connection,
-                Request::PollChanges { lease, base: None }
-            ),
+            presentation(host.request([1; 32], lease.connection, poll_changes(lease, None))),
             Reply::Screen(_)
         ));
         await_text(&mut host, 1, lease, "HIDDEN-OUTPUT");
@@ -1903,23 +1962,28 @@ mod tests {
             let reply = host.request(
                 [1; 32],
                 lease.connection,
-                Request::NativeEffects {
+                Request::PollChanges {
                     lease,
-                    generation: 1,
+                    base: None,
+                    effects: Some(1),
+                    reading: false,
                 },
             );
-            match reply {
-                Reply::NativeEffects {
+            let Reply::Cycle(cycle) = reply else {
+                panic!("native effects unavailable: {reply:?}")
+            };
+            match cycle.effects {
+                Some(pane::effects::Poll {
                     request: Some(request),
                     ..
-                } => {
+                }) => {
                     assert!(
                         matches!(request.effect, pane::effects::Effect::ClipboardWrite { text, .. } if text == "hello")
                     );
                     break;
                 }
-                Reply::NativeEffects { request: None, .. } => {}
-                other => panic!("native effects unavailable: {other:?}"),
+                Some(pane::effects::Poll { request: None, .. }) => {}
+                None => panic!("output check omitted the requested effects"),
             }
             assert!(
                 Instant::now() < deadline,
@@ -2084,7 +2148,7 @@ mod tests {
         }
     }
 
-    fn batch_key(text: &str, ime: bool) -> Key {
+    pub(super) fn batch_key(text: &str, ime: bool) -> Key {
         let InteractiveInput::Key(key) = text_key(text, ime) else {
             unreachable!()
         };

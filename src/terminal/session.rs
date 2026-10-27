@@ -9,7 +9,7 @@ pub use clipboard::ClipboardCompletion;
 pub use clipboard::{ClientEffectGrant, ClientEffectRequest, ClipboardRequest};
 use clipboard::{ClipboardAuthority, WorkerClipboard};
 use input::PtyInput;
-pub use subscriptions::TerminalSubscription;
+pub use subscriptions::{Publications, TerminalSubscription};
 use subscriptions::{TerminalEventPublisher, WorkerEventLifetime};
 mod schedules;
 use schedules::{FindQueryUpdate, ScheduleInput, WorkerSchedules};

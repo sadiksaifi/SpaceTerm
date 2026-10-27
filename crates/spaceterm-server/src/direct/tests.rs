@@ -929,10 +929,10 @@ fn only_a_fully_admitted_device_updates_its_retained_last_connection_time() {
     .unwrap();
     let mut protocol = crate::protocol::Wire::terminal(&mut connection).unwrap();
     protocol
-        .write(&crate::pane::Request::Direct(Management::Devices))
+        .send(0, &crate::pane::Request::Direct(Management::Devices))
         .unwrap();
     let crate::pane::Reply::Direct(Ok(ManagementReply::Devices(observed))) =
-        protocol.read().unwrap()
+        protocol.receive::<crate::pane::Reply>().unwrap().1
     else {
         panic!()
     };
@@ -999,9 +999,9 @@ fn wss_validates_the_actual_pin_and_refuses_a_spoofed_terminal_client_identity()
     )
     .unwrap();
     let mut wire = crate::protocol::Wire::terminal(&mut connection).unwrap();
-    wire.write(&crate::pane::Request::Direct(Management::Status))
+    wire.send(0, &crate::pane::Request::Direct(Management::Status))
         .unwrap();
-    let reply: crate::pane::Reply = wire.read().unwrap();
+    let reply: crate::pane::Reply = wire.receive().unwrap().1;
     assert!(matches!(
         reply,
         crate::pane::Reply::Direct(Ok(ManagementReply::Status(_)))
@@ -1237,33 +1237,39 @@ fn revocation_closes_every_authorized_connection_and_notifies_only_the_target_ru
     let mut other = admit(&endpoint, &actor, &actor_key);
     {
         let mut wire = crate::protocol::Wire::terminal(&mut other).unwrap();
-        wire.write(&crate::pane::Request::Direct(Management::Revoke {
-            operation: crypto::random().unwrap(),
-            target: target.pairing,
-        }))
+        wire.send(
+            0,
+            &crate::pane::Request::Direct(Management::Revoke {
+                operation: crypto::random().unwrap(),
+                target: target.pairing,
+            }),
+        )
         .unwrap();
-        let reply: crate::pane::Reply = wire.read().unwrap();
+        let reply: crate::pane::Reply = wire.receive().unwrap().1;
         assert!(matches!(
             reply,
             crate::pane::Reply::Direct(Err(DirectError::AuthenticationRefused))
         ));
-        wire.write(&crate::pane::Request::Direct(Management::Status))
+        wire.send(0, &crate::pane::Request::Direct(Management::Status))
             .unwrap();
         assert!(matches!(
-            wire.read::<crate::pane::Reply>().unwrap(),
+            wire.receive::<crate::pane::Reply>().unwrap().1,
             crate::pane::Reply::Direct(Ok(ManagementReply::Status(_)))
         ));
     }
     assert!(retired.lock().unwrap().is_empty());
     let (mut local, local_worker) = fixture.serve_local_with(Arc::clone(&runtime));
     let mut wire = crate::protocol::Wire::terminal(&mut local).unwrap();
-    wire.write(&crate::pane::Request::Direct(Management::Revoke {
-        operation: crypto::random().unwrap(),
-        target: target.pairing,
-    }))
+    wire.send(
+        0,
+        &crate::pane::Request::Direct(Management::Revoke {
+            operation: crypto::random().unwrap(),
+            target: target.pairing,
+        }),
+    )
     .unwrap();
     assert!(matches!(
-        wire.read::<crate::pane::Reply>().unwrap(),
+        wire.receive::<crate::pane::Reply>().unwrap().1,
         crate::pane::Reply::Direct(Ok(ManagementReply::Revoked(_)))
     ));
     drop(local);
@@ -1335,10 +1341,10 @@ fn a_paired_policy_request_is_refused_without_mutation_or_retiring_its_connectio
             // The admission reply precedes the retained connection timestamp. A server
             // request completes after that metadata write and fences this baseline.
             let mut wire = crate::protocol::Wire::terminal(&mut connection).unwrap();
-            wire.write(&crate::pane::Request::Direct(Management::Status))
+            wire.send(0, &crate::pane::Request::Direct(Management::Status))
                 .unwrap();
             assert!(matches!(
-                wire.read::<crate::pane::Reply>().unwrap(),
+                wire.receive::<crate::pane::Reply>().unwrap().1,
                 crate::pane::Reply::Direct(Ok(ManagementReply::Status(_)))
             ));
         }
@@ -1346,24 +1352,27 @@ fn a_paired_policy_request_is_refused_without_mutation_or_retiring_its_connectio
         // Refusal leaves this connection usable for the already-enqueued next request.
         let (mut encoded, mut pending) = std::os::unix::net::UnixStream::pair().unwrap();
         let mut wire = crate::protocol::Wire::terminal(&mut encoded).unwrap();
-        wire.write(&crate::pane::Request::Direct(Management::SetPolicy {
-            enabled: policy.is_some(),
-            policy,
-        }))
+        wire.send(
+            0,
+            &crate::pane::Request::Direct(Management::SetPolicy {
+                enabled: policy.is_some(),
+                policy,
+            }),
+        )
         .unwrap();
-        wire.write(&crate::pane::Request::Capabilities).unwrap();
+        wire.send(1, &crate::pane::Request::Capabilities).unwrap();
         encoded.shutdown(std::net::Shutdown::Write).unwrap();
         let mut requests = Vec::new();
         pending.read_to_end(&mut requests).unwrap();
         connection.write_all(&requests).unwrap();
         let mut wire = crate::protocol::Wire::terminal(&mut connection).unwrap();
-        let reply = wire.read::<crate::pane::Reply>().unwrap();
+        let reply = wire.receive::<crate::pane::Reply>().unwrap().1;
         assert!(matches!(
             reply,
             crate::pane::Reply::Direct(Err(DirectError::AuthenticationRefused))
         ));
         assert!(matches!(
-            wire.read::<crate::pane::Reply>().unwrap(),
+            wire.receive::<crate::pane::Reply>().unwrap().1,
             crate::pane::Reply::Capabilities { .. }
         ));
         assert!(
@@ -1393,16 +1402,16 @@ fn a_paired_protocol_connection_cannot_write_native_stop_policy() {
     )
     .unwrap();
     let mut wire = crate::protocol::Wire::terminal(&mut connection).unwrap();
-    wire.write(&crate::pane::Request::Shutdown).unwrap();
+    wire.send(0, &crate::pane::Request::Shutdown).unwrap();
     assert!(matches!(
-        wire.read::<crate::pane::Reply>().unwrap(),
+        wire.receive::<crate::pane::Reply>().unwrap().1,
         crate::pane::Reply::Refused(crate::pane::Refusal::Unsupported)
     ));
     assert!(!fixture.paths.data.join("service.json").exists());
-    wire.write(&crate::pane::Request::Direct(Management::Status))
+    wire.send(0, &crate::pane::Request::Direct(Management::Status))
         .unwrap();
     assert!(matches!(
-        wire.read::<crate::pane::Reply>().unwrap(),
+        wire.receive::<crate::pane::Reply>().unwrap().1,
         crate::pane::Reply::Direct(Ok(ManagementReply::Status(_)))
     ));
     drop(connection);
@@ -1788,9 +1797,9 @@ fn paired_wss_authority_cannot_prepare_enroll_or_cancel_account_setup() {
         request.clone(),
         Management::CancelSetup { pin, operation },
     ] {
-        wire.write(&crate::pane::Request::Direct(action)).unwrap();
+        wire.send(0, &crate::pane::Request::Direct(action)).unwrap();
         assert!(matches!(
-            wire.read().unwrap(),
+            wire.receive::<crate::pane::Reply>().unwrap().1,
             crate::pane::Reply::Direct(Err(DirectError::AuthenticationRefused))
         ));
     }
@@ -2119,10 +2128,10 @@ fn paired_administration_is_refused_without_changing_invitations_claims_or_devic
     .unwrap();
     let mut wire = crate::protocol::Wire::terminal(&mut connection).unwrap();
     // Observe the completed admission timestamp write before measuring admin effects.
-    wire.write(&crate::pane::Request::Direct(Management::Status))
+    wire.send(0, &crate::pane::Request::Direct(Management::Status))
         .unwrap();
     assert!(matches!(
-        wire.read::<crate::pane::Reply>().unwrap(),
+        wire.receive::<crate::pane::Reply>().unwrap().1,
         crate::pane::Reply::Direct(Ok(ManagementReply::Status(_)))
     ));
     let before = std::fs::read(fixture.paths.data.join("direct.json")).unwrap();
@@ -2138,16 +2147,18 @@ fn paired_administration_is_refused_without_changing_invitations_claims_or_devic
         setup,
         cancel,
     ] {
-        wire.write(&crate::pane::Request::Direct(request)).unwrap();
+        wire.send(0, &crate::pane::Request::Direct(request))
+            .unwrap();
         assert!(matches!(
-            wire.read::<crate::pane::Reply>().unwrap(),
+            wire.receive::<crate::pane::Reply>().unwrap().1,
             crate::pane::Reply::Direct(Err(DirectError::AuthenticationRefused))
         ));
     }
     for request in [Management::Status, Management::Claims, Management::Devices] {
-        wire.write(&crate::pane::Request::Direct(request)).unwrap();
+        wire.send(0, &crate::pane::Request::Direct(request))
+            .unwrap();
         assert!(matches!(
-            wire.read::<crate::pane::Reply>().unwrap(),
+            wire.receive::<crate::pane::Reply>().unwrap().1,
             crate::pane::Reply::Direct(Ok(_))
         ));
     }
@@ -2234,9 +2245,9 @@ fn end_all_sessions_requires_account_local_admission_but_workspace_mutations_do_
         },
     };
     let mut wire = crate::protocol::Wire::terminal(&mut connection).unwrap();
-    wire.write(&end).unwrap();
+    wire.send(0, &end).unwrap();
     assert!(matches!(
-        wire.read::<crate::pane::Reply>().unwrap(),
+        wire.receive::<crate::pane::Reply>().unwrap().1,
         crate::pane::Reply::Refused(crate::pane::Refusal::Unsupported)
     ));
     {
@@ -2244,24 +2255,27 @@ fn end_all_sessions_requires_account_local_admission_but_workspace_mutations_do_
         assert!(!effects.session_ended);
         assert_eq!(effects.requests, 0);
     }
-    wire.write(&crate::pane::Request::Mutate {
-        sequence: 1,
-        mutation: crate::hierarchy::Mutation::CreateWorkspace {
-            name: "Remote Workspace".into(),
-            directory: None,
+    wire.send(
+        0,
+        &crate::pane::Request::Mutate {
+            sequence: 1,
+            mutation: crate::hierarchy::Mutation::CreateWorkspace {
+                name: "Remote Workspace".into(),
+                directory: None,
+            },
         },
-    })
+    )
     .unwrap();
     assert!(matches!(
-        wire.read::<crate::pane::Reply>().unwrap(),
+        wire.receive::<crate::pane::Reply>().unwrap().1,
         crate::pane::Reply::Unchanged
     ));
     assert!(effects.lock().unwrap().workspace_created);
     let (mut local, local_worker) = fixture.serve_local_with(Arc::clone(&runtime));
     let mut wire = crate::protocol::Wire::terminal(&mut local).unwrap();
-    wire.write(&end).unwrap();
+    wire.send(0, &end).unwrap();
     assert!(matches!(
-        wire.read::<crate::pane::Reply>().unwrap(),
+        wire.receive::<crate::pane::Reply>().unwrap().1,
         crate::pane::Reply::Unchanged
     ));
     {

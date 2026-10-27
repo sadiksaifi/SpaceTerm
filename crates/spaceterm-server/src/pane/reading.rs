@@ -25,6 +25,20 @@ pub enum Scroll {
     Bottom,
 }
 
+/// Whether the last accepted reading operation has completed, as one output check saw it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Status {
+    Pending,
+    /// The worker refused the accepted operation. It is not retried.
+    Refused,
+    /// Completed. `generation` names the screen that includes its effect.
+    Ready {
+        generation: u64,
+        selection_revision: u64,
+        selection_present: bool,
+    },
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Snapshot {
     pub total_rows: u64,

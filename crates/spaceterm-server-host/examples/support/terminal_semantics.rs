@@ -374,18 +374,27 @@ fn semantics(
 fn copy(connection: &mut PaneConnection, lease: Lease) -> Result<String> {
     let until = Instant::now() + DEADLINE;
     let generation = loop {
-        match stage(
+        let Reply::Cycle(cycle) = stage(
             "selection-status",
-            connection.exchange(&Request::ReadingStatus { lease }),
-        )? {
-            Reply::ReadingReady {
+            connection.exchange(&Request::PollChanges {
+                lease,
+                base: None,
+                effects: None,
+                reading: true,
+            }),
+        )?
+        else {
+            return Err("selection preparation unavailable".into());
+        };
+        match cycle.reading {
+            Some(reading::Status::Ready {
                 selection_revision,
                 selection_present: true,
                 ..
-            } => {
+            }) => {
                 break selection_revision;
             }
-            Reply::ReadingReady { .. } | Reply::SelectionPending => pause(until)?,
+            Some(reading::Status::Ready { .. } | reading::Status::Pending) => pause(until)?,
             _ => return Err("selection preparation unavailable".into()),
         }
     };

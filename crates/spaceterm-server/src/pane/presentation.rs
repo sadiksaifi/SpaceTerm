@@ -12,6 +12,15 @@ pub struct RowChanges {
     pub screen: Screen,
 }
 
+/// One output check: its presentation and the facts the same check asked for.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Cycle {
+    /// `Screen`, `ScreenChanges`, `AccessibilityRevision` or `Unchanged`.
+    pub output: Reply,
+    pub effects: Option<super::effects::Poll>,
+    pub reading: Option<super::reading::Status>,
+}
+
 /// Retains only the last emitted screen. Unknown bases receive a complete reset.
 #[derive(Default)]
 pub struct ScreenEncoder {
@@ -143,6 +152,7 @@ impl ScreenDecoder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pane::Color;
     fn screen(generation: u64) -> Screen {
         serde_json::from_value(serde_json::json!({
             "generation": generation, "columns": 2,
@@ -182,6 +192,36 @@ mod tests {
             serde_json::to_value(actual).unwrap(),
             serde_json::to_value(next).unwrap()
         );
+    }
+
+    #[test]
+    fn a_full_screen_round_trips_exactly_and_a_blank_screen_stays_compact() {
+        let blank = serde_json::json!({"text":" ","foreground":"Default","background":"Default",
+            "underline_color":"Default","flags":0,"underline":0});
+        let mut wide = screen(1);
+        wide.columns = 80;
+        wide.rows = vec![vec![serde_json::from_value(blank).unwrap(); 80]; 24];
+        wide.wrapped = vec![false; 24];
+        // About 12 bytes per blank cell. Every default field written out takes about 100.
+        let bytes = serde_json::to_vec(&Reply::Screen(Box::new(wide))).unwrap();
+        assert!(bytes.len() < 32 * 1024, "{} bytes", bytes.len());
+
+        let mut styled = screen(2);
+        let row = &mut styled.rows[0];
+        row[0].hyperlink = Some(0);
+        row[0].foreground = Color::Palette(3);
+        row[0].background = Color::Rgb([1, 2, 3]);
+        row[0].underline_color = Color::Rgb([0, 0, 0]);
+        row[0].flags = 1;
+        row[0].underline = 2;
+        row[1].foreground = Color::Palette(0);
+        let decoded: Screen =
+            serde_json::from_slice(&serde_json::to_vec(&styled).unwrap()).unwrap();
+        assert_eq!(decoded.rows, styled.rows);
+        assert_eq!(decoded.rows[1][0], cell_value("c"));
+    }
+    fn cell_value(text: &str) -> Cell {
+        serde_json::from_value(cell(text)).unwrap()
     }
 
     #[test]

@@ -1,5 +1,5 @@
 use super::*;
-use pane::reading::{Operation, SELECTION_CHUNK_BYTES, Scroll};
+use pane::reading::{Operation, SELECTION_CHUNK_BYTES, Scroll, Status};
 use std::sync::mpsc::{Receiver, TryRecvError};
 
 type Prepared = Receiver<Result<Option<Arc<[u8]>>, crate::terminal::SelectionCopyError>>;
@@ -156,22 +156,24 @@ impl OwnedPane {
             .ok_or(Refusal::Stale)
     }
 
-    pub(super) fn reading_status(&mut self) -> Result<Reply, Refusal> {
+    pub(super) fn reading_status(&mut self) -> Status {
         if self.reading.busy() {
-            return Ok(Reply::SelectionPending);
+            return Status::Pending;
         }
-        self.reading.take_refused()?;
+        if self.reading.take_refused().is_err() {
+            return Status::Refused;
+        }
         // A worker completion follows its presentation barrier. Drain again after observing
         // completion so this fence includes a newly published screen as well as a quiet release.
         self.drain();
         let Some(screen) = &self.screen else {
-            return Ok(Reply::SelectionPending);
+            return Status::Pending;
         };
-        Ok(Reply::ReadingReady {
+        Status::Ready {
             generation: self.screen_generation,
             selection_revision: screen.selection_revision,
             selection_present: screen.selection_present,
-        })
+        }
     }
     pub(super) fn read(&mut self, operation: Operation) -> Result<Reply, Refusal> {
         if self.ended || self.failed {

@@ -1,4 +1,4 @@
-use super::tests::{command, host, size};
+use super::tests::{command, host, poll_changes, presentation, size};
 use super::*;
 use spaceterm_server::hierarchy::{Axis, Mutation, Outcome};
 use std::time::Instant;
@@ -17,12 +17,12 @@ fn screen(
 ) -> Box<Screen> {
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
-        match exchange(
+        match presentation(exchange(
             host,
             1,
             lease.connection[0],
-            Request::PollChanges { lease, base: None },
-        ) {
+            poll_changes(lease, None),
+        )) {
             Reply::Screen(screen) if ready(&screen) => return screen,
             Reply::Screen(_) | Reply::ScreenChanges(_) | Reply::Unchanged => {}
             reply => panic!("screen refused: {reply:?}"),
@@ -188,15 +188,7 @@ fn clear_under_lease(preserve_prompt: bool) {
     ));
     if !preserve_prompt {
         assert!(matches!(
-            exchange(
-                &mut host,
-                1,
-                3,
-                Request::PollChanges {
-                    lease: resumed,
-                    base: None
-                }
-            ),
+            presentation(exchange(&mut host, 1, 3, poll_changes(resumed, None))),
             Reply::Unchanged
         ));
         assert!(matches!(

@@ -1,5 +1,6 @@
 //! Desktop presentation and fenced input for an authenticated server Pane.
 mod accessibility;
+mod attached;
 mod claim;
 mod control;
 mod effects;
@@ -902,6 +903,7 @@ impl ActiveInput {
     /// Sends up to [`INPUT_DRAIN`] queued commands in order before the worker next checks the
     /// screen. Where the server takes key batches, adjacent queued keys travel in one exchange,
     /// and any other command first sends the keys queued before it. It never waits for more.
+    /// Returns, in order, the screen replies that accepted key batches carried.
     fn drain(
         &mut self,
         state: &DevelopmentPaneState,
@@ -909,7 +911,8 @@ impl ActiveInput {
         batches: bool,
         exchange: &mut impl FnMut(&Request) -> Result<Reply, ServerError>,
         paste_unconfirmed: &mut bool,
-    ) -> Result<(), ServerError> {
+    ) -> Result<Vec<Reply>, ServerError> {
+        let mut echoes = Vec::new();
         let mut keys = Vec::new();
         for _ in 0..INPUT_DRAIN {
             let Ok(submitted) = input.try_recv() else {
@@ -925,23 +928,25 @@ impl ActiveInput {
                 keys.push(submitted);
                 continue;
             }
-            self.send_keys(state, std::mem::take(&mut keys), exchange)?;
+            echoes.extend(self.send_keys(state, std::mem::take(&mut keys), exchange)?);
             self.process(state, submitted, exchange, paste_unconfirmed)?;
         }
-        self.send_keys(state, keys, exchange)
+        echoes.extend(self.send_keys(state, keys, exchange)?);
+        Ok(echoes)
     }
     /// Sends queued keys as one batch, keeping only those a single key exchange would send now:
     /// this lease's epoch, the current focus generation, and a target that takes them. The
     /// server checks the whole batch before it enters any key. A batch whose outcome is
     /// unknown invalidates the connection like a single key would, and is never sent again.
+    /// An accepting reply may carry the Pane's next publication, which is returned.
     fn send_keys(
         &mut self,
         state: &DevelopmentPaneState,
         submitted: Vec<SubmittedInput>,
         exchange: &mut impl FnMut(&Request) -> Result<Reply, ServerError>,
-    ) -> Result<(), ServerError> {
+    ) -> Result<Option<Reply>, ServerError> {
         if submitted.is_empty() || state.epoch.load(Ordering::Acquire) != self.epoch {
-            return Ok(());
+            return Ok(None);
         }
         if let Err(error) = self.sync_focus(state, exchange) {
             state.invalidate();
@@ -950,7 +955,7 @@ impl ActiveInput {
         let (generation, keys) = {
             let interaction = state.interaction.lock().unwrap_or_else(|e| e.into_inner());
             if state.epoch.load(Ordering::Acquire) != self.epoch || !interaction.interactive {
-                return Ok(());
+                return Ok(None);
             }
             let generation = interaction.focus_generation;
             let keys: Vec<_> = submitted
@@ -968,18 +973,19 @@ impl ActiveInput {
             (generation, keys)
         };
         if keys.is_empty() {
-            return Ok(());
+            return Ok(None);
         }
         match exchange(&Request::Keys {
             lease: self.lease,
             generation,
             keys,
         }) {
-            Ok(Reply::Unchanged) => Ok(()),
+            Ok(Reply::Unchanged) => Ok(None),
+            Ok(echo @ (Reply::Screen(_) | Reply::ScreenChanges(_))) => Ok(Some(echo)),
             Ok(_) => Err(ServerError::Protocol),
             Err(ServerError::Unsupported) => {
                 self.disable(state);
-                Ok(())
+                Ok(None)
             }
             Err(error) => {
                 state.invalidate();
@@ -1527,11 +1533,7 @@ fn present(
         state.retry.store(false, Ordering::Release);
         let connected = (|| {
             let mut connection = server.connect_shared_pane()?;
-            let Some(claim::Granted {
-                lease,
-                size: grant_size,
-                appearance: grant_appearance,
-            }) = (claim::ClaimWorker {
+            let Some(grant) = (claim::ClaimWorker {
                 state: &state,
                 pane_id,
                 alive: &alive,
@@ -1569,24 +1571,34 @@ fn present(
             // Authenticate and receive the authoritative screen before enabling input.
             let epoch = state.attach(&presenter)?;
             drain_input(&state, &input);
-            let mut active_input = ActiveInput {
-                epoch,
-                lease,
-                focus_sent: None,
+            let lease = grant.lease;
+            let supports = attached::Supports {
+                changes: connection.supports_presentation_changes(),
+                batches: connection.supports_key_input_batches(),
+                interactive: connection.supports_interactive_input(),
+                reading: connection.supports_reading(),
+                effects: connection.supports_native_effects(),
+                graphics: connection.supports_graphics(),
+                accessibility: connection.supports_accessibility(),
             };
-            let mut active_size = grant_size;
-            let mut ready = false;
-            let mut reader = reading::Reader::default();
-            let mut graphics = graphics::Graphics::default();
-            let mut semantic = accessibility::Fetcher::new(lease);
-            let mut latest_screen = None;
-            let changes = connection.supports_presentation_changes();
-            let batches = connection.supports_key_input_batches();
-            // Row changes apply only to this exact lease's own previous screen.
-            let mut decoder = pane::presentation::ScreenDecoder::default();
-            let mut cadence = schedule::Cadence::new(
-                std::time::Instant::now(),
-                state.presentable.load(Ordering::Acquire),
+            let mut worker = attached::Attached::new(
+                attached::Presentation {
+                    state: &state,
+                    input: &input,
+                    events: &events,
+                    semantics: &semantics,
+                    size: &size,
+                    appearance: &appearance,
+                    local_files: local_files.as_ref(),
+                    remote_metadata: remote_metadata.as_ref(),
+                    effects: &mut effects,
+                    generation: &mut generation,
+                    takeover: &mut takeover,
+                    paste_unconfirmed: &mut paste_unconfirmed,
+                },
+                supports,
+                epoch,
+                grant,
             );
             let attached = (|| loop {
                 if !alive.load(Ordering::Acquire) {
@@ -1595,280 +1607,22 @@ fn present(
                 if attachment.as_ref().is_some_and(|permit| !permit.active()) {
                     return Ok(());
                 }
-                if state.epoch.load(Ordering::Acquire) != epoch {
-                    return Err(ServerError::Protocol);
-                }
-                // Queued input is sent before any output check.
-                active_input.drain(
-                    &state,
-                    &input,
-                    batches,
-                    &mut |request| {
-                        let reply =
-                            send(&presenter, &alive, &attachment, &mut connection, request)?;
-                        if let Request::Resize { size, .. } = request {
-                            active_size = *size;
-                        }
-                        Ok(reply)
-                    },
-                    &mut paste_unconfirmed,
+                let turn = worker.turn(
+                    &mut |request| send(&presenter, &alive, &attachment, &mut connection, request),
+                    &|| presenter.current(),
                 )?;
-                let now = std::time::Instant::now();
-                cadence.set_visible(state.presentable.load(Ordering::Acquire), now);
-                cadence.set_preparation(state.preparation.load(Ordering::Acquire));
-                if changes && let Some(visible) = cadence.take_demand() {
-                    expect_unchanged(send(
-                        &presenter,
-                        &alive,
-                        &attachment,
-                        &mut connection,
-                        &Request::PresentationDemand { lease, visible },
-                    )?)?;
-                    // A changed demand restarts row changes from a complete screen.
-                    decoder = pane::presentation::ScreenDecoder::default();
-                }
-                let polled = cadence.poll_due(now);
-                if polled {
-                    let reply = if changes {
-                        let base = decoder.baseline();
-                        let reply = send(
-                            &presenter,
-                            &alive,
-                            &attachment,
-                            &mut connection,
-                            &Request::PollChanges { lease, base },
-                        )?;
-                        decoder.apply(reply)?
-                    } else {
-                        send(
-                            &presenter,
-                            &alive,
-                            &attachment,
-                            &mut connection,
-                            &Request::Poll { lease },
-                        )?
-                    };
-                    // A reply that completed after a successor claimed the Pane is not published.
-                    if !presenter.current() {
-                        return Err(ServerError::NotRunning);
-                    }
-                    if state.epoch.load(Ordering::Acquire) != epoch {
-                        return Err(ServerError::Protocol);
-                    }
-                    match reply {
-                        Reply::Screen(mut screen) => {
-                            semantic.note_revision(screen.accessibility_revision);
-                            let graphics_error = graphics
-                                .update(screen.graphics.take(), screen.alternate)
-                                .err();
-                            if let Some(error) = graphics_error {
-                                graphics.clear();
-                                graphics.failure(error);
-                            }
-                            graphics.recovered();
-                            generation = generation.next();
-                            let mapping = ScreenMapping {
-                                epoch,
-                                local: generation,
-                                wire: screen.generation,
-                                selection: screen
-                                    .reading
-                                    .as_ref()
-                                    .map_or(0, |reading| reading.selection_revision),
-                                size: PaneSize {
-                                    columns: screen.columns,
-                                    rows: screen.rows.len() as u16,
-                                    cell_width: screen
-                                        .cell_pixels
-                                        .map_or(active_size.cell_width, |p| p.0),
-                                    cell_height: screen
-                                        .cell_pixels
-                                        .map_or(active_size.cell_height, |p| p.1),
-                                },
-                                mouse_tracking: screen.mouse_tracking,
-                                alternate: screen.alternate,
-                                alternate_scroll: screen.alternate_scroll,
-                            };
-                            let mut screen = decode_screen(
-                                *screen,
-                                generation,
-                                &appearance.lock().unwrap_or_else(|e| e.into_inner()),
-                                local_files.as_ref(),
-                            )?;
-                            if let Some(metadata) = &remote_metadata {
-                                Arc::make_mut(&mut Arc::make_mut(&mut screen).metadata).context =
-                                    super::metadata::TerminalMetadataContext::Remote(
-                                        metadata.clone(),
-                                    );
-                            }
-                            Arc::make_mut(&mut screen).graphics = graphics.snapshot();
-                            if !ready {
-                                // Claims apply their measured controller facts once.
-                                // Reconcile changes made while attachment was in flight.
-                                let current_size = *size.lock().unwrap_or_else(|e| e.into_inner());
-                                let update =
-                                    appearance.lock().unwrap_or_else(|e| e.into_inner()).clone();
-                                if current_size != grant_size {
-                                    expect_unchanged(send(
-                                        &presenter,
-                                        &alive,
-                                        &attachment,
-                                        &mut connection,
-                                        &Request::Resize {
-                                            lease,
-                                            size: current_size,
-                                        },
-                                    )?)?;
-                                    active_size = current_size;
-                                }
-                                if grant_appearance != Some(update.generation) {
-                                    expect_unchanged(send(
-                                        &presenter,
-                                        &alive,
-                                        &attachment,
-                                        &mut connection,
-                                        &Request::Style {
-                                            lease,
-                                            style: encode_style(&update),
-                                        },
-                                    )?)?;
-                                }
-                                state
-                                    .interaction
-                                    .lock()
-                                    .unwrap_or_else(|e| e.into_inner())
-                                    .interactive = connection.supports_interactive_input();
-                                state
-                                    .interaction
-                                    .lock()
-                                    .unwrap_or_else(|e| e.into_inner())
-                                    .reading = connection.supports_reading();
-                                // Publish the authorized screen first. Input stays queued
-                                // until this worker's focus barrier is acknowledged.
-                                ready = true;
-                            }
-                            state.connected(epoch, mapping, paste_unconfirmed)?;
-                            reader.screen(&state, mapping, screen.selection_present);
-                            latest_screen = Some((Arc::clone(&screen), mapping));
-                            measurement::record(MeasurementEvent::ScreenDecoded {
-                                generation: generation.as_u64(),
-                                wire_generation: mapping.wire,
-                            });
-                            let _ = events.force_send(TerminalSessionEvent::Screen(screen));
-                            if let Some(model) = semantic.rebind(&state, generation) {
-                                let _ = semantics.force_send(model);
-                            }
-                            takeover = false;
-                            if paste_unconfirmed {
-                                paste_unconfirmed = false;
-                                let _ = events.force_send(TerminalSessionEvent::PasteUnconfirmed);
-                            }
-                        }
-                        Reply::Ended => {
-                            state.set(DevelopmentPaneStatus::Ended);
-                            let _ = events.force_send(TerminalSessionEvent::Exited(
-                                TerminalSessionExit::Success,
-                            ));
-                            return Ok(());
-                        }
-                        Reply::Unchanged => {}
-                        Reply::AccessibilityRevision { revision } => {
-                            semantic.note_revision(revision)
-                        }
-                        _ => return Err(ServerError::Protocol),
-                    }
-                }
-                if ready {
-                    active_input.sync_focus(&state, &mut |request| {
-                        send(&presenter, &alive, &attachment, &mut connection, request)
-                    })?;
-                }
-                let mut next = reading::Next::Idle;
-                if ready && connection.supports_reading() {
-                    next = reader.poll(&state, lease, &mut |request| {
-                        send(&presenter, &alive, &attachment, &mut connection, request)
-                    })?;
-                    let mut reading = state.reading.lock().unwrap_or_else(|e| e.into_inner());
-                    reading.publish_ready(&events);
-                }
-                if polled
-                    && ready
-                    && connection.supports_native_effects()
-                    && let Some((generation, _)) = active_input.focus_sent
-                {
-                    effects.poll(&state, lease, generation, &events, &mut |request| {
-                        send(&presenter, &alive, &attachment, &mut connection, request)
-                    })?;
-                }
-                // A hidden Pane transfers no images.
-                if polled && cadence.visible() && ready && connection.supports_graphics() {
-                    let result = graphics.poll(lease, &mut |request| {
-                        send(&presenter, &alive, &attachment, &mut connection, request)
-                    })?;
-                    if state.epoch.load(Ordering::Acquire) != epoch {
-                        return Err(ServerError::Protocol);
-                    }
-                    let changed = match result {
-                        Ok(changed) => changed,
-                        Err(error) => graphics.failure(error),
-                    };
-                    let recovered = graphics.recovered();
-                    if (changed || recovered)
-                        && let Some((screen, mapping)) = &mut latest_screen
-                    {
-                        generation = generation.next();
-                        let next = Arc::make_mut(screen);
-                        next.generation = generation;
-                        next.graphics = graphics.snapshot();
-                        mapping.local = generation;
-                        state.connected(epoch, *mapping, paste_unconfirmed)?;
-                        reader.screen(&state, *mapping, next.selection_present);
-                        let _ = events.force_send(TerminalSessionEvent::Screen(Arc::clone(screen)));
-                        if let Some(model) = semantic.rebind(&state, generation) {
-                            let _ = semantics.force_send(model);
-                        }
-                    }
-                }
-                // Semantic transfer follows its own explicit demand, even while hidden, and a
-                // partial document continues one chunk per turn.
-                if (polled || semantic.can_continue())
-                    && ready
-                    && connection.supports_accessibility()
-                {
-                    let model = semantic.poll(&state, generation, &mut |request| {
-                        send(&presenter, &alive, &attachment, &mut connection, request)
-                    })?;
-                    if state.epoch.load(Ordering::Acquire) != epoch {
-                        return Err(ServerError::Protocol);
-                    }
-                    if let Some(model) = model {
-                        let _ = semantics.force_send(model);
-                    }
-                }
-                if semantic.can_continue() {
-                    next = next.max(reading::Next::Continue);
-                }
-                if polled && ready {
-                    // A complete healthy round renews recovery even when its screen is unchanged.
-                    state
-                        .connection_recovery
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .connected(std::time::Instant::now());
-                }
-                let now = std::time::Instant::now();
-                match next {
-                    reading::Next::Idle => state.wake.wait_until(cadence.deadline()),
-                    reading::Next::Recheck => state.wake.wait_until(cadence.recheck_deadline(now)),
-                    reading::Next::Continue => {}
-                    reading::Next::Refresh => cadence.poll_now(now),
+                match turn {
+                    attached::Turn::Ended => return Ok(()),
+                    attached::Turn::Again => {}
+                    attached::Turn::WaitUntil(deadline) => state.wake.wait_until(deadline),
                 }
             })();
+            drop(worker);
             if alive.load(Ordering::Acquire) {
                 return attached;
             }
             // Dismissal, even mid-exchange, unfocuses the Pane in order; its control remains.
-            presenter.retire(lease, changes, |request| {
+            presenter.retire(lease, supports.changes, |request| {
                 exchange(&attachment, &mut connection, request)
             });
             Ok(())
@@ -2772,24 +2526,24 @@ mod tests {
         let mut reader = reading::Reader::default();
         reader.screen(&adapter.handle.state, mapping, false);
         for _ in 0..3 {
-            reader
-                .poll(
-                    &adapter.handle.state,
-                    adapter.active.lease,
-                    &mut |request| match request {
-                        Request::Read { .. } => Ok(Reply::Reading { accepted: true }),
-                        Request::ReadingStatus { .. } => Ok(Reply::ReadingReady {
-                            generation: mapping.wire,
-                            selection_revision: mapping.selection,
-                            selection_present: true,
-                        }),
-                        Request::SelectionChunk { .. } => Ok(Reply::SelectionPending),
-                        _ => panic!(
-                            "Copy must not reach the application after selection input completes"
-                        ),
-                    },
-                )
-                .unwrap();
+            reading::tests::turn(
+                &mut reader,
+                &adapter.handle.state,
+                adapter.active.lease,
+                || pane::reading::Status::Ready {
+                    generation: mapping.wire,
+                    selection_revision: mapping.selection,
+                    selection_present: true,
+                },
+                &mut |request| match request {
+                    Request::Read { .. } => Ok(Reply::Reading { accepted: true }),
+                    Request::SelectionChunk { .. } => Ok(Reply::SelectionPending),
+                    _ => panic!(
+                        "Copy must not reach the application after selection input completes"
+                    ),
+                },
+            )
+            .unwrap();
         }
     }
 
@@ -2907,34 +2661,34 @@ mod tests {
         reader.screen(&adapter.handle.state, mapping, false);
         let mut delivered = vec![];
         for _ in 0..8 {
-            reader
-                .poll(
-                    &adapter.handle.state,
-                    adapter.active.lease,
-                    &mut |request| match request {
-                        Request::Read {
-                            operation: pane::reading::Operation::Pointer(p),
-                            ..
-                        } => {
-                            delivered.push((
-                                match p.phase {
-                                    pane::PointerPhase::Press => "press",
-                                    pane::PointerPhase::Motion => "motion",
-                                    pane::PointerPhase::Release => "release",
-                                },
-                                p.x,
-                            ));
-                            Ok(Reply::Reading { accepted: true })
-                        }
-                        Request::ReadingStatus { .. } => Ok(Reply::ReadingReady {
-                            generation: 17,
-                            selection_revision: 17,
-                            selection_present: false,
-                        }),
-                        _ => panic!("unexpected reading request"),
-                    },
-                )
-                .unwrap();
+            reading::tests::turn(
+                &mut reader,
+                &adapter.handle.state,
+                adapter.active.lease,
+                || pane::reading::Status::Ready {
+                    generation: 17,
+                    selection_revision: 17,
+                    selection_present: false,
+                },
+                &mut |request| match request {
+                    Request::Read {
+                        operation: pane::reading::Operation::Pointer(p),
+                        ..
+                    } => {
+                        delivered.push((
+                            match p.phase {
+                                pane::PointerPhase::Press => "press",
+                                pane::PointerPhase::Motion => "motion",
+                                pane::PointerPhase::Release => "release",
+                            },
+                            p.x,
+                        ));
+                        Ok(Reply::Reading { accepted: true })
+                    }
+                    _ => panic!("unexpected reading request"),
+                },
+            )
+            .unwrap();
         }
         assert_eq!(
             delivered,
@@ -2952,7 +2706,7 @@ mod tests {
 
     pub(super) struct Adapter {
         pub(super) handle: PresentationHandle,
-        input: mpsc::Receiver<SubmittedInput>,
+        pub(super) input: mpsc::Receiver<SubmittedInput>,
         pub(super) active: ActiveInput,
         unconfirmed: bool,
     }
@@ -3269,7 +3023,7 @@ mod tests {
     }
 
     /// A typed character: its press carries the text and its release carries none.
-    fn typed(text: &str) -> [KeyInput; 2] {
+    pub(super) fn typed(text: &str) -> [KeyInput; 2] {
         let press = KeyInput {
             action: KeyAction::Press,
             physical_key: PhysicalKey::A,
