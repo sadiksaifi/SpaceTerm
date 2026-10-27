@@ -3635,7 +3635,9 @@ fn control_text_input_is_typed_as_keys_and_text_without_a_key_is_discarded() {
     session.key(KeyInput::text_input("token=secret\u{1c}".to_owned()));
     // A line feed is typed as Enter, which the legacy encoding writes as a carriage return.
     session.key(KeyInput::text_input("ls\nok".to_owned()));
-    records.wait_for("the typed text and Enter", |state| state.written == b"ls\rok");
+    records.wait_for("the typed text and Enter", |state| {
+        state.written == b"ls\rok"
+    });
     while let Ok(event) = events.try_recv() {
         assert!(
             !matches!(event, TerminalSessionEvent::Failed(_)),

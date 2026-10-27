@@ -79,7 +79,10 @@ fn await_line(served: &mut Served<SharedWorkspaceHost>, rows: &mut Vec<String>, 
         if rows.iter().any(|row| row.trim_end() == line) {
             return;
         }
-        assert!(Instant::now() < deadline, "expected {line:?}; screen: {rows:?}");
+        assert!(
+            Instant::now() < deadline,
+            "expected {line:?}; screen: {rows:?}"
+        );
         std::thread::sleep(Duration::from_millis(10));
     }
 }
