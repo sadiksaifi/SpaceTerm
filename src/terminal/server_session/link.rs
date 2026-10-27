@@ -1574,15 +1574,16 @@ pub(super) fn present(
                     let mut reading = state.reading.lock().unwrap_or_else(|e| e.into_inner());
                     reading.publish_ready(&events);
                 }
-                // A hidden Pane transfers no images. A new manifest or a transfer in progress
-                // continues one chunk per turn.
-                if ready && demand.visible() && (presented || graphics.transferring()) {
+                // A hidden Pane transfers no images. Every image the manifest names is fetched,
+                // one chunk per turn, whether or not a newer frame arrives.
+                if ready && demand.visible() && (presented || graphics.wants()) {
                     let result = graphics.poll(lease, &mut |request| {
                         send(&presenter, &alive, &mut connection, request)
                     })?;
                     if state.epoch.load(Ordering::Acquire) != epoch {
                         return Err(ServerError::Protocol);
                     }
+                    let completed = matches!(result, Ok(true));
                     let changed = match result {
                         Ok(changed) => changed,
                         Err(error) => graphics.failure(error),
@@ -1603,7 +1604,8 @@ pub(super) fn present(
                             let _ = semantics.force_send(model);
                         }
                     }
-                    if graphics.transferring() {
+                    // A failed image waits for the next turn; a finished one goes on at once.
+                    if graphics.transferring() || (completed && graphics.wants()) {
                         next = next.max(reading::Next::Continue);
                     }
                 }

@@ -135,41 +135,46 @@ impl Graphics {
         self.transfer.is_some()
     }
 
+    /// Whether [`Self::poll`] has work: a transfer in progress, a manifest image not cached yet,
+    /// or one whose failure a later attempt may overcome.
+    pub(crate) fn wants(&self) -> bool {
+        self.transfer.is_some() || self.wanted().is_some()
+    }
+
+    /// The next manifest image to fetch. Cycles through IDs so a changing animation cannot
+    /// monopolize transfers.
+    fn wanted(&self) -> Option<&Image> {
+        self.manifest
+            .as_ref()?
+            .images
+            .iter()
+            .filter(|image| {
+                self.images
+                    .get(&image.key.image_id)
+                    .is_none_or(|cached| cached.key != image.key)
+                    && self
+                        .failures
+                        .get(&image.key.image_id)
+                        .is_none_or(|(generation, error)| {
+                            *generation != image.key.generation || *error == Error::Capacity
+                        })
+            })
+            .min_by_key(|image| {
+                (
+                    self.last_requested_image
+                        .is_some_and(|last| image.key.image_id <= last),
+                    image.key.image_id,
+                )
+            })
+    }
+
     pub(crate) fn poll(
         &mut self,
         lease: Lease,
         exchange: &mut impl FnMut(&Request) -> Result<Reply, ServerError>,
     ) -> Result<Result<bool, Error>, ServerError> {
         if self.transfer.is_none() {
-            let Some(image) = self
-                .manifest
-                .as_ref()
-                .and_then(|manifest| {
-                    manifest
-                        .images
-                        .iter()
-                        .filter(|image| {
-                            self.images
-                                .get(&image.key.image_id)
-                                .is_none_or(|cached| cached.key != image.key)
-                                && self.failures.get(&image.key.image_id).is_none_or(
-                                    |(generation, error)| {
-                                        *generation != image.key.generation
-                                            || *error == Error::Capacity
-                                    },
-                                )
-                        })
-                        // Cycle through IDs so a changing animation cannot monopolize transfers.
-                        .min_by_key(|image| {
-                            (
-                                self.last_requested_image
-                                    .is_some_and(|last| image.key.image_id <= last),
-                                image.key.image_id,
-                            )
-                        })
-                })
-                .cloned()
-            else {
+            let Some(image) = self.wanted().cloned() else {
                 return Ok(Ok(false));
             };
             self.last_requested_image = Some(image.key.image_id);
@@ -317,6 +322,46 @@ mod tests {
             offset: *offset,
             bytes: vec![255; CHUNK_BYTES.min(total - offset)],
         })))
+    }
+
+    /// After one image completes, the next is still wanted though no new manifest arrives, as
+    /// on an idle screen.
+    #[test]
+    fn every_image_of_one_manifest_is_wanted_until_it_is_cached() {
+        let _guard = crate::terminal::graphics::test_lock();
+        let mut graphics = Graphics::default();
+        let mut manifest = manifest(4, 4);
+        let mut second = manifest.images[0].clone();
+        second.key.image_id = 8;
+        manifest.images.push(second);
+        graphics.update(Some(Ok(manifest)), false).unwrap();
+
+        let mut fetched = Vec::new();
+        while graphics.wants() {
+            let completed = graphics
+                .poll(lease(), &mut |request| {
+                    if let Request::GraphicsChunk { image, .. } = request {
+                        fetched.push(image.image_id);
+                    }
+                    reply(request, 64)
+                })
+                .unwrap()
+                .unwrap();
+            assert!(completed, "a 4x4 image arrives in one chunk");
+        }
+
+        assert_eq!(fetched, [7, 8]);
+        assert_eq!(graphics.snapshot().images.len(), 2);
+    }
+
+    #[test]
+    fn a_capacity_failure_stays_wanted_but_another_failure_does_not() {
+        let mut graphics = Graphics::default();
+        graphics.update(Some(Ok(manifest(4, 4))), false).unwrap();
+        graphics.failures.insert(7, (1, Error::Capacity));
+        assert!(graphics.wants());
+        graphics.failures.insert(7, (1, Error::Malformed));
+        assert!(!graphics.wants());
     }
 
     #[test]
