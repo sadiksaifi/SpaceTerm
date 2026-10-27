@@ -436,6 +436,29 @@ pub struct Served<H> {
     connections: BTreeMap<[u8; 32], Connection>,
     /// When the host's timed work is next due. `None` runs it at every tick.
     host_due: Option<std::time::Instant>,
+    /// Rung when a Terminal Session has something to publish, or a request may have ended
+    /// another channel's binding. Only a tick after a ring publishes.
+    bell: Arc<Bell>,
+}
+
+/// Records a ring for the next tick and wakes the host to run it.
+#[derive(Default)]
+struct Bell {
+    rung: std::sync::atomic::AtomicBool,
+    wake: std::sync::OnceLock<Arc<dyn Wake>>,
+}
+
+impl Bell {
+    fn ring(&self) {
+        self.rung.store(true, std::sync::atomic::Ordering::Release);
+        if let Some(wake) = self.wake.get() {
+            wake.wake();
+        }
+    }
+
+    fn take(&self) -> bool {
+        self.rung.swap(false, std::sync::atomic::Ordering::AcqRel)
+    }
 }
 
 struct Connection {
@@ -468,6 +491,7 @@ impl<H: HostCommands> Served<H> {
             host,
             connections: BTreeMap::new(),
             host_due: None,
+            bell: Arc::default(),
         }
     }
 
@@ -660,11 +684,20 @@ impl<H: HostCommands> Served<H> {
     /// first refusal discards that event and every later one, and aborts a paste in progress.
     fn input_message(&mut self, peer: &Peer, input: protocol::Input) {
         let (channel, serial) = (input.channel, input.serial);
-        if let Some(outcome) = self.apply(peer, input) {
+        let outcome = self.apply(peer, input);
+        // A paste waiting for later chunks or for confirmation has written nothing yet, so its
+        // serial waits for the message that writes it. Even a discarded message may have applied
+        // the events before its refusal.
+        let waiting = matches!(
+            outcome,
+            Some(InputOutcome::Paste(PasteOutcome::ConfirmationRequired(_)))
+        ) || self
+            .bound(peer, channel)
+            .is_some_and(|bound| bound.paste.is_some());
+        if let Some(outcome) = outcome {
             self.report(peer, channel, serial, outcome);
         }
-        // Even a discarded message may have applied the events before its refusal.
-        if let Ok(lease) = self.lease(peer, channel) {
+        if !waiting && let Ok(lease) = self.lease(peer, channel) {
             self.host.input_written(&lease, serial);
         }
     }
@@ -918,7 +951,9 @@ impl<H: HostCommands> ConnectionService for Served<H> {
         self.host.restore(store)
     }
     fn set_wake(&mut self, wake: Arc<dyn Wake>) {
-        self.host.set_notifier(Arc::new(move || wake.wake()));
+        let _ = self.bell.wake.set(wake);
+        let bell = Arc::clone(&self.bell);
+        self.host.set_notifier(Arc::new(move || bell.ring()));
     }
     fn admitted(&mut self, peer: &Peer, name: control::ClientName, outbox: Outbox) {
         self.host.admitted(peer.client, name);
@@ -933,8 +968,72 @@ impl<H: HostCommands> ConnectionService for Served<H> {
     }
     fn revoked(&mut self, client: [u8; 32]) {
         self.host.revoked(client);
+        self.bell.ring();
     }
-    fn request(&mut self, peer: &Peer, _id: RequestId, operation: Operation) -> Dispatch {
+    fn request(&mut self, peer: &Peer, id: RequestId, operation: Operation) -> Dispatch {
+        let dispatch = self.dispatch(peer, id, operation);
+        // A claim, close, release or edit may have ended another channel's binding.
+        self.bell.ring();
+        dispatch
+    }
+    fn input(&mut self, peer: &Peer, input: protocol::Input) {
+        self.input_message(peer, input);
+    }
+    /// The connection already applied `view` to the outbox. A revealed channel receives the
+    /// current screen again.
+    fn view(&mut self, peer: &Peer, view: protocol::View) {
+        let Some(bound) = self.bound(peer, view.channel) else {
+            return;
+        };
+        bound.publication.view(view.visible);
+        let lease = bound.lease;
+        self.host.view(&lease, view.visible, view.max_hz);
+        if view.visible {
+            self.publish(peer.connection, view.channel);
+        }
+    }
+    fn effect_done(&mut self, peer: &Peer, done: protocol::EffectDone) {
+        if let Ok(lease) = self.lease(peer, done.channel) {
+            self.command(
+                peer,
+                Request::CompleteClipboard {
+                    lease,
+                    generation: done.generation,
+                    id: done.effect,
+                    completion: done.completion,
+                },
+            );
+        }
+    }
+    fn acknowledge(&mut self, peer: &Peer, sequence: u64) {
+        self.command(peer, Request::Acknowledge { sequence });
+    }
+    /// Pushes what every bound Pane published when the bell rang, then runs the host's timed
+    /// work when it is due. A host deadline alone publishes nothing.
+    fn tick(&mut self, now: std::time::Instant) -> Option<std::time::Instant> {
+        // Publication ends each channel whose Pane is gone with its last event, and hands an
+        // ended shell's final screen over before the host's timed work retires its Pane.
+        if self.bell.take() {
+            self.publish_all();
+        }
+        if self.host_due.is_none_or(|due| now >= due) {
+            self.host_due = self.host.tick(now);
+        }
+        self.sweep();
+        self.host_due
+    }
+    fn disconnected(&mut self, peer: &Peer) {
+        self.connections.remove(&peer.connection);
+        self.host.disconnected(peer.connection);
+    }
+    fn shutdown(&mut self) -> Result<(), ServerError> {
+        self.host.shutdown()
+    }
+}
+
+impl<H: HostCommands> Served<H> {
+    /// Answers one request.
+    fn dispatch(&mut self, peer: &Peer, _id: RequestId, operation: Operation) -> Dispatch {
         Dispatch::reply(match operation {
             Operation::Claim(claim) => self.claim(peer, claim),
             Operation::ReleaseAttachment { attachment } => {
@@ -1010,59 +1109,7 @@ impl<H: HostCommands> ConnectionService for Served<H> {
             Operation::ScrollbackPage { .. } | Operation::Direct(_) => Err(Refusal::Unsupported),
         })
     }
-    fn input(&mut self, peer: &Peer, input: protocol::Input) {
-        self.input_message(peer, input);
-    }
-    /// The connection already applied `view` to the outbox. A revealed channel receives the
-    /// current screen again.
-    fn view(&mut self, peer: &Peer, view: protocol::View) {
-        let Some(bound) = self.bound(peer, view.channel) else {
-            return;
-        };
-        bound.publication.view(view.visible);
-        let lease = bound.lease;
-        self.host.view(&lease, view.visible, view.max_hz);
-        if view.visible {
-            self.publish(peer.connection, view.channel);
-        }
-    }
-    fn effect_done(&mut self, peer: &Peer, done: protocol::EffectDone) {
-        if let Ok(lease) = self.lease(peer, done.channel) {
-            self.command(
-                peer,
-                Request::CompleteClipboard {
-                    lease,
-                    generation: done.generation,
-                    id: done.effect,
-                    completion: done.completion,
-                },
-            );
-        }
-    }
-    fn acknowledge(&mut self, peer: &Peer, sequence: u64) {
-        self.command(peer, Request::Acknowledge { sequence });
-    }
-    /// Runs the host's timed work when it is due, then pushes what every bound Pane published.
-    fn tick(&mut self, now: std::time::Instant) -> Option<std::time::Instant> {
-        // Publication ends each channel whose Pane is gone with its last event, and hands an
-        // ended shell's final screen over before the host's timed work retires its Pane.
-        self.publish_all();
-        if self.host_due.is_none_or(|due| now >= due) {
-            self.host_due = self.host.tick(now);
-        }
-        self.sweep();
-        self.host_due
-    }
-    fn disconnected(&mut self, peer: &Peer) {
-        self.connections.remove(&peer.connection);
-        self.host.disconnected(peer.connection);
-    }
-    fn shutdown(&mut self) -> Result<(), ServerError> {
-        self.host.shutdown()
-    }
-}
 
-impl<H: HostCommands> Served<H> {
     fn interim(&mut self, peer: &Peer, interim: Interim) -> Result<ReplyBody, Refusal> {
         match interim {
             Interim::Inventory => body(self.command(peer, Request::Inventory)),

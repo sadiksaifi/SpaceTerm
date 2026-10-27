@@ -20,6 +20,8 @@ struct Sessions {
     started: u32,
     live: BTreeSet<[u8; 32]>,
     unbound: Vec<Lease>,
+    /// Input serials the host was told reached the PTY.
+    written: Vec<u32>,
 }
 
 /// Attaches every claim to a new Session. The test ends Sessions by removing them.
@@ -27,6 +29,24 @@ struct Host(Arc<Mutex<Sessions>>);
 
 impl HostCommands for Host {
     fn request(&mut self, _: [u8; 32], connection: [u8; 32], request: Request) -> Reply {
+        if let Request::Input {
+            input: InteractiveInput::Paste { text },
+            ..
+        } = &request
+        {
+            return Reply::Paste(if text.contains("confirm") {
+                PasteOutcome::ConfirmationRequired(pane::PasteConfirmation {
+                    id: 1,
+                    byte_len: text.len() as u32,
+                    line_count: 1,
+                    multiline: false,
+                    control_bytes: false,
+                    closing_fence: false,
+                })
+            } else {
+                PasteOutcome::Written
+            });
+        }
         let Request::ClaimPane { .. } = request else {
             return Reply::Unchanged;
         };
@@ -66,7 +86,9 @@ impl HostCommands for Host {
         }
     }
     fn view(&mut self, _: &Lease, _: bool, _: u8) {}
-    fn input_written(&mut self, _: &Lease, _: u32) {}
+    fn input_written(&mut self, _: &Lease, serial: u32) {
+        self.0.lock().unwrap().written.push(serial);
+    }
     fn disconnected(&mut self, _: [u8; 32]) {}
     fn shutdown(&mut self) -> Result<(), ServerError> {
         Ok(())
@@ -131,4 +153,34 @@ fn a_reclaim_on_the_same_connection_resets_the_previous_binding() {
         1,
         "another Pane is unaffected"
     );
+}
+
+/// Only a message that wrote to the Terminal Session marks its serial: not a paste chunk that
+/// waits for more, nor a paste that waits for confirmation.
+#[test]
+fn an_input_serial_is_written_only_once_its_bytes_reach_the_session() {
+    let (mut served, sessions, _outbox) = served();
+    claim(&mut served, 1, 9);
+    let paste = |text: &str, last| protocol::InputEvent::Paste {
+        text: text.into(),
+        last,
+    };
+    let mut send = |serial, events| {
+        served.input(
+            &PEER,
+            protocol::Input {
+                channel: Channel(1),
+                serial,
+                generation: 1,
+                events,
+            },
+        );
+    };
+
+    send(1, vec![paste("first ", false)]);
+    send(2, vec![paste("half", true)]);
+    send(3, vec![paste("needs confirm", true)]);
+    send(4, vec![protocol::InputEvent::Resize(super::tests::size())]);
+
+    assert_eq!(sessions.lock().unwrap().written, [2, 4]);
 }

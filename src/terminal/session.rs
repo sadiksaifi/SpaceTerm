@@ -1807,6 +1807,8 @@ impl TerminalWorker {
                     let success = action.is_none_or(|action| self.apply_emulator_action(action))
                         && self.refresh_selection_autoscroll();
                     let _ = reply.send(applied && success);
+                    // The server waits on this reply before it drains the session again.
+                    self.events.notify();
                     success
                 }
                 Err(error) => {
@@ -1819,6 +1821,7 @@ impl TerminalWorker {
                     let applied = action.is_some();
                     let success = action.is_none_or(|action| self.apply_emulator_action(action));
                     let _ = reply.send(applied && success);
+                    self.events.notify();
                     success
                 }
                 Err(error) => {
@@ -1828,6 +1831,8 @@ impl TerminalWorker {
             },
             Command::ReadingBarrier(reply) => {
                 let _ = reply.send(());
+                // The server holds back draining the session until this barrier passes.
+                self.events.notify();
                 true
             }
             Command::ResetReading => match self.emulator.reset_reading() {
