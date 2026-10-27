@@ -8,7 +8,7 @@
 # USAGE }
 # USAGE flag "--owner-host <host>" help="SSH host whose server a paired run measures; omit for this machine"
 # USAGE flag "--owner-directory <directory>" help="Repository checkout on the owner host; defaults to this checkout's path from ~"
-# USAGE flag "--expose <address>" help="Enable this machine's server exposure at this address and port for the run"
+# USAGE flag "--expose <address>" help="Enable the measured server's exposure at this address and port for the run"
 # USAGE flag "--samples <count>" help="Keys to echo" default="200"
 # USAGE flag "--requests <count>" help="Requests to time" default="50"
 # USAGE flag "--route-host <host>" help="Server address the paired connection uses, for the route guard"
@@ -51,8 +51,6 @@ def owner_command(args):
 def run(args):
     if args.route == "local" and (args.owner_host or args.expose):
         raise TaskError("--owner-host and --expose apply only to --route paired")
-    if args.owner_host and args.expose:
-        raise TaskError("--expose changes only this machine's server")
     check_route(args)
     executable = build_executable(*PROTOCOL_PROBE, binary="latency_probe", example=True)
     command = [executable, "measure", args.identity, args.route]

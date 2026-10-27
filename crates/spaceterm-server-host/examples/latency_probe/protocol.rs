@@ -458,16 +458,9 @@ impl EchoPane {
         Ok(Some(frame))
     }
 
-    /// One request that changes nothing. It releases an attachment of a Workspace that never
-    /// existed, which the server answers before it reads any attachment state.
+    /// One request that changes nothing.
     pub fn round_trip(&mut self) -> Result<()> {
-        let nothing = Operation::ReleaseAttachment {
-            attachment: Attachment {
-                workspace: [0; 32],
-                generation: 0,
-            },
-        };
-        match request(&self.link, "round trip", nothing)? {
+        match request(&self.link, "round trip", nothing())? {
             ReplyBody::Done => Ok(()),
             _ => fail("round trip"),
         }
@@ -545,11 +538,31 @@ fn discarded(received: &Received) -> Result<()> {
     }
 }
 
+/// A request that changes nothing. It releases an attachment of a Workspace that never existed,
+/// which the server answers before it reads any attachment state.
+fn nothing() -> Operation {
+    Operation::ReleaseAttachment {
+        attachment: Attachment {
+            workspace: [0; 32],
+            generation: 0,
+        },
+    }
+}
+
+/// Applies one Workspace edit and retires its outcome. The server keeps every client's
+/// unretired outcomes and refuses edits from all of them with `Capacity` once 32 wait. A paired
+/// run is a new client each time, so a retirement lost with its link is never repeated.
 fn mutate(link: &ServerLink, sequence: u64, mutation: Mutation) -> Result<Outcome> {
     let reply = request(link, "mutate", Operation::Mutate { sequence, mutation })?;
     let ReplyBody::Outcome(result) = reply else {
         return fail("mutation outcome");
     };
+    if result.outcome != Outcome::Pending {
+        at("mutate", link.acknowledge(sequence))?;
+        // The link writes everything queued in one pass, so the retirement queued before this
+        // request has left once its reply arrives, and ending the link cannot drop it.
+        request(link, "mutate", nothing())?;
+    }
     Ok(result.outcome)
 }
 
