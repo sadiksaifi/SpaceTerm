@@ -190,8 +190,7 @@ struct OwnedPane {
     subscription: TerminalSubscription,
     screen: Option<Arc<ScreenSnapshot>>,
     graphics_transfer: Option<(ActiveScreenSnapshot, Arc<crate::terminal::ImageSnapshot>)>,
-    /// The snapshot a keyframe poll last returned.
-    /// The last frame number a poll returned.
+    /// Whether the controlling client shows this Pane, so its Terminal Session publishes frames.
     presentable: bool,
     ended: bool,
     failed: bool,

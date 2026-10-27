@@ -45,8 +45,6 @@ fn a_direct_close_refuses_a_changed_control_grant_without_ending_the_same_sessio
                     .as_ref()
                     .unwrap()
                     .controls
-                    .as_ref()
-                    .unwrap()
                     .iter()
                     .filter(|control| control.pane == pane)
                     .cloned()
@@ -75,7 +73,7 @@ fn a_direct_close_refuses_a_changed_control_grant_without_ending_the_same_sessio
                 reviewed.close.as_ref().unwrap().sessions
             );
             assert_ne!(
-                current.close.as_ref().unwrap().controls.as_ref().unwrap()[0].epoch,
+                current.close.as_ref().unwrap().controls[0].epoch,
                 confirmation.own_controls.as_ref().unwrap()[0].epoch
             );
             assert!(matches!(host.request([1; 32], [1; 32], Request::Mutate {
@@ -99,7 +97,7 @@ fn a_direct_close_refuses_a_changed_control_grant_without_ending_the_same_sessio
                 "refusal leaves the other client's Session and control intact"
             );
 
-            // Explicit review can end another client's work, including from an older client.
+            // Explicit review can end another client's work.
             let confirmation = after.close_confirmation(target).unwrap();
             assert!(confirmation.own_controls.is_none());
             assert!(matches!(host.request([1; 32], [1; 32], Request::Mutate {
@@ -112,7 +110,7 @@ fn a_direct_close_refuses_a_changed_control_grant_without_ending_the_same_sessio
 }
 
 #[test]
-fn end_all_sessions_from_an_older_client_ignores_new_control_facts() {
+fn end_all_sessions_ignores_control_changes_after_its_review() {
     let mut host = SharedWorkspaceHost::new(host());
     host.prepare_initial_organization().unwrap();
     let pane = shared_inventory(&mut host).workspaces[0].tabs[0].root_pane;
@@ -128,8 +126,7 @@ fn end_all_sessions_from_an_older_client_ignores_new_control_facts() {
     ) else {
         panic!("Pane starts");
     };
-    let mut confirmation = shared_inventory(&mut host).close.unwrap();
-    confirmation.controls = None;
+    let confirmation = shared_inventory(&mut host).close.unwrap();
     assert!(matches!(
         host.request(
             [2; 32],

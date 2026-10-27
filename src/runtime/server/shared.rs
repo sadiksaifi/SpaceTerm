@@ -325,31 +325,29 @@ impl SharedWorkspaceHost {
         inventory.close = Some(CloseInventory {
             boot: self.prototype.boot,
             sessions,
-            controls: Some(
-                inventory
-                    .workspaces
-                    .iter()
-                    .flat_map(|w| &w.tabs)
-                    .flat_map(|t| &t.panes)
-                    .filter_map(|pane| {
-                        let host = self.panes.get(&pane.id);
-                        let (owner, epoch, session) =
-                            if let Some(live) = host.and_then(|h| h.pane.as_ref()) {
-                                (live.device, live.control_epoch, Some(live.lease.session))
-                            } else if let Some(dormant) = host.and_then(|h| h.dormant) {
-                                (dormant.device, dormant.control_epoch, None)
-                            } else {
-                                (pane.creator, 0, None)
-                            };
-                        Some(ConfirmedControl {
-                            pane: pane.id,
-                            session,
-                            owner: owner?,
-                            epoch,
-                        })
+            controls: inventory
+                .workspaces
+                .iter()
+                .flat_map(|w| &w.tabs)
+                .flat_map(|t| &t.panes)
+                .filter_map(|pane| {
+                    let host = self.panes.get(&pane.id);
+                    let (owner, epoch, session) =
+                        if let Some(live) = host.and_then(|h| h.pane.as_ref()) {
+                            (live.device, live.control_epoch, Some(live.lease.session))
+                        } else if let Some(dormant) = host.and_then(|h| h.dormant) {
+                            (dormant.device, dormant.control_epoch, None)
+                        } else {
+                            (pane.creator, 0, None)
+                        };
+                    Some(ConfirmedControl {
+                        pane: pane.id,
+                        session,
+                        owner: owner?,
+                        epoch,
                     })
-                    .collect(),
-            ),
+                })
+                .collect(),
         });
         inventory
     }

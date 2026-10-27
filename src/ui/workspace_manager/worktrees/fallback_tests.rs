@@ -17,7 +17,7 @@ fn only_feature() -> Inventory {
 
 fn live_close(inventory: &mut Inventory) {
     inventory.close = Some(CloseInventory {
-        controls: None,
+        controls: Vec::new(),
         boot: [9; 32],
         sessions: inventory.workspaces[0]
             .tabs

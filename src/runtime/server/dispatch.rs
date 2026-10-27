@@ -54,7 +54,7 @@ impl DevelopmentPaneHost {
                 resume,
                 style,
             } => {
-                // Legacy clients cannot render a Takeover Screen or request takeover.
+                // `Attach` resumes only its own lease and refuses another client's control.
                 if let (Some(pane), Some(old)) = (&self.pane, resume)
                     && (old.server, old.session, old.control)
                         != (pane.lease.server, pane.lease.session, pane.lease.control)
