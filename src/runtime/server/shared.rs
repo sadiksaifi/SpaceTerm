@@ -965,9 +965,7 @@ impl SharedWorkspaceHost {
     }
     /// When timed work is next due, without running it.
     fn due(&self, now: Instant) -> Option<Instant> {
-        let waiting = !self.settled()
-            || self.writes.busy()
-            || !self.waiting.is_empty();
+        let waiting = !self.settled() || self.writes.busy() || !self.waiting.is_empty();
         // A failed synchronization reads the record back from storage on each retry, and a stuck
         // process or full disk rarely recovers within milliseconds, so it retries once a second.
         let soon = if self.blocked.is_some() {

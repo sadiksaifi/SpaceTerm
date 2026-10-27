@@ -9,8 +9,8 @@ use crate::{
     cancellation::CancellationToken,
     repository_status::{
         self as policy, ProbeOutcome, ProgramError, ProgramExit, ProgramRequest,
-        RepositoryProgramRunner, RepositoryRoot, RepositoryToolDiscovery, WatchDirectory,
-        WatchSet, WatchSets,
+        RepositoryProgramRunner, RepositoryRoot, RepositoryToolDiscovery, WatchDirectory, WatchSet,
+        WatchSets,
     },
 };
 use spaceterm_server::{
@@ -21,10 +21,7 @@ use spaceterm_server::{
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
-    sync::{
-        Arc, Mutex, OnceLock,
-        mpsc,
-    },
+    sync::{Arc, Mutex, OnceLock, mpsc},
     thread::JoinHandle,
     time::{Duration, Instant},
 };
@@ -634,7 +631,9 @@ fn incidental(within_git: &Path) -> bool {
     within_git.components().any(|component| {
         let component = component.as_os_str().to_string_lossy();
         component == "objects" || component == "logs" || component.contains("fsmonitor--daemon")
-    }) || within_git.extension().is_some_and(|extension| extension == "lock")
+    }) || within_git
+        .extension()
+        .is_some_and(|extension| extension == "lock")
 }
 /// Paths the watch set saw change since the supervisor last looked.
 #[derive(Default)]

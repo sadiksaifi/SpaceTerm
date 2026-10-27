@@ -783,7 +783,15 @@ fn a_disconnected_route_stops_following_its_old_link() {
     let (connections, ids) = connected_routes(&["Studio"]);
     let id = ids[0];
     let health = worker::follow_link(&connections.0, id);
-    connections.0.state.lock().unwrap().routes.get_mut(&id).unwrap().health = Some(health);
+    connections
+        .0
+        .state
+        .lock()
+        .unwrap()
+        .routes
+        .get_mut(&id)
+        .unwrap()
+        .health = Some(health);
     connections.disconnect(&id);
     assert!(
         connections.0.state.lock().unwrap().routes[&id]

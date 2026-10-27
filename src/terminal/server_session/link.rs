@@ -1281,7 +1281,8 @@ pub(super) fn present(
         state,
     } = factory;
     let presenter = reservation.activate(&alive);
-    let _control = claim::ControlWatch::start(&server, Arc::clone(&state), pane_id, attachment.as_ref());
+    let _control =
+        claim::ControlWatch::start(&server, Arc::clone(&state), pane_id, attachment.as_ref());
     let mut attached_session = false;
     let mut generation = PresentationGeneration::default();
     let mut takeover = false;

@@ -668,7 +668,8 @@ impl HiddenInputSchedule {
         now: Instant,
         result: Result<bool, NativePtyOperationFailure>,
     ) -> Option<bool> {
-        self.deadline = std::mem::take(&mut self.settle).then(|| now + HIDDEN_INPUT_SETTLE_INTERVAL);
+        self.deadline =
+            std::mem::take(&mut self.settle).then(|| now + HIDDEN_INPUT_SETTLE_INTERVAL);
         let active = match result {
             Ok(active) => active,
             Err(_) => {
@@ -1045,7 +1046,11 @@ mod tests {
         let mut schedules = WorkerSchedules::new(now, ScheduleInput::default());
         schedules.update_hidden_input(now, Ok(false));
         assert_eq!(schedules.deadline(None), None);
-        assert!(schedules.take_due(now + Duration::from_secs(3600)).is_none());
+        assert!(
+            schedules
+                .take_due(now + Duration::from_secs(3600))
+                .is_none()
+        );
 
         let prompt = now + Duration::from_secs(1);
         schedules.hidden_input_transition(prompt);

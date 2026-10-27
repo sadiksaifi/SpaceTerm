@@ -1676,10 +1676,9 @@ fn an_idle_server_with_a_visible_pane_and_a_repository_subscriber_wakes_and_send
     HostCommands::view(&mut host, &lease, true, 60);
     git_facts(&mut host, &git.0, |facts| {
         facts.worktrees.is_some()
-            && facts
-                .repository
-                .as_ref()
-                .is_some_and(|repository| repository.counting.is_none() && repository.changes.is_ok())
+            && facts.repository.as_ref().is_some_and(|repository| {
+                repository.counting.is_none() && repository.changes.is_ok()
+            })
     });
     // Let the shell print its prompt and the read that follows a new watch by 2 s finish,
     // ticking whenever the host is woken, as the host's loop does.
@@ -1702,11 +1701,23 @@ fn an_idle_server_with_a_visible_pane_and_a_repository_subscriber_wakes_and_send
     sent(&outbox);
     let (wakes_before, rings_before) = (wakes.load(Ordering::SeqCst), rings.load(Ordering::SeqCst));
     std::thread::sleep(Duration::from_secs(3));
-    assert_eq!(wakes.load(Ordering::SeqCst), wakes_before, "nothing woke the host");
-    assert_eq!(rings.load(Ordering::SeqCst), rings_before, "no Terminal Session rang");
+    assert_eq!(
+        wakes.load(Ordering::SeqCst),
+        wakes_before,
+        "nothing woke the host"
+    );
+    assert_eq!(
+        rings.load(Ordering::SeqCst),
+        rings_before,
+        "no Terminal Session rang"
+    );
     assert_eq!(sent(&outbox), 0, "nothing was pushed");
     // Even a tick nobody asked for finds nothing to read, publish or schedule.
     assert_eq!(HostCommands::tick(&mut host, Instant::now()), None);
-    assert_eq!(sent(&outbox), 0, "an unchanged repository publishes nothing");
+    assert_eq!(
+        sent(&outbox),
+        0,
+        "an unchanged repository publishes nothing"
+    );
     host.shutdown().unwrap();
 }

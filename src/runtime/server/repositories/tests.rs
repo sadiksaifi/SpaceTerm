@@ -123,7 +123,12 @@ impl Reading {
             watcher,
         };
         let worker = std::thread::spawn(move || {
-            read_sources(sources, Some(readers), GitToolStatus::Ready(version), reader);
+            read_sources(
+                sources,
+                Some(readers),
+                GitToolStatus::Ready(version),
+                reader,
+            );
         });
         repositories.worker = Some(Worker {
             cancellation,
@@ -921,7 +926,10 @@ fn a_linked_worktree_using_the_builtin_fsmonitor_goes_idle() {
         assert!(Instant::now() < until, "each read started another");
     }
     // The daemon keeps its cookies here. Its socket may live elsewhere for a long path.
-    let used = git.0.join(".git/worktrees/linked/fsmonitor--daemon").is_dir()
+    let used = git
+        .0
+        .join(".git/worktrees/linked/fsmonitor--daemon")
+        .is_dir()
         && git.0.join(".git/fsmonitor--daemon").is_dir();
     for directory in [&git.0, &tree] {
         let _ = std::process::Command::new("git")
