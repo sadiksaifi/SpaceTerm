@@ -6923,33 +6923,164 @@ mod tests {
     }
 
     #[gpui::test]
-    fn pane_output_leaves_an_unchanged_caption_alone(cx: &mut TestAppContext) {
-        let (_, view, records, cx) = caption_view(cx);
-        cx.run_until_parked();
-        let caption = view.read_with(cx, |view, _| {
-            view.pane_caption_views[&PaneId::new(1)].clone()
-        });
-        for generation in 1..=3 {
-            records
-                .event_sender(1)
-                .unwrap()
-                .try_send(TerminalSessionEvent::Screen(
-                    ScreenSnapshot::from_test_parts_at(
-                        Arc::from([]),
-                        Default::default(),
-                        "zsh",
-                        generation,
-                    ),
-                ))
-                .unwrap();
-            cx.run_until_parked();
-            // The Tab rendered for the output and kept the caption view and its cached frame.
-            view.read_with(cx, |view, _| {
-                assert_eq!(view.pane_caption_views[&PaneId::new(1)], caption);
-                assert!(view.refreshed_captions.is_empty());
-            });
+    fn cached_captions_redraw_when_title_attention_focus_or_zoom_change(cx: &mut TestAppContext) {
+        let (_, view, _, cx) = caption_view(cx);
+        click_caption_control("pane-split-right-1", cx);
+        // The second caption was never under the pointer, so only these changes redraw it.
+        let first = PaneId::new(1);
+        let second = PaneId::new(2);
+        fn present(selector: &'static str, cx: &mut VisualTestContext) -> bool {
+            cx.debug_bounds(selector).is_some()
         }
-        assert!(cx.debug_bounds("pane-caption-1-focused").is_some());
+
+        let name =
+            |cx: &mut VisualTestContext| cx.debug_bounds("pane-caption-name-2").unwrap().size.width;
+        let short = name(cx);
+        view.update(cx, |view, cx| {
+            view.pane_captions.get_mut(&second).unwrap().name =
+                "a pane name long enough to take more room".into();
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(name(cx) > short, "the caption must show its new title");
+
+        view.update(cx, |view, cx| {
+            view.pane_attention.insert(second, 1);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(present("pane-status-2-attention", cx));
+        view.update(cx, |view, cx| {
+            view.pane_attention.remove(&second);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(!present("pane-status-2-attention", cx));
+
+        for (pane_id, focused, unfocused) in [
+            (first, "pane-caption-1-focused", "pane-caption-2-unfocused"),
+            (second, "pane-caption-2-focused", "pane-caption-1-unfocused"),
+        ] {
+            view.update(cx, |view, cx| view.focus_pane(pane_id, cx));
+            cx.run_until_parked();
+            assert!(present(focused, cx) && present(unfocused, cx));
+        }
+
+        let split_width = cx
+            .debug_bounds("pane-caption-2-focused")
+            .unwrap()
+            .size
+            .width;
+        cx.update(|window, cx| view.update(cx, |view, cx| view.toggle_zoom(window, cx)));
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("pane-caption-2-focused")
+                .unwrap()
+                .size
+                .width
+                > split_width
+        );
+        cx.update(|window, cx| view.update(cx, |view, cx| view.toggle_zoom(window, cx)));
+        cx.run_until_parked();
+        assert_eq!(
+            cx.debug_bounds("pane-caption-2-focused")
+                .unwrap()
+                .size
+                .width,
+            split_width
+        );
+    }
+
+    #[gpui::test]
+    fn a_cached_pane_redraws_after_a_focus_change_but_not_for_another_panes_output(
+        cx: &mut TestAppContext,
+    ) {
+        let (_, view, records, cx) = caption_view(cx);
+        click_caption_control("pane-split-right-1", cx);
+        let first = PaneId::new(1);
+        let second = PaneId::new(2);
+        let screen = |generation: u64, blinking: bool| {
+            let mut screen = ScreenSnapshot::from_test_parts_at(
+                Arc::from([Arc::from([crate::terminal::CellSnapshot {
+                    text: "x".to_owned(),
+                    foreground_source: crate::terminal::TerminalColor::Default,
+                    background_source: crate::terminal::TerminalColor::Default,
+                    inverse: false,
+                    bold: false,
+                    faint: false,
+                    italic: false,
+                    blinking: false,
+                    invisible: false,
+                    underline: crate::terminal::TerminalUnderlineSnapshot::None,
+                    underline_source: crate::terminal::TerminalColor::Default,
+                    strikethrough: false,
+                    overline: false,
+                    selected: false,
+                    spacer_tail: false,
+                    semantic_content: crate::terminal::CellSemanticSnapshot::Output,
+                    hyperlink: None,
+                }])]),
+                Default::default(),
+                "zsh",
+                generation,
+            );
+            let screen_mut = Arc::make_mut(&mut screen);
+            screen_mut.cursor.position = Some(crate::terminal::CursorPositionSnapshot {
+                column: 0,
+                row: 0,
+                width_cells: 1,
+            });
+            screen_mut.cursor.visible = true;
+            screen_mut.cursor.blinking = blinking;
+            screen
+        };
+        let send = |pane: usize, screen: Arc<ScreenSnapshot>| {
+            records
+                .event_sender(pane)
+                .unwrap()
+                .try_send(TerminalSessionEvent::Screen(screen))
+                .unwrap();
+        };
+        let terminal = |pane_id: PaneId, cx: &mut VisualTestContext| {
+            view.read_with(cx, |view, _| view.tab.pane(pane_id).unwrap().clone())
+        };
+        // The cursor draws with every paint of its Pane, so its count is the Pane's draw count.
+        let draws = |pane_id: PaneId, cx: &mut VisualTestContext| {
+            let terminal = terminal(pane_id, cx);
+            terminal.read_with(cx, |terminal, _| terminal.grid_paint_counts().1)
+        };
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                view.focus_pane(first, cx);
+                view.focus(window, cx);
+            })
+        });
+        send(1, screen(1, true));
+        send(2, screen(1, false));
+        cx.run_until_parked();
+        let before = draws(first, cx);
+        assert!(before > 0, "the focused Pane must draw its cursor");
+
+        for generation in 2..=4 {
+            send(2, screen(generation, false));
+            cx.run_until_parked();
+        }
+        assert_eq!(
+            draws(first, cx),
+            before,
+            "another Pane's output must not redraw it"
+        );
+
+        // Losing focus hollows the cursor. Moving the Focused Pane alone refreshes no window.
+        view.update(cx, |view, cx| view.focus_pane(second, cx));
+        cx.run_until_parked();
+        let hollow = cx.update(|window, _| {
+            window.painted_quads().iter().any(|quad| {
+                quad.border_widths.left > gpui::ScaledPixels(0.0)
+                    && quad.background == gpui::transparent_black().into()
+            })
+        });
+        assert!(hollow, "the unfocused Pane must draw a hollow cursor");
     }
 
     #[gpui::test]

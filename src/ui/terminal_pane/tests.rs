@@ -3928,6 +3928,102 @@ fn occlusion_releases_the_cursor_batch_before_another_frame(cx: &mut TestAppCont
     }));
 }
 
+#[test]
+fn block_cursor_hides_overhang_from_a_neighboring_row_on_both_cursor_paths() {
+    // A steady cursor draws with its grid. A focused blinking cursor draws over a retained grid.
+    for blinking in [false, true] {
+        let mut app = gpui::TestAppContext::build_with_text_system(
+            gpui::TestDispatcher::new(0),
+            None,
+            Arc::new(crate::ui::terminal_element::RasterTextSystem {
+                base: gpui::NoopTextSystem,
+                // Every glyph reaches far above its cell, into the row above.
+                bounds: Bounds::new(
+                    point(gpui::DevicePixels(-2), gpui::DevicePixels(-40)),
+                    size(gpui::DevicePixels(20), gpui::DevicePixels(48)),
+                ),
+                observation: None,
+            }),
+        );
+        let (pane, cx, _records) = connected_terminal_pane(&mut app);
+        let red = Color::rgb(0xdd_00_00);
+        let mut screen = text_screen(10, &["xx", "AA"]);
+        {
+            let screen = Arc::make_mut(&mut screen);
+            for cell in Arc::make_mut(&mut Arc::make_mut(&mut screen.rows)[1]).iter_mut() {
+                cell.foreground_source = crate::terminal::TerminalColor::Rgb(red);
+            }
+            screen.cursor = blinking_cursor_screen(true, blinking).cursor;
+        }
+        cx.simulate_resize(gpui::size(px(324.0), px(162.0)));
+        pane.update(cx, |pane, cx| {
+            pane.set_product_focus(
+                TerminalProductFocus {
+                    active_workspace: true,
+                    active_tab: true,
+                    focused_pane: true,
+                    ..TerminalProductFocus::default()
+                },
+                cx,
+            );
+            pane.cell_width = px(8.0);
+            pane.line_height = 16.0;
+            pane.last_geometry = Some(TerminalGeometry::from_grid(
+                CellGridSize::new(40, 10),
+                LogicalCellSize::new(8.0, 16.0),
+                BackingScale::ONE,
+            ));
+            pane.handle_event(TerminalSessionEvent::Screen(screen), cx);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        cx.update(|window, _| {
+            let cursor = window
+                .pixel_snap_bounds(Bounds::new(
+                    point(px(2.0), px(0.0)),
+                    size(px(8.0), px(16.0)),
+                ))
+                .scale(window.scale_factor());
+            let quads = window.painted_quads();
+            let red: gpui::Hsla = gpui_color(red).into();
+            let overhang = window
+                .painted_monochrome_sprites()
+                .into_iter()
+                .filter(|sprite| sprite.color == red)
+                .filter_map(|sprite| {
+                    let visible = sprite
+                        .bounds
+                        .intersect(&sprite.content_mask.bounds)
+                        .intersect(&cursor);
+                    (!visible.is_empty()).then_some((sprite.order, visible))
+                })
+                .collect::<Vec<_>>();
+            assert!(
+                window
+                    .painted_monochrome_sprites()
+                    .iter()
+                    .any(|sprite| sprite.color == red && sprite.bounds.intersects(&cursor)),
+                "blinking={blinking}: the fixture must reach into the cursor cell"
+            );
+            // The steady cursor clips the neighboring text out of its cell. The retained cursor
+            // paints its cell over the text.
+            for (order, visible) in &overhang {
+                assert!(
+                    quads.iter().any(|quad| {
+                        quad.order > *order
+                            && quad
+                                .bounds
+                                .intersect(&quad.content_mask.bounds)
+                                .intersect(visible)
+                                == *visible
+                    }),
+                    "blinking={blinking}: neighboring text must not show in the cursor cell"
+                );
+            }
+        });
+    }
+}
+
 #[gpui::test]
 fn grid_rebuilds_for_output_selection_and_font_changes_and_composes_the_cursor(
     cx: &mut TestAppContext,

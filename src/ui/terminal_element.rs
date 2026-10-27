@@ -5191,37 +5191,142 @@ mod tests {
     }
 
     #[test]
-    fn every_row_paints_text_in_one_layer_above_the_backgrounds() {
+    fn backgrounds_lie_under_text_and_a_strikethrough_over_it_where_they_overlap() {
+        // Glyphs reach well above their cells, so text of the second row overlaps the first.
         let mut cx = test_app_with_raster_bounds(Bounds::new(
             point(gpui::DevicePixels(-2), gpui::DevicePixels(-40)),
             size(gpui::DevicePixels(20), gpui::DevicePixels(48)),
         ));
         let cx = cx.add_empty_window();
+        let background = Color::rgb(0x22_44_88);
+        let accent = Color::rgb(0xaa_66_00);
+        let text = Color::rgb(0x00_cc_44);
+        let decorated = |character: &str| {
+            let mut cell = cell(character);
+            cell.background_source = TerminalColor::Rgb(background);
+            cell.foreground_source = TerminalColor::Rgb(text);
+            cell.underline = crate::terminal::TerminalUnderlineSnapshot::Double;
+            cell.underline_source = TerminalColor::Rgb(accent);
+            cell.strikethrough = true;
+            cell
+        };
+        let rows = Arc::<[RowSnapshot]>::from([
+            Arc::from([decorated("a"), decorated("b")]),
+            Arc::from([decorated("c"), decorated("d")]),
+        ]);
         let capture = PaintCapture::default();
         cx.draw(
             point(px(0.0), px(0.0)),
             size(px(80.0), px(28.0)),
             move |window, _| PaintBatches {
-                batches: cursor_render_batches(window, false),
+                batches: vec![prepared_batch(&rows, window)],
             },
         );
         capture_frame(cx, &capture);
         let glyphs = capture.glyphs.borrow();
         let quads = capture.quads.borrow();
-        let text_orders = glyphs
-            .iter()
-            .map(|glyph| glyph.order)
-            .collect::<std::collections::BTreeSet<_>>();
-        assert_eq!(
-            text_orders.len(),
-            1,
-            "the glyphs of every row must share one draw order: {glyphs:#?}"
+        // At one draw order GPUI draws quads before sprites, so a quad is under a glyph at an
+        // equal order.
+        let visible = |quad: &gpui::Quad| quad.bounds.intersect(&quad.content_mask.bounds);
+        let quads_of = |color: Color| {
+            let color: Hsla = gpui_color(color).into();
+            quads
+                .iter()
+                .filter(move |quad| quad.background == color.into())
+                .collect::<Vec<_>>()
+        };
+        let overlaps = |quad: &gpui::Quad, glyph: &PaintedGlyph| {
+            visible(quad).intersects(&glyph.visible_bounds)
+        };
+        let mut checked = (0, 0, 0);
+        for glyph in glyphs.iter() {
+            for quad in quads_of(background) {
+                if overlaps(quad, glyph) {
+                    assert!(
+                        quad.order <= glyph.order,
+                        "a background must lie under text"
+                    );
+                    checked.0 += 1;
+                }
+            }
+            for quad in quads_of(accent) {
+                if overlaps(quad, glyph) {
+                    assert!(
+                        quad.order <= glyph.order,
+                        "an underline must lie under text"
+                    );
+                    checked.1 += 1;
+                }
+            }
+            for quad in quads_of(text) {
+                if overlaps(quad, glyph) {
+                    assert!(
+                        quad.order > glyph.order,
+                        "a strikethrough must lie over text"
+                    );
+                    checked.2 += 1;
+                }
+            }
+        }
+        assert!(
+            checked.0 > 0 && checked.1 > 0 && checked.2 > 0,
+            "the fixture must overlap every pass: {checked:?}"
         );
-        let background = quads
-            .iter()
-            .find(|quad| quad.background == rgba(0x22_44_88_ff).into())
-            .expect("the cursor background must paint");
-        assert!(text_orders.iter().all(|order| background.order < *order));
+    }
+
+    /// One frame of `rows` at the origin, as the grid prepares it.
+    fn prepared_batch(rows: &Arc<[RowSnapshot]>, window: &mut Window) -> TerminalPaintBatch {
+        let cell_width = px(8.375);
+        let line_height = px(14.0);
+        let grid_bounds = Bounds::new(point(px(0.0), px(0.0)), size(px(80.0), px(28.0)));
+        let mut cache = TerminalGridCache::new();
+        let inputs = cache.prepare(
+            rows,
+            &colors(),
+            &test_terminal_fonts(&"Menlo".into()),
+            &Arc::from([]),
+            TerminalGridMetrics {
+                cell_width,
+                line_height,
+                scale_factor: window.scale_factor(),
+            },
+        );
+        let stable_rows = cache.prepare_visible_geometry(
+            &inputs,
+            rows.len(),
+            PreparedGridLayout {
+                grid_bounds,
+                font_size: px(18.0),
+                cell_width,
+                line_height,
+                scale_factor: window.scale_factor(),
+                decoration_metrics: decoration_metrics(
+                    px(12.0),
+                    px(10.0),
+                    px(4.0),
+                    px(7.0),
+                    line_height,
+                    window.scale_factor(),
+                ),
+            },
+            window,
+        );
+        TerminalPaintBatch {
+            surface: None,
+            padding_backgrounds: Vec::new(),
+            corners: BottomCorners::default(),
+            grid_bounds,
+            line_height,
+            rows: stable_rows
+                .iter()
+                .cloned()
+                .map(PreparedFrameRow::new)
+                .collect(),
+            cursor_text_overlay: None,
+            graphics: GraphicsPaintPlan::default(),
+            blink_phase_visible: true,
+            quad_paint_calls: None,
+        }
     }
 
     #[test]

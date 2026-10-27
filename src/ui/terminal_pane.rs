@@ -1417,6 +1417,12 @@ impl TerminalPane {
         self.terminal_session.current_directory.clone()
     }
 
+    /// How many times the grid and its retained cursor have painted.
+    #[cfg(test)]
+    pub(crate) fn grid_paint_counts(&self) -> (usize, usize) {
+        self.grid_presentation.paint_counts()
+    }
+
     pub(crate) fn surface_background(&self) -> Color {
         self.surface_background
     }
