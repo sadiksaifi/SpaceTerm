@@ -27,4 +27,5 @@ zeroize = "=1.9.0"
 spaceterm-directories = { path = "../spaceterm-directories" }
 thiserror = "2.0.17"
 bytes = "1"
+noq-udp = { version = "=1.4.0", default-features = false }
 noq-proto = { version = "=1.4.0", default-features = false, features = ["rustls-ring"] }

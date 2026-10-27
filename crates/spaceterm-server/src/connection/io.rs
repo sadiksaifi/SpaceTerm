@@ -172,8 +172,9 @@ fn wait(
     waker.drain();
 }
 
-/// The frame taken from the outbox or link but not yet accepted by the carrier.
-type Held = Option<(Vec<u8>, Priority)>;
+/// Frames taken from the outbox or link but not yet accepted by the carrier, highest priority
+/// first and in order within a level.
+type Held = Vec<(Vec<u8>, Priority)>;
 
 struct Written {
     progressed: bool,
@@ -184,45 +185,67 @@ struct Written {
 }
 
 /// Offers frames from `next` until the carrier is full or nothing is left, flushing as it goes.
+///
+/// A carrier may refuse one level and accept another. While only bulk (L2) frames are refused,
+/// at most two, the thread keeps taking frames, so a bulk transfer waiting on flow control never
+/// holds back a reply or a ping. A frame never overtakes a refused frame of its own level.
 fn write(
     carrier: &mut dyn Carrier,
     held: &mut Held,
-    mut next: impl FnMut() -> Held,
+    mut next: impl FnMut() -> Option<(Vec<u8>, Priority)>,
 ) -> Result<Written, CarrierError> {
     let mut progressed = false;
-    // Whether the held frame was already offered again after a flush that freed no room.
+    // Whether the held frames were already offered again after a flush that freed no room.
     let mut retried = false;
     loop {
-        if held.is_none() {
-            *held = next();
-        }
-        let Some((frame, priority)) = held.as_ref() else {
-            break;
-        };
-        match carrier.offer(frame, *priority)? {
-            Offer::Accepted => {
-                *held = None;
-                retried = false;
+        let mut refused = false;
+        let mut index = 0;
+        while index < held.len() {
+            let level = held[index].1;
+            if held[..index].iter().any(|(_, earlier)| *earlier == level) {
+                index += 1;
+                continue;
             }
-            Offer::Full => {
-                let flush = carrier.flush()?;
-                progressed |= flush.progressed;
-                // Bytes written outside `flush`, for example while `receive` answered the peer,
-                // can leave the carrier empty without this flush writing anything. Offer once
-                // more before waiting: an empty carrier has no write readiness to wake on.
-                if flush.progressed || (!flush.pending && !retried) {
-                    retried = !flush.progressed;
-                    continue;
+            match carrier.offer(&held[index].0, level)? {
+                Offer::Accepted => {
+                    held.remove(index);
+                    retried = false;
                 }
-                break;
+                Offer::Full => {
+                    refused = true;
+                    index += 1;
+                }
             }
         }
+        let bulk_only = held.iter().all(|(_, level)| *level == Priority::L2);
+        if bulk_only
+            && held.len() < 2
+            && let Some(frame) = next()
+        {
+            held.push(frame);
+            // Stable, so frames of one level keep their order.
+            held.sort_by_key(|(_, level)| *level);
+            continue;
+        }
+        if !refused {
+            break;
+        }
+        let flush = carrier.flush()?;
+        progressed |= flush.progressed;
+        // Bytes written outside `flush`, for example while `receive` answered the peer, can
+        // leave the carrier empty without this flush writing anything. Offer once more before
+        // waiting: an empty carrier has no write readiness to wake on.
+        if flush.progressed || (!flush.pending && !retried) {
+            retried = !flush.progressed;
+            continue;
+        }
+        break;
     }
     let flush = carrier.flush()?;
     progressed |= flush.progressed;
     Ok(Written {
         progressed,
-        pending: flush.pending || held.is_some(),
+        pending: flush.pending || !held.is_empty(),
         buffered: flush.pending,
     })
 }
@@ -266,7 +289,7 @@ pub fn spawn_link(
 }
 
 fn run_link(mut carrier: Box<dyn Carrier>, weak: &WeakLink, waker: &Waker) {
-    let mut held = None;
+    let mut held = Vec::new();
     loop {
         let Some(link) = weak.upgrade() else {
             break;
@@ -282,6 +305,10 @@ fn run_link(mut carrier: Box<dyn Carrier>, weak: &WeakLink, waker: &Waker) {
         let Some(deadline) = link.check(now) else {
             break;
         };
+        // An unanswered ping may mean the network changed under a still-valid address.
+        if link.suspect(now) {
+            carrier.path_suspect();
+        }
         drop(link);
         wait(carrier.as_ref(), (true, buffered), waker, Some(deadline));
     }
@@ -332,7 +359,7 @@ pub fn serve(
         service: Arc::clone(service),
         peer: *connection.peer(),
     };
-    let mut held = None;
+    let mut held = Vec::new();
     let mut receiving = true;
     let mut stopped: Option<Instant> = None;
     loop {
@@ -563,12 +590,68 @@ mod tests {
     #[test]
     fn a_frame_refused_while_the_carrier_emptied_itself_is_offered_again_at_once() {
         let (mut carrier, _) = Backpressured::new(false);
-        let mut held = None;
+        let mut held = Vec::new();
         let mut frames = vec![(vec![0; 8], Priority::L1)].into_iter();
         let written = write(&mut carrier, &mut held, || frames.next()).unwrap();
-        assert!(held.is_none(), "the frame must not wait for a later wake");
+        assert!(held.is_empty(), "the frame must not wait for a later wake");
         assert_eq!(carrier.accepted, 1);
         assert!(!written.pending);
+    }
+
+    /// A carrier whose L2 stream waits on flow control: it refuses bulk and takes the rest.
+    struct BulkBlocked {
+        accepted: Vec<Priority>,
+        bell: UnixStream,
+    }
+
+    impl Carrier for BulkBlocked {
+        fn offer(&mut self, _: &[u8], priority: Priority) -> Result<Offer, CarrierError> {
+            if priority == Priority::L2 {
+                return Ok(Offer::Full);
+            }
+            self.accepted.push(priority);
+            Ok(Offer::Accepted)
+        }
+        fn flush(&mut self) -> Result<Flush, CarrierError> {
+            Ok(Flush {
+                progressed: false,
+                pending: true,
+            })
+        }
+        fn receive(&mut self) -> Result<Option<RawFrame>, CarrierError> {
+            Ok(None)
+        }
+        fn readiness(&self) -> Readiness {
+            Readiness {
+                read: self.bell.as_raw_fd(),
+                write: None,
+                progress: None,
+                deadline: None,
+            }
+        }
+        fn close(&mut self) {}
+    }
+
+    #[test]
+    fn a_refused_bulk_frame_never_holds_back_a_reply_or_a_ping() {
+        let (bell, _) = UnixStream::pair().unwrap();
+        let mut carrier = BulkBlocked {
+            accepted: Vec::new(),
+            bell,
+        };
+        let mut held = Vec::new();
+        let mut frames = vec![
+            (vec![2; 8], Priority::L2),
+            (vec![1; 8], Priority::L1),
+            (vec![0; 8], Priority::L0),
+            (vec![1; 8], Priority::L1),
+        ]
+        .into_iter();
+        let written = write(&mut carrier, &mut held, || frames.next()).unwrap();
+        assert_eq!(carrier.accepted, [Priority::L1, Priority::L0, Priority::L1]);
+        assert_eq!(held.len(), 1);
+        assert_eq!(held[0].1, Priority::L2);
+        assert!(written.pending);
     }
 
     #[test]

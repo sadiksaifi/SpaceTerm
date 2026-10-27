@@ -34,6 +34,8 @@ pub struct Liveness {
     pinged: Option<Instant>,
     blocked: Option<Instant>,
     nonce: u64,
+    /// Whether the outstanding ping was already reported by `suspect`.
+    suspected: bool,
 }
 
 impl Liveness {
@@ -43,6 +45,7 @@ impl Liveness {
             pinged: None,
             blocked: None,
             nonce: 0,
+            suspected: false,
         }
     }
 
@@ -80,15 +83,33 @@ impl Liveness {
         let last = self.pinged.unwrap_or(self.received);
         if now.duration_since(last) >= limits::PING_AFTER {
             self.pinged = Some(now);
+            self.suspected = false;
             self.nonce = self.nonce.wrapping_add(1);
             return Check::Ping {
                 nonce: self.nonce,
                 next: next.min(now + limits::PING_AFTER),
             };
         }
+        if let Some(pinged) = self.pinged
+            && !self.suspected
+        {
+            next = next.min(pinged + limits::SUSPECT_AFTER);
+        }
         Check::Live {
             next: next.min(last + limits::PING_AFTER),
         }
+    }
+
+    /// Whether a ping has gone unanswered for [`limits::SUSPECT_AFTER`]. True once per ping.
+    pub fn suspect(&mut self, now: Instant) -> bool {
+        let unanswered = self
+            .pinged
+            .is_some_and(|pinged| now.duration_since(pinged) >= limits::SUSPECT_AFTER);
+        if unanswered && !self.suspected {
+            self.suspected = true;
+            return true;
+        }
+        false
     }
 }
 
@@ -96,6 +117,31 @@ impl Liveness {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn an_unanswered_ping_makes_the_path_suspect_once_before_the_connection_is_dead() {
+        let start = Instant::now();
+        let mut liveness = Liveness::new(start);
+        let ping = start + limits::PING_AFTER;
+        assert!(matches!(liveness.check(ping, None), Check::Ping { .. }));
+        assert!(!liveness.suspect(ping + limits::SUSPECT_AFTER / 2));
+        let Check::Live { next } = liveness.check(ping + Duration::from_millis(1), None) else {
+            panic!("expected a live connection");
+        };
+        assert_eq!(
+            next,
+            ping + limits::SUSPECT_AFTER,
+            "the thread wakes to suspect"
+        );
+        assert!(liveness.suspect(ping + limits::SUSPECT_AFTER));
+        assert!(
+            !liveness.suspect(ping + limits::SUSPECT_AFTER * 2),
+            "once per ping"
+        );
+        assert!(limits::PING_AFTER + limits::SUSPECT_AFTER < limits::DEAD_AFTER);
+        liveness.received(ping + limits::SUSPECT_AFTER * 2);
+        assert!(!liveness.suspect(ping + limits::SUSPECT_AFTER * 3));
+    }
 
     #[test]
     fn a_quiet_connection_is_pinged_then_declared_silent() {

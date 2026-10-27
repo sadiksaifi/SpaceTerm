@@ -23,6 +23,9 @@ pub(crate) struct State {
     record: storage::Record,
     pub(super) pin: ServerPin,
     listener: Option<QuicListener>,
+    /// Listeners replaced by a policy change, still routing to their connections until those
+    /// end. A listener at the same address is taken back instead of binding again.
+    retired: Vec<QuicListener>,
     listener_state: ListenerState,
     invitations: Vec<PendingInvitation>,
     claims: Vec<PendingClaim>,
@@ -50,6 +53,7 @@ impl State {
             record,
             pin,
             listener: None,
+            retired: Vec::new(),
             listener_state: ListenerState::Off,
             invitations: Vec::new(),
             claims: Vec::new(),
@@ -76,17 +80,35 @@ impl State {
     }
     fn listen(&mut self) {
         self.listener_changed();
-        self.listener = None;
+        self.retire_listener();
         self.listener_state = match self.record.policy.as_ref().filter(|_| self.record.enabled) {
             None => ListenerState::Off,
-            Some(policy) => match self.bind(policy.bind) {
-                Ok(listener) => {
-                    self.listener = Some(listener);
-                    ListenerState::Listening { addr: policy.bind }
+            Some(policy) => {
+                let address = policy.bind;
+                // Connections of the previous policy still hold its socket, so the same address
+                // takes that listener back rather than failing to bind it again.
+                let revived = self
+                    .retired
+                    .iter()
+                    .position(|listener| listener.address() == address && listener.revive())
+                    .map(|index| self.retired.remove(index));
+                match revived.map_or_else(|| self.bind(address), Ok) {
+                    Ok(listener) => {
+                        self.listener = Some(listener);
+                        ListenerState::Listening { addr: address }
+                    }
+                    Err(_) => ListenerState::Failed(DirectError::Transport),
                 }
-                Err(_) => ListenerState::Failed(DirectError::Transport),
-            },
+            }
         };
+    }
+    /// Stops taking connections; the listener keeps routing to its own until they end.
+    fn retire_listener(&mut self) {
+        if let Some(listener) = self.listener.take() {
+            listener.retire();
+            self.retired.push(listener);
+        }
+        self.retired.retain(|listener| !listener.finished());
     }
     /// Binds QUIC on UDP under the pinned certificate. The listener rings the host's wake when a
     /// connection arrives.
@@ -121,7 +143,7 @@ impl State {
             self.uncertain = true;
             // A renamed but unsynced revocation must never leave ordinary authority usable.
             self.connections.end_all();
-            self.listener = None;
+            self.retire_listener();
             self.listener_changed();
             self.listener_state = ListenerState::Failed(error);
             return Err(error);
@@ -1055,6 +1077,7 @@ impl State {
     }
     pub(crate) fn stop(&mut self) {
         self.listener = None;
+        self.retired.clear();
         self.listener_state = ListenerState::Off;
         self.listener_changed();
         self.connections.end_all();

@@ -3778,6 +3778,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "noq-udp"
+version = "1.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8d0160422832eea1cc11c34be04ee6d5a046452b0b46cfb14695d55a1f24c954"
+dependencies = [
+ "cfg_aliases 0.2.2",
+ "libc",
+ "socket2",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "notify"
 version = "8.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6048,6 +6060,7 @@ dependencies = [
  "flate2",
  "libc",
  "noq-proto",
+ "noq-udp",
  "postcard",
  "rcgen",
  "ring",

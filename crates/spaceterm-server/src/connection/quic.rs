@@ -35,6 +35,7 @@ use std::io::{ErrorKind, Read, Write};
 use std::net::{SocketAddr, UdpSocket};
 use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::net::UnixStream;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -72,6 +73,8 @@ pub enum QuicError {
     TimedOut,
     #[error("the peer closed the QUIC connection")]
     Closed,
+    #[error("the TLS handshake was refused")]
+    Refused,
 }
 
 fn transport() -> Arc<TransportConfig> {
@@ -222,13 +225,100 @@ impl Controller for Floor {
     }
 }
 
-fn nonblocking_socket(address: SocketAddr) -> Result<UdpSocket, QuicError> {
-    let socket = UdpSocket::bind(address).map_err(|_| QuicError::Transport)?;
-    socket
-        .set_nonblocking(true)
-        .map_err(|_| QuicError::Transport)?;
-    Ok(socket)
+/// A nonblocking UDP socket with noq-udp's options: the destination address of each received
+/// datagram, so a server answers from the address the client dialed, and don't-fragment, so path
+/// MTU discovery never passes a probe in fragments.
+struct Udp {
+    socket: UdpSocket,
+    state: noq_udp::UdpSocketState,
+    /// The server a client's socket is connected to.
+    connected: Option<SocketAddr>,
 }
+
+impl Udp {
+    fn bind(address: SocketAddr) -> Result<Self, QuicError> {
+        let socket = UdpSocket::bind(address).map_err(|_| QuicError::Transport)?;
+        socket
+            .set_nonblocking(true)
+            .map_err(|_| QuicError::Transport)?;
+        let state =
+            noq_udp::UdpSocketState::new((&socket).into()).map_err(|_| QuicError::Transport)?;
+        Ok(Self {
+            socket,
+            state,
+            connected: None,
+        })
+    }
+
+    /// A client's socket, bound by the system and connected to `peer`, which keeps the kernel's
+    /// route lookup off every send.
+    fn client(peer: SocketAddr) -> Result<Self, QuicError> {
+        let local: SocketAddr = if peer.is_ipv4() {
+            (std::net::Ipv4Addr::UNSPECIFIED, 0).into()
+        } else {
+            (std::net::Ipv6Addr::UNSPECIFIED, 0).into()
+        };
+        let mut udp = Self::bind(local)?;
+        udp.socket.connect(peer).map_err(|_| QuicError::Transport)?;
+        udp.connected = Some(peer);
+        Ok(udp)
+    }
+
+    /// Sends one datagram from `source`, when known. macOS refuses an explicit address on a
+    /// connected socket, so a client sends plainly.
+    fn send(
+        &self,
+        bytes: &[u8],
+        destination: SocketAddr,
+        source: Option<std::net::IpAddr>,
+    ) -> std::io::Result<()> {
+        if self.connected == Some(destination) {
+            return self.socket.send(bytes).map(drop);
+        }
+        self.state.try_send(
+            (&self.socket).into(),
+            &noq_udp::Transmit {
+                destination,
+                ecn: None,
+                contents: bytes,
+                segment_size: None,
+                src_ip: source,
+            },
+        )
+    }
+
+    /// Reads one batch of datagrams into `buffer` and hands each to `each` with its sender and
+    /// the local address it reached. Datagrams the kernel coalesced are split again; one longer
+    /// than [`DATAGRAM_BYTES`] is not QUIC's and is dropped.
+    fn receive(
+        &self,
+        buffer: &mut [u8],
+        mut each: impl FnMut(SocketAddr, Option<std::net::IpAddr>, &[u8]),
+    ) -> std::io::Result<()> {
+        let mut meta = [noq_udp::RecvMeta::default()];
+        let count = self.state.recv(
+            (&self.socket).into(),
+            &mut [std::io::IoSliceMut::new(buffer)],
+            &mut meta,
+        )?;
+        for meta in &meta[..count] {
+            let stride = meta.stride.max(1);
+            for datagram in buffer[..meta.len].chunks(stride) {
+                if datagram.len() <= DATAGRAM_BYTES {
+                    each(meta.addr, meta.dst_ip, datagram);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn fd(&self) -> RawFd {
+        self.socket.as_raw_fd()
+    }
+}
+
+/// Bytes read from a socket at once: one datagram, or several the kernel coalesced.
+const RECEIVE_BYTES: usize = 64 * 1024;
 
 fn bell() -> Result<(UnixStream, UnixStream), QuicError> {
     let (bell, ring) = UnixStream::pair().map_err(|_| QuicError::Transport)?;
@@ -294,7 +384,7 @@ impl<T> Bounded<T> {
 
 struct Shared {
     server: Mutex<Server>,
-    socket: Arc<UdpSocket>,
+    socket: Arc<Udp>,
 }
 
 impl Shared {
@@ -317,11 +407,18 @@ struct Demux {
     config: Arc<ServerConfig>,
     accepted: Mutex<VecDeque<QuicStream>>,
     wake: Mutex<Option<Arc<dyn super::Wake>>>,
+    address: SocketAddr,
+    /// Whether new connections are taken. A retired listener refuses them.
+    accepting: AtomicBool,
+    /// A retired listener keeps routing to its connections until the last one ends.
+    retired: AtomicBool,
+    /// Set by the thread when it has ended.
+    finished: AtomicBool,
 }
 
 impl QuicListener {
     pub fn bind(address: SocketAddr, config: Arc<ServerConfig>) -> Result<Self, QuicError> {
-        let socket = Arc::new(nonblocking_socket(address)?);
+        let socket = Arc::new(Udp::bind(address)?);
         let endpoint = Endpoint::new(endpoint_config(), Some(Arc::clone(&config)), true);
         let demux = Arc::new(Demux {
             shared: Arc::new(Shared {
@@ -334,6 +431,10 @@ impl QuicListener {
             config,
             accepted: Mutex::default(),
             wake: Mutex::default(),
+            address,
+            accepting: AtomicBool::new(true),
+            retired: AtomicBool::new(false),
+            finished: AtomicBool::new(false),
         });
         let (stopped, stop) = bell()?;
         let running = Arc::clone(&demux);
@@ -353,6 +454,53 @@ impl QuicListener {
         *self.demux.wake.lock().unwrap_or_else(|e| e.into_inner()) = Some(wake);
     }
 
+    /// The address the socket is bound to.
+    pub fn address(&self) -> SocketAddr {
+        self.demux.address
+    }
+
+    /// Stops taking connections but keeps routing to the live ones until the last ends, so
+    /// their goodbyes still leave and their acknowledgements still arrive. Connections that
+    /// waited for the host are dropped.
+    pub fn retire(&self) {
+        self.demux.accepting.store(false, Ordering::Release);
+        self.demux.retired.store(true, Ordering::Release);
+        let waiting = std::mem::take(
+            &mut *self
+                .demux
+                .accepted
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()),
+        );
+        drop(waiting);
+        ring(&self.stop);
+    }
+
+    /// Takes connections again on a retired listener whose thread still runs. Returns false
+    /// when it already ended.
+    pub fn revive(&self) -> bool {
+        self.demux.retired.store(false, Ordering::Release);
+        if self.demux.finished.load(Ordering::Acquire) {
+            return false;
+        }
+        self.demux.accepting.store(true, Ordering::Release);
+        true
+    }
+
+    /// Whether a retired listener's last connection ended and its socket closed.
+    pub fn finished(&self) -> bool {
+        self.demux.finished.load(Ordering::Acquire)
+    }
+
+    /// Connections waiting for the host to take them.
+    pub fn waiting(&self) -> usize {
+        self.demux
+            .accepted
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .len()
+    }
+
     /// The next new connection. Its own thread completes the handshake.
     pub fn accept(&self) -> Option<QuicStream> {
         self.demux
@@ -364,7 +512,10 @@ impl QuicListener {
 }
 
 impl Drop for QuicListener {
+    /// Ends routing at once, even to live connections.
     fn drop(&mut self) {
+        self.demux.retired.store(false, Ordering::Release);
+        self.demux.accepting.store(false, Ordering::Release);
         ring(&self.stop);
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
@@ -375,12 +526,12 @@ impl Drop for QuicListener {
 impl Demux {
     /// Waits on the socket and the stop bell, and routes every datagram.
     fn run(&self, stopped: &UnixStream) {
-        let mut buffer = vec![0; DATAGRAM_BYTES];
+        let mut buffer = vec![0; RECEIVE_BYTES];
         let mut send = Vec::new();
         loop {
             let mut descriptors = [
                 libc::pollfd {
-                    fd: self.shared.socket.as_raw_fd(),
+                    fd: self.shared.socket.fd(),
                     events: libc::POLLIN,
                     revents: 0,
                 },
@@ -390,122 +541,177 @@ impl Demux {
                     revents: 0,
                 },
             ];
+            // A retired listener looks for its last connection's end now and then.
+            let retired = self.retired.load(Ordering::Acquire);
+            let timeout = if retired { 100 } else { -1 };
             // SAFETY: `descriptors` is a live, writable array of `pollfd` for the whole call.
-            unsafe { libc::poll(descriptors.as_mut_ptr(), 2, -1) };
+            unsafe { libc::poll(descriptors.as_mut_ptr(), 2, timeout) };
             if descriptors[1].revents != 0 {
-                return;
+                drain_bell(stopped);
+                if !self.retired.load(Ordering::Acquire) && !self.accepting.load(Ordering::Acquire)
+                {
+                    break;
+                }
             }
             self.route(&mut buffer, &mut send);
+            if self.retired.load(Ordering::Acquire) && self.shared.lock().routes.is_empty() {
+                break;
+            }
         }
+        self.finished.store(true, Ordering::Release);
     }
 
-    fn send(&self, bytes: &[u8], destination: SocketAddr) {
-        let _ = self.shared.socket.send_to(bytes, destination);
+    fn send(&self, bytes: &[u8], destination: SocketAddr, source: Option<std::net::IpAddr>) {
+        let _ = self.shared.socket.send(bytes, destination, source);
     }
 
     /// Reads every waiting datagram and hands it to its connection, or starts a new one.
     fn route(&self, buffer: &mut [u8], send: &mut Vec<u8>) {
         let mut arrived = false;
+        let mut datagrams = Vec::new();
         loop {
-            let (count, remote) = match self.shared.socket.recv_from(buffer) {
-                Ok(received) => received,
+            datagrams.clear();
+            let received = self.shared.socket.receive(buffer, |remote, local, bytes| {
+                datagrams.push((remote, local, BytesMut::from(bytes)));
+            });
+            match received {
+                Ok(()) => {}
                 Err(error) if error.kind() == ErrorKind::Interrupted => continue,
                 // WouldBlock, or a transient error such as an ICMP report: try again later.
                 Err(_) => break,
-            };
-            let now = Instant::now();
-            let data = BytesMut::from(&buffer[..count]);
-            let mut server = self.shared.lock();
-            send.clear();
-            let event = server
-                .endpoint
-                .handle(now, FourTuple::new(remote, None), None, data, send);
-            match event {
-                Some(DatagramEvent::ConnectionEvent(handle, event)) => {
-                    if let Some(route) = server.routes.get(&handle)
-                        && route
-                            .events
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .push(event, count)
-                    {
-                        ring(&route.ring);
-                    }
-                }
-                // A client whose address is not yet proven gets a stateless retry: it must echo
-                // the token from that address before it holds any state or slot, so spoofed
-                // sources cannot.
-                Some(DatagramEvent::NewConnection(incoming))
-                    if !incoming.remote_address_validated() =>
-                {
-                    match server.endpoint.retry(incoming, send) {
-                        Ok(transmit) => self.send(&send[..transmit.size], transmit.destination),
-                        Err(error) => server.endpoint.ignore(error.into_incoming()),
-                    }
-                }
-                Some(DatagramEvent::NewConnection(incoming)) => {
-                    let waiting = self
-                        .accepted
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .len();
-                    if waiting >= MAX_PENDING {
-                        let transmit = server.endpoint.refuse(incoming, send);
-                        self.send(&send[..transmit.size], transmit.destination);
-                        continue;
-                    }
-                    match server.endpoint.accept(
-                        incoming,
-                        now,
-                        send,
-                        Some(Arc::clone(&self.config)),
-                    ) {
-                        Ok((handle, connection)) => {
-                            let Ok((bell, ringer)) = bell() else {
-                                server
-                                    .endpoint
-                                    .handle_event(handle, EndpointEvent::drained());
-                                continue;
-                            };
-                            let route = Arc::new(Route {
-                                events: Mutex::default(),
-                                ring: ringer,
-                            });
-                            server.routes.insert(handle, Arc::clone(&route));
-                            drop(server);
-                            self.accepted
-                                .lock()
-                                .unwrap_or_else(|e| e.into_inner())
-                                .push_back(QuicStream::new(Driver {
-                                    connection,
-                                    handle,
-                                    socket: Arc::clone(&self.shared.socket),
-                                    peer: None,
-                                    side: Side::Server {
-                                        shared: Arc::clone(&self.shared),
-                                        route,
-                                        bell,
-                                    },
-                                    state: DriverState::new(),
-                                }));
-                            arrived = true;
-                        }
-                        Err(error) => {
-                            if let Some(transmit) = error.response {
-                                self.send(&send[..transmit.size], transmit.destination);
-                            }
-                        }
-                    }
-                }
-                Some(DatagramEvent::Response(transmit)) => {
-                    self.send(&send[..transmit.size], transmit.destination);
-                }
-                None => {}
+            }
+            for (remote, local, data) in datagrams.drain(..) {
+                arrived |= self.handle(remote, local, data, send);
             }
         }
         if arrived && let Some(wake) = &*self.wake.lock().unwrap_or_else(|e| e.into_inner()) {
             wake.wake();
         }
+    }
+
+    /// Hands one datagram to its connection, or answers a new one. Returns whether a new
+    /// connection now waits for the host.
+    fn handle(
+        &self,
+        remote: SocketAddr,
+        local: Option<std::net::IpAddr>,
+        data: BytesMut,
+        send: &mut Vec<u8>,
+    ) -> bool {
+        let count = data.len();
+        let now = Instant::now();
+        let mut server = self.shared.lock();
+        send.clear();
+        let event = server
+            .endpoint
+            .handle(now, FourTuple::new(remote, local), None, data, send);
+        match event {
+            Some(DatagramEvent::ConnectionEvent(handle, event)) => {
+                if let Some(route) = server.routes.get(&handle)
+                    && route
+                        .events
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .push(event, count)
+                {
+                    ring(&route.ring);
+                }
+            }
+            // A client whose address is not yet proven gets a stateless retry: it must echo
+            // the token from that address before it holds any state or slot, so spoofed
+            // sources cannot.
+            Some(DatagramEvent::NewConnection(incoming))
+                if !incoming.remote_address_validated() =>
+            {
+                match server.endpoint.retry(incoming, send) {
+                    Ok(transmit) => self.send(
+                        &send[..transmit.size],
+                        transmit.destination,
+                        transmit.src_ip,
+                    ),
+                    Err(error) => server.endpoint.ignore(error.into_incoming()),
+                }
+            }
+            Some(DatagramEvent::NewConnection(incoming))
+                if !self.accepting.load(Ordering::Acquire) =>
+            {
+                let transmit = server.endpoint.refuse(incoming, send);
+                self.send(
+                    &send[..transmit.size],
+                    transmit.destination,
+                    transmit.src_ip,
+                );
+            }
+            Some(DatagramEvent::NewConnection(incoming)) => {
+                let waiting = self
+                    .accepted
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .len();
+                if waiting >= MAX_PENDING {
+                    let transmit = server.endpoint.refuse(incoming, send);
+                    self.send(
+                        &send[..transmit.size],
+                        transmit.destination,
+                        transmit.src_ip,
+                    );
+                    return false;
+                }
+                match server
+                    .endpoint
+                    .accept(incoming, now, send, Some(Arc::clone(&self.config)))
+                {
+                    Ok((handle, connection)) => {
+                        let Ok((bell, ringer)) = bell() else {
+                            server
+                                .endpoint
+                                .handle_event(handle, EndpointEvent::drained());
+                            return false;
+                        };
+                        let route = Arc::new(Route {
+                            events: Mutex::default(),
+                            ring: ringer,
+                        });
+                        server.routes.insert(handle, Arc::clone(&route));
+                        drop(server);
+                        self.accepted
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .push_back(QuicStream::new(Driver {
+                                connection,
+                                handle,
+                                socket: Arc::clone(&self.shared.socket),
+                                peer: None,
+                                side: Side::Server {
+                                    shared: Arc::clone(&self.shared),
+                                    route,
+                                    bell,
+                                },
+                                state: DriverState::new(),
+                            }));
+                        return true;
+                    }
+                    Err(error) => {
+                        if let Some(transmit) = error.response {
+                            self.send(
+                                &send[..transmit.size],
+                                transmit.destination,
+                                transmit.src_ip,
+                            );
+                        }
+                    }
+                }
+            }
+            Some(DatagramEvent::Response(transmit)) => {
+                self.send(
+                    &send[..transmit.size],
+                    transmit.destination,
+                    transmit.src_ip,
+                );
+            }
+            None => {}
+        }
+        false
     }
 }
 
@@ -528,10 +734,12 @@ enum Side {
 struct DriverState {
     connected: bool,
     lost: Option<CarrierError>,
+    /// Whether the connection ended with a TLS alert, a refused certificate or signature.
+    refused: bool,
     /// Send streams whose data the peer acknowledged after this end finished them.
     finished: usize,
     /// A datagram that would have blocked, retried before any other.
-    stashed: Option<(SocketAddr, Vec<u8>)>,
+    stashed: Option<(SocketAddr, Option<std::net::IpAddr>, Vec<u8>)>,
     transmit: Vec<u8>,
 }
 
@@ -540,6 +748,7 @@ impl DriverState {
         Self {
             connected: false,
             lost: None,
+            refused: false,
             finished: 0,
             stashed: None,
             transmit: Vec::new(),
@@ -547,26 +756,11 @@ impl DriverState {
     }
 }
 
-/// Sends one datagram. A client's socket is connected to its server, which keeps the kernel's
-/// route lookup off every send; macOS refuses an explicit address on a connected socket.
-fn send(
-    socket: &UdpSocket,
-    peer: Option<SocketAddr>,
-    bytes: &[u8],
-    destination: SocketAddr,
-) -> std::io::Result<usize> {
-    if peer == Some(destination) {
-        socket.send(bytes)
-    } else {
-        socket.send_to(bytes, destination)
-    }
-}
-
 /// One QUIC connection and its I/O, driven only when its thread calls it.
 struct Driver {
     connection: Connection,
     handle: ConnectionHandle,
-    socket: Arc<UdpSocket>,
+    socket: Arc<Udp>,
     /// The server a client's socket is connected to.
     peer: Option<SocketAddr>,
     side: Side,
@@ -577,7 +771,7 @@ impl Driver {
     /// The descriptor that becomes readable when datagrams arrive for this connection.
     fn descriptor(&self) -> RawFd {
         match &self.side {
-            Side::Client { .. } => self.socket.as_raw_fd(),
+            Side::Client { .. } => self.socket.fd(),
             Side::Server { bell, .. } => bell.as_raw_fd(),
         }
     }
@@ -586,7 +780,7 @@ impl Driver {
     /// connection's events and sends what it has.
     fn pump(&mut self) {
         let now = Instant::now();
-        self.ingest(now);
+        let _ = self.ingest(now);
         self.advance(now);
     }
 
@@ -605,6 +799,15 @@ impl Driver {
             match event {
                 Event::Connected => self.state.connected = true,
                 Event::ConnectionLost { reason } => {
+                    // TLS alerts travel as QUIC crypto errors, 0x100 to 0x1ff.
+                    let crypto = |code: noq_proto::TransportErrorCode| {
+                        (0x100..0x200).contains(&u64::from(code))
+                    };
+                    self.state.refused |= match &reason {
+                        ConnectionError::ConnectionClosed(close) => crypto(close.error_code),
+                        ConnectionError::TransportError(error) => crypto(error.code),
+                        _ => false,
+                    };
                     self.state.lost.get_or_insert(match reason {
                         ConnectionError::ApplicationClosed(_)
                         | ConnectionError::ConnectionClosed(_)
@@ -619,47 +822,56 @@ impl Driver {
         self.transmit(now);
     }
 
-    fn ingest(&mut self, now: Instant) {
+    /// Takes arrived datagrams. Returns whether any arrived.
+    fn ingest(&mut self, now: Instant) -> bool {
+        let arrived;
         match &mut self.side {
-            Side::Client { endpoint, buffer } => loop {
-                let (count, remote) = match self.socket.recv_from(buffer) {
-                    Ok(received) => received,
-                    Err(error) if error.kind() == ErrorKind::Interrupted => continue,
-                    // The connected socket reports the server's port as closed, as TCP would.
-                    Err(error)
-                        if error.kind() == ErrorKind::ConnectionRefused
-                            && !self.state.connected =>
-                    {
-                        self.state.lost.get_or_insert(CarrierError::Failed);
-                        break;
+            Side::Client { endpoint, buffer } => {
+                let mut datagrams = Vec::new();
+                loop {
+                    let received = self.socket.receive(buffer, |remote, local, bytes| {
+                        datagrams.push((remote, local, BytesMut::from(bytes)));
+                    });
+                    match received {
+                        Ok(()) => {}
+                        Err(error) if error.kind() == ErrorKind::Interrupted => continue,
+                        // The connected socket reports the server's port as closed, as TCP would.
+                        Err(error)
+                            if error.kind() == ErrorKind::ConnectionRefused
+                                && !self.state.connected =>
+                        {
+                            self.state.lost.get_or_insert(CarrierError::Failed);
+                            break;
+                        }
+                        Err(_) => break,
                     }
-                    Err(_) => break,
-                };
-                let data = BytesMut::from(&buffer[..count]);
-                self.state.transmit.clear();
-                match endpoint.handle(
-                    now,
-                    FourTuple::new(remote, None),
-                    None,
-                    data,
-                    &mut self.state.transmit,
-                ) {
-                    Some(DatagramEvent::ConnectionEvent(handle, event))
-                        if handle == self.handle =>
-                    {
-                        self.connection.handle_event(event);
-                    }
-                    Some(DatagramEvent::Response(transmit)) => {
-                        let _ = send(
-                            &self.socket,
-                            self.peer,
-                            &self.state.transmit[..transmit.size],
-                            transmit.destination,
-                        );
-                    }
-                    _ => {}
                 }
-            },
+                arrived = !datagrams.is_empty();
+                for (remote, local, data) in datagrams {
+                    self.state.transmit.clear();
+                    match endpoint.handle(
+                        now,
+                        FourTuple::new(remote, local),
+                        None,
+                        data,
+                        &mut self.state.transmit,
+                    ) {
+                        Some(DatagramEvent::ConnectionEvent(handle, event))
+                            if handle == self.handle =>
+                        {
+                            self.connection.handle_event(event);
+                        }
+                        Some(DatagramEvent::Response(transmit)) => {
+                            let _ = self.socket.send(
+                                &self.state.transmit[..transmit.size],
+                                transmit.destination,
+                                transmit.src_ip,
+                            );
+                        }
+                        _ => {}
+                    }
+                }
+            }
             Side::Server { route, bell, .. } => {
                 drain_bell(bell);
                 let events = route
@@ -667,11 +879,13 @@ impl Driver {
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .take();
+                arrived = !events.is_empty();
                 for event in events {
                     self.connection.handle_event(event);
                 }
             }
         }
+        arrived
     }
 
     fn endpoint_events(&mut self) {
@@ -696,10 +910,10 @@ impl Driver {
 
     /// Sends datagrams until QUIC has none or the socket would block.
     fn transmit(&mut self, now: Instant) {
-        if let Some((destination, bytes)) = self.state.stashed.take() {
-            match send(&self.socket, self.peer, &bytes, destination) {
+        if let Some((destination, source, bytes)) = self.state.stashed.take() {
+            match self.socket.send(&bytes, destination, source) {
                 Err(error) if error.kind() == ErrorKind::WouldBlock => {
-                    self.state.stashed = Some((destination, bytes));
+                    self.state.stashed = Some((destination, source, bytes));
                     return;
                 }
                 _ => {}
@@ -715,9 +929,13 @@ impl Driver {
                 return;
             };
             let bytes = &self.state.transmit[..transmit.size];
-            match send(&self.socket, self.peer, bytes, transmit.destination) {
+            match self
+                .socket
+                .send(bytes, transmit.destination, transmit.src_ip)
+            {
                 Err(error) if error.kind() == ErrorKind::WouldBlock => {
-                    self.state.stashed = Some((transmit.destination, bytes.to_vec()));
+                    self.state.stashed =
+                        Some((transmit.destination, transmit.src_ip, bytes.to_vec()));
                     return;
                 }
                 // The connected socket's local address left with its network: move to a socket
@@ -747,17 +965,9 @@ impl Driver {
         let Some(peer) = self.peer else {
             return;
         };
-        let local: SocketAddr = if peer.is_ipv4() {
-            (std::net::Ipv4Addr::UNSPECIFIED, 0).into()
-        } else {
-            (std::net::Ipv6Addr::UNSPECIFIED, 0).into()
-        };
-        let Ok(socket) = nonblocking_socket(local) else {
+        let Ok(socket) = Udp::client(peer) else {
             return;
         };
-        if socket.connect(peer).is_err() {
-            return;
-        }
         self.socket = Arc::new(socket);
         self.state.stashed = None;
         self.connection.handle_network_change(None, now);
@@ -782,7 +992,7 @@ impl Driver {
         // A stashed datagram waits for the socket to take it, not for the bell.
         if self.state.stashed.is_some() {
             descriptors.push(libc::pollfd {
-                fd: self.socket.as_raw_fd(),
+                fd: self.socket.fd(),
                 events: libc::POLLOUT,
                 revents: 0,
             });
@@ -801,6 +1011,10 @@ impl Driver {
     }
 
     fn check(&self) -> Result<(), QuicError> {
+        // A client counts its handshake done before the server judged its certificate.
+        if self.state.refused {
+            return Err(QuicError::Refused);
+        }
         match self.state.lost {
             Some(CarrierError::Closed) => Err(QuicError::Closed),
             Some(_) => Err(QuicError::Transport),
@@ -872,15 +1086,9 @@ impl QuicStream {
             } else {
                 deadline.min(Instant::now() + Duration::from_secs(1))
             };
-            let local: SocketAddr = if address.is_ipv4() {
-                (std::net::Ipv4Addr::UNSPECIFIED, 0).into()
-            } else {
-                (std::net::Ipv6Addr::UNSPECIFIED, 0).into()
-            };
-            let socket = nonblocking_socket(local)?;
-            if socket.connect(address).is_err() {
+            let Ok(socket) = Udp::client(*address) else {
                 continue;
-            }
+            };
             let socket = Arc::new(socket);
             let mut endpoint = Box::new(Endpoint::new(endpoint_config(), None, true));
             let Ok((handle, connection)) =
@@ -895,13 +1103,14 @@ impl QuicStream {
                 peer: Some(*address),
                 side: Side::Client {
                     endpoint,
-                    buffer: vec![0; DATAGRAM_BYTES],
+                    buffer: vec![0; RECEIVE_BYTES],
                 },
                 state: DriverState::new(),
             };
             let mut stream = Self::new(driver);
             match stream.open_l0(until) {
                 Ok(()) => return Ok(stream),
+                Err(QuicError::Refused) => return Err(QuicError::Refused),
                 Err(error) => last = error,
             }
         }
@@ -1365,10 +1574,12 @@ impl Carrier for QuicCarrier {
         if let Some(error) = self.driver.state.lost {
             return Err(error);
         }
-        if self.unflushed() > 1 {
+        let level = if self.client { Priority::L0 } else { priority };
+        // Each level is full on its own, so a stream that waits on flow control never holds
+        // back another.
+        if self.outgoing[index(level)].frames.len() > 1 {
             return Ok(Offer::Full);
         }
-        let level = if self.client { Priority::L0 } else { priority };
         self.outgoing[index(level)].frames.push_back(frame.to_vec());
         Ok(Offer::Accepted)
     }
@@ -1377,9 +1588,16 @@ impl Carrier for QuicCarrier {
         self.rebind_if_asked();
         // Frames first, so acknowledgements of what `receive` took ride on them.
         self.write_streams()?;
-        if self.closing {
-            // Nothing receives any more, so acknowledgements are taken here.
-            self.driver.pump();
+        if self.closing || !self.client {
+            // Acknowledgements and credit arrive with datagrams, and a server that stopped
+            // receiving still needs them to finish writing. A server's bell is its own, so it
+            // rings again for the frames `receive` has not read yet; a client takes datagrams
+            // here only once nothing receives.
+            if self.driver.ingest(Instant::now())
+                && let Side::Server { route, .. } = &self.driver.side
+            {
+                ring(&route.ring);
+            }
             self.write_streams()?;
         }
         self.driver.advance(Instant::now());
@@ -1415,7 +1633,7 @@ impl Carrier for QuicCarrier {
         if self.inbound.is_empty() {
             // Datagrams only: acknowledgements, timers and flow-control updates wait for the
             // `flush` that follows every turn, so a frame reaches the caller before any send.
-            self.driver.ingest(Instant::now());
+            let _ = self.driver.ingest(Instant::now());
             if let Err(error) = self.read_streams() {
                 self.violation = Some(error);
             }
@@ -1424,7 +1642,8 @@ impl Carrier for QuicCarrier {
             self.inbound_bytes -= limits::HEADER_BYTES + frame.body.len();
             return Ok(Some(frame));
         }
-        if self.goodbye.is_some() && self.levels_ended() {
+        // Once the connection is gone nothing more can arrive before the goodbye.
+        if self.goodbye.is_some() && (self.levels_ended() || self.driver.state.lost.is_some()) {
             return Ok(self.goodbye.take());
         }
         if let Some(error) = self.violation.or(self.driver.state.lost) {
@@ -1442,7 +1661,7 @@ impl Carrier for QuicCarrier {
                 .state
                 .stashed
                 .is_some()
-                .then(|| self.driver.socket.as_raw_fd()),
+                .then(|| self.driver.socket.fd()),
             // Acknowledgements arrive on the same descriptor and free QUIC's buffers.
             progress: Some(descriptor),
             deadline: self.driver.connection.poll_timeout(),
@@ -1451,6 +1670,12 @@ impl Carrier for QuicCarrier {
 
     fn close(&mut self) {
         self.closing = true;
+    }
+
+    fn path_suspect(&mut self) {
+        if self.client {
+            self.driver.rebind(Instant::now());
+        }
     }
 }
 

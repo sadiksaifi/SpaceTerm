@@ -32,7 +32,8 @@ pub enum Priority {
 pub trait Carrier: Send {
     /// Offers one whole frame. `Accepted` means the carrier owns the frame and finishes writing it
     /// during later `flush` calls. A carrier returns `Full`, taking nothing, while more than one
-    /// accepted frame is unflushed, so frames wait in the outbox where priority still applies.
+    /// accepted frame is unflushed, so frames wait in the outbox where priority still applies. A
+    /// carrier with a stream per level may refuse one level and accept another.
     /// Offer the frame again after `flush` makes progress or `readiness` reports it.
     fn offer(&mut self, frame: &[u8], priority: Priority) -> Result<Offer, CarrierError>;
     /// Writes buffered bytes without blocking.
@@ -44,6 +45,9 @@ pub trait Carrier: Send {
     /// Starts an orderly close. Later offers and receives fail with `Closed`; `flush` keeps
     /// draining what was accepted, followed by any closing frame of the transport.
     fn close(&mut self);
+    /// The peer stopped answering while this end's address may still look usable, as after a
+    /// network change. A carrier that can move to a new path does so.
+    fn path_suspect(&mut self) {}
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

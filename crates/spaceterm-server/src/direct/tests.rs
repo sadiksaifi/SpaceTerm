@@ -2823,6 +2823,384 @@ mod quic_connections {
         drop(server.join().unwrap());
     }
 
+    /// Turning exposure off and on at the same address while a client is connected takes the
+    /// listener back instead of binding a socket the old connection still holds, and that
+    /// connection still receives its goodbye.
+    #[test]
+    fn toggling_exposure_with_a_connected_client_keeps_the_listener() {
+        let fixture = Fixture::new();
+        fixture.enable();
+        let credential = DeviceCredential::generate().unwrap();
+        let paired = fixture.enroll(&credential);
+        let endpoint = fixture.endpoint();
+        let server = fixture.serve_next();
+        let link = connect(&endpoint, &paired, &credential);
+        assert!(matches!(
+            request(&link, nothing()),
+            Err(RequestError::Refused(Refusal::Unsupported))
+        ));
+        let ManagementReply::Status(status) = fixture.management(Management::Status).unwrap()
+        else {
+            panic!()
+        };
+        for enabled in [false, true] {
+            fixture
+                .management(Management::SetPolicy {
+                    enabled,
+                    policy: status.policy.clone(),
+                })
+                .unwrap();
+        }
+        let ManagementReply::Status(after) = fixture.management(Management::Status).unwrap() else {
+            panic!()
+        };
+        assert_eq!(after.listener, status.listener);
+        assert_eq!(
+            ended(&link),
+            LinkError::Goodbye(crate::protocol::Fatal::Revoked)
+        );
+        drop(link);
+        let _ = server.join().unwrap();
+        let server = fixture.serve_next();
+        let link = connect(&endpoint, &paired, &credential);
+        assert!(matches!(
+            request(&link, nothing()),
+            Err(RequestError::Refused(Refusal::Unsupported))
+        ));
+        drop(link);
+        let _ = server.join().unwrap();
+    }
+
+    /// A server that stopped receiving, as while it says goodbye, still takes the
+    /// acknowledgements and credit that let its writes finish, and does not spin meanwhile.
+    #[test]
+    fn a_server_that_stopped_receiving_still_finishes_writing() {
+        use crate::connection::carrier::{Carrier, Offer, Priority};
+        use crate::protocol::Kind;
+        let fixture = Fixture::new();
+        let (listener, endpoint) = listener(&fixture.state);
+        let pin = fixture.state.lock().unwrap().pin.clone();
+        let frames = 4;
+        let server = std::thread::spawn(move || {
+            let mut stream = accept_from(&listener);
+            stream.send(&"open").unwrap();
+            let mut carrier = stream.into_carrier();
+            let deadline = Instant::now() + Duration::from_secs(20);
+            let (mut sent, mut turns) = (0, 0);
+            let frame = raw(Kind::Frame, crate::protocol::limits::MAX_FRAME_BYTES, 9);
+            // Never `receive`: only offer, flush and wait, as the I/O thread does once it
+            // stopped reading.
+            loop {
+                turns += 1;
+                if sent < frames && carrier.offer(&frame, Priority::L1).unwrap() == Offer::Accepted
+                {
+                    sent += 1;
+                    continue;
+                }
+                let pending = carrier.flush().unwrap().pending;
+                if sent == frames && !pending {
+                    // Closing waits until the client acknowledged every stream to its end.
+                    carrier.close();
+                    if !carrier.flush().unwrap().pending {
+                        break;
+                    }
+                }
+                assert!(Instant::now() < deadline, "the writes never finished");
+                let readiness = carrier.readiness();
+                let until = readiness.deadline.map_or(deadline, |at| at.min(deadline));
+                crate::connection::io::wait_fd(
+                    readiness.progress.unwrap_or(readiness.read),
+                    false,
+                    until,
+                );
+            }
+            turns
+        });
+        let credential = DeviceCredential::generate().unwrap();
+        let mut stream = quic::dial(&endpoint, &pin, &credential).unwrap();
+        assert_eq!(stream.receive::<String>().unwrap(), "open");
+        let mut carrier = stream.into_carrier();
+        let received = receive_frames(
+            &mut carrier,
+            frames,
+            Instant::now() + Duration::from_secs(20),
+        );
+        assert_eq!(received.len(), frames);
+        // Acknowledge the server's close until it is done.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !server.is_finished() && Instant::now() < deadline {
+            let _ = carrier.receive();
+            let _ = carrier.flush();
+            let readiness = carrier.readiness();
+            let until = readiness.deadline.map_or(deadline, |at| {
+                at.min(Instant::now() + Duration::from_millis(50))
+            });
+            crate::connection::io::wait_fd(readiness.read, false, until);
+        }
+        let turns = server.join().unwrap();
+        assert!(turns < 20_000, "the server spun for {turns} turns");
+    }
+
+    /// A level whose stream waits on flow control is full on its own; another level is still
+    /// taken.
+    #[test]
+    fn a_blocked_bulk_stream_leaves_the_other_levels_open() {
+        use crate::connection::carrier::{Carrier, Offer, Priority};
+        use crate::protocol::Kind;
+        let fixture = Fixture::new();
+        let (listener, endpoint) = listener(&fixture.state);
+        let pin = fixture.state.lock().unwrap().pin.clone();
+        let server = std::thread::spawn(move || {
+            let mut stream = accept_from(&listener);
+            stream.send(&"open").unwrap();
+            let mut carrier = stream.into_carrier();
+            let bulk = raw(Kind::BulkReply, crate::protocol::limits::MAX_FRAME_BYTES, 2);
+            let mut offers = Vec::new();
+            for _ in 0..4 {
+                offers.push(carrier.offer(&bulk, Priority::L2).unwrap());
+                carrier.flush().unwrap();
+            }
+            let ping = crate::protocol::frame::encode_server(
+                &crate::protocol::ServerMessage::Goodbye(crate::protocol::Fatal::Stopping),
+            )
+            .unwrap()
+            .frames
+            .remove(0);
+            (offers, carrier.offer(&ping, Priority::L0).unwrap())
+        });
+        let credential = DeviceCredential::generate().unwrap();
+        let mut stream = quic::dial(&endpoint, &pin, &credential).unwrap();
+        assert_eq!(stream.receive::<String>().unwrap(), "open");
+        // The client never reads, so L2 runs out of credit.
+        let (offers, control) = server.join().unwrap();
+        assert!(offers.contains(&Offer::Full), "L2 must fill up: {offers:?}");
+        assert_eq!(control, Offer::Accepted);
+        drop(stream);
+    }
+
+    /// The 33rd connection waiting for the host is refused at once.
+    #[test]
+    fn connections_past_the_pending_bound_are_refused() {
+        let fixture = Fixture::new();
+        let (listener, endpoint) = listener(&fixture.state);
+        let pin = fixture.state.lock().unwrap().pin.clone();
+        let waiting: Vec<_> = (0..32)
+            .map(|_| {
+                let (endpoint, pin) = (endpoint.clone(), pin.clone());
+                std::thread::spawn(move || {
+                    let credential = DeviceCredential::generate().unwrap();
+                    let _ = quic::dial(&endpoint, &pin, &credential);
+                })
+            })
+            .collect();
+        let deadline = Instant::now() + Duration::from_secs(4);
+        while listener.waiting() < 32 {
+            assert!(
+                Instant::now() < deadline,
+                "only {} waited",
+                listener.waiting()
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let credential = DeviceCredential::generate().unwrap();
+        let started = Instant::now();
+        assert!(quic::dial(&endpoint, &pin, &credential).is_err());
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert_eq!(listener.waiting(), 32);
+        drop(listener);
+        for thread in waiting {
+            thread.join().unwrap();
+        }
+    }
+
+    /// A handshake that either side refuses is an authentication refusal, not a transport
+    /// failure to retry.
+    #[test]
+    fn a_refused_tls_handshake_is_an_authentication_refusal() {
+        let fixture = Fixture::new();
+        let (listener, endpoint) = listener(&fixture.state);
+        let pin = fixture.state.lock().unwrap().pin.clone();
+        let pair = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+        let certificate =
+            rcgen::CertificateParams::new(vec![crate::connection::quic::SERVER_NAME.into()])
+                .unwrap()
+                .self_signed(&pair)
+                .unwrap()
+                .der()
+                .clone();
+        let server = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                if let Some(mut stream) = listener.accept() {
+                    return stream.handshake(deadline).is_ok();
+                }
+                if Instant::now() >= deadline {
+                    return false;
+                }
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        });
+        let key = rustls::pki_types::PrivateKeyDer::Pkcs8(pair.serialize_der().into());
+        let config = quic::presenting(&pin, certificate, key, Arc::default()).unwrap();
+        let address = Endpoint::from_url(&endpoint)
+            .unwrap()
+            .resolve(Instant::now() + Duration::from_secs(5))
+            .unwrap();
+        let refused =
+            QuicStream::connect(config, &address, Instant::now() + Duration::from_secs(5));
+        assert_eq!(
+            refused.err().map(quic::transport),
+            Some(DirectError::AuthenticationRefused)
+        );
+        assert!(!server.join().unwrap());
+    }
+
+    /// A UDP relay between clients and a server. Each client source gets its own upstream
+    /// socket, so the server sees a new address when a client moves. `blackhole` drops a source's
+    /// traffic both ways, as a network that vanished under a still-valid address.
+    struct Relay {
+        address: std::net::SocketAddr,
+        sources: Arc<Mutex<Vec<std::net::SocketAddr>>>,
+        blackhole: Arc<Mutex<Option<std::net::SocketAddr>>>,
+        stop: Arc<std::sync::atomic::AtomicBool>,
+        thread: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl Relay {
+        fn new(server: std::net::SocketAddr) -> Self {
+            use std::sync::atomic::Ordering;
+            let front = UdpSocket::bind("127.0.0.1:0").unwrap();
+            front.set_nonblocking(true).unwrap();
+            let address = front.local_addr().unwrap();
+            let sources: Arc<Mutex<Vec<std::net::SocketAddr>>> = Arc::default();
+            let blackhole: Arc<Mutex<Option<std::net::SocketAddr>>> = Arc::default();
+            let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let (seen, hole, stopping) = (
+                Arc::clone(&sources),
+                Arc::clone(&blackhole),
+                Arc::clone(&stop),
+            );
+            let thread = std::thread::spawn(move || {
+                let mut upstreams: Vec<(std::net::SocketAddr, UdpSocket)> = Vec::new();
+                let mut buffer = [0; 65_536];
+                while !stopping.load(Ordering::Acquire) {
+                    let mut idle = true;
+                    while let Ok((count, source)) = front.recv_from(&mut buffer) {
+                        idle = false;
+                        if *hole.lock().unwrap() == Some(source) {
+                            continue;
+                        }
+                        if !upstreams.iter().any(|(known, _)| *known == source) {
+                            let upstream = UdpSocket::bind("127.0.0.1:0").unwrap();
+                            upstream.connect(server).unwrap();
+                            upstream.set_nonblocking(true).unwrap();
+                            upstreams.push((source, upstream));
+                            seen.lock().unwrap().push(source);
+                        }
+                        let (_, upstream) = upstreams
+                            .iter()
+                            .find(|(known, _)| *known == source)
+                            .unwrap();
+                        let _ = upstream.send(&buffer[..count]);
+                    }
+                    for (source, upstream) in &upstreams {
+                        while let Ok(count) = upstream.recv(&mut buffer) {
+                            idle = false;
+                            if *hole.lock().unwrap() != Some(*source) {
+                                let _ = front.send_to(&buffer[..count], source);
+                            }
+                        }
+                    }
+                    if idle {
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                }
+            });
+            Self {
+                address,
+                sources,
+                blackhole,
+                stop,
+                thread: Some(thread),
+            }
+        }
+    }
+
+    impl Drop for Relay {
+        fn drop(&mut self) {
+            self.stop.store(true, std::sync::atomic::Ordering::Release);
+            if let Some(thread) = self.thread.take() {
+                let _ = thread.join();
+            }
+        }
+    }
+
+    /// The path under a client dies while its address stays valid. The client's unanswered ping
+    /// makes it move to a new socket; the server validates the new path, and the session goes on
+    /// with no second admission and no end, so the client keeps its Pane control.
+    #[test]
+    fn an_unanswered_ping_moves_the_client_to_a_new_path_and_keeps_its_session() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct Session {
+            admitted: Arc<AtomicUsize>,
+            ended: Arc<AtomicUsize>,
+        }
+        impl PaneService for Session {
+            fn admitted(&mut self, _: &Peer, _: ClientName, _: Outbox) {
+                self.admitted.fetch_add(1, Ordering::SeqCst);
+            }
+            fn request(&mut self, _: &Peer, _: RequestId, _: Operation) -> Dispatch {
+                Dispatch::reply(Err(Refusal::Unsupported))
+            }
+            fn input(&mut self, _: &Peer, _: Input) {}
+            fn view(&mut self, _: &Peer, _: View) {}
+            fn effect_done(&mut self, _: &Peer, _: EffectDone) {}
+            fn acknowledge(&mut self, _: &Peer, _: u64) {}
+            fn disconnected(&mut self, _: &Peer) {
+                self.ended.fetch_add(1, Ordering::SeqCst);
+            }
+            fn shutdown(&mut self) -> Result<(), ServerError> {
+                Ok(())
+            }
+        }
+        let fixture = Fixture::new();
+        fixture.enable();
+        let credential = DeviceCredential::generate().unwrap();
+        let paired = fixture.enroll(&credential);
+        let server_address = Endpoint::from_url(&fixture.endpoint())
+            .unwrap()
+            .resolve(Instant::now() + Duration::from_secs(5))
+            .unwrap()[0];
+        let relay = Relay::new(server_address);
+        let (admitted, ended) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+        let server = fixture.serve_next_with(service(Session {
+            admitted: Arc::clone(&admitted),
+            ended: Arc::clone(&ended),
+        }));
+        let link = connect(&format!("quic://{}", relay.address), &paired, &credential);
+        assert!(matches!(
+            request(&link, nothing()),
+            Err(RequestError::Refused(Refusal::Unsupported))
+        ));
+        let first = relay.sources.lock().unwrap()[0];
+        *relay.blackhole.lock().unwrap() = Some(first);
+        // The link pings after 5 s of silence and suspects its path 2.5 s later.
+        let deadline = Instant::now() + crate::protocol::limits::DEAD_AFTER;
+        while relay.sources.lock().unwrap().len() < 2 {
+            assert!(Instant::now() < deadline, "the client never moved");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(matches!(
+            request(&link, nothing()),
+            Err(RequestError::Refused(Refusal::Unsupported))
+        ));
+        assert_eq!(link.health(), crate::connection::link::Health::Live);
+        assert_eq!(admitted.load(Ordering::SeqCst), 1, "no second admission");
+        assert_eq!(ended.load(Ordering::SeqCst), 0, "the session never ended");
+        drop(link);
+        let _ = server.join().unwrap();
+    }
+
     /// Measures a QUIC request's round trip on loopback, as `quic_request_round_trip_on_loopback`
     /// does for QUIC. Run it with `mise run bench:latency:quic`.
     #[test]
