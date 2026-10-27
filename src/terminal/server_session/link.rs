@@ -156,9 +156,6 @@ impl ActiveInput {
         Ok(())
     }
     fn disable(&self, state: &DevelopmentPaneState) {
-        Self::disable_interaction(state);
-    }
-    pub(super) fn disable_interaction(state: &DevelopmentPaneState) {
         let mut interaction = state.interaction.lock().unwrap_or_else(|e| e.into_inner());
         interaction.interactive = false;
         interaction.pending = None;
@@ -664,8 +661,6 @@ pub(super) struct PaneLink {
     channel: Option<(ChannelHandle, Lease)>,
     inbox: Arc<Inbox>,
     notify: Arc<dyn Fn() + Send + Sync>,
-    /// Called when the server discards input as `Unsupported`, which disables interactive input.
-    unsupported: Arc<dyn Fn() + Send + Sync>,
 }
 
 #[derive(Default)]
@@ -689,7 +684,6 @@ impl PaneLink {
         link: ServerLink,
         attachment: Option<spaceterm_server::attachments::AttachmentPermit>,
         notify: Arc<dyn Fn() + Send + Sync>,
-        unsupported: Arc<dyn Fn() + Send + Sync>,
     ) -> Self {
         Self {
             link,
@@ -697,14 +691,12 @@ impl PaneLink {
             channel: None,
             inbox: Arc::default(),
             notify,
-            unsupported,
         }
     }
 
     fn sink(&self) -> Arc<dyn ChannelSink> {
         let inbox = Arc::clone(&self.inbox);
         let notify = Arc::clone(&self.notify);
-        let unsupported = Arc::clone(&self.unsupported);
         Arc::new(move |event: ChannelEvent| {
             {
                 let mut received = inbox.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -712,12 +704,14 @@ impl PaneLink {
                     ChannelEvent::Pane(PaneEvent::Input { serial, outcome }) => {
                         if received.awaited.contains(&serial) {
                             received.settled.insert(serial, outcome);
-                        } else if let InputOutcome::Discarded(refusal) = outcome {
-                            if refusal == pane::Refusal::Unsupported {
-                                unsupported();
-                            } else {
-                                received.discarded.get_or_insert(refusal);
-                            }
+                        } else if let InputOutcome::Discarded(refusal) = outcome
+                            && refusal != pane::Refusal::Unsupported
+                        {
+                            // Every major 2 server takes interactive input, so `Unsupported`
+                            // refuses only that message, such as text no key types. Any other
+                            // discard means the lease or focus moved on, as a refused exchange
+                            // did.
+                            received.discarded.get_or_insert(refusal);
                         }
                     }
                     ChannelEvent::Closed(error) => {
@@ -766,6 +760,15 @@ impl PaneLink {
         events: Vec<InputEvent>,
     ) -> Result<u32, ServerError> {
         Ok(self.bound(lease)?.input(generation, events)?)
+    }
+
+    /// Sends pointer or wheel input. While the link's urgent queue is full the event is dropped:
+    /// later motion replaces it, and a stall must not end the Pane's connection.
+    fn pointer(&self, lease: Lease, generation: u64, event: InputEvent) -> Result<(), ServerError> {
+        match self.bound(lease)?.input(generation, vec![event]) {
+            Ok(_) | Err(LinkError::Busy) => Ok(()),
+            Err(error) => Err(error.into()),
+        }
     }
 
     /// Waits until the server settles the paste or resolution that ended with `serial`.
@@ -867,6 +870,19 @@ impl PaneLink {
 
     /// Runs one worker command.
     pub(super) fn exchange(&mut self, request: &Request) -> Result<Reply, ServerError> {
+        let result = self.command(request);
+        // The Terminal Session ended or is gone, so the channel is released and the server frees
+        // its slot.
+        if matches!(
+            result,
+            Ok(Reply::Ended) | Err(ServerError::SessionUnavailable)
+        ) {
+            self.channel = None;
+        }
+        result
+    }
+
+    fn command(&mut self, request: &Request) -> Result<Reply, ServerError> {
         self.reported()?;
         if let Some(permit) = &self.attachment
             && let Some(claim) = permit.claim(&self.link, request)?
@@ -944,16 +960,24 @@ impl PaneLink {
                         channel.input(generation, vec![InputEvent::ResolvePaste { id, confirm }])
                     })
                 }
+                pane::InteractiveInput::Pointer(pointer) => {
+                    self.pointer(lease, generation, InputEvent::Pointer(pointer))?;
+                    Ok(Reply::Unchanged)
+                }
+                pane::InteractiveInput::Wheel(wheel) => {
+                    self.pointer(lease, generation, InputEvent::Wheel(wheel))?;
+                    Ok(Reply::Unchanged)
+                }
                 input => {
                     let event = match input {
                         pane::InteractiveInput::Key(key) => InputEvent::Key(key),
-                        pane::InteractiveInput::Pointer(pointer) => InputEvent::Pointer(pointer),
-                        pane::InteractiveInput::Wheel(wheel) => InputEvent::Wheel(wheel),
                         pane::InteractiveInput::CopyOrForward { modifiers } => {
                             InputEvent::CopyOrForward { modifiers }
                         }
                         pane::InteractiveInput::Paste { .. }
-                        | pane::InteractiveInput::ResolvePaste { .. } => unreachable!(),
+                        | pane::InteractiveInput::ResolvePaste { .. }
+                        | pane::InteractiveInput::Pointer(_)
+                        | pane::InteractiveInput::Wheel(_) => unreachable!(),
                     };
                     self.input(lease, generation, vec![event])?;
                     Ok(Reply::Unchanged)
@@ -1280,18 +1304,10 @@ pub(super) fn present(
         }
         state.retry.store(false, Ordering::Release);
         let connected = (|| {
-            let mut connection = PaneLink::new(
-                server.link()?,
-                attachment.clone(),
-                {
-                    let state = Arc::clone(&state);
-                    Arc::new(move || state.wake.notify())
-                },
-                {
-                    let state = Arc::clone(&state);
-                    Arc::new(move || ActiveInput::disable_interaction(&state))
-                },
-            );
+            let mut connection = PaneLink::new(server.link()?, attachment.clone(), {
+                let state = Arc::clone(&state);
+                Arc::new(move || state.wake.notify())
+            });
             let Some(claim::Granted {
                 lease,
                 size: grant_size,

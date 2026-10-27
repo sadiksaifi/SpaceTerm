@@ -99,10 +99,13 @@ impl AdmittedConnection {
                     if claim.channel.0 <= self.highest_channel {
                         return Err(Fatal::ProtocolViolation);
                     }
-                    if self.serials.len() >= limits::MAX_CHANNELS {
-                        return Err(Fatal::Capacity);
-                    }
                     self.highest_channel = claim.channel.0;
+                    // Too many open channels refuse this claim only; every other channel of the
+                    // connection keeps working.
+                    if self.serials.len() >= limits::MAX_CHANNELS {
+                        self.outbox.reply(request.id, Err(Refusal::Capacity))?;
+                        return Ok(None);
+                    }
                     self.serials.insert(claim.channel, 0);
                 }
                 if self.peer.paired() && administration(&request.operation) {

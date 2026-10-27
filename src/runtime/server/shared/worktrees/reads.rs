@@ -7,7 +7,14 @@ pub(super) struct PreparedRead {
     pub reply: ReadReply,
     pub approval: Option<Approval>,
 }
+/// Reads of one kind a connection runs at once. Every client reader shares one connection, so
+/// each kind of read has its own bound and a slow kind cannot starve another.
+const READS_PER_KIND: usize = 2;
+/// Reads the server runs at once across every connection.
+const READS: usize = 32;
+
 struct Job {
+    kind: std::mem::Discriminant<Read>,
     token: CancellationToken,
     worker: std::thread::JoinHandle<Result<PreparedRead, Error>>,
     deadline: Instant,
@@ -63,8 +70,14 @@ impl Reads {
         settings: Settings,
     ) -> Result<ReadReply, Error> {
         self.tick();
-        if self.jobs.len() + self.retiring.len() >= 32
-            || self.jobs.keys().filter(|(c, _)| *c == connection).count() >= 2
+        let kind = std::mem::discriminant(&read);
+        if self.jobs.len() + self.retiring.len() >= READS
+            || self
+                .jobs
+                .iter()
+                .filter(|((c, _), job)| *c == connection && job.kind == kind)
+                .count()
+                >= READS_PER_KIND
         {
             return Err(Error::Unavailable);
         }
@@ -79,6 +92,7 @@ impl Reads {
         self.jobs.insert(
             (connection, id),
             Job {
+                kind,
                 token,
                 worker,
                 deadline: Instant::now() + Duration::from_secs(30),
@@ -228,4 +242,44 @@ fn read_git(
         _ => return Err(Error::Unavailable),
     };
     Ok(PreparedRead { reply, approval })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Settings' slow reads cannot take the slots of a validation or removal check on the same
+    /// connection.
+    #[test]
+    fn each_kind_of_read_has_its_own_bound_per_connection() {
+        let mut reads = Reads::default();
+        let inventory = State::empty().inventory;
+        let begin = |reads: &mut Reads, read: Read| {
+            reads.begin(
+                [1; 32],
+                [2; 32],
+                read,
+                inventory.clone(),
+                Settings::default(),
+            )
+        };
+        for _ in 0..READS_PER_KIND {
+            assert!(begin(&mut reads, Read::ServerFacts).is_ok());
+            assert!(begin(&mut reads, Read::Git).is_ok());
+        }
+        assert_eq!(
+            begin(&mut reads, Read::ServerFacts).err(),
+            Some(Error::Unavailable)
+        );
+        assert!(
+            begin(
+                &mut reads,
+                Read::ValidateLocationTemplate {
+                    template: "{repository}".into()
+                }
+            )
+            .is_ok()
+        );
+        reads.stop();
+    }
 }

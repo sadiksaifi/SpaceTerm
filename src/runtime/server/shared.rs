@@ -1038,6 +1038,14 @@ impl HostCommands for SharedWorkspaceHost {
         self.rearm();
         reply
     }
+    fn lease_live(&self, lease: &Lease) -> bool {
+        self.panes.values().any(|host| host.lease_live(lease))
+    }
+    fn unbound(&mut self, connection: Id, lease: &Lease) {
+        for host in self.panes.values_mut() {
+            host.unbound(connection, lease);
+        }
+    }
     fn disconnected(&mut self, connection: Id) {
         self.unsubscribe(connection);
         self.cancel_worktree_reads(connection);
