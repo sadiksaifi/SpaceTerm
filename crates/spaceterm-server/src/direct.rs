@@ -305,9 +305,14 @@ pub trait DirectConnector: Send + Sync {
     fn connect(&self) -> Result<DirectConnection, DirectError>;
 }
 
-/// Authenticated WSS carrier. Drop cancels its one socket owner and closes its private bridge.
+/// An authenticated WSS socket before admission. Admission turns it into the connection's
+/// carrier; dropping it closes the socket.
 pub struct DirectConnection {
-    bridge: wss::Bridge,
+    #[cfg_attr(
+        not(any(feature = "client", test)),
+        allow(dead_code, reason = "the desktop admits and carries the socket")
+    )]
+    ws: wss::Ws,
     #[cfg_attr(
         not(feature = "client"),
         allow(

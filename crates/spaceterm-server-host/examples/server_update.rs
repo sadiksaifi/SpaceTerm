@@ -8,6 +8,7 @@ mod support;
 use spaceterm_server::{
     ServerConnection, ServerError,
     client_view::{ClientView, WorkspaceView},
+    connection::link::ServerLink,
     hierarchy::{Mutation, Outcome},
     pane::*,
     service::{RetainedInstallation, Service},
@@ -17,8 +18,11 @@ use std::{
     path::Path,
     time::{Duration, Instant},
 };
+use support::Claimed;
 
 const IDENTITY: &str = "spaceterm-development";
+/// The SpaceTerm Protocol major of this build and of the signed candidates.
+const MAJOR: u16 = 2;
 const SIZE: PaneSize = PaneSize {
     columns: 100,
     rows: 30,
@@ -26,11 +30,11 @@ const SIZE: PaneSize = PaneSize {
     cell_height: 18,
 };
 
-fn connect(client: &ServerConnection) -> Result<PaneConnection, Box<dyn Error>> {
+fn connect(client: &ServerConnection) -> Result<ServerLink, Box<dyn Error>> {
     let deadline = Instant::now() + Duration::from_secs(20);
     loop {
-        match client.connect_pane() {
-            Ok(connection) => return Ok(connection),
+        match support::connect(client) {
+            Ok(link) => return Ok(link),
             Err(ServerError::NotRunning | ServerError::NotSetUp) if Instant::now() < deadline => {
                 std::thread::sleep(Duration::from_millis(100));
             }
@@ -44,43 +48,35 @@ fn retain(service: &Service, args: &[String]) -> Result<RetainedInstallation, Se
         Path::new(&args[0]),
         Path::new(&args[1]),
         &args[2],
-        1,
+        MAJOR,
         &["workspace_policy"],
     )
 }
 
-fn inventory(
-    connection: &mut PaneConnection,
-) -> Result<spaceterm_server::hierarchy::Inventory, Box<dyn Error>> {
-    match connection.exchange(&Request::Inventory)? {
-        Reply::Inventory { inventory, .. } => Ok(inventory),
-        _ => Err("inventory unavailable".into()),
-    }
+fn inventory(link: &ServerLink) -> Result<spaceterm_server::hierarchy::Inventory, Box<dyn Error>> {
+    Ok(support::inventory(link)?.0)
 }
 
 fn create_workspace(
-    connection: &mut PaneConnection,
+    link: &ServerLink,
     name: &str,
 ) -> Result<spaceterm_server::hierarchy::Id, Box<dyn Error>> {
-    let Reply::Inventory { next_sequence, .. } = connection.exchange(&Request::Inventory)? else {
-        return Err("inventory unavailable".into());
-    };
-    let Reply::Outcome(outcome) = connection.exchange(&Request::Mutate {
-        sequence: next_sequence,
-        mutation: Mutation::CreateWorkspace {
+    let (_, next_sequence) = support::inventory(link)?;
+    let Some(outcome) = support::mutate(
+        link,
+        next_sequence,
+        Mutation::CreateWorkspace {
             name: name.into(),
             directory: None,
         },
-    })?
+    )?
     else {
         return Err("creation unavailable".into());
     };
     let Outcome::Accepted { target } = outcome.outcome else {
         return Err("creation refused".into());
     };
-    connection.exchange(&Request::Acknowledge {
-        sequence: next_sequence,
-    })?;
+    link.acknowledge(next_sequence)?;
     Ok(target)
 }
 
@@ -98,14 +94,14 @@ fn run() -> Result<(), Box<dyn Error>> {
     if installed.stopped {
         service.start()?;
     }
-    let first = ServerConnection::for_development_client("update-smoke-a", 1)?;
-    let second = ServerConnection::for_development_client("update-smoke-b", 1)?;
+    let first = ServerConnection::for_development_client("update-smoke-a", MAJOR)?;
+    let second = ServerConnection::for_development_client("update-smoke-b", MAJOR)?;
     first.setup()?;
     second.setup()?;
-    let mut a = connect(&first)?;
-    let mut b = connect(&second)?;
-    let target = create_workspace(&mut a, "Signed update check")?;
-    let before = inventory(&mut a)?;
+    let a = connect(&first)?;
+    let b = connect(&second)?;
+    let target = create_workspace(&a, "Signed update check")?;
+    let before = inventory(&a)?;
     let workspace = before
         .workspaces
         .iter()
@@ -124,21 +120,13 @@ fn run() -> Result<(), Box<dyn Error>> {
         ],
     };
     first.client_view_store()?.save(saved_view.clone())?;
-    let Reply::Attached { lease } = a.exchange(&Request::SelectPane {
-        pane,
-        explicit: true,
-        size: SIZE,
-        style: None,
-    })?
-    else {
+    let Claimed::Attached(running) = support::select(&a, pane, true, SIZE)? else {
         return Err("selection refused".into());
     };
-    support::command(
-        &mut a,
-        lease,
+    running.command(
         "stty -echo; printf '\\033[2J\\033[HUPDATE-BEGIN\\n'; sleep 3; printf '\\nSTAGING-CONTINUED\\n'; sleep 120",
     )?;
-    support::await_output(&mut a, lease, "UPDATE-BEGIN")?;
+    running.await_output("UPDATE-BEGIN")?;
     let archive = Path::new(&args[3]);
     let signature = Path::new(&args[4]);
     if !matches!(
@@ -146,7 +134,7 @@ fn run() -> Result<(), Box<dyn Error>> {
             archive,
             signature,
             &"0".repeat(64),
-            1,
+            MAJOR,
             &["workspace_policy"]
         ),
         Err(ServerError::CandidateChanged)
@@ -158,7 +146,7 @@ fn run() -> Result<(), Box<dyn Error>> {
             archive,
             Path::new(&args[1]),
             &args[5],
-            1,
+            MAJOR,
             &["workspace_policy"]
         ),
         Err(ServerError::RuntimeUnavailable)
@@ -166,7 +154,13 @@ fn run() -> Result<(), Box<dyn Error>> {
         return Err("an inconsistent signed pair was accepted".into());
     }
     if !matches!(
-        service.inspect_candidate(archive, signature, &args[5], 2, &["workspace_policy"]),
+        service.inspect_candidate(
+            archive,
+            signature,
+            &args[5],
+            MAJOR + 1,
+            &["workspace_policy"]
+        ),
         Err(ServerError::IncompatibleProtocol)
     ) {
         return Err("an unsupported required major was accepted".into());
@@ -176,7 +170,7 @@ fn run() -> Result<(), Box<dyn Error>> {
             archive,
             signature,
             &args[5],
-            1,
+            MAJOR,
             &["unavailable_required_feature"]
         ),
         Err(ServerError::MissingRequiredCapability)
@@ -193,19 +187,19 @@ fn run() -> Result<(), Box<dyn Error>> {
     let approval = service
         .prepare_activation(&candidate)?
         .ok_or("candidate was already approved")?;
-    support::await_output(&mut a, lease, "STAGING-CONTINUED")?;
-    if inventory(&mut b)?
+    running.await_output("STAGING-CONTINUED")?;
+    if inventory(&b)?
         .workspaces
         .iter()
         .all(|workspace| workspace.id != target)
     {
         return Err("staging changed shared organization".into());
     }
-    let created_while_staged = create_workspace(&mut b, "Created while staged")?;
-    let newcomer = ServerConnection::for_development_client("update-smoke-c", 1)?;
+    let created_while_staged = create_workspace(&b, "Created while staged")?;
+    let newcomer = ServerConnection::for_development_client("update-smoke-c", MAJOR)?;
     newcomer.setup()?;
-    let mut c = connect(&newcomer)?;
-    if inventory(&mut c)?
+    let c = connect(&newcomer)?;
+    if inventory(&c)?
         .workspaces
         .iter()
         .all(|workspace| workspace.id != created_while_staged)
@@ -225,13 +219,14 @@ fn run() -> Result<(), Box<dyn Error>> {
     );
     service.activate(approval)?;
     service.recover_activation()?;
-    if a.exchange(&Request::Poll { lease }).is_ok() {
+    if running.poll().is_ok() {
         return Err("old connection survived runtime replacement".into());
     }
+    drop(running);
     drop(a);
     drop(b);
-    let mut fresh = connect(&first)?;
-    let after = inventory(&mut fresh)?;
+    let fresh = connect(&first)?;
+    let after = inventory(&fresh)?;
     if after
         .workspaces
         .iter()
@@ -254,13 +249,8 @@ fn run() -> Result<(), Box<dyn Error>> {
         return Err("personal arrangement changed".into());
     }
     if !matches!(
-        fresh.exchange(&Request::SelectPane {
-            pane,
-            explicit: false,
-            size: SIZE,
-            style: None
-        })?,
-        Reply::Restored { .. }
+        support::select(&fresh, pane, false, SIZE)?,
+        Claimed::Restored(_)
     ) {
         return Err("replacement started a shell without explicit selection".into());
     }
@@ -292,15 +282,10 @@ fn run() -> Result<(), Box<dyn Error>> {
         "Changed run observations required fresh approval; stopped activation preserved deliberate Stop."
     );
     service.start()?;
-    let mut started = connect(&second)?;
+    let started = connect(&second)?;
     if !matches!(
-        started.exchange(&Request::SelectPane {
-            pane,
-            explicit: false,
-            size: SIZE,
-            style: None
-        })?,
-        Reply::Restored { .. }
+        support::select(&started, pane, false, SIZE)?,
+        Claimed::Restored(_)
     ) {
         return Err("first Start after stopped activation started a shell incidentally".into());
     }

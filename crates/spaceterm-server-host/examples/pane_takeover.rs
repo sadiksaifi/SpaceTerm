@@ -1,8 +1,17 @@
 //! Real-host two-client check. Admission uses owning-account authority without client credentials.
+#[expect(
+    dead_code,
+    reason = "the takeover check uses only Pane claims and terminal helpers"
+)]
 mod support;
-use spaceterm_server::{ServerConnection, ServerError, pane::control::Controller, pane::*};
+use spaceterm_server::{
+    ServerConnection, ServerError,
+    connection::link::ServerLink,
+    pane::{control::Controller, *},
+    protocol::{Operation, Takeover, interim::Interim},
+};
 use std::error::Error;
-use support::{attach, await_output, command};
+use support::{Claimed, attach};
 
 fn size(columns: u16) -> PaneSize {
     PaneSize {
@@ -12,20 +21,15 @@ fn size(columns: u16) -> PaneSize {
         cell_height: 18,
     }
 }
-fn select(connection: &mut PaneConnection, create: bool) -> Result<Reply, ServerError> {
-    connection.exchange(&Request::Select {
-        create,
-        size: size(80),
-        resume: None,
-        style: None,
-    })
+/// Selects the first Pane, as the single-Pane `Select` request of protocol major 1 did.
+fn select(link: &ServerLink) -> Result<Claimed, ServerError> {
+    let pane = support::first_pane(link, false)?;
+    support::select(link, pane, false, size(80))
 }
-/// The Takeover offer in `reply` and the Controlling Client it names.
-fn offer(reply: Reply) -> Result<(PaneTarget, Controller), Box<dyn Error>> {
-    match reply {
-        Reply::Takeover {
-            target, controller, ..
-        } => Ok((target, controller)),
+/// The Takeover offer in `claimed` and the Controlling Client it names.
+fn offer(claimed: Claimed) -> Result<Takeover, Box<dyn Error>> {
+    match claimed {
+        Claimed::Takeover(takeover) => Ok(takeover),
         _ => Err("expected Takeover Screen".into()),
     }
 }
@@ -50,92 +54,78 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     let major = std::env::args()
         .nth(1)
-        .unwrap_or_else(|| "1".into())
+        .unwrap_or_else(|| "2".into())
         .parse()?;
     let first = ServerConnection::for_development_client("takeover-first", major)?;
     let second = ServerConnection::for_development_client("takeover-second", major)?;
     for client in [&first, &second] {
         assert_eq!(client.refresh()?.protocol_major, major);
     }
-    let mut a = first.connect_pane()?;
-    let original = attach(&mut a, true)?;
-    command(
-        &mut a,
-        original,
+    let a = support::connect(&first)?;
+    let original = attach(&a, true, size(80))?;
+    original.command(
         "stty -echo; printf '\\033[2J\\033[HSTARTED\\n'; sleep 2; printf 'CONTINUED\\n'",
     )?;
-    await_output(&mut a, original, "STARTED")?;
-    let mut b = second.connect_pane()?;
-    let (target, controller) = offer(select(&mut b, false)?)?;
-    let first_name = controlled_by(controller, "takeover-first")?;
+    original.await_output("STARTED")?;
+    let b = support::connect(&second)?;
+    let takeover = offer(select(&b)?)?;
+    let first_name = controlled_by(takeover.controller, "takeover-first")?;
     println!("takeover-second observed the Controlling Client {first_name:?}.");
-    let Reply::Attached { lease: transferred } = b.exchange(&Request::TakeOver {
-        target,
-        size: size(90),
-        style: None,
-    })?
+    let pane = support::first_pane(&b, false)?;
+    let Claimed::Attached(transferred) = support::claim(
+        &b,
+        pane,
+        AttachmentClaim::TakeOver {
+            target: takeover.target,
+        },
+        size(90),
+    )?
     else {
         return Err("takeover failed".into());
     };
-    assert_eq!(original.session, transferred.session);
-    assert_ne!(original.control, transferred.control);
-    for request in [
-        Request::Poll { lease: original },
-        Request::Resize {
-            lease: original,
-            size: size(70),
-        },
-        Request::Close { lease: original },
-    ] {
-        assert!(matches!(
-            a.exchange(&request),
-            Err(ServerError::StaleControl)
-        ));
-    }
+    assert_eq!(original.lease().session, transferred.lease().session);
+    assert_ne!(original.lease().control, transferred.lease().control);
+    // The former controller's channel still names its old lease, which the server now refuses.
+    // Resize is input, so the server reports its refusal as a discard.
+    assert_eq!(original.poll().err(), Some(ServerError::StaleControl));
+    let resize = original.resize(size(70))?;
+    assert_eq!(original.discarded(resize)?, Refusal::Stale);
+    assert_eq!(
+        original
+            .request(Operation::Close {
+                channel: original.channel(),
+            })
+            .err(),
+        Some(ServerError::StaleControl)
+    );
     // The former device reconnects without recovering its former grant.
-    drop(a);
-    let mut a = first.connect_pane()?;
-    let second_name = controlled_by(offer(select(&mut a, false)?)?.1, "takeover-second")?;
+    a.close();
+    drop(original);
+    let a = support::connect(&first)?;
+    let second_name = controlled_by(offer(select(&a)?)?.controller, "takeover-second")?;
     println!("takeover-first observed the Controlling Client {second_name:?} after Take Over.");
-    await_output(&mut b, transferred, "CONTINUED")?;
-    command(&mut b, transferred, "stty size")?;
-    await_output(&mut b, transferred, "24 90")?;
-    b.exchange(&Request::Release { lease: transferred })?;
-    let Reply::Inventory { inventory, .. } = b.exchange(&Request::Inventory)? else {
-        return Err("inventory unavailable".into());
-    };
-    let pane = inventory
-        .workspaces
-        .first()
-        .and_then(|workspace| workspace.tabs.first())
-        .and_then(|tab| tab.panes.first())
-        .ok_or("the Development Pane is missing")?
-        .id;
-    let (_, released) = offer(b.exchange(&Request::SelectPane {
-        pane,
-        explicit: false,
-        size: size(90),
-        style: None,
-    })?)?;
+    transferred.await_output("CONTINUED")?;
+    transferred.command("stty size")?;
+    transferred.await_output("24 90")?;
+    let (lease, channel) = (transferred.lease(), transferred.channel());
+    transferred.release();
+    let released = offer(support::select(&b, pane, false, size(90))?)?.controller;
     if released != Controller::Nobody {
         return Err(
             format!("expected no Controlling Client after Release, observed {released:?}").into(),
         );
     }
     println!("takeover-second observed no Controlling Client after Release.");
-    let Reply::Attached { lease: reclaimed } = select(&mut a, false)? else {
+    let Claimed::Attached(reclaimed) = select(&a)? else {
         return Err("unclaimed acquisition failed".into());
     };
-    assert_eq!(original.session, reclaimed.session);
-    assert!(matches!(select(&mut b, false)?, Reply::Takeover { .. }));
-    assert!(matches!(
-        b.exchange(&Request::Poll { lease: transferred }),
-        Err(ServerError::StaleControl)
-    ));
-    assert!(matches!(
-        a.exchange(&Request::Close { lease: reclaimed })?,
-        Reply::Closed
-    ));
+    assert_eq!(lease.session, reclaimed.lease().session);
+    assert!(matches!(select(&b)?, Claimed::Takeover(_)));
+    assert_eq!(
+        support::interim(&b, Interim::Poll { channel }).err(),
+        Some(ServerError::StaleControl)
+    );
+    reclaimed.close()?;
     println!(
         "Protocol {major}: two account-local clients transferred the same running Session, named each other as the Controlling Client, refused stale content/resize/close, preserved takeover on reconnect, and acquired released control."
     );

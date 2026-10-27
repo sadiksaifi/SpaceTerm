@@ -132,7 +132,7 @@ pub(super) fn connect(
         return Err(DirectError::AuthenticationRefused);
     }
     Ok(DirectConnection {
-        bridge: wss::Bridge::start(ws)?,
+        ws,
         paired: paired.clone(),
     })
 }
@@ -261,30 +261,17 @@ pub(super) fn cancel(enrollment: &Enrollment) -> Result<Option<RevocationReceipt
     }
 }
 
-impl std::io::Read for DirectConnection {
-    fn read(&mut self, b: &mut [u8]) -> std::io::Result<usize> {
-        std::io::Read::read(&mut self.bridge, b)
-    }
-}
-impl std::io::Write for DirectConnection {
-    fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
-        std::io::Write::write(&mut self.bridge, b)
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        std::io::Write::flush(&mut self.bridge)
-    }
-}
-impl crate::transport::Transport for DirectConnection {
-    fn read_fd(&self) -> std::os::fd::RawFd {
-        crate::transport::Transport::read_fd(&self.bridge)
-    }
-    fn write_fd(&self) -> std::os::fd::RawFd {
-        crate::transport::Transport::write_fd(&self.bridge)
-    }
-}
 impl DirectConnection {
     #[cfg(feature = "client")]
     pub(crate) fn paired(&self) -> &PairedDevice {
         &self.paired
+    }
+    /// The authenticated WebSocket, for admission and then the connection's carrier.
+    #[cfg_attr(
+        not(any(feature = "client", test)),
+        allow(dead_code, reason = "the desktop admits and carries the socket")
+    )]
+    pub(crate) fn into_ws(self) -> wss::Ws {
+        self.ws
     }
 }

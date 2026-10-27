@@ -164,12 +164,7 @@ fn graphics_transfers_are_pulled_in_bounded_chunks_without_retaining_a_transfer_
         panic!("missing final chunk")
     };
     assert_eq!(last.bytes, vec![0; 393216 - CHUNK_BYTES]);
-    assert!(
-        serde_json::to_vec(&Reply::GraphicsChunk(Ok(first)))
-            .unwrap()
-            .len()
-            < pane::MAX_TERMINAL_FRAME
-    );
+    assert!(super::dispatch::wire_bytes(Reply::GraphicsChunk(Ok(first))).is_some());
     host.shutdown().unwrap();
 }
 

@@ -345,13 +345,11 @@ fn presentation_is_excluded_from_retained_organization_and_maximum_inventory_fit
     exemplar.presentation = Some(Box::new(metadata));
     inventory.workspaces[0].tabs[0].panes = vec![exemplar; MAX_PANES];
     assert!(
-        serde_json::to_vec(&Reply::Inventory {
+        super::dispatch::wire_bytes(Reply::Inventory {
             inventory: inventory.clone(),
             next_sequence: 1
         })
-        .unwrap()
-        .len()
-            < MAX_TERMINAL_FRAME
+        .is_some()
     );
     let pushed = spaceterm_server::protocol::frame::encode_server(
         &spaceterm_server::protocol::ServerMessage::Inventory(Box::new(

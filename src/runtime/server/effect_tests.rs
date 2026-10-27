@@ -3,7 +3,7 @@ use super::*;
 use pane::effects::{Completion, Effect};
 use std::time::Instant;
 
-fn next(host: &mut impl PaneService, lease: Lease, generation: u64) -> pane::effects::Request {
+fn next(host: &mut impl HostCommands, lease: Lease, generation: u64) -> pane::effects::Request {
     let deadline = Instant::now() + Duration::from_secs(3);
     loop {
         match host.request(

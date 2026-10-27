@@ -214,11 +214,14 @@ impl Attachments {
     #[cfg(feature = "client")]
     pub fn release_pending(
         &self,
-        connection: &mut crate::pane::PaneConnection,
+        link: &crate::connection::link::ServerLink,
     ) -> Result<(), ServerError> {
         for attachment in self.pending() {
-            match connection.exchange(&crate::pane::Request::ReleaseAttachment { attachment })? {
-                crate::pane::Reply::Unchanged => self.released(attachment)?,
+            match link
+                .request(crate::protocol::Operation::ReleaseAttachment { attachment })?
+                .wait()?
+            {
+                crate::protocol::ReplyBody::Done => self.released(attachment)?,
                 _ => return Err(ServerError::Protocol),
             }
         }
@@ -233,78 +236,86 @@ impl AttachmentPermit {
     pub fn attachment(&self) -> Attachment {
         self.attachment
     }
+    /// The claim this permit makes for a Pane request that selects, starts, repairs or takes over
+    /// its Pane. Releases of earlier attachments go first, and the saved generation precedes every
+    /// claim, including one whose reply is lost.
     #[cfg(feature = "client")]
-    pub fn exchange(
+    pub fn claim(
         &self,
-        connection: &mut crate::pane::PaneConnection,
+        link: &crate::connection::link::ServerLink,
         request: &crate::pane::Request,
-    ) -> Result<crate::pane::Reply, ServerError> {
+    ) -> Result<Option<PaneClaim>, ServerError> {
         use crate::pane::{AttachmentClaim, Request};
         if !self.active() {
             return Err(ServerError::SessionUnavailable);
         }
-        let claim = match request {
+        let (claim, size, style) = match request {
             Request::RepairDirectory {
                 target,
                 replacement,
                 size,
                 style,
-            } => Some((
+            } => (
                 AttachmentClaim::Repair {
                     target: target.clone(),
                     replacement: replacement.clone(),
                 },
                 *size,
                 style.clone(),
-            )),
+            ),
             Request::SelectPane {
                 explicit,
                 size,
                 style,
                 ..
-            } => Some((
+            } => (
                 AttachmentClaim::Select {
                     explicit: *explicit,
                 },
                 *size,
                 style.clone(),
-            )),
+            ),
             Request::StartRestored {
                 server,
                 size,
                 style,
                 ..
-            } => Some((
+            } => (
                 AttachmentClaim::Start { server: *server },
                 *size,
                 style.clone(),
-            )),
+            ),
             Request::TakeOver {
                 target,
                 size,
                 style,
-            } => Some((
+            } => (
                 AttachmentClaim::TakeOver { target: *target },
                 *size,
                 style.clone(),
-            )),
-            _ => None,
+            ),
+            _ => return Ok(None),
         };
-        if let Some((claim, size, style)) = claim {
-            self.attachments.release_pending(connection)?;
-            // The saved generation precedes every claim, including one whose reply is lost.
-            connection.exchange(&Request::ClaimPane {
-                attachment: self.attachment,
-                pane: self.pane,
-                claim,
-                size,
-                style,
-            })
-        } else {
-            connection.exchange(request)
-        }
+        self.attachments.release_pending(link)?;
+        Ok(Some(PaneClaim {
+            attachment: self.attachment,
+            pane: self.pane,
+            claim,
+            size,
+            style,
+        }))
     }
 }
+/// What [`crate::connection::link::ChannelHandle::claim`] sends for one Pane.
+#[cfg(feature = "client")]
+pub struct PaneClaim {
+    pub attachment: Attachment,
+    pub pane: Id,
+    pub claim: crate::pane::AttachmentClaim,
+    pub size: crate::pane::PaneSize,
+    pub style: Option<crate::pane::PresentationStyle>,
+}
+
 impl Choices {
     /// An explicit attachment is itself the client's choice, so it completes initialization.
     fn attach(&mut self, workspace: Id) -> Result<(), ServerError> {

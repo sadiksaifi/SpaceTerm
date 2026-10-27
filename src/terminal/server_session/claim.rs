@@ -381,7 +381,8 @@ mod tests {
 
     #[test]
     fn fifteen_hidden_creation_grants_release_startup_without_a_screen() {
-        use spaceterm_server::{hierarchy::Mutation, pane::PaneService as _};
+        use crate::runtime::HostCommands as _;
+        use spaceterm_server::hierarchy::Mutation;
 
         let mut host = crate::runtime::directory_testing::terminal_host();
         host.prepare_initial_organization().unwrap();
@@ -484,7 +485,7 @@ mod tests {
     #[test]
     fn never_visited_hidden_pane_prepares_current_rows_without_visible_cadence() {
         use crate::terminal::geometry::{BackingScale, CellGridSize, LogicalCellSize};
-        use spaceterm_server::pane::PaneService as _;
+        use crate::runtime::HostCommands as _;
 
         let mut host = crate::runtime::directory_testing::terminal_host();
         host.prepare_initial_organization().unwrap();
@@ -623,7 +624,8 @@ mod tests {
     #[test]
     fn fresh_panes_never_present_server_restarted_before_first_use() {
         use crate::ui::server_pane::ServerPaneView;
-        use spaceterm_server::{hierarchy::Mutation, pane::PaneService as _};
+        use crate::runtime::HostCommands as _;
+        use spaceterm_server::hierarchy::Mutation;
 
         for delayed in [false, true] {
             for revoked in [false, true] {

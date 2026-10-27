@@ -966,8 +966,8 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         assert!(matches!(
-            host.request([1; 32], [2; 32], Request::Capabilities),
-            Reply::Capabilities { .. }
+            host.request([1; 32], [2; 32], Request::Inventory),
+            Reply::Inventory { .. }
         ));
         command(
             &mut host,
@@ -1061,8 +1061,8 @@ mod tests {
         restored.state = State::from_organization(&serde_json::from_slice(&bytes).unwrap());
         restored.state.begin_boot(restored.prototype.boot);
         assert!(matches!(
-            restored.request([1; 32], [1; 32], Request::Capabilities),
-            Reply::Capabilities { .. }
+            restored.request([1; 32], [1; 32], Request::Inventory),
+            Reply::Inventory { .. }
         ));
         assert!(
             matches!(restored.request([1; 32], [1; 32], Request::Mutate {

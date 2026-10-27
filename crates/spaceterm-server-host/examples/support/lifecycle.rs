@@ -1,5 +1,7 @@
 //! Shared real-host fixture. The child guard only terminates the server it started.
-use spaceterm_server::{ServerConnection, ServerError, pane::*};
+use spaceterm_server::{
+    ServerConnection, ServerError, connection::link::ServerLink, pane::PaneSize,
+};
 use std::{
     error::Error,
     process::{Child, Command, Stdio},
@@ -54,11 +56,12 @@ impl Drop for Server {
         let _ = self.0.wait();
     }
 }
-pub fn connect(server: &ServerConnection) -> Result<PaneConnection, Box<dyn Error>> {
+/// Opens a connection of its own once the started server accepts it.
+pub fn connect(server: &ServerConnection) -> Result<ServerLink, Box<dyn Error>> {
     let until = Instant::now() + Duration::from_secs(8);
     loop {
-        match server.connect_pane() {
-            Ok(connection) => return Ok(connection),
+        match super::support::connect(server) {
+            Ok(link) => return Ok(link),
             Err(ServerError::NotRunning) if Instant::now() < until => {
                 std::thread::sleep(Duration::from_millis(50))
             }
