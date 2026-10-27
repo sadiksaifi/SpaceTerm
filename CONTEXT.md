@@ -57,7 +57,7 @@ Each SpaceTerm Server owns terminal work on its machine. SpaceTerm Clients prese
 
 **Kill Workspace**: The action that removes a server-owned Workspace and its saved organization, ending all of its Terminal Sessions.
 
-**Workspace Inventory**: A SpaceTerm Server's authoritative Workspaces, Tabs, Panes, and Worktrees, which it publishes to its clients as whole revisions.
+**Workspace Inventory**: A SpaceTerm Server's authoritative Workspaces, Tabs, Panes, Worktrees, and their shared organization, with the live Terminal Session and Pane control facts its clients reconcile against.
 
 **SpaceTerm Protocol**: The versioned exchange of server state, terminal presentation, and client operations between a SpaceTerm Client and a SpaceTerm Server over one multiplexed connection, on which the server pushes changes as they happen.
 
