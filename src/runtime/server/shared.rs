@@ -967,7 +967,12 @@ impl SharedWorkspaceHost {
             || self.prototype.directories.busy()
             || self.panes.values().any(|host| host.pane.is_some());
         let soon = waiting.then_some(now + super::dispatch::TICK);
-        [soon, self.repositories.due(now)].into_iter().flatten().min()
+        // A failed synchronization never reaches the Git read it would start, so its due time
+        // stays past. Retrying waits for the tick instead.
+        let repositories = (self.blocked.is_none() && self.settled())
+            .then(|| self.repositories.due(now))
+            .flatten();
+        [soon, repositories].into_iter().flatten().min()
     }
     /// Wakes the host when a message started timed work due before the deadline it waits for.
     fn rearm(&mut self) {
@@ -1257,6 +1262,26 @@ mod tests {
             )),
             "recovery publishes only retained organization"
         );
+        host.shutdown().unwrap();
+    }
+
+    #[test]
+    fn a_failing_synchronization_waits_a_tick_before_trying_again() {
+        use std::sync::atomic::Ordering;
+        let (mut host, memory) = journaled();
+        let outbox = Outbox::new(Arc::new(|| {}));
+        // A subscriber's Git facts are due at once.
+        HostCommands::connected(&mut host, [1; 32], [1; 32], &outbox);
+        memory.fail.store(true, Ordering::SeqCst);
+        let mutation = rename(&host, "Uncertain");
+        assert!(matches!(
+            host.request([1; 32], [1; 32], Request::Mutate { sequence: 1, mutation }),
+            Reply::Refused(Refusal::StorageUnavailable)
+        ));
+        let now = Instant::now();
+        let next = HostCommands::tick(&mut host, now).expect("recovery is retried");
+        assert!(next > now, "the host would spin while recovery fails");
+        memory.fail.store(false, Ordering::SeqCst);
         host.shutdown().unwrap();
     }
 
