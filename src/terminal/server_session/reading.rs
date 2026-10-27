@@ -59,7 +59,6 @@ impl Reading {
         self.pages.push((request, page));
     }
 
-
     /// Takes the page replies that arrived, for decoding outside the lock.
     pub(super) fn take_pages(&mut self) -> Vec<(PageRequest, Option<Page>)> {
         std::mem::take(&mut self.pages)
@@ -153,7 +152,8 @@ impl PresentationHandle {
             || (input.phase == PointerPhase::Motion && input.button.is_some());
         let (mapping, x, y) =
             self.pointer_position(input.generation, input.position, continuation)?;
-        let shift_selection = input.shift_selection == ShiftSelectionPolicy::OverrideApplicationMouse;
+        let shift_selection =
+            input.shift_selection == ShiftSelectionPolicy::OverrideApplicationMouse;
         let modes = modes(mapping, shift_selection && input.modifiers.shift);
         let phase = match input.phase {
             PointerPhase::Press => route::PointerPhase::Press,
@@ -228,11 +228,14 @@ impl PresentationHandle {
         else {
             return;
         };
-        let shift_selection = input.shift_selection == ShiftSelectionPolicy::OverrideApplicationMouse;
+        let shift_selection =
+            input.shift_selection == ShiftSelectionPolicy::OverrideApplicationMouse;
         match route::wheel_route(modes(mapping, shift_selection && input.modifiers.shift)) {
             WheelRoute::Ignore => {}
             WheelRoute::Scrollback => {
-                let steps = input.vertical_steps.clamp(-MAX_WHEEL_LINES, MAX_WHEEL_LINES);
+                let steps = input
+                    .vertical_steps
+                    .clamp(-MAX_WHEEL_LINES, MAX_WHEEL_LINES);
                 self.local(|reading| ((), reading.scrollback.wheel(steps)));
             }
             WheelRoute::Program => {

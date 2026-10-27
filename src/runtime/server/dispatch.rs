@@ -640,7 +640,9 @@ impl<H: HostCommands> Served<H> {
             self.reads.swap_remove(index);
             if let Some(connection) = self.connections.get(&read.connection) {
                 // A closing connection no longer needs the reply.
-                let _ = connection.outbox.reply_or_refuse(read.id, Ok(settled.reply));
+                let _ = connection
+                    .outbox
+                    .reply_or_refuse(read.id, Ok(settled.reply));
             }
         }
     }

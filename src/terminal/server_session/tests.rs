@@ -248,8 +248,15 @@ fn copy_readiness_is_a_flag_the_worker_keeps_and_pages_decode_outside_the_lock()
     adapter.handle.pointer(pointer(PointerPhase::Motion, 61.0));
     adapter.handle.pointer(pointer(PointerPhase::Release, 61.0));
     let state = &adapter.handle.state;
-    state.reading.lock().unwrap().turn(std::time::Instant::now());
-    assert!(!adapter.handle.selection_copy_ready(), "the selected rows are not cached");
+    state
+        .reading
+        .lock()
+        .unwrap()
+        .turn(std::time::Instant::now());
+    assert!(
+        !adapter.handle.selection_copy_ready(),
+        "the selected rows are not cached"
+    );
     // The worker answers the pages: it decodes them without the lock, then adds them.
     let requests = state.reading.lock().unwrap().scrollback.requests();
     assert!(!requests.is_empty());
@@ -273,7 +280,11 @@ fn copy_readiness_is_a_flag_the_worker_keeps_and_pages_decode_outside_the_lock()
     let decoded = reading::decode_pages(pages, mapping.size.columns, None);
     assert!(decoded.iter().all(|(_, rows)| rows.is_some()));
     state.reading.lock().unwrap().settle_pages(decoded);
-    state.reading.lock().unwrap().turn(std::time::Instant::now());
+    state
+        .reading
+        .lock()
+        .unwrap()
+        .turn(std::time::Instant::now());
     assert!(adapter.handle.selection_copy_ready());
 }
 

@@ -940,8 +940,8 @@ impl SharedWorkspaceHost {
     /// `None` means nothing waits: no write, Git or directory work or Git facts. A live terminal
     /// rings the host's wake when its screen, metadata or lifetime changes, so it needs no tick.
     pub(super) fn tick_until(&mut self, now: Instant) -> Option<Instant> {
-        let presenting = std::mem::take(&mut self.rung)
-            && self.armed.is_none_or(|armed| now < armed);
+        let presenting =
+            std::mem::take(&mut self.rung) && self.armed.is_none_or(|armed| now < armed);
         if presenting && self.paced.0.is_some_and(|next| now < next) {
             self.paced.1 = true;
             self.armed = self.due(now);

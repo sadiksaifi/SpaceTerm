@@ -1545,8 +1545,11 @@ pub(super) fn present(
                         .unwrap_or_else(|e| e.into_inner())
                         .take_pages();
                     if !pages.is_empty() {
-                        let decoded =
-                            reading::decode_pages(pages, mapping.size.columns, local_files.as_ref());
+                        let decoded = reading::decode_pages(
+                            pages,
+                            mapping.size.columns,
+                            local_files.as_ref(),
+                        );
                         state
                             .reading
                             .lock()

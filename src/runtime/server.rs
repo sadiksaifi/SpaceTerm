@@ -77,19 +77,21 @@ pub(crate) mod testing {
             &mut self,
             id: u64,
             timeout: Duration,
-        ) -> Result<Option<Result<pane::directories::Value, pane::directories::Error>>, ()> {
+        ) -> Result<Option<Result<pane::directories::Value, pane::directories::Error>>, ()>
+        {
             let id = request_id(id)?;
             let deadline = std::time::Instant::now() + timeout;
             loop {
                 self.settled.extend(self.host.settled_reads());
                 if let Some(index) = self.settled.iter().position(|read| read.id == id) {
                     return match self.settled.swap_remove(index).reply {
-                        spaceterm_server::protocol::ReplyBody::Directory(result) => Ok(Some(result)),
+                        spaceterm_server::protocol::ReplyBody::Directory(result) => {
+                            Ok(Some(result))
+                        }
                         _ => Err(()),
                     };
                 }
-                let Some(remaining) =
-                    deadline.checked_duration_since(std::time::Instant::now())
+                let Some(remaining) = deadline.checked_duration_since(std::time::Instant::now())
                 else {
                     return Ok(None);
                 };

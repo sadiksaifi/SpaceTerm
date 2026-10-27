@@ -244,7 +244,11 @@ mod tests {
         assert_eq!(input.written_serial(), 0, "no serial of the earlier claim");
         input.enqueue(b"x").unwrap();
         input.note_serial(1);
-        assert_eq!(input.written_serial(), 0, "the new bytes are not written yet");
+        assert_eq!(
+            input.written_serial(),
+            0,
+            "the new bytes are not written yet"
+        );
         pty.budget = usize::MAX;
         input.drain(&mut pty).unwrap();
         assert_eq!(input.written_serial(), 1);

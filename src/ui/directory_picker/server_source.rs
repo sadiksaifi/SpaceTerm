@@ -722,11 +722,7 @@ pub(crate) mod testing {
             fn begin(&mut self, _: u64, _: Operation) -> Result<(), ()> {
                 Err(())
             }
-            fn settled(
-                &mut self,
-                _: u64,
-                _: Duration,
-            ) -> Result<Option<Result<Value, Error>>, ()> {
+            fn settled(&mut self, _: u64, _: Duration) -> Result<Option<Result<Value, Error>>, ()> {
                 Err(())
             }
             fn cancel(&mut self, _: u64) -> Result<(), ()> {
