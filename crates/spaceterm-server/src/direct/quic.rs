@@ -1,13 +1,13 @@
 //! Paired connections over QUIC ([`crate::connection::quic`]): the pinned TLS configurations and
-//! the pairing messages, which run on the L0 stream as length-prefixed JSON with the same bounds
-//! and deadlines as WSS.
+//! the pairing messages, which run on the L0 stream as length-prefixed JSON, each under a
+//! deadline.
 //!
 //! The server presents its pinned certificate. The client presents a self-signed certificate of
 //! its device key, made for each connection; the server accepts any such certificate during the
 //! handshake and later requires its key to be the enrolled key of the device that authenticates.
 use super::*;
 use crate::connection::quic::{ALPN, QuicError, QuicStream};
-use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, UnixTime};
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName, UnixTime};
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -93,7 +93,7 @@ fn client_config(
         .with_protocol_versions(&[&rustls::version::TLS13])
         .map_err(|_| DirectError::Transport)?
         .dangerous()
-        .with_custom_certificate_verifier(Arc::new(wss::Pinned::new(pin.certificate, mismatch)))
+        .with_custom_certificate_verifier(Arc::new(Pinned::new(pin.certificate, mismatch)))
         .with_client_auth_cert(vec![certificate(credential.expose_bytes())?], key)
         .map_err(|_| DirectError::StorageUnavailable)?;
     tls.alpn_protocols = vec![ALPN.to_vec()];
@@ -170,6 +170,68 @@ pub(super) fn server_config(
     crate::connection::quic::server_config(tls).map_err(transport)
 }
 
+/// Accepts only the server certificate whose hash is pinned, and records a mismatch.
+#[derive(Debug)]
+pub(super) struct Pinned {
+    certificate: [u8; 32],
+    mismatch: Arc<AtomicBool>,
+}
+impl Pinned {
+    pub(super) fn new(certificate: [u8; 32], mismatch: Arc<AtomicBool>) -> Self {
+        Self {
+            certificate,
+            mismatch,
+        }
+    }
+}
+impl rustls::client::danger::ServerCertVerifier for Pinned {
+    fn verify_server_cert(
+        &self,
+        cert: &CertificateDer<'_>,
+        intermediates: &[CertificateDer<'_>],
+        _name: &ServerName<'_>,
+        _ocsp: &[u8],
+        _now: UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        if !intermediates.is_empty() || crypto::hash(cert.as_ref()) != self.certificate {
+            self.mismatch.store(true, Ordering::Release);
+            return Err(rustls::Error::General("Pinned certificate mismatch".into()));
+        }
+        Ok(rustls::client::danger::ServerCertVerified::assertion())
+    }
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls12_signature(
+            message,
+            cert,
+            dss,
+            &rustls::crypto::ring::default_provider().signature_verification_algorithms,
+        )
+    }
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &rustls::crypto::ring::default_provider().signature_verification_algorithms,
+        )
+    }
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        rustls::crypto::ring::default_provider()
+            .signature_verification_algorithms
+            .supported_schemes()
+    }
+}
+
 /// Dials the endpoint's address and port in UDP, verifies the pinned certificate, and opens the
 /// L0 stream on which the pairing exchange runs.
 pub(super) fn dial(
@@ -177,7 +239,7 @@ pub(super) fn dial(
     pin: &ServerPin,
     credential: &DeviceCredential,
 ) -> Result<QuicStream, DirectError> {
-    let address = wss::validate_endpoint(endpoint)?;
+    let address = Endpoint::from_url(endpoint)?;
     let deadline = Instant::now() + HANDSHAKE_LIMIT;
     let addresses = address.resolve(deadline)?;
     let mismatch = Arc::new(AtomicBool::new(false));
@@ -188,32 +250,5 @@ pub(super) fn dial(
         } else {
             transport(error)
         }
-    })
-}
-
-/// Connects a paired device over QUIC: the pinned handshake, then the same pairing exchange as
-/// over WSS.
-pub(super) fn connect(
-    endpoint: &str,
-    paired: &PairedDevice,
-    credential: &DeviceCredential,
-) -> Result<DirectConnection, DirectError> {
-    let mut stream = dial(endpoint, &paired.pin, credential)?;
-    let answer = client::exchange_on(
-        &mut stream,
-        &paired.pin,
-        credential,
-        wire::Action::Connect {
-            paired: paired.clone(),
-        },
-        None,
-        None,
-    )?;
-    if !matches!(answer, wire::Answer::Connected) {
-        return Err(DirectError::AuthenticationRefused);
-    }
-    Ok(DirectConnection {
-        transport: Transport::Quic(Box::new(stream)),
-        paired: paired.clone(),
     })
 }

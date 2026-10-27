@@ -631,13 +631,9 @@ flag "--cleanup-exercise" help="Remove only the retained directory-recovery test
 '''
 run = "target/debug/examples/directory_recovery {{usage.major}} {% if usage.cleanup_exercise %}--cleanup{% endif %}"
 
-[tasks."bench:latency:wss"]
-description = "Measure a paired WSS request's round trip on loopback, in a release build"
-run = "cargo test --release --package spaceterm-server --lib --all-features --locked -- direct::tests::wss_request_round_trip_on_loopback --ignored --exact --nocapture"
-
 [tasks."bench:latency:quic"]
-description = "Measure a paired QUIC request's round trip on loopback, in a release build, with the iroh prototype"
-run = "cargo test --release --package spaceterm-server --lib --all-features --locked -- direct::tests::quic_prototype::quic_request_round_trip_on_loopback --ignored --exact --nocapture"
+description = "Measure a paired QUIC request's round trip on loopback, in a release build"
+run = "cargo test --release --package spaceterm-server --lib --all-features --locked -- direct::tests::quic_connections::quic_request_round_trip_on_loopback --ignored --exact --nocapture"
 
 [tasks."server:direct:test"]
 description = "Test direct-network proof, exposure, enrollment and revocation boundaries"

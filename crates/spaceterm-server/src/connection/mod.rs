@@ -21,7 +21,6 @@ pub mod io;
 pub mod link;
 pub mod loopback;
 pub mod outbox;
-#[cfg(feature = "quic")]
 pub mod quic;
 pub mod registry;
 pub mod server;
@@ -30,7 +29,6 @@ pub mod sync;
 #[cfg(test)]
 mod tests;
 pub mod unix;
-pub mod wss;
 
 /// Wakes a connection's I/O thread after another thread queued work for it. Implementations
 /// must not block, for example by writing one byte to a nonblocking pipe.
@@ -64,8 +62,8 @@ mod architecture_tests {
                 }
             }
         }
-        // The paired WSS handshakes and pairing messages that precede the carrier.
-        sources.push(root.join("direct/wss.rs"));
+        // The paired QUIC handshake and pairing messages that precede the carrier.
+        sources.push(root.join("direct/quic.rs"));
         assert!(sources.len() > 10);
         let sleep = ["thread", "::sleep"].concat();
         for path in sources {

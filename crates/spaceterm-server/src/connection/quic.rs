@@ -557,6 +557,14 @@ impl Driver {
                 let (count, remote) = match self.socket.recv_from(buffer) {
                     Ok(received) => received,
                     Err(error) if error.kind() == ErrorKind::Interrupted => continue,
+                    // The connected socket reports the server's port as closed, as TCP would.
+                    Err(error)
+                        if error.kind() == ErrorKind::ConnectionRefused
+                            && !self.state.connected =>
+                    {
+                        self.state.lost.get_or_insert(CarrierError::Failed);
+                        break;
+                    }
                     Err(_) => break,
                 };
                 let data = BytesMut::from(&buffer[..count]);
@@ -730,7 +738,13 @@ impl QuicStream {
         deadline: Instant,
     ) -> Result<Self, QuicError> {
         let mut last = QuicError::Transport;
-        for address in addresses {
+        for (index, address) in addresses.iter().enumerate() {
+            // Each address but the last gets at most a second, as a TCP connect would.
+            let until = if index + 1 == addresses.len() {
+                deadline
+            } else {
+                deadline.min(Instant::now() + Duration::from_secs(1))
+            };
             let local: SocketAddr = if address.is_ipv4() {
                 (std::net::Ipv4Addr::UNSPECIFIED, 0).into()
             } else {
@@ -763,7 +777,7 @@ impl QuicStream {
                 state: DriverState::new(),
             };
             let mut stream = Self::new(driver);
-            match stream.open_l0(deadline) {
+            match stream.open_l0(until) {
                 Ok(()) => return Ok(stream),
                 Err(error) => last = error,
             }
@@ -799,6 +813,21 @@ impl QuicStream {
     /// Completes a server connection's handshake and opens its L0 stream.
     pub fn handshake(&mut self, deadline: Instant) -> Result<(), QuicError> {
         self.open_l0(deadline)
+    }
+
+    /// Finishes L0 and waits until the peer acknowledged everything on it, so a final answer
+    /// arrives before the connection closes.
+    pub fn finish(&mut self, deadline: Instant) -> Result<(), QuicError> {
+        let id = self.l0()?;
+        let _ = self.driver.connection.send_stream(id).finish();
+        loop {
+            self.driver.pump();
+            self.driver.check()?;
+            if self.driver.state.finished > 0 {
+                return Ok(());
+            }
+            self.driver.wait(deadline)?;
+        }
     }
 
     /// The certificates the peer presented.

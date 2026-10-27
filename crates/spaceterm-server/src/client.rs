@@ -353,10 +353,7 @@ impl ServerConnection {
                 return Err(ServerError::AuthenticationRefused);
             }
             // `with_direct` fixed the pin's build to this handle's identity.
-            let carrier = connection.into_transport().admit(
-                (&direct.paired.client, &self.client_name()),
-                &direct.paired.pin,
-            )?;
+            let carrier = connection.admit((&direct.paired.client, &self.client_name()))?;
             return Ok((
                 carrier,
                 self.scope_for(direct.paired.client, direct.paired.pin.server),

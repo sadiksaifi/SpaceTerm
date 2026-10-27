@@ -182,8 +182,7 @@ impl Claim {
         })
     }
 
-    /// Finishes pairing over WSS. Later connections use `transport`.
-    pub fn finish(mut self, transport: Transport) -> Result<Route> {
+    pub fn finish(mut self) -> Result<Route> {
         let Some(paired) = at("enrollment", self.enrollment.finish())? else {
             return fail("enrollment not approved");
         };
@@ -191,42 +190,22 @@ impl Claim {
             endpoint: self.endpoint,
             paired,
             credential: self.credential,
-            transport,
         })))
     }
-}
-
-/// The transport of a paired connection. QUIC is the iroh prototype of #671; pairing itself
-/// always runs over WSS.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum Transport {
-    Wss,
-    Quic,
 }
 
 pub struct Paired {
     endpoint: String,
     paired: PairedDevice,
     credential: DeviceCredential,
-    transport: Transport,
 }
 impl DirectConnector for Paired {
     fn connect(&self) -> std::result::Result<DirectConnection, DirectError> {
-        match self.transport {
-            Transport::Wss => {
-                DirectConnection::connect(&self.endpoint, &self.paired, &self.credential)
-            }
-            #[cfg(feature = "quic")]
-            Transport::Quic => {
-                DirectConnection::connect_quic(&self.endpoint, &self.paired, &self.credential)
-            }
-            #[cfg(not(feature = "quic"))]
-            Transport::Quic => Err(DirectError::Transport),
-        }
+        DirectConnection::connect(&self.endpoint, &self.paired, &self.credential)
     }
 }
 
-/// How the probe reaches the server: account-local IPC or a paired connection.
+/// How the probe reaches the server: account-local IPC or a paired QUIC connection.
 pub enum Route {
     Local,
     Paired(Arc<Paired>),

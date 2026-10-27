@@ -475,7 +475,7 @@ mod tests {
         let setup = owner.clone();
         let preparation = std::thread::spawn(move || {
             setup.prepare_setup(
-                "wss://127.0.0.1:9231/spaceterm".into(),
+                "quic://127.0.0.1:9231".into(),
                 saved(1, 2).route.paired.pin,
                 0,
             )
@@ -500,7 +500,7 @@ mod tests {
         let (owner, records, network) = fixture(true);
         let prepared = owner
             .prepare_setup(
-                "wss://127.0.0.1:9231/spaceterm".into(),
+                "quic://127.0.0.1:9231".into(),
                 saved(1, 2).route.paired.pin,
                 0x0102_0304_0506_0708,
             )
@@ -517,14 +517,14 @@ mod tests {
     }
 
     #[test]
-    fn account_confirmed_setup_cancellation_retires_only_its_credential_without_wss() {
+    fn account_confirmed_setup_cancellation_retires_only_its_credential_without_quic() {
         let (owner, records, network) = fixture(true);
         let pin = saved(1, 2).route.paired.pin;
         let prepared = owner
-            .prepare_setup("wss://127.0.0.1:9231/spaceterm".into(), pin.clone(), 0)
+            .prepare_setup("quic://127.0.0.1:9231".into(), pin.clone(), 0)
             .unwrap();
         let other = owner
-            .prepare_setup("wss://127.0.0.1:9232/spaceterm".into(), pin, 0)
+            .prepare_setup("quic://127.0.0.1:9232".into(), pin, 0)
             .unwrap();
         let original = records.load().unwrap();
         let key = original
@@ -570,7 +570,7 @@ mod tests {
         let (owner, records, network) = publication_fixture();
         let pin = saved(1, 2).route.paired.pin;
         let prepared = owner
-            .prepare_setup("wss://127.0.0.1:9231/spaceterm".into(), pin, 0)
+            .prepare_setup("quic://127.0.0.1:9231".into(), pin, 0)
             .unwrap();
         let operation = prepared.operation();
         let key = records.load().unwrap().pending[0].credential_key().unwrap();
@@ -608,7 +608,7 @@ mod tests {
         let (other, _, _) = fixture(true);
         let prepared = owner
             .prepare_setup(
-                "wss://127.0.0.1:9231/spaceterm".into(),
+                "quic://127.0.0.1:9231".into(),
                 saved(1, 2).route.paired.pin,
                 0,
             )
@@ -627,11 +627,7 @@ mod tests {
         let (owner, records, network) = publication_fixture();
         let paired = saved(1, 2).route.paired;
         let prepared = owner
-            .prepare_setup(
-                "wss://127.0.0.1:9231/spaceterm".into(),
-                paired.pin.clone(),
-                0,
-            )
+            .prepare_setup("quic://127.0.0.1:9231".into(), paired.pin.clone(), 0)
             .unwrap();
         records.mode.store(1, Ordering::Release);
         let id = owner
@@ -661,11 +657,7 @@ mod tests {
             let (owner, records, network) = publication_fixture();
             let paired = saved(1, 2).route.paired;
             let prepared = owner
-                .prepare_setup(
-                    "wss://127.0.0.1:9231/spaceterm".into(),
-                    paired.pin.clone(),
-                    0,
-                )
+                .prepare_setup("quic://127.0.0.1:9231".into(), paired.pin.clone(), 0)
                 .unwrap();
             let id = prepared.operation();
             records.mode.store(mode, Ordering::Release);
@@ -697,11 +689,7 @@ mod tests {
         let (owner, records, _) = fixture(false);
         let paired = saved(1, 2).route.paired;
         let prepared = owner
-            .prepare_setup(
-                "wss://127.0.0.1:9231/spaceterm".into(),
-                paired.pin.clone(),
-                0,
-            )
+            .prepare_setup("quic://127.0.0.1:9231".into(), paired.pin.clone(), 0)
             .unwrap();
         let id = owner
             .complete_setup(
@@ -719,15 +707,11 @@ mod tests {
     }
 
     #[test]
-    fn unreachable_wss_never_publishes_a_setup_route() {
+    fn unreachable_server_never_publishes_a_setup_route() {
         let (owner, records, network) = fixture(true);
         let paired = saved(1, 2).route.paired;
         let prepared = owner
-            .prepare_setup(
-                "wss://127.0.0.1:9231/spaceterm".into(),
-                paired.pin.clone(),
-                0,
-            )
+            .prepare_setup("quic://127.0.0.1:9231".into(), paired.pin.clone(), 0)
             .unwrap();
         let original = records.load().unwrap();
         assert!(matches!(&original.pending[0].authority,
@@ -747,15 +731,11 @@ mod tests {
     }
 
     #[test]
-    fn cancellation_during_wss_admission_never_publishes_the_pairing() {
+    fn cancellation_during_admission_never_publishes_the_pairing() {
         let (owner, records, network) = fixture(false);
         let paired = saved(1, 2).route.paired;
         let prepared = owner
-            .prepare_setup(
-                "wss://127.0.0.1:9231/spaceterm".into(),
-                paired.pin.clone(),
-                0,
-            )
+            .prepare_setup("quic://127.0.0.1:9231".into(), paired.pin.clone(), 0)
             .unwrap();
         assert_eq!(
             owner.complete_setup(

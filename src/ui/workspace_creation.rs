@@ -44,10 +44,10 @@ impl RemoteCreationServer {
     }
 }
 
-/// The address an endpoint such as `wss://192.168.1.20:9231/spaceterm` reaches, as a person reads
+/// The address an endpoint such as `quic://192.168.1.20:9231` reaches, as a person reads
 /// it: `192.168.1.20:9231`.
 pub(crate) fn endpoint_address(endpoint: &str) -> &str {
-    let rest = endpoint.strip_prefix("wss://").unwrap_or(endpoint);
+    let rest = endpoint.strip_prefix("quic://").unwrap_or(endpoint);
     rest.split('/').next().unwrap_or(rest)
 }
 

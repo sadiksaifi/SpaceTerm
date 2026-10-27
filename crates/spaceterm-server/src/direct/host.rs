@@ -1,35 +1,12 @@
 use super::*;
 use crate::connection::Wake;
+use crate::connection::quic::{QuicListener, QuicStream};
 use crate::connection::registry::{PairedConnections, Sever};
-use std::{
-    net::{TcpListener, TcpStream},
-    os::fd::{AsRawFd, RawFd},
-    sync::{Arc, Mutex},
-};
+use std::sync::{Arc, Mutex};
 
 const MAX_PENDING: usize = 32;
-fn bind_listener(address: std::net::SocketAddr) -> std::io::Result<TcpListener> {
-    let socket = socket2::Socket::new(
-        socket2::Domain::for_address(address),
-        socket2::Type::STREAM,
-        Some(socket2::Protocol::TCP),
-    )?;
-    socket.set_reuse_address(true)?;
-    socket.set_nonblocking(true)?;
-    socket.bind(&address.into())?;
-    socket.listen(32)?;
-    Ok(socket.into())
-}
 pub(crate) type Shared = Arc<Mutex<State>>;
 
-/// Severs a paired connection by shutting its TCP read side. Its I/O thread then writes the queued
-/// goodbye and closes.
-struct ReadSide(TcpStream);
-impl Sever for ReadSide {
-    fn sever(&self) {
-        let _ = self.0.shutdown(std::net::Shutdown::Read);
-    }
-}
 struct PendingInvitation {
     id: ClaimId,
     token: [u8; 32],
@@ -45,10 +22,7 @@ pub(crate) struct State {
     store: storage::Store,
     record: storage::Record,
     pub(super) pin: ServerPin,
-    listener: Option<TcpListener>,
-    /// The QUIC prototype's endpoint on the same address and port in UDP.
-    #[cfg(feature = "quic")]
-    quic: Option<crate::connection::quic::QuicListener>,
+    listener: Option<QuicListener>,
     listener_state: ListenerState,
     invitations: Vec<PendingInvitation>,
     claims: Vec<PendingClaim>,
@@ -76,8 +50,6 @@ impl State {
             record,
             pin,
             listener: None,
-            #[cfg(feature = "quic")]
-            quic: None,
             listener_state: ListenerState::Off,
             invitations: Vec::new(),
             claims: Vec::new(),
@@ -92,15 +64,10 @@ impl State {
         Ok(Arc::new(Mutex::new(state)))
     }
     pub(crate) fn set_wake(&mut self, wake: Arc<dyn Wake>) {
-        #[cfg(feature = "quic")]
-        if let Some(quic) = &self.quic {
-            quic.set_wake(Arc::clone(&wake));
+        if let Some(listener) = &self.listener {
+            listener.set_wake(Arc::clone(&wake));
         }
         self.wake = Some(wake);
-    }
-    /// The listener the host's accept loop waits on.
-    pub(crate) fn listener_fd(&self) -> Option<RawFd> {
-        self.listener.as_ref().map(AsRawFd::as_raw_fd)
     }
     fn listener_changed(&self) {
         if let Some(wake) = &self.wake {
@@ -110,13 +77,9 @@ impl State {
     fn listen(&mut self) {
         self.listener_changed();
         self.listener = None;
-        #[cfg(feature = "quic")]
-        {
-            self.quic = None;
-        }
         self.listener_state = match self.record.policy.as_ref().filter(|_| self.record.enabled) {
             None => ListenerState::Off,
-            Some(policy) => match bind_listener(policy.bind) {
+            Some(policy) => match self.bind(policy.bind) {
                 Ok(listener) => {
                     self.listener = Some(listener);
                     ListenerState::Listening { addr: policy.bind }
@@ -124,31 +87,21 @@ impl State {
                 Err(_) => ListenerState::Failed(DirectError::Transport),
             },
         };
-        #[cfg(feature = "quic")]
-        if let ListenerState::Listening { addr } = self.listener_state {
-            self.quic = self.bind_quic(addr);
-        }
     }
-    /// Binds QUIC on the same address and port in UDP, under the pinned certificate. WSS keeps
-    /// working without it.
-    #[cfg(feature = "quic")]
-    fn bind_quic(
-        &self,
-        address: std::net::SocketAddr,
-    ) -> Option<crate::connection::quic::QuicListener> {
-        let config = super::quic::server_config(&self.record.certificate, &self.record.key).ok()?;
-        let listener = crate::connection::quic::QuicListener::bind(address, config).ok()?;
+    /// Binds QUIC on UDP under the pinned certificate. The listener rings the host's wake when a
+    /// connection arrives.
+    fn bind(&self, address: std::net::SocketAddr) -> Result<QuicListener, DirectError> {
+        let config = super::quic::server_config(&self.record.certificate, &self.record.key)?;
+        let listener = QuicListener::bind(address, config).map_err(super::quic::transport)?;
         if let Some(wake) = &self.wake {
             listener.set_wake(Arc::clone(wake));
         }
-        Some(listener)
+        Ok(listener)
     }
-    /// The next new QUIC connection, with the listener generation it belongs to.
-    #[cfg(feature = "quic")]
-    pub(crate) fn accept_quic(
-        &mut self,
-    ) -> Option<(crate::connection::quic::QuicStream, [u8; 32])> {
-        let stream = self.quic.as_ref()?.accept()?;
+    /// The next new connection and the listener generation it belongs to. Its own thread
+    /// completes the handshake.
+    pub(crate) fn accept(&mut self) -> Option<(QuicStream, [u8; 32])> {
+        let stream = self.listener.as_ref()?.accept()?;
         Some((stream, self.generation))
     }
     fn recover(&mut self) -> Result<(), DirectError> {
@@ -169,10 +122,6 @@ impl State {
             // A renamed but unsynced revocation must never leave ordinary authority usable.
             self.connections.end_all();
             self.listener = None;
-            #[cfg(feature = "quic")]
-            {
-                self.quic = None;
-            }
             self.listener_changed();
             self.listener_state = ListenerState::Failed(error);
             return Err(error);
@@ -181,24 +130,6 @@ impl State {
         Ok(())
     }
     #[cfg(test)]
-    pub(crate) fn accept(&mut self) -> Option<(TcpStream, [u8; 32])> {
-        self.accept_next().ok().flatten()
-    }
-    /// The next waiting connection and the listener generation it belongs to. `Ok(None)` means
-    /// none waits; an error is the listener's, such as running out of descriptors.
-    pub(crate) fn accept_next(&mut self) -> std::io::Result<Option<(TcpStream, [u8; 32])>> {
-        let Some(listener) = self.listener.as_ref() else {
-            return Ok(None);
-        };
-        loop {
-            match listener.accept() {
-                Ok((tcp, _)) => return Ok(Some((tcp, self.generation))),
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return Ok(None),
-                Err(error) if crate::host::accept_retries(&error) => {}
-                Err(error) => return Err(error),
-            }
-        }
-    }
     pub(crate) fn certificate(&self) -> (&[u8], &[u8]) {
         (&self.record.certificate, &self.record.key)
     }
@@ -224,27 +155,10 @@ impl State {
         }
         Ok(())
     }
-    /// Registers a paired connection of listener `generation`, so revocation reaches it. The
-    /// authorization check and the registration share this lock with every revocation.
+    /// Registers a paired connection of listener `generation`, so revocation reaches it through
+    /// `sever`. The authorization check and the registration share this lock with every
+    /// revocation.
     pub(crate) fn register(
-        &mut self,
-        paired: &PairedDevice,
-        generation: [u8; 32],
-        connection: [u8; 32],
-        outbox: crate::connection::outbox::Outbox,
-        tcp: &TcpStream,
-    ) -> Result<(), DirectError> {
-        let read_side = tcp.try_clone().map_err(|_| DirectError::Transport)?;
-        self.register_with(
-            paired,
-            generation,
-            connection,
-            outbox,
-            Box::new(ReadSide(read_side)),
-        )
-    }
-    /// Like `register`, with the transport's own way to sever the connection.
-    pub(crate) fn register_with(
         &mut self,
         paired: &PairedDevice,
         generation: [u8; 32],
@@ -269,7 +183,6 @@ impl State {
             .map_err(|_| DirectError::Capacity)
     }
     /// The enrolled public key of `paired`'s device.
-    #[cfg(feature = "quic")]
     fn device_key(&self, paired: &PairedDevice) -> Option<[u8; 32]> {
         self.record
             .devices
@@ -637,7 +550,7 @@ impl State {
                         } else {
                             addr
                         };
-                        format!("wss://{advertised}/spaceterm")
+                        format!("quic://{advertised}")
                     }
                     _ => return Err(DirectError::Disabled),
                 };
@@ -1142,10 +1055,6 @@ impl State {
     }
     pub(crate) fn stop(&mut self) {
         self.listener = None;
-        #[cfg(feature = "quic")]
-        {
-            self.quic = None;
-        }
         self.listener_state = ListenerState::Off;
         self.listener_changed();
         self.connections.end_all();
@@ -1166,105 +1075,12 @@ impl State {
     }
 }
 
-/// Serves one accepted TCP connection: the pinned WSS handshake, one pairing exchange, and for a
-/// paired device admission and then the protocol connection over a [`crate::connection::wss::WssCarrier`].
+/// Serves one QUIC connection: the pinned handshake, one pairing exchange on its L0 stream, and
+/// for a paired device admission and then the protocol connection over a
+/// [`crate::connection::quic::QuicCarrier`]. Every action's device key must be the key of the
+/// certificate the client proved in the handshake.
 pub(crate) fn serve(
-    tcp: TcpStream,
-    generation: [u8; 32],
-    state: Shared,
-    environment: &crate::host::Environment,
-    waker: crate::connection::io::Waker,
-    wake: Arc<dyn Wake>,
-) -> Result<(), ServerError> {
-    let (certificate, key) = {
-        let state = state.lock().unwrap_or_else(|e| e.into_inner());
-        let (certificate, key) = state.certificate();
-        (certificate.to_vec(), zeroize::Zeroizing::new(key.to_vec()))
-    };
-    let mut ws = wss::accept(tcp, &certificate, &key)?;
-    let challenge = {
-        let state = state.lock().unwrap_or_else(|e| e.into_inner());
-        if generation != state.generation {
-            return Err(DirectError::Disabled.into());
-        }
-        state.challenge()?
-    };
-    wss::send(&mut ws, &challenge)?;
-    let authentication: wire::Authentication = wss::receive(&mut ws)?;
-    let paired = match &authentication.action {
-        wire::Action::Connect { paired } => Some(paired.clone()),
-        _ => None,
-    };
-    let answer = {
-        // Revocation ends registered connections inside the direct-network lock, before the
-        // service learns of it. The locks are taken in the same order as everywhere else.
-        let answer = state
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .authenticate_and_resolve(&challenge, &authentication);
-        let (answer, retired) = answer;
-        if let Some(client) = retired {
-            environment
-                .panes
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .revoked(client);
-        }
-        answer
-    };
-    let connected = matches!(answer, Ok(wire::Answer::Connected));
-    wss::send(&mut ws, &answer)?;
-    if !connected {
-        return Ok(());
-    }
-    let paired = paired.ok_or(ServerError::AuthenticationRefused)?;
-    let (_, client, name) = crate::protocol::admit_direct_server(&mut ws, &paired)?;
-    let connection = crate::protocol::random()?;
-    let outbox = crate::connection::outbox::Outbox::new(Arc::clone(&wake));
-    state.lock().unwrap_or_else(|e| e.into_inner()).register(
-        &paired,
-        generation,
-        connection,
-        outbox.clone(),
-        ws.get_ref().tcp(),
-    )?;
-    // Unregisters when serving ends, also when it panics.
-    let _registered = Registered {
-        state: Arc::clone(&state),
-        connection,
-    };
-    (|| {
-        state
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .note_connection(&paired)?;
-        let peer = crate::connection::service::Peer {
-            client,
-            connection,
-            pairing: Some(crate::connection::service::Pairing {
-                pairing: paired.pairing,
-                generation,
-            }),
-        };
-        crate::host::serve_admitted(
-            Box::new(crate::connection::wss::WssCarrier::new(ws)),
-            peer,
-            name,
-            outbox,
-            waker,
-            environment,
-        );
-        Ok::<_, ServerError>(())
-    })()
-}
-
-/// Serves one QUIC connection like [`serve`]: one pairing exchange on its L0 stream, and for a
-/// paired device whose proven iroh key is its enrolled key, admission and then the protocol
-/// connection over a [`crate::connection::quic::IrohCarrier`]. The prototype carries connections
-/// only, so any other action is refused.
-#[cfg(feature = "quic")]
-pub(crate) fn serve_quic(
-    mut stream: crate::connection::quic::QuicStream,
+    mut stream: QuicStream,
     generation: [u8; 32],
     state: Shared,
     environment: &crate::host::Environment,
@@ -1272,10 +1088,13 @@ pub(crate) fn serve_quic(
     wake: Arc<dyn Wake>,
 ) -> Result<(), ServerError> {
     use super::client::Messages;
+    // A connection the listener accepted before its policy changed never joins the new one.
+    if generation != state.lock().unwrap_or_else(|e| e.into_inner()).generation {
+        return Err(DirectError::Disabled.into());
+    }
     stream
         .handshake(std::time::Instant::now() + super::quic::HANDSHAKE_LIMIT)
         .map_err(super::quic::transport)?;
-    // The handshake verified the client's signature with this certificate's key.
     let device = stream
         .peer_certificates()
         .and_then(|certificates| super::quic::certificate_key(certificates.first()?))
@@ -1289,38 +1108,57 @@ pub(crate) fn serve_quic(
     };
     stream.send(&challenge)?;
     let authentication: wire::Authentication = stream.receive()?;
-    let wire::Action::Connect { paired } = &authentication.action else {
-        return Err(DirectError::InvalidRequest.into());
+    let paired = match &authentication.action {
+        wire::Action::Connect { paired } => Some(paired.clone()),
+        _ => None,
     };
-    let paired = paired.clone();
     let answer = {
+        // Revocation ends registered connections inside the direct-network lock, before the
+        // service learns of it. The locks are taken in the same order as everywhere else.
         let mut state = state.lock().unwrap_or_else(|e| e.into_inner());
-        if state.device_key(&paired) != Some(device) {
-            return Err(ServerError::AuthenticationRefused);
+        let key = match &authentication.action {
+            wire::Action::Connect { paired } => state.device_key(paired),
+            wire::Action::Revoke { actor, .. } => state.device_key(actor),
+            wire::Action::Claim { key, .. }
+            | wire::Action::Finish { key, .. }
+            | wire::Action::Cancel { key, .. } => Some(*key),
+        };
+        // A proof from another device's certificate is refused like a bad proof.
+        let (answer, retired) = if key == Some(device) {
+            state.authenticate_and_resolve(&challenge, &authentication)
+        } else {
+            (Err(DirectError::AuthenticationRefused), None)
+        };
+        drop(state);
+        if let Some(client) = retired {
+            environment
+                .panes
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .revoked(client);
         }
-        state
-            .authenticate_and_resolve(&challenge, &authentication)
-            .0
+        answer
     };
     let connected = matches!(answer, Ok(wire::Answer::Connected));
     stream.send(&answer)?;
     if !connected {
+        // The answer must reach the client before the connection closes.
+        let _ = stream.finish(std::time::Instant::now() + super::quic::HANDSHAKE_LIMIT);
         return Ok(());
     }
+    let paired = paired.ok_or(ServerError::AuthenticationRefused)?;
     let (_, client, name) = crate::protocol::admit_direct_server(&mut stream, &paired)?;
     let connection = crate::protocol::random()?;
     let outbox = crate::connection::outbox::Outbox::new(Arc::clone(&wake));
     let carrier = stream.into_carrier();
-    state
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .register_with(
-            &paired,
-            generation,
-            connection,
-            outbox.clone(),
-            Box::new(carrier.sever()),
-        )?;
+    state.lock().unwrap_or_else(|e| e.into_inner()).register(
+        &paired,
+        generation,
+        connection,
+        outbox.clone(),
+        Box::new(carrier.sever()),
+    )?;
+    // Unregisters when serving ends, also when it panics.
     let _registered = Registered {
         state: Arc::clone(&state),
         connection,
@@ -1544,11 +1382,14 @@ mod tests {
         // A failed atomic save leaves its durable outcome uncertain. Its next authority
         // check reloads the document and rotates exposure before registering a stream.
         state.uncertain = true;
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let _client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-        let (tcp, _) = listener.accept().unwrap();
         let outbox = crate::connection::outbox::Outbox::new(Arc::new(|| {}));
-        let registered = state.register(&paired, generation, [5; 32], outbox, &tcp);
+        let registered = state.register(
+            &paired,
+            generation,
+            [5; 32],
+            outbox,
+            Box::new(super::super::tests::Quiet),
+        );
         let empty = state.connections.is_empty();
         drop(state);
         assert_eq!(registered, Err(DirectError::Disabled));

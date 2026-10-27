@@ -529,69 +529,33 @@ fn serve_runtime_ready(
     // A listener that failed to accept, for example out of descriptors, rests until a connection
     // ends or the pause passes, instead of waking the loop at once forever.
     let mut local_paused: Option<Instant> = None;
-    let mut network_paused: Option<Instant> = None;
     while !stop.stopping() {
         let deadline = tick(&panes, direct.as_ref());
         // A connection thread rings the bell when it ends, so a full set of network slots waits
         // for that instead of a listener it cannot accept from.
         if reap(&mut connections, &mut network) {
-            (local_paused, network_paused) = (None, None);
+            local_paused = None;
         }
         let now = Instant::now();
         local_paused = local_paused.filter(|until| now < *until);
-        network_paused = network_paused.filter(|until| now < *until);
-        let listening =
-            network_listener(direct.as_ref(), network.len()).filter(|_| network_paused.is_none());
-        let deadline = [deadline, local_paused, network_paused]
-            .into_iter()
-            .flatten()
-            .min();
-        wait_for_work(
-            &bell,
-            local_paused.is_none().then_some(&listener),
-            listening,
-            deadline,
-        );
+        let deadline = [deadline, local_paused].into_iter().flatten().min();
+        // The QUIC listener's own thread rings the bell when a connection arrives.
+        wait_for_work(&bell, local_paused.is_none().then_some(&listener), deadline);
         if stop.stopping() {
             break;
         }
         if reap(&mut connections, &mut network) {
-            (local_paused, network_paused) = (None, None);
+            local_paused = None;
         }
         // The fixed admission limits bound worker allocation; admission has an absolute deadline.
-        while network_paused.is_none()
-            && network.len() < MAX_NETWORK_CONNECTIONS
-            && let Some(state) = &direct
-        {
-            let accepted = state
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .accept_next();
-            let (tcp, generation) = match accepted {
-                Ok(Some(accepted)) => accepted,
-                Ok(None) => break,
-                Err(_) => {
-                    network_paused = Some(Instant::now() + ACCEPT_PAUSE);
-                    break;
-                }
-            };
-            match spawn_network(tcp, generation, state, &environment) {
-                Ok(running) => network.push(running),
-                Err(_) => break,
-            }
-        }
-        #[cfg(feature = "quic")]
         while network.len() < MAX_NETWORK_CONNECTIONS
             && let Some(state) = &direct
         {
-            let accepted = state
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .accept_quic();
+            let accepted = state.lock().unwrap_or_else(|e| e.into_inner()).accept();
             let Some((stream, generation)) = accepted else {
                 break;
             };
-            match spawn_quic(stream, generation, state, &environment) {
+            match spawn_network(stream, generation, state, &environment) {
                 Ok(running) => network.push(running),
                 Err(_) => break,
             }
@@ -654,22 +618,6 @@ fn serve_runtime_ready(
 const MAX_LOCAL_CONNECTIONS: usize = 64;
 /// Serving threads for network connections, including those still in the WSS handshake.
 const MAX_NETWORK_CONNECTIONS: usize = 32;
-
-/// The network listener the accept loop waits on, or `None` while every network slot is taken.
-fn network_listener(
-    direct: Option<&crate::direct::host::Shared>,
-    running: usize,
-) -> Option<std::os::fd::RawFd> {
-    if running >= MAX_NETWORK_CONNECTIONS {
-        return None;
-    }
-    direct.and_then(|state| {
-        state
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .listener_fd()
-    })
-}
 
 /// Runs the service's timed work and revocations found by direct-network recovery, and returns
 /// when the service next needs a tick.
@@ -740,12 +688,7 @@ fn raise_descriptor_limit() {
 
 /// Waits for a connection on either listener, a wake, or the service's next tick. A paused
 /// listener is left out.
-fn wait_for_work(
-    bell: &UnixStream,
-    listener: Option<&UnixListener>,
-    network: Option<std::os::fd::RawFd>,
-    deadline: Option<Instant>,
-) {
+fn wait_for_work(bell: &UnixStream, listener: Option<&UnixListener>, deadline: Option<Instant>) {
     let mut descriptors = vec![libc::pollfd {
         fd: bell.as_raw_fd(),
         events: libc::POLLIN,
@@ -754,13 +697,6 @@ fn wait_for_work(
     if let Some(listener) = listener {
         descriptors.push(libc::pollfd {
             fd: listener.as_raw_fd(),
-            events: libc::POLLIN,
-            revents: 0,
-        });
-    }
-    if let Some(fd) = network {
-        descriptors.push(libc::pollfd {
-            fd,
             events: libc::POLLIN,
             revents: 0,
         });
@@ -854,14 +790,15 @@ fn serve_local(
     Ok(())
 }
 
+/// Serves one QUIC connection. Its handshake and pairing exchange wait under deadlines, and an
+/// admitted connection stops on the wake, so stopping needs no sever.
 fn spawn_network(
-    tcp: std::net::TcpStream,
+    stream: crate::connection::quic::QuicStream,
     generation: [u8; 32],
     state: &crate::direct::host::Shared,
     environment: &Environment,
 ) -> Result<Running, ServerError> {
     let (waker, wake) = Waker::new().map_err(|_| ServerError::Protocol)?;
-    let cancel = tcp.try_clone().map_err(|_| ServerError::Protocol)?;
     let state = Arc::clone(state);
     let environment = environment.clone();
     let outbox_wake = Arc::clone(&wake);
@@ -875,48 +812,6 @@ fn spawn_network(
                 wake: Arc::clone(&environment.stop.wake),
             };
             let _ = crate::direct::host::serve(
-                tcp,
-                generation,
-                state,
-                &environment,
-                waker,
-                outbox_wake,
-            );
-        })
-        .map_err(|_| ServerError::Protocol)?;
-    Ok(Running {
-        thread,
-        done,
-        sever: Box::new(move || {
-            let _ = cancel.shutdown(std::net::Shutdown::Read);
-        }),
-        wake,
-    })
-}
-
-/// Serves one QUIC connection of the prototype. Its handshake waits under deadlines, and an
-/// admitted connection stops on the wake, so stopping needs no sever.
-#[cfg(feature = "quic")]
-fn spawn_quic(
-    stream: crate::connection::quic::QuicStream,
-    generation: [u8; 32],
-    state: &crate::direct::host::Shared,
-    environment: &Environment,
-) -> Result<Running, ServerError> {
-    let (waker, wake) = Waker::new().map_err(|_| ServerError::Protocol)?;
-    let state = Arc::clone(state);
-    let environment = environment.clone();
-    let outbox_wake = Arc::clone(&wake);
-    let done = Arc::new(AtomicBool::new(false));
-    let finished = Arc::clone(&done);
-    let thread = std::thread::Builder::new()
-        .name("spaceterm-quic-connection".into())
-        .spawn(move || {
-            let _ended = Ended {
-                done: finished,
-                wake: Arc::clone(&environment.stop.wake),
-            };
-            let _ = crate::direct::host::serve_quic(
                 stream,
                 generation,
                 state,
@@ -1232,13 +1127,9 @@ mod tests {
     }
 
     #[test]
-    fn full_network_slots_leave_the_listener_unwatched_and_an_ended_thread_rings_the_bell() {
+    fn an_ended_connection_thread_rings_the_accept_loop_bell() {
         let fixture = crate::direct::tests::Fixture::new();
         fixture.enable();
-        let state = Some(&fixture.state);
-        assert!(network_listener(state, MAX_NETWORK_CONNECTIONS - 1).is_some());
-        // A readable listener the loop cannot accept from would wake it at once, forever.
-        assert_eq!(network_listener(state, MAX_NETWORK_CONNECTIONS), None);
         let rung = Arc::new(AtomicBool::new(false));
         let (sync, _) = SyncWorker::spawn().unwrap();
         let mut environment =

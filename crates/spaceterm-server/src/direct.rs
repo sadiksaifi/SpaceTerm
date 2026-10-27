@@ -1,4 +1,4 @@
-//! Deliberately enabled WSS access, exact device enrollment and restricted revocation.
+//! Deliberately enabled QUIC access, exact device enrollment and restricted revocation.
 //! Native credential access and connection persistence belong to the calling client.
 use crate::{ServerError, pane::control::ClientName};
 use serde::{Deserialize, Serialize};
@@ -12,13 +12,11 @@ mod endpoint;
 pub use endpoint::Endpoint;
 pub(crate) mod host;
 mod network;
-#[cfg(feature = "quic")]
 mod quic;
 mod storage;
 #[cfg(test)]
 pub(crate) mod tests;
 mod wire;
-mod wss;
 
 pub(super) fn setup_generation(operation: &[u8; 32]) -> u64 {
     let mut generation = [0; 8];
@@ -307,14 +305,14 @@ pub trait DirectConnector: Send + Sync {
     fn connect(&self) -> Result<DirectConnection, DirectError>;
 }
 
-/// An authenticated WSS socket, or with the `iroh` feature a QUIC connection, before admission.
-/// Admission turns it into the connection's carrier; dropping it closes the connection.
+/// An authenticated QUIC connection before admission. Admission turns it into the connection's
+/// carrier; dropping it closes the connection.
 pub struct DirectConnection {
     #[cfg_attr(
         not(any(feature = "client", test)),
-        allow(dead_code, reason = "the desktop admits and carries the socket")
+        allow(dead_code, reason = "the desktop admits and carries the connection")
     )]
-    transport: Transport,
+    stream: Box<crate::connection::quic::QuicStream>,
     #[cfg_attr(
         not(feature = "client"),
         allow(
@@ -332,62 +330,6 @@ impl DirectConnection {
         credential: &DeviceCredential,
     ) -> Result<Self, DirectError> {
         client::connect(endpoint, paired, credential)
-    }
-    /// Like [`Self::connect`], over QUIC to the same address and port in UDP. The server's iroh
-    /// key is its pinned public key, and this device's is its credential.
-    #[cfg(feature = "quic")]
-    pub fn connect_quic(
-        endpoint: &str,
-        paired: &PairedDevice,
-        credential: &DeviceCredential,
-    ) -> Result<Self, DirectError> {
-        quic::connect(endpoint, paired, credential)
-    }
-}
-
-/// The authenticated connection under a [`DirectConnection`].
-pub(crate) enum Transport {
-    Wss(Box<wss::Ws>),
-    #[cfg(feature = "quic")]
-    Quic(Box<crate::connection::quic::QuicStream>),
-}
-#[cfg_attr(
-    not(any(feature = "client", test)),
-    allow(dead_code, reason = "the desktop admits and carries the socket")
-)]
-impl Transport {
-    /// Admits this client and returns the connection's carrier.
-    pub(crate) fn admit(
-        self,
-        client: (&[u8; 32], &ClientName),
-        pin: &ServerPin,
-    ) -> Result<Box<dyn crate::connection::carrier::Carrier>, ServerError> {
-        let versions = [crate::protocol::MAJOR];
-        match self {
-            Self::Wss(ws) => {
-                let mut ws = *ws;
-                crate::protocol::admit_transport(
-                    &mut ws,
-                    client,
-                    &pin.server,
-                    &pin.build,
-                    &versions,
-                )?;
-                Ok(Box::new(crate::connection::wss::WssCarrier::new(ws)))
-            }
-            #[cfg(feature = "quic")]
-            Self::Quic(stream) => {
-                let mut stream = *stream;
-                crate::protocol::admit_transport(
-                    &mut stream,
-                    client,
-                    &pin.server,
-                    &pin.build,
-                    &versions,
-                )?;
-                Ok(Box::new(stream.into_carrier()))
-            }
-        }
     }
 }
 
@@ -409,7 +351,7 @@ impl Enrollment {
         claim: ClaimId,
         credential: &DeviceCredential,
     ) -> Result<Self, DirectError> {
-        wss::validate_endpoint(endpoint)?;
+        Endpoint::from_url(endpoint)?;
         if claim == [0; 32]
             || pin.server == [0; 32]
             || pin.public_key == [0; 32]

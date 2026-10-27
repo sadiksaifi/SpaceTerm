@@ -191,7 +191,7 @@ impl Document {
                     if *claim == [0; 32]
                         || *credential == [0; 32]
                         || endpoint.len() > 512
-                        || !endpoint.starts_with("wss://")
+                        || !endpoint.starts_with("quic://")
                     {
                         return Err(());
                     }
@@ -227,7 +227,7 @@ fn validate_route(saved: &SavedRoute) -> Result<(), ()> {
         || saved.route.paired.client == [0; 32]
         || saved.route.label.len() > 512
         || saved.route.endpoint.len() > 512
-        || !saved.route.endpoint.starts_with("wss://")
+        || !saved.route.endpoint.starts_with("quic://")
         || saved.route.endpoint.chars().any(char::is_control)
     {
         return Err(());
