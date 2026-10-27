@@ -998,7 +998,7 @@ impl ServerArtifactCatalog {
             &signature,
             &digest,
             target,
-            1,
+            spaceterm_server::protocol::MAJOR,
             &["workspace_policy"],
         )
         .map_err(map_server_error)?;
