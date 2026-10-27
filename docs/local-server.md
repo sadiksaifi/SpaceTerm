@@ -84,6 +84,22 @@ Finish Update resumes the original admitted local operation. Headless controls e
 
 An interrupted Stop dispatch may require finishing the original run through the local service manager before Finish Update. Recovery waits for the next desktop launch or local service invocation; no permanent helper runs. Unresolved process cleanup blocks return to a previous runtime.
 
+## Measure terminal latency
+
+Run `mise tasks ls | grep bench:latency` for the latency tasks and `mise run <task> --help` for their options. They measure an installed or running build.
+
+The pixel tasks post keyboard and wheel events and capture the screen with ScreenCaptureKit. The app that runs them, such as Terminal, needs Accessibility and Screen Recording permission in System Settings > Privacy & Security. They need a US keyboard layout and a shell prompt in the focused Pane of the frontmost window. Leave the keyboard, mouse and screen alone until they finish. A pixel task holds an flock on `/tmp/spaceterm-screen.flock`, so a second one waits.
+
+The pixel tasks type commands into the focused Pane and force a steady cursor there. The workload task also splits that Pane to the right and runs `bench:workload` in the new Pane from this checkout's path relative to `~`, on the Pane's host. When a task finishes, or fails while its app is frontmost, it stops those commands, restores the cursor and closes the new Pane. When a failure leaves another app frontmost, the task prints what it left changed.
+
+The workload task reports keystroke-to-pixels p99 with the other Pane idle, then while `bench:workload` draws in it, and the difference. Each miss, an echo not seen within 1 second, counts as 1000 ms in that p99. #670 requires a difference of at most 10 ms. In `scroll` and `partial` modes, the task fails if the workload Pane stops drawing during the measurement.
+
+`bench:latency:protocol` creates a probe Workspace with its own client identity and closes it afterwards. A paired run enrolls a fresh pairing and revokes it afterwards, including after an interrupt; it also withdraws an invitation that no approved claim used. `--owner-host` runs the owner side through SSH on the server's machine, which needs this repository at the same commit. Without it, the server must run on this machine. `--expose ADDRESS` enables that server's network exposure for the run and then restores the previous address and enabled state. When no address was configured before, the probe's address stays configured, disabled. Each exposure change disconnects every paired client, so the task changes nothing when exposure is already enabled at that address. The probe's protocol calls live in [one module](../crates/spaceterm-server-host/examples/latency_probe/protocol.rs).
+
+The idle task reads per-connection byte counters with `nettop`, so it sees paired WSS connections but not account-local IPC.
+
+On macOS, remote tasks accept `--interface` with a remote host, and the pixel, idle and protocol tasks take that host as `--route-host`. A task given them refuses to run unless the route to the host uses that interface and every established TCP connection to the host uses an address on it. Use them to keep a wired batch on Ethernet.
+
 ## Replace incompatible development state
 
 Obsolete server-client formats are replaced directly under [ADR 0035](adr/0035-negotiate-one-protocol-major.md). Quit desktops and finish server shutdown before resetting local state. Complete or reconcile started operations and Git writes first. A retained endpoint, active lock or unresolved service cleanup refuses reset. Never remove a socket or signal a saved PID to bypass ownership checks.

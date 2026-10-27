@@ -2263,6 +2263,34 @@ mod draft {
     }
 
     #[gpui::test]
+    fn republishing_the_same_rows_should_not_redraw_the_sidebar(cx: &mut TestAppContext) {
+        let (sidebar, _events, cx) = sidebar(cx);
+        publish(&sidebar, row("Build", 0), cx);
+        let notifications = std::rc::Rc::new(std::cell::Cell::new(0));
+        cx.update(|_, cx| {
+            let notifications = notifications.clone();
+            cx.observe(&sidebar, move |_, _| {
+                notifications.set(notifications.get() + 1)
+            })
+            .detach();
+        });
+        let set = |row: WorkspaceRowViewModel, cx: &mut VisualTestContext| {
+            cx.update(|_, cx| {
+                sidebar.update(cx, |sidebar, cx| {
+                    sidebar.set_rows(vec![row], Vec::new(), cx)
+                })
+            })
+        };
+
+        assert!(!set(row("Build", 0), cx));
+        cx.run_until_parked();
+        assert_eq!(notifications.get(), 0);
+        assert!(set(row("Theirs", 1), cx));
+        cx.run_until_parked();
+        assert_eq!(notifications.get(), 1);
+    }
+
+    #[gpui::test]
     fn a_rename_published_while_the_editor_is_open_should_not_overwrite_it(
         cx: &mut TestAppContext,
     ) {
