@@ -76,7 +76,10 @@ impl Organization {
 }
 
 /// The host hands this store to the runtime only while holding its instance lock.
-/// Every operation revalidates and synchronizes retained state before admitting a mutation.
+///
+/// [`Self::read`] confirms that what it returns is durable. A publication syncs its new file and
+/// the directory after renaming it; that makes the whole record durable, so a publication does not
+/// first confirm the record it replaces. Two syncs remain per publication.
 pub struct OrganizationStore(pub(crate) Directory);
 impl OrganizationStore {
     /// A Git child retains this lock across exec, fencing recovery after a server crash until
@@ -93,7 +96,7 @@ impl OrganizationStore {
             value.validate()?;
         }
         let _lock = self.0.lock("setup.lock", false)?;
-        let mut record = self.0.read()?;
+        let mut record = self.0.read_unconfirmed()?;
         record.organization = organization.cloned();
         self.0.write(&record)
     }
