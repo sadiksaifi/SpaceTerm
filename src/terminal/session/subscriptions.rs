@@ -139,6 +139,14 @@ impl TerminalEventPublisher {
             .line
     }
 
+    /// Retains a changed line state and tells the subscriber. It queues no event, so a change
+    /// never displaces a screen waiting in the bounded event queue.
+    pub(super) fn set_line(&self, line: LineState) {
+        let mut state = self.0.lock().unwrap_or_else(|error| error.into_inner());
+        state.line = line;
+        notify(state);
+    }
+
     pub(super) fn try_send(
         &self,
         event: TerminalSessionEvent,
@@ -197,7 +205,6 @@ impl EventState {
                 stop(&mut self.line);
                 self.finished = Some(Err(failure.clone()));
             }
-            TerminalSessionEvent::Line(line) => self.line = *line,
             _ => {}
         }
     }
@@ -239,6 +246,35 @@ mod tests {
             Ok(TerminalSessionEvent::Exited(TerminalSessionExit::Success))
         ));
         assert!(replacement.try_recv().is_err());
+    }
+
+    #[test]
+    fn a_line_state_change_notifies_without_displacing_a_queued_screen() {
+        let (events, _receiver) = async_channel::bounded(2);
+        let publisher = TerminalEventPublisher::from(events);
+        let notified = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = Arc::clone(&notified);
+        let (receiver, _) = publisher.subscribe(Some(Arc::new(move || {
+            counter.fetch_add(1, Ordering::Relaxed);
+        })));
+        let screen = ScreenSnapshot::empty(crate::local_path::LocalPathSemantics::Posix);
+        publisher
+            .force_send(TerminalSessionEvent::Screen(Arc::clone(&screen)))
+            .unwrap();
+
+        for epoch in 1..=3 {
+            publisher.set_line(LineState {
+                epoch,
+                mode: LineMode::UNKNOWN,
+            });
+        }
+
+        assert_eq!(publisher.line().epoch, 3);
+        assert_eq!(notified.load(Ordering::Relaxed), 4);
+        assert!(
+            matches!(receiver.try_recv(), Ok(TerminalSessionEvent::Screen(actual)) if Arc::ptr_eq(&actual, &screen))
+        );
+        assert!(receiver.try_recv().is_err());
     }
 
     #[test]

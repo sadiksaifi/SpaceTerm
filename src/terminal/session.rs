@@ -97,7 +97,9 @@ pub enum TerminalSessionEvent {
     ClientEffectsReady,
     /// A complete asynchronous pointer selection is ready for the initiating client.
     SelectionCopyReady,
-    /// The PTY's line mode changed.
+    /// A server Pane's line mode changed. A server Pane's client sends it to its view. A
+    /// Terminal Session retains its line state in its subscription instead, so a change never
+    /// displaces a queued screen.
     Line(spaceterm_server::pane::LineState),
     /// A paste may have been written before the connection lost its acknowledgement.
     PasteUnconfirmed,
@@ -1815,7 +1817,8 @@ impl TerminalWorker {
                 }
                 self.events.repeat_screen();
                 self.schedules.note_screen_published();
-                self.send_terminal_event(TerminalSessionEvent::Line(self.events.line()))
+                // The new subscription reads the retained line state.
+                true
             }
             Command::Key(input) => self.process_key(input),
             Command::ClearScreenAndScrollback => {
@@ -2116,24 +2119,25 @@ impl TerminalWorker {
                 }
             }
             Command::Shutdown => false,
-            Command::ReadLineMode => self.read_line_mode(),
+            Command::ReadLineMode => {
+                self.read_line_mode();
+                true
+            }
         }
     }
 
-    fn read_line_mode(&mut self) -> bool {
+    fn read_line_mode(&mut self) {
         if let Some(state) = self
             .schedules
             .update_line(Instant::now(), self.native_pty.line_mode())
         {
-            send_session_event(&self.events, TerminalSessionEvent::Line(state))
-        } else {
-            true
+            self.events.set_line(state);
         }
     }
 
-    fn line_transition(&mut self) -> bool {
+    fn line_transition(&mut self) {
         self.schedules.line_transition(Instant::now());
-        self.read_line_mode()
+        self.read_line_mode();
     }
 
     fn process_paste_request(
@@ -2414,9 +2418,10 @@ impl TerminalWorker {
                 self.metadata_state.publish(metadata);
                 self.schedules.note_metadata_changed();
             }
-            if !self.flush_ordered_terminal_replies(&mut focus_reports) || !self.line_transition() {
+            if !self.flush_ordered_terminal_replies(&mut focus_reports) {
                 return false;
             }
+            self.line_transition();
             // A presentable Terminal Session's next Screen carries the metadata wakeup. A separate
             // event first can evict lossless attention when that Screen replaces an older queue
             // entry. Hidden Terminal Sessions receive no Screens, so they still need the wakeup.
@@ -2594,9 +2599,7 @@ impl TerminalWorker {
         if !focused && !self.cancel_pointer_drag() {
             return false;
         }
-        if !self.line_transition() {
-            return false;
-        }
+        self.line_transition();
         if self.terminal_input_focused == focused {
             return true;
         }
@@ -2640,8 +2643,8 @@ impl TerminalWorker {
         if !action.bytes.is_empty() && !self.write_pty(&action.bytes) {
             return false;
         }
-        if !action.bytes.is_empty() && !self.line_transition() {
-            return false;
+        if !action.bytes.is_empty() {
+            self.line_transition();
         }
         !action.screen_changed || self.publish_visible_screen_change()
     }
