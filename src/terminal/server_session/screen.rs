@@ -1,6 +1,91 @@
 //! Decodes server screens into desktop snapshots and encodes the presentation style.
 use super::*;
 
+/// Receives one lease's server screens for the desktop presentation.
+pub(super) struct ScreenReceiver<'a> {
+    /// Row changes apply only to this exact lease's own previous screen.
+    decoder: pane::presentation::ScreenDecoder,
+    local_files: Option<&'a crate::platform::local_filesystem::LocalFilesystemAuthority>,
+    remote_metadata: Option<&'a super::super::metadata::RemoteTerminalMetadataContext>,
+}
+impl<'a> ScreenReceiver<'a> {
+    pub(super) fn new(
+        local_files: Option<&'a crate::platform::local_filesystem::LocalFilesystemAuthority>,
+        remote_metadata: Option<&'a super::super::metadata::RemoteTerminalMetadataContext>,
+    ) -> Self {
+        Self {
+            decoder: pane::presentation::ScreenDecoder::default(),
+            local_files,
+            remote_metadata,
+        }
+    }
+
+    pub(super) fn baseline(&self) -> Option<u64> {
+        self.decoder.baseline()
+    }
+
+    /// A changed demand restarts row changes from a complete screen.
+    pub(super) fn restart(&mut self) {
+        self.decoder = pane::presentation::ScreenDecoder::default();
+    }
+
+    /// Completes a row-change reply against the previous screen.
+    pub(super) fn apply(&mut self, reply: Reply) -> Result<Reply, ServerError> {
+        self.decoder.apply(reply)
+    }
+
+    /// Decodes a complete screen with its graphics, and maps it to the server's generation and size.
+    pub(super) fn decode(
+        &self,
+        mut screen: Box<pane::Screen>,
+        epoch: u64,
+        generation: &mut PresentationGeneration,
+        active_size: PaneSize,
+        graphics: &mut graphics::Graphics,
+        appearance: &Mutex<TerminalAppearanceUpdate>,
+    ) -> Result<(Arc<ScreenSnapshot>, ScreenMapping), ServerError> {
+        let graphics_error = graphics
+            .update(screen.graphics.take(), screen.alternate)
+            .err();
+        if let Some(error) = graphics_error {
+            graphics.clear();
+            graphics.failure(error);
+        }
+        graphics.recovered();
+        *generation = generation.next();
+        let mapping = ScreenMapping {
+            epoch,
+            local: *generation,
+            wire: screen.generation,
+            selection: screen
+                .reading
+                .as_ref()
+                .map_or(0, |reading| reading.selection_revision),
+            size: PaneSize {
+                columns: screen.columns,
+                rows: screen.rows.len() as u16,
+                cell_width: screen.cell_pixels.map_or(active_size.cell_width, |p| p.0),
+                cell_height: screen.cell_pixels.map_or(active_size.cell_height, |p| p.1),
+            },
+            mouse_tracking: screen.mouse_tracking,
+            alternate: screen.alternate,
+            alternate_scroll: screen.alternate_scroll,
+        };
+        let mut screen = decode_screen(
+            *screen,
+            *generation,
+            &appearance.lock().unwrap_or_else(|e| e.into_inner()),
+            self.local_files,
+        )?;
+        if let Some(metadata) = self.remote_metadata {
+            Arc::make_mut(&mut Arc::make_mut(&mut screen).metadata).context =
+                super::super::metadata::TerminalMetadataContext::Remote(metadata.clone());
+        }
+        Arc::make_mut(&mut screen).graphics = graphics.snapshot();
+        Ok((screen, mapping))
+    }
+}
+
 pub(super) fn clear_presentation(
     events: &async_channel::Sender<TerminalSessionEvent>,
     generation: &mut PresentationGeneration,
@@ -73,7 +158,7 @@ fn decode_hyperlink(
     Some(Arc::new(target))
 }
 
-pub(super) fn decode_screen(
+fn decode_screen(
     wire: pane::Screen,
     generation: PresentationGeneration,
     appearance: &TerminalAppearanceUpdate,

@@ -831,8 +831,7 @@ pub(super) fn present(
             let mut latest_screen = None;
             let changes = connection.supports_presentation_changes();
             let batches = connection.supports_key_input_batches();
-            // Row changes apply only to this exact lease's own previous screen.
-            let mut decoder = pane::presentation::ScreenDecoder::default();
+            let mut screens = ScreenReceiver::new(local_files.as_ref(), remote_metadata.as_ref());
             let mut cadence = schedule::Cadence::new(
                 std::time::Instant::now(),
                 state.presentable.load(Ordering::Acquire),
@@ -873,13 +872,12 @@ pub(super) fn present(
                         &mut connection,
                         &Request::PresentationDemand { lease, visible },
                     )?)?;
-                    // A changed demand restarts row changes from a complete screen.
-                    decoder = pane::presentation::ScreenDecoder::default();
+                    screens.restart();
                 }
                 let polled = cadence.poll_due(now);
                 if polled {
                     let reply = if changes {
-                        let base = decoder.baseline();
+                        let base = screens.baseline();
                         let reply = send(
                             &presenter,
                             &alive,
@@ -887,7 +885,7 @@ pub(super) fn present(
                             &mut connection,
                             &Request::PollChanges { lease, base },
                         )?;
-                        decoder.apply(reply)?
+                        screens.apply(reply)?
                     } else {
                         send(
                             &presenter,
@@ -905,52 +903,16 @@ pub(super) fn present(
                         return Err(ServerError::Protocol);
                     }
                     match reply {
-                        Reply::Screen(mut screen) => {
+                        Reply::Screen(screen) => {
                             semantic.note_revision(screen.accessibility_revision);
-                            let graphics_error = graphics
-                                .update(screen.graphics.take(), screen.alternate)
-                                .err();
-                            if let Some(error) = graphics_error {
-                                graphics.clear();
-                                graphics.failure(error);
-                            }
-                            graphics.recovered();
-                            generation = generation.next();
-                            let mapping = ScreenMapping {
+                            let (screen, mapping) = screens.decode(
+                                screen,
                                 epoch,
-                                local: generation,
-                                wire: screen.generation,
-                                selection: screen
-                                    .reading
-                                    .as_ref()
-                                    .map_or(0, |reading| reading.selection_revision),
-                                size: PaneSize {
-                                    columns: screen.columns,
-                                    rows: screen.rows.len() as u16,
-                                    cell_width: screen
-                                        .cell_pixels
-                                        .map_or(active_size.cell_width, |p| p.0),
-                                    cell_height: screen
-                                        .cell_pixels
-                                        .map_or(active_size.cell_height, |p| p.1),
-                                },
-                                mouse_tracking: screen.mouse_tracking,
-                                alternate: screen.alternate,
-                                alternate_scroll: screen.alternate_scroll,
-                            };
-                            let mut screen = decode_screen(
-                                *screen,
-                                generation,
-                                &appearance.lock().unwrap_or_else(|e| e.into_inner()),
-                                local_files.as_ref(),
+                                &mut generation,
+                                active_size,
+                                &mut graphics,
+                                &appearance,
                             )?;
-                            if let Some(metadata) = &remote_metadata {
-                                Arc::make_mut(&mut Arc::make_mut(&mut screen).metadata).context =
-                                    super::super::metadata::TerminalMetadataContext::Remote(
-                                        metadata.clone(),
-                                    );
-                            }
-                            Arc::make_mut(&mut screen).graphics = graphics.snapshot();
                             if !ready {
                                 // Claims apply their measured controller facts once.
                                 // Reconcile changes made while attachment was in flight.

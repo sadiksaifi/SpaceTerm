@@ -21,7 +21,7 @@ use effects::ClientEffects;
 #[cfg(test)]
 use link::encode_key;
 use link::{encode_modifiers, expect_unchanged, submit_input};
-use screen::{clear_presentation, decode_screen, encode_style};
+use screen::{ScreenReceiver, clear_presentation, encode_style};
 use spaceterm_server::pane::{self, Lease, PaneSize, Reply, Request};
 use std::sync::{
     Arc, Mutex,
