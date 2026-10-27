@@ -5,7 +5,9 @@
 //! one epoch instead. A tracked reference to the first visible row, re-anchored at every
 //! snapshot, tells how many rows were discarded or erased above it since. Visible rows are never
 //! discarded with history, so the anchor survives clearing the Scrollback. A new epoch starts when
-//! the engine rewraps history, resets, or discards past the anchor.
+//! the engine rewraps history, resets, or discards past the anchor, and when a taller screen pulls
+//! history rows back onto it: those positions may name other rows once they scroll off again,
+//! and a client that missed the frame with the lower total could keep the old rows.
 use super::*;
 use libghostty_vt::screen::GridRef;
 
@@ -21,6 +23,7 @@ pub struct HistorySnapshot {
 pub(super) struct HistoryTracker {
     current: HistorySnapshot,
     columns: u16,
+    rows: u16,
     /// The first visible row and its position.
     anchor: Option<(TrackedGridRef, u64)>,
 }
@@ -34,6 +37,7 @@ impl Default for HistoryTracker {
                 total: 0,
             },
             columns: 0,
+            rows: 0,
             anchor: None,
         }
     }
@@ -51,10 +55,13 @@ impl HistoryTracker {
         }
         let retained = terminal.scrollback_rows()? as u64;
         let columns = terminal.cols()?;
+        let rows = terminal.rows()?;
+        let pulled_down = rows > self.rows && retained < self.current.total - self.current.oldest;
+        self.rows = rows;
         let anchored = self
             .anchor
             .as_ref()
-            .filter(|_| columns == self.columns)
+            .filter(|_| columns == self.columns && !pulled_down)
             .map(|(anchor, position)| {
                 anchor
                     .point(PointSpace::Screen)
@@ -334,8 +341,18 @@ mod tests {
         .unwrap();
         emulator.snapshot().unwrap();
         let taller = emulator.history.current;
-        assert_eq!(taller.epoch, 1, "more rows keep every position");
-        assert!(taller.total <= history.total);
+        assert_eq!(
+            taller.epoch, 2,
+            "history pulled onto a taller screen renumbers what scrolls off again"
+        );
+        emulator.resize(TerminalGeometry::from_grid(
+            CellGridSize::new(20, 4),
+            LogicalCellSize::new(10.0, 20.0),
+            BackingScale::ONE,
+        ))
+        .unwrap();
+        emulator.snapshot().unwrap();
+        assert_eq!(emulator.history.current.epoch, 2, "a shorter screen keeps positions");
         emulator.resize(TerminalGeometry::from_grid(
             CellGridSize::new(12, 6),
             LogicalCellSize::new(10.0, 20.0),
@@ -343,9 +360,9 @@ mod tests {
         ))
         .unwrap();
         emulator.snapshot().unwrap();
-        assert_eq!(emulator.history.current.epoch, 2, "rewrapped rows name new content");
+        assert_eq!(emulator.history.current.epoch, 3, "rewrapped rows name new content");
         assert!(
-            emulator.scrollback_page(1, 0, 10).unwrap().is_none(),
+            emulator.scrollback_page(2, 0, 10).unwrap().is_none(),
             "an ended epoch is refused"
         );
         let rewrapped = emulator.history.current;
@@ -365,7 +382,7 @@ mod tests {
         assert!(page.rows.is_empty());
         emulator.feed(b"\x1bc");
         emulator.snapshot().unwrap();
-        assert_eq!(emulator.history.current.epoch, 3, "a reset starts over");
+        assert_eq!(emulator.history.current.epoch, 4, "a reset starts over");
     }
 
     #[test]
