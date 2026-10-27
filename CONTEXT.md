@@ -57,7 +57,9 @@ Each SpaceTerm Server owns terminal work on its machine. SpaceTerm Clients prese
 
 **Kill Workspace**: The action that removes a server-owned Workspace and its saved organization, ending all of its Terminal Sessions.
 
-**SpaceTerm Protocol**: The versioned, language-neutral exchange of server state, terminal presentation, and client operations between SpaceTerm Clients and SpaceTerm Servers.
+**Workspace Inventory**: A SpaceTerm Server's authoritative Workspaces, Tabs, Panes, Worktrees, and their shared organization, with the live Terminal Session and Pane control facts its clients reconcile against.
+
+**SpaceTerm Protocol**: The versioned exchange of server state, terminal presentation, and client operations between a SpaceTerm Client and a SpaceTerm Server over one multiplexed connection, on which the server pushes changes as they happen.
 
 **SSH Setup**: Temporary OpenSSH provisioning inside Add Server that prepares a SpaceTerm Server and enrolls the client for paired WSS access.
 
@@ -212,6 +214,10 @@ _Avoid_: session, terminal
 **Terminal Emulator**: The state machine interpreting terminal output and owning screen state.
 
 **Terminal Metadata**: Sanitized facts about terminal screen state, such as its title and Current Directory.
+
+**Scrollback**: The rows of a Terminal Session's history above its screen, owned by the SpaceTerm Server.
+
+**Scrollback Cache**: The Scrollback rows a SpaceTerm Client holds for one Pane, over which it scrolls, selects, and runs Terminal Find.
 
 ## Terminal interaction and safety
 

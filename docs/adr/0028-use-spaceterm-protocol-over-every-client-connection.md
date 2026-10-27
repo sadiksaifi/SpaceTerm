@@ -9,3 +9,5 @@ An Invitation Link contains the reachable address, pinned TLS certificate, publi
 Invite Device presents the link and QR code. Add Server waits for explicit Join. Operating-system `spaceterm://pair/…` delivery opens that same Settings journey on launch or in the running client. Invitations remain transient and never enter retained state, diagnostics or child commands.
 
 Enrollment binds a device credential and pairing to one Client Identity before terminal admission. A new pairing cannot claim another pairing's views or Pane control by supplying its identity. Cancellation and lost replies follow [ADR 0038](0038-unpair-devices-without-blocking-local-connection-removal.md).
+
+[ADR 0050](0050-push-terminal-presentation-over-one-multiplexed-connection.md) replaces this protocol's request-and-poll exchange with one pushed, multiplexed connection per server.

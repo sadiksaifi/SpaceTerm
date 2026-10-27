@@ -24,7 +24,7 @@ The desktop installation includes a CLI fallback for use without a status area o
 "$HOME/.local/lib/spaceterm/bin/spaceterm" --help
 ```
 
-For Preflight, use "SpaceTerm Preflight" for both the macOS app and executable names, or `spaceterm-preflight` in the Linux directory. For a custom installation, use the desktop executable inside that app or installation directory. The help names the compiled application identity and lists the service commands and confirmation flag. These service commands run without opening the client or initializing its graphical interface. Headless installations expose the same commands through `bin/spaceterm-server` in their installation directory. Source builds use `mise run server:service --help` for the Development identity.
+For Preflight on macOS, use "SpaceTerm Preflight" for both the app and executable names. On Linux, the Preflight executable is `~/.local/lib/spaceterm-preflight/bin/spaceterm`, linked from `~/.local/bin/spaceterm-preflight`. For a custom installation, use the desktop executable inside that app or installation directory. The help names the compiled application identity and lists the service commands and confirmation flag. These service commands run without opening the client or initializing its graphical interface. Headless installations expose the same commands through `bin/spaceterm-server` in their installation directory. Source builds use `mise run server:service --help` for the Development identity.
 
 ## Signed server artifacts
 
