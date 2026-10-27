@@ -227,13 +227,13 @@ pub(super) fn split_wheel(mut wheel: pane::Wheel) -> Vec<pane::Wheel> {
 /// When a worker's reading continues. Later variants are more urgent.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) enum Next {
-    /// Nothing until the next output check.
+    /// Nothing until the worker is woken.
     Idle,
-    /// The server is still applying reading work; recheck before the next output check.
+    /// The server is still applying reading work; recheck soon.
     Recheck,
     /// More ready work follows at once.
     Continue,
-    /// Reading completed against a newer screen; check output now.
+    /// Reading completed against a newer screen, which the server pushes.
     Refresh,
 }
 

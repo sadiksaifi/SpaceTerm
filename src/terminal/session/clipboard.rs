@@ -103,6 +103,9 @@ impl fmt::Debug for ClipboardCompletion {
     }
 }
 
+/// Receives a relayed request's completion on the client. It must not block.
+pub(crate) type ClipboardRelay = Arc<dyn Fn(u64, ClipboardCompletion) + Send + Sync>;
+
 pub struct ClipboardRequest {
     id: u64,
     operation: Osc52Operation,
@@ -110,7 +113,7 @@ pub struct ClipboardRequest {
     epoch: u64,
     deadline: Instant,
     commands: Option<CommandSender<Command>>,
-    relay: Option<mpsc::SyncSender<(u64, ClipboardCompletion)>>,
+    relay: Option<ClipboardRelay>,
 }
 
 impl fmt::Debug for ClipboardRequest {
@@ -181,7 +184,7 @@ impl ClipboardRequest {
         authority: Arc<ClipboardAuthority>,
         epoch: u64,
         remaining: Duration,
-        relay: mpsc::SyncSender<(u64, ClipboardCompletion)>,
+        relay: ClipboardRelay,
     ) -> Self {
         Self {
             id,
@@ -213,7 +216,7 @@ impl ClipboardRequest {
             ClipboardCompletion::Denied
         };
         if let Some(relay) = self.relay.take() {
-            let _ = relay.try_send((self.id, completion));
+            relay(self.id, completion);
             return;
         }
         if let Some(commands) = self.commands.take() {

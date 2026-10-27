@@ -15,7 +15,7 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 
 /// A Pane's screen state, captured under the `PaneService` lock and encoded outside it.
 #[derive(Clone)]
-pub(crate) struct ScreenCapture {
+pub struct ScreenCapture {
     pub(crate) screen: Arc<ScreenSnapshot>,
     pub(crate) history: History,
     /// Fences pointer and wheel coordinates.

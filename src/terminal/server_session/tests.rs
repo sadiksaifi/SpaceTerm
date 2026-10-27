@@ -469,7 +469,7 @@ impl FocusServer {
                 self.keys.push(*generation);
                 Ok(Reply::Unchanged)
             }
-            Request::PresentationDemand { visible, .. } => {
+            Request::View { visible, .. } => {
                 self.visible = Some(*visible);
                 Ok(Reply::Unchanged)
             }
@@ -494,7 +494,7 @@ fn a_reopened_presentation_is_interactive_at_once_after_many_focus_changes() {
                 .unwrap();
         }
         // Command-Q closes the window; the same client reopens a new one.
-        presenter.retire(old.active.lease, true, |request| server.handle(request));
+        presenter.retire(old.active.lease, |request| server.handle(request));
         // Closing every window leaves the Pane unfocused and without visual demand.
         assert_eq!(server.target, Some(pane::FocusTarget::Unfocused));
         assert_eq!(server.visible, Some(false));
@@ -530,7 +530,7 @@ fn a_dismissed_presentations_paused_input_cannot_follow_its_successors_focus() {
             server.handle(request)
         })
     });
-    presenter.retire(old.active.lease, true, |request| {
+    presenter.retire(old.active.lease, |request| {
         reached += 1;
         server.handle(request)
     });
@@ -560,7 +560,7 @@ fn a_dismissed_window_whose_worker_starts_late_cannot_revoke_its_reopened_succes
     let (_, input) = mpsc::sync_channel(1);
     let (events, _output) = async_channel::bounded(2);
     let (semantics, _semantics) = async_channel::bounded(1);
-    let (effects, _clipboard) = ClientEffects::new();
+    let (effects, _clipboard) = ClientEffects::new(Arc::new(|| {}));
     // The dismissed worker's production entry point. Its view is gone, so it connects to
     // nothing.
     present(
@@ -575,7 +575,7 @@ fn a_dismissed_window_whose_worker_starts_late_cannot_revoke_its_reopened_succes
             cell_height: 20,
         })),
         Arc::new(Mutex::new(TerminalAppearanceUpdate::builtin().unwrap())),
-        effects,
+        (effects, 60),
     );
     assert!(
         successor.send(&focus, |_| Ok(Reply::Unchanged)).is_ok(),

@@ -238,10 +238,6 @@ pub enum Request {
         generation: u64,
         offset: usize,
     },
-    NativeEffects {
-        lease: Lease,
-        generation: u64,
-    },
     CompleteClipboard {
         lease: Lease,
         generation: u64,
@@ -321,16 +317,12 @@ pub enum Request {
     Release {
         lease: Lease,
     },
-    Poll {
-        lease: Lease,
-    },
-    PollChanges {
-        lease: Lease,
-        base: Option<u64>,
-    },
-    PresentationDemand {
+    /// Whether the client presents the channel bound to `lease`, and at what frame rate. The
+    /// desktop's Pane worker sends it as `ClientMessage::View`; it never reaches a host.
+    View {
         lease: Lease,
         visible: bool,
+        max_hz: u8,
     },
     Key {
         lease: Lease,
@@ -358,9 +350,6 @@ pub enum Request {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Reply {
     Accessibility(Result<accessibility::Chunk, accessibility::Error>),
-    AccessibilityRevision {
-        revision: u64,
-    },
     WorktreeRead(Result<crate::worktree::ReadReply, crate::worktree::Error>),
     MutationPending,
     DirectoryRead(Result<directories::Progress, directories::Error>),
@@ -381,10 +370,6 @@ pub enum Reply {
         bytes: Vec<u8>,
     },
     SelectionPending,
-    NativeEffects {
-        request: Option<effects::Request>,
-        hidden_input: bool,
-    },
     Paste(PasteOutcome),
     Inventory {
         inventory: crate::hierarchy::Inventory,
@@ -412,9 +397,7 @@ pub enum Reply {
     Attached {
         lease: Lease,
     },
-    Screen(Box<crate::protocol::interim::ScreenFrame>),
     Unchanged,
-    Ended,
     Closed,
     Refused(Refusal),
 }

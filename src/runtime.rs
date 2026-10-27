@@ -85,4 +85,7 @@ mod server;
 pub(crate) use server::screen_encoder;
 #[cfg(all(test, feature = "desktop"))]
 pub(crate) use server::testing as directory_testing;
-pub use server::{DevelopmentPaneHost, HostCommands, Served, SharedWorkspaceHost};
+pub use server::{
+    DevelopmentPaneHost, HostCommands, Observation, Observed, ScreenCapture, Served,
+    SharedWorkspaceHost,
+};

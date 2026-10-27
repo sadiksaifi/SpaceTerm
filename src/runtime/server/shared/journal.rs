@@ -159,10 +159,7 @@ impl Journal {
                 return Err(Uncertain);
             }
             if progress.writing || progress.reporting {
-                progress = self
-                    .wrote
-                    .wait(progress)
-                    .unwrap_or_else(|e| e.into_inner());
+                progress = self.wrote.wait(progress).unwrap_or_else(|e| e.into_inner());
                 continue;
             }
             let (number, envelope) = progress.pending.take().ok_or(Uncertain)?;

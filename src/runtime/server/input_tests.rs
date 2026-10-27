@@ -7,9 +7,7 @@ use spaceterm_server::connection::outbox::Outbox;
 use spaceterm_server::connection::service::{Dispatch, PaneService as _, Peer};
 use spaceterm_server::protocol::{
     self, Channel, ClaimReply, InputEvent, InputOutcome, Operation, PaneEvent, ReplyBody,
-    RequestId, ServerMessage,
-    frame::Assembler,
-    interim::{Interim, InterimReply},
+    RequestId, ServerMessage, frame::Assembler, screen::ScreenUpdate,
 };
 use std::time::{Duration, Instant};
 
@@ -46,39 +44,74 @@ fn send(served: &mut Served<SharedWorkspaceHost>, serial: u32, events: Vec<Input
     );
 }
 
-/// The Input outcomes the server reported, by serial.
-fn reported(outbox: &Outbox) -> Vec<(u32, InputOutcome)> {
-    let mut assembler = Assembler::default();
-    let mut outcomes = Vec::new();
-    while let Some((frame, _)) = outbox.next_frame() {
-        let frame = protocol::RawFrame::parse(&frame).unwrap();
-        if let Some(ServerMessage::Pane(message)) = assembler.server(frame).unwrap()
-            && let PaneEvent::Input { serial, outcome } = message.event
-        {
-            outcomes.push((serial, outcome));
-        }
-    }
-    outcomes
+/// What the client received on its channel: the screen's rows and the Input outcomes.
+#[derive(Default)]
+struct Received {
+    assembler: Assembler,
+    rows: Vec<String>,
+    outcomes: Vec<(u32, InputOutcome)>,
 }
 
-/// Polls until a row of the screen ends with `line`. Output can follow a prompt on its row when
-/// input arrives before the shell prints that prompt, as dash does. `rows` keeps the last screen,
-/// because a poll answers `Unchanged` until the screen changes again.
-fn await_line(served: &mut Served<SharedWorkspaceHost>, rows: &mut Vec<String>, line: &str) {
+impl Received {
+    /// Applies every message the outbox holds and acknowledges each frame.
+    fn drain(&mut self, outbox: &Outbox) {
+        while let Some((frame, _)) = outbox.next_frame() {
+            let frame = protocol::RawFrame::parse(&frame).unwrap();
+            match self.assembler.server(frame).unwrap() {
+                Some(ServerMessage::Frame(frame)) => {
+                    self.apply(&frame.update, frame.base.is_none());
+                    outbox.acknowledge(frame.channel, frame.frame).unwrap();
+                }
+                Some(ServerMessage::Pane(message)) => {
+                    if let PaneEvent::Input { serial, outcome } = message.event {
+                        self.outcomes.push((serial, outcome));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Applies a keyframe, or a delta's `shift` and then its `rows`.
+    fn apply(&mut self, update: &ScreenUpdate, keyframe: bool) {
+        if let Some(geometry) = update.geometry
+            && (keyframe || self.rows.len() != usize::from(geometry.rows))
+        {
+            self.rows = vec![String::new(); usize::from(geometry.rows)];
+        }
+        if let Some(shift) = update.shift {
+            shift.apply(&mut self.rows, String::new).unwrap();
+        }
+        for row in &update.rows {
+            self.rows[usize::from(row.index)] =
+                row.runs.iter().map(|run| run.text.as_str()).collect();
+        }
+    }
+}
+
+/// Publishes until a row of the received screen ends with `line`. Output can follow a prompt on
+/// its row when input arrives before the shell prints that prompt, as dash does.
+fn await_line(
+    served: &mut Served<SharedWorkspaceHost>,
+    outbox: &Outbox,
+    received: &mut Received,
+    line: &str,
+) {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        if let ReplyBody::Interim(InterimReply::Screen(screen)) = reply(
-            served,
-            Operation::Interim(Interim::Poll { channel: CHANNEL }),
-        ) {
-            *rows = super::tests::lines(&screen);
-        }
-        if rows.iter().any(|row| row.trim_end().ends_with(line)) {
+        served.tick(Instant::now());
+        received.drain(outbox);
+        if received
+            .rows
+            .iter()
+            .any(|row| row.trim_end().ends_with(line))
+        {
             return;
         }
         assert!(
             Instant::now() < deadline,
-            "expected {line:?}; screen: {rows:?}"
+            "expected {line:?}; screen: {:?}",
+            received.rows
         );
         std::thread::sleep(Duration::from_millis(10));
     }
@@ -100,6 +133,8 @@ fn control_characters_in_text_input_reach_the_pty_and_unknown_ones_are_refused()
         .unwrap()
         .id;
     let mut served = Served::new(shared);
+    // Terminal Sessions ring this wake; a tick publishes only after a ring.
+    served.ticker(Arc::new(|| {}));
     let outbox = Outbox::new(Arc::new(|| {}));
     served.admitted(&PEER, "Test".into(), outbox.clone());
     let claim = reply(
@@ -120,12 +155,22 @@ fn control_characters_in_text_input_reach_the_pty_and_unknown_ones_are_refused()
         claim,
         ReplyBody::Claim(ClaimReply::Attached { .. })
     ));
+    // A channel starts hidden; showing it pushes the current screen.
+    outbox.view(CHANNEL, true);
+    served.view(
+        &PEER,
+        protocol::View {
+            channel: CHANNEL,
+            visible: true,
+            max_hz: 60,
+        },
+    );
     send(
         &mut served,
         1,
         vec![InputEvent::Focus(FocusTarget::Terminal)],
     );
-    let mut rows = Vec::new();
+    let mut received = Received::default();
     // One message with printable text, a carriage return and more text: both lines run.
     send(
         &mut served,
@@ -135,8 +180,8 @@ fn control_characters_in_text_input_reach_the_pty_and_unknown_ones_are_refused()
             text("\r"),
         ],
     );
-    await_line(&mut served, &mut rows, "CR-one");
-    await_line(&mut served, &mut rows, "CR-two");
+    await_line(&mut served, &outbox, &mut received, "CR-one");
+    await_line(&mut served, &outbox, &mut received, "CR-two");
     // FS (0x1c) has no key. The message is refused as a whole and nothing reaches the PTY.
     send(
         &mut served,
@@ -144,9 +189,9 @@ fn control_characters_in_text_input_reach_the_pty_and_unknown_ones_are_refused()
         vec![text("printf 'FS-%s\\n' typed\u{1c}\r")],
     );
     send(&mut served, 4, vec![text("printf 'CR-%s\\n' three\r")]);
-    await_line(&mut served, &mut rows, "CR-three");
+    await_line(&mut served, &outbox, &mut received, "CR-three");
     assert_eq!(
-        reported(&outbox),
+        received.outcomes,
         [(3, InputOutcome::Discarded(Refusal::Unsupported))],
         "only the refused message is reported"
     );

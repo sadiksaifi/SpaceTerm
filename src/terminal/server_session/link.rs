@@ -1,4 +1,4 @@
-//! The Pane worker's server connection, request sending, polling loop and input.
+//! The Pane worker's server connection, request sending, event-driven loop and input.
 use super::*;
 use spaceterm_server::connection::link::{
     ChannelEvent, ChannelHandle, ChannelSink, LinkError, PendingReply, ServerLink,
@@ -477,7 +477,7 @@ impl ActiveInput {
                     *paste_unconfirmed = true;
                 }
                 // Native async readers must observe the lost epoch before their
-                // outcome is published, even if the UI has not polled status yet.
+                // outcome is published, even if the UI has not read the status yet.
                 state.invalidate();
                 self.finish_paste_request(state, generation);
                 if let Some(reply) = paste_reply {
@@ -651,15 +651,17 @@ fn decode_paste_rejection(rejection: pane::PasteRejection) -> super::super::past
 const PASTE_SETTLES: Duration = Duration::from_secs(10);
 
 /// The Pane worker's connection: its channel on the server's shared link. It maps the worker's
-/// commands onto the channel: claims bind it, input is sent without waiting, and polled
-/// presentation, effects and reading travel as `Operation::Interim` until push and scrollback
-/// replace them. Discarded input is reported by the server and fails the next command, as a
-/// refused exchange did.
+/// commands onto the channel: claims bind it, input is sent without waiting, pushed frames and
+/// Pane events queue for the worker's loop, and reading travels as `Operation::Interim` until
+/// scrollback replaces it. Discarded input is reported by the server and fails the next command,
+/// as a refused exchange did.
 pub(super) struct PaneLink {
     link: ServerLink,
     attachment: Option<spaceterm_server::attachments::AttachmentPermit>,
     channel: Option<(ChannelHandle, Lease)>,
     inbox: Arc<Inbox>,
+    /// The bound channel's pushed frames and Pane events, waiting for the worker.
+    pushed: Option<Arc<super::inbox::Inbox>>,
     notify: Arc<dyn Fn() + Send + Sync>,
 }
 
@@ -690,11 +692,14 @@ impl PaneLink {
             attachment,
             channel: None,
             inbox: Arc::default(),
+            pushed: None,
             notify,
         }
     }
 
-    fn sink(&self) -> Arc<dyn ChannelSink> {
+    /// Input outcomes and the link's end settle here. Frames and every other Pane event queue in
+    /// `pushed` for the worker's loop.
+    fn sink(&self, pushed: Arc<super::inbox::Inbox>) -> Arc<dyn ChannelSink> {
         let inbox = Arc::clone(&self.inbox);
         let notify = Arc::clone(&self.notify);
         Arc::new(move |event: ChannelEvent| {
@@ -717,8 +722,12 @@ impl PaneLink {
                     ChannelEvent::Closed(error) => {
                         received.closed.get_or_insert(error.into());
                     }
-                    // Presentation is polled until push sends frames and Pane events.
-                    ChannelEvent::Frame(_) | ChannelEvent::Pane(_) => return,
+                    event @ (ChannelEvent::Frame(_) | ChannelEvent::Pane(_)) => {
+                        drop(received);
+                        // The inbox wakes the worker.
+                        pushed.deliver(event);
+                        return;
+                    }
                 }
             }
             inbox.ready.notify_all();
@@ -822,7 +831,9 @@ impl PaneLink {
         if let Some((old, _)) = self.channel.take() {
             old.detach();
         }
-        let channel = self.link.open_channel(self.sink())?;
+        self.pushed = None;
+        let pushed = super::inbox::Inbox::new(Arc::clone(&self.notify));
+        let channel = self.link.open_channel(self.sink(Arc::clone(&pushed)))?;
         let reply = Self::wait(channel.claim(
             claim.attachment,
             claim.pane,
@@ -832,6 +843,7 @@ impl PaneLink {
         )?);
         if let Ok(ReplyBody::Claim(ClaimReply::Attached { lease })) = reply {
             self.channel = Some((channel, lease));
+            self.pushed = Some(pushed);
             return Ok(Reply::Attached { lease });
         }
         // The server already closed a channel its claim did not bind, so it needs no Release.
@@ -871,15 +883,38 @@ impl PaneLink {
     /// Runs one worker command.
     pub(super) fn exchange(&mut self, request: &Request) -> Result<Reply, ServerError> {
         let result = self.command(request);
-        // The Terminal Session ended or is gone, so the channel is released and the server frees
-        // its slot.
-        if matches!(
-            result,
-            Ok(Reply::Ended) | Err(ServerError::SessionUnavailable)
-        ) {
-            self.channel = None;
+        // The Terminal Session is gone, so the channel is released and the server frees its slot.
+        if matches!(result, Err(ServerError::SessionUnavailable)) {
+            self.release();
         }
         result
+    }
+
+    /// Releases the channel after its last event or once its Terminal Session is gone.
+    pub(super) fn release(&mut self) {
+        self.channel = None;
+        self.pushed = None;
+    }
+
+    /// Applies every pushed event in order: each frame is applied, then acknowledged, and
+    /// `deliver` receives the newest visible screen once per drain and every Pane event.
+    pub(super) fn drain<A>(
+        &self,
+        applier: &mut A,
+        deliver: impl FnMut(super::inbox::Delivery<A::Screen>),
+    ) -> Result<super::inbox::Flow, ServerError>
+    where
+        A: super::inbox::Apply<Error = ServerError>,
+    {
+        self.reported()?;
+        let (Some((channel, _)), Some(pushed)) = (&self.channel, &self.pushed) else {
+            return Ok(super::inbox::Flow::Open);
+        };
+        pushed.drain(
+            applier,
+            |frame| channel.acknowledge(frame).map_err(ServerError::from),
+            deliver,
+        )
     }
 
     fn command(&mut self, request: &Request) -> Result<Reply, ServerError> {
@@ -896,23 +931,14 @@ impl PaneLink {
                 .and_then(interim_reply)
         };
         match request.clone() {
-            Request::Poll { lease } => interim(Interim::Poll {
-                channel: channel(lease)?,
-            }),
-            Request::PollChanges { lease, base } => interim(Interim::PollChanges {
-                channel: channel(lease)?,
-                base,
-            }),
-            Request::PresentationDemand { lease, visible } => {
-                interim(Interim::PresentationDemand {
-                    channel: channel(lease)?,
-                    visible,
-                })
+            Request::View {
+                lease,
+                visible,
+                max_hz,
+            } => {
+                self.bound(lease)?.view(visible, max_hz)?;
+                Ok(Reply::Unchanged)
             }
-            Request::NativeEffects { lease, generation } => interim(Interim::NativeEffects {
-                channel: channel(lease)?,
-                generation,
-            }),
             Request::Read { lease, operation } => interim(Interim::Read {
                 channel: channel(lease)?,
                 operation,
@@ -1134,25 +1160,12 @@ fn key_batches(keys: Vec<pane::Key>) -> Vec<Vec<InputEvent>> {
     batches
 }
 
-/// The worker's reply for a polled operation's body.
+/// The worker's reply for an interim operation's body.
 fn interim_reply(body: ReplyBody) -> Result<Reply, ServerError> {
     Ok(match body {
         ReplyBody::Done => Reply::Unchanged,
         ReplyBody::Outcome(outcome) => Reply::Outcome(outcome),
         ReplyBody::Interim(reply) => match reply {
-            InterimReply::Screen(screen) => Reply::Screen(screen),
-            InterimReply::Unchanged => Reply::Unchanged,
-            InterimReply::Ended => Reply::Ended,
-            InterimReply::AccessibilityRevision { revision } => {
-                Reply::AccessibilityRevision { revision }
-            }
-            InterimReply::NativeEffects {
-                request,
-                hidden_input,
-            } => Reply::NativeEffects {
-                request,
-                hidden_input,
-            },
             InterimReply::Reading { accepted } => Reply::Reading { accepted },
             InterimReply::ReadingReady {
                 generation,
@@ -1204,7 +1217,10 @@ impl TerminalSessionFactory for DevelopmentServerSessionFactory {
         let (input, receiver) = mpsc::sync_channel(512);
         let (events, output) = async_channel::bounded(2);
         let (accessibility_sender, accessibility) = async_channel::bounded(1);
-        let (effects, clipboard) = ClientEffects::new();
+        let (effects, clipboard) = ClientEffects::new({
+            let state = Arc::clone(&self.state);
+            Arc::new(move || state.wake.notify())
+        });
         let alive = Arc::new(AtomicBool::new(true));
         let measured_size = Arc::new(Mutex::new(pane_size(geometry)));
         self.state
@@ -1222,6 +1238,8 @@ impl TerminalSessionFactory for DevelopmentServerSessionFactory {
             geometry: Mutex::new(geometry),
         };
         let factory = self.clone();
+        // The worker cannot read the displays off the main thread.
+        let max_hz = crate::platform::display_refresh::frame_rate();
         // Ownership follows creation order, however late each worker first runs.
         let reservation = self.control.reserve();
         std::thread::Builder::new()
@@ -1234,7 +1252,7 @@ impl TerminalSessionFactory for DevelopmentServerSessionFactory {
                     (events, accessibility_sender),
                     measured_size,
                     appearance,
-                    effects,
+                    (effects, max_hz),
                 );
             })
             .map_err(TerminalSessionError::from)?;
@@ -1281,7 +1299,7 @@ pub(super) fn present(
     ),
     size: Arc<Mutex<PaneSize>>,
     appearance: Arc<Mutex<TerminalAppearanceUpdate>>,
-    mut effects: ClientEffects,
+    (mut effects, max_hz): (ClientEffects, u8),
 ) {
     let DevelopmentServerSessionFactory {
         server,
@@ -1360,14 +1378,9 @@ pub(super) fn present(
             let mut graphics = graphics::Graphics::default();
             let mut semantic = accessibility::Fetcher::new(lease);
             let mut latest_screen = None;
-            // Protocol major 2 servers take presentation changes and key batches.
-            let changes = true;
-            let batches = true;
+            let mut shown = None;
             let mut screens = ScreenReceiver::new(local_files.as_ref(), remote_metadata.as_ref());
-            let mut cadence = schedule::Cadence::new(
-                std::time::Instant::now(),
-                state.presentable.load(Ordering::Acquire),
-            );
+            let mut demand = inbox::Demand::new(state.presentable.load(Ordering::Acquire), max_hz);
             let attached = (|| loop {
                 if !alive.load(Ordering::Acquire) {
                     return Ok(());
@@ -1378,11 +1391,11 @@ pub(super) fn present(
                 if state.epoch.load(Ordering::Acquire) != epoch {
                     return Err(ServerError::Protocol);
                 }
-                // Queued input is sent before any output check.
+                // Queued input is sent before pushed output is applied.
                 active_input.drain(
                     &state,
                     &input,
-                    batches,
+                    true,
                     &mut |request| {
                         let reply = send(&presenter, &alive, &mut connection, request)?;
                         if let Request::Resize { size, .. } = request {
@@ -1392,122 +1405,143 @@ pub(super) fn present(
                     },
                     &mut paste_unconfirmed,
                 )?;
-                let now = std::time::Instant::now();
-                cadence.set_visible(state.presentable.load(Ordering::Acquire), now);
-                cadence.set_preparation(state.preparation.load(Ordering::Acquire));
-                if changes && let Some(visible) = cadence.take_demand() {
+                demand.set_visible(state.presentable.load(Ordering::Acquire));
+                demand.set_preparation(state.preparation.load(Ordering::Acquire));
+                if let Some((visible, max_hz)) = demand.take_view() {
                     expect_unchanged(send(
                         &presenter,
                         &alive,
                         &mut connection,
-                        &Request::PresentationDemand { lease, visible },
+                        &Request::View {
+                            lease,
+                            visible,
+                            max_hz,
+                        },
                     )?)?;
-                    screens.restart();
                 }
-                let polled = cadence.poll_due(now);
-                if polled {
-                    let base = screens.baseline();
-                    let reply = send(
-                        &presenter,
-                        &alive,
-                        &mut connection,
-                        &Request::PollChanges { lease, base },
-                    )?;
-                    // A reply that completed after a successor claimed the Pane is not published.
+                // Frames are applied and acknowledged as they arrive; the view hears of the
+                // newest visible screen once.
+                let mut delivered = Vec::new();
+                let flow = connection.drain(
+                    &mut screen::Frames {
+                        screens: &mut screens,
+                        epoch,
+                        generation: &mut generation,
+                        active_size,
+                        graphics: &mut graphics,
+                        appearance: &appearance,
+                        semantic: &mut semantic,
+                        shown: &mut shown,
+                    },
+                    |delivery| delivered.push(delivery),
+                )?;
+                let mut presented = false;
+                for delivery in delivered {
+                    // A frame that arrived after a successor claimed the Pane is not published.
                     if !presenter.current() {
                         return Err(ServerError::NotRunning);
                     }
                     if state.epoch.load(Ordering::Acquire) != epoch {
                         return Err(ServerError::Protocol);
                     }
-                    match reply {
-                        Reply::Screen(frame) => 'screen: {
-                            // A frame for a lost baseline is skipped; the next poll asks for a
-                            // keyframe.
-                            let Some((screen, mapping, revision)) = screens.receive(
-                                *frame,
-                                epoch,
-                                &mut generation,
-                                active_size,
-                                &mut graphics,
-                                &appearance,
-                            )?
-                            else {
-                                break 'screen;
-                            };
-                            semantic.note_revision(revision);
-                            if !ready {
-                                // Claims apply their measured controller facts once.
-                                // Reconcile changes made while attachment was in flight.
-                                let current_size = *size.lock().unwrap_or_else(|e| e.into_inner());
-                                let update =
-                                    appearance.lock().unwrap_or_else(|e| e.into_inner()).clone();
-                                if current_size != grant_size {
-                                    expect_unchanged(send(
-                                        &presenter,
-                                        &alive,
-                                        &mut connection,
-                                        &Request::Resize {
-                                            lease,
-                                            size: current_size,
-                                        },
-                                    )?)?;
-                                    active_size = current_size;
+                    let (screen, mapping) = match delivery {
+                        inbox::Delivery::Screen(screen) => screen,
+                        inbox::Delivery::Pane(event) => {
+                            match event {
+                                PaneEvent::Effect(request) => effects.request(
+                                    &state,
+                                    active_input.focus_sent.map(|(generation, _)| generation),
+                                    &events,
+                                    request,
+                                )?,
+                                PaneEvent::HiddenInput(active) => {
+                                    effects.hidden_input(&state, &events, active)?
                                 }
-                                if grant_appearance != Some(update.generation) {
-                                    expect_unchanged(send(
-                                        &presenter,
-                                        &alive,
-                                        &mut connection,
-                                        &Request::Style {
-                                            lease,
-                                            style: encode_style(&update),
-                                        },
-                                    )?)?;
+                                PaneEvent::Accessibility { revision } => {
+                                    semantic.note_revision(revision)
                                 }
-                                state
-                                    .interaction
-                                    .lock()
-                                    .unwrap_or_else(|e| e.into_inner())
-                                    .interactive = true;
-                                state
-                                    .interaction
-                                    .lock()
-                                    .unwrap_or_else(|e| e.into_inner())
-                                    .reading = true;
-                                // Publish the authorized screen first. Input stays queued
-                                // until this worker's focus barrier is acknowledged.
-                                ready = true;
+                                PaneEvent::Ended => {
+                                    connection.release();
+                                    state.set(DevelopmentPaneStatus::Ended);
+                                    let _ = events.force_send(TerminalSessionEvent::Exited(
+                                        TerminalSessionExit::Success,
+                                    ));
+                                    return Ok(());
+                                }
+                                // Another lease holds the Pane now; a new claim says how.
+                                PaneEvent::SessionEnded | PaneEvent::Takeover(_) => {
+                                    return Err(ServerError::StaleControl);
+                                }
+                                PaneEvent::DirectoryUnavailable => {
+                                    return Err(ServerError::DirectoryUnavailable);
+                                }
+                                PaneEvent::Failed => return Err(ServerError::StartupFailed),
+                                // The link settles input outcomes before they reach the inbox.
+                                PaneEvent::Input { .. } => {}
                             }
-                            state.connected(epoch, mapping, paste_unconfirmed)?;
-                            reader.screen(&state, mapping, screen.selection_present);
-                            latest_screen = Some((Arc::clone(&screen), mapping));
-                            let _ = events.force_send(TerminalSessionEvent::Screen(screen));
-                            if let Some(model) = semantic.rebind(&state, generation) {
-                                let _ = semantics.force_send(model);
-                            }
-                            takeover = false;
-                            if paste_unconfirmed {
-                                paste_unconfirmed = false;
-                                let _ = events.force_send(TerminalSessionEvent::PasteUnconfirmed);
-                            }
+                            continue;
                         }
-                        Reply::Ended => {
-                            state.set(DevelopmentPaneStatus::Ended);
-                            let _ = events.force_send(TerminalSessionEvent::Exited(
-                                TerminalSessionExit::Success,
-                            ));
-                            return Ok(());
+                    };
+                    presented = true;
+                    if !ready {
+                        // Claims apply their measured controller facts once.
+                        // Reconcile changes made while attachment was in flight.
+                        let current_size = *size.lock().unwrap_or_else(|e| e.into_inner());
+                        let update = appearance.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                        if current_size != grant_size {
+                            expect_unchanged(send(
+                                &presenter,
+                                &alive,
+                                &mut connection,
+                                &Request::Resize {
+                                    lease,
+                                    size: current_size,
+                                },
+                            )?)?;
+                            active_size = current_size;
                         }
-                        Reply::Unchanged => {}
-                        Reply::AccessibilityRevision { revision } => {
-                            semantic.note_revision(revision)
+                        if grant_appearance != Some(update.generation) {
+                            expect_unchanged(send(
+                                &presenter,
+                                &alive,
+                                &mut connection,
+                                &Request::Style {
+                                    lease,
+                                    style: encode_style(&update),
+                                },
+                            )?)?;
                         }
-                        _ => return Err(ServerError::Protocol),
+                        {
+                            let mut interaction =
+                                state.interaction.lock().unwrap_or_else(|e| e.into_inner());
+                            interaction.interactive = true;
+                            interaction.reading = true;
+                        }
+                        // Publish the authorized screen first. Input stays queued until this
+                        // worker's focus barrier is acknowledged.
+                        ready = true;
                     }
+                    state.connected(epoch, mapping, paste_unconfirmed)?;
+                    reader.screen(&state, mapping, screen.selection_present);
+                    latest_screen = Some((Arc::clone(&screen), mapping));
+                    let _ = events.force_send(TerminalSessionEvent::Screen(screen));
+                    if let Some(model) = semantic.rebind(&state, generation) {
+                        let _ = semantics.force_send(model);
+                    }
+                    takeover = false;
+                    if paste_unconfirmed {
+                        paste_unconfirmed = false;
+                        let _ = events.force_send(TerminalSessionEvent::PasteUnconfirmed);
+                    }
+                }
+                if flow == inbox::Flow::Ended {
+                    return Err(ServerError::Protocol);
                 }
                 if ready {
                     active_input.sync_focus(&state, &mut |request| {
+                        send(&presenter, &alive, &mut connection, request)
+                    })?;
+                    effects.complete(&state, lease, &mut |request| {
                         send(&presenter, &alive, &mut connection, request)
                     })?;
                 }
@@ -1519,22 +1553,16 @@ pub(super) fn present(
                     let mut reading = state.reading.lock().unwrap_or_else(|e| e.into_inner());
                     reading.publish_ready(&events);
                 }
-                if polled
-                    && ready
-                    && let Some((generation, _)) = active_input.focus_sent
-                {
-                    effects.poll(&state, lease, generation, &events, &mut |request| {
-                        send(&presenter, &alive, &mut connection, request)
-                    })?;
-                }
-                // A hidden Pane transfers no images.
-                if polled && cadence.visible() && ready {
+                // A hidden Pane transfers no images. Every image the manifest names is fetched,
+                // one chunk per turn, whether or not a newer frame arrives.
+                if ready && demand.visible() && (presented || graphics.wants()) {
                     let result = graphics.poll(lease, &mut |request| {
                         send(&presenter, &alive, &mut connection, request)
                     })?;
                     if state.epoch.load(Ordering::Acquire) != epoch {
                         return Err(ServerError::Protocol);
                     }
+                    let completed = matches!(result, Ok(true));
                     let changed = match result {
                         Ok(changed) => changed,
                         Err(error) => graphics.failure(error),
@@ -1555,10 +1583,15 @@ pub(super) fn present(
                             let _ = semantics.force_send(model);
                         }
                     }
+                    // A failed image waits for the next turn; a finished one goes on at once.
+                    if graphics.transferring() || (completed && graphics.wants()) {
+                        next = next.max(reading::Next::Continue);
+                    }
                 }
                 // Semantic transfer follows its own explicit demand, even while hidden, and a
-                // partial document continues one chunk per turn.
-                if (polled || semantic.can_continue()) && ready {
+                // partial document continues one chunk per turn. It sends nothing while the
+                // client holds the server's revision.
+                if ready {
                     let model = semantic.poll(&state, generation, &mut |request| {
                         send(&presenter, &alive, &mut connection, request)
                     })?;
@@ -1572,27 +1605,30 @@ pub(super) fn present(
                 if semantic.can_continue() {
                     next = next.max(reading::Next::Continue);
                 }
-                if polled && ready {
-                    // A complete healthy round renews recovery even when its screen is unchanged.
+                if ready {
+                    // Each turn on a live channel renews recovery once it stays healthy.
                     state
                         .connection_recovery
                         .lock()
                         .unwrap_or_else(|e| e.into_inner())
                         .connected(std::time::Instant::now());
                 }
-                let now = std::time::Instant::now();
+                // The worker waits for pushed events, input or a view change. Only reading work
+                // the server is still applying has a deadline.
                 match next {
-                    reading::Next::Idle => state.wake.wait_until(cadence.deadline()),
-                    reading::Next::Recheck => state.wake.wait_until(cadence.recheck_deadline(now)),
+                    // A screen that reading work produced is pushed and wakes the worker.
+                    reading::Next::Idle | reading::Next::Refresh => state.wake.wait(None),
+                    reading::Next::Recheck => state
+                        .wake
+                        .wait(Some(std::time::Instant::now() + inbox::READING_RECHECK)),
                     reading::Next::Continue => {}
-                    reading::Next::Refresh => cadence.poll_now(now),
                 }
             })();
             if alive.load(Ordering::Acquire) {
                 return attached;
             }
             // Dismissal, even mid-exchange, unfocuses the Pane in order; its control remains.
-            presenter.retire(lease, changes, |request| connection.exchange(request));
+            presenter.retire(lease, |request| connection.exchange(request));
             Ok(())
         })();
         match connected {
@@ -1632,11 +1668,11 @@ pub(super) fn present(
                     if retryable && now >= backoff {
                         break;
                     }
-                    state.wake.wait_until(if retryable {
+                    state.wake.wait(Some(if retryable {
                         backoff
                     } else {
                         now + Duration::from_secs(1)
-                    });
+                    }));
                 }
             }
         }
@@ -1852,14 +1888,11 @@ mod tests {
         let wait = |host: &mut crate::runtime::SharedWorkspaceHost, marker: Option<&str>| {
             let deadline = std::time::Instant::now() + Duration::from_secs(10);
             loop {
-                if let Reply::Screen(screen) =
-                    host.request([1; 32], [1; 32], Request::Poll { lease })
-                    && crate::terminal::server_session::screen_decoder::keyframe_lines(&screen)
-                        .iter()
-                        .any(|line| {
-                            marker
-                                .map_or(!line.trim().is_empty(), |marker| line.trim_end() == marker)
-                        })
+                if crate::terminal::server_session::screen_decoder::observed_lines(host, lease)
+                    .iter()
+                    .any(|line| {
+                        marker.map_or(!line.trim().is_empty(), |marker| line.trim_end() == marker)
+                    })
                 {
                     break;
                 }

@@ -406,6 +406,12 @@ impl ServerConnection {
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         Ok(link)
     }
+    /// Makes `link`, already admitted, this handle's shared connection while it stays live. Tests
+    /// use it to serve a handle in process, without a socket.
+    #[cfg(feature = "test-support")]
+    pub fn adopt(&self, link: ServerLink) {
+        *self.shared.link.lock().unwrap_or_else(|e| e.into_inner()) = Some(link);
+    }
     /// Identifies the shared link: it changes each time [`Self::link`] connects a new one. Facts
     /// read over an older link may describe a server that has since restarted.
     pub fn link_generation(&self) -> u64 {

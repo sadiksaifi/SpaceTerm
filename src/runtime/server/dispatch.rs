@@ -1,5 +1,8 @@
 //! Request dispatch, and the connection-facing service boundary of the Development host.
+use super::publish::{Observed, Publication};
 use super::*;
+use crate::terminal::session::SubscriptionNotifier;
+use spaceterm_server::connection::Wake;
 use spaceterm_server::connection::outbox::Outbox;
 use spaceterm_server::connection::service::{Dispatch, PaneService as ConnectionService, Peer};
 use spaceterm_server::protocol::{
@@ -16,10 +19,6 @@ impl DevelopmentPaneHost {
         connection: [u8; 32],
         request: Request,
     ) -> Result<Reply, Refusal> {
-        let (request, changes) = match request {
-            Request::PollChanges { lease, base } => (Request::Poll { lease }, Some(base)),
-            request => (request, None),
-        };
         self.recover()?;
         self.retain_directory()?;
         if let Request::DirectoryRead(request) = request {
@@ -113,12 +112,6 @@ impl DevelopmentPaneHost {
             self.shutdown().map_err(|_| Refusal::CleanupUnresolved)?;
             return Ok(Reply::Closed);
         }
-        if let Request::Poll { lease } = &request
-            && self.pane.is_none()
-            && self.failed_directory_session == Some((*lease).into())
-        {
-            return Err(Refusal::DirectoryUnavailable);
-        }
         // The protocol bounds an Input message too. Check before decoding or dispatching any
         // key, including malformed later events in a batch.
         if let Request::Keys { keys, .. } = &request
@@ -135,10 +128,7 @@ impl DevelopmentPaneHost {
             | Request::ReadingStatus { lease }
             | Request::GraphicsChunk { lease, .. }
             | Request::SelectionChunk { lease, .. } => lease,
-            Request::Poll { lease }
-            | Request::PresentationDemand { lease, .. }
-            | Request::NativeEffects { lease, .. }
-            | Request::CompleteClipboard { lease, .. }
+            Request::CompleteClipboard { lease, .. }
             | Request::Focus { lease, .. }
             | Request::Input { lease, .. }
             | Request::Keys { lease, .. }
@@ -158,15 +148,7 @@ impl DevelopmentPaneHost {
             return Err(Refusal::Stale);
         }
         pane.drain();
-        if matches!(request, Request::Poll { .. }) && pane.directory_failed {
-            self.retire_exited()?;
-            return Err(Refusal::DirectoryUnavailable);
-        }
         match request {
-            Request::PresentationDemand { visible, .. } => {
-                pane.presentation_demand(visible);
-                Ok(Reply::Unchanged)
-            }
             Request::EndAccessibilityDemand { .. } => {
                 pane.runtime.end_server_accessibility_demand();
                 Ok(Reply::Unchanged)
@@ -225,15 +207,6 @@ impl DevelopmentPaneHost {
                 }
                 pane.reading.chunk(generation, offset)
             }
-            Request::NativeEffects { generation, .. } => {
-                if generation == 0 || generation != pane.focus_generation {
-                    return Err(Refusal::Stale);
-                }
-                Ok(Reply::NativeEffects {
-                    request: pane.effects.next(generation),
-                    hidden_input: pane.subscription.hidden_input(),
-                })
-            }
             Request::CompleteClipboard {
                 generation,
                 id,
@@ -245,25 +218,6 @@ impl DevelopmentPaneHost {
                 }
                 pane.effects.complete(id, completion);
                 Ok(Reply::Unchanged)
-            }
-            Request::Poll { .. } => {
-                if let Some(frame) = pane.screen_frame(changes) {
-                    return Ok(frame);
-                }
-                if pane.failed {
-                    return Err(Refusal::Failed);
-                }
-                if pane.ended {
-                    self.retire_exited()?;
-                    self.pane = None;
-                    Ok(Reply::Ended)
-                } else {
-                    if let Some(revision) = pane.accessibility.take_changed_revision() {
-                        Ok(Reply::AccessibilityRevision { revision })
-                    } else {
-                        Ok(Reply::Unchanged)
-                    }
-                }
             }
             Request::Key { key, .. } => {
                 if pane.focus_generation != 0 {
@@ -375,6 +329,18 @@ impl HostCommands for DevelopmentPaneHost {
             pane.connected = false;
         }
     }
+    fn set_notifier(&mut self, notifier: SubscriptionNotifier) {
+        self.notifier = Some(notifier);
+    }
+    fn observe(&mut self, device: [u8; 32], lease: &Lease) -> Observed {
+        DevelopmentPaneHost::observe(self, device, lease)
+    }
+    fn view(&mut self, lease: &Lease, visible: bool, max_hz: u8) {
+        DevelopmentPaneHost::view(self, lease, visible, max_hz);
+    }
+    fn input_written(&mut self, lease: &Lease, serial: u32) {
+        DevelopmentPaneHost::input_written(self, lease, serial);
+    }
     fn disconnected(&mut self, connection: [u8; 32]) {
         self.directories.cancel_connection(connection);
         if let Some(pane) = &mut self.pane
@@ -465,25 +431,58 @@ pub trait HostCommands: Send {
     /// The connection's channel bound to `lease` is gone, as if the connection had ended for that
     /// Pane: its input state resets and the next claim starts afresh.
     fn unbound(&mut self, _connection: [u8; 32], _lease: &Lease) {}
+    /// Every Terminal Session started from now on calls `notifier` when it has something to
+    /// publish.
+    fn set_notifier(&mut self, _notifier: SubscriptionNotifier) {}
+    /// Drains the Pane `lease` controls for the channel bound to it, which `device` claimed.
+    fn observe(&mut self, device: [u8; 32], lease: &Lease) -> Observed;
+    /// Applies a client `View` to the Pane `lease` controls.
+    fn view(&mut self, lease: &Lease, visible: bool, max_hz: u8);
+    /// Marks the end of Input `serial`, so screens captured once its bytes reach the PTY carry it.
+    fn input_written(&mut self, lease: &Lease, serial: u32);
     fn disconnected(&mut self, connection: [u8; 32]);
     fn shutdown(&mut self) -> Result<(), ServerError>;
 }
 
 /// How soon a host's timed work runs again while it waits on another thread: a journal or Git
-/// write, a directory read, or a live terminal whose metadata and exit the tick observes.
+/// write, or a directory read. A live terminal rings the host's wake instead.
 pub(super) const TICK: Duration = Duration::from_millis(10);
 
 /// A host served over SpaceTerm Protocol connections. It binds each claimed channel to its lease,
-/// opens and closes the channel in the connection's outbox, and turns input into host commands.
-/// Polled presentation, inventory and reading travel as `Operation::Interim` until push,
-/// control-plane and scrollback replace them.
+/// opens and closes the channel in the connection's outbox, turns input into host commands, and
+/// pushes each bound Pane's presentation when the host's wake or a client `View` calls for it.
+/// Inventory and reading travel as `Operation::Interim` until control-plane and scrollback
+/// replace them.
 pub struct Served<H> {
     host: H,
     connections: BTreeMap<[u8; 32], Connection>,
+    /// Rung when a Terminal Session has something to publish, or a request may have ended
+    /// another channel's binding. Only a tick after a ring publishes.
+    bell: Arc<Bell>,
     /// Reads whose replies wait for the host to finish them.
     reads: Vec<PendingRead>,
     /// The host's wake, so a new read is checked on the next tick.
     ticker: Option<Arc<dyn spaceterm_server::connection::Wake>>,
+}
+
+/// Records a ring for the next tick and wakes the host to run it.
+#[derive(Default)]
+struct Bell {
+    rung: std::sync::atomic::AtomicBool,
+    wake: std::sync::OnceLock<Arc<dyn Wake>>,
+}
+
+impl Bell {
+    fn ring(&self) {
+        self.rung.store(true, std::sync::atomic::Ordering::Release);
+        if let Some(wake) = self.wake.get() {
+            wake.wake();
+        }
+    }
+
+    fn take(&self) -> bool {
+        self.rung.swap(false, std::sync::atomic::Ordering::AcqRel)
+    }
 }
 
 /// A directory or Worktree read, or a directory creation, still running on the host.
@@ -552,6 +551,7 @@ struct Bound {
     pane: [u8; 32],
     lease: Lease,
     paste: Option<PendingPaste>,
+    publication: Publication,
 }
 
 /// The chunks of one paste received so far. Nothing reaches the PTY before its last chunk.
@@ -570,6 +570,39 @@ impl<H: HostCommands> Served<H> {
             connections: BTreeMap::new(),
             reads: Vec::new(),
             ticker: None,
+            bell: Arc::default(),
+        }
+    }
+
+    /// Pushes what changed for one bound channel, and forgets the binding once it ended.
+    fn publish(&mut self, connection: [u8; 32], channel: Channel) {
+        let Some(bound) = self.connections.get(&connection) else {
+            return;
+        };
+        let client = bound.client;
+        let Some(lease) = bound.channels.get(&channel).map(|bound| bound.lease) else {
+            return;
+        };
+        let observed = self.host.observe(client, &lease);
+        let Some(connection) = self.connections.get_mut(&connection) else {
+            return;
+        };
+        if let Some(bound) = connection.channels.get_mut(&channel)
+            && !bound.publication.publish(observed)
+        {
+            connection.channels.remove(&channel);
+        }
+    }
+
+    /// Pushes what changed for every bound channel.
+    fn publish_all(&mut self) {
+        let bound: Vec<_> = self
+            .connections
+            .iter()
+            .flat_map(|(id, connection)| connection.channels.keys().map(|channel| (*id, *channel)))
+            .collect();
+        for (connection, channel) in bound {
+            self.publish(connection, channel);
         }
     }
 
@@ -605,9 +638,11 @@ impl<H: HostCommands> Served<H> {
     /// Replies to each read that settled.
     fn answer_reads(&mut self) {
         for read in std::mem::take(&mut self.reads) {
-            let reply = self
-                .host
-                .request(self.peer_of(read.connection), read.connection, read.kind.poll(read.host));
+            let reply = self.host.request(
+                self.peer_of(read.connection),
+                read.connection,
+                read.kind.poll(read.host),
+            );
             match ReadAnswer::of(reply) {
                 ReadAnswer::Running(_) => self.reads.push(read),
                 ReadAnswer::Settled(result) => {
@@ -643,32 +678,38 @@ impl<H: HostCommands> Served<H> {
         &mut self,
         peer: &Peer,
         channel: Channel,
-        interim: bool,
         request: impl FnOnce(Lease) -> Request,
     ) -> Result<ReplyBody, Refusal> {
         let lease = self.lease(peer, channel)?;
-        let result = body(self.command(peer, request(lease)), interim);
-        // A Session that ended, or a lease the host no longer knows, frees the channel.
-        if matches!(result, Ok(ReplyBody::Interim(InterimReply::Ended)))
-            || !self.host.lease_live(&lease)
-        {
+        let result = body(self.command(peer, request(lease)));
+        // A lease the host no longer knows frees the channel.
+        if !self.host.lease_live(&lease) {
             self.unbind(peer, channel);
         }
         result
     }
 
-    /// Closes every channel whose lease the host no longer knows: a Session that ended and
-    /// reported it, a closed Pane, End All Sessions, or control another client took.
+    /// Ends every channel whose lease the host no longer knows: a Session that ended, a closed
+    /// Pane, End All Sessions, or control another client took. Each receives its last event, so
+    /// timed work that retired a Pane never closes a channel silently.
     fn sweep(&mut self) {
-        for connection in self.connections.values_mut() {
-            let dead: Vec<_> = connection
-                .channels
-                .iter()
-                .filter(|(_, bound)| !self.host.lease_live(&bound.lease))
-                .map(|(channel, _)| *channel)
-                .collect();
-            for channel in dead {
-                connection.channels.remove(&channel);
+        let dead: Vec<_> = self
+            .connections
+            .iter()
+            .flat_map(|(id, connection)| {
+                connection
+                    .channels
+                    .iter()
+                    .filter(|(_, bound)| !self.host.lease_live(&bound.lease))
+                    .map(move |(channel, _)| (*id, *channel))
+            })
+            .collect();
+        for (connection, channel) in dead {
+            self.publish(connection, channel);
+            // A host that still answers `Live` for a lease it no longer knows is not trusted.
+            if let Some(connection) = self.connections.get_mut(&connection)
+                && connection.channels.remove(&channel).is_some()
+            {
                 connection.outbox.close(channel);
             }
         }
@@ -711,10 +752,10 @@ impl<H: HostCommands> Served<H> {
                 style: claim.style,
             },
         );
-        let result = body(reply, false);
+        let result = body(reply);
         match &result {
             Ok(ReplyBody::Claim(ClaimReply::Attached { lease })) => {
-                self.bind(peer, channel, pane, *lease)?
+                self.bind(peer, channel, pane, *lease)?;
             }
             // A claim that ends without binding leaves the channel closed.
             _ => {
@@ -749,18 +790,20 @@ impl<H: HostCommands> Served<H> {
             connection.channels.remove(&old);
             connection.outbox.close(old);
         }
-        connection
-            .outbox
-            .open(channel)
-            .map_err(|_| Refusal::Capacity)?;
+        let publication =
+            Publication::bind(&connection.outbox, channel).map_err(|_| Refusal::Capacity)?;
         connection.channels.insert(
             channel,
             Bound {
                 pane,
                 lease,
                 paste: None,
+                publication,
             },
         );
+        // The Terminal Session publishes nothing until the client's first `View` shows it.
+        self.host
+            .view(&lease, false, crate::terminal::session::DEFAULT_FRAME_RATE);
         Ok(())
     }
 
@@ -784,8 +827,21 @@ impl<H: HostCommands> Served<H> {
     /// first refusal discards that event and every later one, and aborts a paste in progress.
     fn input_message(&mut self, peer: &Peer, input: protocol::Input) {
         let (channel, serial) = (input.channel, input.serial);
-        if let Some(outcome) = self.apply(peer, input) {
+        let outcome = self.apply(peer, input);
+        // A paste waiting for later chunks or for confirmation has written nothing yet, so its
+        // serial waits for the message that writes it. Even a discarded message may have applied
+        // the events before its refusal.
+        let waiting = matches!(
+            outcome,
+            Some(InputOutcome::Paste(PasteOutcome::ConfirmationRequired(_)))
+        ) || self
+            .bound(peer, channel)
+            .is_some_and(|bound| bound.paste.is_some());
+        if let Some(outcome) = outcome {
             self.report(peer, channel, serial, outcome);
+        }
+        if !waiting && let Ok(lease) = self.lease(peer, channel) {
+            self.host.input_written(&lease, serial);
         }
     }
 
@@ -816,17 +872,14 @@ impl<H: HostCommands> Served<H> {
                 input,
             };
             let result = match event {
-                InputEvent::Focus(target) => body(
-                    self.command(
-                        peer,
-                        Request::Focus {
-                            lease,
-                            generation,
-                            target,
-                        },
-                    ),
-                    false,
-                ),
+                InputEvent::Focus(target) => body(self.command(
+                    peer,
+                    Request::Focus {
+                        lease,
+                        generation,
+                        target,
+                    },
+                )),
                 InputEvent::Key(key) => {
                     let mut keys = vec![key];
                     while let Some(InputEvent::Key(_)) = events.peek() {
@@ -834,32 +887,26 @@ impl<H: HostCommands> Served<H> {
                             keys.push(key);
                         }
                     }
-                    body(
-                        self.command(
-                            peer,
-                            Request::Keys {
-                                lease,
-                                generation,
-                                keys,
-                            },
-                        ),
-                        false,
-                    )
+                    body(self.command(
+                        peer,
+                        Request::Keys {
+                            lease,
+                            generation,
+                            keys,
+                        },
+                    ))
                 }
-                InputEvent::Pointer(pointer) => body(
-                    self.command(peer, request(InteractiveInput::Pointer(pointer))),
-                    false,
-                ),
-                InputEvent::Wheel(wheel) => body(
-                    self.command(peer, request(InteractiveInput::Wheel(wheel))),
-                    false,
-                ),
-                InputEvent::CopyOrForward { modifiers } => body(
-                    self.command(peer, request(InteractiveInput::CopyOrForward { modifiers })),
-                    false,
-                ),
+                InputEvent::Pointer(pointer) => {
+                    body(self.command(peer, request(InteractiveInput::Pointer(pointer))))
+                }
+                InputEvent::Wheel(wheel) => {
+                    body(self.command(peer, request(InteractiveInput::Wheel(wheel))))
+                }
+                InputEvent::CopyOrForward { modifiers } => {
+                    body(self.command(peer, request(InteractiveInput::CopyOrForward { modifiers })))
+                }
                 InputEvent::Resize(size) => {
-                    body(self.command(peer, Request::Resize { lease, size }), false)
+                    body(self.command(peer, Request::Resize { lease, size }))
                 }
                 InputEvent::ResolvePaste { id, confirm } => {
                     match self.command(
@@ -870,7 +917,7 @@ impl<H: HostCommands> Served<H> {
                             outcome = Some(InputOutcome::Paste(settled));
                             Ok(ReplyBody::Done)
                         }
-                        reply => body(reply, false),
+                        reply => body(reply),
                     }
                 }
                 InputEvent::Paste { text, last } => {
@@ -954,25 +1001,23 @@ impl<H: HostCommands> Served<H> {
     }
 }
 
-/// The bytes `reply` takes on the wire as the reply to a polled operation, or `None` when it
+/// The bytes `reply` takes on the wire as a reply, or `None` when it
 /// exceeds the protocol's bounds.
 #[cfg(test)]
 pub(super) fn wire_bytes(reply: Reply) -> Option<usize> {
     let message = protocol::ServerMessage::Reply(Box::new(protocol::Reply {
         id: RequestId(1),
-        result: body(reply, true),
+        result: body(reply),
     }));
     protocol::frame::encode_server(&message)
         .ok()
         .map(|wire| wire.bytes())
 }
 
-/// The protocol reply to a host command. `interim` keeps `Unchanged` distinct for polled
-/// operations, which the client still interprets.
-fn body(reply: Reply, interim: bool) -> Result<ReplyBody, Refusal> {
+/// The protocol reply to a host command.
+fn body(reply: Reply) -> Result<ReplyBody, Refusal> {
     Ok(match reply {
         Reply::Refused(refusal) => return Err(refusal),
-        Reply::Unchanged if interim => ReplyBody::Interim(InterimReply::Unchanged),
         Reply::Unchanged | Reply::Closed => ReplyBody::Done,
         Reply::Attached { lease } => ReplyBody::Claim(ClaimReply::Attached { lease }),
         Reply::Takeover {
@@ -1011,18 +1056,6 @@ fn body(reply: Reply, interim: bool) -> Result<ReplyBody, Refusal> {
             return Err(Refusal::Failed);
         }
         Reply::MutationPending | Reply::Inventory { .. } => return Err(Refusal::Failed),
-        Reply::Screen(screen) => ReplyBody::Interim(InterimReply::Screen(screen)),
-        Reply::Ended => ReplyBody::Interim(InterimReply::Ended),
-        Reply::AccessibilityRevision { revision } => {
-            ReplyBody::Interim(InterimReply::AccessibilityRevision { revision })
-        }
-        Reply::NativeEffects {
-            request,
-            hidden_input,
-        } => ReplyBody::Interim(InterimReply::NativeEffects {
-            request,
-            hidden_input,
-        }),
         Reply::Reading { accepted } => ReplyBody::Interim(InterimReply::Reading { accepted }),
         Reply::ReadingReady {
             generation,
@@ -1067,120 +1100,30 @@ impl<H: HostCommands> ConnectionService for Served<H> {
     }
     fn revoked(&mut self, client: [u8; 32]) {
         self.host.revoked(client);
+        self.bell.ring();
     }
     fn request(&mut self, peer: &Peer, id: RequestId, operation: Operation) -> Dispatch {
-        Dispatch::reply(match operation {
-            Operation::Claim(claim) => self.claim(peer, claim),
-            Operation::ReleaseAttachment { attachment } => body(
-                self.command(peer, Request::ReleaseAttachment { attachment }),
-                false,
-            ),
-            Operation::Release { channel } => {
-                let result =
-                    self.on_channel(peer, channel, false, |lease| Request::Release { lease });
-                self.unbind(peer, channel);
-                result
-            }
-            Operation::Close { channel } => {
-                let result =
-                    self.on_channel(peer, channel, false, |lease| Request::Close { lease });
-                if result.is_ok() {
-                    self.unbind(peer, channel);
-                }
-                result
-            }
-            Operation::ClearScrollback { channel } => {
-                self.on_channel(peer, channel, false, |lease| {
-                    Request::ClearScreenAndScrollback { lease }
-                })
-            }
-            Operation::Style { channel, style } => self.on_channel(peer, channel, false, |lease| {
-                Request::Style { lease, style }
-            }),
-            Operation::Mutate { sequence, mutation } => {
-                return self.host.mutate(
-                    peer.client,
-                    peer.connection,
-                    id,
-                    sequence,
-                    Some(mutation),
-                );
-            }
-            Operation::Resolve { sequence } => {
-                return self
-                    .host
-                    .mutate(peer.client, peer.connection, id, sequence, None);
-            }
-            Operation::Graphics {
-                channel,
-                image,
-                offset,
-            } => self.on_channel(peer, channel, false, |lease| Request::GraphicsChunk {
-                lease,
-                image,
-                offset: offset as usize,
-            }),
-            Operation::Accessibility {
-                channel,
-                revision,
-                offset,
-                base,
-            } => self.on_channel(peer, channel, false, |lease| Request::Accessibility {
-                lease,
-                revision,
-                offset: offset as usize,
-                base,
-            }),
-            Operation::AccessibilitySelection {
-                channel,
-                focus_generation,
-                selection,
-            } => self.on_channel(peer, channel, false, |lease| {
-                Request::AccessibilitySelection {
-                    lease,
-                    focus_generation,
-                    selection,
-                }
-            }),
-            Operation::EndAccessibility { channel } => {
-                self.on_channel(peer, channel, false, |lease| {
-                    Request::EndAccessibilityDemand { lease }
-                })
-            }
-            Operation::DirectoryRead(operation) => {
-                let request = Request::DirectoryRead(pane::directories::Request::Begin {
-                    id: u64::from(id.0),
-                    operation,
-                });
-                return self.read(peer, id, ReadKind::Directory, request);
-            }
-            Operation::DirectoryCreate(creation) => {
-                let request = Request::DirectoryCreate(pane::directories::CreationRequest::Begin {
-                    id: u64::from(id.0),
-                    path: creation.path,
-                });
-                return self.read(peer, id, ReadKind::Creation, request);
-            }
-            // Polling is the server's own business.
-            Operation::WorktreeRead(spaceterm_server::worktree::Read::Poll { .. }) => {
-                Err(Refusal::Unsupported)
-            }
-            Operation::WorktreeRead(read) => {
-                return self.read(peer, id, ReadKind::Worktree, Request::WorktreeRead(read));
-            }
-            Operation::Shutdown => body(self.command(peer, Request::Shutdown), false),
-            Operation::Interim(interim) => self.interim(peer, interim),
-            // Scrollback pages arrive with the client Scrollback cache. Direct-network
-            // administration never reaches the service.
-            Operation::ScrollbackPage { .. } | Operation::Direct(_) => Err(Refusal::Unsupported),
-        })
+        let dispatch = self.dispatch(peer, id, operation);
+        // A claim, close, release or edit may have ended another channel's binding.
+        self.bell.ring();
+        dispatch
     }
     fn input(&mut self, peer: &Peer, input: protocol::Input) {
         self.input_message(peer, input);
     }
-    /// Presentation is still polled through `Interim::PresentationDemand`. Push publishes on view
-    /// changes.
-    fn view(&mut self, _peer: &Peer, _view: protocol::View) {}
+    /// The connection already applied `view` to the outbox. A revealed channel receives the
+    /// current screen again.
+    fn view(&mut self, peer: &Peer, view: protocol::View) {
+        let Some(bound) = self.bound(peer, view.channel) else {
+            return;
+        };
+        bound.publication.view(view.visible);
+        let lease = bound.lease;
+        self.host.view(&lease, view.visible, view.max_hz);
+        if view.visible {
+            self.publish(peer.connection, view.channel);
+        }
+    }
     fn effect_done(&mut self, peer: &Peer, done: protocol::EffectDone) {
         if let Ok(lease) = self.lease(peer, done.channel) {
             self.command(
@@ -1197,11 +1140,22 @@ impl<H: HostCommands> ConnectionService for Served<H> {
     fn acknowledge(&mut self, peer: &Peer, sequence: u64) {
         self.host.acknowledge(peer.client, sequence);
     }
-    fn ticker(&mut self, wake: Arc<dyn spaceterm_server::connection::Wake>) {
+    /// Terminal Sessions ring the bell, which wakes the host to tick and publish.
+    fn ticker(&mut self, wake: Arc<dyn Wake>) {
+        let _ = self.bell.wake.set(Arc::clone(&wake));
+        let bell = Arc::clone(&self.bell);
+        self.host.set_notifier(Arc::new(move || bell.ring()));
         self.ticker = Some(Arc::clone(&wake));
         self.host.ticker(wake);
     }
+    /// Pushes what every bound Pane published when the bell rang, then runs the host's timed
+    /// work when it is due. A host deadline alone publishes nothing.
     fn tick(&mut self, now: std::time::Instant) -> Option<std::time::Instant> {
+        // Publication ends each channel whose Pane is gone with its last event, and hands an
+        // ended shell's final screen over before the host's timed work retires its Pane.
+        if self.bell.take() {
+            self.publish_all();
+        }
         let host = self.host.tick(now);
         self.sweep();
         self.answer_reads();
@@ -1260,41 +1214,119 @@ impl<H: HostCommands> ConnectionService for Served<H> {
 }
 
 impl<H: HostCommands> Served<H> {
+    /// Answers one request.
+    fn dispatch(&mut self, peer: &Peer, id: RequestId, operation: Operation) -> Dispatch {
+        Dispatch::reply(match operation {
+            Operation::Claim(claim) => self.claim(peer, claim),
+            Operation::ReleaseAttachment { attachment } => {
+                body(self.command(peer, Request::ReleaseAttachment { attachment }))
+            }
+            Operation::Release { channel } => {
+                let result = self.on_channel(peer, channel, |lease| Request::Release { lease });
+                self.unbind(peer, channel);
+                result
+            }
+            Operation::Close { channel } => {
+                let result = self.on_channel(peer, channel, |lease| Request::Close { lease });
+                if result.is_ok() {
+                    self.unbind(peer, channel);
+                }
+                result
+            }
+            Operation::ClearScrollback { channel } => self.on_channel(peer, channel, |lease| {
+                Request::ClearScreenAndScrollback { lease }
+            }),
+            Operation::Style { channel, style } => {
+                self.on_channel(peer, channel, |lease| Request::Style { lease, style })
+            }
+            Operation::Mutate { sequence, mutation } => {
+                return self.host.mutate(
+                    peer.client,
+                    peer.connection,
+                    id,
+                    sequence,
+                    Some(mutation),
+                );
+            }
+            Operation::Resolve { sequence } => {
+                return self
+                    .host
+                    .mutate(peer.client, peer.connection, id, sequence, None);
+            }
+            Operation::Graphics {
+                channel,
+                image,
+                offset,
+            } => self.on_channel(peer, channel, |lease| Request::GraphicsChunk {
+                lease,
+                image,
+                offset: offset as usize,
+            }),
+            Operation::Accessibility {
+                channel,
+                revision,
+                offset,
+                base,
+            } => self.on_channel(peer, channel, |lease| Request::Accessibility {
+                lease,
+                revision,
+                offset: offset as usize,
+                base,
+            }),
+            Operation::AccessibilitySelection {
+                channel,
+                focus_generation,
+                selection,
+            } => self.on_channel(peer, channel, |lease| Request::AccessibilitySelection {
+                lease,
+                focus_generation,
+                selection,
+            }),
+            Operation::EndAccessibility { channel } => self.on_channel(peer, channel, |lease| {
+                Request::EndAccessibilityDemand { lease }
+            }),
+            Operation::DirectoryRead(operation) => {
+                let request = Request::DirectoryRead(pane::directories::Request::Begin {
+                    id: u64::from(id.0),
+                    operation,
+                });
+                return self.read(peer, id, ReadKind::Directory, request);
+            }
+            Operation::DirectoryCreate(creation) => {
+                let request = Request::DirectoryCreate(pane::directories::CreationRequest::Begin {
+                    id: u64::from(id.0),
+                    path: creation.path,
+                });
+                return self.read(peer, id, ReadKind::Creation, request);
+            }
+            // Polling is the server's own business.
+            Operation::WorktreeRead(spaceterm_server::worktree::Read::Poll { .. }) => {
+                Err(Refusal::Unsupported)
+            }
+            Operation::WorktreeRead(read) => {
+                return self.read(peer, id, ReadKind::Worktree, Request::WorktreeRead(read));
+            }
+            Operation::Shutdown => body(self.command(peer, Request::Shutdown)),
+            Operation::Interim(interim) => self.interim(peer, interim),
+            // Scrollback pages arrive with the client Scrollback cache. Direct-network
+            // administration never reaches the service.
+            Operation::ScrollbackPage { .. } | Operation::Direct(_) => Err(Refusal::Unsupported),
+        })
+    }
+
     fn interim(&mut self, peer: &Peer, interim: Interim) -> Result<ReplyBody, Refusal> {
         match interim {
-            Interim::Poll { channel } => {
-                self.on_channel(peer, channel, true, |lease| Request::Poll { lease })
+            Interim::Read { channel, operation } => {
+                self.on_channel(peer, channel, |lease| Request::Read { lease, operation })
             }
-            Interim::PollChanges { channel, base } => {
-                self.on_channel(peer, channel, true, |lease| Request::PollChanges {
-                    lease,
-                    base,
-                })
+            Interim::ReadingStatus { channel } => {
+                self.on_channel(peer, channel, |lease| Request::ReadingStatus { lease })
             }
-            Interim::NativeEffects {
-                channel,
-                generation,
-            } => self.on_channel(peer, channel, true, |lease| Request::NativeEffects {
-                lease,
-                generation,
-            }),
-            Interim::PresentationDemand { channel, visible } => {
-                self.on_channel(peer, channel, true, |lease| Request::PresentationDemand {
-                    lease,
-                    visible,
-                })
-            }
-            Interim::Read { channel, operation } => self.on_channel(peer, channel, true, |lease| {
-                Request::Read { lease, operation }
-            }),
-            Interim::ReadingStatus { channel } => self.on_channel(peer, channel, true, |lease| {
-                Request::ReadingStatus { lease }
-            }),
             Interim::SelectionChunk {
                 channel,
                 generation,
                 offset,
-            } => self.on_channel(peer, channel, true, |lease| Request::SelectionChunk {
+            } => self.on_channel(peer, channel, |lease| Request::SelectionChunk {
                 lease,
                 generation,
                 offset: offset as usize,

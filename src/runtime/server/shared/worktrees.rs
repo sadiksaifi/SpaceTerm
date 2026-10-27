@@ -503,7 +503,7 @@ mod tests {
     use super::*;
     use crate::runtime::server::{
         repository_tests::{GitFixture, finish_write, git_facts, review_removal},
-        tests::{create_shared, host, shared_inventory, size},
+        tests::{create_shared, host, screen, shared_inventory, size},
     };
 
     mod close_fallback {
@@ -588,7 +588,6 @@ mod tests {
         );
         crate::runtime::server::tests::await_text(
             &mut host,
-            2,
             lease,
             &format!("SPLIT-CWD:{}", tree.display()),
         );
@@ -672,12 +671,7 @@ mod tests {
             lease,
             "printf '\\nSOURCE-CWD:%s\\n' \"$PWD\"\n",
         );
-        await_text(
-            &mut host,
-            2,
-            lease,
-            &format!("SOURCE-CWD:{}", tree.display()),
-        );
+        await_text(&mut host, lease, &format!("SOURCE-CWD:{}", tree.display()));
         let target = CloseTarget::Worktree { workspace, tab };
         let confirmation = shared_inventory(&mut host)
             .close_confirmation(target)
@@ -778,7 +772,6 @@ mod tests {
                 );
                 crate::runtime::server::tests::await_text(
                     &mut host,
-                    2,
                     lease,
                     &format!("TAB-CWD:{}", expected.display()),
                 );
@@ -920,10 +913,7 @@ mod tests {
             Outcome::WorktreeFailed(Error::Changed)
         );
         assert!(tree.exists());
-        assert!(matches!(
-            host.request([1; 32], [2; 32], Request::Poll { lease }),
-            Reply::Screen(_) | Reply::Unchanged
-        ));
+        assert!(screen(&mut host, [1; 32], lease).is_ok());
         assert!(
             matches!(host.request([3; 32], [3; 32], Request::Mutate { sequence: 1, mutation: other }), Reply::Outcome(record) if matches!(record.outcome, Outcome::Accepted { .. }))
         );
@@ -989,7 +979,7 @@ mod tests {
             lease,
             "printf '\\nother-terminal-responsive\\n'\n",
         );
-        await_text(&mut host, 2, lease, "other-terminal-responsive");
+        await_text(&mut host, lease, "other-terminal-responsive");
         drop(gate);
         assert!(matches!(
             crate::runtime::server::repository_tests::read_worktree(&mut host, Read::Poll { id }),

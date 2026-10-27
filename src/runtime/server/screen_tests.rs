@@ -1,6 +1,6 @@
-use super::tests::{attach, await_text, command, host, keyframe, size};
+use super::tests::{attach, await_text, command, frame_bytes, host, keyframe, lines, screen, size};
 use super::*;
-use spaceterm_server::protocol::interim::ScreenFrame;
+use spaceterm_server::protocol::PaneEvent;
 
 #[test]
 fn server_screen_carries_graphics_geometry_without_inline_pixels() {
@@ -19,11 +19,7 @@ fn server_screen_carries_graphics_geometry_without_inline_pixels() {
         panic!("the keyframe carries the graphics manifest")
     };
     assert_eq!(graphics.placements[0].destination_width, 26);
-    let bytes = super::dispatch::wire_bytes(Reply::Screen(Box::new(ScreenFrame {
-        frame: 1,
-        base: None,
-        update,
-    })));
+    let bytes = frame_bytes(update);
     assert!(
         bytes.is_some_and(|bytes| bytes < 4096),
         "pixels stay out of the frame"
@@ -49,12 +45,7 @@ fn server_screen_with_a_long_hyperlink_remains_within_the_transport_limit() {
     }
     let update = keyframe(&screen);
     assert_eq!(update.links.len(), 1);
-    let reply = Reply::Screen(Box::new(ScreenFrame {
-        frame: 1,
-        base: None,
-        update,
-    }));
-    assert!(super::dispatch::wire_bytes(reply).is_some());
+    assert!(frame_bytes(update).is_some());
 }
 
 #[test]
@@ -88,14 +79,15 @@ fn server_screen_with_many_distinct_links_retains_text_with_bounded_metadata() {
     let last = update.rows.last().unwrap().runs.last().unwrap();
     assert!(last.link.is_none());
     assert_eq!(update.rows.len(), 40);
-    assert!(
-        super::dispatch::wire_bytes(Reply::Screen(Box::new(ScreenFrame {
-            frame: 1,
-            base: None,
-            update,
-        })))
-        .is_some()
-    );
+    assert!(frame_bytes(update).is_some());
+}
+
+/// The Pane's current screen, as the channel bound to `lease` captures it.
+fn capture(host: &mut DevelopmentPaneHost, lease: Lease) -> ScreenCapture {
+    let Observed::Live(observation) = host.observe([1; 32], &lease) else {
+        panic!("the lease no longer presents the Pane")
+    };
+    observation.screen.expect("the Pane has a screen")
 }
 
 #[test]
@@ -108,44 +100,27 @@ fn row_changes_follow_the_exact_baseline_and_connection_lease() {
         lease,
         "stty -echo; printf '\\033[2J\\033[HBASELINE-READY\\r\\n'",
     );
-    await_text(&mut host, 1, lease, "BASELINE-READY");
-    let Reply::Screen(reset) = host.request(
-        [1; 32],
-        lease.connection,
-        Request::PollChanges { lease, base: None },
-    ) else {
-        panic!("a poll without a base receives a keyframe")
-    };
-    assert!(reset.base.is_none());
+    await_text(&mut host, lease, "BASELINE-READY");
+    let mut encoder = screen_encoder::ScreenEncoder::default();
+    let reset = encoder
+        .encode(&capture(&mut host, lease), 1, None)
+        .expect("a keyframe always encodes");
+    assert!(
+        reset.geometry.is_some(),
+        "a frame without a base is a keyframe"
+    );
     command(
         &mut host,
         1,
         lease,
         "printf '\\033[H\\033[2KCHANGED-ROW\\r\\n'",
     );
-    await_text(&mut host, 1, lease, "CHANGED-ROW");
-    let reply = host.request(
-        [1; 32],
-        lease.connection,
-        Request::PollChanges {
-            lease,
-            base: Some(reset.frame),
-        },
-    );
-    assert!(matches!(
-        &reply,
-        Reply::Screen(changes) if changes.base == Some(reset.frame)
-            && !changes.update.rows.is_empty()
-            && changes.update.rows.len() < 24
-    ));
-    assert!(matches!(
-        host.request(
-            [1; 32],
-            lease.connection,
-            Request::PollChanges { lease, base: None }
-        ),
-        Reply::Screen(_)
-    ));
+    await_text(&mut host, lease, "CHANGED-ROW");
+    let changes = encoder
+        .encode(&capture(&mut host, lease), 2, Some(1))
+        .expect("the screen changed");
+    assert!(changes.geometry.is_none());
+    assert!(!changes.rows.is_empty() && changes.rows.len() < 24);
     let Reply::Attached { lease: replacement } = host.request(
         [1; 32],
         [2; 32],
@@ -159,26 +134,12 @@ fn row_changes_follow_the_exact_baseline_and_connection_lease() {
         panic!("reattachment failed")
     };
     assert!(matches!(
-        host.request(
-            [1; 32],
-            lease.connection,
-            Request::PollChanges {
-                lease,
-                base: Some(reset.frame)
-            }
-        ),
-        Reply::Refused(Refusal::Stale)
+        screen(&mut host, [1; 32], lease),
+        Err(PaneEvent::Takeover(_))
     ));
     assert!(matches!(
-        host.request(
-            [1; 32],
-            replacement.connection,
-            Request::PollChanges {
-                lease: replacement,
-                base: None
-            }
-        ),
-        Reply::Screen(_)
+        screen(&mut host, [1; 32], replacement),
+        Ok(Some(_))
     ));
     host.shutdown().unwrap();
 }
@@ -193,53 +154,25 @@ fn hidden_presentation_suppresses_rows_and_reveal_resets_the_baseline() {
         lease,
         "stty -echo; printf '\\033[2J\\033[HHIDDEN-READY\\r\\n'",
     );
-    await_text(&mut host, 1, lease, "HIDDEN-READY");
-    assert!(matches!(
-        host.request(
-            [1; 32],
-            lease.connection,
-            Request::PresentationDemand {
-                lease,
-                visible: false
-            }
-        ),
-        Reply::Unchanged
-    ));
-    for _ in 0..10 {
-        assert!(!matches!(
-            host.request(
-                [1; 32],
-                lease.connection,
-                Request::PollChanges { lease, base: None }
-            ),
-            Reply::Screen(_)
-        ));
-    }
+    await_text(&mut host, lease, "HIDDEN-READY");
+    host.view(&lease, false, 60);
     command(
         &mut host,
         1,
         lease,
         "printf '\\033[H\\033[2KHIDDEN-OUTPUT\\r\\n'",
     );
-    assert!(matches!(
-        host.request(
-            [1; 32],
-            lease.connection,
-            Request::PresentationDemand {
-                lease,
-                visible: true
-            }
-        ),
-        Reply::Unchanged
-    ));
-    assert!(matches!(
-        host.request(
-            [1; 32],
-            lease.connection,
-            Request::PollChanges { lease, base: None }
-        ),
-        Reply::Screen(_)
-    ));
-    await_text(&mut host, 1, lease, "HIDDEN-OUTPUT");
+    // A hidden Pane's Terminal Session publishes nothing, so the captured screen stays.
+    for _ in 0..10 {
+        let hidden = screen(&mut host, [1; 32], lease).unwrap().unwrap();
+        assert!(
+            lines(&hidden)
+                .iter()
+                .any(|line| line.trim_end() == "HIDDEN-READY")
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    host.view(&lease, true, 60);
+    await_text(&mut host, lease, "HIDDEN-OUTPUT");
     host.shutdown().unwrap();
 }

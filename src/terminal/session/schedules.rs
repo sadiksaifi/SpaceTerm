@@ -1,4 +1,5 @@
 //! Private Terminal Session scheduling, including deadline arbitration and bounded fairness.
+use super::publication::PublicationSchedule;
 use super::*;
 use crate::terminal::paste::PasteConfirmationSchedule;
 use libghostty_vt::terminal::{CompressionActivity, CompressionResult};
@@ -7,8 +8,6 @@ use std::sync::{Mutex, MutexGuard};
 const HIDDEN_INPUT_SETTLE_INTERVAL: Duration = Duration::from_millis(200);
 const HIDDEN_INPUT_IDLE_INTERVAL: Duration = Duration::from_secs(30);
 const ACCESSIBILITY_NORMAL_COMMAND_BURST: u8 = 8;
-const PRESENTATION_ACCUMULATION_INTERVAL: Duration = Duration::from_millis(8);
-const PRESENTATION_INTERVAL: Duration = Duration::from_micros(16_667);
 const ACCESSIBILITY_PRESENTATION_INTERVAL: Duration = Duration::from_millis(100);
 const COMPRESSION_IDLE_INTERVAL: Duration = Duration::from_millis(250);
 const COMPRESSION_STEP_INTERVAL: Duration = Duration::from_millis(1);
@@ -134,14 +133,38 @@ pub(super) struct WorkerSchedules {
     paste_confirmations: PasteConfirmationSchedule,
     paste_confirmation_owner: Option<(PasteConfirmationId, PasteConfirmationOwner)>,
     hidden_input: HiddenInputSchedule,
-    presentation: PresentationSchedule,
+    presentation: PublicationSchedule,
     metadata_presentation_pending: bool,
     metadata_presentation_queued: Arc<AtomicBool>,
     graphics_animation: Option<Instant>,
     compression: CompressionSchedule<CompressionActivity>,
+    clock: Clock,
+}
+
+/// Where publication reads the time. Tests fix it, so a slow run cannot change what coalesces.
+#[derive(Clone, Copy)]
+enum Clock {
+    System,
+    #[cfg(test)]
+    Fixed(Instant),
 }
 
 impl WorkerSchedules {
+    /// The time publication decisions use.
+    pub(super) fn now(&self) -> Instant {
+        match self.clock {
+            Clock::System => Instant::now(),
+            #[cfg(test)]
+            Clock::Fixed(now) => now,
+        }
+    }
+
+    /// Fixes the time publication decisions use.
+    #[cfg(test)]
+    pub(super) fn fix_clock(&mut self, now: Instant) {
+        self.clock = Clock::Fixed(now);
+    }
+
     pub(super) fn subscribe(&mut self, now: Instant) {
         self.metadata_presentation_queued
             .store(false, Ordering::Release);
@@ -244,7 +267,7 @@ impl WorkerSchedules {
 
     pub(super) fn update_selection_autoscroll(&mut self, now: Instant, interval: Option<Duration>) {
         self.selection_autoscroll
-            .update(now, interval.filter(|_| self.presentation.presentable));
+            .update(now, interval.filter(|_| self.presentation.is_presentable()));
     }
 
     pub(super) fn update_hidden_input(
@@ -264,7 +287,12 @@ impl WorkerSchedules {
     }
 
     pub(super) fn request_pty_presentation(&mut self, now: Instant) {
-        self.presentation.request_accumulated(now);
+        self.presentation.output(now);
+    }
+
+    /// Sets the frame rate the presenting client declared, in hertz.
+    pub(super) fn set_frame_rate(&mut self, hz: u8) {
+        self.presentation.set_frame_rate(hz);
     }
 
     pub(super) fn note_metadata_changed(&mut self) {
@@ -289,7 +317,7 @@ impl WorkerSchedules {
     }
 
     pub(super) fn is_presentable(&self) -> bool {
-        self.presentation.presentable
+        self.presentation.is_presentable()
     }
 
     pub(super) fn presentation_due(&mut self, now: Instant) -> bool {
@@ -309,7 +337,7 @@ impl WorkerSchedules {
     }
 
     pub(super) fn update_graphics_animation(&mut self, deadline: Option<Instant>) {
-        self.graphics_animation = deadline.filter(|_| self.presentation.presentable);
+        self.graphics_animation = deadline.filter(|_| self.presentation.is_presentable());
     }
 
     pub(super) fn set_presentable(&mut self, presentable: bool, now: Instant) {
@@ -340,7 +368,7 @@ impl WorkerSchedules {
     }
 
     pub(super) fn note_hidden_server_content_changed(&mut self) {
-        if !self.presentation.presentable
+        if !self.presentation.is_presentable()
             && self.accessibility_presentation.demand_request.is_some()
         {
             self.accessibility_presentation.note_screen_published();
@@ -413,20 +441,25 @@ impl WorkerSchedules {
             paste_confirmations: PasteConfirmationSchedule::default(),
             paste_confirmation_owner: None,
             hidden_input: HiddenInputSchedule::new(now),
-            presentation: PresentationSchedule::new(now),
+            presentation: PublicationSchedule::new(now),
             metadata_presentation_pending: false,
             metadata_presentation_queued: Arc::new(AtomicBool::new(false)),
             graphics_animation: None,
             compression: CompressionSchedule::new(),
+            clock: Clock::System,
         }
     }
 
+    /// The earliest due work. A synchronized update (DEC 2026) holds publication until it ends
+    /// or `synchronized_output`, the engine's timeout, passes.
     pub(super) fn deadline(&self, synchronized_output: Option<Instant>) -> Option<Instant> {
         [
             synchronized_output,
             self.selection_autoscroll.deadline(),
             self.paste_confirmations.deadline(),
-            self.presentation.deadline(),
+            self.presentation
+                .deadline()
+                .filter(|_| synchronized_output.is_none()),
             self.accessibility_presentation.deadline(),
             self.graphics_animation,
             self.compression.deadline(),
@@ -544,74 +577,6 @@ impl AccessibilityPresentationSchedule {
         } else {
             false
         }
-    }
-}
-
-struct PresentationSchedule {
-    presentable: bool,
-    pending: bool,
-    not_before: Instant,
-}
-
-impl PresentationSchedule {
-    fn new(now: Instant) -> Self {
-        Self {
-            presentable: true,
-            pending: false,
-            not_before: now,
-        }
-    }
-
-    fn request(&mut self) {
-        self.pending = true;
-    }
-
-    fn request_accumulated(&mut self, now: Instant) {
-        if self.presentable && !self.pending {
-            // TUI redraws commonly erase and rewrite a row in adjacent PTY reads. Hold the first
-            // read briefly so the renderer does not publish the intermediate erased state.
-            self.not_before = self
-                .not_before
-                .max(now + PRESENTATION_ACCUMULATION_INTERVAL);
-        }
-        self.request();
-    }
-
-    fn set_presentable(&mut self, presentable: bool, now: Instant) {
-        if presentable && !self.presentable {
-            self.not_before = now;
-        }
-        self.presentable = presentable;
-    }
-
-    fn mark_presented(&mut self, now: Instant) {
-        self.pending = false;
-        self.not_before = now + PRESENTATION_INTERVAL;
-    }
-
-    fn deadline(&self) -> Option<Instant> {
-        (self.presentable && self.pending).then_some(self.not_before)
-    }
-
-    fn take_due(&mut self, now: Instant) -> bool {
-        if self.deadline().is_some_and(|deadline| now >= deadline) {
-            self.take_pending()
-        } else {
-            false
-        }
-    }
-
-    fn take_pending(&mut self) -> bool {
-        if self.pending {
-            self.pending = false;
-            true
-        } else {
-            false
-        }
-    }
-
-    fn take_visible_pending(&mut self) -> bool {
-        self.presentable && self.take_pending()
     }
 }
 
@@ -1151,36 +1116,17 @@ mod tests {
     }
 
     #[test]
-    fn presentation_schedule_accumulates_an_idle_output_burst_before_publishing() {
+    fn synchronized_output_holds_publication_until_the_engine_deadline() {
         let start = Instant::now();
-        let mut schedule = PresentationSchedule::new(start);
+        let mut schedules = WorkerSchedules::new(start, ScheduleInput::default());
+        schedules.update_hidden_input(start, Ok(false));
+        schedules.mark_presented(start);
+        let output = start + Duration::from_secs(1);
+        schedules.request_pty_presentation(output);
+        assert!(schedules.deadline(None).is_some_and(|due| due <= output));
 
-        schedule.request_accumulated(start);
-        let accumulation_deadline = start + PRESENTATION_ACCUMULATION_INTERVAL;
-        assert_eq!(schedule.deadline(), Some(accumulation_deadline));
-        assert!(!schedule.take_due(accumulation_deadline - Duration::from_micros(1)));
-
-        schedule.request_accumulated(start + Duration::from_millis(1));
-        assert_eq!(schedule.deadline(), Some(accumulation_deadline));
-        assert!(schedule.take_due(accumulation_deadline));
-    }
-
-    #[test]
-    fn presentation_schedule_coalesces_repeated_requests_to_one_display_interval() {
-        let start = Instant::now();
-        let mut schedule = PresentationSchedule::new(start);
-
-        schedule.request();
-        assert!(schedule.take_due(start));
-        schedule.mark_presented(start);
-
-        schedule.request();
-        schedule.request();
-        let next_frame = start + PRESENTATION_INTERVAL;
-        assert_eq!(schedule.deadline(), Some(next_frame));
-        assert!(!schedule.take_due(next_frame - Duration::from_micros(1)));
-        assert!(schedule.take_due(next_frame));
-        assert!(!schedule.take_due(next_frame));
+        let timeout = output + Duration::from_millis(150);
+        assert_eq!(schedules.deadline(Some(timeout)), Some(timeout));
     }
 
     #[test]
@@ -1219,25 +1165,6 @@ mod tests {
             schedules.take_due(shown),
             Some(Command::PublishPendingScreen)
         ));
-    }
-
-    #[test]
-    fn hidden_presentation_retains_only_pending_work_and_restores_it_immediately() {
-        let start = Instant::now();
-        let mut schedule = PresentationSchedule::new(start);
-        schedule.mark_presented(start);
-        schedule.set_presentable(false, start);
-
-        schedule.request();
-        schedule.request();
-        assert_eq!(schedule.deadline(), None);
-        assert!(!schedule.take_due(start + Duration::from_secs(1)));
-
-        let restored = start + Duration::from_secs(1);
-        schedule.set_presentable(true, restored);
-        assert_eq!(schedule.deadline(), Some(restored));
-        assert!(schedule.take_due(restored));
-        assert!(!schedule.take_due(restored));
     }
 
     #[test]

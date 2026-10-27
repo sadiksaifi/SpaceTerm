@@ -3,12 +3,15 @@ use super::native_services::PastePayload;
 use crate::terminal::key::InputModifiers;
 pub(crate) mod clipboard;
 mod input;
+mod publication;
+pub(crate) use publication::DEFAULT_FRAME_RATE;
 mod server_reading;
 mod subscriptions;
 pub use clipboard::ClipboardCompletion;
 pub use clipboard::{ClientEffectGrant, ClientEffectRequest, ClipboardRequest};
 use clipboard::{ClipboardAuthority, WorkerClipboard};
 use input::PtyInput;
+pub(crate) use subscriptions::SubscriptionNotifier;
 pub use subscriptions::TerminalSubscription;
 use subscriptions::{TerminalEventPublisher, WorkerEventLifetime};
 mod schedules;
@@ -799,10 +802,35 @@ impl TerminalRuntime {
     pub(crate) fn client_effect_focus(&self, focused: Option<bool>) {
         self.clipboard_authority.client_focus(focused);
     }
+    /// Sets the frame rate the presenting client declared, in hertz. Publication coalesces
+    /// continued output to at most one screen per frame at this rate.
+    pub(crate) fn set_frame_rate(&self, hz: u8) {
+        if let Some(commands) = &self.commands {
+            let _ = commands.send(Command::SetFrameRate(hz));
+        }
+    }
+
+    /// Marks the end of client Input `serial`: call it after the runtime calls that apply that
+    /// Input. Screens captured once its bytes reach the PTY carry it as `input_serial`.
+    pub(crate) fn note_input_serial(&self, serial: u32) {
+        if let Some(commands) = &self.commands {
+            let _ = commands.send(Command::InputSerial(serial));
+        }
+    }
+
     /// Opens one presentation subscription, replacing the previous subscription.
     /// Dropping its receivers leaves this runtime and its PTY alive.
     pub fn subscribe(&self) -> TerminalSubscription {
-        let (events, event_sender) = self.event_publisher.subscribe();
+        self.subscribe_notifying(None)
+    }
+
+    /// Opens a subscription like [`Self::subscribe`] that calls `notifier` whenever it has
+    /// something to receive, so its owner waits for that instead of polling.
+    pub(crate) fn subscribe_notifying(
+        &self,
+        notifier: Option<SubscriptionNotifier>,
+    ) -> TerminalSubscription {
+        let (events, event_sender) = self.event_publisher.subscribe(notifier);
         self.clipboard_authority.observe_subscription(event_sender);
         let (accessibility_sender, accessibility) = async_channel::bounded(1);
         let (clipboard_sender, clipboard) = async_channel::bounded(1);
@@ -1255,6 +1283,10 @@ enum Command {
     GraphicsAnimationTick,
     GraphicsBudgetAvailable,
     SetPresentable(bool),
+    /// The presenting client's frame rate, in hertz.
+    SetFrameRate(u8),
+    /// Every byte of client Input `serial` has been enqueued for the PTY.
+    InputSerial(u32),
     AppearanceChanged,
     ReaderReady(Option<u64>),
     CompressScrollback,
@@ -1333,6 +1365,8 @@ impl fmt::Debug for Command {
             Self::GraphicsAnimationTick => "GraphicsAnimationTick",
             Self::GraphicsBudgetAvailable => "GraphicsBudgetAvailable",
             Self::SetPresentable(..) => "SetPresentable",
+            Self::SetFrameRate(..) => "SetFrameRate",
+            Self::InputSerial(..) => "InputSerial",
             Self::AppearanceChanged => "AppearanceChanged",
             Self::ReaderReady(_) => "ReaderReady",
             Self::CompressScrollback => "CompressScrollback",
@@ -1773,6 +1807,8 @@ impl TerminalWorker {
                     let success = action.is_none_or(|action| self.apply_emulator_action(action))
                         && self.refresh_selection_autoscroll();
                     let _ = reply.send(applied && success);
+                    // The server waits on this reply before it drains the session again.
+                    self.events.notify();
                     success
                 }
                 Err(error) => {
@@ -1785,6 +1821,7 @@ impl TerminalWorker {
                     let applied = action.is_some();
                     let success = action.is_none_or(|action| self.apply_emulator_action(action));
                     let _ = reply.send(applied && success);
+                    self.events.notify();
                     success
                 }
                 Err(error) => {
@@ -1794,6 +1831,8 @@ impl TerminalWorker {
             },
             Command::ReadingBarrier(reply) => {
                 let _ = reply.send(());
+                // The server holds back draining the session until this barrier passes.
+                self.events.notify();
                 true
             }
             Command::ResetReading => match self.emulator.reset_reading() {
@@ -2127,6 +2166,14 @@ impl TerminalWorker {
                     true
                 }
             }
+            Command::SetFrameRate(hz) => {
+                self.schedules.set_frame_rate(hz);
+                true
+            }
+            Command::InputSerial(serial) => {
+                self.input.note_serial(serial);
+                true
+            }
             Command::AppearanceChanged => {
                 let Some(update) = self.schedules.take_terminal_appearance() else {
                     return true;
@@ -2406,9 +2453,11 @@ impl TerminalWorker {
                     if !self.flush_ordered_terminal_replies(&mut focus_reports) {
                         return false;
                     }
-                    self.clipboard
-                        .begin(operation, epoch)
-                        .is_none_or(|bytes| self.write_pty(&bytes))
+                    let denied = self.clipboard.begin(operation, epoch);
+                    if self.clipboard.pending() {
+                        self.events.notify();
+                    }
+                    denied.is_none_or(|bytes| self.write_pty(&bytes))
                 }
                 Osc52Effect::Rejected(_) => true,
             };
@@ -2740,6 +2789,7 @@ impl TerminalWorker {
             reading.update(&mut self.emulator);
         }
         let semantic_content_changed = self.emulator.accessibility_content_changed();
+        self.emulator.set_input_serial(self.input.written_serial());
         let snapshot = self.emulator.snapshot();
         self.schedules
             .update_graphics_animation(self.emulator.graphics_animation_deadline());
@@ -2765,7 +2815,7 @@ impl TerminalWorker {
                     .is_ok()
                     || self.events.is_closed();
                 if result {
-                    let now = Instant::now();
+                    let now = self.schedules.now();
                     self.schedules.metadata_presented();
                     self.schedules.mark_presented(now);
                     if self.accessibility.is_closed() {
@@ -2794,11 +2844,11 @@ impl TerminalWorker {
     }
 
     fn request_presentation(&mut self) -> bool {
-        self.request_presentation_at(Instant::now())
+        self.request_presentation_at(self.schedules.now())
     }
 
     fn request_pty_presentation(&mut self) -> bool {
-        let now = Instant::now();
+        let now = self.schedules.now();
         self.schedules.request_pty_presentation(now);
         if self.schedules.presentation_due(now) {
             self.publish_screen()
@@ -2878,6 +2928,7 @@ impl TerminalWorker {
             // Accessibility is an independent best-effort presentation lane. Losing its
             // receiver must not stop shell IO or lifecycle delivery on the event lane.
             let _ = self.accessibility.force_send(accessibility);
+            self.events.notify();
         }
         true
     }

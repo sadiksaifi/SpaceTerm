@@ -624,8 +624,7 @@ mod tests {
         impl Server {
             pub fn new(client: [u8; 32]) -> Self {
                 let (sync, _) = SyncWorker::spawn().unwrap();
-                let host =
-                    crate::runtime::SharedWorkspaceHost::local(sync.clone()).unwrap();
+                let host = crate::runtime::SharedWorkspaceHost::local(sync.clone()).unwrap();
                 Self {
                     service: Arc::new(Mutex::new(Box::new(crate::runtime::Served::new(host)))),
                     sync,
@@ -675,7 +674,10 @@ mod tests {
                 std::thread::spawn(move || {
                     serve(Box::new(far), connection, &waker, &service, &stop);
                 });
-                (spawn_link(Box::new(near), events).unwrap(), (stopping, wake))
+                (
+                    spawn_link(Box::new(near), events).unwrap(),
+                    (stopping, wake),
+                )
             }
 
             /// Ends the shared link from the server's side.
@@ -800,15 +802,18 @@ mod tests {
         });
 
         server.end_shared();
-        eventually("the client sees the link end", || !edits.snapshot().connected);
+        eventually("the client sees the link end", || {
+            !edits.snapshot().connected
+        });
         // A Pane reconnects the shared link while the edit loop waits to reconnect, so its
         // admission revision arrives during that wait.
         server.link().unwrap();
         eventually("the client reconnects", || edits.snapshot().connected);
         let (other, _) = server.connect([8; 32], Arc::clone(&ignore));
         create(&other, "Another client's");
-        eventually("another client's edit reaches the reconnected client", || {
-            workspaces(&edits) == 2
-        });
+        eventually(
+            "another client's edit reaches the reconnected client",
+            || workspaces(&edits) == 2,
+        );
     }
 }

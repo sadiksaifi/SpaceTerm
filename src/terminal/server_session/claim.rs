@@ -248,7 +248,7 @@ impl ClaimWorker<'_> {
                     // Take Over, Start and selection wake this check early.
                     state
                         .wake
-                        .wait_until(std::time::Instant::now() + Duration::from_millis(100));
+                        .wait(Some(std::time::Instant::now() + Duration::from_millis(100)));
                     let size = *size.lock().unwrap_or_else(|e| e.into_inner());
                     grant_size = size;
                     grant_appearance = None;
@@ -301,7 +301,7 @@ impl ClaimWorker<'_> {
                     // Take Over, Start and selection wake this check early.
                     state
                         .wake
-                        .wait_until(std::time::Instant::now() + Duration::from_millis(100));
+                        .wait(Some(std::time::Instant::now() + Duration::from_millis(100)));
                     let size = *size.lock().unwrap_or_else(|e| e.into_inner());
                     grant_size = size;
                     grant_appearance = None;
@@ -442,37 +442,17 @@ mod tests {
             )
             .unwrap()
             .unwrap();
-            assert!(matches!(
-                host.request(
-                    [1; 32],
-                    [1; 32],
-                    Request::PresentationDemand {
-                        lease: grant.lease,
-                        visible: false
-                    }
-                ),
-                Reply::Unchanged
-            ));
-            let poll = host.request(
-                [1; 32],
-                [1; 32],
-                Request::PollChanges {
-                    lease: grant.lease,
-                    base: None,
-                },
-            );
+            crate::runtime::HostCommands::view(&mut host, &grant.lease, false, 60);
             observations.push((
                 state.startup_pending(),
                 state.status(),
                 state.interactive_input(),
-                matches!(poll, Reply::Screen(_)),
             ));
         }
         // Stop every fixture PTY before any assertion can fail.
         host.shutdown().unwrap();
         assert_eq!(observations.len(), 15);
-        for (pending, status, input, screen) in observations {
-            assert!(!screen, "hidden lifecycle polls supply no screen");
+        for (pending, status, input) in observations {
             assert_eq!(status, DevelopmentPaneStatus::Connecting);
             assert_eq!(input, crate::terminal::InteractiveInput::Pending);
             assert!(
@@ -559,50 +539,26 @@ mod tests {
         }
         handle.set_preparation_demand(true);
         let start = std::time::Instant::now();
-        let mut cadence = schedule::Cadence::new(start, false);
+        let mut demand = super::inbox::Demand::new(false, 60);
         // Read the same demand inputs that the production presentation worker uses.
-        cadence.set_preparation(state.preparation.load(Ordering::Acquire));
+        demand.set_preparation(state.preparation.load(Ordering::Acquire));
         let mut prepared = false;
-        let mut decoder = crate::terminal::server_session::screen_decoder::ScreenDecoder::default();
         while start.elapsed() < Duration::from_secs(3) {
-            if let Some(visible) = cadence.take_demand() {
-                assert!(matches!(
-                    host.request(
-                        [1; 32],
-                        [1; 32],
-                        Request::PresentationDemand { lease, visible }
-                    ),
-                    Reply::Unchanged
-                ));
+            if let Some((visible, max_hz)) = demand.take_view() {
+                crate::runtime::HostCommands::view(&mut host, &lease, visible, max_hz);
             }
-            let now = std::time::Instant::now();
-            if cadence.poll_due(now) {
-                let reply = host.request(
-                    [1; 32],
-                    [1; 32],
-                    Request::PollChanges {
-                        lease,
-                        base: decoder.frame(),
-                    },
-                );
-                if let Reply::Screen(frame) = reply {
-                    let decoded = decoder
-                        .apply(frame.frame, frame.base, frame.update, None)
-                        .unwrap();
-                    prepared = decoded
-                        .lines()
-                        .iter()
-                        .any(|row| row.trim_end() == "HIDDEN-PREPARED");
-                    if prepared {
-                        break;
-                    }
-                }
+            prepared =
+                crate::terminal::server_session::screen_decoder::observed_lines(&mut host, lease)
+                    .iter()
+                    .any(|row| row.trim_end() == "HIDDEN-PREPARED");
+            if prepared {
+                break;
             }
             std::thread::sleep(Duration::from_millis(5));
         }
         handle.set_preparation_demand(false);
-        cadence.set_preparation(state.preparation.load(Ordering::Acquire));
-        let withdrawn = cadence.take_demand();
+        demand.set_preparation(state.preparation.load(Ordering::Acquire));
+        let withdrawn = demand.take_view();
         host.shutdown().unwrap();
         assert!(
             prepared,
@@ -610,11 +566,10 @@ mod tests {
         );
         assert!(!state.presentable.load(Ordering::Acquire));
         assert!(
-            !cadence.visible(),
-            "preparation must not enable graphics fetching or visible cadence"
+            !demand.visible(),
+            "preparation must not enable graphics fetching"
         );
-        assert_eq!(withdrawn, Some(false));
-        assert!(cadence.deadline() >= start + Duration::from_millis(250));
+        assert_eq!(withdrawn, Some((false, 60)));
         assert_eq!(
             state.interactive_input(),
             crate::terminal::InteractiveInput::Pending
@@ -852,7 +807,7 @@ mod tests {
             Request::SelectPane {
                 explicit: false, ..
             } => {
-                // Select once to enter Restored, then request a start on its passive poll.
+                // Select once to enter Restored, then request a start on its next selection check.
                 state.start_restored();
                 Ok(restored(1))
             }

@@ -17,7 +17,7 @@ use spaceterm_server::{
     connection::link::ServerLink,
     hierarchy::{Axis, CloseTarget, Id, Inventory, Mutation, Outcome},
     pane::*,
-    protocol::Operation,
+    protocol::{Operation, PaneEvent},
 };
 use std::{
     error::Error,
@@ -314,8 +314,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         .ok_or("surviving Workspace")?;
     assert_eq!(w.tabs[0].root_pane, split);
     assert!(matches!(
-        restored.poll(),
-        Err(ServerError::SessionUnavailable)
+        restored.ending()?,
+        support::Ending::Pane(PaneEvent::Ended)
     ));
     // Close the other client's Tab, preserving the later Tab and promoting it to Root.
     close(&first, tab_target)?;
