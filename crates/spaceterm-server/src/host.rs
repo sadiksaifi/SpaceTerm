@@ -765,11 +765,18 @@ fn wait_for_work(
     while matches!((&*bell).read(&mut drained), Ok(count) if count > 0) {}
 }
 
-/// Marks a serving thread done and rings the host's bell, so the accept loop frees its slot and
-/// may accept again.
-fn ended(done: &AtomicBool, environment: &Environment) {
-    done.store(true, Ordering::Release);
-    environment.stop.wake.wake();
+/// Marks a serving thread done and rings the host's bell when it drops, also when the thread
+/// panics, so the accept loop frees its slot and may accept again.
+struct Ended {
+    done: Arc<AtomicBool>,
+    wake: Arc<dyn Wake>,
+}
+
+impl Drop for Ended {
+    fn drop(&mut self) {
+        self.done.store(true, Ordering::Release);
+        self.wake.wake();
+    }
 }
 
 fn spawn_local(
@@ -788,8 +795,11 @@ fn spawn_local(
     let thread = std::thread::Builder::new()
         .name("spaceterm-connection".into())
         .spawn(move || {
+            let _ended = Ended {
+                done: finished,
+                wake: Arc::clone(&environment.stop.wake),
+            };
             let _ = serve_local(stream, server, &identity, waker, outbox_wake, &environment);
-            ended(&finished, &environment);
         })
         .map_err(|_| ServerError::Protocol)?;
     Ok(Running {
@@ -844,6 +854,10 @@ fn spawn_network(
     let thread = std::thread::Builder::new()
         .name("spaceterm-network".into())
         .spawn(move || {
+            let _ended = Ended {
+                done: finished,
+                wake: Arc::clone(&environment.stop.wake),
+            };
             let _ = crate::direct::host::serve(
                 tcp,
                 generation,
@@ -852,7 +866,6 @@ fn spawn_network(
                 waker,
                 outbox_wake,
             );
-            ended(&finished, &environment);
         })
         .map_err(|_| ServerError::Protocol)?;
     Ok(Running {
@@ -1088,6 +1101,77 @@ mod tests {
         assert_eq!(
             link.health(),
             Health::Closed(LinkError::Goodbye(Fatal::Stopping))
+        );
+    }
+
+    #[test]
+    fn a_panicking_connection_still_frees_its_slot_and_reports_its_end() {
+        use std::sync::atomic::AtomicUsize;
+        /// Panics on any request, after recording connections that ended.
+        struct Panicking(Arc<AtomicUsize>);
+        impl PaneService for Panicking {
+            fn admitted(&mut self, _: &Peer, _: ClientName, _: Outbox) {}
+            fn request(&mut self, _: &Peer, _: RequestId, _: Operation) -> Dispatch {
+                panic!("a service failure");
+            }
+            fn input(&mut self, _: &Peer, _: Input) {}
+            fn view(&mut self, _: &Peer, _: View) {}
+            fn effect_done(&mut self, _: &Peer, _: EffectDone) {}
+            fn acknowledge(&mut self, _: &Peer, _: u64) {}
+            fn disconnected(&mut self, _: &Peer) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+            fn shutdown(&mut self) -> Result<(), ServerError> {
+                Ok(())
+            }
+        }
+        let fixture = crate::direct::tests::Fixture::new();
+        let ended = Arc::new(AtomicUsize::new(0));
+        let rung = Arc::new(AtomicBool::new(false));
+        let (sync, _) = SyncWorker::spawn().unwrap();
+        let mut environment = Environment::for_tests(
+            Arc::new(Mutex::new(Box::new(Panicking(Arc::clone(&ended))))),
+            sync,
+            None,
+        );
+        environment.stop = Arc::new(Stop {
+            stopping: AtomicBool::new(false),
+            wake: Arc::new({
+                let rung = Arc::clone(&rung);
+                move || rung.store(true, Ordering::Release)
+            }),
+        });
+        let (mut client, server) = UnixStream::pair().unwrap();
+        let running = spawn_local(server, [7; 32], &fixture.paths, &environment).unwrap();
+        protocol::admit_client(
+            &mut client,
+            (&[9; 32], &"Test".into()),
+            &[7; 32],
+            &fixture.paths.identity,
+            &[protocol::MAJOR],
+        )
+        .unwrap();
+        let link = link(client, Arc::new(|_| {})).unwrap();
+        let reply = link.request(Operation::Shutdown).unwrap();
+        // The accept loop drops a reaped thread's socket clone; this test drops it here.
+        let Running {
+            thread,
+            done,
+            sever,
+            wake,
+        } = running;
+        drop((sever, wake));
+        assert!(thread.join().is_err(), "the service panicked");
+        assert!(reply.wait().is_err());
+        assert!(done.load(Ordering::Acquire));
+        assert!(
+            rung.load(Ordering::Acquire),
+            "the accept loop must learn of the free slot"
+        );
+        assert_eq!(
+            ended.load(Ordering::SeqCst),
+            1,
+            "the service must learn of the end"
         );
     }
 

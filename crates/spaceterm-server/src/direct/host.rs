@@ -137,6 +137,7 @@ impl State {
         self.record = next;
         Ok(())
     }
+    #[cfg(test)]
     pub(crate) fn accept(&mut self) -> Option<(TcpStream, [u8; 32])> {
         self.accept_next().ok().flatten()
     }
@@ -1154,7 +1155,12 @@ pub(crate) fn serve(
         outbox.clone(),
         ws.get_ref().tcp(),
     )?;
-    let served = (|| {
+    // Unregisters when serving ends, also when it panics.
+    let _registered = Registered {
+        state: Arc::clone(&state),
+        connection,
+    };
+    (|| {
         state
             .lock()
             .unwrap_or_else(|error| error.into_inner())
@@ -1176,12 +1182,22 @@ pub(crate) fn serve(
             environment,
         );
         Ok::<_, ServerError>(())
-    })();
-    state
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .unregister(connection);
-    served
+    })()
+}
+
+/// A paired connection's place in the registry, removed when it drops.
+struct Registered {
+    state: Shared,
+    connection: [u8; 32],
+}
+
+impl Drop for Registered {
+    fn drop(&mut self) {
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .unregister(self.connection);
+    }
 }
 
 #[cfg(test)]
