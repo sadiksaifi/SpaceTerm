@@ -6,10 +6,13 @@
 // calibration word and diffs the window. It prints one JSON object per line on stdout.
 //
 //   latency-pixels check
-//   latency-pixels measure --app NAME --mode keystroke|scroll --samples N [--workload COMMAND]
+//   latency-pixels measure --app NAME --mode keystroke|scroll --samples N [--workload COMMAND [--continuous]]
 //
 // With --workload, SpaceTerm splits the focused Pane to the right, measures the left Pane idle,
 // runs COMMAND in the right Pane, measures the left Pane again and closes the right Pane.
+// --continuous requires the right Pane to keep changing through the measured phase.
+// After a failure the probe undoes its changes if the app is still frontmost, and otherwise
+// prints what it left changed.
 // Key codes assume a US keyboard layout.
 import AppKit
 import CoreGraphics
@@ -249,32 +252,55 @@ func calibrate(_ target: Target) async throws -> CGRect {
     return strip
 }
 
-/// Waits until the window changes outside the strip, which shows the workload has started.
-/// Fails if the strip changes too, because it would then time the workload instead of the echo.
-func awaitActivity(_ target: Target, outside strip: CGRect) async throws {
-    let window = try windowFrame(target)
-    let local = strip.offsetBy(dx: -window.minX, dy: -window.minY)
+/// Follows the window outside the measured strip, where the workload Pane draws.
+final class Activity {
+    let window: CGRect
+    let local: CGRect
+    var previous: Image
+
+    init(_ target: Target, strip: CGRect) async throws {
+        window = try windowFrame(target)
+        local = strip.offsetBy(dx: -window.minX, dy: -window.minY)
+        previous = try await capture(window)
+    }
+
+    /// Changed pixels inside and outside the strip since the previous capture.
+    func step() async throws -> (inside: Int, outside: Int) {
+        let next = try await capture(window)
+        let counts = differences(previous, next).reduce(into: (inside: 0, outside: 0)) { counts, pixel in
+            if local.contains(CGPoint(x: Double(pixel % next.width) / 2, y: Double(pixel / next.width) / 2)) {
+                counts.inside += 1
+            } else {
+                counts.outside += 1
+            }
+        }
+        previous = next
+        return counts
+    }
+}
+
+/// Pixels outside the strip that show a continuous workload is still drawing.
+let workloadChange = 20
+
+/// Waits until the window changes outside the strip, which shows the workload has started, then
+/// makes five more comparisons. Each fails if the strip changes too, because the probe would then
+/// time the workload instead of the echo. A continuous workload must also change outside the
+/// strip in every comparison.
+func awaitActivity(_ activity: Activity, continuous: Bool) async throws {
     let deadline = Date().addingTimeInterval(60)
-    var previous = try await capture(window)
-    // Comparisons still to make after the workload starts, to catch overlap with the strip.
     var remaining: Int?
     while Date() < deadline && remaining != 0 {
         pause(0.3)
-        let next = try await capture(window)
-        let (inside, outside) = differences(previous, next).reduce(into: (0, 0)) { counts, pixel in
-            if local.contains(CGPoint(x: Double(pixel % next.width) / 2, y: Double(pixel / next.width) / 2)) {
-                counts.0 += 1
-            } else {
-                counts.1 += 1
-            }
-        }
+        let (inside, outside) = try await activity.step()
         if inside > 0 { throw Failure(message: "the workload Pane overlaps the measured strip; widen the window") }
         if let count = remaining {
+            if continuous && outside < workloadChange {
+                throw Failure(message: "the workload stopped drawing right after it started")
+            }
             remaining = count - 1
         } else if outside > 200 {
             remaining = 5
         }
-        previous = next
     }
     if remaining != 0 { throw Failure(message: "the workload produced no visible output within 60 seconds") }
 }
@@ -335,7 +361,11 @@ final class Grabber: NSObject, SCStreamOutput {
 
 enum Mode: String { case keystroke, scroll }
 
-func measure(_ target: Target, strip: CGRect, mode: Mode, samples: Int, phase: String?) async throws {
+/// Times `samples` events. `checkpoint` runs while each echoed line is cleared and once at the end.
+func measure(
+    _ target: Target, strip: CGRect, mode: Mode, samples: Int, phase: String?,
+    checkpoint: (() async throws -> Void)? = nil
+) async throws {
     let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
     guard let display = content.displays.first(where: { $0.frame.contains(strip.origin) }) ?? content.displays.first
     else { throw Failure(message: "no display") }
@@ -361,6 +391,7 @@ func measure(_ target: Target, strip: CGRect, mode: Mode, samples: Int, phase: S
             if mode == .keystroke && index > 0 && index % keysPerLine == 0 {
                 control("u")
                 pause(0.4)
+                try await checkpoint?()
             }
             // The baseline is the latest frame of an idle strip.
             pause(Double.random(in: 0.12...0.22))
@@ -383,6 +414,7 @@ func measure(_ target: Target, strip: CGRect, mode: Mode, samples: Int, phase: S
             }
             if let seen { latencies.append(Double(Int64(seen) - Int64(start)) / 1e6) } else { misses += 1 }
         }
+        try await checkpoint?()
     } catch {
         try? await stream.stopCapture()
         throw error
@@ -398,16 +430,53 @@ func measure(_ target: Target, strip: CGRect, mode: Mode, samples: Int, phase: S
 
 // MARK: Commands
 
-func run(app: String, mode: Mode, samples: Int, workload: String?) async throws {
+/// What the probe has changed in the app, so a failure can undo it.
+struct Changes {
+    var split = false
+    var prepared = false
+    var workload = false
+}
+
+func focusPane(right: Bool) {
+    postKey(right ? 124 : 123, flags: [.maskCommand, .maskAlternate])  // Focus Pane Right or Left
+    pause(0.5)
+}
+
+/// Stops the workload in the right Pane and exits its shell, which closes that Pane.
+func closeSplit(_ target: Target, workload: Bool) throws {
+    try requireFront(target)
+    focusPane(right: true)
+    if workload {
+        control("c")
+        pause(1)
+    }
+    try typeText(target, "exit\n")
+    pause(1.5)
+}
+
+func run(app: String, mode: Mode, samples: Int, workload: String?, continuous: Bool) async throws {
     try requirePermissions()
     let target = try findTarget(app: app)
     try activate(target)
+    var changes = Changes()
+    do {
+        try await session(target, mode: mode, samples: samples, workload: workload, continuous: continuous, changes: &changes)
+    } catch {
+        undo(target, changes)
+        throw error
+    }
+}
+
+func session(
+    _ target: Target, mode: Mode, samples: Int, workload: String?, continuous: Bool, changes: inout Changes
+) async throws {
     if workload != nil {
         postKey(keyCodes["d"]!, flags: .maskCommand)  // Split Right
+        changes.split = true
         pause(2)
-        postKey(123, flags: [.maskCommand, .maskAlternate])  // Focus Pane Left
-        pause(0.5)
+        focusPane(right: false)
     }
+    changes.prepared = true
     try typeText(target, "clear; printf '\\e[2 q'; cat\n")
     pause(1)
     let strip = try await calibrate(target)
@@ -419,37 +488,55 @@ func run(app: String, mode: Mode, samples: Int, workload: String?) async throws 
     }
     try await measure(target, strip: strip, mode: mode, samples: samples, phase: workload == nil ? nil : "idle")
     if let workload {
-        postKey(124, flags: [.maskCommand, .maskAlternate])  // Focus Pane Right
-        pause(0.5)
+        focusPane(right: true)
+        changes.workload = true
         try typeText(target, workload + "\n")
-        postKey(123, flags: [.maskCommand, .maskAlternate])
-        pause(0.5)
-        do {
-            try await awaitActivity(target, outside: strip)
-            pause(1)
-            try await measure(target, strip: strip, mode: mode, samples: samples, phase: "workload")
-        } catch {
-            try? closeWorkload(target)
-            throw error
-        }
-        try closeWorkload(target)
+        focusPane(right: false)
+        let activity = try await Activity(target, strip: strip)
+        try await awaitActivity(activity, continuous: continuous)
+        pause(1)
+        // A continuous workload must keep drawing through the whole measured phase.
+        let checkpoint: (() async throws -> Void)? = continuous ? {
+            if try await activity.step().outside < workloadChange {
+                throw Failure(message: "the workload Pane stopped drawing during the measurement")
+            }
+        } : nil
+        try await measure(target, strip: strip, mode: mode, samples: samples, phase: "workload", checkpoint: checkpoint)
+        try closeSplit(target, workload: true)
+        changes.workload = false
+        changes.split = false
         try activate(target)
     }
     try requireFront(target)
     if mode == .keystroke { control("c") }
     pause(0.3)
     try typeText(target, "printf '\\e[0 q'; clear\n")
+    changes.prepared = false
 }
 
-/// Stops the workload in the right Pane and exits its shell, which closes that Pane.
-func closeWorkload(_ target: Target) throws {
-    try requireFront(target)
-    postKey(124, flags: [.maskCommand, .maskAlternate])
-    pause(0.5)
-    control("c")
-    pause(1)
-    try typeText(target, "exit\n")
-    pause(1.5)
+/// Undoes `changes` after a failure while the app is frontmost, or says what remains.
+func undo(_ target: Target, _ changes: Changes) {
+    guard changes.split || changes.prepared else { return }
+    if frontmost() == target.pid {
+        if changes.split {
+            try? closeSplit(target, workload: changes.workload)
+            focusPane(right: false)
+        }
+        if changes.prepared {
+            control("c")
+            pause(0.3)
+            try? typeText(target, "printf '\\e[0 q'; clear\n")
+        }
+        if frontmost() == target.pid { return }
+    }
+    var remains: [String] = []
+    if changes.prepared { remains.append("the measured Pane may still run cat or seq with a steady cursor") }
+    if changes.workload {
+        remains.append("the right Pane still runs bench:workload")
+    } else if changes.split {
+        remains.append("the split Pane is still open")
+    }
+    progress("\(target.app) was not frontmost, so the probe left it changed: \(remains.joined(separator: "; "))")
 }
 
 func option(_ arguments: [String], _ name: String) -> String? {
@@ -470,10 +557,12 @@ Task {
             guard let app = option(arguments, "--app"),
                   let mode = option(arguments, "--mode").flatMap(Mode.init(rawValue:)),
                   let samples = option(arguments, "--samples").flatMap(Int.init), samples > 0
-            else { throw Failure(message: "usage: measure --app NAME --mode keystroke|scroll --samples N [--workload COMMAND]") }
-            try await run(app: app, mode: mode, samples: samples, workload: option(arguments, "--workload"))
+            else { throw Failure(message: "usage: measure --app NAME --mode keystroke|scroll --samples N [--workload COMMAND [--continuous]]") }
+            try await run(
+                app: app, mode: mode, samples: samples, workload: option(arguments, "--workload"),
+                continuous: arguments.contains("--continuous"))
         default:
-            throw Failure(message: "usage: check | measure --app NAME --mode keystroke|scroll --samples N [--workload COMMAND]")
+            throw Failure(message: "usage: check | measure --app NAME --mode keystroke|scroll --samples N [--workload COMMAND [--continuous]]")
         }
     } catch let failure as Failure {
         progress(failure.message)

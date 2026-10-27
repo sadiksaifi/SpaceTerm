@@ -33,6 +33,13 @@ from spaceterm_tasks.latency import (
 # Longer than both measurement phases; the probe stops the workload when it finishes.
 WORKLOAD_SECONDS = 900
 CRITERION_MS = 10
+# The pixel probe waits this long for an echo before it counts a miss.
+MISS_MS = 1000
+
+
+def p99_with_misses(result):
+    """p99 counting each miss as the probe's deadline, since its echo took at least that long."""
+    return percentile(result["samples"] + [MISS_MS] * result.get("misses", 0), 99)
 
 
 def run(args):
@@ -43,13 +50,20 @@ def run(args):
     )
     results = {
         result["phase"]: result
-        for result in measure_pixels(args.app, "keystroke", args.samples, workload=workload)
+        for result in measure_pixels(
+            args.app,
+            "keystroke",
+            args.samples,
+            workload=workload,
+            # Idle and image workloads draw once and then stay still.
+            continuous=args.mode in ("partial", "scroll"),
+        )
     }
     if set(results) != {"idle", "workload"}:
         raise TaskError("the pixel probe did not report both phases")
     for phase in ("idle", "workload"):
         report(results[phase])
-    idle, loaded = (percentile(results[phase]["samples"], 99) for phase in ("idle", "workload"))
+    idle, loaded = (p99_with_misses(results[phase]) for phase in ("idle", "workload"))
     verdict = "meets" if loaded - idle <= CRITERION_MS else "misses"
     print(
         f"p99 during {args.mode} workload minus idle p99: {loaded - idle:.2f} ms; "
