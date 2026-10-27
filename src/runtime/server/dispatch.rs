@@ -178,15 +178,7 @@ impl DevelopmentPaneHost {
         }
         match request {
             Request::PresentationDemand { visible, .. } => {
-                if pane.presentable != visible {
-                    pane.presentable = visible;
-                    pane.runtime.set_presentable(visible);
-                    pane.screen_encoder = pane::presentation::ScreenEncoder::default();
-                    pane.sent = None;
-                    if !visible {
-                        pane.runtime.end_server_accessibility_demand();
-                    }
-                }
+                pane.presentation_demand(visible);
                 Ok(Reply::Unchanged)
             }
             Request::EndAccessibilityDemand { .. } => {
@@ -269,27 +261,8 @@ impl DevelopmentPaneHost {
                 Ok(Reply::Unchanged)
             }
             Request::Poll { .. } => {
-                if let Some(screen) = &pane.screen
-                    && pane.presentable
-                    && match changes {
-                        Some(base) => {
-                            base != Some(pane.screen_generation)
-                                || base != pane.screen_encoder.baseline()
-                        }
-                        None => pane.sent != Some(screen.generation),
-                    }
-                {
-                    pane.sent = Some(screen.generation);
-                    let mut screen = encode_screen(screen);
-                    screen.generation = pane.screen_generation;
-                    screen.accessibility_revision = pane
-                        .accessibility
-                        .take_changed_revision()
-                        .unwrap_or(pane.accessibility.revision());
-                    return Ok(match changes {
-                        Some(base) => pane.screen_encoder.encode(screen, base),
-                        None => Reply::Screen(Box::new(screen)),
-                    });
+                if let Some(frame) = pane.screen_frame(changes) {
+                    return Ok(frame);
                 }
                 if pane.failed {
                     return Err(Refusal::Failed);

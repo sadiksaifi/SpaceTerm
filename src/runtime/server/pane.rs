@@ -728,13 +728,7 @@ impl OwnedPane {
                     {
                         self.graphics_transfer = None;
                     }
-                    if self
-                        .screen
-                        .as_ref()
-                        .is_none_or(|old| old.generation != screen.generation)
-                    {
-                        self.screen_generation = self.screen_generation.saturating_add(1);
-                    }
+                    self.advance_screen_generation(&screen);
                     self.reading.observe(self.screen_generation, &screen);
                     self.screen = Some(screen);
                 }

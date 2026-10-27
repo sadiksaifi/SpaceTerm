@@ -1,6 +1,59 @@
 //! Screen snapshot encoding, presentation style and palette for the Development host.
 use super::*;
 
+impl OwnedPane {
+    /// Shows or hides the Pane. A change restarts row changes from a complete screen.
+    pub(super) fn presentation_demand(&mut self, visible: bool) {
+        if self.presentable != visible {
+            self.presentable = visible;
+            self.runtime.set_presentable(visible);
+            self.screen_encoder = pane::presentation::ScreenEncoder::default();
+            self.sent = None;
+            if !visible {
+                self.runtime.end_server_accessibility_demand();
+            }
+        }
+    }
+
+    /// The screen frame a poll returns, or `None` when the controller already has it.
+    /// `changes` holds the controller's row-change baseline, when it asks for row changes.
+    pub(super) fn screen_frame(&mut self, changes: Option<Option<u64>>) -> Option<Reply> {
+        if let Some(screen) = &self.screen
+            && self.presentable
+            && match changes {
+                Some(base) => {
+                    base != Some(self.screen_generation) || base != self.screen_encoder.baseline()
+                }
+                None => self.sent != Some(screen.generation),
+            }
+        {
+            self.sent = Some(screen.generation);
+            let mut screen = encode_screen(screen);
+            screen.generation = self.screen_generation;
+            screen.accessibility_revision = self
+                .accessibility
+                .take_changed_revision()
+                .unwrap_or(self.accessibility.revision());
+            return Some(match changes {
+                Some(base) => self.screen_encoder.encode(screen, base),
+                None => Reply::Screen(Box::new(screen)),
+            });
+        }
+        None
+    }
+
+    /// Advances the wire screen generation when `screen` replaces a different snapshot.
+    pub(super) fn advance_screen_generation(&mut self, screen: &ScreenSnapshot) {
+        if self
+            .screen
+            .as_ref()
+            .is_none_or(|old| old.generation != screen.generation)
+        {
+            self.screen_generation = self.screen_generation.saturating_add(1);
+        }
+    }
+}
+
 pub(super) fn appearance(
     style: Option<PresentationStyle>,
     generation: u64,

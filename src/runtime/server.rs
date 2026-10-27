@@ -67,7 +67,8 @@ mod tests;
 use self::pane_host::decode_modifiers;
 pub(crate) use self::pane_host::{decode_key, geometry};
 use self::screen::appearance;
-pub(crate) use self::screen::encode_screen;
+#[cfg(test)]
+use self::screen::encode_screen;
 
 pub struct DevelopmentPaneHost {
     boot: [u8; 32],
