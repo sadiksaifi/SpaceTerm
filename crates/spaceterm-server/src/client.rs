@@ -408,7 +408,7 @@ impl ServerConnection {
     }
     /// Makes `link`, already admitted, this handle's shared connection while it stays live. Tests
     /// use it to serve a handle in process, without a socket.
-    #[doc(hidden)]
+    #[cfg(feature = "test-support")]
     pub fn adopt(&self, link: ServerLink) {
         *self.shared.link.lock().unwrap_or_else(|e| e.into_inner()) = Some(link);
     }

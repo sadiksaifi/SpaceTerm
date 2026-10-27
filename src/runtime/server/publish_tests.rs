@@ -482,26 +482,40 @@ mod bell {
             self.input(serial, vec![InputEvent::Key(key), InputEvent::Key(enter)]);
         }
 
-        /// Ticks after each ring until an event satisfies `found`. Fails if nothing rings for
+        /// Waits until the wake rings or `deadline` passes, and returns whether it rang.
+        fn rang_by(&self, deadline: Instant) -> bool {
+            let mut rung = self.rings.rung.lock().unwrap();
+            while !*rung {
+                let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                    return false;
+                };
+                rung = self.rings.ready.wait_timeout(rung, remaining).unwrap().0;
+            }
+            *rung = false;
+            true
+        }
+
+        /// Ticks after each ring until a message satisfies `found`. Fails if nothing rings for
         /// 10 seconds.
-        fn await_event(&mut self, found: impl Fn(&PaneEvent) -> bool) -> PaneEvent {
+        fn await_message(&mut self, found: impl Fn(&ServerMessage) -> bool) -> ServerMessage {
             let deadline = Instant::now() + Duration::from_secs(10);
             loop {
-                {
-                    let mut rung = self.rings.rung.lock().unwrap();
-                    while !*rung {
-                        let remaining = deadline
-                            .checked_duration_since(Instant::now())
-                            .expect("nothing rang the host's wake");
-                        rung = self.rings.ready.wait_timeout(rung, remaining).unwrap().0;
-                    }
-                    *rung = false;
-                }
+                assert!(self.rang_by(deadline), "nothing rang the host's wake");
                 self.served.tick(Instant::now());
-                if let Some(event) = events(drain(&self.outbox)).into_iter().find(&found) {
-                    return event;
+                if let Some(message) = drain(&self.outbox).into_iter().find(&found) {
+                    return message;
                 }
             }
+        }
+
+        fn await_event(&mut self, found: impl Fn(&PaneEvent) -> bool) -> PaneEvent {
+            let message = self.await_message(
+                |message| matches!(message, ServerMessage::Pane(pane) if found(&pane.event)),
+            );
+            let ServerMessage::Pane(pane) = message else {
+                unreachable!()
+            };
+            pane.event
         }
     }
 

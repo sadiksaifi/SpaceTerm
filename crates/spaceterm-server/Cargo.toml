@@ -7,6 +7,8 @@ autobins = false
 [features]
 default = []
 client = []
+# Lets another crate's tests serve a client handle in process.
+test-support = ["client"]
 
 [dependencies]
 base64 = "=0.22.1"

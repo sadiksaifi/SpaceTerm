@@ -445,7 +445,7 @@ pub trait HostCommands: Send {
 }
 
 /// How soon a host's timed work runs again while it waits on another thread: a journal or Git
-/// write, a directory read, or a live terminal whose metadata and exit the tick observes.
+/// write, or a directory read. A live terminal rings the host's wake instead.
 pub(super) const TICK: Duration = Duration::from_millis(10);
 
 /// A host served over SpaceTerm Protocol connections. It binds each claimed channel to its lease,
@@ -689,18 +689,27 @@ impl<H: HostCommands> Served<H> {
         result
     }
 
-    /// Closes every channel whose lease the host no longer knows: a Session that ended and
-    /// reported it, a closed Pane, End All Sessions, or control another client took.
+    /// Ends every channel whose lease the host no longer knows: a Session that ended, a closed
+    /// Pane, End All Sessions, or control another client took. Each receives its last event, so
+    /// timed work that retired a Pane never closes a channel silently.
     fn sweep(&mut self) {
-        for connection in self.connections.values_mut() {
-            let dead: Vec<_> = connection
-                .channels
-                .iter()
-                .filter(|(_, bound)| !self.host.lease_live(&bound.lease))
-                .map(|(channel, _)| *channel)
-                .collect();
-            for channel in dead {
-                connection.channels.remove(&channel);
+        let dead: Vec<_> = self
+            .connections
+            .iter()
+            .flat_map(|(id, connection)| {
+                connection
+                    .channels
+                    .iter()
+                    .filter(|(_, bound)| !self.host.lease_live(&bound.lease))
+                    .map(move |(channel, _)| (*id, *channel))
+            })
+            .collect();
+        for (connection, channel) in dead {
+            self.publish(connection, channel);
+            // A host that still answers `Live` for a lease it no longer knows is not trusted.
+            if let Some(connection) = self.connections.get_mut(&connection)
+                && connection.channels.remove(&channel).is_some()
+            {
                 connection.outbox.close(channel);
             }
         }
