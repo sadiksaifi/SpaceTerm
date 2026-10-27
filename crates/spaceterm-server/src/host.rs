@@ -383,6 +383,8 @@ impl DirectManagement for HostDirect {
 /// One serving thread and what ends it: its socket's read side and its I/O thread's wake pipe.
 struct Running {
     thread: std::thread::JoinHandle<()>,
+    /// Set by the thread just before it rings the host's bell and ends.
+    done: Arc<AtomicBool>,
     sever: Box<dyn FnOnce() + Send>,
     wake: Arc<dyn Wake>,
 }
@@ -518,20 +520,19 @@ fn serve_runtime_ready(
     let mut network: Vec<Running> = Vec::new();
     while !stop.stopping() {
         let deadline = tick(&panes, direct.as_ref());
-        let listening = direct.as_ref().and_then(|state| {
-            state
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .listener_fd()
-        });
+        // A connection thread rings the bell when it ends, so a full set of network slots waits
+        // for that instead of a listener it cannot accept from.
+        connections.retain(|running| !running.done.load(Ordering::Acquire));
+        network.retain(|running| !running.done.load(Ordering::Acquire));
+        let listening = network_listener(direct.as_ref(), network.len());
         wait_for_work(&bell, &listener, listening, deadline);
         if stop.stopping() {
             break;
         }
-        connections.retain(|running| !running.thread.is_finished());
-        network.retain(|running| !running.thread.is_finished());
+        connections.retain(|running| !running.done.load(Ordering::Acquire));
+        network.retain(|running| !running.done.load(Ordering::Acquire));
         // The fixed admission limits bound worker allocation; admission has an absolute deadline.
-        while network.len() < 32
+        while network.len() < MAX_NETWORK_CONNECTIONS
             && let Some(state) = &direct
         {
             let accepted = state.lock().unwrap_or_else(|e| e.into_inner()).accept();
@@ -550,7 +551,7 @@ fn serve_runtime_ready(
                 Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
                 Err(_) => return Err(ServerError::Protocol),
             };
-            if connections.len() >= 64 || check_peer(&stream).is_err() {
+            if connections.len() >= MAX_LOCAL_CONNECTIONS || check_peer(&stream).is_err() {
                 continue;
             }
             if let Ok(running) = spawn_local(stream, server, paths, &environment) {
@@ -582,6 +583,27 @@ fn serve_runtime_ready(
     runtime.verify_path(&paths.runtime)?;
     runtime.remove_socket(c"s", socket_identity)?;
     readiness
+}
+
+/// Serving threads for account-local connections, including those still in admission.
+const MAX_LOCAL_CONNECTIONS: usize = 64;
+/// Serving threads for network connections, including those still in the WSS handshake.
+const MAX_NETWORK_CONNECTIONS: usize = 32;
+
+/// The network listener the accept loop waits on, or `None` while every network slot is taken.
+fn network_listener(
+    direct: Option<&crate::direct::host::Shared>,
+    running: usize,
+) -> Option<std::os::fd::RawFd> {
+    if running >= MAX_NETWORK_CONNECTIONS {
+        return None;
+    }
+    direct.and_then(|state| {
+        state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .listener_fd()
+    })
 }
 
 /// Runs the service's timed work and revocations found by direct-network recovery, and returns
@@ -648,6 +670,13 @@ fn wait_for_work(
     while matches!((&*bell).read(&mut drained), Ok(count) if count > 0) {}
 }
 
+/// Marks a serving thread done and rings the host's bell, so the accept loop frees its slot and
+/// may accept again.
+fn ended(done: &AtomicBool, environment: &Environment) {
+    done.store(true, Ordering::Release);
+    environment.stop.wake.wake();
+}
+
 fn spawn_local(
     stream: UnixStream,
     server: [u8; 32],
@@ -659,14 +688,18 @@ fn spawn_local(
     let identity = paths.identity.clone();
     let environment = environment.clone();
     let outbox_wake = Arc::clone(&wake);
+    let done = Arc::new(AtomicBool::new(false));
+    let finished = Arc::clone(&done);
     let thread = std::thread::Builder::new()
         .name("spaceterm-connection".into())
         .spawn(move || {
             let _ = serve_local(stream, server, &identity, waker, outbox_wake, &environment);
+            ended(&finished, &environment);
         })
         .map_err(|_| ServerError::Protocol)?;
     Ok(Running {
         thread,
+        done,
         sever: Box::new(move || {
             let _ = cancel.shutdown(std::net::Shutdown::Read);
         }),
@@ -711,6 +744,8 @@ fn spawn_network(
     let state = Arc::clone(state);
     let environment = environment.clone();
     let outbox_wake = Arc::clone(&wake);
+    let done = Arc::new(AtomicBool::new(false));
+    let finished = Arc::clone(&done);
     let thread = std::thread::Builder::new()
         .name("spaceterm-network".into())
         .spawn(move || {
@@ -722,10 +757,12 @@ fn spawn_network(
                 waker,
                 outbox_wake,
             );
+            ended(&finished, &environment);
         })
         .map_err(|_| ServerError::Protocol)?;
     Ok(Running {
         thread,
+        done,
         sever: Box::new(move || {
             let _ = cancel.shutdown(std::net::Shutdown::Read);
         }),
@@ -876,6 +913,37 @@ mod tests {
                 Health::Closed(LinkError::Goodbye(Fatal::Stopping))
             );
         }
+    }
+
+    #[test]
+    fn full_network_slots_leave_the_listener_unwatched_and_an_ended_thread_rings_the_bell() {
+        let fixture = crate::direct::tests::Fixture::new();
+        fixture.enable();
+        let state = Some(&fixture.state);
+        assert!(network_listener(state, MAX_NETWORK_CONNECTIONS - 1).is_some());
+        // A readable listener the loop cannot accept from would wake it at once, forever.
+        assert_eq!(network_listener(state, MAX_NETWORK_CONNECTIONS), None);
+        let rung = Arc::new(AtomicBool::new(false));
+        let (sync, _) = SyncWorker::spawn().unwrap();
+        let mut environment =
+            Environment::for_tests(Arc::new(Mutex::new(Box::new(NoPanes))), sync, None);
+        environment.stop = Arc::new(Stop {
+            stopping: AtomicBool::new(false),
+            wake: Arc::new({
+                let rung = Arc::clone(&rung);
+                move || rung.store(true, Ordering::Release)
+            }),
+        });
+        let (client, server) = UnixStream::pair().unwrap();
+        let running = spawn_local(server, [7; 32], &fixture.paths, &environment).unwrap();
+        // The peer leaves during admission, so the thread ends.
+        drop(client);
+        running.thread.join().unwrap();
+        assert!(running.done.load(Ordering::Acquire));
+        assert!(
+            rung.load(Ordering::Acquire),
+            "the accept loop must learn of the free slot"
+        );
     }
 
     #[test]
