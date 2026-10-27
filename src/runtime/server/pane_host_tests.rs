@@ -1,8 +1,9 @@
 use super::tests::{
-    attach, await_text, command, create_shared, focus, host, input, native_command,
+    attach, await_text, command, create_shared, focus, host, input, lines, native_command,
     shared_inventory, size, text_key,
 };
 use super::*;
+use spaceterm_server::protocol::interim::ScreenFrame;
 use std::time::{Duration, Instant};
 
 #[test]
@@ -133,7 +134,7 @@ fn capture(host: &mut DevelopmentPaneHost, lease: Lease, bytes: usize, modes: &s
     await_text(host, 1, lease, "READY");
 }
 
-fn next_screen(host: &mut DevelopmentPaneHost, lease: Lease) -> Box<Screen> {
+fn next_screen(host: &mut DevelopmentPaneHost, lease: Lease) -> Box<ScreenFrame> {
     let deadline = Instant::now() + Duration::from_secs(3);
     loop {
         if let Reply::Screen(screen) =
@@ -153,7 +154,7 @@ fn batch_key(text: &str, ime: bool) -> Key {
     key
 }
 
-fn key_batch(host: &mut impl PaneService, lease: Lease, generation: u64, keys: Vec<Key>) -> Reply {
+fn key_batch(host: &mut impl HostCommands, lease: Lease, generation: u64, keys: Vec<Key>) -> Reply {
     host.request(
         [1; 32],
         lease.connection,
@@ -177,7 +178,7 @@ fn key_batches_reject_invalid_bounds_keys_and_authority_without_a_prefix() {
     let mut overlong = key.clone();
     overlong.text = Some("a".repeat(4097));
     let mut overframe = key.clone();
-    overframe.text = Some("a".repeat(MAX_TERMINAL_FRAME));
+    overframe.text = Some("a".repeat(spaceterm_server::protocol::limits::MAX_INPUT_BYTES + 1));
     for keys in [
         vec![],
         vec![key.clone(); MAX_KEY_BATCH + 1],
@@ -415,17 +416,17 @@ fn paste_confirmation_preserves_exact_modal_authority_and_focus_loss_cancels_it(
     host.shutdown().unwrap();
 }
 
-fn screen_with_marker(host: &mut DevelopmentPaneHost, lease: Lease, marker: &str) -> Box<Screen> {
+fn screen_with_marker(
+    host: &mut DevelopmentPaneHost,
+    lease: Lease,
+    marker: &str,
+) -> Box<ScreenFrame> {
     let deadline = Instant::now() + Duration::from_secs(3);
     loop {
         if let Reply::Screen(screen) = host.request([1; 32], [1; 32], Request::Poll { lease })
-            && screen.rows.iter().any(|row| {
-                row.iter()
-                    .map(|cell| cell.text.as_str())
-                    .collect::<String>()
-                    .trim_end()
-                    .starts_with(marker)
-            })
+            && lines(&screen)
+                .iter()
+                .any(|row| row.trim_end().starts_with(marker))
         {
             return screen;
         }
@@ -447,7 +448,7 @@ fn redraw_between_pointer_press_and_release_does_not_swallow_the_next_click() {
     let original = screen_with_marker(&mut host, lease, "READY");
     focus(&mut host, lease, 1, FocusTarget::Terminal);
     let press = Pointer {
-        screen_generation: original.generation,
+        screen_generation: original.update.generation,
         phase: pane::PointerPhase::Press,
         button: Some(pane::PointerButton::Left),
         x: 4.0,
@@ -460,7 +461,7 @@ fn redraw_between_pointer_press_and_release_does_not_swallow_the_next_click() {
         Reply::Unchanged
     ));
     let changed = screen_with_marker(&mut host, lease, "CHANGED");
-    assert_ne!(changed.generation, original.generation);
+    assert_ne!(changed.update.generation, original.update.generation);
     // An accepted application gesture continues across output in the same geometry.
     assert!(matches!(
         input(
@@ -491,7 +492,7 @@ fn redraw_between_pointer_press_and_release_does_not_swallow_the_next_click() {
         Reply::Unchanged
     ));
     let fresh = Pointer {
-        screen_generation: changed.generation,
+        screen_generation: changed.update.generation,
         x: 12.0,
         y: 23.0,
         ..press
@@ -511,14 +512,8 @@ fn redraw_between_pointer_press_and_release_does_not_swallow_the_next_click() {
     input(&mut host, lease, 1, InteractiveInput::Pointer(press));
     input(&mut host, lease, 1, text_key("!", false));
     let screen = screen_with_marker(&mut host, lease, "R:");
-    let report = screen
-        .rows
-        .iter()
-        .map(|row| {
-            row.iter()
-                .map(|cell| cell.text.as_str())
-                .collect::<String>()
-        })
+    let report = lines(&screen)
+        .into_iter()
         .find(|row| row.starts_with("R:"))
         .unwrap();
     assert_eq!(
@@ -551,7 +546,7 @@ fn geometry_change_balances_pointer_release_and_publishes_without_program_output
     let original = screen_with_marker(&mut host, lease, "READY");
     focus(&mut host, lease, 1, FocusTarget::Terminal);
     let press = Pointer {
-        screen_generation: original.generation,
+        screen_generation: original.update.generation,
         phase: pane::PointerPhase::Press,
         button: Some(pane::PointerButton::Left),
         x: 4.0,
@@ -575,8 +570,9 @@ fn geometry_change_balances_pointer_release_and_publishes_without_program_output
         Reply::Unchanged
     ));
     let resized = next_screen(&mut host, lease);
-    assert!(resized.generation > original.generation);
-    assert_eq!((resized.columns, resized.rows.len()), (80, 24));
+    assert!(resized.update.generation > original.update.generation);
+    let geometry = resized.update.geometry.unwrap();
+    assert_eq!((geometry.columns, geometry.rows), (80, 24));
     // A discarded gesture cannot be resumed by its delayed release or a stale press.
     input(
         &mut host,
@@ -591,7 +587,7 @@ fn geometry_change_balances_pointer_release_and_publishes_without_program_output
     );
     input(&mut host, lease, 1, InteractiveInput::Pointer(press));
     let fresh = Pointer {
-        screen_generation: resized.generation,
+        screen_generation: resized.update.generation,
         x: 12.0,
         y: 23.0,
         ..press
@@ -606,14 +602,8 @@ fn geometry_change_balances_pointer_release_and_publishes_without_program_output
     }
     input(&mut host, lease, 1, text_key("!", false));
     let screen = screen_with_marker(&mut host, lease, "R:");
-    let report = screen
-        .rows
-        .iter()
-        .map(|row| {
-            row.iter()
-                .map(|cell| cell.text.as_str())
-                .collect::<String>()
-        })
+    let report = lines(&screen)
+        .into_iter()
         .find(|row| row.starts_with("R:"))
         .unwrap();
     assert_eq!(
@@ -642,9 +632,9 @@ fn application_pointer_and_wheel_encode_at_the_pty_and_stale_screens_are_dropped
         },
     );
     let screen = next_screen(&mut host, lease);
-    assert!(screen.mouse_tracking);
+    assert!(screen.update.modes.unwrap().mouse_tracking);
     let pointer = Pointer {
-        screen_generation: screen.generation,
+        screen_generation: screen.update.generation,
         phase: pane::PointerPhase::Press,
         button: Some(pane::PointerButton::Left),
         x: 4.0,
@@ -674,7 +664,7 @@ fn application_pointer_and_wheel_encode_at_the_pty_and_stale_screens_are_dropped
             lease,
             1,
             InteractiveInput::Pointer(Pointer {
-                screen_generation: screen.generation,
+                screen_generation: screen.update.generation,
                 phase: pane::PointerPhase::Release,
                 ..pointer
             })
@@ -687,7 +677,7 @@ fn application_pointer_and_wheel_encode_at_the_pty_and_stale_screens_are_dropped
             lease,
             1,
             InteractiveInput::Wheel(Wheel {
-                screen_generation: screen.generation,
+                screen_generation: screen.update.generation,
                 horizontal_steps: 0,
                 vertical_steps: 1,
                 phase: pane::WheelPhase::GestureChanged,
@@ -899,13 +889,7 @@ fn reconnect_takeover_and_wrong_device_invalidate_paste_and_input_authority() {
     loop {
         if let Reply::Screen(screen) =
             host.request([2; 32], [3; 32], Request::Poll { lease: successor })
-            && screen.rows.iter().any(|row| {
-                row.iter()
-                    .map(|cell| cell.text.as_str())
-                    .collect::<String>()
-                    .trim_end()
-                    == "6f6b"
-            })
+            && lines(&screen).iter().any(|row| row.trim_end() == "6f6b")
         {
             break;
         }
@@ -1110,13 +1094,9 @@ fn shared_interactive_input_uses_controlling_size_and_terminal_visible_appearanc
     let deadline = Instant::now() + Duration::from_secs(3);
     loop {
         if let Reply::Screen(screen) = host.request([1; 32], [1; 32], Request::Poll { lease })
-            && screen.rows.iter().any(|row| {
-                row.iter()
-                    .map(|cell| cell.text.as_str())
-                    .collect::<String>()
-                    .trim_end()
-                    == "QUERY-READY"
-            })
+            && lines(&screen)
+                .iter()
+                .any(|row| row.trim_end() == "QUERY-READY")
         {
             break;
         }
@@ -1130,21 +1110,14 @@ fn shared_interactive_input_uses_controlling_size_and_terminal_visible_appearanc
     let deadline = Instant::now() + Duration::from_secs(3);
     loop {
         if let Reply::Screen(screen) = host.request([1; 32], [1; 32], Request::Poll { lease }) {
-            let rows = screen
-                .rows
-                .iter()
-                .map(|row| {
-                    row.iter()
-                        .map(|cell| cell.text.as_str())
-                        .collect::<String>()
-                })
-                .collect::<Vec<_>>();
+            let rows = lines(&screen);
             if rows
                 .iter()
                 .any(|row| row.trim_end() == "APPEARANCE:1b5b3f3939373b326e")
             {
-                assert_eq!((screen.columns, screen.rows.len()), (91, 31));
-                assert_eq!(screen.background, [240; 3]);
+                let geometry = screen.update.geometry.unwrap();
+                assert_eq!((geometry.columns, geometry.rows), (91, 31));
+                assert_eq!(screen.update.colors.as_ref().unwrap().background, [240; 3]);
                 assert!(rows.iter().any(|row| row.trim_end() == "SIZE:31 91"));
                 break;
             }
@@ -1186,7 +1159,7 @@ fn a_restored_pane_waits_for_explicit_first_use_and_starts_only_once() {
         assert!(matches!(host.request([1; 32], [1; 32], Request::Select {
             create: false, size: size(), resume, style: None,
         }), Reply::Restored { pane, .. } if pane == pane_id));
-        host.tick();
+        host.tick(std::time::Instant::now());
         assert!(host.pane.is_none());
     }
     let request = Request::StartRestored {
@@ -1239,7 +1212,7 @@ fn ordinary_exit_retires_organization_without_a_connected_client() {
     host.disconnected([1; 32]);
     let until = Instant::now() + Duration::from_secs(3);
     while host.organization.is_some() && Instant::now() < until {
-        host.tick();
+        host.tick(std::time::Instant::now());
         std::thread::sleep(Duration::from_millis(10));
     }
     assert!(
@@ -1259,7 +1232,7 @@ fn only_owning_shell_directory_confirmation_changes_restoration() {
         "stty -echo; printf '\\033]7;file://localhost/\\007\\033]133;A;spaceterm=%s\\007' \"$SPACETERM_PROMPT_OWNER\"; printf '\\033[2J\\033[HCONFIRMED\\n'",
     );
     await_text(&mut host, 1, lease, "CONFIRMED");
-    host.tick();
+    host.tick(std::time::Instant::now());
     assert_eq!(
         host.organization
             .as_ref()
@@ -1275,7 +1248,7 @@ fn only_owning_shell_directory_confirmation_changes_restoration() {
         "printf '\\033]7;file://localhost/tmp\\007\\033]133;A;spaceterm=foreign\\007'; printf 'NESTED\\n'",
     );
     await_text(&mut host, 1, lease, "NESTED");
-    host.tick();
+    host.tick(std::time::Instant::now());
     assert_eq!(
         host.organization
             .as_ref()

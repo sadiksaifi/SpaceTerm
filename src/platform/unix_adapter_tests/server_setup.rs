@@ -27,6 +27,12 @@ use crate::ssh::process::{
     reason = "acceptance uses inventory and owning-server mutation helpers"
 )]
 mod repository;
+#[path = "../../../crates/spaceterm-server-host/examples/support/mod.rs"]
+#[expect(
+    dead_code,
+    reason = "acceptance uses Pane claims, terminal commands and directory requests"
+)]
+mod support;
 #[path = "../../../crates/spaceterm-server-host/examples/support/terminal_semantics.rs"]
 mod terminal_semantics;
 #[path = "../../../crates/spaceterm-server-host/examples/support/worktree.rs"]
@@ -36,72 +42,18 @@ mod terminal_semantics;
 )]
 mod worktree_fixture;
 
-fn terminal_command(
-    connection: &mut spaceterm_server::pane::PaneConnection,
-    lease: spaceterm_server::pane::Lease,
-    text: &str,
-) -> Result<(), spaceterm_server::ServerError> {
-    use spaceterm_server::pane::{FocusTarget, InteractiveInput, Key, Request};
-    let key = |physical, logical: &str, text| Key {
-        physical,
-        action: 0,
-        logical: logical.into(),
-        text,
-        unshifted: None,
-        modifiers: 0,
-        consumed: 0,
-        option_as_alt: false,
-    };
-    connection.exchange(&Request::Focus {
-        lease,
-        generation: 1,
-        target: FocusTarget::Terminal,
-    })?;
-    connection.exchange(&Request::Input {
-        lease,
-        generation: 1,
-        input: InteractiveInput::Key(key(
-            crate::runtime::PhysicalKey::Unidentified as u32,
-            "text-input",
-            Some(text.into()),
-        )),
-    })?;
-    connection.exchange(&Request::Input {
-        lease,
-        generation: 1,
-        input: InteractiveInput::Key(key(
-            crate::runtime::PhysicalKey::Enter as u32,
-            "enter",
-            None,
-        )),
-    })?;
-    Ok(())
-}
-
 /// Observes only a fixture's static witness or its bounded shell exit status.
 fn terminal_fixture_command(
-    connection: &mut spaceterm_server::pane::PaneConnection,
-    lease: spaceterm_server::pane::Lease,
+    pane: &support::Pane,
     command: &str,
     stage: &'static str,
     witness: &'static str,
-) -> Result<Box<spaceterm_server::pane::Screen>, terminal_semantics::Failure> {
+) -> Result<Box<spaceterm_server::protocol::interim::ScreenFrame>, terminal_semantics::Failure> {
     let status = format!("ST-FIXTURE-{stage}-EXIT=");
     let command = format!("{command}; printf '\\n{status}%d\\n' \"$?\"");
-    terminal_semantics::stage(stage, terminal_command(connection, lease, &command))?;
-    let lines = |screen: &spaceterm_server::pane::Screen| {
-        screen
-            .rows
-            .iter()
-            .map(|row| {
-                row.iter()
-                    .map(|cell| cell.text.as_str())
-                    .collect::<String>()
-            })
-            .collect::<Vec<_>>()
-    };
-    let output = terminal_semantics::screen(connection, lease, |screen| {
-        lines(screen).iter().any(|line| {
+    terminal_semantics::stage(stage, pane.command(&command))?;
+    let output = terminal_semantics::screen(pane, |screen| {
+        support::rows(screen).iter().any(|line| {
             line.trim_end() == witness
                 || line
                     .trim_end()
@@ -110,7 +62,7 @@ fn terminal_fixture_command(
         })
     })
     .map_err(|failure| failure.at(stage))?;
-    let lines = lines(&output);
+    let lines = support::rows(&output);
     if lines.iter().any(|line| line.trim_end() == witness) {
         return Ok(output);
     }
@@ -133,7 +85,8 @@ fn native_server_owned_work(
 ) -> Result<(), terminal_semantics::Failure> {
     use spaceterm_server::{
         hierarchy::{CloseTarget, Mutation, Outcome},
-        pane::{PaneSize, Reply, Request},
+        pane::{PaneSize, directories},
+        protocol,
         worktree::{Branch, BranchName, Operation},
     };
     use terminal_semantics::stage as api;
@@ -145,17 +98,13 @@ fn native_server_owned_work(
         return Err("WSS fixture has an unresolved original; preserve it before new work".into());
     }
     drop(journal);
-    let mut connection = api("wss-connect-pane", server.connect_shared_pane())?;
-    let baseline = api(
-        "wss-baseline-inventory",
-        repository::inventory(&mut connection),
-    )?
-    .0;
+    let mut connection = api("wss-connect-pane", server.link())?;
+    let baseline = api("wss-baseline-inventory", repository::inventory(&connection))?.0;
     let created = api(
         "wss-create-workspace",
         worktree_fixture::journaled_mutation(
             server,
-            &mut connection,
+            &connection,
             Mutation::CreateWorkspace {
                 name: "WSS native semantics".into(),
                 directory: None,
@@ -165,14 +114,12 @@ fn native_server_owned_work(
     let Outcome::Accepted { target: workspace } = created.outcome else {
         return Err("WSS native fixture Workspace creation refused".into());
     };
+    // The fixture Pane outlives the exercise, so cleanup can still run its shell commands.
+    let mut fixture: Option<support::Pane> = None;
     let mut remote_root = None;
     let mut root_identity = None;
     let exercise = (|| -> Result<_, terminal_semantics::Failure> {
-        let current = api(
-            "wss-fixture-inventory",
-            repository::inventory(&mut connection),
-        )?
-        .0;
+        let current = api("wss-fixture-inventory", repository::inventory(&connection))?.0;
         let pane = current
             .workspaces
             .iter()
@@ -180,48 +127,36 @@ fn native_server_owned_work(
             .and_then(|work| work.tabs.first())
             .ok_or("WSS fixture Pane missing")?
             .root_pane;
-        let Reply::Attached { mut lease } = api(
-            "wss-select-fixture-pane",
-            connection.exchange(&Request::SelectPane {
-                pane,
-                explicit: true,
-                style: None,
-                size: PaneSize {
-                    columns: 80,
-                    rows: 24,
-                    cell_width: 8,
-                    cell_height: 18,
-                },
-            }),
-        )?
-        else {
-            return Err("WSS fixture Pane did not start".into());
+        let size = PaneSize {
+            columns: 80,
+            rows: 24,
+            cell_width: 8,
+            cell_height: 18,
         };
-        let report = terminal_semantics::exercise(&mut connection, lease, terminal_command)?;
+        let started = api(
+            "wss-select-fixture-pane",
+            support::select(&connection, pane, true, size),
+        )?
+        .attached()
+        .ok_or("WSS fixture Pane did not start")?;
+        let shell = &*fixture.insert(started);
+        let report = terminal_semantics::exercise(shell)?;
         terminal_fixture_command(
-            &mut connection,
-            lease,
+            shell,
             "st653_live=retained; printf 'ST653-LIVE\\n'",
             "wss-live-shell",
             "ST653-LIVE",
         )?;
-        let before = api(
-            "wss-before-reconnect",
-            repository::inventory(&mut connection),
-        )?
-        .0;
+        let before = api("wss-before-reconnect", repository::inventory(&connection))?.0;
         let reconnected = reconnect();
         if api("wss-original-client", server.client_scope())?
             != api("wss-reconnected-client", reconnected.client_scope())?
         {
             return Err("WSS reconnect changed the paired Client Identity".into());
         }
-        connection = api("wss-reconnect-pane", reconnected.connect_shared_pane())?;
-        let after = api(
-            "wss-after-reconnect",
-            repository::inventory(&mut connection),
-        )?
-        .0;
+        connection.close();
+        connection = api("wss-reconnect-pane", reconnected.link())?;
+        let after = api("wss-after-reconnect", repository::inventory(&connection))?.0;
         let before = before.close.ok_or("WSS original live inventory missing")?;
         let after = after
             .close
@@ -234,38 +169,22 @@ fn native_server_owned_work(
         {
             return Err("WSS reconnect replaced existing Terminal Sessions".into());
         }
-        let Reply::Attached { lease: resumed } = api(
+        let resumed = api(
             "wss-resume-fixture-pane",
-            connection.exchange(&Request::SelectPane {
-                pane,
-                explicit: true,
-                style: None,
-                size: PaneSize {
-                    columns: 80,
-                    rows: 24,
-                    cell_width: 8,
-                    cell_height: 18,
-                },
-            }),
+            support::select(&connection, pane, true, size),
         )?
-        else {
-            return Err("WSS fixture Pane did not resume".into());
-        };
-        lease = resumed;
+        .attached()
+        .ok_or("WSS fixture Pane did not resume")?;
+        let shell = &*fixture.insert(resumed);
         terminal_fixture_command(
-            &mut connection,
-            lease,
+            shell,
             "test \"$st653_live\" = retained && printf 'ST653-REUSED\\n'",
             "wss-shell-reuse",
             "ST653-REUSED",
         )?;
-        if !connection.worktree_writes() {
-            return Err("WSS Worktree capability missing".into());
-        }
         // Only the owning server's shell creates or accesses these paths. They never enter local I/O.
         terminal_fixture_command(
-            &mut connection,
-            lease,
+            shell,
             r#"st653_root=$(mktemp -d /tmp/st653.XXXXXXXX) && printf 'ST-ROOT-CREATED\n'"#,
             "wss-root-mkdir",
             "ST-ROOT-CREATED",
@@ -273,28 +192,18 @@ fn native_server_owned_work(
         // A cd inside command substitution captures the integration's chpwd OSC output.
         // Resolve the server path without changing the shell's directory or invoking hooks.
         terminal_fixture_command(
-            &mut connection,
-            lease,
+            shell,
             r#"st653_root=$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$st653_root") && printf 'ST-ROOT-CANONICAL\n'"#,
             "wss-root-canonicalize",
             "ST-ROOT-CANONICAL",
         )?;
         let output = terminal_fixture_command(
-            &mut connection,
-            lease,
+            shell,
             r#"st653_identity=$(python3 -c 'import os,sys; s=os.stat(sys.argv[1],follow_symlinks=False); print("%d:%d"%(s.st_dev,s.st_ino))' "$st653_root") && printf 'ST-FIXTURE-ROOT=%s\nST-FIXTURE-IDENTITY=%s\nST-ROOT-READY\n' "$st653_root" "$st653_identity""#,
             "wss-root-identity",
             "ST-ROOT-READY",
         )?;
-        let lines = output
-            .rows
-            .iter()
-            .map(|row| {
-                row.iter()
-                    .map(|cell| cell.text.as_str())
-                    .collect::<String>()
-            })
-            .collect::<Vec<_>>();
+        let lines = support::rows(&output);
         let root = lines
             .iter()
             .find_map(|line| line.trim_end().strip_prefix("ST-FIXTURE-ROOT="))
@@ -322,67 +231,58 @@ fn native_server_owned_work(
                 Some((device.parse::<u64>().ok()?, inode.parse::<u64>().ok()?))
             })
             .ok_or("WSS fixture filesystem identity missing")?;
-        remote_root = Some((path.clone(), lease));
+        remote_root = Some(path.clone());
         root_identity = Some(identity);
         let created_directory = path.join("created-directory");
         let value = directory_operation(
-            &mut connection,
+            &connection,
             1,
-            spaceterm_server::pane::Request::DirectoryCreate(
-                spaceterm_server::pane::directories::CreationRequest::Begin {
-                    id: 1,
-                    path: created_directory.clone(),
-                },
-            ),
+            protocol::Operation::DirectoryCreate(directories::CreationRequest::Begin {
+                id: 1,
+                path: created_directory.clone(),
+            }),
             true,
         )?;
-        if !matches!(value, spaceterm_server::pane::directories::Value::Directory(ref value) if value == &created_directory)
+        if !matches!(value, directories::Value::Directory(ref value) if value == &created_directory)
         {
             return Err("WSS directory creation returned another directory".into());
         }
         let value = directory_operation(
-            &mut connection,
+            &connection,
             2,
-            Request::DirectoryRead(spaceterm_server::pane::directories::Request::Begin {
+            protocol::Operation::DirectoryRead(directories::Request::Begin {
                 id: 2,
-                operation: spaceterm_server::pane::directories::Operation::List {
-                    path: path.clone(),
-                },
+                operation: directories::Operation::List { path: path.clone() },
             }),
             false,
         )?;
-        if !matches!(value, spaceterm_server::pane::directories::Value::Listing { names, truncated: false } if names.iter().any(|name| name == "created-directory"))
+        if !matches!(value, directories::Value::Listing { names, truncated: false } if names.iter().any(|name| name == "created-directory"))
         {
             return Err("WSS directory browsing missed its created directory".into());
         }
         terminal_fixture_command(
-            &mut connection,
-            lease,
+            shell,
             r#"ln -s "$st653_root/created-directory" "$st653_root/alias" && printf 'ST-ALIAS-READY\n'"#,
             "wss-directory-alias",
             "ST-ALIAS-READY",
         )?;
         let value = directory_operation(
-            &mut connection,
+            &connection,
             3,
-            Request::DirectoryRead(spaceterm_server::pane::directories::Request::Begin {
+            protocol::Operation::DirectoryRead(directories::Request::Begin {
                 id: 3,
-                operation: spaceterm_server::pane::directories::Operation::Match {
+                operation: directories::Operation::Match {
                     path: path.join("alias"),
                     candidates: vec![created_directory],
                 },
             }),
             false,
         )?;
-        if !matches!(
-            value,
-            spaceterm_server::pane::directories::Value::Match { index: Some(0) }
-        ) {
+        if !matches!(value, directories::Value::Match { index: Some(0) }) {
             return Err("WSS directory comparison did not resolve the owning-server alias".into());
         }
         terminal_fixture_command(
-            &mut connection,
-            lease,
+            shell,
             r#"GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 git -C "$st653_root" -c init.defaultBranch=main init -q && git -C "$st653_root" config core.hooksPath /dev/null && git -C "$st653_root" -c commit.gpgSign=false -c user.name=Fixture -c user.email=fixture@invalid commit -q --allow-empty -m fixture && printf 'ST-REPOSITORY-READY\n'"#,
             "wss-repository-ready",
             "ST-REPOSITORY-READY",
@@ -391,7 +291,7 @@ fn native_server_owned_work(
             "wss-pin-fixture-workspace",
             worktree_fixture::journaled_mutation(
                 server,
-                &mut connection,
+                &connection,
                 Mutation::PinWorkspace {
                     workspace,
                     version: 0,
@@ -407,7 +307,7 @@ fn native_server_owned_work(
             "wss-create-fixture-worktree",
             worktree_fixture::journaled_mutation(
                 server,
-                &mut connection,
+                &connection,
                 Mutation::Worktree(Operation::Create {
                     workspace,
                     root: path.clone(),
@@ -424,7 +324,7 @@ fn native_server_owned_work(
         }
         let published = api(
             "wss-observe-created-worktree",
-            repository::await_facts(&mut connection, &path, |facts| {
+            repository::await_facts(&connection, &path, |facts| {
                 facts
                     .worktrees
                     .as_ref()
@@ -444,30 +344,25 @@ fn native_server_owned_work(
             return Err("WSS Worktree Tab did not belong to its owning server".into());
         }
         terminal_fixture_command(
-            &mut connection,
-            lease,
+            shell,
             r#"test -d "$st653_root/created" && printf 'ST-WORKTREE-EXISTS\n'"#,
             "wss-worktree-exists",
             "ST-WORKTREE-EXISTS",
         )?;
         let removal = api(
             "wss-review-worktree-removal",
-            worktree_fixture::review(&mut connection, &path, &worktree),
+            worktree_fixture::review(&connection, &path, &worktree),
         )?;
         let removed = api(
             "wss-remove-fixture-worktree",
-            worktree_fixture::journaled_mutation(
-                server,
-                &mut connection,
-                Mutation::Worktree(removal),
-            ),
+            worktree_fixture::journaled_mutation(server, &connection, Mutation::Worktree(removal)),
         )?;
         if !matches!(removed.outcome, Outcome::Accepted { .. }) {
             return Err("WSS Worktree removal refused".into());
         }
         api(
             "wss-observe-removed-worktree",
-            repository::await_facts(&mut connection, &path, |facts| {
+            repository::await_facts(&connection, &path, |facts| {
                 facts
                     .worktrees
                     .as_ref()
@@ -475,8 +370,7 @@ fn native_server_owned_work(
             }),
         )?;
         terminal_fixture_command(
-            &mut connection,
-            lease,
+            shell,
             r#"test ! -e "$st653_root/created" && printf 'ST-WORKTREE-REMOVED\n'"#,
             "wss-worktree-removed",
             "ST-WORKTREE-REMOVED",
@@ -494,30 +388,19 @@ fn native_server_owned_work(
     }
     // Recheck the exact remote filesystem object before descriptor-safe recursive removal.
     // A changed target is retained, and an uncertain write never reaches this cleanup.
-    let directory_cleanup = if let (Some((path, lease)), Some((device, inode))) =
-        (remote_root, root_identity)
+    let directory_cleanup = if let (Some(path), Some(shell), Some((device, inode))) =
+        (remote_root, fixture.as_ref(), root_identity)
     {
         let root = path.to_str().ok_or("WSS fixture root encoding changed")?;
         let cleanup = format!(
             r#"python3 -c 'import os,shutil,stat,sys; p=sys.argv[1]; parent=os.open(os.path.dirname(p),os.O_RDONLY|os.O_DIRECTORY); name=os.path.basename(p); fd=os.open(name,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=parent); s=os.fstat(fd); assert (s.st_dev,s.st_ino)==({device},{inode}) and shutil.rmtree.avoids_symlink_attacks; os.fchdir(fd); [shutil.rmtree(n) if stat.S_ISDIR(os.stat(n,dir_fd=fd,follow_symlinks=False).st_mode) else os.unlink(n,dir_fd=fd) for n in os.listdir(fd)]; s=os.stat(name,dir_fd=parent,follow_symlinks=False); assert (s.st_dev,s.st_ino)==({device},{inode}); os.rmdir(name,dir_fd=parent); os.close(fd); os.close(parent); print("ST-ROOT-REMOVED")' '{root}' 2>/dev/null"#
         );
-        terminal_fixture_command(
-            &mut connection,
-            lease,
-            &cleanup,
-            "wss-root-removed",
-            "ST-ROOT-REMOVED",
-        )
-        .map(drop)
+        terminal_fixture_command(shell, &cleanup, "wss-root-removed", "ST-ROOT-REMOVED").map(drop)
     } else {
         Ok(())
     };
     let target = CloseTarget::Workspace { workspace };
-    let current = api(
-        "wss-cleanup-inventory",
-        repository::inventory(&mut connection),
-    )?
-    .0;
+    let current = api("wss-cleanup-inventory", repository::inventory(&connection))?.0;
     let confirmation = current
         .close_confirmation(target)
         .ok_or("WSS fixture close target missing")?;
@@ -525,7 +408,7 @@ fn native_server_owned_work(
         "wss-close-fixture-workspace",
         worktree_fixture::journaled_mutation(
             server,
-            &mut connection,
+            &connection,
             Mutation::Close {
                 target,
                 confirmation,
@@ -537,7 +420,7 @@ fn native_server_owned_work(
     }
     let after = api(
         "wss-verify-baseline-inventory",
-        repository::inventory(&mut connection),
+        repository::inventory(&connection),
     )?
     .0;
     if !baseline
@@ -1307,40 +1190,44 @@ fn native_server_setup_reports_unavailable_credentials_without_publishing_a_conn
 }
 
 fn directory_operation(
-    connection: &mut spaceterm_server::pane::PaneConnection,
+    link: &spaceterm_server::connection::link::ServerLink,
     id: u64,
-    begin: spaceterm_server::pane::Request,
+    begin: spaceterm_server::protocol::Operation,
     creating: bool,
 ) -> Result<spaceterm_server::pane::directories::Value, terminal_semantics::Failure> {
-    use spaceterm_server::pane::{Reply, Request, directories};
-    let mut reply = connection
-        .exchange(&begin)
-        .map_err(|_| "WSS directory request failed")?;
+    use spaceterm_server::{
+        pane::directories,
+        protocol::{Operation, ReplyBody},
+    };
+    let mut reply = support::request(link, begin).map_err(|_| "WSS directory request failed")?;
     let deadline = Instant::now() + Duration::from_secs(8);
     loop {
         match reply {
-            Reply::DirectoryRead(Ok(directories::Progress::Ready(value)))
-            | Reply::DirectoryCreate(Ok(directories::Progress::Ready(value))) => return Ok(value),
-            Reply::DirectoryRead(Ok(directories::Progress::Pending))
-            | Reply::DirectoryCreate(Ok(directories::Progress::Pending)) => {}
+            ReplyBody::Directory(Ok(directories::Progress::Ready(value))) => return Ok(value),
+            ReplyBody::Directory(Ok(directories::Progress::Pending)) => {}
             _ => return Err("WSS directory operation refused".into()),
         }
         if Instant::now() >= deadline {
-            let _ = connection.exchange(&if creating {
-                Request::DirectoryCreate(directories::CreationRequest::Cancel { id })
-            } else {
-                Request::DirectoryRead(directories::Request::Cancel { id })
-            });
+            let _ = support::request(
+                link,
+                if creating {
+                    Operation::DirectoryCreate(directories::CreationRequest::Cancel { id })
+                } else {
+                    Operation::DirectoryRead(directories::Request::Cancel { id })
+                },
+            );
             return Err("WSS directory operation exceeded its deadline".into());
         }
         std::thread::sleep(Duration::from_millis(20));
-        reply = connection
-            .exchange(&if creating {
-                Request::DirectoryCreate(directories::CreationRequest::Poll { id })
+        reply = support::request(
+            link,
+            if creating {
+                Operation::DirectoryCreate(directories::CreationRequest::Poll { id })
             } else {
-                Request::DirectoryRead(directories::Request::Poll { id })
-            })
-            .map_err(|_| "WSS directory reply lost")?;
+                Operation::DirectoryRead(directories::Request::Poll { id })
+            },
+        )
+        .map_err(|_| "WSS directory reply lost")?;
     }
 }
 
@@ -1472,7 +1359,7 @@ fn native_server_setup_acceptance() {
         !server.is_account_local(),
         "setup returned local file authority"
     );
-    assert_eq!(server.refresh().unwrap().protocol_major, 1);
+    assert_eq!(server.refresh().unwrap().protocol_major, 2);
     let spawns = fixture.adapter.seal();
     let counts = backend.process_counts();
     assert_eq!(counts.active(), 0);
@@ -1524,7 +1411,7 @@ fn native_server_setup_acceptance() {
         relaunched.status(&route) == Some(DirectRouteStatus::Connected)
     });
     let server = relaunched.server(&route).unwrap();
-    assert_eq!(server.refresh().unwrap().protocol_major, 1);
+    assert_eq!(server.refresh().unwrap().protocol_major, 2);
     assert!(
         server
             .paired_devices()
@@ -1552,10 +1439,7 @@ fn native_server_setup_acceptance() {
 #[test]
 #[ignore = "requires installed Preflight and reachable WSS; overlaps read-only admission on one saved pairing, then revokes only that pairing"]
 fn native_server_setup_refresh_overlaps_first_shared_pane_without_losing_admission() {
-    use spaceterm_server::{
-        ServerError,
-        pane::{Reply, Request},
-    };
+    use spaceterm_server::ServerError;
     use std::sync::{Barrier, mpsc};
 
     fn observed<T>(
@@ -1647,25 +1531,21 @@ fn native_server_setup_refresh_overlaps_first_shared_pane_without_losing_admissi
                                     cycle,
                                     "refresh-protocol",
                                     started,
-                                    if status.protocol_major == 1 {
+                                    if status.protocol_major == 2 {
                                         Ok(())
                                     } else {
                                         Err(ServerError::Protocol)
                                     },
                                 )
                             });
-                        // refresh's short-lived Pane transport has been dropped.
+                        // refresh finished on the handle's shared connection.
                         let _ = refresh_done.send(());
                         result
                     });
                     let shared = scope.spawn(move || {
                         barrier.wait();
-                        let mut connection = observed(
-                            cycle,
-                            "first-shared-connect",
-                            started,
-                            captured.connect_shared_pane(),
-                        )?;
+                        let link =
+                            observed(cycle, "first-shared-connect", started, captured.link())?;
                         observed(
                             cycle,
                             "refresh-drop",
@@ -1674,26 +1554,18 @@ fn native_server_setup_refresh_overlaps_first_shared_pane_without_losing_admissi
                                 .recv_timeout(deadline.saturating_duration_since(Instant::now()))
                                 .map_err(|_| ServerError::Protocol),
                         )?;
+                        // Protocol major 2 implies every capability, so a request that changes
+                        // nothing checks the admitted connection.
                         let reply = observed(
                             cycle,
-                            "sibling-capabilities",
+                            "sibling-round-trip",
                             started,
-                            connection.exchange(&Request::Capabilities),
-                        )?;
-                        observed(
-                            cycle,
-                            "sibling-capability-reply",
-                            started,
-                            match reply {
-                                Reply::Capabilities {
-                                    development_pane: true,
-                                    workspace_policy: true,
-                                    ..
-                                } => Ok(()),
-                                _ => Err(ServerError::MissingRequiredCapability),
-                            },
-                        )
-                        // Drop the only shared Pane before the next cycle.
+                            support::round_trip(&link),
+                        );
+                        // Close the shared connection, so the next cycle's refresh and connect
+                        // overlap the first connection again.
+                        link.close();
+                        reply
                     });
                     (
                         refresh.join().unwrap_or(Err(ServerError::StartupFailed)),
@@ -2319,7 +2191,7 @@ impl SshServerBootstrap for StoppedDiscovery {
                 commit: "b".repeat(40),
                 stopped: true,
             }),
-            protocol_majors: vec![1],
+            protocol_majors: vec![spaceterm_server::protocol::MAJOR],
             capabilities: vec!["workspace_policy".into()],
             target: env!("SPACETERM_TARGET").into(),
             version: "1.0.0".into(),

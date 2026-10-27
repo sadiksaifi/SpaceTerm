@@ -32,8 +32,8 @@ mod exercise {
     };
     use spaceterm_server::{
         ServerConnection,
+        connection::link::ServerLink,
         hierarchy::{CloseTarget, Id, Mutation, Outcome},
-        pane::{Lease, PaneConnection, Reply, Request},
     };
     const IDENTITY: &str = "spaceterm-development";
     type Result<T> = std::result::Result<T, Failure>;
@@ -95,8 +95,8 @@ mod exercise {
             let Some((workspace, pane)) = self.workspace else {
                 return Ok(());
             };
-            let mut connection = stage("cleanup-connect", self.server.connect_pane())?;
-            let inventory = stage("cleanup-inventory", repository::inventory(&mut connection))?.0;
+            let connection = stage("cleanup-connect", support::connect(self.server))?;
+            let inventory = stage("cleanup-inventory", repository::inventory(&connection))?.0;
             if inventory.close.as_ref().map(|close| close.boot) != Some(self.boot) {
                 return Err("cleanup refused replacement server boot".into());
             }
@@ -117,7 +117,7 @@ mod exercise {
                     .ok_or("cleanup confirmation missing")?;
                 accepted(
                     self.server,
-                    &mut connection,
+                    &connection,
                     Mutation::Close {
                         target,
                         confirmation,
@@ -137,7 +137,7 @@ mod exercise {
     }
     fn accepted(
         server: &ServerConnection,
-        connection: &mut PaneConnection,
+        connection: &ServerLink,
         mutation: Mutation,
     ) -> Result<Id> {
         let outcome = stage(
@@ -149,19 +149,13 @@ mod exercise {
             _ => Err("test Workspace mutation refused".into()),
         }
     }
-    fn select(connection: &mut PaneConnection, pane: Id) -> Result<Lease> {
-        match stage(
+    fn select(connection: &ServerLink, pane: Id) -> Result<support::Pane> {
+        stage(
             "presentation-select",
-            connection.exchange(&Request::SelectPane {
-                pane,
-                explicit: true,
-                size: lifecycle::size(),
-                style: None,
-            }),
-        )? {
-            Reply::Attached { lease } => Ok(lease),
-            _ => Err("test Pane did not attach".into()),
-        }
+            support::select(connection, pane, true, lifecycle::size()),
+        )?
+        .attached()
+        .ok_or_else(|| "test Pane did not attach".into())
     }
     pub fn run() -> Result<()> {
         let Some(options) = Options::parse(&std::env::args().skip(1).collect::<Vec<_>>())? else {
@@ -189,27 +183,23 @@ mod exercise {
         }
         let server = stage(
             "ipc-client",
-            ServerConnection::for_development_client(&name, 1),
+            ServerConnection::for_development_client(&name, 2),
         )?;
         let observer = stage(
             "ipc-observer",
-            ServerConnection::for_development_client(&format!("{name}-observer"), 1),
+            ServerConnection::for_development_client(&format!("{name}-observer"), 2),
         )?;
         // Client credentials are created by admission, without service registration or setup/reset.
-        let mut connection = stage("presentation-connect", server.connect_pane())?;
-        let mut observer = stage("observer-connect", observer.connect_pane())?;
-        let inventory = stage(
-            "presentation-inventory",
-            repository::inventory(&mut connection),
-        )?
-        .0;
+        let connection = stage("presentation-connect", support::connect(&server))?;
+        let observer = stage("observer-connect", support::connect(&observer))?;
+        let inventory = stage("presentation-inventory", repository::inventory(&connection))?.0;
         let boot = inventory.close.as_ref().ok_or("server boot missing")?.boot;
         if options.boot.is_some_and(|expected| expected != boot) {
             return Err("expected server boot changed".into());
         }
         let workspace = accepted(
             &server,
-            &mut connection,
+            &connection,
             Mutation::CreateWorkspace {
                 name: "Presentation acceptance 612".into(),
                 directory: None,
@@ -220,7 +210,7 @@ mod exercise {
             boot,
             workspace: Some((workspace, None)),
         };
-        let current = stage("fixture-inventory", repository::inventory(&mut connection))?.0;
+        let current = stage("fixture-inventory", repository::inventory(&connection))?.0;
         let pane = current
             .workspaces
             .iter()
@@ -229,14 +219,16 @@ mod exercise {
             .ok_or("test Workspace missing")?
             .root_pane;
         scope.workspace = Some((workspace, Some(pane)));
-        let lease = select(&mut connection, pane)?;
-        let witness = presentation::begin(&mut connection, lease, support::command)?;
-        presentation::observe_hidden_inventory(&mut observer, pane)?;
-        drop(connection);
-        let mut connection = stage("presentation-reconnect", server.connect_pane())?;
-        let resumed = select(&mut connection, pane)?;
-        presentation::observe_hidden_inventory(&mut observer, pane)?;
-        presentation::finish(&mut connection, resumed, lease, witness)?;
+        let started = select(&connection, pane)?;
+        let witness = presentation::begin(&started)?;
+        presentation::observe_hidden_inventory(&observer, pane)?;
+        let lease = started.lease();
+        connection.close();
+        drop(started);
+        let connection = stage("presentation-reconnect", support::connect(&server))?;
+        let resumed = select(&connection, pane)?;
+        presentation::observe_hidden_inventory(&observer, pane)?;
+        presentation::finish(&resumed, lease, witness)?;
         scope.cleanup()?;
         println!(
             "PASS existing-server presentation acceptance and independent inventory observer; test Workspace removed"

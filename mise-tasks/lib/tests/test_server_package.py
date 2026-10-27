@@ -34,7 +34,7 @@ class ServerArchiveTests(unittest.TestCase):
         self.commit = "a" * 40
         self.info = {
             "schema": 1,
-            "protocol_major": 1,
+            "protocol_major": 2,
             "capabilities": ["workspace_policy"],
             "identity": "spaceterm-preflight",
             "target": "x86_64-unknown-linux-gnu",
@@ -295,7 +295,7 @@ class ServerArchiveTests(unittest.TestCase):
         with patch.object(server_package, "host_target", return_value=self.info["target"]):
             server_package.compatible_candidate(self.info, self.info["identity"])
         for changed, reason in [
-            ({"protocol_major": 2}, "protocol major"),
+            ({"protocol_major": 1}, "protocol major"),
             ({"capabilities": ["future_optional"]}, "required capability"),
         ]:
             with self.subTest(changed=changed):

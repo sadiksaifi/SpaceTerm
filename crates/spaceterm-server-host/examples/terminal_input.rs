@@ -1,13 +1,27 @@
 //! Real account-local client input check. Refuses to interfere with an already running server.
 #[path = "support/lifecycle.rs"]
 mod lifecycle;
+#[expect(
+    dead_code,
+    reason = "the input check uses its own key, command and screen helpers"
+)]
+mod support;
 use lifecycle::{Server, connect, require_idle, size};
 use spaceterm::runtime::PhysicalKey;
-use spaceterm_server::{ServerConnection, ServerError, hierarchy::*, pane::*};
+use spaceterm_server::{
+    ServerConnection, ServerError,
+    hierarchy::*,
+    pane::*,
+    protocol::{
+        InputEvent, Operation,
+        interim::{Interim, InterimReply, ScreenFrame},
+    },
+};
 use std::{
     error::Error,
     time::{Duration, Instant},
 };
+use support::{Claimed, Pane, has_row};
 
 struct WorkspaceCleanup<'a> {
     client: &'a ServerConnection,
@@ -19,14 +33,8 @@ impl WorkspaceCleanup<'_> {
         let Some(workspace) = self.workspace else {
             return Ok(());
         };
-        let mut connection = self.client.connect_pane()?;
-        let Reply::Inventory {
-            inventory,
-            next_sequence,
-        } = connection.exchange(&Request::Inventory)?
-        else {
-            return Err("cleanup inventory missing".into());
-        };
+        let link = support::connect(self.client)?;
+        let (inventory, next_sequence) = support::inventory(&link)?;
         if inventory.close.as_ref().map(|live| live.boot) != Some(self.boot) {
             return Err("cleanup refused a replacement server".into());
         }
@@ -35,13 +43,14 @@ impl WorkspaceCleanup<'_> {
             let confirmation = inventory
                 .close_confirmation(target)
                 .ok_or("cleanup authority missing")?;
-            let Reply::Outcome(result) = connection.exchange(&Request::Mutate {
-                sequence: next_sequence,
-                mutation: Mutation::Close {
+            let Some(result) = support::mutate(
+                &link,
+                next_sequence,
+                Mutation::Close {
                     target,
                     confirmation,
                 },
-            })?
+            )?
             else {
                 return Err("cleanup outcome missing".into());
             };
@@ -61,36 +70,8 @@ impl Drop for WorkspaceCleanup<'_> {
     }
 }
 
-fn focus(
-    c: &mut PaneConnection,
-    lease: Lease,
-    generation: u64,
-    target: FocusTarget,
-) -> Result<(), ServerError> {
-    assert!(matches!(
-        c.exchange(&Request::Focus {
-            lease,
-            generation,
-            target
-        })?,
-        Reply::Unchanged
-    ));
-    Ok(())
-}
-fn input(
-    c: &mut PaneConnection,
-    lease: Lease,
-    generation: u64,
-    input: InteractiveInput,
-) -> Result<Reply, ServerError> {
-    c.exchange(&Request::Input {
-        lease,
-        generation,
-        input,
-    })
-}
-fn key(text: &str, ime: bool) -> InteractiveInput {
-    InteractiveInput::Key(Key {
+fn key(text: &str, ime: bool) -> Key {
+    Key {
         physical: PhysicalKey::Unidentified as u32,
         action: 0,
         logical: if ime {
@@ -104,121 +85,82 @@ fn key(text: &str, ime: bool) -> InteractiveInput {
         modifiers: 0,
         consumed: 0,
         option_as_alt: false,
-    })
+    }
 }
-fn command(
-    c: &mut PaneConnection,
-    lease: Lease,
-    generation: u64,
-    text: &str,
-) -> Result<(), ServerError> {
-    input(c, lease, generation, key(text, false))?;
-    input(
-        c,
-        lease,
-        generation,
-        InteractiveInput::Key(Key {
-            physical: PhysicalKey::Enter as u32,
-            action: 0,
-            logical: "enter".into(),
-            text: None,
-            unshifted: None,
-            modifiers: 0,
-            consumed: 0,
-            option_as_alt: false,
-        }),
-    )?;
+/// Sends `key` under `generation` and waits for the server to discard it as stale.
+fn refused(pane: &Pane, generation: u64, key: Key) -> Result<(), Box<dyn Error>> {
+    let serial = pane.key(generation, key)?;
+    assert_eq!(pane.discarded(serial)?, Refusal::Stale);
     Ok(())
 }
-fn await_marker(
-    c: &mut PaneConnection,
-    lease: Lease,
-    marker: &str,
-) -> Result<Box<Screen>, Box<dyn Error>> {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while Instant::now() < deadline {
-        if let Reply::Screen(screen) = c.exchange(&Request::Poll { lease })?
-            && screen.rows.iter().any(|row| {
-                row.iter()
-                    .map(|cell| cell.text.as_str())
-                    .collect::<String>()
-                    .trim_end()
-                    == marker
-            })
-        {
-            return Ok(screen);
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    Err(format!("PTY marker missing: {marker}").into())
+fn command(pane: &Pane, generation: u64, text: &str) -> Result<(), ServerError> {
+    pane.input(
+        generation,
+        vec![
+            InputEvent::Key(key(text, false)),
+            InputEvent::Key(Key {
+                physical: PhysicalKey::Enter as u32,
+                action: 0,
+                logical: "enter".into(),
+                text: None,
+                unshifted: None,
+                modifiers: 0,
+                consumed: 0,
+                option_as_alt: false,
+            }),
+        ],
+    )
+    .map(drop)
+}
+fn await_marker(pane: &Pane, marker: &str) -> Result<Box<ScreenFrame>, Box<dyn Error>> {
+    pane.await_screen(Duration::from_secs(10), |screen| has_row(screen, marker))?
+        .ok_or_else(|| format!("PTY marker missing: {marker}").into())
 }
 fn capture(
-    c: &mut PaneConnection,
-    lease: Lease,
+    pane: &Pane,
     generation: u64,
     bytes: usize,
     modes: &str,
-) -> Result<Box<Screen>, Box<dyn Error>> {
+) -> Result<Box<ScreenFrame>, Box<dyn Error>> {
     let marker = format!("READY-{generation}-{bytes}");
     command(
-        c,
-        lease,
+        pane,
         generation,
         &format!(
             "stty raw -echo; printf '{modes}\\033[2J\\033[H{marker}\\r\\n'; dd bs=1 count={bytes} 2>/dev/null | od -An -tx1 | tr -d ' \\n'; stty sane; printf '\\r\\n'"
         ),
     )?;
-    await_marker(c, lease, &marker)
+    await_marker(pane, &marker)
 }
-fn unsafe_paste(
-    c: &mut PaneConnection,
-    lease: Lease,
-    generation: u64,
-) -> Result<u64, Box<dyn Error>> {
-    let Reply::Paste(PasteOutcome::ConfirmationRequired(p)) = input(
-        c,
-        lease,
-        generation,
-        InteractiveInput::Paste {
-            text: "a\nb".into(),
-        },
-    )?
-    else {
+fn unsafe_paste(pane: &Pane, generation: u64) -> Result<u64, Box<dyn Error>> {
+    let PasteOutcome::ConfirmationRequired(p) = pane.paste(generation, "a\nb")? else {
         return Err("unsafe paste did not require confirmation".into());
     };
     assert_eq!((p.byte_len, p.line_count, p.multiline), (3, 2, true));
     Ok(p.id)
 }
-fn native_effects(c: &mut PaneConnection, lease: Lease) -> Result<(), Box<dyn Error>> {
+fn native_effects(pane: &Pane) -> Result<(), Box<dyn Error>> {
     use spaceterm_server::pane::effects::{Completion, Effect};
-    assert!(c.supports_native_effects());
-    focus(c, lease, 3, FocusTarget::Terminal)?;
+    pane.focus(3, FocusTarget::Terminal)?;
     command(
-        c,
-        lease,
+        pane,
         3,
         "stty raw -echo; printf '\\033[2J\\033[H\\033]52;c;?\\007'; dd bs=1 count=12 2>/dev/null | od -An -tx1 | tr -d ' \\n'; stty sane; printf '\\r\\n'",
     )?;
-    let request = await_effect(c, lease, 3)?;
+    let request = await_effect(pane, 3)?;
     assert!(matches!(request.effect, Effect::ClipboardRead { .. }));
-    c.exchange(&Request::CompleteClipboard {
-        lease,
-        generation: 3,
-        id: request.id,
-        completion: Completion::Text("abc".into()),
-    })?;
-    await_marker(c, lease, "1b5d35323b633b59574a6a07")?;
+    pane.effect_done(3, request.id, Completion::Text("abc".into()))?;
+    await_marker(pane, "1b5d35323b633b59574a6a07")?;
     command(
-        c,
-        lease,
+        pane,
         3,
         "sleep 0.1; printf '\\033]7701;permissions=accessibility\\007\\007'",
     )?;
-    focus(c, lease, 4, FocusTarget::Unfocused)?;
+    pane.focus(4, FocusTarget::Unfocused)?;
     let mut permission = false;
     let mut bell = false;
     for _ in 0..2 {
-        match await_effect(c, lease, 4)?.effect {
+        match await_effect(pane, 4)?.effect {
             Effect::PermissionSetup {
                 accessibility: true,
                 ..
@@ -228,42 +170,34 @@ fn native_effects(c: &mut PaneConnection, lease: Lease) -> Result<(), Box<dyn Er
         }
     }
     assert!(permission && bell);
-    focus(c, lease, 5, FocusTarget::Terminal)?;
+    pane.focus(5, FocusTarget::Terminal)?;
     command(
-        c,
-        lease,
+        pane,
         5,
         "stty raw -echo; printf '\\033[2J\\033[H\\033]52;c;?\\007'; dd bs=1 count=8 2>/dev/null | od -An -tx1 | tr -d ' \\n'; stty sane; printf '\\r\\n'",
     )?;
-    let request = await_effect(c, lease, 5)?;
-    focus(c, lease, 6, FocusTarget::Unfocused)?;
-    focus(c, lease, 7, FocusTarget::Terminal)?;
-    assert!(matches!(
-        c.exchange(&Request::CompleteClipboard {
-            lease,
-            generation: 5,
-            id: request.id,
-            completion: Completion::Text("must not enter PTY".into())
-        }),
-        Err(ServerError::StaleControl)
-    ));
-    await_marker(c, lease, "1b5d35323b633b07")?;
+    let request = await_effect(pane, 5)?;
+    pane.focus(6, FocusTarget::Unfocused)?;
+    pane.focus(7, FocusTarget::Terminal)?;
+    // The server reports no outcome for a completion. The empty clipboard reply below shows that
+    // the completion of generation 5 never reached the PTY.
+    pane.effect_done(5, request.id, Completion::Text("must not enter PTY".into()))?;
+    await_marker(pane, "1b5d35323b633b07")?;
     Ok(())
 }
 
-fn await_effect(
-    c: &mut PaneConnection,
-    lease: Lease,
-    generation: u64,
-) -> Result<effects::Request, Box<dyn Error>> {
+fn await_effect(pane: &Pane, generation: u64) -> Result<effects::Request, Box<dyn Error>> {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
-        match c.exchange(&Request::NativeEffects { lease, generation })? {
-            Reply::NativeEffects {
+        match pane.interim(Interim::NativeEffects {
+            channel: pane.channel(),
+            generation,
+        })? {
+            InterimReply::NativeEffects {
                 request: Some(request),
                 ..
             } => return Ok(request),
-            Reply::NativeEffects { request: None, .. } => {}
+            InterimReply::NativeEffects { request: None, .. } => {}
             _ => return Err("native effects missing".into()),
         }
         if Instant::now() >= deadline {
@@ -273,10 +207,14 @@ fn await_effect(
     }
 }
 
+fn attached(claimed: Claimed, failure: &'static str) -> Result<Pane, Box<dyn Error>> {
+    claimed.attached().ok_or_else(|| failure.into())
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     let major = std::env::args()
         .nth(1)
-        .unwrap_or_else(|| "1".into())
+        .unwrap_or_else(|| "2".into())
         .parse()?;
     let first = ServerConnection::for_development_client("input-first", major)?;
     let second = ServerConnection::for_development_client("input-second", major)?;
@@ -284,23 +222,17 @@ fn main() -> Result<(), Box<dyn Error>> {
     first.setup()?;
     second.setup()?;
     let mut server = Server::start()?;
-    let mut a = connect(&first)?;
-    assert!(a.supports_interactive_input());
-    let Reply::Inventory {
-        next_sequence,
-        inventory,
-    } = a.exchange(&Request::Inventory)?
-    else {
-        return Err("inventory missing".into());
-    };
+    let a = connect(&first)?;
+    let (inventory, next_sequence) = support::inventory(&a)?;
     let boot = inventory.close.as_ref().ok_or("server boot missing")?.boot;
-    let Reply::Outcome(created) = a.exchange(&Request::Mutate {
-        sequence: next_sequence,
-        mutation: Mutation::CreateWorkspace {
+    let Some(created) = support::mutate(
+        &a,
+        next_sequence,
+        Mutation::CreateWorkspace {
             name: "Interactive input check".into(),
             directory: None,
         },
-    })?
+    )?
     else {
         return Err("creation outcome missing".into());
     };
@@ -312,9 +244,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         boot,
         workspace: Some(workspace),
     };
-    let Reply::Inventory { inventory, .. } = a.exchange(&Request::Inventory)? else {
-        return Err("inventory missing".into());
-    };
+    let (inventory, _) = support::inventory(&a)?;
     let pane = inventory
         .workspaces
         .iter()
@@ -322,167 +252,91 @@ fn main() -> Result<(), Box<dyn Error>> {
         .ok_or("created Workspace missing")?
         .tabs[0]
         .root_pane;
-    let Reply::Attached { lease: original } = a.exchange(&Request::SelectPane {
-        pane,
-        explicit: true,
-        size: size(),
-        style: None,
-    })?
-    else {
-        return Err("Pane missing".into());
-    };
-    assert!(matches!(
-        input(&mut a, original, 1, key("discarded", false)),
-        Err(ServerError::StaleControl)
-    ));
-    focus(&mut a, original, 1, FocusTarget::Terminal)?;
-    capture(&mut a, original, 1, 15, "\\033[?1004h")?;
-    focus(&mut a, original, 2, FocusTarget::FocusedPane)?;
-    assert!(matches!(
-        input(&mut a, original, 2, key("discarded", false)),
-        Err(ServerError::StaleControl)
-    ));
-    input(&mut a, original, 2, key("界", true))?;
-    focus(&mut a, original, 3, FocusTarget::Unfocused)?;
-    assert!(matches!(
-        input(&mut a, original, 3, key("discarded", true)),
-        Err(ServerError::StaleControl)
-    ));
-    focus(&mut a, original, 4, FocusTarget::Terminal)?;
-    input(&mut a, original, 4, key("K", false))?;
-    input(
-        &mut a,
-        original,
-        4,
-        InteractiveInput::Paste { text: "ok".into() },
-    )?;
-    await_marker(&mut a, original, "1b5b491b5b4fe7958c1b5b494b6f6b")?;
+    let original = attached(support::select(&a, pane, true, size())?, "Pane missing")?;
+    refused(&original, 1, key("discarded", false))?;
+    original.focus(1, FocusTarget::Terminal)?;
+    capture(&original, 1, 15, "\\033[?1004h")?;
+    original.focus(2, FocusTarget::FocusedPane)?;
+    refused(&original, 2, key("discarded", false))?;
+    original.key(2, key("界", true))?;
+    original.focus(3, FocusTarget::Unfocused)?;
+    refused(&original, 3, key("discarded", true))?;
+    original.focus(4, FocusTarget::Terminal)?;
+    original.key(4, key("K", false))?;
+    original.paste(4, "ok")?;
+    await_marker(&original, "1b5b491b5b4fe7958c1b5b494b6f6b")?;
     // Disable focus reporting before the next byte capture.
     command(
-        &mut a,
-        original,
+        &original,
         4,
         "printf '\\033[?1004l\\033[2J\\033[HFOCUS-DONE\\n'",
     )?;
-    await_marker(&mut a, original, "FOCUS-DONE")?;
-    capture(&mut a, original, 4, 5, "")?;
-    let cancelled = unsafe_paste(&mut a, original, 4)?;
-    focus(
-        &mut a,
-        original,
-        4,
-        FocusTarget::PasteConfirmation { id: cancelled },
+    await_marker(&original, "FOCUS-DONE")?;
+    capture(&original, 4, 5, "")?;
+    let cancelled = unsafe_paste(&original, 4)?;
+    original.focus(4, FocusTarget::PasteConfirmation { id: cancelled })?;
+    original.focus(5, FocusTarget::Unfocused)?;
+    original.focus(6, FocusTarget::Terminal)?;
+    assert_eq!(
+        original.resolve_paste(6, cancelled, true)?,
+        PasteOutcome::Stale
+    );
+    let disconnected = unsafe_paste(&original, 6)?;
+    a.close();
+    let original = original.lease();
+    let a = connect(&first)?;
+    let resumed = attached(
+        support::select(&a, pane, false, size())?,
+        "reconnect did not resume",
     )?;
-    focus(&mut a, original, 5, FocusTarget::Unfocused)?;
-    focus(&mut a, original, 6, FocusTarget::Terminal)?;
-    assert!(matches!(
-        input(
-            &mut a,
-            original,
-            6,
-            InteractiveInput::ResolvePaste {
-                id: cancelled,
-                confirm: true
-            }
+    assert_eq!(resumed.lease().session, original.session);
+    assert_ne!(resumed.lease().connection, original.connection);
+    resumed.focus(1, FocusTarget::Terminal)?;
+    assert_eq!(
+        resumed.resolve_paste(1, disconnected, true)?,
+        PasteOutcome::Stale
+    );
+    let transferred = unsafe_paste(&resumed, 1)?;
+    let b = connect(&second)?;
+    let taken = attached(
+        support::claim(
+            &b,
+            pane,
+            AttachmentClaim::TakeOver {
+                target: resumed.lease().into(),
+            },
+            size(),
         )?,
-        Reply::Paste(PasteOutcome::Stale)
-    ));
-    let disconnected = unsafe_paste(&mut a, original, 6)?;
-    drop(a);
-    let mut a = connect(&first)?;
-    let Reply::Attached { lease: resumed } = a.exchange(&Request::SelectPane {
-        pane,
-        explicit: false,
-        size: size(),
-        style: None,
-    })?
-    else {
-        return Err("reconnect did not resume".into());
-    };
-    assert_eq!(resumed.session, original.session);
-    assert_ne!(resumed.connection, original.connection);
-    focus(&mut a, resumed, 1, FocusTarget::Terminal)?;
-    assert!(matches!(
-        input(
-            &mut a,
-            resumed,
-            1,
-            InteractiveInput::ResolvePaste {
-                id: disconnected,
-                confirm: true
-            }
-        )?,
-        Reply::Paste(PasteOutcome::Stale)
-    ));
-    let transferred = unsafe_paste(&mut a, resumed, 1)?;
-    let mut b = connect(&second)?;
-    let Reply::Attached { lease } = b.exchange(&Request::TakeOver {
-        target: resumed.into(),
-        size: size(),
-        style: None,
-    })?
-    else {
-        return Err("takeover failed".into());
-    };
-    assert_eq!(lease.session, resumed.session);
-    assert_ne!(lease.control, resumed.control);
-    assert!(matches!(
-        input(
-            &mut a,
-            resumed,
-            1,
-            InteractiveInput::ResolvePaste {
-                id: transferred,
-                confirm: true
-            }
-        ),
-        Err(ServerError::StaleControl)
-    ));
-    focus(&mut b, lease, 1, FocusTarget::Terminal)?;
-    assert!(matches!(
-        input(
-            &mut b,
-            lease,
-            1,
-            InteractiveInput::ResolvePaste {
-                id: transferred,
-                confirm: true
-            }
-        )?,
-        Reply::Paste(PasteOutcome::Stale)
-    ));
-    input(
-        &mut b,
-        lease,
-        1,
-        InteractiveInput::Paste { text: "ok".into() },
+        "takeover failed",
     )?;
-    let id = unsafe_paste(&mut b, lease, 1)?;
-    focus(&mut b, lease, 1, FocusTarget::PasteConfirmation { id })?;
-    assert!(matches!(
-        input(
-            &mut b,
-            lease,
-            1,
-            InteractiveInput::ResolvePaste { id, confirm: true }
-        )?,
-        Reply::Paste(PasteOutcome::Written)
-    ));
-    assert!(matches!(
-        input(
-            &mut b,
-            lease,
-            1,
-            InteractiveInput::ResolvePaste { id, confirm: true }
-        )?,
-        Reply::Paste(PasteOutcome::Stale)
-    ));
-    await_marker(&mut b, lease, "6f6b610d62")?;
-    focus(&mut b, lease, 2, FocusTarget::Terminal)?;
-    let screen = capture(&mut b, lease, 2, 28, "\\033[?1000h\\033[?1006h")?;
-    assert!(screen.mouse_tracking);
+    let lease = taken.lease();
+    assert_eq!(lease.session, resumed.lease().session);
+    assert_ne!(lease.control, resumed.lease().control);
+    assert_eq!(
+        resumed.resolve_paste(1, transferred, true).err(),
+        Some(ServerError::StaleControl)
+    );
+    taken.focus(1, FocusTarget::Terminal)?;
+    assert_eq!(
+        taken.resolve_paste(1, transferred, true)?,
+        PasteOutcome::Stale
+    );
+    taken.paste(1, "ok")?;
+    let id = unsafe_paste(&taken, 1)?;
+    taken.focus(1, FocusTarget::PasteConfirmation { id })?;
+    assert_eq!(taken.resolve_paste(1, id, true)?, PasteOutcome::Written);
+    assert_eq!(taken.resolve_paste(1, id, true)?, PasteOutcome::Stale);
+    await_marker(&taken, "6f6b610d62")?;
+    taken.focus(2, FocusTarget::Terminal)?;
+    let screen = capture(&taken, 2, 28, "\\033[?1000h\\033[?1006h")?;
+    assert!(
+        screen
+            .update
+            .modes
+            .is_some_and(|modes| modes.mouse_tracking)
+    );
     let pointer = Pointer {
-        screen_generation: screen.generation,
+        screen_generation: screen.update.generation,
         phase: PointerPhase::Press,
         button: Some(PointerButton::Left),
         x: 4.0,
@@ -490,22 +344,18 @@ fn main() -> Result<(), Box<dyn Error>> {
         modifiers: 0,
         shift_selection: true,
     };
-    input(&mut b, lease, 2, InteractiveInput::Pointer(pointer))?;
-    input(
-        &mut b,
-        lease,
+    taken.input(2, vec![InputEvent::Pointer(pointer)])?;
+    taken.input(
         2,
-        InteractiveInput::Pointer(Pointer {
+        vec![InputEvent::Pointer(Pointer {
             phase: PointerPhase::Release,
             ..pointer
-        }),
+        })],
     )?;
-    input(
-        &mut b,
-        lease,
+    taken.input(
         2,
-        InteractiveInput::Wheel(Wheel {
-            screen_generation: screen.generation,
+        vec![InputEvent::Wheel(Wheel {
+            screen_generation: screen.update.generation,
             horizontal_steps: 0,
             vertical_steps: 1,
             phase: WheelPhase::GestureChanged,
@@ -513,24 +363,20 @@ fn main() -> Result<(), Box<dyn Error>> {
             y: 5.0,
             modifiers: 0,
             shift_selection: true,
-        }),
+        })],
     )?;
     await_marker(
-        &mut b,
-        lease,
+        &taken,
         "1b5b3c303b313b314d1b5b3c303b313b316d1b5b3c36343b313b314d",
     )?;
-    b.exchange(&Request::Resize {
-        lease,
-        size: PaneSize {
-            columns: 91,
-            rows: 31,
-            cell_width: 9,
-            cell_height: 19,
-        },
+    taken.resize(PaneSize {
+        columns: 91,
+        rows: 31,
+        cell_width: 9,
+        cell_height: 19,
     })?;
-    b.exchange(&Request::Style {
-        lease,
+    taken.request(Operation::Style {
+        channel: taken.channel(),
         style: PresentationStyle {
             light: true,
             foreground: [20; 3],
@@ -542,27 +388,26 @@ fn main() -> Result<(), Box<dyn Error>> {
         },
     })?;
     command(
-        &mut b,
-        lease,
+        &taken,
         2,
         "stty size; stty raw -echo; printf '\\033[?996n'; dd bs=1 count=9 2>/dev/null | od -An -tx1 | tr -d ' \\n'; stty sane; printf '\\r\\n'",
     )?;
-    let screen = await_marker(&mut b, lease, "1b5b3f3939373b326e")?;
+    let screen = await_marker(&taken, "1b5b3f3939373b326e")?;
+    let geometry = screen.update.geometry.ok_or("keyframe geometry missing")?;
+    let colors = screen
+        .update
+        .colors
+        .as_ref()
+        .ok_or("keyframe colors missing")?;
     assert_eq!(
-        (screen.columns, screen.rows.len(), screen.background),
+        (geometry.columns, geometry.rows, colors.background),
         (91, 31, [240; 3])
     );
-    assert!(screen.rows.iter().any(|row| {
-        row.iter()
-            .map(|cell| cell.text.as_str())
-            .collect::<String>()
-            .trim_end()
-            == "31 91"
-    }));
-    native_effects(&mut b, lease)?;
-    b.exchange(&Request::Close { lease })?;
+    assert!(has_row(&screen, "31 91"));
+    native_effects(&taken)?;
+    taken.close()?;
     cleanup.cleanup()?;
-    b.exchange(&Request::Shutdown)?;
+    support::done(&b, Operation::Shutdown)?;
     let _ = server.kill();
     println!(
         "Protocol {major}: account-local clients verified PTY keys/IME, focus reports, paste approval/focus/reconnect/takeover fences, pointer/wheel, measured resize, controlling appearance, clipboard replies/refusal, Permission Requests and background attention."

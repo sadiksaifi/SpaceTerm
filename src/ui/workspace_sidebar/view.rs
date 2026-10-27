@@ -991,15 +991,8 @@ impl WorkspaceSidebar {
         let sidebar = div()
             .id("workspace-sidebar")
             .debug_selector(|| "workspace-sidebar".to_owned())
-            .absolute()
-            .top(
-                crate::ui::workspace_frame::WorkspaceFrame::for_appearance(appearance, cx)
-                    .top_chrome_height(appearance.top_height()),
-            )
-            .bottom_0()
-            // The sidebar slides in from the window's leading edge as it shows.
-            .left(self.frame.between(-self.layout.width, px(0.0)))
-            .w(self.layout.width)
+            // The Workspace Manager places the sidebar and slides it in as it shows.
+            .size_full()
             .min_h_0()
             .flex()
             .flex_col()

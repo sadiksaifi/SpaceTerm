@@ -5,10 +5,7 @@ pub mod directories;
 pub mod effects;
 pub mod graphics;
 pub mod metadata;
-pub mod presentation;
 pub mod reading;
-#[cfg(feature = "client")]
-mod transport;
 use crate::ServerError;
 use serde::{Deserialize, Serialize};
 
@@ -18,9 +15,6 @@ pub const MAX_ROWS: u16 = 256;
 /// Maximum number of ordered key events accepted by one focused batch.
 pub const MAX_KEY_BATCH: usize = 32;
 pub const MAX_KEY_TEXT_BYTES: usize = 4096;
-// Includes a full grid of 64-codepoint cells plus bounded links and graphics metadata.
-// Image pixels continue to travel in independently bounded GraphicsChunk messages.
-pub const MAX_TERMINAL_FRAME: usize = 96 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PaneSize {
@@ -196,9 +190,14 @@ pub enum AttachmentClaim {
     },
 }
 
+/// A host's in-process command vocabulary for one connection and its leases. It never travels on
+/// the wire: the transport maps each protocol [`crate::protocol::Operation`] and
+/// [`crate::protocol::InputEvent`] to these commands on the server, and the desktop's Pane worker
+/// maps them back to operations on its channel. Variants disappear as the polled semantics they
+/// carry are replaced by pushed presentation, inventory and Scrollback. It derives serde only
+/// for test fixtures that cross a process boundary.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Request {
-    Direct(crate::direct::Management),
     EndAccessibilityDemand {
         lease: Lease,
     },
@@ -276,7 +275,6 @@ pub enum Request {
     ReleaseAttachment {
         attachment: crate::attachments::Attachment,
     },
-    Capabilities,
     Inventory,
     Mutate {
         sequence: u64,
@@ -355,9 +353,9 @@ pub enum Request {
     Shutdown,
 }
 
+/// The reply to one [`Request`], in process only.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Reply {
-    Direct(Result<crate::direct::ManagementReply, crate::direct::DirectError>),
     Accessibility(Result<accessibility::Chunk, accessibility::Error>),
     AccessibilityRevision {
         revision: u64,
@@ -392,47 +390,12 @@ pub enum Reply {
         next_sequence: u64,
     },
     Outcome(crate::hierarchy::RetainedOutcome),
-    Capabilities {
-        development_pane: bool,
-        #[serde(default)]
-        pane_takeover: bool,
-        #[serde(default)]
-        interactive_input: bool,
-        #[serde(default)]
-        key_input_batches: bool,
-        #[serde(default)]
-        native_effects: bool,
-        #[serde(default)]
-        reading: bool,
-        #[serde(default)]
-        graphics: bool,
-        #[serde(default)]
-        accessibility: bool,
-        #[serde(default)]
-        directory_recovery: bool,
-        #[serde(default)]
-        directory_creation: bool,
-        #[serde(default)]
-        directory_matching: bool,
-        #[serde(default)]
-        worktree_writes: bool,
-        #[serde(default)]
-        end_all_sessions: bool,
-        #[serde(default)]
-        workspace_policy: bool,
-        #[serde(default)]
-        presentation_changes: bool,
-    },
     Restored {
         /// This running server created the Pane; no previous shell ended in a server restart.
-        #[serde(default)]
         fresh: bool,
         /// End All Sessions cleared this Pane in the current running server.
-        #[serde(default)]
         session_ended: bool,
-        #[serde(default)]
         recovery: Option<directories::Target>,
-        #[serde(default)]
         directory_unavailable: bool,
         server: [u8; 32],
         workspace: [u8; 32],
@@ -441,7 +404,6 @@ pub enum Reply {
     },
     /// This client does not control the Pane. `controller` says who does, for presentation only.
     Takeover {
-        #[serde(default)]
         session_ended: bool,
         target: PaneTarget,
         controller: control::Controller,
@@ -449,8 +411,7 @@ pub enum Reply {
     Attached {
         lease: Lease,
     },
-    Screen(Box<Screen>),
-    ScreenChanges(Box<presentation::RowChanges>),
+    Screen(Box<crate::protocol::interim::ScreenFrame>),
     Unchanged,
     Ended,
     Closed,
@@ -490,526 +451,4 @@ pub enum Color {
     Default,
     Palette(u8),
     Rgb([u8; 3]),
-}
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Cell {
-    #[serde(default)]
-    pub hyperlink: Option<u16>,
-    pub text: String,
-    pub foreground: Color,
-    pub background: Color,
-    pub underline_color: Color,
-    pub flags: u16,
-    pub underline: u8,
-}
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct Screen {
-    #[serde(default)]
-    pub accessibility_revision: u64,
-    #[serde(default)]
-    pub graphics: Option<Result<graphics::Snapshot, graphics::Error>>,
-    #[serde(default)]
-    pub cell_pixels: Option<(u16, u16)>,
-    #[serde(default)]
-    pub reading: Option<reading::Snapshot>,
-    /// Per-screen targets; cells refer to indices in this bounded table.
-    #[serde(default)]
-    pub hyperlinks: Vec<effects::Hyperlink>,
-    #[serde(default)]
-    pub generation: u64,
-    #[serde(default)]
-    pub mouse_tracking: bool,
-    #[serde(default)]
-    pub alternate_scroll: bool,
-    pub columns: u16,
-    pub rows: Vec<Vec<Cell>>,
-    pub wrapped: Vec<bool>,
-    pub foreground: [u8; 3],
-    pub background: [u8; 3],
-    pub palette: Vec<[u8; 3]>,
-    pub reversed: bool,
-    pub foreground_overridden: bool,
-    pub background_overridden: bool,
-    pub cursor_overridden: bool,
-    pub palette_overrides: Vec<bool>,
-    pub cursor: Option<(u16, u16, u8)>,
-    pub cursor_visible: bool,
-    pub cursor_blinking: bool,
-    pub cursor_shape: u8,
-    pub cursor_color: [u8; 3],
-    pub cursor_text: [u8; 3],
-    pub alternate: bool,
-}
-
-/// The host supplies runtime ownership; the protocol supplies authenticated device/connection facts.
-pub trait PaneService: Send {
-    fn restore(
-        &mut self,
-        _store: crate::organization::OrganizationStore,
-    ) -> Result<(), ServerError> {
-        Ok(())
-    }
-    fn tick(&mut self) {}
-    /// Records the Client Name an admitted client supplied, before any of its requests.
-    fn admitted(&mut self, _client: [u8; 32], _name: control::ClientName) {}
-    /// Permanently releases this paired identity's live and dormant control grants.
-    fn revoked(&mut self, _client: [u8; 32]) {}
-    fn request(&mut self, device: [u8; 32], connection: [u8; 32], request: Request) -> Reply;
-    fn disconnected(&mut self, connection: [u8; 32]);
-    fn shutdown(&mut self) -> Result<(), ServerError>;
-}
-
-#[cfg(feature = "client")]
-pub struct PaneConnection {
-    transport: std::sync::Arc<PaneTransport>,
-    last_exchange: Option<ExchangeTiming>,
-}
-/// Local bounded numeric evidence; no terminal data or operation contents are retained.
-#[cfg(feature = "client")]
-#[derive(Clone, Copy, Debug)]
-pub struct ExchangeTiming {
-    pub queue_wait: std::time::Duration,
-    pub exchange: std::time::Duration,
-}
-#[cfg(feature = "client")]
-struct PaneTransport {
-    admission: transport::Admission,
-    presentation_changes: bool,
-    stream: std::sync::Mutex<Option<Box<dyn crate::transport::Transport>>>,
-    takeover: bool,
-    interactive_input: bool,
-    key_input_batches: bool,
-    native_effects: bool,
-    reading: bool,
-    graphics: bool,
-    accessibility: bool,
-    directory_recovery: bool,
-    directory_creation: bool,
-    directory_matching: bool,
-    worktree_writes: bool,
-    end_all_sessions: bool,
-}
-/// One transport for a desktop's inventory and Pane workers. It retains no credential.
-#[cfg(feature = "client")]
-#[derive(Default)]
-pub(crate) struct SharedPaneConnection(std::sync::Mutex<std::sync::Weak<PaneTransport>>);
-#[cfg(feature = "client")]
-impl SharedPaneConnection {
-    pub(crate) fn connect(
-        &self,
-        open: impl FnOnce() -> Result<PaneConnection, ServerError>,
-    ) -> Result<PaneConnection, ServerError> {
-        let mut saved = self.0.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(transport) = saved.upgrade()
-            && transport
-                .stream
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .is_some()
-        {
-            return Ok(PaneConnection {
-                transport,
-                last_exchange: None,
-            });
-        }
-        // Serialize authentication as well as publication, so simultaneous Pane
-        // workers never briefly allocate a separate host connection each.
-        let connection = open()?;
-        *saved = std::sync::Arc::downgrade(&connection.transport);
-        Ok(connection)
-    }
-}
-#[cfg(feature = "client")]
-impl PaneConnection {
-    pub fn supports_end_all_sessions(&self) -> bool {
-        self.transport.end_all_sessions
-    }
-    pub fn worktree_writes(&self) -> bool {
-        self.transport.worktree_writes
-    }
-
-    pub(crate) fn negotiate(
-        mut stream: impl crate::transport::Transport + 'static,
-    ) -> Result<Self, ServerError> {
-        let mut wire = crate::protocol::Wire::terminal(&mut stream)?;
-        wire.write(&Request::Capabilities)?;
-        match wire.read()? {
-            Reply::Capabilities {
-                development_pane: true,
-                pane_takeover,
-                interactive_input,
-                key_input_batches,
-                native_effects,
-                reading,
-                graphics,
-                accessibility,
-                directory_recovery,
-                directory_creation,
-                directory_matching,
-                worktree_writes,
-                end_all_sessions,
-                workspace_policy: true,
-                presentation_changes,
-            } => {
-                let mut connection = Self::new(stream, pane_takeover);
-                std::sync::Arc::get_mut(&mut connection.transport)
-                    .ok_or(ServerError::Protocol)?
-                    .accessibility = accessibility;
-                std::sync::Arc::get_mut(&mut connection.transport)
-                    .ok_or(ServerError::Protocol)?
-                    .worktree_writes = worktree_writes;
-                std::sync::Arc::get_mut(&mut connection.transport)
-                    .ok_or(ServerError::Protocol)?
-                    .end_all_sessions = end_all_sessions;
-                std::sync::Arc::get_mut(&mut connection.transport)
-                    .ok_or(ServerError::Protocol)?
-                    .interactive_input = interactive_input;
-                std::sync::Arc::get_mut(&mut connection.transport)
-                    .ok_or(ServerError::Protocol)?
-                    .key_input_batches = key_input_batches;
-                std::sync::Arc::get_mut(&mut connection.transport)
-                    .ok_or(ServerError::Protocol)?
-                    .native_effects = native_effects;
-                std::sync::Arc::get_mut(&mut connection.transport)
-                    .ok_or(ServerError::Protocol)?
-                    .reading = reading;
-                std::sync::Arc::get_mut(&mut connection.transport)
-                    .ok_or(ServerError::Protocol)?
-                    .graphics = graphics;
-                std::sync::Arc::get_mut(&mut connection.transport)
-                    .ok_or(ServerError::Protocol)?
-                    .directory_recovery = directory_recovery;
-                std::sync::Arc::get_mut(&mut connection.transport)
-                    .ok_or(ServerError::Protocol)?
-                    .directory_creation = directory_creation;
-                std::sync::Arc::get_mut(&mut connection.transport)
-                    .ok_or(ServerError::Protocol)?
-                    .directory_matching = directory_matching;
-                std::sync::Arc::get_mut(&mut connection.transport)
-                    .ok_or(ServerError::Protocol)?
-                    .presentation_changes = presentation_changes;
-                Ok(connection)
-            }
-            Reply::Capabilities {
-                development_pane: true,
-                workspace_policy: false,
-                ..
-            } => Err(ServerError::MissingRequiredCapability),
-            Reply::Refused(reason) => Err(reason.into()),
-            _ => Err(ServerError::Unsupported),
-        }
-    }
-    pub(crate) fn new(stream: impl crate::transport::Transport + 'static, takeover: bool) -> Self {
-        Self {
-            transport: std::sync::Arc::new(PaneTransport {
-                admission: transport::Admission::default(),
-                presentation_changes: false,
-                stream: std::sync::Mutex::new(Some(Box::new(stream))),
-                takeover,
-                interactive_input: false,
-                key_input_batches: false,
-                native_effects: false,
-                reading: false,
-                graphics: false,
-                accessibility: false,
-                directory_recovery: false,
-                directory_creation: false,
-                directory_matching: false,
-                worktree_writes: false,
-                end_all_sessions: false,
-            }),
-            last_exchange: None,
-        }
-    }
-    pub fn supports_directory_matching(&self) -> bool {
-        self.transport.directory_matching
-    }
-    pub fn supports_directory_creation(&self) -> bool {
-        self.transport.directory_creation
-    }
-    pub fn supports_directory_recovery(&self) -> bool {
-        self.transport.directory_recovery
-    }
-    pub fn supports_presentation_changes(&self) -> bool {
-        self.transport.presentation_changes
-    }
-    pub fn supports_native_effects(&self) -> bool {
-        self.transport.native_effects
-    }
-    pub fn supports_graphics(&self) -> bool {
-        self.transport.graphics
-    }
-    pub fn supports_accessibility(&self) -> bool {
-        self.transport.accessibility
-    }
-    pub fn supports_reading(&self) -> bool {
-        self.transport.reading
-    }
-    pub fn supports_takeover(&self) -> bool {
-        self.transport.takeover
-    }
-    pub fn supports_key_input_batches(&self) -> bool {
-        self.transport.key_input_batches
-    }
-    pub fn supports_interactive_input(&self) -> bool {
-        self.transport.interactive_input
-    }
-    pub fn exchange(&mut self, request: &Request) -> Result<Reply, ServerError> {
-        let queued = std::time::Instant::now();
-        let _turn = self.transport.admission.enter()?;
-        let admitted = std::time::Instant::now();
-        let mut stream = self
-            .transport
-            .stream
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let result = (|| {
-            let mut wire = crate::protocol::Wire::terminal(
-                stream.as_deref_mut().ok_or(ServerError::NotRunning)?,
-            )?;
-            wire.write(request)?;
-            let reply: Reply = wire.read()?;
-            if let Reply::Inventory { inventory, .. } = &reply {
-                let panes: Vec<_> = inventory
-                    .workspaces
-                    .iter()
-                    .flat_map(|workspace| &workspace.tabs)
-                    .flat_map(|tab| &tab.panes)
-                    .collect();
-                if panes.len() > crate::hierarchy::MAX_PANES {
-                    return Err(ServerError::Protocol);
-                }
-                for pane in panes {
-                    if let Some(snapshot) = &pane.presentation {
-                        snapshot.validate()?;
-                    }
-                }
-            }
-            Ok(reply)
-        })();
-        // An uncertain exchange fences every subscriber of this transport. A new
-        // connection gets a fresh host identity; no request is replayed here.
-        if result.is_err() {
-            *stream = None;
-        }
-        self.last_exchange = Some(ExchangeTiming {
-            queue_wait: admitted.duration_since(queued),
-            exchange: admitted.elapsed(),
-        });
-        match result? {
-            Reply::Refused(reason) => Err(reason.into()),
-            reply => Ok(reply),
-        }
-    }
-    pub fn last_exchange_timing(&self) -> Option<ExchangeTiming> {
-        self.last_exchange
-    }
-}
-
-#[cfg(all(test, feature = "client"))]
-mod transport_tests {
-    use super::*;
-    use std::os::unix::net::UnixStream;
-
-    #[test]
-    fn a_retained_runtime_without_workspace_policy_is_refused_before_operations() {
-        for capability in [None, Some(false)] {
-            let (client, mut server) = UnixStream::pair().unwrap();
-            let peer = std::thread::spawn(move || {
-                let mut wire = crate::protocol::Wire::terminal(&mut server).unwrap();
-                assert!(matches!(
-                    wire.read::<Request>().unwrap(),
-                    Request::Capabilities
-                ));
-                let mut reply = serde_json::json!({ "Capabilities": { "development_pane": true } });
-                if let Some(capability) = capability {
-                    reply["Capabilities"]["workspace_policy"] = capability.into();
-                }
-                wire.write(&reply).unwrap();
-            });
-            assert!(matches!(
-                PaneConnection::negotiate(client),
-                Err(ServerError::MissingRequiredCapability)
-            ));
-            peer.join().unwrap();
-        }
-    }
-
-    #[test]
-    fn absent_optional_capabilities_keep_the_required_connection_available() {
-        let (client, mut server) = UnixStream::pair().unwrap();
-        let peer = std::thread::spawn(move || {
-            let mut wire = crate::protocol::Wire::terminal(&mut server).unwrap();
-            assert!(matches!(
-                wire.read::<Request>().unwrap(),
-                Request::Capabilities
-            ));
-            wire.write(&serde_json::json!({
-                "Capabilities": { "development_pane": true, "workspace_policy": true }
-            }))
-            .unwrap();
-        });
-        let connection = PaneConnection::negotiate(client).unwrap();
-        assert!(!connection.supports_graphics());
-        assert!(!connection.supports_interactive_input());
-        assert!(!connection.supports_key_input_batches());
-        assert!(!connection.supports_reading());
-        assert!(!connection.supports_end_all_sessions());
-        assert!(!connection.supports_directory_creation());
-        assert!(!connection.supports_directory_matching());
-        peer.join().unwrap();
-    }
-
-    #[test]
-    fn key_batches_require_an_explicit_optional_capability() {
-        for supported in [None, Some(false), Some(true)] {
-            let (client, mut server) = UnixStream::pair().unwrap();
-            let peer = std::thread::spawn(move || {
-                let mut wire = crate::protocol::Wire::terminal(&mut server).unwrap();
-                assert!(matches!(
-                    wire.read::<Request>().unwrap(),
-                    Request::Capabilities
-                ));
-                let mut reply = serde_json::json!({
-                    "Capabilities": { "development_pane": true, "workspace_policy": true,
-                        "interactive_input": true }
-                });
-                if let Some(supported) = supported {
-                    reply["Capabilities"]["key_input_batches"] = supported.into();
-                }
-                wire.write(&reply).unwrap();
-            });
-            let connection = PaneConnection::negotiate(client).unwrap();
-            assert_eq!(
-                connection.supports_key_input_batches(),
-                supported == Some(true)
-            );
-            peer.join().unwrap();
-        }
-    }
-
-    #[test]
-    fn directory_matching_requires_an_explicit_optional_capability() {
-        for supported in [None, Some(false), Some(true)] {
-            let (client, mut server) = UnixStream::pair().unwrap();
-            let peer = std::thread::spawn(move || {
-                let mut wire = crate::protocol::Wire::terminal(&mut server).unwrap();
-                assert!(matches!(
-                    wire.read::<Request>().unwrap(),
-                    Request::Capabilities
-                ));
-                let mut reply = serde_json::json!({
-                    "Capabilities": { "development_pane": true, "workspace_policy": true }
-                });
-                if let Some(supported) = supported {
-                    reply["Capabilities"]["directory_matching"] = supported.into();
-                }
-                wire.write(&reply).unwrap();
-            });
-            let connection = PaneConnection::negotiate(client).unwrap();
-            assert_eq!(
-                connection.supports_directory_matching(),
-                supported == Some(true)
-            );
-            peer.join().unwrap();
-        }
-    }
-
-    #[test]
-    fn directory_creation_requires_an_explicit_optional_capability() {
-        for supported in [false, true] {
-            let (client, mut server) = UnixStream::pair().unwrap();
-            let peer = std::thread::spawn(move || {
-                let mut wire = crate::protocol::Wire::terminal(&mut server).unwrap();
-                assert!(matches!(
-                    wire.read::<Request>().unwrap(),
-                    Request::Capabilities
-                ));
-                wire.write(&serde_json::json!({
-                    "Capabilities": {
-                        "development_pane": true,
-                        "workspace_policy": true,
-                        "directory_creation": supported
-                    }
-                }))
-                .unwrap();
-            });
-            assert_eq!(
-                PaneConnection::negotiate(client)
-                    .unwrap()
-                    .supports_directory_creation(),
-                supported
-            );
-            peer.join().unwrap();
-        }
-    }
-
-    #[test]
-    fn end_all_sessions_support_requires_an_explicit_optional_capability() {
-        let (client, mut server) = UnixStream::pair().unwrap();
-        let peer = std::thread::spawn(move || {
-            let mut wire = crate::protocol::Wire::terminal(&mut server).unwrap();
-            assert!(matches!(
-                wire.read::<Request>().unwrap(),
-                Request::Capabilities
-            ));
-            wire.write(&serde_json::json!({
-                "Capabilities": { "development_pane": true, "workspace_policy": true, "end_all_sessions": true }
-            })).unwrap();
-        });
-        assert!(
-            PaneConnection::negotiate(client)
-                .unwrap()
-                .supports_end_all_sessions()
-        );
-        peer.join().unwrap();
-    }
-
-    #[test]
-    fn uncertain_exchange_fences_all_subscribers_before_reconnecting() {
-        let shared = SharedPaneConnection::default();
-        let (client, mut server) = UnixStream::pair().unwrap();
-        let mut inventory = shared
-            .connect(|| Ok(PaneConnection::new(client, true)))
-            .unwrap();
-        let mut pane = shared
-            .connect(|| panic!("Pane must reuse inventory transport"))
-            .unwrap();
-        let peer = std::thread::spawn(move || {
-            let mut wire = crate::protocol::Wire::terminal(&mut server).unwrap();
-            assert!(matches!(
-                wire.read::<Request>().unwrap(),
-                Request::Inventory
-            ));
-            // A lost reply leaves the operation uncertain. The transport never retries it.
-        });
-        assert!(inventory.exchange(&Request::Inventory).is_err());
-        peer.join().unwrap();
-        assert!(matches!(
-            pane.exchange(&Request::Capabilities),
-            Err(ServerError::NotRunning)
-        ));
-
-        let (client, mut server) = UnixStream::pair().unwrap();
-        let mut replacement = shared
-            .connect(|| Ok(PaneConnection::new(client, false)))
-            .unwrap();
-        let peer = std::thread::spawn(move || {
-            let mut wire = crate::protocol::Wire::terminal(&mut server).unwrap();
-            assert!(matches!(
-                wire.read::<Request>().unwrap(),
-                Request::Capabilities
-            ));
-            wire.write(&Reply::Unchanged).unwrap();
-        });
-        assert!(matches!(
-            replacement.exchange(&Request::Capabilities).unwrap(),
-            Reply::Unchanged
-        ));
-        assert!(matches!(
-            pane.exchange(&Request::Inventory),
-            Err(ServerError::NotRunning)
-        ));
-        peer.join().unwrap();
-    }
 }

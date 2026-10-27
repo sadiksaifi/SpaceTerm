@@ -25,7 +25,7 @@ pub enum Scroll {
     Bottom,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Snapshot {
     pub total_rows: u64,
     pub offset_rows: u64,
@@ -35,7 +35,7 @@ pub struct Snapshot {
     pub find: Option<Find>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Find {
     pub generation: u64,
     pub total: usize,

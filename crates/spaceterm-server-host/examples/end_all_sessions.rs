@@ -11,11 +11,13 @@ mod support;
 
 #[cfg(feature = "client")]
 mod exercise {
-    use super::support::{await_output, command};
+    use super::support::{self, Claimed, Pane};
     use spaceterm_server::{
         ServerConnection, ServerError,
+        connection::link::ServerLink,
         hierarchy::{Axis, CloseTarget, Id, Inventory, Mutation, Outcome},
         pane::{control::Controller, *},
+        protocol::interim::{Interim, InterimReply},
     };
     use std::{
         error::Error,
@@ -37,60 +39,41 @@ mod exercise {
         }
     }
 
-    fn inventory(connection: &mut PaneConnection) -> Result<(Inventory, u64)> {
-        match connection.exchange(&Request::Inventory)? {
-            Reply::Inventory {
-                inventory,
-                next_sequence,
-            } => Ok((inventory, next_sequence)),
-            _ => Err("inventory unavailable".into()),
-        }
+    fn inventory(link: &ServerLink) -> Result<(Inventory, u64)> {
+        Ok(support::inventory(link)?)
     }
 
-    fn select(connection: &mut PaneConnection, pane: Id, explicit: bool) -> Result<Reply> {
-        Ok(connection.exchange(&Request::SelectPane {
-            pane,
-            explicit,
-            size: size(),
-            style: None,
-        })?)
+    fn select(link: &ServerLink, pane: Id, explicit: bool) -> Result<Claimed> {
+        Ok(support::select(link, pane, explicit, size())?)
     }
 
-    fn attached(reply: Reply) -> Result<Lease> {
-        match reply {
-            Reply::Attached { lease } => Ok(lease),
-            _ => Err("expected an explicitly started Terminal Session".into()),
-        }
+    fn attached(claimed: Claimed) -> Result<Pane> {
+        claimed
+            .attached()
+            .ok_or_else(|| "expected an explicitly started Terminal Session".into())
     }
 
-    fn mutate(
-        server: &ServerConnection,
-        connection: &mut PaneConnection,
-        mutation: Mutation,
-    ) -> Result<Id> {
+    fn mutate(server: &ServerConnection, link: &ServerLink, mutation: Mutation) -> Result<Id> {
         let mut journal = server.shared_journal()?;
         if journal.pending().is_some() {
             return Err("resolve the original fixture operation before continuing".into());
         }
-        let (_, sequence) = inventory(connection)?;
+        let (_, sequence) = inventory(link)?;
         journal.submit(sequence, mutation.clone())?;
-        let mut reply = connection.exchange(&Request::Mutate {
-            sequence,
-            mutation: mutation.clone(),
-        })?;
+        let mut outcome = support::mutate(link, sequence, mutation.clone())?;
         let deadline = Instant::now() + Duration::from_secs(15);
-        while matches!(reply, Reply::MutationPending) && Instant::now() < deadline {
+        while outcome.is_none() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(50));
-            reply = connection.exchange(&Request::Resolve { sequence })?;
+            outcome = support::resolve(link, sequence)?;
         }
-        let Reply::Outcome(outcome) = reply else {
+        let Some(outcome) = outcome else {
             return Err("fixture operation remains unresolved".into());
         };
         if outcome.sequence != sequence || outcome.mutation != mutation {
             return Err("fixture operation identity changed".into());
         }
         journal.complete(outcome.clone())?;
-        connection.exchange(&Request::Acknowledge { sequence })?;
+        link.acknowledge(sequence)?;
         journal.retire()?;
         match outcome.outcome {
             Outcome::Accepted { target } => Ok(target),
@@ -164,16 +147,14 @@ mod exercise {
         workspaces
     }
 
-    fn takeover(reply: Reply, name: Option<&str>) -> Result<()> {
-        let Reply::Takeover {
-            controller,
-            session_ended: true,
-            ..
-        } = reply
-        else {
+    fn takeover(claimed: Claimed, name: Option<&str>) -> Result<()> {
+        let Claimed::Takeover(takeover) = claimed else {
             return Err("ended Pane did not retain its Takeover Screen".into());
         };
-        match (controller, name) {
+        if !takeover.session_ended {
+            return Err("ended Pane did not retain its Takeover Screen".into());
+        }
+        match (takeover.controller, name) {
             (Controller::Nobody, None) => Ok(()),
             (
                 Controller::Client {
@@ -186,36 +167,20 @@ mod exercise {
         }
     }
 
-    fn restored(reply: Reply) -> Result<()> {
-        if !matches!(
-            reply,
-            Reply::Restored {
-                session_ended: true,
-                ..
-            }
-        ) {
+    fn restored(claimed: Claimed) -> Result<()> {
+        if !matches!(claimed, Claimed::Restored(restored) if restored.session_ended) {
             return Err("controller did not observe an ended retained Pane".into());
         }
         Ok(())
     }
 
-    fn stale(connection: &mut PaneConnection, lease: Lease) -> Result<()> {
-        for request in [
-            Request::Poll { lease },
-            Request::Input {
-                lease,
-                generation: 1,
-                input: InteractiveInput::Paste {
-                    text: "STALE_557".into(),
-                },
-            },
-        ] {
-            if !matches!(
-                connection.exchange(&request),
-                Err(ServerError::StaleControl)
-            ) {
-                return Err("ended Session accepted an old lease or input".into());
-            }
+    /// The channel of a Pane whose Session ended still names the old lease, so the server refuses
+    /// both a poll and a paste on it.
+    fn stale(pane: &Pane) -> Result<()> {
+        if !matches!(pane.poll(), Err(ServerError::StaleControl))
+            || !matches!(pane.paste(1, "STALE_557"), Err(ServerError::StaleControl))
+        {
+            return Err("ended Session accepted an old lease or input".into());
         }
         Ok(())
     }
@@ -240,11 +205,8 @@ mod exercise {
         let first_name = format!("end557-{}-a", std::process::id());
         let second_name = format!("end557-{}-b", std::process::id());
         let (first, second) = named_clients(&first_name, &second_name)?;
-        let mut a = first.connect_shared_pane()?;
-        if !a.supports_end_all_sessions() {
-            return Err("server lacks End All Sessions capability".into());
-        }
-        let initial = inventory(&mut a)?.0;
+        let a = first.link()?;
+        let initial = inventory(&a)?.0;
         if initial
             .close
             .as_ref()
@@ -258,7 +220,7 @@ mod exercise {
         fs::write(directory.join("retained-file"), b"repository-file-witness")?;
         let workspace = mutate(
             &first,
-            &mut a,
+            &a,
             Mutation::CreateWorkspace {
                 name: name.clone(),
                 directory: Some(directory.clone()),
@@ -267,7 +229,7 @@ mod exercise {
         println!(
             "Prepared disposable Workspace {name:?}. On failure preserve it for inspection; this helper never stops the service."
         );
-        let prepared = inventory(&mut a)?.0;
+        let prepared = inventory(&a)?.0;
         let tab = prepared
             .workspaces
             .iter()
@@ -280,7 +242,7 @@ mod exercise {
         let tab = tab.id;
         let other = mutate(
             &first,
-            &mut a,
+            &a,
             Mutation::SplitPane {
                 workspace,
                 tab,
@@ -290,7 +252,7 @@ mod exercise {
         )?;
         let unclaimed = mutate(
             &first,
-            &mut a,
+            &a,
             Mutation::SplitPane {
                 workspace,
                 tab,
@@ -298,46 +260,49 @@ mod exercise {
                 axis: Axis::Down,
             },
         )?;
-        let mut leases = Vec::new();
+        let mut panes = Vec::new();
         for (index, pane) in [root, other, unclaimed].into_iter().enumerate() {
-            let lease = attached(a.exchange(&Request::SelectPane {
+            let claimed = support::select(
+                &a,
                 pane,
-                explicit: true,
-                size: PaneSize {
+                true,
+                PaneSize {
                     columns: 80,
                     rows: 24,
                     ..size()
                 },
-                style: None,
-            })?)?;
-            let marker = format!("END_ALL_557_{stamp}_{index}");
-            command(
-                &mut a,
-                lease,
-                &format!(
-                    "stty -echo; printf '\\033[2J\\033[H{marker}\\n'; while :; do sleep 60; done"
-                ),
             )?;
-            await_output(&mut a, lease, &marker)?;
-            leases.push((lease, marker));
+            let started = attached(claimed)?;
+            let marker = format!("END_ALL_557_{stamp}_{index}");
+            started.command(&format!(
+                "stty -echo; printf '\\033[2J\\033[H{marker}\\n'; while :; do sleep 60; done"
+            ))?;
+            started.await_output(&marker)?;
+            panes.push((started, marker));
         }
-        let mut b = second.connect_shared_pane()?;
-        let transferred = attached(b.exchange(&Request::TakeOver {
-            target: leases[1].0.into(),
-            size: size(),
-            style: None,
-        })?)?;
-        leases[1].0 = transferred;
-        a.exchange(&Request::Release { lease: leases[2].0 })?;
-        drop(b); // Its grant survives this deliberate disconnect until the actual UI action.
-        let before = inventory(&mut a)?.0;
+        let b = second.link()?;
+        let transferred = attached(support::claim(
+            &b,
+            other,
+            AttachmentClaim::TakeOver {
+                target: panes[1].0.lease().into(),
+            },
+            size(),
+        )?)?;
+        let markers: Vec<_> = panes.iter().map(|(_, marker)| marker.clone()).collect();
+        let first_lease = panes[0].0.lease();
+        let (released, _) = panes.remove(2);
+        released.release();
+        b.close(); // Its grant survives this deliberate disconnect until the actual UI action.
+        drop(transferred);
+        let before = inventory(&a)?.0;
         let boot = before.close.as_ref().ok_or("live boot unavailable")?.boot;
         println!(
             "READY: three marked PTYs; controllers {first_name:?}, disconnected {second_name:?}, and nobody. Invoke End All Sessions in Preflight Settings within five minutes."
         );
         let deadline = Instant::now() + Duration::from_secs(300);
         loop {
-            let current = inventory(&mut a)?.0;
+            let current = inventory(&a)?.0;
             let close = current
                 .close
                 .as_ref()
@@ -361,16 +326,18 @@ mod exercise {
             }
             std::thread::sleep(Duration::from_millis(100));
         }
-        restored(select(&mut a, root, false)?)?;
-        takeover(select(&mut a, other, false)?, Some(&second_name))?;
-        takeover(select(&mut a, unclaimed, false)?, None)?;
-        let mut b = second.connect_shared_pane()?;
-        restored(select(&mut b, other, false)?)?;
-        takeover(select(&mut b, root, false)?, Some(&first_name))?;
-        stale(&mut a, leases[0].0)?;
-        stale(&mut b, leases[1].0)?;
+        restored(select(&a, root, false)?)?;
+        takeover(select(&a, other, false)?, Some(&second_name))?;
+        takeover(select(&a, unclaimed, false)?, None)?;
+        let b = second.link()?;
+        restored(select(&b, other, false)?)?;
+        takeover(select(&b, root, false)?, Some(&first_name))?;
+        // The second client's channel ended with its connection, so only the first client's
+        // channels still name ended leases.
+        stale(&panes[0].0)?;
+        stale(&panes[1].0)?;
         std::thread::sleep(Duration::from_millis(500));
-        if inventory(&mut a)?
+        if inventory(&a)?
             .0
             .close
             .as_ref()
@@ -378,24 +345,23 @@ mod exercise {
         {
             return Err("passive reconciliation started a shell".into());
         }
-        let fresh = attached(select(&mut a, root, true)?)?;
-        if fresh.session == leases[0].0.session || fresh.control == leases[0].0.control {
+        let (ended, _) = panes.remove(0);
+        let fresh = attached(select(&a, root, true)?)?;
+        if fresh.lease().session == first_lease.session
+            || fresh.lease().control == first_lease.control
+        {
             return Err("explicit restart reused an ended Session identity".into());
         }
-        stale(&mut a, leases[0].0)?;
-        command(
-            &mut a,
-            fresh,
-            "stty -echo; stty size; printf 'FRESH_557\\n'",
-        )?;
-        let output = await_output(&mut a, fresh, "FRESH_557")?;
+        stale(&ended)?;
+        fresh.command("stty -echo; stty size; printf 'FRESH_557\\n'")?;
+        let output = fresh.await_output("FRESH_557")?;
         if !output.lines().any(|line| line.trim_end() == "31 97")
-            || leases.iter().any(|(_, marker)| output.contains(marker))
+            || markers.iter().any(|marker| output.contains(marker))
         {
             return Err("restart did not use measured dimensions and cleared output".into());
         }
-        a.exchange(&Request::Read {
-            lease: fresh,
+        fresh.interim(Interim::Read {
+            channel: fresh.channel(),
             operation: reading::Operation::Query {
                 generation: 1,
                 text: format!("END_ALL_557_{stamp}"),
@@ -403,8 +369,8 @@ mod exercise {
         })?;
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
-            if let Reply::Screen(screen) = a.exchange(&Request::Poll { lease: fresh })?
-                && let Some(find) = screen.reading.and_then(|reading| reading.find)
+            if let InterimReply::Screen(screen) = fresh.poll()?
+                && let Some(find) = screen.update.reading.and_then(|reading| reading.find)
                 && find.generation == 1
             {
                 if find.total != 0 {
@@ -420,20 +386,20 @@ mod exercise {
         if fs::read(directory.join("retained-file"))? != b"repository-file-witness" {
             return Err("End All Sessions changed a repository-file witness".into());
         }
-        let current = inventory(&mut a)?.0;
+        let current = inventory(&a)?.0;
         let target = CloseTarget::Workspace { workspace };
         let confirmation = current
             .close_confirmation(target)
             .ok_or("fixture cleanup confirmation unavailable")?;
         mutate(
             &first,
-            &mut a,
+            &a,
             Mutation::Close {
                 target,
                 confirmation,
             },
         )?;
-        if inventory(&mut a)?
+        if inventory(&a)?
             .0
             .workspaces
             .iter()

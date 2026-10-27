@@ -381,7 +381,8 @@ mod tests {
 
     #[test]
     fn fifteen_hidden_creation_grants_release_startup_without_a_screen() {
-        use spaceterm_server::{hierarchy::Mutation, pane::PaneService as _};
+        use crate::runtime::HostCommands as _;
+        use spaceterm_server::hierarchy::Mutation;
 
         let mut host = crate::runtime::directory_testing::terminal_host();
         host.prepare_initial_organization().unwrap();
@@ -464,7 +465,7 @@ mod tests {
                 state.startup_pending(),
                 state.status(),
                 state.interactive_input(),
-                matches!(poll, Reply::Screen(_) | Reply::ScreenChanges(_)),
+                matches!(poll, Reply::Screen(_)),
             ));
         }
         // Stop every fixture PTY before any assertion can fail.
@@ -483,8 +484,8 @@ mod tests {
 
     #[test]
     fn never_visited_hidden_pane_prepares_current_rows_without_visible_cadence() {
+        use crate::runtime::HostCommands as _;
         use crate::terminal::geometry::{BackingScale, CellGridSize, LogicalCellSize};
-        use spaceterm_server::pane::PaneService as _;
 
         let mut host = crate::runtime::directory_testing::terminal_host();
         host.prepare_initial_organization().unwrap();
@@ -562,7 +563,7 @@ mod tests {
         // Read the same demand inputs that the production presentation worker uses.
         cadence.set_preparation(state.preparation.load(Ordering::Acquire));
         let mut prepared = false;
-        let mut decoder = pane::presentation::ScreenDecoder::default();
+        let mut decoder = crate::terminal::server_session::screen_decoder::ScreenDecoder::default();
         while start.elapsed() < Duration::from_secs(3) {
             if let Some(visible) = cadence.take_demand() {
                 assert!(matches!(
@@ -581,17 +582,17 @@ mod tests {
                     [1; 32],
                     Request::PollChanges {
                         lease,
-                        base: decoder.baseline(),
+                        base: decoder.frame(),
                     },
                 );
-                if let Reply::Screen(screen) = decoder.apply(reply).unwrap() {
-                    prepared = screen.rows.iter().any(|row| {
-                        row.iter()
-                            .map(|cell| cell.text.as_str())
-                            .collect::<String>()
-                            .trim_end()
-                            == "HIDDEN-PREPARED"
-                    });
+                if let Reply::Screen(frame) = reply {
+                    let decoded = decoder
+                        .apply(frame.frame, frame.base, frame.update, None)
+                        .unwrap();
+                    prepared = decoded
+                        .lines()
+                        .iter()
+                        .any(|row| row.trim_end() == "HIDDEN-PREPARED");
                     if prepared {
                         break;
                     }
@@ -622,8 +623,9 @@ mod tests {
 
     #[test]
     fn fresh_panes_never_present_server_restarted_before_first_use() {
+        use crate::runtime::HostCommands as _;
         use crate::ui::server_pane::ServerPaneView;
-        use spaceterm_server::{hierarchy::Mutation, pane::PaneService as _};
+        use spaceterm_server::hierarchy::Mutation;
 
         for delayed in [false, true] {
             for revoked in [false, true] {

@@ -1,5 +1,6 @@
-use super::tests::{attach, await_text, command, host, size};
+use super::tests::{attach, await_text, command, host, keyframe, size};
 use super::*;
+use spaceterm_server::protocol::interim::ScreenFrame;
 
 #[test]
 fn server_screen_carries_graphics_geometry_without_inline_pixels() {
@@ -13,12 +14,20 @@ fn server_screen_carries_graphics_geometry_without_inline_pixels() {
     .unwrap();
     emulator.feed(b"\x1b_Ga=T,t=d,f=32,i=7,p=3,s=1,v=1,c=2,r=1;AQIDBA==\x1b\\");
     let screen = emulator.snapshot().unwrap().unwrap();
-    let encoded = serde_json::to_value(encode_screen(&screen)).unwrap();
-    assert_eq!(
-        encoded["graphics"]["Ok"]["placements"][0]["destination_width"],
-        26
+    let update = keyframe(&screen);
+    let Some(Ok(graphics)) = &update.graphics else {
+        panic!("the keyframe carries the graphics manifest")
+    };
+    assert_eq!(graphics.placements[0].destination_width, 26);
+    let bytes = super::dispatch::wire_bytes(Reply::Screen(Box::new(ScreenFrame {
+        frame: 1,
+        base: None,
+        update,
+    })));
+    assert!(
+        bytes.is_some_and(|bytes| bytes < 4096),
+        "pixels stay out of the frame"
     );
-    assert!(!encoded.to_string().contains("rgba"));
 }
 
 #[test]
@@ -38,15 +47,14 @@ fn server_screen_with_a_long_hyperlink_remains_within_the_transport_limit() {
             cell.hyperlink = Some(Arc::clone(&link));
         }
     }
-    let encoded = encode_screen(&screen);
-    assert_eq!(encoded.hyperlinks.len(), 1);
-    let reply = Reply::Screen(Box::new(encoded));
-    let bytes = serde_json::to_vec(&reply).unwrap();
-    assert!(
-        bytes.len() < pane::MAX_TERMINAL_FRAME,
-        "screen frame has {} bytes",
-        bytes.len()
-    );
+    let update = keyframe(&screen);
+    assert_eq!(update.links.len(), 1);
+    let reply = Reply::Screen(Box::new(ScreenFrame {
+        frame: 1,
+        base: None,
+        update,
+    }));
+    assert!(super::dispatch::wire_bytes(reply).is_some());
 }
 
 #[test]
@@ -69,24 +77,24 @@ fn server_screen_with_many_distinct_links_retains_text_with_bounded_metadata() {
             index += 1;
         }
     }
-    let encoded = encode_screen(&screen);
-    assert!(encoded.rows[0][0].hyperlink.is_some());
-    assert!(
-        encoded
-            .rows
-            .last()
-            .unwrap()
-            .last()
-            .unwrap()
-            .hyperlink
-            .is_none()
+    // Links beyond the channel's table lose their target, not their text.
+    let update = keyframe(&screen);
+    assert_eq!(
+        update.links.len(),
+        spaceterm_server::protocol::limits::MAX_LINKS
     );
-    assert_eq!(encoded.rows[0][0].text, "f");
+    assert!(update.rows[0].runs[0].link.is_some());
+    assert!(update.rows[0].runs[0].text.starts_with('f'));
+    let last = update.rows.last().unwrap().runs.last().unwrap();
+    assert!(last.link.is_none());
+    assert_eq!(update.rows.len(), 40);
     assert!(
-        serde_json::to_vec(&Reply::Screen(Box::new(encoded)))
-            .unwrap()
-            .len()
-            < pane::MAX_TERMINAL_FRAME
+        super::dispatch::wire_bytes(Reply::Screen(Box::new(ScreenFrame {
+            frame: 1,
+            base: None,
+            update,
+        })))
+        .is_some()
     );
 }
 
@@ -101,14 +109,14 @@ fn row_changes_follow_the_exact_baseline_and_connection_lease() {
         "stty -echo; printf '\\033[2J\\033[HBASELINE-READY\\r\\n'",
     );
     await_text(&mut host, 1, lease, "BASELINE-READY");
-    let mut decoder = pane::presentation::ScreenDecoder::default();
-    let reset = host.request(
+    let Reply::Screen(reset) = host.request(
         [1; 32],
         lease.connection,
         Request::PollChanges { lease, base: None },
-    );
-    assert!(matches!(&reset, Reply::Screen(_)));
-    decoder.apply(reset).unwrap();
+    ) else {
+        panic!("a poll without a base receives a keyframe")
+    };
+    assert!(reset.base.is_none());
     command(
         &mut host,
         1,
@@ -121,13 +129,15 @@ fn row_changes_follow_the_exact_baseline_and_connection_lease() {
         lease.connection,
         Request::PollChanges {
             lease,
-            base: decoder.baseline(),
+            base: Some(reset.frame),
         },
     );
-    assert!(
-        matches!(&reply, Reply::ScreenChanges(changes) if !changes.indices.is_empty() && changes.indices.len() < 24)
-    );
-    decoder.apply(reply).unwrap();
+    assert!(matches!(
+        &reply,
+        Reply::Screen(changes) if changes.base == Some(reset.frame)
+            && !changes.update.rows.is_empty()
+            && changes.update.rows.len() < 24
+    ));
     assert!(matches!(
         host.request(
             [1; 32],
@@ -154,7 +164,7 @@ fn row_changes_follow_the_exact_baseline_and_connection_lease() {
             lease.connection,
             Request::PollChanges {
                 lease,
-                base: decoder.baseline()
+                base: Some(reset.frame)
             }
         ),
         Reply::Refused(Refusal::Stale)
@@ -202,7 +212,7 @@ fn hidden_presentation_suppresses_rows_and_reveal_resets_the_baseline() {
                 lease.connection,
                 Request::PollChanges { lease, base: None }
             ),
-            Reply::Screen(_) | Reply::ScreenChanges(_)
+            Reply::Screen(_)
         ));
     }
     command(

@@ -155,7 +155,9 @@ impl DevelopmentPaneHost {
             screen: None,
             graphics_transfer: None,
             sent: None,
-            screen_encoder: pane::presentation::ScreenEncoder::default(),
+            screen_encoder: screen_encoder::ScreenEncoder::default(),
+            frame: 0,
+            history: screen_encoder::HistoryTracker::default(),
             presentable: true,
             ended: false,
             failed: false,
@@ -344,7 +346,7 @@ impl OwnedPane {
     pub(super) fn invalidate_input(&mut self) {
         self.presentable = false;
         self.runtime.set_presentable(false);
-        self.screen_encoder = pane::presentation::ScreenEncoder::default();
+        self.screen_encoder = screen_encoder::ScreenEncoder::default();
         self.graphics_transfer = None;
         self.accessibility.disconnect();
         self.runtime.end_server_accessibility_demand();
@@ -694,7 +696,7 @@ impl OwnedPane {
         self.presentable = true;
         self.runtime.set_presentable(true);
         self.sent = None;
-        self.screen_encoder = pane::presentation::ScreenEncoder::default();
+        self.screen_encoder = screen_encoder::ScreenEncoder::default();
         self.runtime.resize(geometry(size));
         self.size = size;
         if let Some(appearance) = appearance {
@@ -832,5 +834,10 @@ pub(crate) fn decode_key(key: Key) -> Option<KeyInput> {
         },
     };
     input.validate().ok()?;
+    // Text input made of control characters reaches the PTY as the keys that type it. Text with
+    // a control character no key produces is refused here, before the Terminal Session sees it.
+    if input.is_text_input() || input.is_input_method_commit() {
+        input.typed_keys().ok()?;
+    }
     Some(input)
 }
