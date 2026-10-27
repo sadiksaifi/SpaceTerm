@@ -60,3 +60,7 @@ required-features = ["client"]
 [[example]]
 name = "server_update"
 required-features = ["client"]
+
+[[example]]
+name = "latency_probe"
+required-features = ["client"]
