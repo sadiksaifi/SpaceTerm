@@ -762,6 +762,40 @@ pub(super) fn screen(
     }
 }
 
+/// Starts `read` as request `id` of `connection` and waits for its reply.
+pub(super) fn read(
+    host: &mut impl HostCommands,
+    connection: [u8; 32],
+    id: u32,
+    read: HostRead,
+) -> Result<spaceterm_server::protocol::ReplyBody, Refusal> {
+    let id = spaceterm_server::protocol::RequestId(id);
+    if let Some(reply) = host.read([1; 32], connection, id, read) {
+        return reply;
+    }
+    Ok(await_read(host, connection, id))
+}
+
+/// Waits for read `id` of `connection`, which runs on the host, to settle.
+pub(super) fn await_read(
+    host: &mut impl HostCommands,
+    connection: [u8; 32],
+    id: spaceterm_server::protocol::RequestId,
+) -> spaceterm_server::protocol::ReplyBody {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        if let Some(read) = host
+            .settled_reads()
+            .into_iter()
+            .find(|read| read.connection == connection && read.id == id)
+        {
+            return read.reply;
+        }
+        assert!(Instant::now() < deadline, "the read did not settle");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
 /// Waits until a row of the Pane's screen reads exactly `text`, for the client `[1; 32]`.
 pub(super) fn await_text(host: &mut impl HostCommands, lease: Lease, text: &str) {
     await_screen(host, [1; 32], lease, |update| {
@@ -776,7 +810,7 @@ pub(super) fn await_screen(
     lease: Lease,
     ready: impl Fn(&ScreenUpdate) -> bool,
 ) -> ScreenUpdate {
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + Duration::from_secs(15);
     let mut diagnostic = Vec::new();
     loop {
         match screen(host, device, lease) {

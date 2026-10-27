@@ -6196,6 +6196,43 @@ fn clicking_the_active_inline_rename_should_keep_it_editable(cx: &mut TestAppCon
 }
 
 #[gpui::test]
+fn sidebar_redraws_for_a_new_appearance_without_a_window_refresh(cx: &mut TestAppContext) {
+    let (manager, _records, cx) = workspace_manager(cx);
+    cx.run_until_parked();
+    let mut appearance = cx.update(|_, cx| crate::ui::appearance::chrome(cx).clone());
+    appearance.colors.panel_background = Color::rgb(0x55_11_77);
+    let surface = gpui_color(appearance.surface(
+        crate::appearance::SurfaceRole::Base,
+        crate::ui::workspace_frame::base_surface(&appearance.colors),
+    ));
+    let sidebar_paints = |cx: &mut VisualTestContext| {
+        let sidebar = cx.debug_bounds("workspace-sidebar").unwrap();
+        cx.update(|window, _| {
+            let sidebar = sidebar.scale(window.scale_factor());
+            window
+                .painted_quads()
+                .iter()
+                .any(|quad| quad.background == surface.into() && quad.bounds.intersects(&sidebar))
+        })
+    };
+    assert!(
+        !sidebar_paints(cx),
+        "the fixture must change the sidebar surface"
+    );
+
+    // An appearance change redraws the Workspace Manager, which observes it, and refreshes no
+    // window.
+    cx.update(|_, cx| {
+        cx.set_global(crate::ui::appearance::InstalledChrome::single(Arc::new(
+            appearance,
+        )));
+        manager.update(cx, |_, cx| cx.notify());
+    });
+    cx.run_until_parked();
+    assert!(sidebar_paints(cx), "the sidebar must draw the new Chrome");
+}
+
+#[gpui::test]
 fn inline_rename_frame_should_resolve_inside_the_sidebar_control_host(cx: &mut TestAppContext) {
     let (_manager, _records, cx) = workspace_manager(cx);
     let mut appearance = cx.update(|_, cx| crate::ui::appearance::chrome(cx).clone());
@@ -9645,7 +9682,7 @@ fn shared_close_inventory(
         repositories: None,
         revision,
         close: Some(CloseInventory {
-            controls: None,
+            controls: Vec::new(),
             boot: SHARED_CLOSE_BOOT,
             sessions: tabs
                 .iter()
@@ -12322,7 +12359,7 @@ mod shared_repositories {
         second.panes[0].id = second.root_pane;
         initial.workspaces[0].tabs.push(second);
         initial.close = Some(CloseInventory {
-            controls: None,
+            controls: Vec::new(),
             boot: [9; 32],
             sessions: initial.workspaces[0]
                 .tabs

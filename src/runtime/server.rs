@@ -24,16 +24,97 @@ pub(crate) mod testing {
         SharedWorkspaceHost::new(super::tests::host())
     }
 
-    pub(crate) fn directory_host() -> impl FnMut(&Request) -> Reply + Send {
+    /// A server's directory reads and creations, in process, for one client connection.
+    pub(crate) struct DirectoryHost {
+        host: SharedWorkspaceHost,
+        /// Rung when a read settles.
+        woken: std::sync::mpsc::Receiver<()>,
+        settled: Vec<SettledRead>,
+    }
+
+    pub(crate) fn directory_host() -> DirectoryHost {
         let mut host = terminal_host();
-        move |request| host.request([3; 32], [4; 32], request.clone())
+        let (sender, woken) = std::sync::mpsc::channel();
+        host.ticker(Arc::new(move || {
+            let _ = sender.send(());
+        }));
+        DirectoryHost {
+            host,
+            woken,
+            settled: Vec::new(),
+        }
+    }
+
+    impl DirectoryHost {
+        const DEVICE: [u8; 32] = [3; 32];
+        const CONNECTION: [u8; 32] = [4; 32];
+
+        /// Starts a directory read or creation as request `id`.
+        pub(crate) fn begin(
+            &mut self,
+            id: u64,
+            operation: spaceterm_server::protocol::Operation,
+        ) -> Result<(), ()> {
+            use spaceterm_server::protocol::Operation;
+            let read = match operation {
+                Operation::DirectoryRead(operation) => HostRead::Directory(operation),
+                Operation::DirectoryCreate(creation) => HostRead::Creation(creation),
+                _ => return Err(()),
+            };
+            let id = request_id(id)?;
+            if let Some(reply) = self.host.read(Self::DEVICE, Self::CONNECTION, id, read) {
+                self.settled.push(SettledRead {
+                    connection: Self::CONNECTION,
+                    id,
+                    reply: reply.map_err(|_| ())?,
+                });
+            }
+            Ok(())
+        }
+
+        /// Waits at most `timeout` for request `id` to settle.
+        pub(crate) fn settled(
+            &mut self,
+            id: u64,
+            timeout: Duration,
+        ) -> Result<Option<Result<pane::directories::Value, pane::directories::Error>>, ()> {
+            let id = request_id(id)?;
+            let deadline = std::time::Instant::now() + timeout;
+            loop {
+                self.settled.extend(self.host.settled_reads());
+                if let Some(index) = self.settled.iter().position(|read| read.id == id) {
+                    return match self.settled.swap_remove(index).reply {
+                        spaceterm_server::protocol::ReplyBody::Directory(result) => Ok(Some(result)),
+                        _ => Err(()),
+                    };
+                }
+                let Some(remaining) =
+                    deadline.checked_duration_since(std::time::Instant::now())
+                else {
+                    return Ok(None);
+                };
+                let _ = self.woken.recv_timeout(remaining);
+            }
+        }
+
+        pub(crate) fn cancel(&mut self, id: u64) {
+            if let Ok(id) = request_id(id) {
+                self.host.cancel_read(Self::CONNECTION, id);
+            }
+        }
+    }
+
+    fn request_id(id: u64) -> Result<spaceterm_server::protocol::RequestId, ()> {
+        u32::try_from(id)
+            .map(spaceterm_server::protocol::RequestId)
+            .map_err(|_| ())
     }
 }
 
 #[cfg(test)]
 mod directory_tests;
 mod dispatch;
-pub use dispatch::{HostCommands, Served};
+pub use dispatch::{HostCommands, HostRead, Served, SettledRead};
 pub use publish::{Observation, Observed};
 pub use screen_encoder::ScreenCapture;
 #[cfg(test)]
@@ -109,8 +190,7 @@ struct OwnedPane {
     subscription: TerminalSubscription,
     screen: Option<Arc<ScreenSnapshot>>,
     graphics_transfer: Option<(ActiveScreenSnapshot, Arc<crate::terminal::ImageSnapshot>)>,
-    /// The snapshot a keyframe poll last returned.
-    /// The last frame number a poll returned.
+    /// Whether the controlling client shows this Pane, so its Terminal Session publishes frames.
     presentable: bool,
     ended: bool,
     failed: bool,

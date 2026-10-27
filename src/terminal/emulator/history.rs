@@ -183,7 +183,9 @@ impl TerminalEmulator {
                 text.push(' ');
             }
             let background_source = match cell.content_tag()? {
-                CellContentTag::BgColorPalette => TerminalColor::Palette(cell.bg_color_palette()?.0),
+                CellContentTag::BgColorPalette => {
+                    TerminalColor::Palette(cell.bg_color_palette()?.0)
+                }
                 CellContentTag::BgColorRgb => TerminalColor::Rgb(cell.bg_color_rgb()?.into()),
                 _ => style.bg_color.into(),
             };
@@ -308,7 +310,11 @@ mod tests {
         let history = feed_lines(&mut emulator, 0..12_000);
         assert_eq!(history.epoch, 1, "discarding old rows keeps the epoch");
         assert!(history.oldest > 0, "the engine discarded rows: {history:?}");
-        assert_eq!(history.total, 12_000 - 3, "three numbered lines are still on screen");
+        assert_eq!(
+            history.total,
+            12_000 - 3,
+            "three numbered lines are still on screen"
+        );
         let page = emulator
             .scrollback_page(history.epoch, history.oldest - 5, 10)
             .unwrap()
@@ -316,7 +322,10 @@ mod tests {
         assert_eq!(page.start, history.oldest, "discarded rows are left out");
         assert_eq!(page.rows.len(), 5);
         for (offset, (row, wrapped)) in page.rows.iter().enumerate() {
-            assert_eq!(text(row), format!("line {}", history.oldest + offset as u64));
+            assert_eq!(
+                text(row),
+                format!("line {}", history.oldest + offset as u64)
+            );
             assert!(!wrapped);
         }
         let newest = emulator
@@ -324,7 +333,10 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(newest.rows.len(), 1, "a page ends at the screen");
-        assert_eq!(text(&newest.rows[0].0), format!("line {}", history.total - 1));
+        assert_eq!(
+            text(&newest.rows[0].0),
+            format!("line {}", history.total - 1)
+        );
     }
 
     #[test]
@@ -333,34 +345,43 @@ mod tests {
         emulator.snapshot().unwrap();
         let history = feed_lines(&mut emulator, 0..50);
         assert_eq!((history.epoch, history.oldest, history.total), (1, 0, 47));
-        emulator.resize(TerminalGeometry::from_grid(
-            CellGridSize::new(20, 6),
-            LogicalCellSize::new(10.0, 20.0),
-            BackingScale::ONE,
-        ))
-        .unwrap();
+        emulator
+            .resize(TerminalGeometry::from_grid(
+                CellGridSize::new(20, 6),
+                LogicalCellSize::new(10.0, 20.0),
+                BackingScale::ONE,
+            ))
+            .unwrap();
         emulator.snapshot().unwrap();
         let taller = emulator.history.current;
         assert_eq!(
             taller.epoch, 2,
             "history pulled onto a taller screen renumbers what scrolls off again"
         );
-        emulator.resize(TerminalGeometry::from_grid(
-            CellGridSize::new(20, 4),
-            LogicalCellSize::new(10.0, 20.0),
-            BackingScale::ONE,
-        ))
-        .unwrap();
+        emulator
+            .resize(TerminalGeometry::from_grid(
+                CellGridSize::new(20, 4),
+                LogicalCellSize::new(10.0, 20.0),
+                BackingScale::ONE,
+            ))
+            .unwrap();
         emulator.snapshot().unwrap();
-        assert_eq!(emulator.history.current.epoch, 2, "a shorter screen keeps positions");
-        emulator.resize(TerminalGeometry::from_grid(
-            CellGridSize::new(12, 6),
-            LogicalCellSize::new(10.0, 20.0),
-            BackingScale::ONE,
-        ))
-        .unwrap();
+        assert_eq!(
+            emulator.history.current.epoch, 2,
+            "a shorter screen keeps positions"
+        );
+        emulator
+            .resize(TerminalGeometry::from_grid(
+                CellGridSize::new(12, 6),
+                LogicalCellSize::new(10.0, 20.0),
+                BackingScale::ONE,
+            ))
+            .unwrap();
         emulator.snapshot().unwrap();
-        assert_eq!(emulator.history.current.epoch, 3, "rewrapped rows name new content");
+        assert_eq!(
+            emulator.history.current.epoch, 3,
+            "rewrapped rows name new content"
+        );
         assert!(
             emulator.scrollback_page(2, 0, 10).unwrap().is_none(),
             "an ended epoch is refused"
@@ -404,7 +425,10 @@ mod tests {
         assert_eq!(text(&page.rows[1].0), "ef");
         emulator.feed(b"\x1b[?1049h");
         emulator.snapshot().unwrap();
-        assert_eq!(emulator.history.current, history, "the primary history stands");
+        assert_eq!(
+            emulator.history.current, history,
+            "the primary history stands"
+        );
         assert!(
             emulator
                 .scrollback_page(history.epoch, history.oldest, 3)

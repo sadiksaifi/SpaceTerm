@@ -1869,7 +1869,10 @@ impl TabView {
                     }
                 }
                 None => {
-                    let caption = cx.new(|_| PaneCaptionView { props });
+                    let caption = cx.new(|cx| {
+                        super::cached_view::redraw_on_presentation_change(cx);
+                        PaneCaptionView { props }
+                    });
                     self.pane_caption_views.insert(pane_id, caption);
                 }
             }

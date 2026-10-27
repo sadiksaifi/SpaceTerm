@@ -8,6 +8,9 @@ use std::sync::{Mutex, MutexGuard};
 const HIDDEN_INPUT_SETTLE_INTERVAL: Duration = Duration::from_millis(200);
 const ACCESSIBILITY_NORMAL_COMMAND_BURST: u8 = 8;
 const ACCESSIBILITY_PRESENTATION_INTERVAL: Duration = Duration::from_millis(100);
+/// How often a hidden Terminal Session reports changed metadata. A program that retitles its
+/// Pane on every write would otherwise wake the server for every write.
+const METADATA_PRESENTATION_INTERVAL: Duration = Duration::from_millis(100);
 const COMPRESSION_IDLE_INTERVAL: Duration = Duration::from_millis(250);
 const COMPRESSION_STEP_INTERVAL: Duration = Duration::from_millis(1);
 
@@ -135,6 +138,8 @@ pub(super) struct WorkerSchedules {
     presentation: PublicationSchedule,
     metadata_presentation_pending: bool,
     metadata_presentation_queued: Arc<AtomicBool>,
+    /// The earliest time a hidden Terminal Session reports metadata again.
+    metadata_not_before: Instant,
     graphics_animation: Option<Instant>,
     compression: CompressionSchedule<CompressionActivity>,
     clock: Clock,
@@ -298,17 +303,29 @@ impl WorkerSchedules {
         self.metadata_presentation_pending = true;
     }
 
-    pub(super) fn take_metadata_presentation(&mut self) -> Option<MetadataWakeup> {
-        if !std::mem::take(&mut self.metadata_presentation_pending)
-            || self
-                .metadata_presentation_queued
-                .swap(true, Ordering::AcqRel)
+    /// The wakeup for changed metadata, at most once per [`METADATA_PRESENTATION_INTERVAL`]. A
+    /// change before then stays pending until [`Self::take_due`] reports it.
+    pub(super) fn take_metadata_presentation(&mut self, now: Instant) -> Option<MetadataWakeup> {
+        if !self.metadata_presentation_pending || now < self.metadata_not_before {
+            return None;
+        }
+        self.metadata_presentation_pending = false;
+        if self
+            .metadata_presentation_queued
+            .swap(true, Ordering::AcqRel)
         {
             return None;
         }
+        self.metadata_not_before = now + METADATA_PRESENTATION_INTERVAL;
         Some(MetadataWakeup::new(Arc::clone(
             &self.metadata_presentation_queued,
         )))
+    }
+
+    /// When a hidden Terminal Session's pending metadata is next reported.
+    fn metadata_deadline(&self) -> Option<Instant> {
+        (self.metadata_presentation_pending && !self.is_presentable())
+            .then_some(self.metadata_not_before)
     }
 
     pub(super) fn metadata_presented(&mut self) {
@@ -443,6 +460,7 @@ impl WorkerSchedules {
             presentation: PublicationSchedule::new(now),
             metadata_presentation_pending: false,
             metadata_presentation_queued: Arc::new(AtomicBool::new(false)),
+            metadata_not_before: now,
             graphics_animation: None,
             compression: CompressionSchedule::new(),
             clock: Clock::System,
@@ -460,6 +478,7 @@ impl WorkerSchedules {
                 .deadline()
                 .filter(|_| synchronized_output.is_none()),
             self.accessibility_presentation.deadline(),
+            self.metadata_deadline(),
             self.graphics_animation,
             self.compression.deadline(),
             self.hidden_input.deadline,
@@ -489,6 +508,9 @@ impl WorkerSchedules {
         }
         if self.accessibility_presentation.take_due(now) {
             return Some(Command::PublishAccessibility);
+        }
+        if self.metadata_deadline().is_some_and(|due| now >= due) {
+            return Some(Command::PublishMetadata);
         }
         self.hidden_input
             .deadline

@@ -7,7 +7,7 @@
 mod lifecycle;
 #[expect(
     dead_code,
-    reason = "The shared-Pane exercise does not use the legacy attach helper."
+    reason = "The shared-Pane exercise never uses `support::attach`."
 )]
 mod support;
 use lifecycle::{Server, require_idle, size};

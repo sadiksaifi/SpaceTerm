@@ -38,6 +38,13 @@ impl PtyInput {
         }
     }
 
+    /// A new client claim numbers its Input from 1 again. Bytes still queued are written, but no
+    /// earlier serial is reported for them.
+    pub(super) fn restart_serials(&mut self) {
+        self.serials.clear();
+        self.serial = 0;
+    }
+
     /// The highest client Input serial whose bytes the PTY has accepted. Zero before any.
     pub(super) fn written_serial(&self) -> u32 {
         self.serial
@@ -215,5 +222,32 @@ mod tests {
             input.drain(&mut pty).unwrap();
         }
         assert_eq!(input.written_serial(), MAX_PENDING_SERIALS as u32 + 10);
+    }
+
+    /// A new claim numbers its Input from 1 again. Its serials are reported only once its own
+    /// bytes reach the PTY, never because an earlier claim reached a higher serial.
+    #[test]
+    fn serials_restart_with_each_claim_without_running_ahead_of_the_pty() {
+        let mut input = PtyInput::default();
+        let mut pty = Slow {
+            written: Vec::new(),
+            budget: b"first claim".len(),
+        };
+        input.enqueue(b"first claim").unwrap();
+        input.note_serial(40);
+        input.enqueue(b"pending").unwrap();
+        input.note_serial(41);
+        input.drain(&mut pty).unwrap();
+        assert_eq!(input.written_serial(), 40);
+
+        input.restart_serials();
+        assert_eq!(input.written_serial(), 0, "no serial of the earlier claim");
+        input.enqueue(b"x").unwrap();
+        input.note_serial(1);
+        assert_eq!(input.written_serial(), 0, "the new bytes are not written yet");
+        pty.budget = usize::MAX;
+        input.drain(&mut pty).unwrap();
+        assert_eq!(input.written_serial(), 1);
+        assert_eq!(pty.written, b"first claimpendingx");
     }
 }

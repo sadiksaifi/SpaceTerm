@@ -535,6 +535,22 @@ mod tests {
         use crate::attachments::Attachments;
         use crate::hierarchy::{Axis, Inventory, Pane, Tab, Workspace};
         let fixture = Fixture::new();
+        // The lock's descriptor is close-on-exec, but a process another test forks holds a copy
+        // until it executes, and the copy keeps the lock. A reopen retries that contention
+        // briefly.
+        let reopen = |server: [u8; 32], client: [u8; 32]| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            loop {
+                match Attachments::open(fixture.open(), server, client) {
+                    Err(ServerError::StorageUnavailable)
+                        if std::time::Instant::now() < deadline =>
+                    {
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    result => return result,
+                }
+            }
+        };
         let inventory = Inventory {
             repositories: None,
             revision: 1,
@@ -578,7 +594,7 @@ mod tests {
             );
             permit.attachment()
         };
-        let choices = Attachments::open(fixture.open(), [8; 32], [9; 32]).unwrap();
+        let choices = reopen([8; 32], [9; 32]).unwrap();
         choices.reconcile(&inventory).unwrap();
         assert!(!choices.is_attached([1; 32]));
         assert_eq!(choices.pending(), vec![original]);
@@ -589,11 +605,11 @@ mod tests {
         assert!(choices.is_attached([1; 32]));
         drop(choices);
         assert!(matches!(
-            Attachments::open(fixture.open(), [7; 32], [9; 32]),
+            reopen([7; 32], [9; 32]),
             Err(ServerError::AuthenticationRefused)
         ));
         assert!(matches!(
-            Attachments::open(fixture.open(), [8; 32], [10; 32]),
+            reopen([8; 32], [10; 32]),
             Err(ServerError::AuthenticationRefused)
         ));
         assert_eq!(
@@ -606,7 +622,7 @@ mod tests {
         assert!(!fixture.0.join("settings.json").exists());
         fs::write(fixture.0.join("attachments.json"), b"incomplete document").unwrap();
         assert!(matches!(
-            Attachments::open(fixture.open(), [8; 32], [9; 32]),
+            reopen([8; 32], [9; 32]),
             Err(ServerError::UnsafeStorage)
         ));
         assert_eq!(

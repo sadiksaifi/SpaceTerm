@@ -319,6 +319,11 @@ pub fn serve(
     service: &SharedPaneService,
     stopping: &AtomicBool,
 ) {
+    let _ended = Ended {
+        outbox: connection.outbox().clone(),
+        service: Arc::clone(service),
+        peer: *connection.peer(),
+    };
     let mut held = None;
     let mut receiving = true;
     let mut stopped: Option<Instant> = None;
@@ -329,9 +334,12 @@ pub fn serve(
             receiving = false;
             stopped.get_or_insert(now);
         }
+        // A turn that stopped at its receive bound continues without waiting: the socket, or the
+        // plaintext TLS and the WebSocket hold, may already have more.
+        let mut more = false;
         if receiving {
             match receive(carrier.as_mut(), &mut connection, service, now) {
-                Ok(()) => {}
+                Ok(remaining) => more = remaining,
                 Err(Some(fatal)) => {
                     let _ = outbox.goodbye(fatal);
                     receiving = false;
@@ -380,6 +388,9 @@ pub fn serve(
             // A goodbye that cannot leave either ends the connection now.
             Err(_) => break,
         };
+        if more {
+            continue;
+        }
         wait(
             carrier.as_ref(),
             (receiving, written.buffered),
@@ -388,33 +399,62 @@ pub fn serve(
         );
     }
     drain(carrier.as_mut(), waker);
-    connection.outbox().disconnected();
-    service
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .disconnected(connection.peer());
 }
 
-/// Receives until the carrier has nothing, dispatching under one lock per turn. `Err(None)` means
+/// Reports a connection's end to its outbox and service, also when its thread panics, so its
+/// state never stays registered.
+struct Ended {
+    outbox: super::outbox::Outbox,
+    service: SharedPaneService,
+    peer: super::service::Peer,
+}
+
+impl Drop for Ended {
+    fn drop(&mut self) {
+        self.outbox.disconnected();
+        self.service
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .disconnected(&self.peer);
+    }
+}
+
+/// Frames one turn receives before it dispatches, writes and checks health, so a peer that never
+/// stops sending cannot grow the turn without bound or starve writing.
+const TURN_FRAMES: usize = 256;
+/// Frame bytes one turn receives before it dispatches.
+const TURN_BYTES: usize = limits::MAX_FRAME_BYTES;
+
+/// Receives until the carrier has nothing or the turn's bound is reached, then dispatches under one
+/// lock. `Ok(true)` means the turn stopped at its bound and more may be waiting. `Err(None)` means
 /// the socket closed; `Err(Some)` is the goodbye to send.
 fn receive(
     carrier: &mut dyn Carrier,
     connection: &mut AdmittedConnection,
     service: &SharedPaneService,
     now: Instant,
-) -> Result<(), Option<Fatal>> {
+) -> Result<bool, Option<Fatal>> {
     let mut inbound: Vec<Inbound> = Vec::new();
-    let mut result = Ok(());
+    let mut result = Ok(false);
+    let (mut frames, mut bytes) = (0, 0);
     loop {
+        if frames >= TURN_FRAMES || bytes >= TURN_BYTES {
+            result = Ok(true);
+            break;
+        }
         match carrier.receive() {
-            Ok(Some(frame)) => match connection.receive(frame, now) {
-                Ok(Some(message)) => inbound.push(message),
-                Ok(None) => {}
-                Err(fatal) => {
-                    result = Err(Some(fatal));
-                    break;
+            Ok(Some(frame)) => {
+                frames += 1;
+                bytes += limits::HEADER_BYTES + frame.body.len();
+                match connection.receive(frame, now) {
+                    Ok(Some(message)) => inbound.push(message),
+                    Ok(None) => {}
+                    Err(fatal) => {
+                        result = Err(Some(fatal));
+                        break;
+                    }
                 }
-            },
+            }
             Ok(None) => break,
             Err(CarrierError::Decode(_)) => {
                 result = Err(Some(Fatal::ProtocolViolation));
@@ -519,5 +559,112 @@ mod tests {
         }
         // The drain flushes once, then waits on its wake pipe and the stall deadline.
         assert!(flushes.load(Ordering::Relaxed) < 10);
+    }
+
+    /// A peer that sends without pause: acknowledgements forever, which need no reply.
+    struct Flood {
+        frame: Vec<u8>,
+        sent: usize,
+        dispatched: Arc<AtomicUsize>,
+        bell: UnixStream,
+    }
+
+    impl Carrier for Flood {
+        fn offer(&mut self, _: &[u8], _: Priority) -> Result<Offer, CarrierError> {
+            Ok(Offer::Accepted)
+        }
+        fn flush(&mut self) -> Result<Flush, CarrierError> {
+            Ok(Flush {
+                progressed: false,
+                pending: false,
+            })
+        }
+        fn receive(&mut self) -> Result<Option<RawFrame>, CarrierError> {
+            if self.sent == 4 * TURN_FRAMES {
+                return Err(CarrierError::Closed);
+            }
+            // Every turn dispatches before it reads further.
+            assert!(self.sent - self.dispatched.load(Ordering::SeqCst) <= TURN_FRAMES);
+            self.sent += 1;
+            Ok(Some(RawFrame::parse(&self.frame).unwrap()))
+        }
+        fn readiness(&self) -> Readiness {
+            Readiness {
+                read: self.bell.as_raw_fd(),
+                write: None,
+            }
+        }
+        fn close(&mut self) {}
+    }
+
+    struct Counting(Arc<AtomicUsize>);
+    impl super::super::service::PaneService for Counting {
+        fn admitted(
+            &mut self,
+            _: &super::super::service::Peer,
+            _: crate::pane::control::ClientName,
+            _: super::super::outbox::Outbox,
+        ) {
+        }
+        fn request(
+            &mut self,
+            _: &super::super::service::Peer,
+            _: crate::protocol::RequestId,
+            _: crate::protocol::Operation,
+        ) -> super::super::service::Dispatch {
+            super::super::service::Dispatch::reply(Err(crate::protocol::Refusal::Unsupported))
+        }
+        fn input(&mut self, _: &super::super::service::Peer, _: crate::protocol::Input) {}
+        fn view(&mut self, _: &super::super::service::Peer, _: crate::protocol::View) {}
+        fn effect_done(&mut self, _: &super::super::service::Peer, _: crate::protocol::EffectDone) {
+        }
+        fn acknowledge(&mut self, _: &super::super::service::Peer, _: u64) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+        fn disconnected(&mut self, _: &super::super::service::Peer) {}
+        fn shutdown(&mut self) -> Result<(), crate::ServerError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_peer_that_never_pauses_is_served_in_bounded_turns() {
+        use crate::protocol::{Acknowledge, ClientMessage, frame::encode_client};
+        let dispatched = Arc::new(AtomicUsize::new(0));
+        let frame = encode_client(&ClientMessage::Acknowledge(Acknowledge { sequence: 1 }))
+            .unwrap()
+            .frames
+            .remove(0);
+        let (bell, _) = UnixStream::pair().unwrap();
+        let carrier = Flood {
+            frame,
+            sent: 0,
+            dispatched: Arc::clone(&dispatched),
+            bell,
+        };
+        let service: SharedPaneService = Arc::new(std::sync::Mutex::new(Box::new(Counting(
+            Arc::clone(&dispatched),
+        ))));
+        let (waker, wake) = Waker::new().unwrap();
+        let (sync, _) = super::super::sync::SyncWorker::spawn().unwrap();
+        let connection = AdmittedConnection::new(
+            super::super::service::Peer {
+                client: [1; 32],
+                connection: [2; 32],
+                pairing: None,
+            },
+            super::super::outbox::Outbox::new(wake),
+            sync,
+            None,
+            Instant::now(),
+        );
+        serve(
+            Box::new(carrier),
+            connection,
+            &waker,
+            &service,
+            &AtomicBool::new(false),
+        );
+        assert_eq!(dispatched.load(Ordering::SeqCst), 4 * TURN_FRAMES);
     }
 }

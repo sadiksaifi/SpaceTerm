@@ -3,7 +3,7 @@
 mod lifecycle;
 #[expect(
     dead_code,
-    reason = "this exercise uses named Pane claims rather than legacy attach"
+    reason = "this exercise claims named Panes and never uses `support::attach`"
 )]
 mod support;
 use lifecycle::{Server, connect, require_idle, size};

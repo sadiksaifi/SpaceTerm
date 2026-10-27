@@ -2635,7 +2635,11 @@ fn hidden_worker_should_publish_directory_changes_without_constructing_screens()
         assert!(receiver.try_recv().is_err());
         assert!(worker.feed_test_output(vec![b"ordinary hidden output".to_vec()]));
         assert!(receiver.try_recv().is_err());
-        // A hidden Terminal Session's title and progress reach its Tab through the retained facts.
+        // A hidden Terminal Session's title and progress reach its Tab through the retained facts,
+        // once the metadata reporting interval since the directory change has passed.
+        worker
+            .schedules
+            .fix_clock(Instant::now() + Duration::from_millis(100));
         assert!(worker.feed_test_output(vec![b"\x1b]2;agent\x07\x1b]9;4;2\x07".to_vec()]));
         assert!(matches!(
             receiver.try_recv().unwrap(),
@@ -5026,4 +5030,73 @@ fn hidden_server_semantic_demand_is_enqueued_before_the_visibility_command_runs(
         receiver.try_recv(),
         Ok(Command::AccessibilityDemand)
     ));
+}
+
+#[test]
+fn a_hidden_session_reports_retitles_at_most_once_per_interval() {
+    let (_command_tx, commands) = mpsc::channel();
+    let (_reader_events, reader_events) = mpsc::sync_channel(PTY_OUTPUT_QUEUE_CAPACITY);
+    let (events, receiver) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
+    let (accessibility, _accessibility_receiver) = async_channel::bounded(1);
+    let start = Instant::now();
+    let mut worker = TerminalWorker {
+        metadata_state: TerminalSessionMetadataState::default(),
+        permission_request_state: TerminalSessionPermissionRequestState::default(),
+        native_pty: direct_native_pty(ScriptedPtyRecords::default()),
+        input: PtyInput::default(),
+        emulator: TerminalEmulator::new(test_geometry()).unwrap(),
+        served: false,
+        commands,
+        reader_events,
+        events: events.into(),
+        accessibility,
+        pending_command: None,
+        terminal_input_focused: false,
+        focus_reporting_enabled: false,
+        held_keys: HeldKeys::default(),
+        schedules: WorkerSchedules::new(start, ScheduleInput::default()),
+        osc52_filter: Osc52Filter::default(),
+        permission_requests: PermissionRequestFilter::default(),
+        clipboard: WorkerClipboard::default(),
+    };
+    worker.schedules.fix_clock(start);
+    assert!(worker.process_command(Command::SetPresentable(false)));
+    assert!(worker.feed_test_output(vec![b"\x1b]2;first\x07".to_vec()]));
+    // The consumer reads the change and drops its wakeup.
+    assert!(matches!(
+        receiver.try_recv().unwrap(),
+        TerminalSessionEvent::MetadataChanged(_)
+    ));
+    for title in 0..32 {
+        let output = format!("\x1b]2;title {title}\x07");
+        assert!(worker.feed_test_output(vec![output.into_bytes()]));
+    }
+    assert!(
+        receiver.try_recv().is_err(),
+        "retitles within the interval wait"
+    );
+    let due = worker.schedules.deadline(None).unwrap();
+    assert!(due > start, "the pending retitle is reported later");
+    assert!(matches!(
+        worker.schedules.take_due(due),
+        Some(Command::PublishMetadata)
+    ));
+    worker.schedules.fix_clock(due);
+    assert!(worker.process_command(Command::PublishMetadata));
+    assert!(matches!(
+        receiver.try_recv().unwrap(),
+        TerminalSessionEvent::MetadataChanged(_)
+    ));
+    assert!(receiver.try_recv().is_err());
+    assert_eq!(
+        worker
+            .metadata_state
+            .snapshot()
+            .unwrap()
+            .title
+            .value
+            .as_ref(),
+        "title 31"
+    );
+    worker.finish();
 }

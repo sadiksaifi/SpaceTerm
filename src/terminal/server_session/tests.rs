@@ -105,7 +105,10 @@ fn copy_with_a_selection_is_local_and_without_one_forwards_through_the_fenced_in
             Ok(Reply::Unchanged)
         })
         .unwrap();
-    assert_eq!(forwarded, 1, "the program decides what Copy without a Selection does");
+    assert_eq!(
+        forwarded, 1,
+        "the program decides what Copy without a Selection does"
+    );
     let pointer = |phase, x| PointerInput {
         generation: mapping.local,
         phase,
@@ -125,7 +128,10 @@ fn copy_with_a_selection_is_local_and_without_one_forwards_through_the_fenced_in
     assert!(adapter.input.try_recv().is_err(), "selecting sends nothing");
     let copied = adapter.handle.copy_or_forward(modifiers).unwrap().unwrap();
     assert_eq!(copied.plain_text, copy.plain_text);
-    assert!(adapter.input.try_recv().is_err(), "Copy of a Selection forwards nothing");
+    assert!(
+        adapter.input.try_recv().is_err(),
+        "Copy of a Selection forwards nothing"
+    );
     // Typing clears the Selection, as in a local terminal.
     adapter.handle.key(KeyInput {
         action: KeyAction::Press,
@@ -197,7 +203,10 @@ fn a_copy_waiting_for_rows_wakes_the_worker_to_request_them() {
         .state
         .wake
         .wait(Some(std::time::Instant::now()));
-    assert!(adapter.handle.copy_selection().unwrap().is_none(), "no row is cached yet");
+    assert!(
+        adapter.handle.copy_selection().unwrap().is_none(),
+        "no row is cached yet"
+    );
     let started = std::time::Instant::now();
     adapter
         .handle
@@ -219,6 +228,89 @@ fn a_copy_waiting_for_rows_wakes_the_worker_to_request_them() {
             .requests()
             .is_empty()
     );
+}
+
+#[test]
+fn copy_readiness_is_a_flag_the_worker_keeps_and_pages_decode_outside_the_lock() {
+    use super::super::pointer_input::*;
+    let adapter = Adapter::new();
+    let mapping = adapter.frame(40);
+    adapter.handle.scroll_scrollback(ScrollbackMovement::Top);
+    let pointer = |phase, y| PointerInput {
+        generation: mapping.local,
+        phase,
+        button: Some(PointerButton::Left),
+        position: SurfacePosition { x: 1.0, y },
+        modifiers: Default::default(),
+        shift_selection: ShiftSelectionPolicy::ReportToApplication,
+    };
+    adapter.handle.pointer(pointer(PointerPhase::Press, 1.0));
+    adapter.handle.pointer(pointer(PointerPhase::Motion, 61.0));
+    adapter.handle.pointer(pointer(PointerPhase::Release, 61.0));
+    let state = &adapter.handle.state;
+    state.reading.lock().unwrap().turn(std::time::Instant::now());
+    assert!(!adapter.handle.selection_copy_ready(), "the selected rows are not cached");
+    // The worker answers the pages: it decodes them without the lock, then adds them.
+    let requests = state.reading.lock().unwrap().scrollback.requests();
+    assert!(!requests.is_empty());
+    let history = mapping_history(&adapter);
+    for request in requests {
+        let rows: Vec<RowSnapshot> = (request.start..request.start + u64::from(request.rows))
+            .filter(|line| *line < history.total)
+            .map(|_| {
+                let cells = vec![blank_test_cell("line"); usize::from(mapping.size.columns)];
+                Arc::from(cells)
+            })
+            .collect();
+        let page = crate::runtime::screen_encoder::encode_page(
+            history.epoch,
+            request.start,
+            rows.iter().map(|row| (row.as_ref(), false)),
+        );
+        state.reading.lock().unwrap().page(request, Some(page));
+    }
+    let pages = state.reading.lock().unwrap().take_pages();
+    let decoded = reading::decode_pages(pages, mapping.size.columns, None);
+    assert!(decoded.iter().all(|(_, rows)| rows.is_some()));
+    state.reading.lock().unwrap().settle_pages(decoded);
+    state.reading.lock().unwrap().turn(std::time::Instant::now());
+    assert!(adapter.handle.selection_copy_ready());
+}
+
+fn mapping_history(adapter: &Adapter) -> crate::terminal::emulator::HistorySnapshot {
+    adapter
+        .handle
+        .state
+        .reading
+        .lock()
+        .unwrap()
+        .scrollback
+        .present(PresentationGeneration::test(1))
+        .unwrap()
+        .history
+}
+
+/// A cell in the default style holding the first character of `text`.
+fn blank_test_cell(text: &str) -> CellSnapshot {
+    CellSnapshot {
+        text: text.chars().next().unwrap().to_string(),
+        foreground_source: TerminalColor::Default,
+        background_source: TerminalColor::Default,
+        inverse: false,
+        bold: false,
+        faint: false,
+        italic: false,
+        blinking: false,
+        invisible: false,
+        underline: TerminalUnderlineSnapshot::None,
+        underline_source: TerminalColor::Default,
+        strikethrough: false,
+        overline: false,
+        selected: false,
+        spacer_tail: false,
+        semantic_content: CellSemanticSnapshot::Output,
+        hyperlink: None,
+    }
 }
 
 pub(super) struct Adapter {
@@ -328,14 +420,13 @@ impl Adapter {
     /// worker applies frames, and returns its mapping.
     fn frame(&self, history: u64) -> ScreenMapping {
         use super::super::geometry::{BackingScale, CellGridSize, LogicalCellSize};
-        let mut emulator = crate::terminal::emulator::TerminalEmulator::new(
-            TerminalGeometry::from_grid(
+        let mut emulator =
+            crate::terminal::emulator::TerminalEmulator::new(TerminalGeometry::from_grid(
                 CellGridSize::new(20, 6),
                 LogicalCellSize::new(10.0, 20.0),
                 BackingScale::ONE,
-            ),
-        )
-        .unwrap();
+            ))
+            .unwrap();
         emulator.snapshot().unwrap();
         for _ in 0..history + 5 {
             emulator.feed(b"line\r\n");

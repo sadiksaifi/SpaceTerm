@@ -1737,10 +1737,7 @@ mod development {
                 scope,
                 workspace: workspace.name.clone(),
                 confirmation,
-                controls: inventory
-                    .close
-                    .as_ref()
-                    .and_then(|live| live.controls.clone()),
+                controls: inventory.close.as_ref().map(|live| live.controls.clone()),
             })
         }
 
@@ -2281,8 +2278,8 @@ mod development {
     }
 
     impl SharedCloseApproval {
-        /// A direct close binds every reviewed Pane to its exact control grant. Older servers
-        /// cannot report these facts, so they always require explicit confirmation.
+        /// A direct close binds every reviewed Pane to its exact control grant. A Pane without a
+        /// reported grant requires explicit confirmation.
         pub(crate) fn direct_close(
             &self,
             directly_closable: impl Fn(Id, bool) -> bool,

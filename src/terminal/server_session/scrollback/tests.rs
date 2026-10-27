@@ -78,7 +78,9 @@ impl Server {
         Self {
             epoch: 1,
             oldest: 0,
-            rows: (0..count).map(|line| (format!("line{line}"), false)).collect(),
+            rows: (0..count)
+                .map(|line| (format!("line{line}"), false))
+                .collect(),
         }
     }
 
@@ -194,7 +196,10 @@ fn pages_start_small_continue_at_full_size_and_stay_within_four_in_flight() {
         vec![2300, 1800, 1300, 800],
         "pages nearest the view come first"
     );
-    assert!(scrollback.requests().is_empty(), "nothing more until a page settles");
+    assert!(
+        scrollback.requests().is_empty(),
+        "nothing more until a page settles"
+    );
     scrollback.page(find[0], server.answer(find[0]));
     assert_eq!(
         scrollback.requests(),
@@ -218,13 +223,22 @@ fn wheel_scrolling_within_cached_history_needs_no_page() {
             "step {step} reads cached rows only"
         );
     }
-    assert_eq!(presented(&mut scrollback), ["line140", "line141", "line142", "line143"]);
+    assert_eq!(
+        presented(&mut scrollback),
+        ["line140", "line141", "line142", "line143"]
+    );
     let shown = scrollback.present(PresentationGeneration::test(2)).unwrap();
     assert_eq!(shown.scrollbar.total_rows, 154);
     assert_eq!(shown.scrollbar.offset_rows, 140);
-    assert_eq!(shown.cursor.position, None, "the cursor row is below the view");
+    assert_eq!(
+        shown.cursor.position, None,
+        "the cursor row is below the view"
+    );
     assert!(scrollback.wheel(-7));
-    assert_eq!(presented(&mut scrollback), ["line147", "line148", "line149", "$ a"]);
+    assert_eq!(
+        presented(&mut scrollback),
+        ["line147", "line148", "line149", "$ a"]
+    );
     assert!(scrollback.wheel(-100));
     assert_eq!(presented(&mut scrollback), ["$ a", "", "", ""]);
     assert!(!scrollback.wheel(-1), "the view already follows the screen");
@@ -257,7 +271,10 @@ fn an_uncached_view_shows_blank_rows_until_its_page_arrives() {
     let requests = scrollback.requests();
     assert_eq!(requests[0].start, 0, "the view's own rows come first");
     scrollback.page(requests[0], server.answer(requests[0]));
-    assert_eq!(presented(&mut scrollback), ["line0", "line1", "line2", "line3"]);
+    assert_eq!(
+        presented(&mut scrollback),
+        ["line0", "line1", "line2", "line3"]
+    );
 }
 
 #[test]
@@ -266,19 +283,33 @@ fn a_scrolled_view_stays_on_its_rows_while_output_continues() {
     let mut scrollback = attached(&server, &["a", "b", "c", "$"]);
     server.serve(&mut scrollback);
     scrollback.wheel(3);
-    assert_eq!(presented(&mut scrollback), ["line97", "line98", "line99", "a"]);
+    assert_eq!(
+        presented(&mut scrollback),
+        ["line97", "line98", "line99", "a"]
+    );
     // Two rows scroll into history. Until their page arrives, the view shows them as the last
     // frame did, never blank.
     server.rows.push(("a".into(), false));
     server.rows.push(("b".into(), false));
     scrollback.screen(screen(&["c", "$ ls", "x", "y"], server.history()));
-    assert_eq!(presented(&mut scrollback), ["line97", "line98", "line99", "a"]);
+    assert_eq!(
+        presented(&mut scrollback),
+        ["line97", "line98", "line99", "a"]
+    );
     scrollback.set_find_query(FindQueryGeneration::test(1), "b".into());
-    let find = scrollback.present(PresentationGeneration::test(1)).unwrap().find.clone().unwrap();
+    let find = scrollback
+        .present(PresentationGeneration::test(1))
+        .unwrap()
+        .find
+        .clone()
+        .unwrap();
     assert_eq!(find.total_matches, 0, "a placeholder is not searched");
     scrollback.end_find(FindQueryGeneration::test(1));
     server.serve(&mut scrollback);
-    assert_eq!(presented(&mut scrollback), ["line97", "line98", "line99", "a"]);
+    assert_eq!(
+        presented(&mut scrollback),
+        ["line97", "line98", "line99", "a"]
+    );
     assert!(scrollback.wheel(-5));
     assert_eq!(presented(&mut scrollback), ["c", "$ ls", "x", "y"]);
 }
@@ -302,7 +333,14 @@ fn discarded_history_leaves_the_cache_and_positions_stay_absolute() {
         "the view keeps to the oldest retained row"
     );
     assert!(scrollback.cache.get(9).is_none());
-    assert_eq!(scrollback.present(PresentationGeneration::test(3)).unwrap().scrollbar.total_rows, 24);
+    assert_eq!(
+        scrollback
+            .present(PresentationGeneration::test(3))
+            .unwrap()
+            .scrollbar
+            .total_rows,
+        24
+    );
     server.serve(&mut scrollback);
     scrollback.scroll(ScrollbackMovement::PageDown);
     scrollback.scroll(ScrollbackMovement::PageDown);
@@ -319,8 +357,15 @@ fn the_cache_survives_a_reconnect_only_with_the_same_session_and_epoch() {
     // The connection ends and the same Terminal Session is presented again.
     scrollback.attach(SESSION);
     scrollback.screen(screen(&["$", "", "", ""], server.history()));
-    assert!(scrollback.requests().is_empty(), "every row is still cached");
-    assert_eq!(presented(&mut scrollback)[0], "line290", "the view is kept too");
+    assert!(
+        scrollback.requests().is_empty(),
+        "every row is still cached"
+    );
+    assert_eq!(
+        presented(&mut scrollback)[0],
+        "line290",
+        "the view is kept too"
+    );
 
     // A cleared Scrollback starts a new epoch.
     let mut cleared = Server::new(0);
@@ -385,7 +430,10 @@ fn find_matches_across_page_boundaries_and_soft_wraps() {
     let shown = scrollback.present(PresentationGeneration::test(2)).unwrap();
     let find = shown.find.clone().unwrap();
     assert_eq!(find.current_match, Some(2));
-    assert_eq!(shown.viewport.offset_rows, 799, "the view moved to the match");
+    assert_eq!(
+        shown.viewport.offset_rows, 799,
+        "the view moved to the match"
+    );
     assert_eq!(
         find.visible_spans.as_ref(),
         [
@@ -430,11 +478,28 @@ fn find_spans_cover_wide_characters_whole() {
         }]
     );
     scrollback.set_find_query(FindQueryGeneration::test(2), "界".into());
-    let find = scrollback.present(PresentationGeneration::test(2)).unwrap().find.clone().unwrap();
-    assert_eq!(find.total_matches, 2, "one in history and one on the screen");
-    assert!(!scrollback.end_find(FindQueryGeneration::test(1)), "an older query ends nothing");
+    let find = scrollback
+        .present(PresentationGeneration::test(2))
+        .unwrap()
+        .find
+        .clone()
+        .unwrap();
+    assert_eq!(
+        find.total_matches, 2,
+        "one in history and one on the screen"
+    );
+    assert!(
+        !scrollback.end_find(FindQueryGeneration::test(1)),
+        "an older query ends nothing"
+    );
     assert!(scrollback.end_find(FindQueryGeneration::test(2)));
-    assert!(scrollback.present(PresentationGeneration::test(3)).unwrap().find.is_none());
+    assert!(
+        scrollback
+            .present(PresentationGeneration::test(3))
+            .unwrap()
+            .find
+            .is_none()
+    );
 }
 
 #[test]
@@ -482,15 +547,28 @@ fn words_and_lines_select_whole_wide_characters_and_soft_wrapped_lines() {
     // Double-click on the spacer of 界 selects the wide word across the soft wrap.
     press(&mut scrollback, 45.0, 5.0, start);
     scrollback.pointer(PointerEvent::Release, GRID, start);
-    press(&mut scrollback, 45.0, 5.0, start + Duration::from_millis(100));
+    press(
+        &mut scrollback,
+        45.0,
+        5.0,
+        start + Duration::from_millis(100),
+    );
     scrollback.pointer(PointerEvent::Release, GRID, start);
     let copy = ready(scrollback.copy(SelectionCopyOptions::default()));
     assert_eq!(copy.plain_text.as_ref(), "界世cde");
     let shown = scrollback.present(PresentationGeneration::test(1)).unwrap();
-    assert!(shown.rows[0][3].selected && shown.rows[0][4].selected, "the spacer too");
+    assert!(
+        shown.rows[0][3].selected && shown.rows[0][4].selected,
+        "the spacer too"
+    );
     assert!(!shown.rows[0][2].selected);
     // A third click selects the logical line.
-    press(&mut scrollback, 45.0, 5.0, start + Duration::from_millis(200));
+    press(
+        &mut scrollback,
+        45.0,
+        5.0,
+        start + Duration::from_millis(200),
+    );
     let copy = ready(scrollback.copy(SelectionCopyOptions::default()));
     assert_eq!(copy.plain_text.as_ref(), "ab 界世cde f");
     // A late click starts over and clears the Selection.
@@ -514,7 +592,10 @@ fn a_cell_drag_follows_ghosttys_threshold_and_copies_plain_text_and_html() {
     // Pressing past 60% of the first cell excludes it.
     press(&mut scrollback, 7.0, 5.0, start);
     scrollback.pointer(PointerEvent::Drag { x: 8.0, y: 5.0 }, GRID, start);
-    assert!(!scrollback.selection_present(), "the drag has not crossed a threshold");
+    assert!(
+        !scrollback.selection_present(),
+        "the drag has not crossed a threshold"
+    );
     scrollback.pointer(PointerEvent::Drag { x: 36.0, y: 25.0 }, GRID, start);
     scrollback.pointer(PointerEvent::Release, GRID, start);
     let copy = ready(scrollback.copy(SelectionCopyOptions::default()));
@@ -580,8 +661,10 @@ fn the_alternate_screen_has_no_scrollback_to_read() {
     let mut scrollback = attached(&server, &["$", "", "", ""]);
     server.serve(&mut scrollback);
     scrollback.wheel(5);
-    let mut alternate =
-        Arc::unwrap_or_clone(screen_of(&[("vim", false), ("", false), ("", false), ("", false)], true));
+    let mut alternate = Arc::unwrap_or_clone(screen_of(
+        &[("vim", false), ("", false), ("", false), ("", false)],
+        true,
+    ));
     alternate.history = server.history();
     scrollback.screen(Arc::new(alternate));
     assert!(!scrollback.wheel(1));
@@ -591,8 +674,16 @@ fn the_alternate_screen_has_no_scrollback_to_read() {
     assert_eq!(shown.scrollbar.total_rows, 4);
     scrollback.set_find_query(FindQueryGeneration::test(1), "line".into());
     assert!(scrollback.requests().is_empty());
-    let find = scrollback.present(PresentationGeneration::test(2)).unwrap().find.clone().unwrap();
-    assert_eq!(find.total_matches, 0, "history is not searched behind the alternate screen");
+    let find = scrollback
+        .present(PresentationGeneration::test(2))
+        .unwrap()
+        .find
+        .clone()
+        .unwrap();
+    assert_eq!(
+        find.total_matches, 0,
+        "history is not searched behind the alternate screen"
+    );
 }
 
 #[test]
@@ -638,9 +729,19 @@ fn a_press_decides_where_its_whole_pointer_gesture_goes() {
     assert_eq!(router.route(Motion, left, plain), PointerRoute::Program);
     assert_eq!(router.route(Release, left, plain), PointerRoute::Program);
     assert_eq!(router.route(Press, left, shifted), PointerRoute::Selection);
-    assert_eq!(router.route(Motion, left, tracking), PointerRoute::Selection);
-    assert_eq!(router.route(Release, left, tracking), PointerRoute::Selection);
-    assert_eq!(router.route(Motion, None, tracking), PointerRoute::Program, "hover reports");
+    assert_eq!(
+        router.route(Motion, left, tracking),
+        PointerRoute::Selection
+    );
+    assert_eq!(
+        router.route(Release, left, tracking),
+        PointerRoute::Selection
+    );
+    assert_eq!(
+        router.route(Motion, None, tracking),
+        PointerRoute::Program,
+        "hover reports"
+    );
     assert_eq!(router.route(Motion, None, plain), PointerRoute::Ignore);
     assert_eq!(
         router.route(Press, Some(PointerButton::Other), plain),
@@ -679,10 +780,13 @@ fn a_refused_or_shortened_page_is_not_asked_for_again_until_history_changes() {
     // a page starts later than asked.
     server.rows.push(("line1000".into(), false));
     server.oldest = 300;
-    scrollback.screen(screen(&["$", "", "", ""], History {
-        oldest: 0,
-        ..server.history()
-    }));
+    scrollback.screen(screen(
+        &["$", "", "", ""],
+        History {
+            oldest: 0,
+            ..server.history()
+        },
+    ));
     let requests = scrollback.requests();
     assert_eq!(requests[0].start, 0, "a new frame allows asking again");
     for request in requests {
@@ -695,7 +799,10 @@ fn a_refused_or_shortened_page_is_not_asked_for_again_until_history_changes() {
     );
     assert_eq!(presented(&mut scrollback)[0], "line300");
     assert!(
-        scrollback.requests().iter().all(|request| request.start >= 300),
+        scrollback
+            .requests()
+            .iter()
+            .all(|request| request.start >= 300),
         "discarded rows are never asked for"
     );
 }
@@ -739,4 +846,55 @@ fn a_copy_survives_unrelated_output_and_follows_rewritten_selected_text() {
     scrollback.screen(screen(&["replaced", "changed", "", "$"], server.history()));
     let replaced = ready(scrollback.copy(SelectionCopyOptions::default()));
     assert_eq!(replaced.plain_text.as_ref(), "replaced");
+}
+
+#[test]
+fn requests_the_link_did_not_send_leave_the_in_flight_count_and_are_asked_again() {
+    let server = Server::new(5000);
+    let mut scrollback = attached(&server, &["$", "", "", ""]);
+    scrollback.set_find_query(FindQueryGeneration::test(1), "line".into());
+    let first = scrollback.requests();
+    assert_eq!(first.len(), 4);
+    // The link took the first two and was busy for the rest.
+    scrollback.unsent(&first[2..]);
+    assert_eq!(
+        scrollback.requests(),
+        first[2..],
+        "unsent rows are asked for again, within the limit"
+    );
+    // The link closed before taking any of them.
+    scrollback.unsent(&first);
+    let again = scrollback.requests();
+    assert_eq!(again.len(), 4, "no unsent request stays counted");
+    assert_eq!(
+        again[0].start + u64::from(again[0].rows),
+        5000,
+        "the rows nearest the screen are asked for again first"
+    );
+}
+
+#[test]
+fn a_scrolled_view_keeps_each_cached_rows_snapshot_between_presents() {
+    let mut server = Server::new(100);
+    let mut scrollback = attached(&server, &["a", "b", "c", "$"]);
+    server.serve(&mut scrollback);
+    scrollback.wheel(10);
+    let before = scrollback.present(PresentationGeneration::test(1)).unwrap();
+    // Output continues below the view.
+    server.rows.push(("a".into(), false));
+    scrollback.screen(screen(&["b", "c", "$", "x"], server.history()));
+    let after = scrollback.present(PresentationGeneration::test(2)).unwrap();
+    for (old, new) in before.rows.iter().zip(after.rows.iter()) {
+        assert!(Arc::ptr_eq(old, new), "an unchanged row is rebuilt");
+    }
+    // A Selection marks its rows anew, once.
+    let start = Instant::now();
+    press(&mut scrollback, 0.0, 5.0, start);
+    scrollback.pointer(PointerEvent::Drag { x: 79.0, y: 5.0 }, GRID, start);
+    scrollback.pointer(PointerEvent::Release, GRID, start);
+    let selected = scrollback.present(PresentationGeneration::test(3)).unwrap();
+    assert!(selected.rows[0][0].selected);
+    assert!(Arc::ptr_eq(&selected.rows[1], &after.rows[1]));
+    let again = scrollback.present(PresentationGeneration::test(4)).unwrap();
+    assert!(Arc::ptr_eq(&selected.rows[0], &again.rows[0]));
 }

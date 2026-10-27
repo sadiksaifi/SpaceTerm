@@ -63,9 +63,8 @@ pub struct ConfirmedControl {
 pub struct CloseInventory {
     pub boot: Id,
     pub sessions: Vec<ConfirmedPane>,
-    /// Missing on older peers, which cannot fence confirmation-free closes.
-    #[serde(default)]
-    pub controls: Option<Vec<ConfirmedControl>>,
+    /// Each Pane's control grant, which fences confirmation-free closes.
+    pub controls: Vec<ConfirmedControl>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -75,7 +74,6 @@ pub struct CloseConfirmation {
     pub removes_tab: bool,
     pub removes_workspace: bool,
     /// Only a confirmation-free own close binds control in addition to exact membership.
-    #[serde(default)]
     pub own_controls: Option<Vec<ConfirmedControl>>,
 }
 
@@ -273,11 +271,7 @@ impl Mutation {
     pub fn is_bounded(&self) -> bool {
         match self {
             Self::EndAllSessions { confirmation } => {
-                confirmation.sessions.len() <= MAX_PANES
-                    && confirmation
-                        .controls
-                        .as_ref()
-                        .is_none_or(|c| c.len() <= MAX_PANES)
+                confirmation.sessions.len() <= MAX_PANES && confirmation.controls.len() <= MAX_PANES
             }
             Self::Worktree(operation) => operation.is_bounded(),
             Self::Close { confirmation, .. } => {
@@ -658,8 +652,8 @@ impl State {
                 let Some(live) = &self.inventory.close else {
                     return Ok(Outcome::StaleConfirmation);
                 };
-                // Control changes do not broaden an explicit End All Sessions approval.
-                // Older clients omit controls; both forms still compare the exact Sessions.
+                // Control changes do not broaden an explicit End All Sessions approval, so only
+                // the exact Sessions are compared.
                 if live.boot != confirmation.boot || live.sessions != confirmation.sessions {
                     return Ok(Outcome::StaleConfirmation);
                 }
@@ -682,11 +676,7 @@ impl State {
                     return Ok(Outcome::StaleConfirmation);
                 }
                 if let Some(reviewed) = &confirmation.own_controls {
-                    let current = self
-                        .inventory
-                        .close
-                        .as_ref()
-                        .and_then(|live| live.controls.as_ref());
+                    let current = self.inventory.close.as_ref().map(|live| &live.controls);
                     if reviewed.len() != confirmation.panes.len()
                         || confirmation.panes.iter().any(|pane| {
                             reviewed
@@ -1132,10 +1122,7 @@ impl State {
             let ids: std::collections::BTreeSet<_> = ends.sessions.iter().map(|p| p.id).collect();
             if Some(ends.boot) != self.creator_boot
                 || ends.sessions.len() > MAX_PANES
-                || ends
-                    .controls
-                    .as_ref()
-                    .is_some_and(|controls| controls.len() > MAX_PANES)
+                || ends.controls.len() > MAX_PANES
                 || ids.len() != ends.sessions.len()
                 || ends
                     .sessions
@@ -1366,7 +1353,7 @@ mod tests {
                 id: pane,
                 session: control.session,
             }],
-            controls: Some(vec![control.clone()]),
+            controls: vec![control.clone()],
         });
         let target = CloseTarget::Tab { workspace, tab };
         let explicit = original.inventory.close_confirmation(target).unwrap();
@@ -1449,16 +1436,6 @@ mod tests {
     }
 
     #[test]
-    fn retained_close_records_without_control_fences_read_as_absent_fences() {
-        let old = serde_json::json!({ "boot": vec![9u8; 32], "sessions": [] });
-        let inventory: CloseInventory = serde_json::from_value(old).unwrap();
-        assert!(inventory.controls.is_none());
-        let old = serde_json::json!({ "boot": vec![9u8; 32], "panes": [], "removes_tab": true, "removes_workspace": false });
-        let confirmation: CloseConfirmation = serde_json::from_value(old).unwrap();
-        assert!(confirmation.own_controls.is_none());
-    }
-
-    #[test]
     fn end_all_sessions_retains_exact_originals_across_acknowledgement_recovery_and_boots() {
         let mut state = State::empty();
         state.begin_boot([9; 32]);
@@ -1476,7 +1453,7 @@ mod tests {
             .unwrap();
         let pane = state.inventory.workspaces[0].tabs[0].root_pane;
         let original = CloseInventory {
-            controls: None,
+            controls: Vec::new(),
             boot: [9; 32],
             sessions: vec![ConfirmedPane {
                 id: pane,
@@ -1592,7 +1569,7 @@ mod tests {
             )
             .unwrap();
         state.inventory.close = Some(CloseInventory {
-            controls: None,
+            controls: Vec::new(),
             boot: [9; 32],
             sessions: state
                 .inventory
@@ -1676,7 +1653,7 @@ mod tests {
             .unwrap();
         state.remove_pane(outside_pane);
         state.inventory.close = Some(CloseInventory {
-            controls: None,
+            controls: Vec::new(),
             boot: [9; 32],
             sessions: state
                 .inventory
@@ -2039,7 +2016,7 @@ mod tests {
         let survivor = state.inventory.workspaces[0].tabs[1].id;
         let pane = state.inventory.workspaces[0].tabs[0].root_pane;
         state.inventory.close = Some(CloseInventory {
-            controls: None,
+            controls: Vec::new(),
             boot: [9; 32],
             sessions: vec![ConfirmedPane {
                 id: pane,

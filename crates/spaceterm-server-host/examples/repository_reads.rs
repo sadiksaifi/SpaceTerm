@@ -2,7 +2,7 @@
 #[path = "support/lifecycle.rs"]
 #[expect(
     dead_code,
-    reason = "Git reads do not start terminal programs or use legacy Pane connections."
+    reason = "Git reads start no terminal programs and claim no Panes."
 )]
 mod lifecycle;
 use spaceterm_server::{

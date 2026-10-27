@@ -10,11 +10,11 @@ use super::server_graphics as graphics;
 mod link;
 mod reading;
 mod recovery;
-mod scrollback;
 mod screen;
 mod screen_decoder;
 #[cfg(test)]
 mod screen_decoder_tests;
+mod scrollback;
 #[cfg(test)]
 mod tests;
 use super::pointer_input::{PointerInput, WheelInput};
@@ -388,7 +388,7 @@ impl DevelopmentPaneState {
                 .connection_recovery
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .failed(error);
+                .failed(error, std::time::Instant::now());
             retryable = allowed;
             cause
         } else {
@@ -850,7 +850,7 @@ impl TerminalSessionHandle for PresentationHandle {
         Ok(None)
     }
     fn selection_copy_ready(&self) -> bool {
-        self.take_deferred_copy().is_some()
+        self.copy_ready()
     }
     fn key(&self, k: KeyInput) {
         if k.validate().is_err()

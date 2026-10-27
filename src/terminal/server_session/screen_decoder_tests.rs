@@ -167,7 +167,11 @@ fn assert_same(decoded: &DecodedScreen, capture: &ScreenCapture) {
     );
     let history = capture.screen.history;
     assert_eq!(
-        (decoded.history.epoch, decoded.history.oldest, decoded.history.total),
+        (
+            decoded.history.epoch,
+            decoded.history.oldest,
+            decoded.history.total
+        ),
         (history.epoch, history.oldest, history.total)
     );
     assert_eq!(decoded.generation, capture.generation);
@@ -445,10 +449,7 @@ fn random_terminal_output_round_trips_through_every_frame() {
             }
         }
     }
-    assert!(
-        selected > 0 && images > 0,
-        "{selected} {images}"
-    );
+    assert!(selected > 0 && images > 0, "{selected} {images}");
 }
 
 #[test]

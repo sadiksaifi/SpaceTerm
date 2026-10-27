@@ -1,7 +1,7 @@
 //! Signed native update evidence. Run only against disposable Development account state.
 #[expect(
     dead_code,
-    reason = "Update evidence uses shared hierarchy instead of legacy Attach."
+    reason = "Update evidence uses the shared hierarchy and never uses `support::attach`."
 )]
 mod support;
 

@@ -783,6 +783,14 @@ impl TerminalRuntime {
         }
     }
 
+    /// A new client claim numbers its Input from 1 again, so screens report no serial of an
+    /// earlier claim. Call it before any Input of the new claim.
+    pub(crate) fn restart_input_serials(&self) {
+        if let Some(commands) = &self.commands {
+            let _ = commands.send(Command::RestartInputSerials);
+        }
+    }
+
     /// Opens one presentation subscription, replacing the previous subscription.
     /// Dropping its receivers leaves this runtime and its PTY alive.
     pub fn subscribe(&self) -> TerminalSubscription {
@@ -1238,6 +1246,8 @@ enum Command {
     AccessibilityDemand,
     AccessibilityContinue,
     PublishAccessibility,
+    /// A hidden Terminal Session reports metadata that changed while it was paced.
+    PublishMetadata,
     SelectionAutoscrollTick,
     PublishPendingScreen,
     MetadataStatusTick,
@@ -1248,6 +1258,8 @@ enum Command {
     SetFrameRate(u8),
     /// Every byte of client Input `serial` has been enqueued for the PTY.
     InputSerial(u32),
+    /// A new client claim numbers its Input from 1 again.
+    RestartInputSerials,
     AppearanceChanged,
     ReaderReady(Option<u64>),
     CompressScrollback,
@@ -1312,6 +1324,7 @@ impl fmt::Debug for Command {
             Self::AccessibilityDemand => "AccessibilityDemand",
             Self::AccessibilityContinue => "AccessibilityContinue",
             Self::PublishAccessibility => "PublishAccessibility",
+            Self::PublishMetadata => "PublishMetadata",
             Self::SelectionAutoscrollTick => "SelectionAutoscrollTick",
             Self::PublishPendingScreen => "PublishPendingScreen",
             Self::MetadataStatusTick => "MetadataStatusTick",
@@ -1320,6 +1333,7 @@ impl fmt::Debug for Command {
             Self::SetPresentable(..) => "SetPresentable",
             Self::SetFrameRate(..) => "SetFrameRate",
             Self::InputSerial(..) => "InputSerial",
+            Self::RestartInputSerials => "RestartInputSerials",
             Self::AppearanceChanged => "AppearanceChanged",
             Self::ReaderReady(_) => "ReaderReady",
             Self::CompressScrollback => "CompressScrollback",
@@ -2025,6 +2039,7 @@ impl TerminalWorker {
             }
             Command::AccessibilityContinue => self.publish_accessibility(false),
             Command::PublishAccessibility => self.publish_accessibility(true),
+            Command::PublishMetadata => self.publish_metadata_changed(),
             Command::SelectionAutoscrollTick => {
                 if self.emulator.synchronized_output_deadline().is_some() {
                     return self.refresh_selection_autoscroll();
@@ -2074,6 +2089,11 @@ impl TerminalWorker {
             }
             Command::InputSerial(serial) => {
                 self.input.note_serial(serial);
+                true
+            }
+            Command::RestartInputSerials => {
+                self.input.restart_serials();
+                self.emulator.set_input_serial(0);
                 true
             }
             Command::AppearanceChanged => {
@@ -2757,7 +2777,8 @@ impl TerminalWorker {
     }
 
     fn publish_metadata_changed(&mut self) -> bool {
-        let Some(wakeup) = self.schedules.take_metadata_presentation() else {
+        let now = self.schedules.now();
+        let Some(wakeup) = self.schedules.take_metadata_presentation(now) else {
             return true;
         };
         match self

@@ -189,13 +189,11 @@ pub enum AttachmentClaim {
     },
 }
 
-/// A host's in-process command vocabulary for one connection and its leases. It never travels on
-/// the wire: the transport maps each protocol [`crate::protocol::Operation`] and
-/// [`crate::protocol::InputEvent`] to these commands on the server, and the desktop's Pane worker
-/// maps them back to operations on its channel. Variants disappear as the polled semantics they
-/// carry are replaced by pushed presentation, inventory and Scrollback. It derives serde only
-/// for test fixtures that cross a process boundary.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+/// The in-process command set of a host and of the desktop's Pane worker, for one connection and
+/// its leases. It never travels on the wire. On the server, the connection service maps each
+/// protocol [`crate::protocol::Operation`] and [`crate::protocol::InputEvent`] to these commands.
+/// On the desktop, the Pane worker maps them to operations and input on its channel.
+#[derive(Clone, Debug)]
 pub enum Request {
     EndAccessibilityDemand {
         lease: Lease,
@@ -211,9 +209,6 @@ pub enum Request {
         focus_generation: u64,
         selection: Option<accessibility::SelectionRefs>,
     },
-    WorktreeRead(crate::worktree::Read),
-    DirectoryRead(directories::Request),
-    DirectoryCreate(directories::CreationRequest),
     RepairDirectory {
         target: directories::Target,
         replacement: Option<std::path::PathBuf>,
@@ -334,13 +329,10 @@ pub enum Request {
 }
 
 /// The reply to one [`Request`], in process only.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug)]
 pub enum Reply {
     Accessibility(Result<accessibility::Chunk, accessibility::Error>),
-    WorktreeRead(Result<crate::worktree::ReadReply, crate::worktree::Error>),
     MutationPending,
-    DirectoryRead(Result<directories::Progress, directories::Error>),
-    DirectoryCreate(Result<directories::Progress, directories::Error>),
     GraphicsChunk(Result<graphics::Chunk, graphics::Error>),
     Paste(PasteOutcome),
     Inventory {

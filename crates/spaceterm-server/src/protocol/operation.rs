@@ -1,6 +1,7 @@
 //! Client requests and their reply bodies.
 //!
-//! Operations reuse the payload types of the request-and-poll exchange where postcard encodes them.
+//! Operations reuse the `pane`, `hierarchy`, `worktree` and `direct` payload types where postcard
+//! encodes them.
 use super::message::{Channel, check};
 use super::screen::Page;
 use super::{Fatal, limits};
@@ -81,7 +82,7 @@ pub enum Operation {
     /// Replied when the write settles. `Cancel` prevents the write if it has not started;
     /// directories it already created stay.
     DirectoryCreate(directories::Creation),
-    /// Replied when the read settles. `Cancel` abandons it. `Read::Poll` is refused.
+    /// Replied when the read settles. `Cancel` abandons it.
     WorktreeRead(crate::worktree::Read),
     /// Direct-network administration. Paired connections may send only what the host allows.
     Direct(crate::direct::Management),

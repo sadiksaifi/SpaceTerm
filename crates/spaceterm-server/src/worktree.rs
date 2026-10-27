@@ -182,9 +182,6 @@ impl ServerFacts {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Read {
-    Poll {
-        id: u64,
-    },
     Context {
         root: PathBuf,
     },
@@ -208,9 +205,6 @@ pub enum Read {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ReadReply {
-    Pending {
-        id: u64,
-    },
     Context {
         settings: Settings,
         home: PathBuf,
@@ -231,9 +225,6 @@ pub fn read_worktree(
     link: &crate::connection::link::ServerLink,
     read: Read,
 ) -> Result<Result<ReadReply, Error>, crate::ServerError> {
-    if matches!(read, Read::Poll { .. }) {
-        return Err(crate::ServerError::Unsupported);
-    }
     let pending = link.request(crate::protocol::Operation::WorktreeRead(read))?;
     match pending.wait_for(READ_LIMIT) {
         Some(Ok(crate::protocol::ReplyBody::Worktree(result))) => Ok(result),

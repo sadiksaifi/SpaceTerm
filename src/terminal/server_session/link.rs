@@ -162,6 +162,7 @@ impl ActiveInput {
     /// Sends up to [`INPUT_DRAIN`] queued commands in order before the worker next checks the
     /// screen. Where the server takes key batches, adjacent queued keys travel in one exchange,
     /// and any other command first sends the keys queued before it. It never waits for more.
+    /// Returns whether it stopped at the bound, so more input may wait for the next turn.
     pub(super) fn drain(
         &mut self,
         state: &DevelopmentPaneState,
@@ -169,10 +170,12 @@ impl ActiveInput {
         batches: bool,
         exchange: &mut impl FnMut(&Request) -> Result<Reply, ServerError>,
         paste_unconfirmed: &mut bool,
-    ) -> Result<(), ServerError> {
+    ) -> Result<bool, ServerError> {
         let mut keys = Vec::new();
+        let mut bounded = true;
         for _ in 0..INPUT_DRAIN {
             let Ok(submitted) = input.try_recv() else {
+                bounded = false;
                 break;
             };
             if state.epoch.load(Ordering::Acquire) != self.epoch {
@@ -185,7 +188,8 @@ impl ActiveInput {
             self.send_keys(state, std::mem::take(&mut keys), exchange)?;
             self.process(state, submitted, exchange, paste_unconfirmed)?;
         }
-        self.send_keys(state, keys, exchange)
+        self.send_keys(state, keys, exchange)?;
+        Ok(bounded)
     }
     /// Sends queued keys as one batch, keeping only those a single key exchange would send now:
     /// this lease's epoch, the current focus generation, and a target that takes them. The
@@ -875,15 +879,16 @@ impl PaneLink {
     }
 
     /// Asks for a Scrollback page of the bound channel. `then` receives the page, or `None` when
-    /// the server refused it or the link ended, on the link's I/O thread.
+    /// the server refused it or the link ended, on the link's I/O thread. Returns `false`, without
+    /// calling `then`, when the link already carries as many requests as it allows.
     pub(super) fn scrollback_page(
         &self,
         lease: Lease,
         request: super::scrollback::PageRequest,
         then: impl FnOnce(Option<protocol::Page>) + Send + 'static,
-    ) -> Result<(), ServerError> {
+    ) -> Result<bool, ServerError> {
         let channel = self.bound(lease)?.channel();
-        self.link.request_then(
+        let sent = self.link.request_then(
             Operation::ScrollbackPage {
                 channel,
                 epoch: request.epoch,
@@ -896,8 +901,12 @@ impl PaneLink {
                     _ => None,
                 })
             },
-        )?;
-        Ok(())
+        );
+        match sent {
+            Ok(_) => Ok(true),
+            Err(LinkError::Busy) => Ok(false),
+            Err(error) => Err(error.into()),
+        }
     }
 
     /// Releases the channel after its last event or once its Terminal Session is gone.
@@ -1097,10 +1106,6 @@ impl PaneLink {
             Request::ReleaseAttachment { attachment } => self
                 .request(Operation::ReleaseAttachment { attachment })
                 .map(|_| Reply::Unchanged),
-            // Directory and Worktree reads have their own deferred requests.
-            Request::DirectoryRead(_) | Request::DirectoryCreate(_) | Request::WorktreeRead(_) => {
-                Err(ServerError::Unsupported)
-            }
             Request::Shutdown => self.request(Operation::Shutdown).map(|_| Reply::Closed),
             // Claims need this Pane's attachment permit. The single-key form predates focus
             // generations.
@@ -1332,6 +1337,13 @@ pub(super) fn present(
             attached_session = true;
             // Authenticate and receive the authoritative screen before enabling input.
             let epoch = state.attach(&presenter)?;
+            // Health is judged by time when the connection fails, so a hidden or idle Pane
+            // whose worker never turns still renews recovery.
+            state
+                .connection_recovery
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .connected(std::time::Instant::now());
             drain_input(&state, &input);
             let mut active_input = ActiveInput {
                 epoch,
@@ -1363,8 +1375,9 @@ pub(super) fn present(
                 if state.epoch.load(Ordering::Acquire) != epoch {
                     return Err(ServerError::Protocol);
                 }
-                // Queued input is sent before pushed output is applied.
-                active_input.drain(
+                // Queued input is sent before pushed output is applied. Input beyond the bound
+                // goes on in the next turn without waiting.
+                let more_input = active_input.drain(
                     &state,
                     &input,
                     true,
@@ -1522,18 +1535,30 @@ pub(super) fn present(
                     })?;
                 }
                 // Graphics and semantic transfers continue one chunk per turn without waiting.
-                let mut busy = false;
+                let mut busy = more_input;
                 let mut deadline = None;
                 if ready && let Some((_, mapping)) = &mut latest_screen {
+                    // Pages decode outside the reading lock, which the main thread takes for
+                    // every key, pointer and wheel event; the lock is held only to add the rows.
+                    let pages = state
+                        .reading
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .take_pages();
+                    if !pages.is_empty() {
+                        let decoded =
+                            reading::decode_pages(pages, mapping.size.columns, local_files.as_ref());
+                        state
+                            .reading
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .settle_pages(decoded);
+                    }
                     let turn = state
                         .reading
                         .lock()
                         .unwrap_or_else(|e| e.into_inner())
-                        .turn(
-                            std::time::Instant::now(),
-                            mapping.size.columns,
-                            local_files.as_ref(),
-                        );
+                        .turn(std::time::Instant::now());
                     if turn.copy_ready {
                         let _ = events.force_send(TerminalSessionEvent::SelectionCopyReady);
                     }
@@ -1557,16 +1582,30 @@ pub(super) fn present(
                         .unwrap_or_else(|e| e.into_inner())
                         .scrollback
                         .requests();
-                    for request in requests {
-                        let state = Arc::clone(&state);
-                        connection.scrollback_page(lease, request, move |page| {
-                            state
+                    for (index, request) in requests.iter().copied().enumerate() {
+                        let replies = Arc::clone(&state);
+                        let sent = connection.scrollback_page(lease, request, move |page| {
+                            replies
                                 .reading
                                 .lock()
                                 .unwrap_or_else(|e| e.into_inner())
                                 .page(request, page);
-                            state.wake.notify();
-                        })?;
+                            replies.wake.notify();
+                        });
+                        if !matches!(sent, Ok(true)) {
+                            // Requests the link did not take leave the in-flight count, and their
+                            // rows may be asked for again.
+                            state
+                                .reading
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .unsent(&requests[index..]);
+                            // A busy link takes them on a later turn.
+                            sent?;
+                            let retry = std::time::Instant::now() + reading::PAGE_RETRY;
+                            deadline = Some(deadline.map_or(retry, |due| due.min(retry)));
+                            break;
+                        }
                     }
                 }
                 // A hidden Pane transfers no images. Every image the manifest names is fetched,
@@ -1620,14 +1659,6 @@ pub(super) fn present(
                     }
                 }
                 busy |= semantic.can_continue();
-                if ready {
-                    // Each turn on a live channel renews recovery once it stays healthy.
-                    state
-                        .connection_recovery
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .connected(std::time::Instant::now());
-                }
                 // The worker waits for pushed events, input, a view change or a Scrollback page.
                 // Only a selection drag past an edge has a deadline.
                 if !busy {
@@ -1769,6 +1800,53 @@ mod tests {
             _ => {}
         }
         Ok(Reply::Unchanged)
+    }
+
+    /// Input queued while the worker was blocked can exceed one turn's bound. Each drain that
+    /// stops at the bound says so, and the worker turns again without waiting, so the rest is
+    /// sent even if the program shows nothing, as at a password prompt.
+    #[test]
+    fn a_drain_stopped_at_its_bound_reports_the_input_left_for_the_next_turn() {
+        let adapter = Adapter::new();
+        let Adapter {
+            handle,
+            input,
+            mut active,
+            ..
+        } = adapter;
+        for index in 0..40 {
+            for key in typed(&format!("{}", index % 10)) {
+                handle.key(key);
+            }
+        }
+        let mut sent = Vec::new();
+        let mut unconfirmed = false;
+        let mut turns = Vec::new();
+        loop {
+            let more = active
+                .drain(
+                    &handle.state,
+                    &input,
+                    true,
+                    &mut |request| record(&mut sent, request),
+                    &mut unconfirmed,
+                )
+                .unwrap();
+            turns.push(more);
+            if !more {
+                break;
+            }
+        }
+
+        assert_eq!(turns, [true, true, false], "80 events in bounds of 32");
+        let keys: usize = sent
+            .iter()
+            .map(|sent| match sent {
+                Sent::Batch(keys) => keys.len(),
+                _ => 1,
+            })
+            .sum();
+        assert_eq!(keys, 80);
     }
 
     /// Typing 53 characters queues 106 key events. A server that takes key batches gets them

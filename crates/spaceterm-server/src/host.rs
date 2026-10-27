@@ -424,6 +424,7 @@ fn serve_runtime_ready(
     supervised: bool,
     ready: impl FnOnce() -> Result<(), ServerError>,
 ) -> Result<(), ServerError> {
+    raise_descriptor_limit();
     crate::service::check_runtime(paths, supervised)?;
     let data = Directory::open(&paths.data, false)?;
     // Verify retained identity before changing any runtime state. Never generate a replacement.
@@ -525,38 +526,70 @@ fn serve_runtime_ready(
     }
     let mut connections: Vec<Running> = Vec::new();
     let mut network: Vec<Running> = Vec::new();
+    // A listener that failed to accept, for example out of descriptors, rests until a connection
+    // ends or the pause passes, instead of waking the loop at once forever.
+    let mut local_paused: Option<Instant> = None;
+    let mut network_paused: Option<Instant> = None;
     while !stop.stopping() {
         let deadline = tick(&panes, direct.as_ref());
         // A connection thread rings the bell when it ends, so a full set of network slots waits
         // for that instead of a listener it cannot accept from.
-        connections.retain(|running| !running.done.load(Ordering::Acquire));
-        network.retain(|running| !running.done.load(Ordering::Acquire));
-        let listening = network_listener(direct.as_ref(), network.len());
-        wait_for_work(&bell, &listener, listening, deadline);
+        if reap(&mut connections, &mut network) {
+            (local_paused, network_paused) = (None, None);
+        }
+        let now = Instant::now();
+        local_paused = local_paused.filter(|until| now < *until);
+        network_paused = network_paused.filter(|until| now < *until);
+        let listening =
+            network_listener(direct.as_ref(), network.len()).filter(|_| network_paused.is_none());
+        let deadline = [deadline, local_paused, network_paused]
+            .into_iter()
+            .flatten()
+            .min();
+        wait_for_work(
+            &bell,
+            local_paused.is_none().then_some(&listener),
+            listening,
+            deadline,
+        );
         if stop.stopping() {
             break;
         }
-        connections.retain(|running| !running.done.load(Ordering::Acquire));
-        network.retain(|running| !running.done.load(Ordering::Acquire));
+        if reap(&mut connections, &mut network) {
+            (local_paused, network_paused) = (None, None);
+        }
         // The fixed admission limits bound worker allocation; admission has an absolute deadline.
-        while network.len() < MAX_NETWORK_CONNECTIONS
+        while network_paused.is_none()
+            && network.len() < MAX_NETWORK_CONNECTIONS
             && let Some(state) = &direct
         {
-            let accepted = state.lock().unwrap_or_else(|e| e.into_inner()).accept();
-            let Some((tcp, generation)) = accepted else {
-                break;
+            let accepted = state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .accept_next();
+            let (tcp, generation) = match accepted {
+                Ok(Some(accepted)) => accepted,
+                Ok(None) => break,
+                Err(_) => {
+                    network_paused = Some(Instant::now() + ACCEPT_PAUSE);
+                    break;
+                }
             };
             match spawn_network(tcp, generation, state, &environment) {
                 Ok(running) => network.push(running),
                 Err(_) => break,
             }
         }
-        loop {
+        while local_paused.is_none() {
             let stream = match listener.accept() {
                 Ok((stream, _)) => stream,
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
-                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-                Err(_) => return Err(ServerError::Protocol),
+                Err(error) if accept_retries(&error) => continue,
+                // Out of descriptors or memory: the service keeps running and accepts again later.
+                Err(_) => {
+                    local_paused = Some(Instant::now() + ACCEPT_PAUSE);
+                    break;
+                }
             };
             if connections.len() >= MAX_LOCAL_CONNECTIONS || check_peer(&stream).is_err() {
                 continue;
@@ -644,25 +677,71 @@ fn tick(
     panes.tick(Instant::now())
 }
 
-/// Waits for a connection on either listener, a wake, or the service's next tick.
+/// How long a listener that failed to accept rests unless a connection ends first.
+const ACCEPT_PAUSE: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Whether an accept error concerns only the connection it tried to accept, so the next accept
+/// may succeed at once.
+pub(crate) fn accept_retries(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::Interrupted | std::io::ErrorKind::ConnectionAborted
+    )
+}
+
+/// Forgets the serving threads that ended and reports whether any did.
+fn reap(connections: &mut Vec<Running>, network: &mut Vec<Running>) -> bool {
+    let before = connections.len() + network.len();
+    connections.retain(|running| !running.done.load(Ordering::Acquire));
+    network.retain(|running| !running.done.load(Ordering::Acquire));
+    connections.len() + network.len() < before
+}
+
+/// Raises the soft descriptor limit to the hard one. Each connection holds several descriptors,
+/// and launchd starts services with a soft limit of 256.
+fn raise_descriptor_limit() {
+    let mut limit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: getrlimit writes one rlimit into the live local.
+    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) } != 0 {
+        return;
+    }
+    // macOS refuses a soft limit above OPEN_MAX, even when the hard limit is unlimited.
+    #[cfg(target_os = "macos")]
+    let ceiling = limit.rlim_max.min(10240);
+    #[cfg(not(target_os = "macos"))]
+    let ceiling = limit.rlim_max;
+    if limit.rlim_cur < ceiling {
+        limit.rlim_cur = ceiling;
+        // SAFETY: setrlimit reads one rlimit from the live local. Failure keeps the old limit.
+        unsafe {
+            libc::setrlimit(libc::RLIMIT_NOFILE, &limit);
+        }
+    }
+}
+
+/// Waits for a connection on either listener, a wake, or the service's next tick. A paused
+/// listener is left out.
 fn wait_for_work(
     bell: &UnixStream,
-    listener: &UnixListener,
+    listener: Option<&UnixListener>,
     network: Option<std::os::fd::RawFd>,
     deadline: Option<Instant>,
 ) {
-    let mut descriptors = vec![
-        libc::pollfd {
-            fd: bell.as_raw_fd(),
-            events: libc::POLLIN,
-            revents: 0,
-        },
-        libc::pollfd {
+    let mut descriptors = vec![libc::pollfd {
+        fd: bell.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    }];
+    if let Some(listener) = listener {
+        descriptors.push(libc::pollfd {
             fd: listener.as_raw_fd(),
             events: libc::POLLIN,
             revents: 0,
-        },
-    ];
+        });
+    }
     if let Some(fd) = network {
         descriptors.push(libc::pollfd {
             fd,
@@ -686,11 +765,18 @@ fn wait_for_work(
     while matches!((&*bell).read(&mut drained), Ok(count) if count > 0) {}
 }
 
-/// Marks a serving thread done and rings the host's bell, so the accept loop frees its slot and
-/// may accept again.
-fn ended(done: &AtomicBool, environment: &Environment) {
-    done.store(true, Ordering::Release);
-    environment.stop.wake.wake();
+/// Marks a serving thread done and rings the host's bell when it drops, also when the thread
+/// panics, so the accept loop frees its slot and may accept again.
+struct Ended {
+    done: Arc<AtomicBool>,
+    wake: Arc<dyn Wake>,
+}
+
+impl Drop for Ended {
+    fn drop(&mut self) {
+        self.done.store(true, Ordering::Release);
+        self.wake.wake();
+    }
 }
 
 fn spawn_local(
@@ -709,8 +795,11 @@ fn spawn_local(
     let thread = std::thread::Builder::new()
         .name("spaceterm-connection".into())
         .spawn(move || {
+            let _ended = Ended {
+                done: finished,
+                wake: Arc::clone(&environment.stop.wake),
+            };
             let _ = serve_local(stream, server, &identity, waker, outbox_wake, &environment);
-            ended(&finished, &environment);
         })
         .map_err(|_| ServerError::Protocol)?;
     Ok(Running {
@@ -765,6 +854,10 @@ fn spawn_network(
     let thread = std::thread::Builder::new()
         .name("spaceterm-network".into())
         .spawn(move || {
+            let _ended = Ended {
+                done: finished,
+                wake: Arc::clone(&environment.stop.wake),
+            };
             let _ = crate::direct::host::serve(
                 tcp,
                 generation,
@@ -773,7 +866,6 @@ fn spawn_network(
                 waker,
                 outbox_wake,
             );
-            ended(&finished, &environment);
         })
         .map_err(|_| ServerError::Protocol)?;
     Ok(Running {
@@ -1009,6 +1101,77 @@ mod tests {
         assert_eq!(
             link.health(),
             Health::Closed(LinkError::Goodbye(Fatal::Stopping))
+        );
+    }
+
+    #[test]
+    fn a_panicking_connection_still_frees_its_slot_and_reports_its_end() {
+        use std::sync::atomic::AtomicUsize;
+        /// Panics on any request, after recording connections that ended.
+        struct Panicking(Arc<AtomicUsize>);
+        impl PaneService for Panicking {
+            fn admitted(&mut self, _: &Peer, _: ClientName, _: Outbox) {}
+            fn request(&mut self, _: &Peer, _: RequestId, _: Operation) -> Dispatch {
+                panic!("a service failure");
+            }
+            fn input(&mut self, _: &Peer, _: Input) {}
+            fn view(&mut self, _: &Peer, _: View) {}
+            fn effect_done(&mut self, _: &Peer, _: EffectDone) {}
+            fn acknowledge(&mut self, _: &Peer, _: u64) {}
+            fn disconnected(&mut self, _: &Peer) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+            fn shutdown(&mut self) -> Result<(), ServerError> {
+                Ok(())
+            }
+        }
+        let fixture = crate::direct::tests::Fixture::new();
+        let ended = Arc::new(AtomicUsize::new(0));
+        let rung = Arc::new(AtomicBool::new(false));
+        let (sync, _) = SyncWorker::spawn().unwrap();
+        let mut environment = Environment::for_tests(
+            Arc::new(Mutex::new(Box::new(Panicking(Arc::clone(&ended))))),
+            sync,
+            None,
+        );
+        environment.stop = Arc::new(Stop {
+            stopping: AtomicBool::new(false),
+            wake: Arc::new({
+                let rung = Arc::clone(&rung);
+                move || rung.store(true, Ordering::Release)
+            }),
+        });
+        let (mut client, server) = UnixStream::pair().unwrap();
+        let running = spawn_local(server, [7; 32], &fixture.paths, &environment).unwrap();
+        protocol::admit_client(
+            &mut client,
+            (&[9; 32], &"Test".into()),
+            &[7; 32],
+            &fixture.paths.identity,
+            &[protocol::MAJOR],
+        )
+        .unwrap();
+        let link = link(client, Arc::new(|_| {})).unwrap();
+        let reply = link.request(Operation::Shutdown).unwrap();
+        // The accept loop drops a reaped thread's socket clone; this test drops it here.
+        let Running {
+            thread,
+            done,
+            sever,
+            wake,
+        } = running;
+        drop((sever, wake));
+        assert!(thread.join().is_err(), "the service panicked");
+        assert!(reply.wait().is_err());
+        assert!(done.load(Ordering::Acquire));
+        assert!(
+            rung.load(Ordering::Acquire),
+            "the accept loop must learn of the free slot"
+        );
+        assert_eq!(
+            ended.load(Ordering::SeqCst),
+            1,
+            "the service must learn of the end"
         );
     }
 
@@ -1453,6 +1616,84 @@ mod startup_tests {
             runtime: root.join("r"),
         })
         .unwrap();
+    }
+
+    #[test]
+    #[ignore = "runs only as a child of the descriptor exhaustion test"]
+    fn server_descriptor_child() {
+        // A few descriptors above those already open, so connections exhaust them quickly.
+        let open = (0..4096)
+            // SAFETY: F_GETFD only reads the flags of a descriptor number.
+            .filter(|fd| unsafe { libc::fcntl(*fd, libc::F_GETFD) } != -1)
+            .max()
+            .unwrap_or(0);
+        let limit = libc::rlimit {
+            rlim_cur: (open + 24) as libc::rlim_t,
+            rlim_max: (open + 24) as libc::rlim_t,
+        };
+        // SAFETY: setrlimit reads one rlimit from the live local.
+        assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) }, 0);
+        install_shutdown_signals().unwrap();
+        let root = PathBuf::from(std::env::var_os(CHILD_ROOT).expect("startup fixture root"));
+        serve(&Paths {
+            identity: "spaceterm-development".into(),
+            data: root.join("d"),
+            runtime: root.join("r"),
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn exhausted_descriptors_pause_accepting_without_ending_the_server() {
+        let fixture = Fixture::new();
+        let mut child = fixture.start_test("host::startup_tests::server_descriptor_child", false);
+        let first = connect_when_ready(&fixture);
+        // Idle connections hold descriptors in admission until the server runs out.
+        let idle: Vec<_> = (0..64)
+            .filter_map(|_| UnixStream::connect(fixture.paths.socket()).ok())
+            .chain(std::iter::once(first))
+            .collect();
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(
+            child.0.try_wait().unwrap().is_none(),
+            "running out of descriptors must not end the server"
+        );
+        drop(idle);
+        // Admission resumes once connections end.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let mut stream = connect_when_ready(&fixture);
+            if protocol::admit_client(
+                &mut stream,
+                (&fixture.device, &"Test".into()),
+                &fixture.pin,
+                "spaceterm-development",
+                &[protocol::MAJOR],
+            )
+            .is_ok()
+            {
+                break;
+            }
+            assert!(Instant::now() < deadline, "the server never accepted again");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        // SAFETY: the guard owns this live child process.
+        assert_eq!(
+            unsafe { libc::kill(child.0.id() as libc::pid_t, libc::SIGTERM) },
+            0
+        );
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Some(exit) = child.0.try_wait().unwrap() {
+                assert!(exit.success(), "the server must still shut down in order");
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "server ignored its shutdown signal"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 
     #[test]

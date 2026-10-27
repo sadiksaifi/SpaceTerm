@@ -31,7 +31,7 @@ pub(crate) use selection::{Grid, PointerEvent};
 use crate::terminal::emulator::HistorySnapshot as History;
 use crate::terminal::selection::{SelectionCopy, SelectionCopyOptions};
 use crate::terminal::{
-    ActiveScreenSnapshot, RowSnapshot, FindDirection, FindQueryGeneration, PresentationGeneration,
+    ActiveScreenSnapshot, FindDirection, FindQueryGeneration, PresentationGeneration, RowSnapshot,
     ScreenSnapshot, ScrollbackMovement,
 };
 use cache::ScrollbackCache;
@@ -129,6 +129,7 @@ pub(crate) struct Scrollback {
     /// Rows earlier frames showed that scrolled into history before their page arrived. They
     /// stand in for those rows on screen only; Find and copy read cached rows alone.
     placeholders: BTreeMap<u64, (RowSnapshot, bool)>,
+    shown: view::Shown,
 }
 
 /// What assistive technology sees of this client's view: how far it is scrolled back, and the
@@ -171,8 +172,13 @@ impl Scrollback {
             self.view.observe(history);
         }
         let readable = self.lines_range();
-        let floor = if alternate { readable.start } else { self.floor() };
-        self.selection.observe(floor.max(readable.start)..readable.end);
+        let floor = if alternate {
+            readable.start
+        } else {
+            self.floor()
+        };
+        self.selection
+            .observe(floor.max(readable.start)..readable.end);
     }
 
     /// Moves the view by native wheel steps; positive steps move toward older rows.
@@ -273,10 +279,7 @@ impl Scrollback {
         let rows = self.rows();
         let top = self.view.top(history);
         let lines = lines(&self.cache, &screen);
-        let Some(target) = self
-            .find
-            .navigate(generation, direction, lines, top, rows)
-        else {
+        let Some(target) = self.find.navigate(generation, direction, lines, top, rows) else {
             return false;
         };
         if !alternate {
@@ -305,7 +308,9 @@ impl Scrollback {
         {
             return copy.clone();
         }
-        let copy = self.selection.copy(lines(&self.cache, &screen), &screen, options);
+        let copy = self
+            .selection
+            .copy(lines(&self.cache, &screen), &screen, options);
         self.copying = (copy == CopyOutcome::Pending).then_some(options);
         self.prepared = Some((key, options, copy.clone()));
         copy
@@ -342,13 +347,13 @@ impl Scrollback {
             ..lines(&self.cache, next)
         };
         let shown = next.history.total..next.history.total + next.rows.len() as u64;
-        (start.line.max(shown.start)..=end.line.min(shown.end.saturating_sub(1))).any(|line| {
-            match (before.get(line), after.get(line)) {
+        (start.line.max(shown.start)..=end.line.min(shown.end.saturating_sub(1))).any(
+            |line| match (before.get(line), after.get(line)) {
                 (Some(old), Some(new)) => !old.same(new),
                 (None, None) => false,
                 _ => true,
-            }
-        })
+            },
+        )
     }
 
     /// Keeps the rows of `previous` that scrolled into history and are not cached, so a
@@ -361,7 +366,11 @@ impl Scrollback {
                 break;
             }
             if self.cache.get(line).is_none() {
-                let wrapped = previous.row_soft_wrapped.get(offset).copied().unwrap_or(false);
+                let wrapped = previous
+                    .row_soft_wrapped
+                    .get(offset)
+                    .copied()
+                    .unwrap_or(false);
                 self.placeholders.insert(line, (Arc::clone(row), wrapped));
             }
         }
@@ -427,6 +436,19 @@ impl Scrollback {
         requests
     }
 
+    /// Forgets requests the link could not send.
+    pub(crate) fn unsent(&mut self, requests: &[PageRequest]) {
+        self.cache.unsent(requests);
+    }
+
+    /// Whether the Selection's rows are all cached, so copying needs no page.
+    pub(crate) fn copy_available(&self) -> bool {
+        let Some((start, end)) = self.selection.range() else {
+            return false;
+        };
+        self.screen.is_some() && self.cache.covers(start.line..end.line + 1)
+    }
+
     /// Settles a page request. `page` is the reply's epoch, start and rows, or `None` when the
     /// server refused it or the connection ended.
     pub(crate) fn page(&mut self, request: PageRequest, page: Option<(u64, u64, Vec<CachedRow>)>) {
@@ -437,7 +459,10 @@ impl Scrollback {
 
     /// The screen this client presents: the newest frame, moved to the view's position, with
     /// the Selection and Find matches applied.
-    pub(crate) fn present(&mut self, generation: PresentationGeneration) -> Option<Arc<ScreenSnapshot>> {
+    pub(crate) fn present(
+        &mut self,
+        generation: PresentationGeneration,
+    ) -> Option<Arc<ScreenSnapshot>> {
         let screen = self.screen.clone()?;
         let history = self.cache.history();
         let top = self.view.top(history);
@@ -446,7 +471,7 @@ impl Scrollback {
         Some(view::compose(
             &screen,
             lines,
-            &self.placeholders,
+            (&self.placeholders, &mut self.shown),
             top,
             (self.selection.range(), self.selection.revision()),
             find,
@@ -456,6 +481,7 @@ impl Scrollback {
 
     fn reset_reading(&mut self) {
         self.placeholders.clear();
+        self.shown.clear();
         self.view.follow();
         self.selection.clear();
         self.find.invalidate();
@@ -476,9 +502,9 @@ impl Scrollback {
     }
 
     fn rows(&self) -> u16 {
-        self.screen
-            .as_ref()
-            .map_or(0, |screen| u16::try_from(screen.rows.len()).unwrap_or(u16::MAX))
+        self.screen.as_ref().map_or(0, |screen| {
+            u16::try_from(screen.rows.len()).unwrap_or(u16::MAX)
+        })
     }
 
     /// The oldest line Find and copying read: the cache holds at most the newest

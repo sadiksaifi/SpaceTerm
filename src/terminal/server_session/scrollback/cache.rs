@@ -88,12 +88,7 @@ impl ScrollbackCache {
     /// Adds rows the server reported for consecutive positions from `start`, keeping only
     /// retained positions. `focus` is the position the reader is closest to; rows farthest from
     /// it leave first when the cache is full.
-    fn insert(
-        &mut self,
-        start: u64,
-        rows: impl IntoIterator<Item = CachedRow>,
-        focus: u64,
-    ) {
+    fn insert(&mut self, start: u64, rows: impl IntoIterator<Item = CachedRow>, focus: u64) {
         let retained = self.history.oldest..self.history.total;
         let mut changed = false;
         for (position, row) in (start..).zip(rows) {
@@ -139,13 +134,33 @@ impl ScrollbackCache {
         }
     }
 
+    /// Forgets requests that were never sent, so they neither count toward the in-flight limit
+    /// nor block asking for their rows again.
+    pub(super) fn unsent(&mut self, requests: &[PageRequest]) {
+        for request in requests {
+            if let Some(index) = self.in_flight.iter().position(|sent| sent == request) {
+                self.in_flight.swap_remove(index);
+            }
+        }
+    }
+
+    /// Whether every retained position in `range` is cached.
+    pub(super) fn covers(&self, range: Range<u64>) -> bool {
+        let range = self.retained(range);
+        self.rows.range(range.clone()).count() as u64 == range.end - range.start
+    }
+
     /// Pages to ask for so the retained positions in `wanted` become cached, nearest to `focus`
     /// first, within the in-flight limit.
     pub(super) fn request(&mut self, wanted: Range<u64>, focus: u64) -> Vec<PageRequest> {
         let wanted = self.retained(wanted);
         let mut missing = Vec::new();
         let mut cursor = wanted.start;
-        for position in self.rows.range(wanted.clone()).map(|(position, _)| *position) {
+        for position in self
+            .rows
+            .range(wanted.clone())
+            .map(|(position, _)| *position)
+        {
             if position > cursor {
                 missing.push(cursor..position);
             }

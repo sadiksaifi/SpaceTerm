@@ -1001,24 +1001,20 @@ pub(super) fn review_removal(
             path: path.to_owned(),
         },
     ) {
-        Reply::WorktreeRead(Ok(spaceterm_server::worktree::ReadReply::Removal(review))) => review,
+        Ok(spaceterm_server::worktree::ReadReply::Removal(review)) => review,
         other => panic!("unexpected removal review: {other:?}"),
     }
 }
+/// Runs a Worktree read for the client `[1; 32]` and waits for its reply.
 pub(super) fn read_worktree(
     host: &mut SharedWorkspaceHost,
-    mut read: spaceterm_server::worktree::Read,
-) -> Reply {
-    let until = Instant::now() + Duration::from_secs(30);
-    loop {
-        match host.request([1; 32], [1; 32], Request::WorktreeRead(read)) {
-            Reply::WorktreeRead(Ok(spaceterm_server::worktree::ReadReply::Pending { id })) => {
-                assert!(Instant::now() < until, "server Git read did not finish");
-                read = spaceterm_server::worktree::Read::Poll { id };
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            reply => return reply,
-        }
+    read: spaceterm_server::worktree::Read,
+) -> Result<spaceterm_server::worktree::ReadReply, spaceterm_server::worktree::Error> {
+    static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
+    let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    match super::tests::read(host, [1; 32], id, HostRead::Worktree(read)) {
+        Ok(spaceterm_server::protocol::ReplyBody::Worktree(result)) => result,
+        other => panic!("unexpected Worktree read reply: {other:?}"),
     }
 }
 #[test]
@@ -1141,7 +1137,7 @@ fn replaced_worktree_and_main_worktree_are_preserved_after_confirmation() {
                 path: git.0.clone()
             }
         ),
-        Reply::WorktreeRead(Err(Error::Main))
+        Err(Error::Main)
     ));
     let review = review_removal(&mut host, &git.0, &tree);
     git.git(&["worktree", "remove", tree.to_str().unwrap()]);
@@ -1197,8 +1193,8 @@ fn worktree_location_refuses_an_unwritable_folder_without_changing_settings() {
         "a read-only ancestor on the owning server must reject the edit: {result:?}"
     );
     assert!(matches!(
-        host.request([1; 32], [1; 32], Request::WorktreeRead(Read::Settings)),
-        Reply::WorktreeRead(Ok(ReadReply::Settings(saved))) if saved == Settings::default()
+        read_worktree(&mut host, Read::Settings),
+        Ok(ReadReply::Settings(saved)) if saved == Settings::default()
     ));
     assert!(!folder.join("missing").exists());
     host.shutdown().unwrap();
@@ -1251,7 +1247,7 @@ fn worktree_location_draft_validation_returns_typed_errors_without_saving_or_cre
         assert!(
             matches!(
                 read_worktree(&mut host, Read::ValidateLocationTemplate { template: template.into() }),
-                Reply::WorktreeRead(Err(Error::Template(actual))) if actual == expected
+                Err(Error::Template(actual)) if actual == expected
             ),
             "incorrect validation for {template:?}"
         );
@@ -1264,12 +1260,12 @@ fn worktree_location_draft_validation_returns_typed_errors_without_saving_or_cre
                 template: format!("{}/{{repository}}/{{branch}}", folder.display()),
             }
         ),
-        Reply::WorktreeRead(Ok(ReadReply::LocationTemplate))
+        Ok(ReadReply::LocationTemplate)
     ));
     assert!(!folder.exists());
     assert!(matches!(
         read_worktree(&mut host, Read::Settings),
-        Reply::WorktreeRead(Ok(ReadReply::Settings(saved))) if saved == Settings::default()
+        Ok(ReadReply::Settings(saved)) if saved == Settings::default()
     ));
     host.shutdown().unwrap();
 }
@@ -1282,7 +1278,7 @@ fn worktree_location_concurrent_clients_reload_the_authoritative_value_after_a_c
     };
     let fixture = GitFixture::new();
     let mut host = SharedWorkspaceHost::new(host());
-    let Reply::WorktreeRead(Ok(ReadReply::Settings(original))) =
+    let Ok(ReadReply::Settings(original)) =
         read_worktree(&mut host, Read::Settings)
     else {
         panic!("initial settings unavailable")
@@ -1315,8 +1311,8 @@ fn worktree_location_concurrent_clients_reload_the_authoritative_value_after_a_c
     };
     assert_eq!(result.outcome, Outcome::WorktreeFailed(Error::Changed));
     assert!(matches!(
-        host.request([3; 32], [3; 32], Request::WorktreeRead(Read::Settings)),
-        Reply::WorktreeRead(Ok(ReadReply::Settings(saved))) if saved.template == template && saved.version == original.version + 1
+        read_worktree(&mut host, Read::Settings),
+        Ok(ReadReply::Settings(saved)) if saved.template == template && saved.version == original.version + 1
     ));
     host.shutdown().unwrap();
 }
@@ -1329,7 +1325,7 @@ fn server_facts_read_the_owning_hosts_metadata_without_a_workspace_or_git_contex
     let mut host = SharedWorkspaceHost::new(host());
     assert!(shared_inventory(&mut host).workspaces.is_empty());
     let reply = read_worktree(&mut host, Read::ServerFacts);
-    let Reply::WorktreeRead(Ok(ReadReply::ServerFacts(facts))) = reply else {
+    let Ok(ReadReply::ServerFacts(facts)) = reply else {
         panic!("owning-server facts unavailable without a Workspace: {reply:?}")
     };
     assert_eq!(facts.machine, expected_machine.hostname().unwrap());
@@ -1354,7 +1350,7 @@ fn git_settings_read_the_owning_servers_tools_without_a_workspace() {
     assert!(
         matches!(
             reply,
-            Reply::WorktreeRead(Ok(ReadReply::Git(GitToolStatus::Ready(_))))
+            Ok(ReadReply::Git(GitToolStatus::Ready(_)))
         ),
         "the fixture host's Git must be readable without a repository: {reply:?}"
     );
@@ -1370,8 +1366,8 @@ fn worktree_location_uses_server_defaults_and_validates_explicit_edits() {
     };
     let mut host = SharedWorkspaceHost::new(host());
     assert!(matches!(
-        host.request([1; 32], [1; 32], Request::WorktreeRead(Read::Settings)),
-        Reply::WorktreeRead(Ok(ReadReply::Settings(settings)))
+        read_worktree(&mut host, Read::Settings),
+        Ok(ReadReply::Settings(settings))
             if settings == spaceterm_server::worktree::Settings::default()
     ));
     assert_eq!(
@@ -1410,7 +1406,7 @@ fn worktree_location_uses_server_defaults_and_validates_explicit_edits() {
         Outcome::WorktreeFailed(Error::Changed)
     );
     assert!(
-        matches!(host.request([1;32],[1;32],Request::WorktreeRead(Read::Settings)),Reply::WorktreeRead(Ok(ReadReply::Settings(s))) if s.template=="~/second/{branch}" && s.version==1)
+        matches!(read_worktree(&mut host, Read::Settings),Ok(ReadReply::Settings(s)) if s.template=="~/second/{branch}" && s.version==1)
     );
     host.shutdown().unwrap();
 }
@@ -1471,7 +1467,7 @@ fn server_removal_protects_pins_in_unattached_workspaces_and_rechecks_missing_lo
                 path: tree.clone()
             }
         ),
-        Reply::WorktreeRead(Err(Error::Pinned))
+        Err(Error::Pinned)
     ));
     host.request(
         [1; 32],

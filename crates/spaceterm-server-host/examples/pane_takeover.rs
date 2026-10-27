@@ -21,7 +21,7 @@ fn size(columns: u16) -> PaneSize {
         cell_height: 18,
     }
 }
-/// Selects the first Pane, as the single-Pane `Select` request of protocol major 1 did.
+/// Selects the inventory's first Pane without starting or acquiring it.
 fn select(link: &ServerLink) -> Result<Claimed, ServerError> {
     let pane = support::first_pane(link, false)?;
     support::select(link, pane, false, size(80))

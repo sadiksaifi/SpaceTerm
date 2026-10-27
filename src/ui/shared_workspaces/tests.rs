@@ -87,7 +87,7 @@ fn inventory(revision: u64, tabs: Vec<Tab>) -> Inventory {
         repositories: None,
         revision,
         close: Some(CloseInventory {
-            controls: None,
+            controls: Vec::new(),
             boot: BOOT,
             sessions,
         }),

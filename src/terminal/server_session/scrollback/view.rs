@@ -4,7 +4,7 @@ use crate::terminal::emulator::{
     ContentDamageSnapshot, ScrollbarSnapshot, SnapshotDamage, ViewportSnapshot,
 };
 use crate::terminal::{PresentationGeneration, RowSnapshot, ScreenSnapshot, TerminalFindSnapshot};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 /// Where the view starts. Following, it shows the screen and moves with output. Scrolled back,
@@ -17,8 +17,9 @@ pub(super) struct Viewport {
 impl Viewport {
     /// The line at the top of the view.
     pub(super) fn top(&self, history: History) -> u64 {
-        self.top
-            .map_or(history.total, |top| top.clamp(history.oldest, history.total))
+        self.top.map_or(history.total, |top| {
+            top.clamp(history.oldest, history.total)
+        })
     }
 
     pub(super) fn following(&self) -> bool {
@@ -54,12 +55,23 @@ impl Viewport {
     }
 }
 
+/// The presented snapshot of each cached history row in view, and its selected variant with the
+/// Selection revision it was marked at. History rows of one epoch never change, so a snapshot
+/// stays valid until the epoch ends.
+pub(super) type Shown = HashMap<u64, ShownRow>;
+
+pub(super) struct ShownRow {
+    row: RowSnapshot,
+    soft: bool,
+    selected: Option<(u64, RowSnapshot)>,
+}
+
 /// Builds the presented screen. A view following the screen with no Selection and no Find
 /// reuses the frame's rows as they are.
 pub(super) fn compose(
     screen: &Arc<ScreenSnapshot>,
     lines: Lines<'_>,
-    placeholders: &BTreeMap<u64, (RowSnapshot, bool)>,
+    (placeholders, shown): (&BTreeMap<u64, (RowSnapshot, bool)>, &mut Shown),
     top: u64,
     (selection, selection_revision): (Option<(Point, Point)>, u64),
     find: Option<Arc<TerminalFindSnapshot>>,
@@ -90,7 +102,35 @@ pub(super) fn compose(
     let blank = blank_row(screen);
     let mut presented_rows = Vec::with_capacity(rows);
     let mut wrapped = Vec::with_capacity(rows);
-    for line in top..top + rows as u64 {
+    let shown_lines = top..top + rows as u64;
+    shown.retain(|line, _| shown_lines.contains(line) && *line < total);
+    for line in shown_lines {
+        let selected = selection.filter(|(start, end)| (start.line..=end.line).contains(&line));
+        // A cached history row keeps one presented snapshot between presents, so the renderer
+        // finds it unchanged by pointer.
+        if line < total
+            && let Some(cached) = lines.get(line)
+        {
+            let entry = shown.entry(line).or_insert_with(|| ShownRow {
+                row: cached.snapshot(),
+                soft: cached.wrapped(),
+                selected: None,
+            });
+            let row = match selected {
+                None => Arc::clone(&entry.row),
+                Some(range) => match &entry.selected {
+                    Some((revision, row)) if *revision == selection_revision => Arc::clone(row),
+                    _ => {
+                        let row = select(Arc::clone(&entry.row), line, range);
+                        entry.selected = Some((selection_revision, Arc::clone(&row)));
+                        row
+                    }
+                },
+            };
+            presented_rows.push(row);
+            wrapped.push(entry.soft);
+            continue;
+        }
         let (row, soft) = match lines.get(line) {
             Some(row) => (row.snapshot(), row.wrapped()),
             None => placeholders
@@ -98,7 +138,7 @@ pub(super) fn compose(
                 .cloned()
                 .unwrap_or_else(|| (Arc::clone(&blank), false)),
         };
-        presented_rows.push(match selection {
+        presented_rows.push(match selected {
             Some(range) => select(row, line, range),
             None => row,
         });

@@ -225,45 +225,71 @@ impl SharedWorkspaceHost {
     pub(super) fn cancel_worktree_reads(&mut self, connection: Id) {
         self.writes.reads.cancel_connection(connection);
     }
+    pub(super) fn cancel_worktree_read(&mut self, connection: Id, id: RequestId) {
+        self.writes.reads.cancel((connection, id));
+    }
+    /// When the earliest running Worktree read outlasts its deadline.
+    pub(super) fn worktree_reads_due(&self) -> Option<Instant> {
+        self.writes.reads.due()
+    }
+    /// Every Worktree read started from now on wakes `wake` when it settles.
+    pub(super) fn wake_worktree_reads(&mut self, wake: Arc<dyn spaceterm_server::connection::Wake>) {
+        self.writes.reads.set_wake(wake);
+    }
     pub(super) fn stop_worktree_reads(&mut self) {
         self.writes.reads.stop();
     }
+    /// Answers `read` at once, or starts it as read `id` of `connection` and returns `None`.
     pub(super) fn worktree_read(
         &mut self,
         device: Id,
         connection: Id,
+        id: RequestId,
         read: Read,
-    ) -> Result<ReadReply, Error> {
-        self.writes.approvals.retain(|a| a.expires > Instant::now());
-        match read {
-            Read::Settings => Ok(ReadReply::Settings(
+    ) -> Result<Option<ReadReply>, Error> {
+        if let Read::Settings = read {
+            return Ok(Some(ReadReply::Settings(
                 self.state.worktree_settings.clone().unwrap_or_default(),
-            )),
-            Read::Poll { id } => {
-                let prepared = self.writes.reads.poll(connection, id)?;
-                if let Some(approval) = prepared.approval {
-                    self.writes.approvals.retain(|a| a.device != device);
-                    if self.writes.approvals.len() >= 32 {
-                        return Err(Error::Unavailable);
-                    }
-                    self.writes.approvals.push(approval);
-                }
-                Ok(prepared.reply)
-            }
-            read => {
-                if matches!(read, Read::CheckRemoval { .. })
-                    && !self.state.pending_worktrees().is_empty()
-                {
-                    return Err(Error::Unavailable);
-                }
-                let mut inventory = self.inventory();
-                inventory.repositories = None;
-                let settings = self.state.worktree_settings.clone().unwrap_or_default();
-                self.writes
-                    .reads
-                    .begin(connection, device, read, inventory, settings)
-            }
+            )));
         }
+        if matches!(read, Read::CheckRemoval { .. }) && !self.state.pending_worktrees().is_empty()
+        {
+            return Err(Error::Unavailable);
+        }
+        let mut inventory = self.inventory();
+        inventory.repositories = None;
+        let settings = self.state.worktree_settings.clone().unwrap_or_default();
+        self.writes
+            .reads
+            .begin((connection, id), device, read, inventory, settings)?;
+        Ok(None)
+    }
+    /// The replies of Worktree reads that settled. A removal check that settled records its
+    /// approval first, so the removal it reviewed can follow its reply.
+    pub(super) fn settled_worktree_reads(&mut self) -> Vec<crate::runtime::server::SettledRead> {
+        self.writes.approvals.retain(|a| a.expires > Instant::now());
+        let settled = self.writes.reads.settled();
+        settled
+            .into_iter()
+            .map(|((connection, id), prepared)| {
+                let reply = prepared.and_then(|prepared| {
+                    if let Some(approval) = prepared.approval {
+                        let device = approval.device;
+                        self.writes.approvals.retain(|a| a.device != device);
+                        if self.writes.approvals.len() >= 32 {
+                            return Err(Error::Unavailable);
+                        }
+                        self.writes.approvals.push(approval);
+                    }
+                    Ok(prepared.reply)
+                });
+                crate::runtime::server::SettledRead {
+                    connection,
+                    id,
+                    reply: ReplyBody::Worktree(reply),
+                }
+            })
+            .collect()
     }
     pub(super) fn begin_worktree(
         &mut self,
@@ -942,10 +968,12 @@ mod tests {
             panic!("start unrelated Terminal Session");
         };
         let started = Instant::now();
-        let reply = host.request(
+        let id = RequestId(1);
+        let reply = host.read(
             [1; 32],
             [1; 32],
-            Request::WorktreeRead(Read::CheckRemoval {
+            id,
+            crate::runtime::server::HostRead::Worktree(Read::CheckRemoval {
                 root: git.0.clone(),
                 path: tree,
             }),
@@ -954,13 +982,9 @@ mod tests {
             started.elapsed() < Duration::from_secs(1),
             "a Git read held the terminal request lock"
         );
-        let Reply::WorktreeRead(Ok(ReadReply::Pending { id })) = reply else {
-            panic!("read must be asynchronous");
-        };
-        assert!(matches!(
-            host.request([3; 32], [3; 32], Request::WorktreeRead(Read::Poll { id })),
-            Reply::WorktreeRead(Err(Error::Unavailable))
-        ));
+        assert!(reply.is_none(), "read must be asynchronous");
+        // Another connection's cancellation never reaches this read.
+        host.cancel_read([3; 32], id);
         let until = Instant::now() + Duration::from_secs(4);
         while !gate.0.join("started").exists() {
             assert!(
@@ -982,13 +1006,10 @@ mod tests {
         await_text(&mut host, lease, "other-terminal-responsive");
         drop(gate);
         assert!(matches!(
-            crate::runtime::server::repository_tests::read_worktree(&mut host, Read::Poll { id }),
-            Reply::WorktreeRead(Ok(ReadReply::Removal(_)))
+            crate::runtime::server::tests::await_read(&mut host, [1; 32], id),
+            ReplyBody::Worktree(Ok(ReadReply::Removal(_)))
         ));
-        assert!(matches!(
-            host.request([1; 32], [1; 32], Request::WorktreeRead(Read::Poll { id })),
-            Reply::WorktreeRead(Err(Error::Unavailable))
-        ));
+        assert!(host.settled_reads().is_empty());
         host.shutdown().unwrap();
     }
 

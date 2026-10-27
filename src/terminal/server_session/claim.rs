@@ -58,7 +58,6 @@ impl ControlFacts {
             control: close
                 .controls
                 .iter()
-                .flatten()
                 .find(|control| control.pane == pane)
                 .cloned(),
         })
@@ -1304,12 +1303,12 @@ mod tests {
                         id: pane,
                         session: Some(session),
                     }],
-                    controls: Some(vec![ConfirmedControl {
+                    controls: vec![ConfirmedControl {
                         pane,
                         session: Some(session),
                         owner: [owner; 32],
                         epoch,
-                    }]),
+                    }],
                 }),
             };
             LinkEvent::Inventory(Arc::new(InventoryRevision {
