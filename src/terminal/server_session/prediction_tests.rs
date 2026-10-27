@@ -1,12 +1,16 @@
 //! Deterministic tests for predictive local echo. Each test drives the predictor with the
-//! requests, frames and line states a Pane worker would see, at fixed instants.
+//! requests, frames and line states a Pane worker would see, at fixed instants, and checks what
+//! the view would show.
 use super::*;
+use crate::terminal::PresentationGeneration;
 use crate::terminal::emulator::CellSemanticSnapshot;
+use crate::terminal::server_session::reading::Reading;
 use crate::terminal::{CellSnapshot, TerminalColor};
 use spaceterm_server::pane::{self, Lease, LineMode};
 
 const COLUMNS: u16 = 12;
-const LEASE: Lease = Lease {
+const ROUND_TRIP: Duration = Duration::from_millis(80);
+pub(super) const LEASE: Lease = Lease {
     server: [1; 32],
     session: [2; 32],
     control: [3; 32],
@@ -34,6 +38,7 @@ const JOB: LineMode = LineMode {
     shell_foreground: false,
     ..SHELL
 };
+const CONTROL: u16 = 1 << 2;
 
 fn blank() -> CellSnapshot {
     CellSnapshot {
@@ -85,7 +90,23 @@ fn screen(lines: &[&str]) -> Arc<ScreenSnapshot> {
     Arc::new(screen)
 }
 
-fn key(text: &str, modifiers: u16) -> pane::Key {
+/// The characters the view draws as predictions over `screen`, in reading order.
+pub(super) fn shown(predictor: &Predictor, screen: &ScreenSnapshot) -> String {
+    let mut presented = screen.clone();
+    let Some(overlay) = predictor.overlay() else {
+        return String::new();
+    };
+    overlay.apply(&mut presented);
+    presented
+        .rows
+        .iter()
+        .flat_map(|row| row.iter())
+        .filter(|cell| cell.underline == TerminalUnderlineSnapshot::Single)
+        .map(|cell| cell.text.as_str())
+        .collect()
+}
+
+pub(super) fn key(text: &str, modifiers: u16) -> pane::Key {
     pane::Key {
         physical: 0,
         action: 0,
@@ -98,7 +119,7 @@ fn key(text: &str, modifiers: u16) -> pane::Key {
     }
 }
 
-fn keys(keys: Vec<pane::Key>) -> Request {
+pub(super) fn keys(keys: Vec<pane::Key>) -> Request {
     Request::Keys {
         lease: LEASE,
         generation: 1,
@@ -126,18 +147,13 @@ struct Worker {
 impl Worker {
     /// A shell prompt at `$ ` whose frames arrive `round_trip` after each key.
     fn at_prompt(round_trip: Duration) -> Self {
-        Self::under(SHELL, round_trip)
-    }
-
-    /// A prompt read under `mode`, with frames arriving `round_trip` after each key.
-    fn under(mode: LineMode, round_trip: Duration) -> Self {
         let mut worker = Self {
             predictor: Predictor::default(),
             now: Instant::now(),
             serial: 0,
             lines: vec!["$ ".into()],
         };
-        worker.predictor.line(line(1, mode));
+        worker.predictor.line(line(1, SHELL));
         worker.server_frame(0);
         // One echoed key measures the round trip.
         worker.send(typed("e"));
@@ -147,26 +163,26 @@ impl Worker {
 
     /// A prompt with an active, confirmed epoch: the next printable key shows at once.
     fn confirmed() -> Self {
-        let mut worker = Self::at_prompt(Duration::from_millis(80));
+        let mut worker = Self::at_prompt(ROUND_TRIP);
         worker.send(typed("c"));
-        assert_eq!(
-            worker.predictor.overlay(),
-            None,
-            "a new epoch shows nothing yet"
-        );
-        worker.echo("c", Duration::from_millis(80));
+        assert_eq!(worker.shown(), "", "a new epoch shows nothing yet");
+        worker.echo("c", ROUND_TRIP);
         worker
     }
 
     fn send(&mut self, request: Request) -> u32 {
         self.serial += 1;
-        self.predictor.sent(&request, self.serial, self.now);
+        self.predictor.sent(&request, Some(self.serial), self.now);
         self.serial
     }
 
-    fn server_frame(&mut self, input: u32) {
+    fn screen(&self) -> Arc<ScreenSnapshot> {
         let lines: Vec<&str> = self.lines.iter().map(String::as_str).collect();
-        self.predictor.frame(&screen(&lines), input, self.now);
+        screen(&lines)
+    }
+
+    fn server_frame(&mut self, input: u32) {
+        self.predictor.frame(&self.screen(), input, self.now);
     }
 
     /// The server echoes `text` on its last line and the frame arrives `after` the key.
@@ -176,67 +192,61 @@ impl Worker {
         self.server_frame(self.serial);
     }
 
-    fn shown(&self) -> Vec<char> {
-        self.predictor
-            .overlay()
-            .map(|overlay| overlay.cells.iter().map(|cell| cell.2).collect())
-            .unwrap_or_default()
+    /// The server starts a new line, and the frame arrives one round trip later.
+    fn new_line(&mut self, text: &str) {
+        self.lines.push(text.into());
+        self.now += ROUND_TRIP;
+        self.server_frame(self.serial);
     }
-}
 
-/// Whether printable keys typed under `mode` at an 80 ms round trip ever show before their echo.
-/// Real PTY tests pass the mode a program set.
-pub(crate) fn shows_keys_under(mode: LineMode) -> bool {
-    let mut worker = Worker::under(mode, Duration::from_millis(80));
-    let mut shown = false;
-    for text in ["a", "b", "c"] {
-        worker.send(typed(text));
-        shown |= !worker.shown().is_empty();
-        worker.echo(text, Duration::from_millis(80));
+    fn shown(&self) -> String {
+        shown(&self.predictor, &self.screen())
     }
-    shown
 }
 
 #[test]
 fn a_printable_key_at_the_shell_prompt_shows_before_its_echo_once_the_epoch_is_confirmed() {
-    let mut worker = Worker::at_prompt(Duration::from_millis(80));
+    let mut worker = Worker::at_prompt(ROUND_TRIP);
 
     // The first prediction of an epoch waits for the server's echo.
     worker.send(typed("l"));
-    assert!(worker.shown().is_empty());
-    worker.echo("l", Duration::from_millis(80));
+    assert_eq!(worker.shown(), "");
+    worker.echo("l", ROUND_TRIP);
 
-    // Later keys show at once, underlined at the predicted cursor.
+    // Later keys show at once, underlined, with the cursor after them.
     worker.send(typed("s"));
-    let overlay = worker.predictor.overlay().unwrap();
-    assert_eq!(overlay.cells, [(0, 4, 's')]);
-    assert_eq!(overlay.cursor, (0, 5));
     worker.send(typed(" "));
-    assert_eq!(worker.shown(), ['s', ' ']);
+    assert_eq!(worker.shown(), "s ");
+    let mut presented = ScreenSnapshot::clone(&worker.screen());
+    worker.predictor.overlay().unwrap().apply(&mut presented);
+    assert_eq!(
+        presented.cursor.position.map(|cursor| cursor.column),
+        Some(6)
+    );
 
     // The frame that reflects both keys and shows their echo confirms them.
-    worker.echo("s ", Duration::from_millis(80));
-    assert_eq!(worker.predictor.overlay(), None);
+    worker.echo("s ", ROUND_TRIP);
+    assert_eq!(worker.shown(), "");
 }
 
 #[test]
 fn no_prediction_appears_below_the_round_trip_threshold() {
-    let mut worker = Worker::at_prompt(Duration::from_millis(29));
+    let fast = Duration::from_millis(29);
+    let mut worker = Worker::at_prompt(fast);
     for text in ["a", "b", "c", "d"] {
         worker.send(typed(text));
-        assert!(worker.shown().is_empty());
-        worker.echo(text, Duration::from_millis(29));
+        assert_eq!(worker.shown(), "");
+        worker.echo(text, fast);
     }
-    assert!(worker.shown().is_empty());
 
-    // Prediction turns off when the round trip falls under the lower threshold.
+    // Prediction turns off when the round trip falls well under the threshold.
     let mut worker = Worker::confirmed();
-    for _ in 0..ROUND_TRIP_SAMPLES {
+    for _ in 0..10 {
         worker.send(typed("x"));
         worker.echo("x", Duration::from_millis(5));
     }
     worker.send(typed("y"));
-    assert!(worker.shown().is_empty());
+    assert_eq!(worker.shown(), "");
 }
 
 #[test]
@@ -246,16 +256,13 @@ fn password_prompts_raw_mode_and_foreground_jobs_never_predict() {
         worker.predictor.line(line(2, mode));
         for text in ["p", "w", "d"] {
             worker.send(typed(text));
-            assert!(worker.shown().is_empty(), "{mode:?} predicted {text}");
+            assert_eq!(worker.shown(), "", "{mode:?} predicted {text}");
         }
         // The program's frames change nothing.
-        worker.now += Duration::from_millis(80);
+        worker.now += ROUND_TRIP;
         worker.server_frame(worker.serial);
         worker.send(typed("x"));
-        assert!(
-            worker.shown().is_empty(),
-            "{mode:?} predicted after a frame"
-        );
+        assert_eq!(worker.shown(), "", "{mode:?} predicted after a frame");
     }
 }
 
@@ -263,27 +270,58 @@ fn password_prompts_raw_mode_and_foreground_jobs_never_predict() {
 fn enter_and_control_keys_suspend_until_a_frame_reflects_them_and_the_echo_confirms_again() {
     for suspending in [
         key("\r", 0),
-        key("c", 1 << 2),
+        key("c", CONTROL),
         key("u", 1 << 8),
         key("\u{7f}", 0),
+        key("a", 1 << 1),
+        key("v", 1 << 3),
     ] {
         let mut worker = Worker::confirmed();
         worker.send(keys(vec![suspending.clone()]));
         worker.send(typed("a"));
-        assert!(worker.shown().is_empty(), "{suspending:?} did not suspend");
+        assert_eq!(worker.shown(), "", "{suspending:?} did not suspend");
 
         // A frame reflects the suspending key: the next key starts an unconfirmed epoch.
-        worker.lines.push("$ ".into());
-        worker.now += Duration::from_millis(80);
-        worker.server_frame(worker.serial);
+        worker.new_line("$ ");
         worker.send(typed("b"));
-        assert!(worker.shown().is_empty());
+        assert_eq!(worker.shown(), "");
 
         // Its echo confirms the epoch again.
-        worker.echo("b", Duration::from_millis(80));
+        worker.echo("b", ROUND_TRIP);
         worker.send(typed("c"));
-        assert_eq!(worker.shown(), ['c']);
+        assert_eq!(worker.shown(), "c");
     }
+}
+
+#[test]
+fn only_unmodified_printable_ascii_shows() {
+    let mut worker = Worker::confirmed();
+    worker.send(keys(vec![key("A", 1)]));
+    assert_eq!(worker.shown(), "A", "Shift types text");
+
+    for text in ["é", "ab", "\t"] {
+        let mut worker = Worker::confirmed();
+        worker.send(typed(text));
+        worker.send(typed("z"));
+        assert_eq!(worker.shown(), "", "{text:?} did not suspend");
+    }
+
+    // A key release writes nothing that moves the cursor.
+    let mut worker = Worker::confirmed();
+    let mut release = key("a", 0);
+    release.action = KEY_RELEASE;
+    worker.send(keys(vec![key("a", 0), release]));
+    worker.send(typed("b"));
+    assert_eq!(worker.shown(), "ab");
+
+    let mut worker = Worker::confirmed();
+    worker.send(Request::Input {
+        lease: LEASE,
+        generation: 1,
+        input: InteractiveInput::Paste { text: "a".into() },
+    });
+    worker.send(typed("b"));
+    assert_eq!(worker.shown(), "", "a paste did not suspend");
 }
 
 #[test]
@@ -292,96 +330,109 @@ fn a_password_typed_before_the_prompt_appears_never_shows() {
     worker.send(typed("\r"));
     // The frame reflecting Enter arrives before the program reads it, so the line state still
     // shows the line editor.
-    worker.lines.push(String::new());
-    worker.now += Duration::from_millis(80);
-    worker.server_frame(worker.serial);
+    worker.new_line("");
 
     // The first password key lands where the prompt will start, as a hidden prediction.
     worker.send(typed("P"));
-    assert!(worker.shown().is_empty());
+    assert_eq!(worker.shown(), "");
 
     // The server pushes the line state it read with the prompt before the prompt's frame.
     worker.predictor.line(line(2, PASSWORD));
-    worker.echo("Password:", Duration::from_millis(80));
+    worker.echo("Password:", ROUND_TRIP);
     for text in ["a", "s", "s"] {
         worker.send(typed(text));
-        assert!(worker.shown().is_empty());
+        assert_eq!(worker.shown(), "");
     }
 }
 
 #[test]
-fn an_unechoed_key_never_shows_and_expires_after_the_grace() {
+fn a_silent_read_in_the_line_editors_mode_never_shows_its_keys() {
+    // bash's `read -rsn4 -p 'PIN: '` reads in the line editor's mode, so only the echo
+    // confirmation protects it.
     let mut worker = Worker::confirmed();
     worker.send(typed("\r"));
-    worker.lines.push(String::new());
-    worker.now += Duration::from_millis(80);
-    worker.server_frame(worker.serial);
-    worker.send(typed("s"));
+    worker.new_line("");
+    worker.send(typed("P"));
+    assert_eq!(worker.shown(), "");
 
-    // A program that turned echo off reads the key; its frame shows nothing at the cell.
-    worker.now += Duration::from_millis(80);
-    worker.server_frame(worker.serial);
-    assert!(worker.shown().is_empty());
-    let deadline = worker.predictor.deadline().unwrap();
-    assert_eq!(deadline, worker.now + ECHO_GRACE);
-    worker.predictor.expire(deadline);
-    assert_eq!(worker.predictor.deadline(), None);
-    worker.send(typed("t"));
-    assert!(worker.shown().is_empty());
+    // The prompt starts with the typed character where it was predicted, but leaves the cursor
+    // after itself.
+    worker.echo("PIN: ", ROUND_TRIP);
+    for text in ["1", "2", "3"] {
+        worker.send(typed(text));
+        assert_eq!(worker.shown(), "", "{text} showed");
+        worker.now += ROUND_TRIP;
+        worker.server_frame(worker.serial);
+    }
+
+    // The same character where it was predicted, with the cursor after it, still does not
+    // confirm the epoch when the row to its left changed.
+    let mut worker = Worker::confirmed();
+    worker.send(typed("\r"));
+    worker.new_line("> ");
+    worker.send(typed("x"));
+    worker.lines.pop();
+    worker.new_line("$ x");
+    worker.send(typed("y"));
+    assert_eq!(worker.shown(), "");
 }
 
 #[test]
-fn a_frame_that_reflects_a_key_before_its_echo_keeps_the_shown_prediction_within_the_grace() {
+fn an_unechoed_key_never_shows_and_expires() {
+    let mut worker = Worker::confirmed();
+    worker.send(typed("\r"));
+    worker.new_line("");
+    worker.send(typed("s"));
+
+    // A program that turned echo off reads the key; its frame shows nothing at the cell.
+    worker.now += ROUND_TRIP;
+    worker.server_frame(worker.serial);
+    assert_eq!(worker.shown(), "");
+    assert!(worker.predictor.deadline().is_some());
+    worker.predictor.expire(worker.now + Duration::from_secs(1));
+    assert_eq!(worker.predictor.deadline(), None);
+    worker.send(typed("t"));
+    assert_eq!(worker.shown(), "");
+}
+
+#[test]
+fn a_frame_that_reflects_a_key_before_its_echo_keeps_the_shown_prediction() {
     let mut worker = Worker::confirmed();
     worker.send(typed("a"));
     worker.send(typed("b"));
     // The frame of `a`'s echo already reflects `b`.
-    worker.echo("a", Duration::from_millis(80));
-    assert_eq!(worker.shown(), ['b']);
+    worker.echo("a", ROUND_TRIP);
+    assert_eq!(worker.shown(), "b");
     worker.echo("b", Duration::from_millis(1));
-    assert!(worker.shown().is_empty());
+    assert_eq!(worker.shown(), "");
     worker.send(typed("c"));
-    assert_eq!(worker.shown(), ['c'], "the epoch stays confirmed");
+    assert_eq!(worker.shown(), "c", "the epoch stays confirmed");
 }
 
 #[test]
 fn a_mismatch_rolls_back_the_whole_epoch_and_restores_the_server_screen() {
     let mut worker = Worker::confirmed();
-    let before: Vec<&str> = worker.lines.iter().map(String::as_str).collect();
-    let server = screen(&before);
+    let server = worker.screen();
     worker.send(typed("a"));
     worker.send(typed("b"));
-    assert_eq!(worker.shown(), ['a', 'b']);
-
-    // The overlay draws into a copy; the server's screen is untouched.
-    let mut presented = ScreenSnapshot::clone(&server);
-    worker.predictor.overlay().unwrap().apply(&mut presented);
-    assert_eq!(presented.rows[0][4].text, "a");
+    assert_eq!(worker.shown(), "ab");
     assert_eq!(
-        presented.rows[0][4].underline,
-        TerminalUnderlineSnapshot::Single
+        server.rows[0][4].text, " ",
+        "the server's screen is untouched"
     );
-    assert_eq!(
-        presented.cursor.position.map(|cursor| cursor.column),
-        Some(6)
-    );
-    assert_eq!(server.rows[0][4].text, " ");
 
-    // The program echoed something else: every prediction goes, so the view shows exactly the
-    // server's screen.
-    worker.echo("ax", Duration::from_millis(80));
-    assert_eq!(worker.predictor.overlay(), None);
+    // The program echoed something else: every prediction goes.
+    worker.echo("ax", ROUND_TRIP);
+    assert_eq!(worker.shown(), "");
     worker.send(typed("c"));
-    assert!(worker.shown().is_empty());
+    assert_eq!(worker.shown(), "");
 }
 
 #[test]
 fn the_view_shows_predictions_over_the_server_screen_and_exactly_that_screen_after_rollback() {
-    use super::super::reading::Reading;
-    use crate::terminal::PresentationGeneration;
     let mut worker = Worker::confirmed();
     let mut reading = Reading::default();
-    reading.scrollback.screen(screen(&["$ ec"]));
+    reading.scrollback.screen(worker.screen());
     worker.send(typed("a"));
     assert!(reading.predict(worker.predictor.overlay()));
     let predicted = reading.presented(PresentationGeneration::test(1)).unwrap();
@@ -392,8 +443,8 @@ fn the_view_shows_predictions_over_the_server_screen_and_exactly_that_screen_aft
     );
 
     // The server echoed something else. The view shows exactly the server's rows and cursor.
-    worker.echo("x", Duration::from_millis(80));
-    let server = screen(&["$ ecx"]);
+    worker.echo("x", ROUND_TRIP);
+    let server = worker.screen();
     reading.scrollback.screen(Arc::clone(&server));
     assert!(reading.predict(worker.predictor.overlay()));
     let presented = reading.presented(PresentationGeneration::test(2)).unwrap();
@@ -402,72 +453,105 @@ fn the_view_shows_predictions_over_the_server_screen_and_exactly_that_screen_aft
 }
 
 #[test]
+fn a_lost_connection_presents_the_frozen_screen_without_predictions_once() {
+    let mut worker = Worker::confirmed();
+    let server = worker.screen();
+    let mut reading = Reading::default();
+    reading.scrollback.screen(Arc::clone(&server));
+    assert_eq!(reading.withdraw(PresentationGeneration::test(1)), None);
+
+    worker.send(typed("a"));
+    reading.predict(worker.predictor.overlay());
+    let predicted = reading.presented(PresentationGeneration::test(2)).unwrap();
+    assert_ne!(predicted.rows, server.rows);
+
+    reading.disconnect();
+    let frozen = reading
+        .withdraw(PresentationGeneration::test(3))
+        .expect("the view still shows predictions");
+    assert_eq!(frozen.rows, server.rows);
+    assert_eq!(frozen.cursor, server.cursor);
+    assert_eq!(reading.withdraw(PresentationGeneration::test(4)), None);
+}
+
+#[test]
+fn a_paste_measures_its_round_trip_from_before_its_send() {
+    let mut worker = Worker::confirmed();
+    // A paste's send waits for its outcome, so its frame can arrive before the send returns.
+    // The round trip starts when the send began.
+    let sent_at = worker.now;
+    worker.serial += 1;
+    let paste = Request::Input {
+        lease: LEASE,
+        generation: 1,
+        input: InteractiveInput::Paste { text: "ab".into() },
+    };
+    worker.predictor.sent(&paste, Some(worker.serial), sent_at);
+    worker.echo("ab", ROUND_TRIP);
+
+    worker.send(typed("c"));
+    worker.echo("c", ROUND_TRIP);
+    worker.send(typed("d"));
+    assert_eq!(worker.shown(), "d", "the paste turned prediction off");
+}
+
+#[test]
+fn a_scrollback_clear_takes_no_sample_and_drops_predictions() {
+    let mut worker = Worker::confirmed();
+    worker.send(typed("a"));
+    assert_eq!(worker.shown(), "a");
+
+    // The clear takes no Input serial, and its reply arrives one round trip after `a`.
+    worker.now += ROUND_TRIP / 2;
+    let clear = Request::ClearScreenAndScrollback { lease: LEASE };
+    worker.predictor.sent(&clear, None, worker.now);
+    assert_eq!(worker.shown(), "");
+    worker.lines = vec!["$ eca".into()];
+    worker.now += ROUND_TRIP / 2;
+    worker.server_frame(worker.serial);
+    // A frame drained right after the clear's reply must not count as a round trip.
+    worker.now += Duration::from_millis(1);
+    worker.server_frame(worker.serial);
+
+    worker.send(typed("b"));
+    worker.echo("b", ROUND_TRIP);
+    worker.send(typed("c"));
+    assert_eq!(worker.shown(), "c", "the clear turned prediction off");
+}
+
+#[test]
 fn a_line_state_change_drops_shown_predictions() {
     let mut worker = Worker::confirmed();
     worker.send(typed("a"));
-    assert_eq!(worker.shown(), ['a']);
+    assert_eq!(worker.shown(), "a");
     worker.predictor.line(line(2, SHELL));
-    assert!(worker.shown().is_empty());
+    assert_eq!(worker.shown(), "");
 }
 
 #[test]
 fn the_alternate_screen_a_hidden_cursor_and_the_last_column_stop_prediction() {
     let mut worker = Worker::confirmed();
-    let mut alternate = (*screen(&["$ ec"])).clone();
+    let mut alternate = ScreenSnapshot::clone(&worker.screen());
     alternate.active_screen = ActiveScreenSnapshot::Alternate;
     worker
         .predictor
         .frame(&Arc::new(alternate), worker.serial, worker.now);
     worker.send(typed("a"));
-    assert!(worker.shown().is_empty());
+    assert_eq!(worker.shown(), "");
 
     let mut worker = Worker::confirmed();
-    let mut hidden = (*screen(&["$ ec"])).clone();
+    let mut hidden = ScreenSnapshot::clone(&worker.screen());
     hidden.cursor.visible = false;
     worker
         .predictor
         .frame(&Arc::new(hidden), worker.serial, worker.now);
     worker.send(typed("a"));
-    assert!(worker.shown().is_empty());
+    assert_eq!(worker.shown(), "");
 
+    // `$ ec` leaves 8 of 12 columns, and the last one is never predicted.
     let mut worker = Worker::confirmed();
     for text in "abcdefgh".chars() {
         worker.send(typed(&text.to_string()));
     }
-    assert_eq!(worker.shown().len(), usize::from(COLUMNS) - 4 - 1);
-}
-
-#[test]
-fn only_unmodified_printable_ascii_is_predicted() {
-    let printable = |key: pane::Key| {
-        let mut kinds = Vec::new();
-        typed_of(&keys(vec![key]), &mut kinds);
-        kinds
-    };
-    assert_eq!(printable(key("a", 1)), [Typed::Printable('a')]);
-    assert_eq!(printable(key("a", 1 << 1)), [Typed::Other]);
-    assert_eq!(printable(key("a", 1 << 3)), [Typed::Other]);
-    assert_eq!(printable(key("é", 0)), [Typed::Other]);
-    assert_eq!(printable(key("ab", 0)), [Typed::Other]);
-    assert_eq!(printable(key("\t", 0)), [Typed::Other]);
-    let mut release = key("a", 0);
-    release.action = KEY_RELEASE;
-    assert!(printable(release).is_empty());
-
-    let mut kinds = Vec::new();
-    let paste = Request::Input {
-        lease: LEASE,
-        generation: 1,
-        input: InteractiveInput::Paste { text: "a".into() },
-    };
-    typed_of(&paste, &mut kinds);
-    typed_of(
-        &Request::EndAccessibilityDemand { lease: LEASE },
-        &mut kinds,
-    );
-    assert_eq!(kinds, [Typed::Other]);
-}
-
-fn typed_of(request: &Request, kinds: &mut Vec<Typed>) {
-    super::typed(request, |kind| kinds.push(kind));
+    assert_eq!(worker.shown(), "abcdefg");
 }

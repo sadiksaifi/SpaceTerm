@@ -33,6 +33,8 @@ pub(super) struct Reading {
     autoscroll_due: Option<std::time::Instant>,
     /// The predictions drawn over the screen while the view follows it.
     prediction: Option<super::prediction::Overlay>,
+    /// The view's latest screen carries predictions.
+    predicted: bool,
 }
 
 /// What one worker turn of reading asks for.
@@ -66,12 +68,26 @@ impl Reading {
         generation: PresentationGeneration,
     ) -> Option<Arc<ScreenSnapshot>> {
         let mut presented = self.scrollback.present(generation)?;
+        self.predicted = false;
         if let Some(overlay) = &self.prediction
             && self.scrollback.following()
         {
-            overlay.apply(Arc::make_mut(&mut presented));
+            self.predicted = overlay.apply(Arc::make_mut(&mut presented));
         }
         Some(presented)
+    }
+
+    /// Drops the predictions. Returns the screen to present under `generation` when the view's
+    /// latest screen carries some, so it shows only what the server confirmed.
+    pub(super) fn withdraw(
+        &mut self,
+        generation: PresentationGeneration,
+    ) -> Option<Arc<ScreenSnapshot>> {
+        self.prediction = None;
+        if !self.predicted {
+            return None;
+        }
+        self.presented(generation)
     }
 
     /// Sets the predictions to draw. Returns whether they changed, so the view needs the screen

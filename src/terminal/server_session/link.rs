@@ -1408,8 +1408,14 @@ pub(super) fn present(
                     &input,
                     true,
                     &mut |request| {
+                        // A send can wait for a reply, such as a settled paste, so the round trip
+                        // starts before it. Only input that took a new serial is timed.
+                        let (before, sent_at) =
+                            (connection.last_input(), std::time::Instant::now());
                         let reply = send(&presenter, &alive, &mut connection, request)?;
-                        predictor.sent(request, connection.last_input(), std::time::Instant::now());
+                        let serial =
+                            Some(connection.last_input()).filter(|serial| *serial > before);
+                        predictor.sent(request, serial, sent_at);
                         if let Request::Resize { size, .. } = request {
                             active_size = *size;
                         }
@@ -1737,6 +1743,16 @@ pub(super) fn present(
                     state.invalidate();
                 }
                 drain_input(&state, &input);
+                // The frozen screen shows only what the server confirmed.
+                let withdrawn = state
+                    .reading
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .withdraw(generation.next());
+                if let Some(screen) = withdrawn {
+                    generation = generation.next();
+                    let _ = events.force_send(TerminalSessionEvent::Screen(screen));
+                }
                 if matches!(error, ServerError::StaleControl | ServerError::Controlled) {
                     takeover = true;
                     paste_unconfirmed = false;

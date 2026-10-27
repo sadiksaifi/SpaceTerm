@@ -7,16 +7,19 @@
 //! echo. Its [`Overlay`] marks the predictions the view draws over the server's screen; the
 //! screen itself never changes.
 //!
-//! A prediction shows only once the server has confirmed its epoch: one prediction of the epoch
-//! appeared in a frame where the cell held something else before. Enter, a control key and any
-//! input that is not a printable key start a new epoch, as does every line state change. A
-//! wrong prediction drops every prediction.
+//! A prediction shows only once the server has confirmed its epoch: a frame showed one prediction
+//! of the epoch echoed in a cell that held something else before, with the cursor right after it
+//! and the row to its left as it was predicted. A program that reads silently in the line
+//! editor's mode, such as bash's `read -rsn4` or zsh's `read -sk4`, never echoes, so its epoch
+//! stays hidden. Enter, a control key and any input that is not a printable key start a new
+//! epoch, as does every line state change. A wrong prediction drops every prediction.
 use super::ScreenSnapshot;
 use crate::terminal::emulator::{
     ActiveScreenSnapshot, CursorPositionSnapshot, RowSnapshot, TerminalUnderlineSnapshot,
 };
 use spaceterm_server::pane::{InteractiveInput, Key, LineState, Request};
 use std::collections::VecDeque;
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -109,6 +112,9 @@ struct Prediction {
     text: char,
     /// What the server's cell held when the prediction was made.
     original: Box<str>,
+    /// The row left of the prediction as its echo will show it: the server's cells with the
+    /// earlier predictions on the row in place.
+    prefix: u64,
     shown: bool,
     /// When a frame first covered the key without showing its echo.
     covered_at: Option<Instant>,
@@ -135,16 +141,24 @@ pub(super) struct Predictor {
 }
 
 impl Predictor {
-    /// Records `request`, sent with Input serials up to `serial`. A printable key is predicted
-    /// when everything allows it; anything else suspends prediction.
-    pub(super) fn sent(&mut self, request: &Request, serial: u32, now: Instant) {
-        self.sent = self.sent.max(serial);
+    /// Records `request`, which the worker began sending at `sent_at`. `serial` is the highest
+    /// Input serial it took, or `None` when it took none, as a Scrollback clear does. A printable
+    /// key is predicted when everything allows it; anything else suspends prediction.
+    pub(super) fn sent(&mut self, request: &Request, serial: Option<u32>, sent_at: Instant) {
+        if let Some(serial) = serial {
+            self.sent = self.sent.max(serial);
+        }
         typed(request, |typed| {
+            let Some(serial) = serial else {
+                // Input without a serial changes the screen in a way no frame identifies.
+                self.reset();
+                return;
+            };
             if self.timed.back().is_none_or(|(timed, _)| *timed != serial) {
                 if self.timed.len() == MAX_TIMED {
                     self.timed.pop_front();
                 }
-                self.timed.push_back((serial, now));
+                self.timed.push_back((serial, sent_at));
             }
             match typed {
                 Typed::Printable(text) if self.predict(serial, text) => {}
@@ -188,24 +202,39 @@ impl Predictor {
         if self.resume.is_some_and(|serial| self.covered >= serial) {
             self.resume = None;
         }
-        while let Some(prediction) = self.predictions.front_mut() {
+        // Where the newest echoed prediction of the current epoch sits, if it may confirm it.
+        let mut credit = None;
+        while let Some(prediction) = self.predictions.front() {
             if prediction.serial > self.covered {
                 break;
             }
             let cell = cell(screen, prediction.row, prediction.column);
             if cell.is_some_and(|cell| is(cell, prediction.text)) {
-                if prediction.epoch == self.epoch && !is(&prediction.original, prediction.text) {
-                    self.confirm();
-                }
+                credit = (prediction.epoch == self.epoch
+                    && !is(&prediction.original, prediction.text)
+                    && prefix(screen, prediction.row, prediction.column, &self.predictions)
+                        == Some(prediction.prefix))
+                .then_some((prediction.row, prediction.column));
                 self.predictions.pop_front();
                 continue;
             }
+            let unchanged = cell == Some(&*prediction.original);
+            let Some(prediction) = self.predictions.front_mut() else {
+                break;
+            };
             let covered_at = *prediction.covered_at.get_or_insert(now);
-            if cell == Some(&*prediction.original) && now < covered_at + ECHO_GRACE {
+            if unchanged && now < covered_at + ECHO_GRACE {
                 break;
             }
             self.reset();
             return;
+        }
+        // A prompt that happens to print the typed character where it was predicted leaves the
+        // cursor after the prompt, and changes the row to its left.
+        if let Some((row, column)) = credit
+            && cursor(screen).is_some_and(|cursor| (cursor.row, cursor.column) == (row, column + 1))
+        {
+            self.confirm();
         }
     }
 
@@ -269,6 +298,9 @@ impl Predictor {
             return false;
         };
         let original = original.into();
+        let Some(prefix) = prefix(screen, row, column, &self.predictions) else {
+            return false;
+        };
         self.predictions.push_back(Prediction {
             serial,
             epoch: self.epoch,
@@ -276,6 +308,7 @@ impl Predictor {
             column,
             text,
             original,
+            prefix,
             shown: self.confirmed,
             covered_at: None,
         });
@@ -313,6 +346,32 @@ fn cursor(screen: &ScreenSnapshot) -> Option<CursorPositionSnapshot> {
         .flatten()
 }
 
+/// A digest of the row left of `column`: the server's cells, with the outstanding predictions
+/// on the row in place of the cells they cover. A blank cell counts as a space.
+fn prefix(
+    screen: &ScreenSnapshot,
+    row: u16,
+    column: u16,
+    predictions: &VecDeque<Prediction>,
+) -> Option<u64> {
+    let cells = screen.rows.get(usize::from(row))?;
+    let mut digest = std::collections::hash_map::DefaultHasher::new();
+    for (index, cell) in cells.iter().take(usize::from(column)).enumerate() {
+        let predicted = predictions
+            .iter()
+            .find(|prediction| prediction.row == row && usize::from(prediction.column) == index);
+        let mut buffer = [0; 4];
+        let text = match predicted {
+            Some(prediction) => &*prediction.text.encode_utf8(&mut buffer),
+            None if cell.spacer_tail => continue,
+            None if cell.text.is_empty() => " ",
+            None => cell.text.as_str(),
+        };
+        text.hash(&mut digest);
+    }
+    Some(digest.finish())
+}
+
 fn cell(screen: &ScreenSnapshot, row: u16, column: u16) -> Option<&str> {
     let cell = screen
         .rows
@@ -338,8 +397,8 @@ pub(super) struct Overlay {
 
 impl Overlay {
     /// Draws the predictions into `screen`, a copy the view presents. Cells off the screen are
-    /// skipped.
-    pub(super) fn apply(&self, screen: &mut ScreenSnapshot) {
+    /// skipped. Returns whether it drew any.
+    pub(super) fn apply(&self, screen: &mut ScreenSnapshot) -> bool {
         let mut rows: Vec<RowSnapshot> = screen.rows.to_vec();
         let mut drawn = false;
         for &(row, column, text) in &self.cells {
@@ -359,7 +418,7 @@ impl Overlay {
             drawn = true;
         }
         if !drawn {
-            return;
+            return false;
         }
         screen.rows = rows.into();
         let (row, column) = self.cursor;
@@ -368,9 +427,18 @@ impl Overlay {
             position.column = column;
             position.width_cells = 1;
         }
+        true
     }
 }
 
 #[cfg(test)]
 #[path = "prediction_tests.rs"]
-pub(super) mod tests;
+mod tests;
+
+#[cfg(all(
+    test,
+    feature = "native-tests",
+    any(target_os = "macos", target_os = "linux")
+))]
+#[path = "prediction_unix_tests.rs"]
+mod unix_tests;

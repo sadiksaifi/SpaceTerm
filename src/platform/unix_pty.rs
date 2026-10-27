@@ -1114,8 +1114,8 @@ fn terminate_after_startup_failure(child: &mut dyn Child) {
 }
 
 #[cfg(all(test, feature = "native-tests"))]
-#[path = "unix_pty_line_mode_tests.rs"]
-mod line_mode_tests;
+#[path = "unix_pty_test_program.rs"]
+pub(crate) mod test_program;
 
 #[cfg(all(test, feature = "native-tests"))]
 mod tests {

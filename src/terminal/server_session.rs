@@ -9,8 +9,6 @@ mod push_tests;
 use super::server_graphics as graphics;
 mod link;
 mod prediction;
-#[cfg(test)]
-pub(crate) use prediction::tests::shows_keys_under;
 mod reading;
 mod recovery;
 mod screen;
