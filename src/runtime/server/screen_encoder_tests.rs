@@ -5,7 +5,7 @@ use super::*;
 use crate::terminal::emulator::TerminalEmulator;
 use crate::terminal::geometry::{BackingScale, CellGridSize, LogicalCellSize, TerminalGeometry};
 use spaceterm_server::protocol::frame::encode_server;
-use spaceterm_server::protocol::screen::{Cells, ScreenUpdate, ScrollShift};
+use spaceterm_server::protocol::screen::{Cells, ScreenUpdate, ScrollShift, StyleRef};
 use spaceterm_server::protocol::{Channel, Frame, ServerMessage, limits};
 
 fn geometry(columns: u16, rows: u16) -> TerminalGeometry {
@@ -120,8 +120,8 @@ fn a_typed_character_costs_about_one_hundred_bytes() {
     assert_eq!(update.rows.len(), 1);
     assert_eq!(update.rows[0].index, 49);
     assert!(update.shift.is_none() && update.styles.is_empty() && update.colors.is_none());
-    // 101 B at the time of writing: 10 B of frame header, 13 B of cursor, history and absent
-    // fields, and the 78 B prompt row of five runs.
+    // 105 B at the time of writing: 10 B of frame header, 13 B of cursor, history and absent
+    // fields, and the 82 B prompt row of five runs, four of them in a table style.
     assert!(bytes <= 105, "a typed character took {bytes} B");
     assert!(
         keyframe_bytes < 8 * 1024,
@@ -246,7 +246,10 @@ fn styles_are_defined_once_per_channel_until_a_keyframe() {
     channel.emulator.feed(b"\r\n\x1b[31mred again\x1b[0m");
     let (second, _) = channel.present().unwrap();
     assert!(second.styles.is_empty());
-    assert_eq!(second.rows[0].runs[0].style, first.styles[0].id);
+    assert_eq!(
+        second.rows[0].runs[0].style,
+        StyleRef::Id(first.styles[0].id)
+    );
     channel.acknowledged = None;
     let (keyframe, _) = channel.present().unwrap();
     assert_eq!(keyframe.styles.len(), 1);
@@ -267,12 +270,12 @@ fn wide_characters_and_graphemes_use_explicit_cells() {
 }
 
 #[test]
-fn a_full_style_table_restarts_the_channel_tables_with_every_row() {
+fn styles_beyond_a_full_table_travel_inline_without_resending_the_screen() {
     let mut channel = Channel1::new(512, 12);
-    let distinct = |row: usize, offset: usize| {
+    let distinct = |row: usize| {
         let mut line = format!("\x1b[{};1H", row + 1);
         for column in 0..512 {
-            let value = offset + row * 512 + column;
+            let value = row * 512 + column;
             line.push_str(&format!(
                 "\x1b[38;2;{};{};{}mx",
                 value % 256,
@@ -283,20 +286,34 @@ fn a_full_style_table_restarts_the_channel_tables_with_every_row() {
         line
     };
     for row in 0..8 {
-        let line = distinct(row, 0);
+        let line = distinct(row);
         channel.emulator.feed(line.as_bytes());
     }
     let (first, _) = channel.present().unwrap();
     assert_eq!(first.styles.len(), limits::MAX_STYLES);
-    let line = distinct(8, 0);
+    let line = distinct(8);
     channel.emulator.feed(line.as_bytes());
-    let (restarted, _) = channel.present().unwrap();
-    // The new row does not fit beside the styles the client holds, so every row is sent again
-    // with tables that start over. Styles beyond the table become the default style.
-    assert_eq!(restarted.rows.len(), 12);
-    assert_eq!(restarted.styles.len(), limits::MAX_STYLES);
-    assert!(restarted.styles.iter().all(|style| style.id != 0));
-    restarted.validate().unwrap();
+    let (update, _) = channel.present().unwrap();
+    // Only the new row travels, and every one of its cells keeps its own color.
+    assert_eq!(
+        update.rows.iter().map(|row| row.index).collect::<Vec<_>>(),
+        [8]
+    );
+    assert!(update.styles.is_empty());
+    assert_eq!(update.rows[0].runs.len(), 512);
+    assert!(
+        update.rows[0]
+            .runs
+            .iter()
+            .all(|run| matches!(run.style, StyleRef::Inline(_)))
+    );
+    update.validate().unwrap();
+    channel.emulator.feed(b"\x1b[12;1Hplain");
+    let (typed, _) = channel.present().unwrap();
+    assert_eq!(
+        typed.rows.iter().map(|row| row.index).collect::<Vec<_>>(),
+        [11]
+    );
 }
 
 #[test]

@@ -7,8 +7,8 @@ use super::*;
 use spaceterm_server::pane::effects::Hyperlink;
 use spaceterm_server::protocol::limits;
 use spaceterm_server::protocol::screen::{
-    self as wire, Cells, Colors, Cursor, CursorPosition, DEFAULT_STYLE, Geometry, History,
-    LinkDefinition, Modes, Page, Run, ScreenUpdate, ScrollShift, Style, StyleDefinition, flags,
+    self as wire, Cells, Colors, Cursor, CursorPosition, Geometry, History, LinkDefinition, Modes,
+    Page, Run, ScreenUpdate, ScrollShift, Style, StyleDefinition, StyleRef, flags,
 };
 use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -134,7 +134,7 @@ impl ScreenEncoder {
         }
     }
 
-    /// `None` when nothing changed, or when the tables overflowed in `Delta` mode.
+    /// `None` when nothing changed, or when the link table overflowed in `Delta` mode.
     fn build(
         &mut self,
         capture: &ScreenCapture,
@@ -428,8 +428,8 @@ impl Line {
         }
     }
 
-    /// Encodes `cells` without trailing blank cells. Links that do not fit the table lose their
-    /// target, and styles that do not fit become the default style; both set `overflowed`.
+    /// Encodes `cells` without trailing blank cells. A style that does not fit the table travels
+    /// inline. A link that does not fit loses its target and sets `overflowed`.
     fn encode(cells: &[CellSnapshot], wrapped: bool, tables: &mut Tables) -> Self {
         let end = cells
             .iter()
@@ -439,7 +439,7 @@ impl Line {
         let mut lengths = Vec::<u16>::new();
         let mut narrow = true;
         // Neighboring cells usually share a style and a link, so table lookups follow changes.
-        let mut last_style: Option<(Style, u16)> = None;
+        let mut last_style: Option<(Style, StyleRef)> = None;
         let mut last_link: Option<(&Arc<HyperlinkTarget>, Option<u16>)> = None;
         for cell in &cells[..end] {
             let style = style(cell);
@@ -561,26 +561,26 @@ struct Tables {
     links: HashMap<Hyperlink, u16>,
     new_styles: Vec<StyleDefinition>,
     new_links: Vec<LinkDefinition>,
-    /// A style or link did not fit its table.
+    /// A link did not fit its table.
     overflowed: bool,
 }
 
 impl Tables {
-    fn style(&mut self, style: Style) -> u16 {
+    /// The table's id for `style`, or the style itself once the table is full.
+    fn style(&mut self, style: Style) -> StyleRef {
         if style == Style::DEFAULT {
-            return DEFAULT_STYLE;
+            return StyleRef::Default;
         }
         if let Some(id) = self.styles.get(&style) {
-            return *id;
+            return StyleRef::Id(*id);
         }
         if self.styles.len() >= limits::MAX_STYLES {
-            self.overflowed = true;
-            return DEFAULT_STYLE;
+            return StyleRef::Inline(style);
         }
         let id = self.styles.len() as u16 + 1;
         self.styles.insert(style, id);
         self.new_styles.push(StyleDefinition { id, style });
-        id
+        StyleRef::Id(id)
     }
 
     fn link(&mut self, target: &HyperlinkTarget) -> Option<u16> {

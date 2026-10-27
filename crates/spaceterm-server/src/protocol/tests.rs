@@ -3,7 +3,8 @@
 use super::frame::{Assembler, DecodeError, FrameReader, Kind, encode_client, encode_server};
 use super::interim::{Interim, InterimReply};
 use super::screen::{
-    Cells, Cursor, CursorPosition, Geometry, History, Row, Run, ScrollShift, Style, StyleDefinition,
+    Cells, Cursor, CursorPosition, Geometry, History, Row, Run, ScrollShift, Style,
+    StyleDefinition, StyleRef,
 };
 use super::*;
 use crate::hierarchy;
@@ -99,7 +100,7 @@ fn update() -> ScreenUpdate {
             index: 23,
             wrapped: false,
             runs: vec![Run {
-                style: 1,
+                style: StyleRef::Id(1),
                 link: None,
                 text: "$ ".into(),
                 cells: Cells::Narrow,
@@ -176,7 +177,7 @@ fn golden_server_vectors() {
             update: update(),
         }))),
         [
-            0, 0, 0, 45, 0x43, // header
+            0, 0, 0, 46, 0x43, // header
             1, 2, 1, 1, 5, // channel, frame, base, input
             1, 3, 0, 1, 1, 0, 0, // cursor
             1, 0, // history
@@ -184,7 +185,7 @@ fn golden_server_vectors() {
             1, 0, 24, 2, // shift
             1, 1, 1, 1, 0, 0, 1, 0, // one style definition
             0, // links
-            1, 23, 0, 1, 1, 0, 2, b'$', b' ', 0, // one row with one run
+            1, 23, 0, 1, 1, 1, 0, 2, b'$', b' ', 0, // one row with one run in style id 1
             0, 0, 0, 0, // graphics, accessibility, generation, reading
         ]
     );
@@ -631,7 +632,7 @@ fn every_server_message_round_trips() {
     });
     keyframe.graphics = Some(Err(pane::graphics::Error::Capacity));
     keyframe.rows[0].runs.push(Run {
-        style: 0,
+        style: StyleRef::Default,
         link: Some(0),
         text: "界a".into(),
         cells: Cells::Explicit(vec![3, 0, 1]),
@@ -677,7 +678,7 @@ fn large_messages_continue_across_frames_and_bulk_replies_use_small_chunks() {
             wrapped: false,
             // 512 cells of 16 bytes each, such as long grapheme clusters.
             runs: vec![Run {
-                style: 0,
+                style: StyleRef::Default,
                 link: None,
                 text: "x".repeat(8 * 1024),
                 cells: Cells::Explicit(vec![16; 512]),
@@ -837,6 +838,23 @@ fn screen_updates_refuse_inconsistent_tables_cells_and_cursors() {
     }));
     assert!(refused(&|update| update.styles[0].style.flags = 1 << 9));
     assert!(refused(&|update| update.styles[0].style.underline = 6));
+    assert!(refused(&|update| update.styles[0].id = 0));
+    assert!(refused(&|update| {
+        update.rows[0].runs[0].style = StyleRef::Id(limits::MAX_STYLES as u16 + 1)
+    }));
+    assert!(refused(&|update| {
+        let mut style = update.styles[0].style;
+        style.flags = u16::MAX;
+        update.rows[0].runs[0].style = StyleRef::Inline(style);
+    }));
+    assert!(refused(&|update| {
+        update.rows[0].runs[0] = Run {
+            style: StyleRef::Default,
+            link: None,
+            text: "ab".into(),
+            cells: Cells::Explicit(vec![1]),
+        }
+    }));
     assert!(refused(&|update| update.cursor.shape = 4));
     assert!(refused(&|update| {
         update.cursor.position = Some(CursorPosition {
@@ -853,7 +871,7 @@ fn screen_updates_refuse_inconsistent_tables_cells_and_cursors() {
     }));
     assert!(refused(&|update| {
         update.rows[0].runs[0] = Run {
-            style: 0,
+            style: StyleRef::Default,
             link: None,
             text: "界".into(),
             cells: Cells::Explicit(vec![2, 1]),
@@ -861,7 +879,7 @@ fn screen_updates_refuse_inconsistent_tables_cells_and_cursors() {
     }));
     assert!(refused(&|update| {
         update.rows[0].runs[0] = Run {
-            style: 0,
+            style: StyleRef::Default,
             link: None,
             text: "x".repeat(limits::MAX_CELL_BYTES + 1),
             cells: Cells::Explicit(vec![limits::MAX_CELL_BYTES as u16 + 1]),
@@ -869,7 +887,7 @@ fn screen_updates_refuse_inconsistent_tables_cells_and_cursors() {
     }));
     assert!(refused(&|update| {
         update.rows[0].runs[0] = Run {
-            style: 0,
+            style: StyleRef::Default,
             link: None,
             text: "x".repeat(usize::from(pane::MAX_COLUMNS) + 1),
             cells: Cells::Narrow,
@@ -897,10 +915,27 @@ fn a_scroll_shift_moves_its_region_and_blanks_the_rows_it_vacates() {
     };
     assert!(outside.apply(&mut rows, || 0).is_none());
     let spacer = Run {
-        style: 0,
+        style: StyleRef::Default,
         link: None,
         text: "界a".into(),
         cells: Cells::Explicit(vec![3, 0, 1]),
     };
-    assert_eq!(spacer.cells(), Some(vec![0..3, 3..3, 3..4]));
+    assert_eq!(spacer.cells().collect::<Vec<_>>(), [0..3, 3..3, 3..4]);
+    assert_eq!(spacer.width(), 3);
+}
+
+#[test]
+fn a_row_with_too_many_cells_is_refused_before_its_lengths_are_walked() {
+    // A frame of zero-length cells costs one byte per cell. The column bound must reject it from
+    // the length of the list alone, without building anything per cell.
+    let mut update = update();
+    update.rows[0].runs[0] = Run {
+        style: StyleRef::Default,
+        link: None,
+        text: String::new(),
+        cells: Cells::Explicit(vec![0; 4 * 1024 * 1024]),
+    };
+    assert_eq!(update.validate(), Err(Fatal::ProtocolViolation));
+    update.rows[0].runs[0].cells = Cells::Explicit(vec![0; usize::from(pane::MAX_COLUMNS)]);
+    assert_eq!(update.validate(), Ok(()));
 }

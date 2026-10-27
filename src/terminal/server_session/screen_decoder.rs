@@ -6,7 +6,7 @@ use super::*;
 use crate::runtime::HyperlinkTarget;
 use spaceterm_server::pane::graphics;
 use spaceterm_server::protocol::screen::{
-    Colors, Cursor, DEFAULT_STYLE, Geometry, History, Modes, Page, Row, ScreenUpdate, Style, flags,
+    Colors, Cursor, Geometry, History, Modes, Page, Row, ScreenUpdate, Style, StyleRef, flags,
 };
 use std::collections::HashMap;
 
@@ -51,7 +51,8 @@ pub(super) struct DecodedScreen {
     pub(super) accessibility_revision: u64,
     pub(super) rows: Arc<[RowSnapshot]>,
     pub(super) wrapped: Arc<[bool]>,
-    text_blinking: bool,
+    /// Whether each row shows blinking text, kept up to date row by row.
+    blinking: Vec<bool>,
     blank: RowSnapshot,
 }
 
@@ -68,6 +69,9 @@ impl ScreenDecoder {
 
     /// Applies frame `frame`, which the server encoded against `base`. A file link becomes a
     /// target only through `local_files`.
+    ///
+    /// `update` must have passed [`ScreenUpdate::validate`]. The link's `Assembler` validates
+    /// every message it receives, so the decoder does not repeat it.
     pub(super) fn apply(
         &mut self,
         frame: u64,
@@ -91,7 +95,6 @@ impl ScreenDecoder {
         update: ScreenUpdate,
         local_files: Option<&crate::platform::local_filesystem::LocalFilesystemAuthority>,
     ) -> Result<(), UpdateError> {
-        update.validate().map_err(|_| UpdateError::Malformed)?;
         let previous = match base {
             None => {
                 self.styles.clear();
@@ -124,9 +127,17 @@ impl ScreenDecoder {
             || Arc::from(vec![blank_cell(); columns]),
             |kept| Arc::clone(&kept.blank),
         );
-        let (mut rows, mut wrapped) = match kept {
-            Some(kept) => (kept.rows.to_vec(), kept.wrapped.to_vec()),
-            None => (vec![Arc::clone(&blank); row_count], vec![false; row_count]),
+        let (mut rows, mut wrapped, mut blinking) = match kept {
+            Some(kept) => (
+                kept.rows.to_vec(),
+                kept.wrapped.to_vec(),
+                kept.blinking.clone(),
+            ),
+            None => (
+                vec![Arc::clone(&blank); row_count],
+                vec![false; row_count],
+                vec![false; row_count],
+            ),
         };
         if let Some(shift) = update.shift {
             shift
@@ -135,13 +146,20 @@ impl ScreenDecoder {
             shift
                 .apply(&mut wrapped, || false)
                 .ok_or(UpdateError::Malformed)?;
+            shift
+                .apply(&mut blinking, || false)
+                .ok_or(UpdateError::Malformed)?;
         }
         for row in &update.rows {
             let index = usize::from(row.index);
             if index >= row_count {
                 return Err(UpdateError::Malformed);
             }
-            rows[index] = self.row(row, columns)?;
+            let decoded = self.row(row, columns)?;
+            blinking[index] = decoded
+                .iter()
+                .any(|cell| cell.blinking && !cell.invisible && !cell.spacer_tail);
+            rows[index] = decoded;
             wrapped[index] = row.wrapped;
         }
         if let Some(position) = update.cursor.position
@@ -167,18 +185,11 @@ impl ScreenDecoder {
                 .as_ref()
                 .and_then(|previous| previous.graphics.clone()),
         };
-        let (rows, wrapped, text_blinking) =
+        let (rows, wrapped) =
             match kept.filter(|_| update.shift.is_none() && update.rows.is_empty()) {
                 // Nothing moved or changed, so the renderer sees the same row list.
-                Some(kept) => (
-                    Arc::clone(&kept.rows),
-                    Arc::clone(&kept.wrapped),
-                    kept.text_blinking,
-                ),
-                None => {
-                    let text_blinking = rows.iter().any(|row| row.iter().any(|cell| cell.blinking));
-                    (Arc::from(rows), Arc::from(wrapped), text_blinking)
-                }
+                Some(kept) => (Arc::clone(&kept.rows), Arc::clone(&kept.wrapped)),
+                None => (Arc::from(rows), Arc::from(wrapped)),
             };
         self.screen = Some(DecodedScreen {
             geometry,
@@ -192,7 +203,7 @@ impl ScreenDecoder {
             accessibility_revision: update.accessibility_revision,
             rows,
             wrapped,
-            text_blinking,
+            blinking,
             blank,
         });
         self.frame = Some(frame);
@@ -204,7 +215,8 @@ impl ScreenDecoder {
     }
 }
 
-/// Decodes a Scrollback page against its own tables. Each row has `columns` cells.
+/// Decodes a Scrollback page against its own tables. Each row has `columns` cells. `page` must
+/// have passed [`Page::validate`], which the link runs on every reply.
 #[cfg_attr(
     not(test),
     expect(
@@ -217,7 +229,6 @@ pub(super) fn decode_page(
     columns: u16,
     local_files: Option<&crate::platform::local_filesystem::LocalFilesystemAuthority>,
 ) -> Result<Vec<(RowSnapshot, bool)>, UpdateError> {
-    page.validate().map_err(|_| UpdateError::Malformed)?;
     let styles = page
         .styles
         .iter()
@@ -262,25 +273,32 @@ fn decode_row(
     let default = blank_cell();
     let mut cells = Vec::with_capacity(columns);
     for run in &row.runs {
+        let inline;
         let template = match run.style {
-            DEFAULT_STYLE => &default,
-            id => styles.get(&id).ok_or(UpdateError::Malformed)?,
+            StyleRef::Default => &default,
+            StyleRef::Id(id) => styles.get(&id).ok_or(UpdateError::Malformed)?,
+            StyleRef::Inline(style) => {
+                inline = template(&style);
+                &inline
+            }
         };
         let link = match run.link {
             None => None,
             Some(id) => links.get(&id).ok_or(UpdateError::Malformed)?.clone(),
         };
-        let ranges = run.cells().ok_or(UpdateError::Malformed)?;
-        if cells.len() + ranges.len() > columns {
+        if cells.len() + run.width() > columns {
             return Err(UpdateError::Malformed);
         }
-        for range in ranges {
+        for range in run.cells() {
             let spacer_tail = range.is_empty();
             cells.push(CellSnapshot {
                 text: if spacer_tail {
                     " ".to_owned()
                 } else {
-                    run.text[range].to_owned()
+                    run.text
+                        .get(range)
+                        .ok_or(UpdateError::Malformed)?
+                        .to_owned()
                 },
                 spacer_tail,
                 hyperlink: link.clone(),
@@ -498,7 +516,7 @@ impl DecodedScreen {
                 configured.cursor_text.unwrap_or(screen.background)
             },
         };
-        screen.text_blinking = self.text_blinking;
+        screen.text_blinking = self.blinking.contains(&true);
         screen
     }
 }
