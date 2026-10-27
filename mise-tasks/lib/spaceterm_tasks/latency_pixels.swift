@@ -361,7 +361,9 @@ final class Grabber: NSObject, SCStreamOutput {
 
 enum Mode: String { case keystroke, scroll }
 
-/// Times `samples` events. `checkpoint` runs while each echoed line is cleared and once at the end.
+/// Times `samples` events. In keystroke mode it clears the echoed line before the first key and
+/// after every `keysPerLine` keys, so each phase starts on an empty line inside the strip.
+/// `checkpoint` runs while each echoed line is cleared and once at the end.
 func measure(
     _ target: Target, strip: CGRect, mode: Mode, samples: Int, phase: String?,
     checkpoint: (() async throws -> Void)? = nil
@@ -388,7 +390,7 @@ func measure(
     do {
         for index in 0..<samples {
             try requireFront(target)
-            if mode == .keystroke && index > 0 && index % keysPerLine == 0 {
+            if mode == .keystroke && index % keysPerLine == 0 {
                 control("u")
                 pause(0.4)
                 try await checkpoint?()
