@@ -22,7 +22,7 @@ use journal::{Journal, Retention, Revision};
 use spaceterm_server::connection::outbox::Outbox;
 use spaceterm_server::connection::service::Dispatch;
 use spaceterm_server::connection::sync::SyncWorker;
-use spaceterm_server::protocol::RequestId;
+use spaceterm_server::protocol::{ReplyBody, RequestId};
 pub(super) use worktrees::pinned_in_worktree;
 
 /// How often what Terminal Sessions present, such as titles and progress, is synchronized and
@@ -338,31 +338,29 @@ impl SharedWorkspaceHost {
         inventory.close = Some(CloseInventory {
             boot: self.prototype.boot,
             sessions,
-            controls: Some(
-                inventory
-                    .workspaces
-                    .iter()
-                    .flat_map(|w| &w.tabs)
-                    .flat_map(|t| &t.panes)
-                    .filter_map(|pane| {
-                        let host = self.panes.get(&pane.id);
-                        let (owner, epoch, session) =
-                            if let Some(live) = host.and_then(|h| h.pane.as_ref()) {
-                                (live.device, live.control_epoch, Some(live.lease.session))
-                            } else if let Some(dormant) = host.and_then(|h| h.dormant) {
-                                (dormant.device, dormant.control_epoch, None)
-                            } else {
-                                (pane.creator, 0, None)
-                            };
-                        Some(ConfirmedControl {
-                            pane: pane.id,
-                            session,
-                            owner: owner?,
-                            epoch,
-                        })
+            controls: inventory
+                .workspaces
+                .iter()
+                .flat_map(|w| &w.tabs)
+                .flat_map(|t| &t.panes)
+                .filter_map(|pane| {
+                    let host = self.panes.get(&pane.id);
+                    let (owner, epoch, session) =
+                        if let Some(live) = host.and_then(|h| h.pane.as_ref()) {
+                            (live.device, live.control_epoch, Some(live.lease.session))
+                        } else if let Some(dormant) = host.and_then(|h| h.dormant) {
+                            (dormant.device, dormant.control_epoch, None)
+                        } else {
+                            (pane.creator, 0, None)
+                        };
+                    Some(ConfirmedControl {
+                        pane: pane.id,
+                        session,
+                        owner: owner?,
+                        epoch,
                     })
-                    .collect(),
-            ),
+                })
+                .collect(),
         });
         inventory
     }
@@ -608,15 +606,6 @@ impl SharedWorkspaceHost {
     fn handle(&mut self, device: Id, connection: Id, request: Request) -> Result<Reply, Refusal> {
         self.ready()?;
         match request {
-            Request::WorktreeRead(read) => Ok(Reply::WorktreeRead(
-                self.worktree_read(device, connection, read),
-            )),
-            Request::DirectoryRead(request) => Ok(Reply::DirectoryRead(
-                self.prototype.directories.request(connection, request),
-            )),
-            Request::DirectoryCreate(request) => Ok(Reply::DirectoryCreate(
-                self.prototype.directories.create(connection, request),
-            )),
             Request::RepairDirectory {
                 target,
                 replacement,
@@ -972,16 +961,21 @@ impl SharedWorkspaceHost {
         let waiting = self.blocked.is_some()
             || !self.settled()
             || self.writes.busy()
-            || !self.waiting.is_empty()
-            || self.prototype.directories.busy();
+            || !self.waiting.is_empty();
         let soon = waiting.then_some(now + super::dispatch::TICK);
         let paced = self.paced.0.filter(|_| self.paced.1);
+        // A read that settles wakes the host. A read that outlasts its deadline settles then.
+        let reads = [self.prototype.directories.due(), self.worktree_reads_due()];
         // A failed synchronization never reaches the Git read it would start, so its due time
         // stays past. Retrying waits for the tick instead.
         let repositories = (self.blocked.is_none() && self.settled())
             .then(|| self.repositories.due(now))
             .flatten();
-        [soon, paced, repositories].into_iter().flatten().min()
+        [soon, paced, repositories]
+            .into_iter()
+            .chain(reads)
+            .flatten()
+            .min()
     }
     /// Wakes the host when a message started timed work due before the deadline it waits for.
     fn rearm(&mut self) {
@@ -1004,6 +998,8 @@ impl HostCommands for SharedWorkspaceHost {
         self.tick_until(now)
     }
     fn ticker(&mut self, wake: Arc<dyn spaceterm_server::connection::Wake>) {
+        self.prototype.directories.set_wake(Arc::clone(&wake));
+        self.wake_worktree_reads(Arc::clone(&wake));
         self.ticker = Some(wake);
     }
     fn rung(&mut self) {
@@ -1059,6 +1055,35 @@ impl HostCommands for SharedWorkspaceHost {
         }
         self.rearm();
         reply
+    }
+    fn read(
+        &mut self,
+        device: Id,
+        connection: Id,
+        id: RequestId,
+        read: super::HostRead,
+    ) -> Option<Result<ReplyBody, Refusal>> {
+        if let Err(refusal) = self.ready() {
+            return Some(Err(refusal));
+        }
+        let started = match read {
+            super::HostRead::Worktree(read) => self
+                .worktree_read(device, connection, id, read)
+                .transpose()
+                .map(|result| Ok(ReplyBody::Worktree(result))),
+            read => self.prototype.directories.read(connection, id, read),
+        };
+        self.rearm();
+        started
+    }
+    fn cancel_read(&mut self, connection: Id, id: RequestId) {
+        self.prototype.directories.cancel((connection, id));
+        self.cancel_worktree_read(connection, id);
+    }
+    fn settled_reads(&mut self) -> Vec<super::SettledRead> {
+        let mut settled = self.prototype.directories.settled_reads();
+        settled.extend(self.settled_worktree_reads());
+        settled
     }
     fn lease_live(&self, lease: &Lease) -> bool {
         self.panes.values().any(|host| host.lease_live(lease))

@@ -2255,7 +2255,7 @@ fn end_all_sessions_requires_account_local_admission_but_workspace_mutations_do_
                     id: [2; 32],
                     session: Some([3; 32]),
                 }],
-                controls: None,
+                controls: Vec::new(),
             },
         },
     };

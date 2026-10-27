@@ -461,7 +461,7 @@ fn inventory() -> hierarchy::Inventory {
                 id: [3; 32],
                 session: Some([6; 32]),
             }],
-            controls: None,
+            controls: Vec::new(),
         }),
     }
 }

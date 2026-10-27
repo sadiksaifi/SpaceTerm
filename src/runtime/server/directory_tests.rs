@@ -4,7 +4,8 @@ use spaceterm_server::protocol::PaneEvent;
 
 #[test]
 fn explicit_directory_creation_is_recursive_idempotent_and_does_not_edit_workspaces() {
-    use pane::directories::{CreationRequest, Progress, Value};
+    use pane::directories::{Creation, Value};
+    use spaceterm_server::protocol::ReplyBody;
     let root = std::env::temp_dir().join(format!(
         "spaceterm-create-{:x}",
         u64::from_ne_bytes(nonce().unwrap()[..8].try_into().unwrap())
@@ -14,37 +15,14 @@ fn explicit_directory_creation_is_recursive_idempotent_and_does_not_edit_workspa
     let mut host = SharedWorkspaceHost::new(host());
     let before = host.request([1; 32], [2; 32], Request::Inventory);
     for id in [1, 2] {
-        assert!(matches!(
-            host.request(
-                [1; 32],
-                [2; 32],
-                Request::DirectoryCreate(CreationRequest::Begin {
-                    id,
-                    path: path.clone()
-                })
-            ),
-            Reply::DirectoryCreate(Ok(Progress::Pending))
-        ));
-        let until = std::time::Instant::now() + Duration::from_secs(2);
-        loop {
-            match host.request(
-                [1; 32],
-                [2; 32],
-                Request::DirectoryCreate(CreationRequest::Poll { id }),
-            ) {
-                Reply::DirectoryCreate(Ok(Progress::Ready(Value::Directory(actual)))) => {
-                    assert_eq!(actual, path);
-                    assert!(actual.is_dir());
-                    break;
-                }
-                Reply::DirectoryCreate(Ok(Progress::Pending))
-                    if std::time::Instant::now() < until =>
-                {
-                    std::thread::sleep(Duration::from_millis(5))
-                }
-                _ => panic!("directory creation did not complete"),
-            }
-        }
+        let creation = HostRead::Creation(Creation { path: path.clone() });
+        let Ok(ReplyBody::Directory(Ok(Value::Directory(actual)))) =
+            super::tests::read(&mut host, [2; 32], id, creation)
+        else {
+            panic!("directory creation did not complete");
+        };
+        assert_eq!(actual, path);
+        assert!(actual.is_dir());
     }
     let after = host.request([1; 32], [2; 32], Request::Inventory);
     let (

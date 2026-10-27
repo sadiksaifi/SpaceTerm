@@ -132,7 +132,10 @@ fn live_inventory(server: &State) -> Inventory {
     let mut inventory = server.inventory.clone();
     let previous = inventory.close.take();
     inventory.close = Some(CloseInventory {
-        controls: previous.as_ref().and_then(|live| live.controls.clone()),
+        controls: previous
+            .as_ref()
+            .map(|live| live.controls.clone())
+            .unwrap_or_default(),
         boot: BOOT,
         sessions: inventory
             .workspaces
@@ -239,7 +242,7 @@ fn a_queued_direct_close_keeps_its_original_control_fence_and_requires_review_af
                 .find(|known| known.id == pane)
                 .unwrap()
                 .session = control.session;
-            live.controls = Some(vec![control.clone()]);
+            live.controls = vec![control.clone()];
             delivery.snapshot.inventory = Some(live_inventory(&delivery.server));
         }
         model.poll();
@@ -291,12 +294,11 @@ fn a_queued_direct_close_keeps_its_original_control_fence_and_requires_review_af
         {
             // A server publication reports Take Over without changing the Terminal Session.
             let mut delivery = server.0.borrow_mut();
-            delivery.server.inventory.close.as_mut().unwrap().controls =
-                Some(vec![ConfirmedControl {
-                    owner: OTHER_DEVICE,
-                    epoch: 2,
-                    ..control.clone()
-                }]);
+            delivery.server.inventory.close.as_mut().unwrap().controls = vec![ConfirmedControl {
+                owner: OTHER_DEVICE,
+                epoch: 2,
+                ..control.clone()
+            }];
             delivery.snapshot.inventory = Some(live_inventory(&delivery.server));
         }
         model.poll();
@@ -350,7 +352,7 @@ fn combined_pending_tab_closes_retain_the_workspace_until_the_final_close_is_rev
     let tabs = server.inventory().workspaces[0].tabs.clone();
     {
         let mut delivery = server.0.borrow_mut();
-        delivery.server.inventory.close.as_mut().unwrap().controls = Some(
+        delivery.server.inventory.close.as_mut().unwrap().controls =
             tabs.iter()
                 .map(|tab| ConfirmedControl {
                     pane: tab.root_pane,
@@ -358,8 +360,7 @@ fn combined_pending_tab_closes_retain_the_workspace_until_the_final_close_is_rev
                     owner: DEVICE,
                     epoch: 0,
                 })
-                .collect(),
-        );
+                .collect();
         delivery.snapshot.inventory = Some(live_inventory(&delivery.server));
     }
     model.poll();
@@ -490,7 +491,7 @@ fn optimistic_split_preserves_published_repository_and_close_control_facts() {
             tab.root_pane,
             std::path::PathBuf::from("/server/protected-repository"),
         );
-        delivery.server.inventory.close.as_mut().unwrap().controls = Some(vec![control.clone()]);
+        delivery.server.inventory.close.as_mut().unwrap().controls = vec![control.clone()];
         delivery.snapshot.inventory = Some(live_inventory(&delivery.server));
     }
     let (source, mut model) = model(&server);
@@ -516,7 +517,7 @@ fn optimistic_split_preserves_published_repository_and_close_control_facts() {
             std::path::Path::new("/server/protected-repository")
         );
         assert_eq!(panes[1].repository_directory, None);
-        assert_eq!(decoded.close.unwrap().controls, Some(vec![control.clone()]));
+        assert_eq!(decoded.close.unwrap().controls, vec![control.clone()]);
     }
 }
 
@@ -1362,7 +1363,7 @@ fn optimistic_close_hides_before_a_doomed_pane_status_and_restores_the_same_view
     assert!(cx.debug_bounds("shared-pane-notice-2").is_none());
     // A changed server confirmation definitely refuses the original close.
     harness.server.0.borrow_mut().server.inventory.close = Some(CloseInventory {
-        controls: None,
+        controls: Vec::new(),
         boot: [99; 32],
         sessions: vec![],
     });
@@ -1494,7 +1495,7 @@ fn successive_refused_tab_closes_restore_the_original_order(cx: &mut TestAppCont
     }
     for _ in 0..2 {
         harness.server.0.borrow_mut().server.inventory.close = Some(CloseInventory {
-            controls: None,
+            controls: Vec::new(),
             boot: [99; 32],
             sessions: vec![],
         });

@@ -233,8 +233,8 @@ pub fn select(link: &ServerLink, pane: Id, explicit: bool, size: PaneSize) -> Re
     claim(link, pane, AttachmentClaim::Select { explicit }, size)
 }
 
-/// Starts the shell of the inventory's first Pane, or resumes its control, as the single-Pane
-/// `Attach` request of protocol major 1 did. That request refused a Takeover Screen as controlled.
+/// Starts the shell of the inventory's first Pane, or resumes its control. Another client's
+/// control fails as `Controlled`.
 pub fn attach(link: &ServerLink, create: bool, size: PaneSize) -> Result<Pane> {
     let pane = first_pane(link, create)?;
     match select(link, pane, create, size)? {
@@ -409,8 +409,8 @@ impl Events {
     }
 }
 
-/// A Pane claimed on one channel. Dropping it keeps the Pane's control, as abandoning a lease of
-/// protocol major 1 did; [`Pane::release`] gives control up.
+/// A Pane claimed on one channel. Dropping it keeps the Pane's control; [`Pane::release`] gives
+/// control up.
 pub struct Pane {
     link: ServerLink,
     id: Channel,
@@ -446,7 +446,7 @@ impl Pane {
     }
 
     /// Fails with the first input discard the server reported that no caller waited for, so a
-    /// refused input fails the next operation, as its refused exchange did in protocol major 1.
+    /// refused input fails the next operation.
     fn reported(&self) -> Result<()> {
         let mut received = self.events.lock();
         if let Some(Ending::Link(error)) = received.ending {

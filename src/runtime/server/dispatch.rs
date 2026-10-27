@@ -20,16 +20,6 @@ impl DevelopmentPaneHost {
     ) -> Result<Reply, Refusal> {
         self.recover()?;
         self.retain_directory()?;
-        if let Request::DirectoryRead(request) = request {
-            return Ok(Reply::DirectoryRead(
-                self.directories.request(connection, request),
-            ));
-        }
-        if let Request::DirectoryCreate(request) = request {
-            return Ok(Reply::DirectoryCreate(
-                self.directories.create(connection, request),
-            ));
-        }
         match request {
             Request::RepairDirectory {
                 target,
@@ -64,7 +54,7 @@ impl DevelopmentPaneHost {
                 resume,
                 style,
             } => {
-                // Legacy clients cannot render a Takeover Screen or request takeover.
+                // `Attach` resumes only its own lease and refuses another client's control.
                 if let (Some(pane), Some(old)) = (&self.pane, resume)
                     && (old.server, old.session, old.control)
                         != (pane.lease.server, pane.lease.session, pane.lease.control)
@@ -286,7 +276,29 @@ impl HostCommands for DevelopmentPaneHost {
         if self.recover().is_ok() && self.retain_directory().is_ok() {
             let _ = self.retire_exited();
         }
-        (self.pane.is_some() || self.directories.busy()).then_some(now + TICK)
+        let pane = self.pane.is_some().then_some(now + TICK);
+        [pane, self.directories.due()].into_iter().flatten().min()
+    }
+    fn ticker(&mut self, wake: Arc<dyn spaceterm_server::connection::Wake>) {
+        self.directories.set_wake(wake);
+    }
+    fn read(
+        &mut self,
+        _device: [u8; 32],
+        connection: [u8; 32],
+        id: RequestId,
+        read: HostRead,
+    ) -> Option<Result<ReplyBody, Refusal>> {
+        if let Err(refusal) = self.recover().and_then(|()| self.retain_directory()) {
+            return Some(Err(refusal));
+        }
+        self.directories.read(connection, id, read)
+    }
+    fn cancel_read(&mut self, connection: [u8; 32], id: RequestId) {
+        self.directories.cancel((connection, id));
+    }
+    fn settled_reads(&mut self) -> Vec<SettledRead> {
+        self.directories.settled_reads()
     }
     fn admitted(&mut self, client: [u8; 32], name: control::ClientName) {
         self.names
@@ -420,6 +432,25 @@ pub trait HostCommands: Send {
     /// Permanently releases this paired identity's live and dormant control grants.
     fn revoked(&mut self, _client: [u8; 32]) {}
     fn request(&mut self, device: [u8; 32], connection: [u8; 32], request: Request) -> Reply;
+    /// Starts read `id` of `connection`. Returns its reply when it settles at once. Otherwise the
+    /// read runs on another thread, which wakes the host when it settles, and the next
+    /// [`Self::settled_reads`] returns its reply.
+    fn read(
+        &mut self,
+        _device: [u8; 32],
+        _connection: [u8; 32],
+        _id: RequestId,
+        _read: HostRead,
+    ) -> Option<Result<ReplyBody, Refusal>> {
+        Some(Err(Refusal::Unsupported))
+    }
+    /// Stops read `id` of `connection`. It never settles. A directory creation that already
+    /// started keeps what it created.
+    fn cancel_read(&mut self, _connection: [u8; 32], _id: RequestId) {}
+    /// The replies of reads that settled since the last call.
+    fn settled_reads(&mut self) -> Vec<SettledRead> {
+        Vec::new()
+    }
     /// Whether `lease` still names a Pane's Terminal Session, ended or not, under its current
     /// control. A channel bound to a lease that is not live is closed.
     fn lease_live(&self, _lease: &Lease) -> bool {
@@ -456,8 +487,8 @@ pub trait HostCommands: Send {
     fn shutdown(&mut self) -> Result<(), ServerError>;
 }
 
-/// How soon a host's timed work runs again while it waits on another thread: a journal or Git
-/// write, or a directory read. A live terminal rings the host's wake instead.
+/// How soon a host's timed work runs again while it waits on another thread for a journal or Git
+/// write. A live terminal, and a read that settles, wake the host instead.
 pub(super) const TICK: Duration = Duration::from_millis(10);
 
 /// A host served over SpaceTerm Protocol connections. It binds each claimed channel to its lease,
@@ -470,10 +501,8 @@ pub struct Served<H> {
     /// Rung when a Terminal Session has something to publish, or a request may have ended
     /// another channel's binding. Only a tick after a ring publishes.
     bell: Arc<Bell>,
-    /// Reads whose replies wait for the host to finish them.
+    /// Reads whose replies wait for the host to settle them.
     reads: Vec<PendingRead>,
-    /// The host's wake, so a new read is checked on the next tick.
-    ticker: Option<Arc<dyn spaceterm_server::connection::Wake>>,
 }
 
 /// Records a ring for the next tick and wakes the host to run it.
@@ -496,58 +525,25 @@ impl Bell {
     }
 }
 
-/// A directory or Worktree read, or a directory creation, still running on the host.
+/// A read that runs on the host: a directory read, a directory creation or a Worktree read.
+pub enum HostRead {
+    Directory(pane::directories::Operation),
+    Creation(pane::directories::Creation),
+    Worktree(spaceterm_server::worktree::Read),
+}
+
+/// The reply to read `id` of `connection`, which settled after [`HostCommands::read`] returned.
+pub struct SettledRead {
+    pub connection: [u8; 32],
+    pub id: RequestId,
+    pub reply: ReplyBody,
+}
+
+/// A read whose reply waits for the host to settle it.
+#[derive(PartialEq, Eq)]
 struct PendingRead {
     connection: [u8; 32],
     id: RequestId,
-    kind: ReadKind,
-    /// The host's identity of the read.
-    host: u64,
-}
-
-#[derive(Clone, Copy)]
-enum ReadKind {
-    Directory,
-    Creation,
-    Worktree,
-}
-
-impl ReadKind {
-    fn poll(self, id: u64) -> Request {
-        match self {
-            Self::Directory => Request::DirectoryRead(pane::directories::Request::Poll { id }),
-            Self::Creation => {
-                Request::DirectoryCreate(pane::directories::CreationRequest::Poll { id })
-            }
-            Self::Worktree => Request::WorktreeRead(spaceterm_server::worktree::Read::Poll { id }),
-        }
-    }
-}
-
-/// A host's answer to a read: settled with its reply, or still running as host read `id`.
-enum ReadAnswer {
-    Settled(Box<Result<ReplyBody, Refusal>>),
-    Running(u64),
-}
-
-impl ReadAnswer {
-    fn of(reply: Reply) -> Self {
-        use pane::directories::{Error, Progress};
-        use spaceterm_server::worktree::ReadReply;
-        Self::Settled(Box::new(match reply {
-            Reply::DirectoryRead(progress) | Reply::DirectoryCreate(progress) => match progress {
-                Ok(Progress::Ready(value)) => Ok(ReplyBody::Directory(Ok(value))),
-                // The host keeps a running read under the identity the server chose.
-                Ok(Progress::Pending) => return Self::Running(0),
-                Ok(Progress::Cancelled) => Ok(ReplyBody::Directory(Err(Error::Cancelled))),
-                Err(error) => Ok(ReplyBody::Directory(Err(error))),
-            },
-            Reply::WorktreeRead(Ok(ReadReply::Pending { id })) => return Self::Running(id),
-            Reply::WorktreeRead(result) => Ok(ReplyBody::Worktree(result)),
-            Reply::Refused(refusal) => Err(refusal),
-            _ => Err(Refusal::Failed),
-        }))
-    }
 }
 
 struct Connection {
@@ -580,7 +576,6 @@ impl<H: HostCommands> Served<H> {
             host,
             connections: BTreeMap::new(),
             reads: Vec::new(),
-            ticker: None,
             bell: Arc::default(),
         }
     }
@@ -617,59 +612,37 @@ impl<H: HostCommands> Served<H> {
         }
     }
 
-    /// Starts a read and replies when it settles, from a later tick when it runs on.
-    fn read(&mut self, peer: &Peer, id: RequestId, kind: ReadKind, request: Request) -> Dispatch {
-        let host = u64::from(id.0);
-        let answer = match ReadAnswer::of(self.command(peer, request)) {
-            // Directory reads run under the identity the server chose: the request id.
-            ReadAnswer::Running(0) if !matches!(kind, ReadKind::Worktree) => {
-                ReadAnswer::Running(host)
-            }
-            answer => answer,
-        };
-        match answer {
-            ReadAnswer::Settled(result) => Dispatch::Reply(result),
-            ReadAnswer::Running(host) => {
-                if self.reads.is_empty()
-                    && let Some(ticker) = &self.ticker
-                {
-                    ticker.wake();
-                }
+    /// Starts a read and replies when it settles.
+    fn read(&mut self, peer: &Peer, id: RequestId, read: HostRead) -> Dispatch {
+        match self.host.read(peer.client, peer.connection, id, read) {
+            Some(result) => Dispatch::Reply(Box::new(result)),
+            None => {
                 self.reads.push(PendingRead {
                     connection: peer.connection,
                     id,
-                    kind,
-                    host,
                 });
                 Dispatch::Deferred
             }
         }
     }
 
-    /// Replies to each read that settled.
+    /// Replies to each read that settled. A read cancelled or disconnected meanwhile has no
+    /// reply left to send.
     fn answer_reads(&mut self) {
-        for read in std::mem::take(&mut self.reads) {
-            let reply = self.host.request(
-                self.peer_of(read.connection),
-                read.connection,
-                read.kind.poll(read.host),
-            );
-            match ReadAnswer::of(reply) {
-                ReadAnswer::Running(_) => self.reads.push(read),
-                ReadAnswer::Settled(result) => {
-                    if let Some(connection) = self.connections.get(&read.connection) {
-                        // A closing connection no longer needs the reply.
-                        let _ = connection.outbox.reply_or_refuse(read.id, *result);
-                    }
-                }
+        for settled in self.host.settled_reads() {
+            let read = PendingRead {
+                connection: settled.connection,
+                id: settled.id,
+            };
+            let Some(index) = self.reads.iter().position(|pending| *pending == read) else {
+                continue;
+            };
+            self.reads.swap_remove(index);
+            if let Some(connection) = self.connections.get(&read.connection) {
+                // A closing connection no longer needs the reply.
+                let _ = connection.outbox.reply_or_refuse(read.id, Ok(settled.reply));
             }
         }
-    }
-
-    fn peer_of(&self, connection: [u8; 32]) -> [u8; 32] {
-        self.connections
-            .get(&connection)
-            .map_or([0; 32], |connection| connection.client)
     }
 
     fn lease(&self, peer: &Peer, channel: Channel) -> Result<Lease, Refusal> {
@@ -1064,10 +1037,6 @@ fn body(reply: Reply) -> Result<ReplyBody, Refusal> {
         Reply::Outcome(outcome) => ReplyBody::Outcome(outcome),
         Reply::GraphicsChunk(chunk) => ReplyBody::Graphics(chunk),
         Reply::Accessibility(chunk) => ReplyBody::Accessibility(chunk),
-        // Reads settle through `ReadAnswer`.
-        Reply::DirectoryRead(_) | Reply::DirectoryCreate(_) | Reply::WorktreeRead(_) => {
-            return Err(Refusal::Failed);
-        }
         Reply::MutationPending | Reply::Inventory { .. } => return Err(Refusal::Failed),
         Reply::Paste(_) => return Err(Refusal::Failed),
     })
@@ -1136,7 +1105,6 @@ impl<H: HostCommands> ConnectionService for Served<H> {
         let _ = self.bell.wake.set(Arc::clone(&wake));
         let bell = Arc::clone(&self.bell);
         self.host.set_notifier(Arc::new(move || bell.ring()));
-        self.ticker = Some(Arc::clone(&wake));
         self.host.ticker(wake);
     }
     /// Pushes what every bound Pane published when the bell rang, then runs the host's timed
@@ -1151,8 +1119,7 @@ impl<H: HostCommands> ConnectionService for Served<H> {
         let host = self.host.tick(now);
         self.sweep();
         self.answer_reads();
-        let reads = (!self.reads.is_empty()).then_some(now + TICK);
-        [host, reads].into_iter().flatten().min()
+        host
     }
     fn stopping(&mut self) {
         for read in std::mem::take(&mut self.reads) {
@@ -1162,35 +1129,17 @@ impl<H: HostCommands> ConnectionService for Served<H> {
         }
         self.host.stopping();
     }
-    /// The client abandoned a read. It replies `Stale` at once. A directory read stops. A
-    /// creation that has not started never runs, and one that has keeps what it created. A
-    /// Worktree read finishes unobserved.
+    /// The client abandoned a read. It replies `Stale` at once, and the host stops the read.
     fn cancel(&mut self, peer: &Peer, id: RequestId) {
-        let Some(index) = self
-            .reads
-            .iter()
-            .position(|read| read.connection == peer.connection && read.id == id)
-        else {
+        let read = PendingRead {
+            connection: peer.connection,
+            id,
+        };
+        let Some(index) = self.reads.iter().position(|pending| *pending == read) else {
             return;
         };
-        let read = self.reads.remove(index);
-        match read.kind {
-            ReadKind::Directory => {
-                self.command(
-                    peer,
-                    Request::DirectoryRead(pane::directories::Request::Cancel { id: read.host }),
-                );
-            }
-            ReadKind::Creation => {
-                self.command(
-                    peer,
-                    Request::DirectoryCreate(pane::directories::CreationRequest::Cancel {
-                        id: read.host,
-                    }),
-                );
-            }
-            ReadKind::Worktree => {}
-        }
+        self.reads.swap_remove(index);
+        self.host.cancel_read(peer.connection, id);
         if let Some(connection) = self.connections.get(&peer.connection) {
             let _ = connection.outbox.reply(id, Err(Refusal::Stale));
         }
@@ -1288,25 +1237,13 @@ impl<H: HostCommands> Served<H> {
                 Request::EndAccessibilityDemand { lease }
             }),
             Operation::DirectoryRead(operation) => {
-                let request = Request::DirectoryRead(pane::directories::Request::Begin {
-                    id: u64::from(id.0),
-                    operation,
-                });
-                return self.read(peer, id, ReadKind::Directory, request);
+                return self.read(peer, id, HostRead::Directory(operation));
             }
             Operation::DirectoryCreate(creation) => {
-                let request = Request::DirectoryCreate(pane::directories::CreationRequest::Begin {
-                    id: u64::from(id.0),
-                    path: creation.path,
-                });
-                return self.read(peer, id, ReadKind::Creation, request);
-            }
-            // Polling is the server's own business.
-            Operation::WorktreeRead(spaceterm_server::worktree::Read::Poll { .. }) => {
-                Err(Refusal::Unsupported)
+                return self.read(peer, id, HostRead::Creation(creation));
             }
             Operation::WorktreeRead(read) => {
-                return self.read(peer, id, ReadKind::Worktree, Request::WorktreeRead(read));
+                return self.read(peer, id, HostRead::Worktree(read));
             }
             Operation::Shutdown => body(self.command(peer, Request::Shutdown)),
             // Scrollback pages reply from the terminal worker. Direct-network administration never

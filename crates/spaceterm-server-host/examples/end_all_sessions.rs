@@ -5,7 +5,7 @@
 #[cfg(feature = "client")]
 #[expect(
     dead_code,
-    reason = "This check uses named Panes rather than legacy attach."
+    reason = "This check claims named Panes and never uses `support::attach`."
 )]
 mod support;
 

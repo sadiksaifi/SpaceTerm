@@ -3,7 +3,7 @@
 mod lifecycle;
 #[expect(
     dead_code,
-    reason = "the restart exercise uses only legacy first-Pane claims"
+    reason = "the restart exercise claims only the inventory's first Pane"
 )]
 mod support;
 use lifecycle::{Server, connect, require_idle, size};
@@ -13,8 +13,7 @@ use spaceterm_server::{
 use std::{error::Error, time::Duration};
 use support::{Claimed, attach};
 
-/// Selects the inventory's first Pane, as the single-Pane `Select` request of protocol major 1
-/// did. Without `create`, an empty inventory has no Pane.
+/// Selects the inventory's first Pane. Without `create`, an empty inventory has no Pane.
 fn select(link: &ServerLink, create: bool) -> Result<Claimed, ServerError> {
     let pane = support::first_pane(link, create)?;
     support::select(link, pane, create, size())

@@ -1,7 +1,7 @@
 //! Native service evidence through the desktop's authenticated transport without credential storage.
 #[expect(
     dead_code,
-    reason = "Service evidence uses shared hierarchy instead of legacy Attach."
+    reason = "Service evidence uses the shared hierarchy and never uses `support::attach`."
 )]
 mod support;
 use spaceterm_server::{

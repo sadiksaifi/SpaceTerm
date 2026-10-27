@@ -1733,7 +1733,7 @@ mod tests {
                     session: session.map(|id| [id; 32]),
                 })
                 .collect(),
-            controls: None,
+            controls: Vec::new(),
         }
     }
 

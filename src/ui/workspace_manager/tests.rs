@@ -9682,7 +9682,7 @@ fn shared_close_inventory(
         repositories: None,
         revision,
         close: Some(CloseInventory {
-            controls: None,
+            controls: Vec::new(),
             boot: SHARED_CLOSE_BOOT,
             sessions: tabs
                 .iter()
@@ -12359,7 +12359,7 @@ mod shared_repositories {
         second.panes[0].id = second.root_pane;
         initial.workspaces[0].tabs.push(second);
         initial.close = Some(CloseInventory {
-            controls: None,
+            controls: Vec::new(),
             boot: [9; 32],
             sessions: initial.workspaces[0]
                 .tabs

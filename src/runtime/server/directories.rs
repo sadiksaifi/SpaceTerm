@@ -1,6 +1,9 @@
 //! Bounded directory reads and explicit idempotent writes outside the terminal operation lock.
 use crate::platform::local_filesystem::LocalFilesystemError;
-use spaceterm_server::pane::directories::*;
+use super::dispatch::{HostRead, SettledRead};
+use spaceterm_server::connection::Wake;
+use spaceterm_server::pane::{Refusal, directories::*};
+use spaceterm_server::protocol::{ReplyBody, RequestId};
 use std::{
     collections::BTreeMap,
     path::Path,
@@ -14,19 +17,10 @@ use std::{
 };
 
 type Id = [u8; 32];
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum Kind {
-    Read,
-    Create,
-}
-enum Work {
+/// One directory operation the owning server performs for a client.
+pub(super) enum Work {
     Read(Operation),
     Create(std::path::PathBuf),
-}
-enum WorkerRequest {
-    Begin { id: u64, work: Work },
-    Poll { id: u64 },
-    Cancel { id: u64 },
 }
 struct Job {
     cancelled: Arc<AtomicBool>,
@@ -34,17 +28,24 @@ struct Job {
     worker: JoinHandle<()>,
     deadline: Instant,
 }
+/// Directory reads and creations, each on its own worker thread. A worker wakes the host when
+/// it settles, and the host collects what settled with [`DirectoryOperations::settled`].
 #[derive(Default)]
 pub(super) struct DirectoryOperations {
-    jobs: BTreeMap<(Id, Kind, u64), Job>,
+    jobs: BTreeMap<(Id, RequestId), Job>,
     retiring: Vec<Job>,
+    wake: Option<Arc<dyn Wake>>,
 }
 impl DirectoryOperations {
+    /// Every operation started from now on wakes `wake` when it settles.
+    pub(super) fn set_wake(&mut self, wake: Arc<dyn Wake>) {
+        self.wake = Some(wake);
+    }
     pub(super) fn cancel_connection(&mut self, connection: Id) {
         let keys: Vec<_> = self
             .jobs
             .keys()
-            .filter(|(c, _, _)| *c == connection)
+            .filter(|(c, _)| *c == connection)
             .copied()
             .collect();
         for key in keys {
@@ -58,124 +59,120 @@ impl DirectoryOperations {
             self.retiring.push(job);
         }
     }
-    fn cancel(&mut self, key: (Id, Kind, u64)) {
+    /// Stops operation `key`. A creation that already started keeps what it created.
+    pub(super) fn cancel(&mut self, key: (Id, RequestId)) {
         if let Some(job) = self.jobs.remove(&key) {
             job.cancelled.store(true, Ordering::Release);
             self.retiring.push(job);
         }
     }
-    /// Whether a job runs or awaits its deadline.
-    pub(super) fn busy(&self) -> bool {
-        !self.jobs.is_empty() || !self.retiring.is_empty()
+    /// When the earliest running operation outlasts its deadline.
+    pub(super) fn due(&self) -> Option<Instant> {
+        self.jobs.values().map(|job| job.deadline).min()
     }
+    /// Forgets workers that finished after their operation was cancelled.
     pub(super) fn tick(&mut self) {
-        let expired: Vec<_> = self
-            .jobs
-            .iter()
-            .filter(|(_, r)| Instant::now() >= r.deadline)
-            .map(|(key, _)| *key)
-            .collect();
-        for key in expired {
-            self.cancel(key);
-        }
         self.retiring.retain(|job| !job.worker.is_finished());
     }
-    pub(super) fn request(&mut self, connection: Id, request: Request) -> Result<Progress, Error> {
-        let request = match request {
-            Request::Begin { id, operation } => WorkerRequest::Begin {
-                id,
-                work: Work::Read(operation),
-            },
-            Request::Poll { id } => WorkerRequest::Poll { id },
-            Request::Cancel { id } => WorkerRequest::Cancel { id },
-        };
-        self.work(connection, Kind::Read, request)
-    }
-    pub(super) fn create(
-        &mut self,
-        connection: Id,
-        request: CreationRequest,
-    ) -> Result<Progress, Error> {
-        let request = match request {
-            CreationRequest::Begin { id, path } => WorkerRequest::Begin {
-                id,
-                work: Work::Create(path),
-            },
-            CreationRequest::Poll { id } => WorkerRequest::Poll { id },
-            CreationRequest::Cancel { id } => WorkerRequest::Cancel { id },
-        };
-        self.work(connection, Kind::Create, request)
-    }
-    fn work(
-        &mut self,
-        connection: Id,
-        kind: Kind,
-        request: WorkerRequest,
-    ) -> Result<Progress, Error> {
+    /// Starts `work` as operation `id` of `connection`. Its result arrives through
+    /// [`Self::settled`].
+    pub(super) fn begin(&mut self, connection: Id, id: RequestId, work: Work) -> Result<(), Error> {
         self.tick();
-        match request {
-            WorkerRequest::Cancel { id } => {
-                self.cancel((connection, kind, id));
-                Ok(Progress::Cancelled)
-            }
-            WorkerRequest::Begin { id, work } => {
-                if id == 0 || self.jobs.contains_key(&(connection, kind, id)) {
-                    return Err(Error::Unavailable);
-                }
-                if self.jobs.len() + self.retiring.len() >= 32
-                    || self
-                        .jobs
-                        .keys()
-                        .filter(|(c, _, _)| *c == connection)
-                        .count()
-                        >= 2
-                {
-                    return Err(Error::Capacity);
-                }
-                let cancelled = Arc::new(AtomicBool::new(false));
-                let token = Arc::clone(&cancelled);
-                let (sender, result) = mpsc::sync_channel(1);
-                let worker = std::thread::Builder::new()
-                    .name("spaceterm-directory-operation".into())
-                    .spawn(move || {
-                        let value = match work {
-                            Work::Read(operation) => read(operation, &token),
-                            Work::Create(path) => create(&path, &token),
-                        };
-                        if !token.load(Ordering::Acquire) {
-                            let _ = sender.send(value);
-                        }
-                    })
-                    .map_err(|_| Error::Capacity)?;
-                self.jobs.insert(
-                    (connection, kind, id),
-                    Job {
-                        cancelled,
-                        result,
-                        worker,
-                        deadline: Instant::now() + Duration::from_secs(10),
-                    },
-                );
-                Ok(Progress::Pending)
-            }
-            WorkerRequest::Poll { id } => {
-                let job = self
-                    .jobs
-                    .get(&(connection, kind, id))
-                    .ok_or(Error::Cancelled)?;
-                match job.result.try_recv() {
-                    Ok(value) => {
-                        self.cancel((connection, kind, id));
-                        value.map(Progress::Ready)
-                    }
-                    Err(mpsc::TryRecvError::Empty) => Ok(Progress::Pending),
-                    Err(_) => {
-                        self.cancel((connection, kind, id));
-                        Err(Error::Unavailable)
-                    }
-                }
-            }
+        if self.jobs.contains_key(&(connection, id)) {
+            return Err(Error::Unavailable);
         }
+        if self.jobs.len() + self.retiring.len() >= 32
+            || self
+                .jobs
+                .keys()
+                .filter(|(c, _)| *c == connection)
+                .count()
+                >= 2
+        {
+            return Err(Error::Capacity);
+        }
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let token = Arc::clone(&cancelled);
+        let wake = self.wake.clone();
+        let (sender, result) = mpsc::sync_channel(1);
+        let worker = std::thread::Builder::new()
+            .name("spaceterm-directory-operation".into())
+            .spawn(move || {
+                let value = match work {
+                    Work::Read(operation) => read(operation, &token),
+                    Work::Create(path) => create(&path, &token),
+                };
+                if !token.load(Ordering::Acquire) {
+                    let _ = sender.send(value);
+                    if let Some(wake) = wake {
+                        wake.wake();
+                    }
+                }
+            })
+            .map_err(|_| Error::Capacity)?;
+        self.jobs.insert(
+            (connection, id),
+            Job {
+                cancelled,
+                result,
+                worker,
+                deadline: Instant::now() + Duration::from_secs(10),
+            },
+        );
+        Ok(())
+    }
+    /// The operations that finished, and those that outlasted their deadline as
+    /// [`Error::Cancelled`], each under its connection and id.
+    pub(super) fn settled(&mut self) -> Vec<((Id, RequestId), Result<Value, Error>)> {
+        let now = Instant::now();
+        let mut settled = Vec::new();
+        let mut expired = Vec::new();
+        self.jobs.retain(|key, job| match job.result.try_recv() {
+            Ok(value) => {
+                settled.push((*key, value));
+                false
+            }
+            Err(mpsc::TryRecvError::Empty) if now < job.deadline => true,
+            Err(mpsc::TryRecvError::Empty) => {
+                expired.push(*key);
+                true
+            }
+            Err(mpsc::TryRecvError::Disconnected) => {
+                settled.push((*key, Err(Error::Unavailable)));
+                false
+            }
+        });
+        for key in expired {
+            self.cancel(key);
+            settled.push((key, Err(Error::Cancelled)));
+        }
+        settled
+    }
+    /// Starts a directory read or creation. `None` means it runs and settles through
+    /// [`Self::settled_reads`].
+    pub(super) fn read(
+        &mut self,
+        connection: Id,
+        id: RequestId,
+        read: HostRead,
+    ) -> Option<Result<ReplyBody, Refusal>> {
+        let work = match read {
+            HostRead::Directory(operation) => Work::Read(operation),
+            HostRead::Creation(creation) => Work::Create(creation.path),
+            HostRead::Worktree(_) => return Some(Err(Refusal::Unsupported)),
+        };
+        let started = self.begin(connection, id, work);
+        started.err().map(|error| Ok(ReplyBody::Directory(Err(error))))
+    }
+    pub(super) fn settled_reads(&mut self) -> Vec<SettledRead> {
+        self.settled()
+            .into_iter()
+            .map(|((connection, id), result)| SettledRead {
+                connection,
+                id,
+                reply: ReplyBody::Directory(result),
+            })
+            .collect()
     }
 }
 impl Drop for DirectoryOperations {
@@ -315,24 +312,40 @@ fn classify(error: LocalFilesystemError) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn directory_match(operation: Operation) -> Result<Value, Error> {
+    /// Operations that wake `woken` when one settles.
+    fn operations() -> (DirectoryOperations, mpsc::Receiver<()>) {
+        let (sender, woken) = mpsc::channel();
         let mut operations = DirectoryOperations::default();
-        assert!(matches!(
-            operations.request([1; 32], Request::Begin { id: 1, operation }),
-            Ok(Progress::Pending)
-        ));
-        let until = Instant::now() + Duration::from_secs(3);
+        operations.set_wake(Arc::new(move || {
+            let _ = sender.send(());
+        }));
+        (operations, woken)
+    }
+    /// Waits for operation `key` to settle.
+    fn settle(
+        operations: &mut DirectoryOperations,
+        woken: &mpsc::Receiver<()>,
+        key: (Id, RequestId),
+    ) -> Result<Value, Error> {
         loop {
-            match operations.request([1; 32], Request::Poll { id: 1 }) {
-                Ok(Progress::Ready(value)) => return Ok(value),
-                Err(error) => return Err(error),
-                Ok(Progress::Pending) => {
-                    assert!(Instant::now() < until, "directory matching did not finish");
-                    std::thread::sleep(Duration::from_millis(5));
-                }
-                _ => panic!("unexpected directory matching progress"),
+            if let Some((_, result)) = operations
+                .settled()
+                .into_iter()
+                .find(|(settled, _)| *settled == key)
+            {
+                return result;
             }
+            woken
+                .recv_timeout(Duration::from_secs(3))
+                .expect("directory operation did not settle");
         }
+    }
+    fn directory_match(operation: Operation) -> Result<Value, Error> {
+        let (mut operations, woken) = operations();
+        operations
+            .begin([1; 32], RequestId(1), Work::Read(operation))
+            .unwrap();
+        settle(&mut operations, &woken, ([1; 32], RequestId(1)))
     }
 
     #[test]
@@ -487,22 +500,15 @@ mod tests {
             u64::from_ne_bytes(super::super::nonce().unwrap()[..8].try_into().unwrap())
         ));
         std::fs::create_dir(&root).unwrap();
-        let mut operations = DirectoryOperations::default();
-        assert!(matches!(
-            operations.create(
-                [1; 32],
-                CreationRequest::Begin {
-                    id: 1,
-                    path: root.join("parent/child")
-                }
-            ),
-            Ok(Progress::Pending)
-        ));
+        let (mut operations, _woken) = operations();
+        operations
+            .begin([1; 32], RequestId(1), Work::Create(root.join("parent/child")))
+            .unwrap();
         // Wait for the actual write, leaving its result unobserved before cancellation.
         let until = Instant::now() + Duration::from_secs(2);
         while !operations
             .jobs
-            .get(&([1; 32], Kind::Create, 1))
+            .get(&([1; 32], RequestId(1)))
             .unwrap()
             .worker
             .is_finished()
@@ -510,20 +516,10 @@ mod tests {
             assert!(Instant::now() < until, "creation worker did not finish");
             std::thread::sleep(Duration::from_millis(5));
         }
-        assert!(matches!(
-            operations.create([2; 32], CreationRequest::Cancel { id: 1 }),
-            Ok(Progress::Cancelled)
-        ));
-        assert!(operations.jobs.contains_key(&([1; 32], Kind::Create, 1)));
-        assert!(matches!(
-            operations.request([1; 32], Request::Poll { id: 1 }),
-            Err(Error::Cancelled)
-        ));
+        operations.cancel(([2; 32], RequestId(1)));
+        assert!(operations.jobs.contains_key(&([1; 32], RequestId(1))));
         operations.cancel_connection([1; 32]);
-        assert!(matches!(
-            operations.create([1; 32], CreationRequest::Poll { id: 1 }),
-            Err(Error::Cancelled)
-        ));
+        assert!(operations.settled().is_empty());
         assert!(root.join("parent/child").is_dir());
         assert!(matches!(
             create(&root.join("cancelled"), &AtomicBool::new(true)),
@@ -536,61 +532,33 @@ mod tests {
     fn reads_and_creation_share_the_same_per_connection_capacity() {
         let mut operations = DirectoryOperations::default();
         for id in [1, 2] {
-            assert!(matches!(
-                operations.request(
-                    [1; 32],
-                    Request::Begin {
-                        id,
-                        operation: Operation::Home
-                    }
-                ),
-                Ok(Progress::Pending)
-            ));
+            operations
+                .begin([1; 32], RequestId(id), Work::Read(Operation::Home))
+                .unwrap();
         }
         assert!(matches!(
-            operations.create(
+            operations.begin(
                 [1; 32],
-                CreationRequest::Begin {
-                    id: 3,
-                    path: std::path::PathBuf::from("/unused")
-                }
+                RequestId(3),
+                Work::Create(std::path::PathBuf::from("/unused"))
             ),
             Err(Error::Capacity)
         ));
     }
     #[test]
     fn cancelled_reads_are_fenced_to_their_own_connection() {
-        let mut reads = DirectoryOperations::default();
+        let (mut reads, woken) = operations();
         for connection in [[1; 32], [2; 32]] {
-            assert!(matches!(
-                reads.request(
-                    connection,
-                    Request::Begin {
-                        id: 1,
-                        operation: Operation::Home
-                    }
-                ),
-                Ok(Progress::Pending)
-            ));
+            reads
+                .begin(connection, RequestId(1), Work::Read(Operation::Home))
+                .unwrap();
         }
         reads.cancel_connection([1; 32]);
-        assert!(matches!(
-            reads.request([1; 32], Request::Poll { id: 1 }),
-            Err(Error::Cancelled)
-        ));
-        let until = Instant::now() + Duration::from_secs(2);
-        loop {
-            match reads.request([2; 32], Request::Poll { id: 1 }) {
-                Ok(Progress::Ready(Value::Directory(path))) => {
-                    assert!(path.is_absolute());
-                    break;
-                }
-                Ok(Progress::Pending) if Instant::now() < until => {
-                    std::thread::sleep(Duration::from_millis(5))
-                }
-                _ => panic!("other connection's read was cancelled"),
-            }
-        }
+        let Ok(Value::Directory(path)) = settle(&mut reads, &woken, ([2; 32], RequestId(1))) else {
+            panic!("other connection's read was cancelled");
+        };
+        assert!(path.is_absolute());
+        assert!(reads.settled().is_empty());
     }
     #[test]
     fn listings_bound_rows_bytes_and_visited_entries_without_creating_anything() {

@@ -13,28 +13,8 @@ impl std::fmt::Debug for Target {
         f.write_str("DirectoryRecoveryTarget(<redacted>)")
     }
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub enum Request {
-    Begin { id: u64, operation: Operation },
-    Poll { id: u64 },
-    Cancel { id: u64 },
-}
-/// An explicit, idempotent filesystem write, independent of Workspace or pin edits.
-/// Cancellation prevents a creation that has not started. Directories already created are never
-/// rolled back.
-#[derive(Clone, Serialize, Deserialize)]
-pub enum CreationRequest {
-    Begin { id: u64, path: PathBuf },
-    Poll { id: u64 },
-    Cancel { id: u64 },
-}
-impl std::fmt::Debug for CreationRequest {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("DirectoryCreation(<redacted>)")
-    }
-}
-/// Creates a directory and any missing parents. The protocol's form of
-/// [`CreationRequest::Begin`]; its reply follows when the write settles.
+/// Creates a directory and any missing parents: an explicit, idempotent filesystem write,
+/// independent of Workspace or pin edits.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Creation {
     pub path: PathBuf,
@@ -78,12 +58,6 @@ impl std::fmt::Debug for Value {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("DirectoryValue(<redacted>)")
     }
-}
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub enum Progress {
-    Pending,
-    Ready(Value),
-    Cancelled,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Error {
