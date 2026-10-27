@@ -84,6 +84,27 @@ Finish Update resumes the original admitted local operation. Headless controls e
 
 An interrupted Stop dispatch may require finishing the original run through the local service manager before Finish Update. Recovery waits for the next desktop launch or local service invocation; no permanent helper runs. Unresolved process cleanup blocks return to a previous runtime.
 
+## Measure terminal latency
+
+The `bench:latency:*` tasks measure an installed or running build. The latency tasks print p50, p90, p99, max, min and mean in milliseconds, then the raw samples. `mise run <task> --help` lists every option.
+
+| Task | Measures |
+|---|---|
+| `bench:latency:keystroke:macos` | Keystroke to pixels in the focused Pane of the frontmost SpaceTerm Preflight, SpaceTerm Development or Terminal.app window |
+| `bench:latency:scroll:macos` | Wheel scrolling to pixels within 3000 lines of history in that Pane |
+| `bench:latency:workload:macos` | Keystroke to pixels idle, then beside a visible Pane running `bench:workload`, and the change in p99 |
+| `bench:latency:idle:macos` | Bytes per second on the app's TCP connections while its Panes stay idle |
+| `bench:latency:protocol` | Request round trip and key-to-echo through the SpaceTerm protocol, over account-local IPC or paired WSS |
+| `bench:latency:ssh` | One-byte SSH echo through a raw `cat` on a remote host |
+| `bench:latency:tcp` | TCP connect time to a remote port |
+| `bench:latency:route` | Checks that the route to a remote host uses the expected interface, and fails otherwise |
+
+The pixel tasks post keyboard and wheel events and capture the screen with ScreenCaptureKit at up to 240 fps. The app that runs them, such as Terminal, needs Accessibility and Screen Recording permission in System Settings > Privacy & Security. They need a US keyboard layout and a shell prompt in the focused Pane. They type commands into that Pane, force a steady cursor and restore it afterwards. Leave the keyboard, mouse and screen alone until they finish. Two pixel tasks never run at once; the second waits for `/tmp/spaceterm-screen.lock`. The workload task splits the focused Pane to the right, runs `bench:workload` from the same checkout path on the Pane's host, then closes that Pane.
+
+`bench:latency:protocol` creates a probe Workspace with its own client identity and closes it afterwards. A paired run enrolls a fresh pairing and revokes it afterwards. `--owner-host` runs the owner side through SSH on the server's machine, which needs this repository at the same commit. Without it, the server must run on this machine, and `--expose ADDRESS` enables its network exposure for the run. Exposure is disabled again afterwards, but the address stays configured. The probe's protocol calls live in [one module](../crates/spaceterm-server-host/examples/latency_probe/protocol.rs).
+
+Remote tasks accept `--interface`, and the pixel and idle tasks also take `--route-host`. With them, a task refuses to run unless the route to the remote host uses that interface and every established TCP connection to it uses an address on that interface. Use them to keep a wired batch on Ethernet.
+
 ## Replace incompatible development state
 
 Obsolete server-client formats are replaced directly under [ADR 0035](adr/0035-negotiate-one-protocol-major.md). Quit desktops and finish server shutdown before resetting local state. Complete or reconcile started operations and Git writes first. A retained endpoint, active lock or unresolved service cleanup refuses reset. Never remove a socket or signal a saved PID to bypass ownership checks.
