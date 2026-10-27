@@ -12,6 +12,12 @@ use std::sync::{
 };
 use std::time::Duration;
 
+/// How long the interim exchange waits before asking again about an edit that waits for a
+/// Worktree write. Deleted when the server defers `Mutate` replies until the outcome settles.
+const PENDING_RETRY: Duration = Duration::from_millis(100);
+/// How often the interim exchange reads the inventory. Deleted when the server pushes it.
+const INVENTORY_POLL: Duration = Duration::from_millis(150);
+
 #[derive(Clone)]
 pub(crate) struct SharedWorkspaceSnapshot {
     pub end_all_sessions: bool,
@@ -182,6 +188,26 @@ struct FinishedOperation {
     reconciled: Option<(Inventory, u64)>,
 }
 
+/// Dispatches an Original Operation with its original identity and returns its settled outcome.
+/// The server replays an outcome it already recorded, so dispatching again after a lost reply
+/// never repeats the edit, and an operation the server never received is applied once.
+fn dispatch(
+    connection: &mut PaneConnection,
+    sequence: u64,
+    mutation: &Mutation,
+) -> Result<RetainedOutcome, ServerError> {
+    loop {
+        match connection.exchange(&Request::Mutate {
+            sequence,
+            mutation: mutation.clone(),
+        })? {
+            Reply::Outcome(outcome) => return Ok(outcome),
+            Reply::MutationPending => std::thread::sleep(PENDING_RETRY),
+            _ => return Err(ServerError::Protocol),
+        }
+    }
+}
+
 fn finish(
     connection: &mut PaneConnection,
     journal: &mut ClientJournal,
@@ -198,27 +224,9 @@ fn finish(
     let result = if let Some(result) = pending.result {
         result
     } else {
-        let resolved = loop {
-            let reply = match connection.exchange(&Request::Resolve {
-                sequence: pending.sequence,
-            }) {
-                Ok(reply) => reply,
-                Err(ServerError::SessionUnavailable) => connection.exchange(&Request::Mutate {
-                    sequence: pending.sequence,
-                    mutation: pending.mutation.clone(),
-                })?,
-                Err(error) => return Err(error),
-            };
-            if matches!(reply, Reply::MutationPending) {
-                std::thread::sleep(Duration::from_millis(100));
-                continue;
-            }
-            break reply;
-        };
-        let Reply::Outcome(outcome) = resolved else {
-            return Err(ServerError::Protocol);
-        };
-        // Reconcile the accepted membership before retiring the operation identity.
+        let outcome = dispatch(connection, pending.sequence, &pending.mutation)?;
+        // The outcome is in the revision before its reply. Reconcile that membership before
+        // retiring the operation identity.
         reconciled = Some(inventory(connection, controls)?);
         journal.complete(outcome.clone())?;
         outcome
@@ -261,6 +269,13 @@ fn run(
             let mut journal = server.shared_journal()?;
             // Authoritative reconciliation always precedes a retry of a previously submitted edit.
             let (initial, mut sequence) = inventory(&mut connection, &controls)?;
+            // The server forgets an outcome only once acknowledged, and nothing confirms that the
+            // last acknowledgement arrived. Repeating it is harmless.
+            if let Some(last) = journal.last() {
+                connection.exchange(&Request::Acknowledge {
+                    sequence: last.sequence,
+                })?;
+            }
             state.publish(|s| {
                 s.worktree_writes = connection.worktree_writes();
                 s.end_all_sessions = connection.supports_end_all_sessions();
@@ -298,7 +313,7 @@ fn run(
                     return Ok(());
                 }
                 attachments.release_pending(&mut connection)?;
-                match commands.recv_timeout(Duration::from_millis(150)) {
+                match commands.recv_timeout(INVENTORY_POLL) {
                     Ok(mutation) => {
                         active = Some((sequence, mutation.clone()));
                         journal.submit(sequence, mutation)?;

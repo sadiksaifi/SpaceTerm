@@ -624,11 +624,11 @@ impl State {
         {
             return Err(Refusal::Stale);
         }
-        let d = self
-            .devices
-            .iter_mut()
-            .find(|d| d.device == device)
-            .ok_or(Refusal::Missing)?;
+        // A client repeats its last acknowledgement after reconnecting, because nothing confirms
+        // that the first one arrived. An outcome this server never recorded needs no retiring.
+        let Some(d) = self.devices.iter_mut().find(|d| d.device == device) else {
+            return Ok(());
+        };
         if sequence <= d.retired {
             return Ok(());
         }
@@ -2161,6 +2161,31 @@ mod tests {
                 .is_err()
         );
         assert_eq!(state.inventory.workspaces.len(), 1);
+    }
+
+    #[test]
+    fn a_repeated_acknowledgement_retires_nothing_else() {
+        let mut state = State::empty();
+        assert_eq!(
+            state.acknowledge([1; 32], 4),
+            Ok(()),
+            "nothing recorded yet"
+        );
+        let create = |name: &str| Mutation::CreateWorkspace {
+            name: name.into(),
+            directory: None,
+        };
+        state
+            .apply([1; 32], 1, create("First"), "/tmp".as_ref(), |_| true)
+            .unwrap();
+        state.acknowledge([1; 32], 1).unwrap();
+        state
+            .apply([1; 32], 2, create("Second"), "/tmp".as_ref(), |_| true)
+            .unwrap();
+        let before = state.clone();
+        assert_eq!(state.acknowledge([1; 32], 1), Ok(()));
+        assert!(state == before, "the newer outcome stays recorded");
+        assert!(state.outcome([1; 32], 2).is_some());
     }
 
     #[test]
