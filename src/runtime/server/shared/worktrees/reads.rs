@@ -1,4 +1,5 @@
-//! Connection-scoped Git reads. Polling never waits for a Git process.
+//! Connection-scoped Git reads. The server looks at a running read on its tick and replies when
+//! it settles; nothing waits for a Git process.
 use super::*;
 use std::collections::BTreeMap;
 
