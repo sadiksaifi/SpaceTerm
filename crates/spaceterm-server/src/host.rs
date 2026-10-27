@@ -581,7 +581,9 @@ fn serve_runtime_ready(
     let _ = sync.flush();
     panes.lock().unwrap_or_else(|e| e.into_inner()).shutdown()?;
     let _ = sync.flush();
+    // The service and every connection's environment hold the last clones of the sync worker.
     drop(environment);
+    drop(panes);
     drop(sync);
     let _ = sync_thread.join();
     runtime.verify_path(&paths.runtime)?;
@@ -1506,8 +1508,10 @@ mod startup_tests {
                 data: root.join("d"),
                 runtime: root.join("r"),
             },
-            Some(crate::panes(move |_| {
+            // Like a real service, this one keeps the shared sync worker until it is dropped.
+            Some(crate::panes(move |sync| {
                 Ok(Answering(move |operation| {
+                    let _ = &sync;
                     if stopped {
                         late.fetch_add(1, Ordering::SeqCst);
                     }
