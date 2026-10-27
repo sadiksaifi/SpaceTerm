@@ -254,29 +254,37 @@ fn write_header(header: &mut [u8], kind: u8, body: usize) {
     header[4] = kind;
 }
 
-/// Splits a byte stream into whole frames. Account-local carriers feed it what they read.
+/// Splits a byte stream into whole frames. Account-local carriers feed it what they read, then
+/// call [`FrameReader::next_frame`] until it returns `Ok(None)`.
 #[derive(Default)]
 pub struct FrameReader {
     buffer: Vec<u8>,
+    /// Bytes before this offset are already returned as frames.
+    read: usize,
 }
 
 impl FrameReader {
+    /// Appends received bytes, first discarding the frames already returned.
     pub fn feed(&mut self, bytes: &[u8]) {
+        if self.read > 0 {
+            self.buffer.drain(..self.read);
+            self.read = 0;
+        }
         self.buffer.extend_from_slice(bytes);
     }
 
     /// The next whole frame, if one has arrived. An error is final for the connection.
     pub fn next_frame(&mut self) -> Result<Option<RawFrame>, DecodeError> {
-        let Some((frame, used)) = parse_prefix(&self.buffer)? else {
+        let Some((frame, used)) = parse_prefix(&self.buffer[self.read..])? else {
             return Ok(None);
         };
-        self.buffer.drain(..used);
+        self.read += used;
         Ok(Some(frame))
     }
 
     /// Whether a frame is partly received.
     pub fn partial(&self) -> bool {
-        !self.buffer.is_empty()
+        self.read < self.buffer.len()
     }
 }
 

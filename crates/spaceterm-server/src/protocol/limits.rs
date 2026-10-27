@@ -32,8 +32,20 @@ pub const MAX_UPDATE_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_REPLY_BYTES: usize = 16 * 1024 * 1024;
 /// Largest Pane event, which can carry a clipboard write.
 pub const MAX_PANE_EVENT_BYTES: usize = crate::pane::effects::MAX_CLIPBOARD_BYTES + 64 * 1024;
-/// Largest Workspace inventory revision.
-pub const MAX_INVENTORY_BYTES: usize = 4 * 1024 * 1024;
+/// Largest Pane presentation metadata: every bounded string at its character limit, four bytes
+/// per character.
+pub const MAX_PANE_METADATA_BYTES: usize = 4
+    * (2 * crate::pane::metadata::MAX_TITLE_CHARS
+        + crate::pane::metadata::MAX_TITLE_CHARS
+        + 2 * crate::pane::metadata::MAX_DIRECTORY_CHARS
+        + 2 * crate::pane::metadata::MAX_MACHINE_CHARS
+        + crate::pane::metadata::MAX_COMMAND_CHARS);
+/// Largest path a Pane carries, four of which it may carry.
+pub const MAX_PATH_BYTES: usize = 4096;
+/// Largest Workspace inventory revision: every Pane at its metadata and path limits, doubled for
+/// Workspaces, Tabs, repository facts and encoding overhead.
+pub const MAX_INVENTORY_BYTES: usize =
+    2 * crate::hierarchy::MAX_PANES * (MAX_PANE_METADATA_BYTES + 4 * MAX_PATH_BYTES);
 
 /// Requests one client keeps in flight on one connection.
 pub const MAX_REQUESTS_IN_FLIGHT: usize = 64;
@@ -58,8 +70,11 @@ pub const FRAME_RATES: [u8; 2] = [60, 120];
 
 /// L0 frames a writer queues before the connection is `Stalled`.
 pub const MAX_L0_FRAMES: usize = 256;
-/// L0 bytes a writer queues before the connection is `Stalled`.
+/// L0 bytes a server queues before the connection is `Stalled`.
 pub const MAX_L0_BYTES: usize = 1024 * 1024;
+/// Client L0 bytes queued for input, acknowledgements, views and pings, excluding requests,
+/// which [`MAX_REQUESTS_IN_FLIGHT`] bounds. Holds a whole [`MAX_PASTE_BYTES`] paste with headroom.
+pub const MAX_CLIENT_L0_BYTES: usize = 2 * MAX_PASTE_BYTES;
 /// L1 messages a server queues before the connection is `Stalled`.
 pub const MAX_L1_MESSAGES: usize = 4096;
 /// L2 messages a server queues before the connection is `Stalled`.

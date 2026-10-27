@@ -59,8 +59,9 @@ pub struct Request {
 /// One ordered batch of terminal input for one channel, applied or discarded as a whole.
 ///
 /// Serials start at 1 on each channel and increase by exactly 1 per message. A gap or repeat is a
-/// protocol violation. Every event except `Focus` is accepted only under the server's current
-/// focus generation, which equals `generation` once a leading `Focus` event applies.
+/// protocol violation. Every event except `Focus` and `Resize` is accepted only under the server's
+/// current focus generation, which equals `generation` once a leading `Focus` event applies.
+/// `Resize` is never fenced by focus.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Input {
     pub channel: Channel,
@@ -78,7 +79,9 @@ pub enum InputEvent {
     Pointer(Pointer),
     Wheel(Wheel),
     /// One chunk of a paste. The server settles the paste after the chunk with `last` set and
-    /// reports the outcome as `PaneEvent::Input`.
+    /// reports the outcome as `PaneEvent::Input` for that message. A discarded or missing chunk
+    /// aborts the whole paste, and nothing partial reaches the PTY. A paste over
+    /// [`limits::MAX_PASTE_BYTES`] settles as `PasteRejection::TooLarge`.
     Paste {
         text: String,
         last: bool,
@@ -212,6 +215,10 @@ pub enum Fatal {
     Stopping,
     #[error("The peers have no compatible protocol.")]
     Incompatible,
+    /// The sender failed on its own, for example a frame it could not encode. Not the
+    /// receiver's fault.
+    #[error("The peer failed.")]
+    Internal,
 }
 
 impl ClientMessage {
