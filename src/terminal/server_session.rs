@@ -735,7 +735,7 @@ impl Drop for PresentationHandle {
     fn drop(&mut self) {
         self.state.effect_authority.client_focus(None);
         self.alive.store(false, Ordering::Release);
-        // The worker retires this presentation now rather than at its next output check.
+        // Wakes the worker, which retires this presentation at once.
         self.state.wake.notify();
     }
 }

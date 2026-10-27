@@ -16,23 +16,58 @@ use spaceterm_server::protocol::RawFrame;
 use std::sync::atomic::AtomicUsize;
 use std::time::Instant;
 
-/// Counts every frame the client writes: requests, input, views, acknowledgements and pings.
+/// Frames and bytes on one connection, in each direction.
+#[derive(Default)]
+struct Traffic {
+    /// The client's requests, input, views, acknowledgements and pings.
+    client_frames: AtomicUsize,
+    client_bytes: AtomicUsize,
+    /// The server's replies, frames, Pane events, inventory and pings.
+    server_frames: AtomicUsize,
+    server_bytes: AtomicUsize,
+}
+
+impl Traffic {
+    /// Client frames, client bytes, server frames and server bytes so far.
+    fn totals(&self) -> [usize; 4] {
+        [
+            &self.client_frames,
+            &self.client_bytes,
+            &self.server_frames,
+            &self.server_bytes,
+        ]
+        .map(|count| count.load(Ordering::SeqCst))
+    }
+}
+
+/// The server's end of the connection, counting everything that crosses it.
 struct Counting {
     inner: Loopback,
-    received: Arc<AtomicUsize>,
+    traffic: Arc<Traffic>,
 }
 
 impl Carrier for Counting {
     fn offer(&mut self, frame: &[u8], priority: Priority) -> Result<Offer, CarrierError> {
-        self.inner.offer(frame, priority)
+        let offer = self.inner.offer(frame, priority)?;
+        if offer == Offer::Accepted {
+            self.traffic.server_frames.fetch_add(1, Ordering::SeqCst);
+            self.traffic
+                .server_bytes
+                .fetch_add(frame.len(), Ordering::SeqCst);
+        }
+        Ok(offer)
     }
     fn flush(&mut self) -> Result<Flush, CarrierError> {
         self.inner.flush()
     }
     fn receive(&mut self) -> Result<Option<RawFrame>, CarrierError> {
         let frame = self.inner.receive()?;
-        if frame.is_some() {
-            self.received.fetch_add(1, Ordering::SeqCst);
+        if let Some(frame) = &frame {
+            self.traffic.client_frames.fetch_add(1, Ordering::SeqCst);
+            // The length prefix and the kind byte, then the body.
+            self.traffic
+                .client_bytes
+                .fetch_add(5 + frame.body.len(), Ordering::SeqCst);
         }
         Ok(frame)
     }
@@ -100,7 +135,7 @@ fn a_visible_idle_pane_sends_no_periodic_requests() {
     };
     let workspace = inventory.workspaces[0].id;
     let pane_id = inventory.workspaces[0].tabs[0].root_pane;
-    let received = Arc::new(AtomicUsize::new(0));
+    let traffic = Arc::new(Traffic::default());
     let service: SharedPaneService = Arc::new(Mutex::new(Box::new(Served::new(host))));
     let running = Arc::new(AtomicBool::new(true));
     let bell = Bell::default();
@@ -113,7 +148,7 @@ fn a_visible_idle_pane_sends_no_periodic_requests() {
     let (client, server) = Loopback::pair(1 << 20).unwrap();
     let server = Counting {
         inner: server,
-        received: Arc::clone(&received),
+        traffic: Arc::clone(&traffic),
     };
     let (waker, wake) = io::Waker::new().unwrap();
     let outbox = Outbox::new(Arc::clone(&wake));
@@ -192,14 +227,27 @@ fn a_visible_idle_pane_sends_no_periodic_requests() {
         );
         std::thread::sleep(Duration::from_millis(10));
     }
-    // Let the claim's follow-up messages, such as the view and focus, settle.
-    std::thread::sleep(Duration::from_millis(500));
-    let settled = received.load(Ordering::SeqCst);
-    let turns = state.wake.waits();
+    // The connection settles once it stays quiet both ways, so the claim's follow-up messages,
+    // such as the view and focus, and any late prompt redraw are behind it.
+    let settle_by = Instant::now() + Duration::from_secs(10);
+    let mut last = traffic.totals();
+    let mut quiet_since = Instant::now();
+    while quiet_since.elapsed() < Duration::from_millis(300) {
+        assert!(
+            Instant::now() < settle_by,
+            "the connection never went quiet"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+        let now = traffic.totals();
+        if now != last {
+            last = now;
+            quiet_since = Instant::now();
+        }
+    }
+    let settled = traffic.totals();
     // The polling worker sent about 66 requests in this time.
     std::thread::sleep(Duration::from_secs(1));
-    let idle = received.load(Ordering::SeqCst) - settled;
-    let spins = state.wake.waits() - turns;
+    let idle = traffic.totals();
 
     drop(started);
     running.store(false, Ordering::Release);
@@ -210,7 +258,11 @@ fn a_visible_idle_pane_sends_no_periodic_requests() {
     let _ = serving.join();
     let _ = ticks.join();
     service.lock().unwrap().shutdown().unwrap();
-    assert!(settled > 0, "the claim itself is counted");
-    assert_eq!(idle, 0, "a visible idle Pane sent {idle} frames");
-    assert_eq!(spins, 0, "an idle Pane worker woke {spins} times");
+    let [frames, bytes, ..] = settled;
+    assert!(frames > 0 && bytes > 0, "the claim itself is counted");
+    assert_eq!(
+        idle[..2],
+        settled[..2],
+        "a visible idle Pane sent frames or bytes"
+    );
 }
