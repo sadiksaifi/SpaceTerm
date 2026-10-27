@@ -702,6 +702,24 @@ fn test_launch_planner() -> ShellLaunchPlanner {
 }
 
 impl TerminalRuntime {
+    /// Applies ordered keys and reports, after the worker applies them, whether any wrote
+    /// bytes to the PTY. A stopped worker reports nothing.
+    pub(crate) fn key_batch(&self, inputs: Vec<KeyInput>) -> mpsc::Receiver<bool> {
+        let (written, report) = mpsc::sync_channel(1);
+        let Some(commands) = &self.commands else {
+            return report;
+        };
+        for _ in &inputs {
+            spaceterm_server::measurement::record(
+                spaceterm_server::measurement::Event::KeyQueueStarted,
+            );
+        }
+        if commands.send(Command::Keys(inputs, written)).is_err() {
+            eprintln!("terminal key input was dropped because the worker has stopped");
+        }
+        report
+    }
+
     pub(crate) fn forward_copy_shortcut(&self, modifiers: InputModifiers) {
         let (reply, _receiver) = mpsc::sync_channel(1);
         if let Some(commands) = &self.commands {
@@ -1207,6 +1225,8 @@ enum Command {
         clipboard: async_channel::Sender<ClipboardRequest>,
     },
     Key(KeyInput),
+    /// Ordered keys, then whether any of them wrote bytes to the PTY.
+    Keys(Vec<KeyInput>, mpsc::SyncSender<bool>),
     ClearScreenAndScrollback,
     Focus(bool),
     FocusPasteConfirmation(PasteConfirmationId),
@@ -1312,6 +1332,7 @@ impl fmt::Debug for Command {
             Self::RouteClientEffects => "RouteClientEffects",
             Self::Subscribe { .. } => "Subscribe",
             Self::Key(..) => "Key",
+            Self::Keys(..) => "Keys",
             Self::ClearScreenAndScrollback => "ClearScreenAndScrollback",
             Self::Focus(..) => "Focus",
             Self::FocusPasteConfirmation(..) => "FocusPasteConfirmation",
@@ -1590,6 +1611,7 @@ impl TerminalWorker {
             let postpone_compression = matches!(
                 &command,
                 Command::Key(..)
+                    | Command::Keys(..)
                     | Command::ReaderReady(_)
                     | Command::RequestPaste(..)
                     | Command::ResolvePaste(..)
@@ -1871,6 +1893,16 @@ impl TerminalWorker {
                 ))
             }
             Command::Key(input) => self.process_key(input),
+            Command::Keys(inputs, written) => {
+                let mut wrote = false;
+                for input in inputs {
+                    if !self.apply_key(input, &mut wrote) {
+                        return false;
+                    }
+                }
+                let _ = written.try_send(wrote);
+                true
+            }
             Command::ClearScreenAndScrollback => {
                 let action = self.emulator.clear_screen_and_scrollback();
                 self.apply_emulator_action(action)
@@ -2570,12 +2602,20 @@ impl TerminalWorker {
     }
 
     fn process_key(&mut self, input: KeyInput) -> bool {
+        self.apply_key(input, &mut false)
+    }
+
+    /// Applies one key and notes in `wrote` whether it wrote bytes to the PTY.
+    fn apply_key(&mut self, input: KeyInput, wrote: &mut bool) -> bool {
         spaceterm_server::measurement::record(spaceterm_server::measurement::Event::KeyProcessed);
         if !self.held_keys.route(&input) {
             return true;
         }
         match self.emulator.key(input) {
-            Ok(action) => self.apply_terminal_input_action(action),
+            Ok(action) => {
+                *wrote |= !action.bytes.is_empty();
+                self.apply_terminal_input_action(action)
+            }
             Err(message) => {
                 self.send_runtime_failure(message);
                 false

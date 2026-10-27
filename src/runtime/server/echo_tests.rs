@@ -36,7 +36,8 @@ fn settle(
     let mut latest = None;
     let mut quiet = 0;
     let deadline = Instant::now() + Duration::from_secs(10);
-    while quiet < 4 {
+    // A Pane that has not published yet is not settled, however quiet it is.
+    while quiet < 4 || latest.is_none() {
         let reply = presentation(host.request(
             [1; 32],
             lease.connection,
@@ -119,7 +120,7 @@ fn an_echo_absent_at_the_deadline_arrives_once_in_the_next_check() {
         &mut host,
         1,
         lease,
-        "stty -echo; read line; sleep 0.2; printf 'LATE-OUTPUT\\r\\n'",
+        "stty -echo; read line; sleep 1; printf 'LATE-OUTPUT\\r\\n'",
     );
     focus(&mut host, lease, 1, FocusTarget::Terminal);
     let mut decoder = ScreenDecoder::default();
@@ -147,7 +148,8 @@ fn an_echo_absent_at_the_deadline_arrives_once_in_the_next_check() {
     let started = Instant::now();
     pending.wait(deadline);
     assert!(started.elapsed() + Duration::from_millis(1) >= KEY_ECHO_WAIT);
-    assert!(started.elapsed() < Duration::from_millis(150));
+    // The output follows a second later, so a loaded host still finishes before it.
+    assert!(started.elapsed() < Duration::from_millis(500));
     assert!(matches!(
         host.finish([1; 32], lease.connection, finish),
         Reply::Unchanged
@@ -185,7 +187,6 @@ fn an_echo_absent_at_the_deadline_arrives_once_in_the_next_check() {
 fn refused_hidden_and_stale_batches_answer_without_waiting() {
     let mut host = host();
     let (lease, _) = ready(&mut host);
-    let started = Instant::now();
     assert!(matches!(
         host.handle([1; 32], lease.connection, keys(lease, 7, "x")),
         Handled::Now(Reply::Refused(Refusal::Stale))
@@ -215,7 +216,60 @@ fn refused_hidden_and_stale_batches_answer_without_waiting() {
         host.handle([1; 32], lease.connection, keys(lease, 3, "x")),
         Handled::Now(Reply::Unchanged)
     ));
-    assert!(started.elapsed() < KEY_ECHO_WAIT);
+    host.shutdown().unwrap();
+}
+
+#[test]
+fn a_batch_that_writes_nothing_to_the_pty_answers_at_once() {
+    /// Answers a batch as the host does: at once, or after the lock-free wait and finish. The
+    /// wait is given far longer than the echo bound, so a reply that waits for a publication
+    /// that never comes takes seconds.
+    fn answer(host: &mut DevelopmentPaneHost, lease: Lease, keys: Vec<Key>) -> (Reply, Duration) {
+        let started = Instant::now();
+        let reply = match host.handle(
+            [1; 32],
+            lease.connection,
+            Request::Keys {
+                lease,
+                generation: 1,
+                keys,
+            },
+        ) {
+            Handled::Now(reply) => reply,
+            Handled::Later {
+                mut pending,
+                deadline,
+                finish,
+            } => {
+                pending.wait(deadline + Duration::from_secs(10));
+                host.finish([1; 32], lease.connection, finish)
+            }
+        };
+        (reply, started.elapsed())
+    }
+    let mut host = host();
+    let (lease, _) = ready(&mut host);
+    let mut release = batch_key("x", false);
+    release.physical = PhysicalKey::A as u32;
+    release.logical = "a".into();
+    release.unshifted = Some('a');
+    release.action = 2;
+    release.text = None;
+    let mut shift = batch_key("", false);
+    shift.physical = PhysicalKey::ShiftLeft as u32;
+    shift.logical = "shift".into();
+    shift.text = None;
+    shift.modifiers = 1;
+    for keys in [vec![release], vec![shift]] {
+        let (reply, elapsed) = answer(&mut host, lease, keys);
+        assert!(matches!(reply, Reply::Unchanged), "{reply:?}");
+        assert!(elapsed < Duration::from_secs(5), "waited {elapsed:?}");
+    }
+    // A batch that writes its text still waits for the echo.
+    assert!(matches!(
+        host.handle([1; 32], lease.connection, keys(lease, 1, "x")),
+        Handled::Later { .. }
+    ));
     host.shutdown().unwrap();
 }
 

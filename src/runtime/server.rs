@@ -106,6 +106,8 @@ struct OwnedPane {
     accessibility: accessibility::Accessibility,
     /// The one accepted key batch whose reply may still carry the next publication.
     echo: Option<echo::Echo>,
+    /// The key batch this request applied, until its reply decides whether to wait.
+    applied_keys: Option<echo::Applied>,
 }
 /// What one output check asks for beyond its presentation.
 #[derive(Clone, Copy)]
@@ -342,6 +344,7 @@ impl DevelopmentPaneHost {
             reading: reading::Reading::default(),
             accessibility: accessibility::Accessibility::default(),
             echo: None,
+            applied_keys: None,
         });
         self.dormant = None;
         Ok(lease)
@@ -1094,9 +1097,12 @@ impl OwnedPane {
                 Ok(key)
             })
             .collect::<Result<Vec<_>, Refusal>>()?;
-        for key in keys {
-            self.runtime.key(key);
-        }
+        // Count publications from before the worker applies the batch, so its echo is newer.
+        let seen = self.subscription.publications().current();
+        self.applied_keys = Some(echo::Applied {
+            seen,
+            written: self.runtime.key_batch(keys),
+        });
         Ok(Reply::Unchanged)
     }
 
